@@ -1,0 +1,39 @@
+{
+  "name": "dolphins-smart-club",
+  "version": "0.9.0",
+  "private": true,
+  "type": "module",
+  "description": "Hollywoodbets Dolphins Smart Club Integration Platform — clickable prototype",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext js,jsx",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "deploy": "sst deploy --stage prod",
+    "deploy:dev": "sst deploy --stage dev",
+    "deploy:remove": "sst remove --stage dev",
+    "dev:sst": "sst dev"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "leaflet": "^1.9.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^8.57.1",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-react": "^7.37.2",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "eslint-plugin-react-refresh": "^0.4.16",
+    "prettier": "^3.4.2",
+    "sst": "^3.7.15",
+    "vite": "^5.4.10"
+  }
+}

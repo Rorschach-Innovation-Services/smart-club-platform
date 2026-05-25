@@ -2,6 +2,9 @@
 .vscode/
 .idea/
 node_modules/
+dist/
+.sst/
+sst-env.d.ts
 *.log
 .env
 .env.local

@@ -1,9 +1,19 @@
 /* ─── Club-side views ─── */
 
-const { useState: useStateC, useMemo: useMemoC, useEffect: useEffectC, useRef: useRefC } = React;
+import { useState as useStateC, useMemo as useMemoC, useEffect as useEffectC, useRef as useRefC } from 'react';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+import {
+  DISTRICTS, COACHING_LEVELS, REQUIRED_DOCS, CQI_STRUCTURE,
+  docCompletion, overallProgress, fixtureCost,
+} from './data.jsx';
+import {
+  Icon, Pill, Btn, Card, KPI, ClubNameCell, YN, Choice, MoneyInput, NumSlider, CountUp,
+  cqiBand, scoreCQI,
+} from './atoms.jsx';
 
 /* ─── Ground map (Leaflet + OpenStreetMap + Nominatim geocoding) ─── */
-function GroundMap({ query, onResolved }) {
+export function GroundMap({ query, onResolved }) {
   const elRef = useRefC(null);
   const mapRef = useRefC(null);
   const markerRef = useRefC(null);
@@ -13,12 +23,12 @@ function GroundMap({ query, onResolved }) {
 
   // Initialise the map once
   useEffectC(() => {
-    if (mapRef.current || !elRef.current || !window.L) return;
-    const map = window.L.map(elRef.current, {
+    if (mapRef.current || !elRef.current || !L) return;
+    const map = L.map(elRef.current, {
       scrollWheelZoom: false,
       attributionControl: true,
     }).setView([-29.85, 31.02], 11); // Durban default
-    window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 18,
       attribution: '© OpenStreetMap contributors',
     }).addTo(map);
@@ -27,7 +37,7 @@ function GroundMap({ query, onResolved }) {
 
   // Geocode + drop marker whenever the query changes
   useEffectC(() => {
-    if (!query || !mapRef.current || !window.L) return;
+    if (!query || !mapRef.current || !L) return;
     const ctrl = new AbortController();
     setLoading(true); setNotFound(false);
     fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(query)}`, {
@@ -42,13 +52,13 @@ function GroundMap({ query, onResolved }) {
         const lat = parseFloat(r.lat), lon = parseFloat(r.lon);
         mapRef.current.flyTo([lat, lon], 16, { duration: 0.8 });
         if (markerRef.current) markerRef.current.remove();
-        const icon = window.L.divIcon({
+        const icon = L.divIcon({
           className: '',
           html: '<div class="ground-marker"></div>',
           iconSize: [24, 24],
           iconAnchor: [12, 12],
         });
-        markerRef.current = window.L.marker([lat, lon], { icon }).addTo(mapRef.current);
+        markerRef.current = L.marker([lat, lon], { icon }).addTo(mapRef.current);
         markerRef.current.bindPopup(`<strong>${r.display_name.split(',').slice(0,2).join(',')}</strong>`).openPopup();
         setNotFound(false);
         setCoords({ lat, lon, name: r.display_name });
@@ -80,7 +90,7 @@ function GroundMap({ query, onResolved }) {
 }
 
 /* ─── Club Home: phase tracker + onboarding next step ─── */
-function ClubHome({ club, goto, toast, replayOnboarding }) {
+export function ClubHome({ club, goto, toast, replayOnboarding }) {
   const dc = docCompletion(club);
   const op = overallProgress(club);
   const band = cqiBand(club.cqi);
@@ -97,7 +107,7 @@ function ClubHome({ club, goto, toast, replayOnboarding }) {
   return (
     <div>
       {/* Aspirational hero banner */}
-      <div className="hero-banner" style={{backgroundImage:"url('players/ackerman-green.jpg?v=8')"}}>
+      <div className="hero-banner" style={{backgroundImage:"url('/players/ackerman-green.jpg')"}}>
         <div className="hero-content">
           <div className="hero-eyebrow">Hollywoodbets Dolphins · 2026/27 Season</div>
           <h2 className="hero-title">From your club to the <em>Dolphins</em>.</h2>
@@ -230,7 +240,7 @@ function ClubHome({ club, goto, toast, replayOnboarding }) {
 const EMPTY_MEMBER = { name:"", cell:"", email:"", gender:"", race:"" };
 const EMPTY_COACH  = { name:"", body:"CSA", level:"Level 2", status:"Completed", cell:"", email:"", teams:[] };
 
-function AffiliationForm({ club, goto, toast, onSubmit }) {
+export function AffiliationForm({ club, goto, toast, onSubmit }) {
   const [data, setData] = useStateC(() => {
     // Pre-fill exco from club.exco (single source of truth shared with the exco roster doc)
     const ex = club.exco || {};
@@ -566,10 +576,10 @@ function AffiliationForm({ club, goto, toast, onSubmit }) {
                 {k:"promotionWomen", l:"Promotion Women"},
                 {k:"veterans", l:"Veterans League"},
                 {k:"emcuD1", l:"EMCU Division 1"},
-              ].map(L=>(
-                <button key={L.k} className={`check-item ${data.leagues[L.k]?"on":""}`} onClick={()=>updateLeague(L.k)}>
-                  <div className="box">{data.leagues[L.k] && <Icon.Check/>}</div>
-                  {L.l}
+              ].map(lg=>(
+                <button key={lg.k} className={`check-item ${data.leagues[lg.k]?"on":""}`} onClick={()=>updateLeague(lg.k)}>
+                  <div className="box">{data.leagues[lg.k] && <Icon.Check/>}</div>
+                  {lg.l}
                 </button>
               ))}
             </div>
@@ -667,12 +677,12 @@ function AffiliationForm({ club, goto, toast, onSubmit }) {
                         {k:"promotionWomen", l:"Promotion Women"},
                         {k:"veterans", l:"Veterans League"},
                         {k:"emcuD1", l:"EMCU Division 1"},
-                      ].filter(L=>selectedTeams.includes(L.k)).map(L => {
-                        const on = c.teams.includes(L.k);
+                      ].filter(lg=>selectedTeams.includes(lg.k)).map(lg => {
+                        const on = c.teams.includes(lg.k);
                         return (
-                          <button key={L.k} className={`trb-chip ${on?"on":""}`} onClick={()=>toggleCoachTeam(idx, L.k)}>
+                          <button key={lg.k} className={`trb-chip ${on?"on":""}`} onClick={()=>toggleCoachTeam(idx, lg.k)}>
                             <span className="trb-chip-tick">{on ? <Icon.Check/> : null}</span>
-                            {L.l}
+                            {lg.l}
                           </button>
                         );
                       })}
@@ -760,7 +770,7 @@ function AffiliationForm({ club, goto, toast, onSubmit }) {
 
         {/* ─── Right-side sticky hero + live summary ─── */}
         <aside className="aff-side">
-          <div className="aff-hero-card" style={{backgroundImage:"url('players/ackerman-green.jpg?v=9')"}}>
+          <div className="aff-hero-card" style={{backgroundImage:"url('/players/ackerman-green.jpg')"}}>
             <div className="aff-hero-content">
               <div className="aff-hero-badge">
                 <span className="dot"/>Affiliation · Step {step} / 4
@@ -1015,7 +1025,7 @@ function ExcoFormModal({ club, onClose, onSave }) {
   );
 }
 
-function DocumentsView({ club, goto, toast, onUpload, onSaveExco }) {
+export function DocumentsView({ club, goto, toast, onUpload, onSaveExco }) {
   const dc = docCompletion(club);
   const [showExcoForm, setShowExcoForm] = useStateC(false);
   const excoBearerCount = (() => {
@@ -1137,7 +1147,7 @@ function DocumentsView({ club, goto, toast, onUpload, onSaveExco }) {
 }
 
 /* ─── CQI Self-Assessment ─── */
-function CQIView({ club, goto, toast, onSubmit }) {
+export function CQIView({ club, goto, toast, onSubmit }) {
   const [answers, setAnswers] = useStateC(()=>{
     // Prefill from existing data shape
     const a = {};
@@ -1275,7 +1285,7 @@ function CQIView({ club, goto, toast, onSubmit }) {
 }
 
 /* ─── Phase 2 · Club Fixtures (only shown once admin has released) ─── */
-function ClubFixturesView({ club, allSeries, clubs, toast }) {
+export function ClubFixturesView({ club, allSeries, clubs, toast }) {
   const clubBy = (id) => clubs.find(c => c.id === id);
 
   // Only series this club is in AND that have been released by the Dolphins office

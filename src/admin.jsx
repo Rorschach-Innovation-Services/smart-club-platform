@@ -1,9 +1,19 @@
 /* ─── Admin views ─── */
 
-const { useState: useStateA, useMemo: useMemoA } = React;
+import { useState as useStateA, useMemo as useMemoA } from 'react';
+import { createPortal } from 'react-dom';
+import {
+  REQUIRED_DOCS, CQI_STRUCTURE,
+  cohortStats, docCompletion, overallProgress, fixtureCost, generateRoundRobin,
+} from './data.jsx';
+import {
+  Icon, Pill, Btn, Card, KPI, ProgressBar, ProgChip,
+  ClubAvatar, ClubNameCell, YN, Choice, CountUp,
+  statusFor, affPill, cqiBand,
+} from './atoms.jsx';
 
 /* ─── AdminFixtures — series cards + drilldown fixture table with distance + travel-cost ─── */
-function AdminFixtures({ clubs, allSeries, onCreateSeries, onUpdateSeries, onDeleteSeries, onDuplicateSeries, onSetReleased, toast }) {
+export function AdminFixtures({ clubs, allSeries, onCreateSeries, onUpdateSeries, onDeleteSeries, onDuplicateSeries, onSetReleased, toast }) {
   const [activeId, setActiveId] = useStateA(allSeries[0]?.id);
   const active = allSeries.find(s => s.id === activeId) || allSeries[0];
   const [confirm, setConfirm] = useStateA(null); // shared confirmation modal state
@@ -112,7 +122,7 @@ function AdminFixtures({ clubs, allSeries, onCreateSeries, onUpdateSeries, onDel
       {/* Shared confirmation modal — portaled to document.body so it escapes the
           .main containing block (which has a residual transform from .main > *
           fadeUp animation that otherwise breaks position:fixed centering). */}
-      {confirm && ReactDOM.createPortal(
+      {confirm && createPortal(
         <div className="fix-confirm" onClick={(e)=>e.target===e.currentTarget && setConfirm(null)}>
           <div className="fix-confirm-box">
             <div className={`fix-confirm-icon ${confirm.danger?"danger":"go"}`}>
@@ -139,7 +149,7 @@ function AdminFixtures({ clubs, allSeries, onCreateSeries, onUpdateSeries, onDel
 }
 
 /* ─── FixtureTable with full human-in-the-loop editing ─── */
-function FixtureTable({ series, clubs, onUpdateSeries, onDeleteSeries, onDuplicateSeries, onSetReleased, onAskRelease, onAskRecall, toast }) {
+export function FixtureTable({ series, clubs, onUpdateSeries, onDeleteSeries, onDuplicateSeries, onSetReleased, onAskRelease, onAskRecall, toast }) {
   const clubBy = (id) => clubs.find(c => c.id === id);
   const [editingId, setEditingId] = useStateA(null);
   const [filter, setFilter] = useStateA("all");
@@ -464,7 +474,7 @@ function EditFixtureRow({ fixture, teams, onSave, onCancel }) {
 }
 
 /* ─── CreateSeriesForm — long form mirroring the cricclubs structure ─── */
-function CreateSeriesForm({ clubs, onCreate, onClose }) {
+export function CreateSeriesForm({ clubs, onCreate, onClose }) {
   const [d, setD] = useStateA({
     name:"", startDate:"", divisions:false, groups:1,
     maxOvers:20, maxPlayers:11, rosterLimit:"No Limit",
@@ -713,7 +723,7 @@ function CreateSeriesForm({ clubs, onCreate, onClose }) {
   );
 }
 
-function AdminDashboard({ clubs, gotoClub, gotoList }) {
+export function AdminDashboard({ clubs, gotoClub, gotoList }) {
   const stats = cohortStats(clubs);
   const pct = (n,d) => Math.round(n/d*100);
 
@@ -734,7 +744,7 @@ function AdminDashboard({ clubs, gotoClub, gotoList }) {
   return (
     <div>
       {/* Aspirational hero banner */}
-      <div className="hero-banner" style={{backgroundImage:"url('players/ackerman-green.jpg?v=8')", height:170}}>
+      <div className="hero-banner" style={{backgroundImage:"url('/players/ackerman-green.jpg')", height:170}}>
         <div className="hero-content">
           <div className="hero-eyebrow">Hollywoodbets Dolphins · KZNCU &amp; EMCU</div>
           <h2 className="hero-title">Building the next <em>generation</em>.</h2>
@@ -965,7 +975,7 @@ function ClubInsights({ clubs }) {
   );
 }
 
-function AdminClubsList({ clubs, gotoClub }) {
+export function AdminClubsList({ clubs, gotoClub }) {
   const [q, setQ] = useStateA("");
   const [filter, setFilter] = useStateA("all");
 
@@ -1056,7 +1066,7 @@ function AdminClubsList({ clubs, gotoClub }) {
   );
 }
 
-function AdminClubDetail({ club, gotoList }) {
+export function AdminClubDetail({ club, gotoList }) {
   if (!club) return null;
   const dc = docCompletion(club);
   const op = overallProgress(club);
@@ -1224,4 +1234,3 @@ function AdminClubDetail({ club, gotoList }) {
   );
 }
 
-Object.assign(window, { AdminDashboard, AdminClubsList, AdminClubDetail, AdminFixtures, CreateSeriesForm });

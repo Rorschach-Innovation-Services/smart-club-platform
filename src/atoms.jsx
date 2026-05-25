@@ -1,9 +1,9 @@
 /* ─── Shared atom components ─── */
 
-const { useState, useMemo, useEffect, useRef } = React;
+import { useState, useEffect, useRef } from 'react';
 
 /* ─── Icons (inline, no external deps) ─── */
-const Icon = {
+export const Icon = {
   Dashboard: () => <svg viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.4"/><rect x="9" y="2" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.4"/><rect x="2" y="9" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.4"/><rect x="9" y="9" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.4"/></svg>,
   Clubs: () => <svg viewBox="0 0 16 16" fill="none"><circle cx="5.5" cy="6" r="2.5" stroke="currentColor" strokeWidth="1.4"/><circle cx="11" cy="7" r="2" stroke="currentColor" strokeWidth="1.4"/><path d="M1 13c.5-2 2.5-3 4.5-3s4 1 4.5 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/><path d="M10 13c.3-1.5 1.5-2.3 3-2.3s2.6.8 3 2.3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>,
   Form: () => <svg viewBox="0 0 16 16" fill="none"><rect x="3" y="2" width="10" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.4"/><path d="M6 6h4M6 9h4M6 12h2.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>,
@@ -29,16 +29,16 @@ const Icon = {
 
 /* ─── Atoms ─── */
 
-function Pill({ tone="muted", children, dot }) {
+export function Pill({ tone="muted", children, dot }) {
   return <span className={`pill pill-${tone}`}>{dot && <span className={`sdot ${tone}`} />}{children}</span>;
 }
 
-function Btn({ tone="outline", size, icon:I, children, onClick, ...rest }) {
+export function Btn({ tone="outline", size, icon:I, children, onClick, ...rest }) {
   const cls = `btn btn-${tone}${size==="sm"?" btn-sm":""}`;
   return <button className={cls} onClick={onClick} {...rest}>{I && <I/>}{children}</button>;
 }
 
-function Card({ title, sub, action, children, style }) {
+export function Card({ title, sub, action, children, style }) {
   return (
     <div className="card" style={style}>
       {(title || action) && (
@@ -55,7 +55,7 @@ function Card({ title, sub, action, children, style }) {
   );
 }
 
-function KPI({ label, num, sub, tone="" }) {
+export function KPI({ label, num, sub, tone="" }) {
   return (
     <div className={`kpi ${tone}`}>
       <div className="kpi-l">{label}</div>
@@ -65,7 +65,7 @@ function KPI({ label, num, sub, tone="" }) {
   );
 }
 
-function ProgressBar({ value, tone }) {
+export function ProgressBar({ value, tone }) {
   return (
     <div className="pbar">
       <div className={`pbar-fill ${tone||""}`} style={{width: Math.min(100, Math.max(0,value))+"%"}}/>
@@ -73,7 +73,7 @@ function ProgressBar({ value, tone }) {
   );
 }
 
-function ProgChip({ value, tone="teal" }) {
+export function ProgChip({ value, tone="teal" }) {
   return (
     <div className="prog-chip">
       <div className="prog-chip-bar"><div className="prog-chip-fill" style={{width:value+"%", background:`var(--${tone})`}}/></div>
@@ -82,12 +82,12 @@ function ProgChip({ value, tone="teal" }) {
   );
 }
 
-function ClubAvatar({ club, size=30 }) {
+export function ClubAvatar({ club, size=30 }) {
   const initials = club.name.split(/\s+/).filter(w => /^[A-Z]/.test(w)).slice(0,2).map(w=>w[0]).join("");
   return <div className="club-avatar" style={{background:club.color, width:size, height:size, fontSize:size*0.34}}>{initials}</div>;
 }
 
-function ClubNameCell({ club }) {
+export function ClubNameCell({ club }) {
   return (
     <div className="club-name-cell">
       <ClubAvatar club={club}/>
@@ -100,7 +100,7 @@ function ClubNameCell({ club }) {
 }
 
 /* yes/no segmented — conditional colours + icons in active state */
-function YN({ value, onChange }) {
+export function YN({ value, onChange }) {
   return (
     <div className="seg">
       <button className={`seg-btn ${value===true?"on yes":""}`} onClick={()=>onChange(true)}>
@@ -114,7 +114,7 @@ function YN({ value, onChange }) {
 }
 
 /* legacy stepper (kept for direct callers) */
-function NumStep({ value, onChange, min=0, max=99 }) {
+export function NumStep({ value, onChange, min=0, max=99 }) {
   return (
     <input
       className="num-input"
@@ -126,7 +126,7 @@ function NumStep({ value, onChange, min=0, max=99 }) {
 }
 
 /* Choice — segmented control for arbitrary string options (used by CQI subscription cycle) */
-function Choice({ value, onChange, options }) {
+export function Choice({ value, onChange, options }) {
   return (
     <div className="seg">
       {options.map(opt => (
@@ -141,7 +141,7 @@ function Choice({ value, onChange, options }) {
 }
 
 /* Money — currency input with prefix and value formatting */
-function MoneyInput({ value, onChange, currency="R" }) {
+export function MoneyInput({ value, onChange, currency="R" }) {
   return (
     <div className="money-input">
       <span className="money-currency">{currency}</span>
@@ -158,7 +158,7 @@ function MoneyInput({ value, onChange, currency="R" }) {
 }
 
 /* slider input — used in CQI for capped quantities (teams, coaches, fields, %) */
-function NumSlider({ value, onChange, min=0, max=10, suffix }) {
+export function NumSlider({ value, onChange, min=0, max=10, suffix }) {
   const v = (value === "" || value == null) ? 0 : Math.max(min, Math.min(max, parseInt(value)||0));
   const pct = max > min ? ((v - min) / (max - min)) * 100 : 0;
   return (
@@ -178,7 +178,7 @@ function NumSlider({ value, onChange, min=0, max=10, suffix }) {
 }
 
 /* CountUp — animates smoothly between previous + new target, with a setTimeout fallback so the value lands even if rAF is throttled (background tabs, headless contexts). */
-function CountUp({ to, duration=900, decimals=0, suffix="" }) {
+export function CountUp({ to, duration=900, decimals=0, suffix="" }) {
   const target = Number(to) || 0;
   const [val, setVal] = useState(target);
   const fromRef = useRef(target);
@@ -213,20 +213,20 @@ function CountUp({ to, duration=900, decimals=0, suffix="" }) {
 }
 
 /* statusFor — picks "good"/"warn"/"danger" tone based on a percentage value */
-function statusFor(value, goodAt=70, warnAt=40) {
+export function statusFor(value, goodAt=70, warnAt=40) {
   if (value >= goodAt) return "good";
   if (value >= warnAt) return "warn";
   return "danger";
 }
 
 /* Affiliation status helpers */
-function affPill(status) {
+export function affPill(status) {
   if (status === "complete")    return <Pill tone="teal">Affiliated</Pill>;
   if (status === "in_progress") return <Pill tone="gold">In progress</Pill>;
   return <Pill tone="muted">Not started</Pill>;
 }
 
-function cqiBand(score) {
+export function cqiBand(score) {
   if (score === 0)   return { tone:"muted",  label:"Pending"  };
   if (score >= 80)   return { tone:"teal",   label:"A · "+score.toFixed(1) };
   if (score >= 65)   return { tone:"navy",   label:"B · "+score.toFixed(1) };
@@ -238,7 +238,7 @@ function cqiBand(score) {
    Each question contributes its `pts` value, scaled by yes/no or by num/max.
    Section total = sum of pts (which roughly equals the section weight),
    we then proportion to the section weight and total to 100. */
-function scoreCQI(answers) {
+export function scoreCQI(answers) {
   let totalScore = 0;
   const byCat = {};
   for (const cat of CQI_STRUCTURE) {
@@ -276,7 +276,7 @@ function scoreCQI(answers) {
 }
 
 /* Simulated toast */
-function useToast() {
+export function useToast() {
   const [msg, setMsg] = useState(null);
   const [tone, setTone] = useState("ok");
   function show(m, t="ok") { setMsg(m); setTone(t); setTimeout(()=>setMsg(null), 2400); }

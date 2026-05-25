@@ -12,22 +12,45 @@ across **KZNCU & EMCU** for the 2026/27 season.
 
 ## Quick start
 
-This is a zero-build static site. Any HTTP server works.
-
 ```bash
-# from the project root
-python3 -m http.server 3201
+npm install
+npm run dev
 # then open http://localhost:3201
 ```
 
-Or just double-click `index.html` (Chrome/Edge — Safari blocks file:// fetches).
+The dev server already binds to `0.0.0.0`, so to preview on your phone over
+Wi-Fi find your LAN IP (`ipconfig getifaddr en0`) and open
+`http://<your-ip>:3201`.
 
-To preview on your phone over Wi-Fi:
+## Build & deploy
 
 ```bash
-python3 -m http.server 3201 --bind 0.0.0.0
-# find your LAN IP with: ipconfig getifaddr en0
-# then on phone: http://<your-ip>:3201
+npm run build        # produces dist/
+npm run preview      # serve the build locally on :3201
+npm run deploy       # deploy to AWS (S3 + CloudFront) via SST, stage=prod
+```
+
+First-time deploy: ~5 min (SST bootstraps a Pulumi state bucket in your AWS
+account — `home: "aws"` means local state, no SST cloud login). Subsequent
+deploys: ~30s for code-only diffs, ~2 min if CloudFront config changes.
+
+Region: `af-south-1`. AWS profile: `medicoach`. The deploy URL is printed at the
+end of `sst deploy` as `Web: <id>.cloudfront.net`. Deep links (e.g.
+`/admin/dashboard`) return HTTP 200 via a CloudFront `customErrorResponses`
+rule wired up in `sst.config.ts`.
+
+To tear down a non-prod stage: `npm run deploy:remove`. Prod has `protect: true`
+on its resources, which blocks destructive Pulumi diffs but does **not** make
+`sst remove --stage prod` safe — that command will still attempt teardown and
+fail partway, leaving the stack in a broken state. Don't run remove against prod
+without manually unsetting `protect` in `sst.config.ts` first.
+
+## Quality
+
+```bash
+npm run lint           # ESLint
+npm run format         # Prettier write
+npm run format:check   # Prettier check (CI-friendly, no writes)
 ```
 
 ---
@@ -60,21 +83,39 @@ python3 -m http.server 3201 --bind 0.0.0.0
 
 ## File map
 
-| File | Purpose |
+| Path | Purpose |
 |---|---|
-| `index.html` | Shell — global CSS, Leaflet + React CDNs, Babel-standalone, mounts `<App/>` |
-| `data.jsx` | Seed `SAMPLE_CLUBS`, `SERIES`, `CQI_STRUCTURE`, helpers (`haversineKm`, `fixtureCost`, `generateRoundRobin`) |
-| `atoms.jsx` | Design-system primitives: `Btn`, `Pill`, `Card`, `KPI`, `CountUp`, `NumSlider`, etc. |
-| `main.jsx` | `App` + `Shell` — routing, role/profile state, task modals, nav |
-| `club.jsx` | Club-side views: `ClubHome`, `AffiliationForm`, `DocumentsView`, `CQIView`, `ClubFixturesView` |
-| `admin.jsx` | Admin views: `AdminDashboard`, `AdminClubsList`, `AdminFixtures`, `FixtureTable`, `CreateSeriesForm` |
-| `onboarding.jsx` | 3-step cinematic welcome modal |
-| `players/` | Aspirational hero photography (Ackerman, Viljoen, Mokoena) |
-| `dolphins-logo.png` | Official Hollywoodbets Dolphins emblem |
+| `index.html` | Vite entrypoint at repo root — embeds global CSS, loads `src/main.jsx` as an ES module |
+| `src/data.jsx` | Seed `SAMPLE_CLUBS`, `SERIES`, `CQI_STRUCTURE`, helpers (`haversineKm`, `fixtureCost`, `generateRoundRobin`) |
+| `src/atoms.jsx` | Design-system primitives: `Btn`, `Pill`, `Card`, `KPI`, `CountUp`, `NumSlider`, etc. |
+| `src/main.jsx` | `App` + `Shell` — React Router routes, role/profile state, task modals, nav |
+| `src/club.jsx` | Club-side views: `ClubHome`, `AffiliationForm`, `DocumentsView`, `CQIView`, `ClubFixturesView` (Leaflet ground locator lives here) |
+| `src/admin.jsx` | Admin views: `AdminDashboard`, `AdminClubsList`, `AdminClubDetail`, `AdminFixtures`, `FixtureTable`, `CreateSeriesForm` |
+| `src/onboarding.jsx` | 3-step cinematic welcome modal |
+| `public/players/` | Hero photography (Ackerman, Viljoen, Mokoena) |
+| `public/dolphins-logo.png` | Official Hollywoodbets Dolphins emblem |
+| `vite.config.js` | Vite config (dev + preview bind to port 3201) |
+| `vercel.json` | Explicit Vite preset, SPA rewrite, immutable cache headers |
 
-The whole thing uses **React 18 + Babel-standalone in the browser** — no build
-step, no bundler. Edit any `.jsx` and refresh. Cache-buster `?v=N` on the
-`<script>` tags in `index.html` forces a hard reload.
+**Stack:** Vite 5 + React 18 + react-router-dom v6 + Leaflet. JSX, not TypeScript.
+
+### URL map
+
+| URL | View |
+|---|---|
+| `/` | Profile picker |
+| `/admin/dashboard` | Cohort dashboard |
+| `/admin/clubs` | All clubs list |
+| `/admin/clubs/:clubId` | Drill-down club detail |
+| `/admin/affiliations`, `/admin/documents`, `/admin/cqi` | Filtered trackers |
+| `/admin/fixtures` | Series + fixtures |
+| `/club/:clubId` | Club home |
+| `/club/:clubId/affiliation` | Affiliation form (modal) |
+| `/club/:clubId/documents` | Compliance docs (modal) |
+| `/club/:clubId/cqi` | CQI self-assessment |
+| `/club/:clubId/fixtures` | Released fixtures |
+
+Deep links work; browser back/forward works; refresh keeps you on the same view.
 
 ---
 
@@ -88,12 +129,11 @@ This is a UX prototype. To make it real, you'd add:
 | File uploads | Supabase Storage / S3 for compliance docs |
 | Payments | Stripe / Yoco / PayFast for the R 4,500 affiliation fee |
 | Email + SMS | Postmark / Resend + Twilio / Clickatell |
-| Build | Vite (replaces in-browser Babel for faster mobile loads) |
 | Hosting | Vercel (front) + Supabase (back) |
 
 The component shape (`updateClub`, `uploadDoc`, `saveExco`, `setReleased`
-handlers in `Shell`) is friendly to API swapping — replace those with `fetch`
-calls and the UI keeps working.
+handlers in `Shell` / `AppRoutes`) is friendly to API swapping — replace those
+with `fetch` calls and the UI keeps working.
 
 ---
 

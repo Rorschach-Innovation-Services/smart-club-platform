@@ -1,8 +1,9 @@
 /* ─── Club Onboarding · 3-step cinematic flow ─── */
 
-const { useState: useStateOb } = React;
+import { useState as useStateOb } from 'react';
+import { Icon, Btn } from './atoms.jsx';
 
-function Onboarding({ club, onClose, onComplete, onStart }) {
+export function Onboarding({ club, onClose, onComplete, onStart }) {
   const [step, setStep] = useStateOb(1);
   const [contact, setContact] = useStateOb({
     name: club.chair,
@@ -72,7 +73,7 @@ function Onboarding({ club, onClose, onComplete, onStart }) {
 function StepWelcome({ club }) {
   return (
     <div className="ob-hero">
-      <div className="ob-hero-photo" style={{backgroundImage:"url('players/ackerman-green.jpg?v=14')"}}>
+      <div className="ob-hero-photo" style={{backgroundImage:"url('/players/ackerman-green.jpg')"}}>
         <div className="ob-hero-overlay">
           <div className="ob-hero-badge"><span className="dot"/>Hollywoodbets Dolphins · 2026/27</div>
           <div className="ob-hero-credit"><strong>Marques Ackerman</strong> · 92 (74)</div>

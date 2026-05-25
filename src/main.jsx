@@ -1,3 +1,26 @@
+import { useState as useStateApp, useMemo as useMemoApp, useEffect } from 'react';
+import { createRoot } from 'react-dom/client';
+import {
+  BrowserRouter, Routes, Route, Navigate,
+  useNavigate, useLocation, useParams,
+} from 'react-router-dom';
+import {
+  REQUIRED_DOCS, SAMPLE_CLUBS, SERIES,
+  cohortStats, docCompletion,
+} from './data.jsx';
+import {
+  Icon, Pill, Btn, ProgChip, ClubNameCell,
+  affPill, cqiBand, useToast,
+} from './atoms.jsx';
+import {
+  AdminDashboard, AdminClubsList, AdminClubDetail, AdminFixtures,
+  CreateSeriesForm,
+} from './admin.jsx';
+import {
+  ClubHome, AffiliationForm, DocumentsView, CQIView, ClubFixturesView,
+} from './club.jsx';
+import { Onboarding } from './onboarding.jsx';
+
 /* ─── Brand mark: leaping dolphin silhouette ───
    Stylised stand-in until the user provides the official Hollywoodbets Dolphins logo. */
 function DolphinMark() {
@@ -30,7 +53,7 @@ function ProfileSelect({ onSelect, clubs }) {
   return (
     <div className="ps-screen">
       <div className="ps-brand">
-        <img className="ps-brand-logo" src="dolphins-logo.png?v=8" alt="Hollywoodbets Dolphins"/>
+        <img className="ps-brand-logo" src="/dolphins-logo.png" alt="Hollywoodbets Dolphins"/>
         <div className="ps-eyebrow" style={{margin:0, color:"rgba(255,255,255,0.6)", fontSize:11}}>Smart Club Integration · KZNCU &amp; EMCU</div>
       </div>
 
@@ -130,7 +153,6 @@ function ProfileSelect({ onSelect, clubs }) {
 
 /* ─── Main App ─── */
 
-const { useState: useStateApp, useMemo: useMemoApp } = React;
 
 /* ─── TaskModal — wraps the affiliation form & documents view ─── */
 function TaskModal({ eyebrow, title, sub, onClose, narrow, children }) {
@@ -155,77 +177,22 @@ function TaskModal({ eyebrow, title, sub, onClose, narrow, children }) {
 }
 
 function App() {
-  const [profile, setProfile] = useStateApp(null);
-
-  if (profile === null) {
-    return <ProfileSelect onSelect={setProfile} clubs={SAMPLE_CLUBS}/>;
-  }
-  return <Shell initialProfile={profile} onSwitchProfile={() => setProfile(null)}/>;
+  return (
+    <BrowserRouter>
+      <AppRoutes/>
+    </BrowserRouter>
+  );
 }
 
-function Shell({ initialProfile, onSwitchProfile }) {
-  const [role, setRole] = useStateApp(initialProfile);          // "admin" | "club"
-  const [view, setView] = useStateApp(initialProfile === "admin" ? "dashboard" : "home");
-  const [clubId, setClubId] = useStateApp("phoenix");           // active club ID
+function AppRoutes() {
   const [clubs, setClubs] = useStateApp(SAMPLE_CLUBS);
+  const [allSeries, setAllSeries] = useStateApp(SERIES);
   const [onboarded, setOnboarded] = useStateApp({});
   const [showOnboarding, setShowOnboarding] = useStateApp(false);
   const [showCreateSeries, setShowCreateSeries] = useStateApp(false);
-  const [allSeries, setAllSeries] = useStateApp(SERIES);
   const [toastShow, toastNode] = useToast();
+  const navigate = useNavigate();
 
-  const activeClub = useMemoApp(()=>clubs.find(c=>c.id === clubId), [clubs, clubId]);
-
-  // Auto-open onboarding the first time a club portal is entered for an unaffiliated club
-  React.useEffect(()=>{
-    if (initialProfile === "club" && !activeClub.paid && !onboarded[clubId]) {
-      const t = setTimeout(()=>setShowOnboarding(true), 350);
-      return () => clearTimeout(t);
-    }
-  }, []);
-
-  function switchProfile() {
-    setShowOnboarding(false);
-    onSwitchProfile();
-  }
-
-  function setActiveClub(id) {
-    setClubId(id);
-    setView(role === "admin" ? "club_detail" : "home");
-  }
-
-  function changeRole(r) {
-    setRole(r);
-    setView(r === "admin" ? "dashboard" : "home");
-    // First-time onboarding for clubs that aren't yet affiliated
-    if (r === "club" && !onboarded[clubId] && !activeClub.paid) {
-      setTimeout(()=>setShowOnboarding(true), 250);
-    }
-  }
-
-  function changeClub(id) {
-    setClubId(id);
-    const c = clubs.find(x=>x.id===id);
-    if (role === "club" && !onboarded[id] && c && !c.paid) {
-      setTimeout(()=>setShowOnboarding(true), 250);
-    }
-  }
-
-  // Club mutations (when club submits forms / uploads docs)
-  function updateClub(updates) {
-    setClubs(cs => cs.map(c => c.id === clubId ? {...c, ...updates} : c));
-  }
-  function uploadDoc(key) {
-    setClubs(cs => cs.map(c => c.id === clubId ? {...c, docs: {...c.docs, [key]: true}} : c));
-  }
-  function saveExco(members) {
-    // Save exco roster + mark the exco compliance doc as captured
-    setClubs(cs => cs.map(c => c.id === clubId
-      ? {...c, exco: members, docs: {...c.docs, exco: true}}
-      : c));
-  }
-
-  // ── Series / fixture editing handlers (admin) ──
   function updateSeries(seriesId, updater) {
     setAllSeries(prev => prev.map(s => s.id === seriesId ? updater(s) : s));
   }
@@ -250,6 +217,119 @@ function Shell({ initialProfile, onSwitchProfile }) {
     setAllSeries(prev => prev.map(s => s.id === seriesId
       ? {...s, released: value, releasedAt: value ? new Date().toISOString() : null}
       : s));
+  }
+
+  const shellProps = {
+    clubs, setClubs, allSeries, setAllSeries, toastShow,
+    onboarded, setOnboarded, showOnboarding, setShowOnboarding,
+    showCreateSeries, setShowCreateSeries,
+    updateSeries, deleteSeries, duplicateSeries, setReleased,
+  };
+
+  return (
+    <>
+      <Routes>
+        <Route path="/" element={
+          <ProfileSelect
+            clubs={clubs}
+            onSelect={(r) => navigate(r === "admin" ? "/admin/dashboard" : "/club/phoenix")}
+          />
+        }/>
+        <Route path="/admin/*" element={<Shell role="admin" {...shellProps}/>}/>
+        <Route path="/club/:clubId/*" element={<Shell role="club" {...shellProps}/>}/>
+        <Route path="*" element={<Navigate to="/" replace/>}/>
+      </Routes>
+      {toastNode}
+    </>
+  );
+}
+
+function Shell({
+  role, clubs, setClubs, allSeries, setAllSeries, toastShow,
+  onboarded, setOnboarded, showOnboarding, setShowOnboarding,
+  showCreateSeries, setShowCreateSeries,
+  updateSeries, deleteSeries, duplicateSeries, setReleased,
+}) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const routeParams = useParams();
+
+  // ── Derive clubId from URL ──
+  let clubId;
+  if (role === "club") {
+    clubId = routeParams.clubId;
+  } else {
+    const m = location.pathname.match(/^\/admin\/clubs\/([^/]+)/);
+    clubId = m ? m[1] : "phoenix";   // fallback for header avatar before drilling in
+  }
+
+  const activeClub = useMemoApp(
+    () => clubs.find(c => c.id === clubId) || clubs[0],
+    [clubs, clubId]
+  );
+
+  // ── Derive view from URL (used for nav highlighting & modal logic) ──
+  let view;
+  if (role === "admin") {
+    const seg = location.pathname.replace(/^\/admin\/?/, "");
+    if (seg.startsWith("clubs/")) view = "club_detail";
+    else if (seg === "clubs") view = "clubs_list";
+    else if (seg === "cqi") view = "cqi_admin";
+    else if (seg === "" || seg === "dashboard") view = "dashboard";
+    else view = seg;                 // affiliations | documents | fixtures
+  } else {
+    const base = `/club/${clubId}`;
+    if (location.pathname === base || location.pathname === base + "/") view = "home";
+    else view = location.pathname.slice(base.length + 1);
+  }
+
+  // ── Auto-open onboarding the first time a club portal is entered ──
+  useEffect(() => {
+    if (role === "club" && activeClub && !activeClub.paid && !onboarded[clubId]) {
+      const t = setTimeout(() => setShowOnboarding(true), 350);
+      return () => clearTimeout(t);
+    }
+  }, [role, clubId]); // re-fire when URL switches club
+
+  // ── Navigation helpers (replace old setView/setRole/setClubId) ──
+  function switchProfile() {
+    setShowOnboarding(false);
+    navigate("/");
+  }
+  function gotoAdminView(v) {
+    const map = { dashboard:"dashboard", clubs_list:"clubs", cqi_admin:"cqi" };
+    navigate(`/admin/${map[v] || v}`);
+  }
+  function gotoClubView(v, cid = clubId) {
+    navigate(v === "home" ? `/club/${cid}` : `/club/${cid}/${v}`);
+  }
+  function setActiveClub(id) {
+    if (role === "admin") navigate(`/admin/clubs/${id}`);
+    else gotoClubView("home", id);
+  }
+  function changeRole(r) {
+    if (r === "admin") navigate("/admin/dashboard");
+    else navigate(`/club/${clubId}`);
+  }
+  function changeClub(id) {
+    navigate(`/club/${id}`);
+    const c = clubs.find(x => x.id === id);
+    if (!onboarded[id] && c && !c.paid) {
+      setTimeout(() => setShowOnboarding(true), 250);
+    }
+  }
+
+  // ── Club mutations (curried by current clubId) ──
+  function updateClub(updates) {
+    setClubs(cs => cs.map(c => c.id === clubId ? {...c, ...updates} : c));
+  }
+  function uploadDoc(key) {
+    setClubs(cs => cs.map(c => c.id === clubId ? {...c, docs: {...c.docs, [key]: true}} : c));
+  }
+  function saveExco(members) {
+    setClubs(cs => cs.map(c => c.id === clubId
+      ? {...c, exco: members, docs: {...c.docs, exco: true}}
+      : c));
   }
 
   // — NAV definition —
@@ -281,9 +361,10 @@ function Shell({ initialProfile, onSwitchProfile }) {
   // — render main pane —
   function renderMain() {
     if (role === "admin") {
-      if (view === "dashboard")    return <AdminDashboard clubs={clubs} gotoClub={setActiveClub} gotoList={()=>setView("clubs_list")} />;
+      const gotoList = () => gotoAdminView("clubs_list");
+      if (view === "dashboard")    return <AdminDashboard clubs={clubs} gotoClub={setActiveClub} gotoList={gotoList} />;
       if (view === "clubs_list")   return <AdminClubsList clubs={clubs} gotoClub={setActiveClub} />;
-      if (view === "club_detail")  return <AdminClubDetail club={activeClub} gotoList={()=>setView("clubs_list")} />;
+      if (view === "club_detail")  return <AdminClubDetail club={activeClub} gotoList={gotoList} />;
       if (view === "affiliations") return <AdminFiltered clubs={clubs} kind="affiliation" gotoClub={setActiveClub}/>;
       if (view === "documents")    return <AdminFiltered clubs={clubs} kind="docs" gotoClub={setActiveClub}/>;
       if (view === "cqi_admin")    return <AdminFiltered clubs={clubs} kind="cqi" gotoClub={setActiveClub}/>;
@@ -298,13 +379,12 @@ function Shell({ initialProfile, onSwitchProfile }) {
                                               toast={toastShow}
                                             />;
     } else {
-      const goto = (v) => setView(v);
       // Affiliation + Documents render in modals layered on top of Home (handled below).
       // The base content stays Home while those are open.
       if (view === "home" || view === "affiliation" || view === "documents")
-        return <ClubHome club={activeClub} goto={goto} toast={toastShow} replayOnboarding={()=>setShowOnboarding(true)}/>;
-      if (view === "cqi")      return <CQIView club={activeClub} goto={goto} toast={toastShow}
-                                       onSubmit={(score)=>{ updateClub({cqi: score}); setView("home"); }}/>;
+        return <ClubHome club={activeClub} goto={gotoClubView} toast={toastShow} replayOnboarding={()=>setShowOnboarding(true)}/>;
+      if (view === "cqi")      return <CQIView club={activeClub} goto={gotoClubView} toast={toastShow}
+                                       onSubmit={(score)=>{ updateClub({cqi: score}); gotoClubView("home"); }}/>;
       if (view === "fixtures") {
         // Locked until affiliation is paid
         if (!activeClub.paid) return <ComingSoon title="Fixtures & Venues" phase="02" unlocked={false} eta="Aug 2026"/>;
@@ -319,7 +399,7 @@ function Shell({ initialProfile, onSwitchProfile }) {
       {/* ─── Top header ─── */}
       <header className="app-header">
         <div className="h-logo">
-          <img className="h-logo-img" src="dolphins-logo.png?v=8" alt="Hollywoodbets Dolphins"/>
+          <img className="h-logo-img" src="/dolphins-logo.png" alt="Hollywoodbets Dolphins"/>
         </div>
         <div className="h-divider"/>
         <span className="h-sub">Smart Club Integration · KZNCU &amp; EMCU</span>
@@ -367,7 +447,11 @@ function Shell({ initialProfile, onSwitchProfile }) {
         <aside className="nav">
           <div className="nav-section">{role === "admin" ? "Cohort" : "Integration journey"}</div>
           {nav.map(n=>(
-            <button key={n.v} className={`nav-item ${view===n.v?"active":""}`} onClick={()=>setView(n.v)}>
+            <button
+              key={n.v}
+              className={`nav-item ${view===n.v?"active":""}`}
+              onClick={()=> role === "admin" ? gotoAdminView(n.v) : gotoClubView(n.v)}
+            >
               <span className="ni-icon"><n.icon/></span>
               <span className="ni-label">{n.label}</span>
               {n.num && <span className={`ni-num ${n.num==="NEW"?"new":""}`}>{n.num}</span>}
@@ -401,8 +485,6 @@ function Shell({ initialProfile, onSwitchProfile }) {
         <main className={`main ${view==="fixtures"?"fullbleed":""}`}>{renderMain()}</main>
       </div>
 
-      {toastNode}
-
       {showOnboarding && role === "club" && (
         <Onboarding
           club={activeClub}
@@ -412,7 +494,7 @@ function Shell({ initialProfile, onSwitchProfile }) {
             setShowOnboarding(false);
             toastShow("Welcome, " + activeClub.chair.split(" ")[0] + " · let's get started");
           }}
-          onStart={() => setView("affiliation")}
+          onStart={() => gotoClubView("affiliation")}
         />
       )}
 
@@ -421,11 +503,11 @@ function Shell({ initialProfile, onSwitchProfile }) {
         <TaskModal
           eyebrow={`Phase 01 · ${activeClub.name}`}
           title={<>2026/27 <em>Affiliation Form</em></>}
-          onClose={() => setView("home")}
+          onClose={() => gotoClubView("home")}
         >
           <AffiliationForm
             club={activeClub}
-            goto={(v) => setView(v)}
+            goto={gotoClubView}
             toast={toastShow}
             onSubmit={(payload)=>{
               updateClub({
@@ -435,7 +517,7 @@ function Shell({ initialProfile, onSwitchProfile }) {
                 ground: payload.ground || null,
                 docs: {...activeClub.docs, exco: true},
               });
-              setView("home");
+              gotoClubView("home");
             }}
           />
         </TaskModal>
@@ -446,11 +528,11 @@ function Shell({ initialProfile, onSwitchProfile }) {
           narrow
           eyebrow={`Compliance · ${activeClub.name}`}
           title={<>Required <em>compliance documents</em></>}
-          onClose={() => setView("home")}
+          onClose={() => gotoClubView("home")}
         >
           <DocumentsView
             club={activeClub}
-            goto={(v) => setView(v)}
+            goto={gotoClubView}
             toast={toastShow}
             onUpload={uploadDoc}
             onSaveExco={saveExco}
@@ -675,4 +757,4 @@ function FixtureEngineEmbed({ role, club }) {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+createRoot(document.getElementById("root")).render(<App/>);

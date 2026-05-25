@@ -1,7 +1,7 @@
 /* ─── Sample data ─── */
 
 // Sub-unions / districts derived from the affiliation form's drop-down
-const DISTRICTS = [
+export const DISTRICTS = [
   "Ethekwini Metro Cricket Union",
   "Umkhanyakude Cricket District",
   "Ugu Cricket District",
@@ -9,7 +9,7 @@ const DISTRICTS = [
   "Illembe Cricket District",
 ];
 
-const LEAGUES = [
+export const LEAGUES = [
   "Premier League",
   "Promotion League",
   "Premier Women",
@@ -20,10 +20,10 @@ const LEAGUES = [
   "EMCU Division 3",
 ];
 
-const COACHING_LEVELS = ["Level 1", "Level 2", "Level 3", "Level 4"];
+export const COACHING_LEVELS = ["Level 1", "Level 2", "Level 3", "Level 4"];
 
 // Required compliance documents (from KZNCU Club Requirements 26-27)
-const REQUIRED_DOCS = [
+export const REQUIRED_DOCS = [
   { key: "constitution", name: "Club Constitution", desc: "Current signed club constitution document" },
   { key: "agm",          name: "AGM Minutes",       desc: "Minutes of the most recent AGM, signed off" },
   { key: "financials",   name: "Financial Statements", desc: "Annual financial statements for the prior season" },
@@ -32,7 +32,7 @@ const REQUIRED_DOCS = [
 
 // Sample clubs — names drawn from the actual Dolphins CQI list
 // Each carries denormalised submission state so the admin views can score them.
-const SAMPLE_CLUBS = [
+export const SAMPLE_CLUBS = [
   {
     id: "ukzn",       name: "UKZN CC",             district: "Ethekwini Metro CU",
     sub: "EMCU",      chair: "Ashraf Ganie",       affiliation: "complete", paid: true,
@@ -135,7 +135,7 @@ const SAMPLE_CLUBS = [
 
 // CQI structure — categories, weights, and questions
 // Weighting model: Admin 20 / Teams 20 / Coaching 20 / Facilities 15 / Representation 10 / Financial 15 = 100
-const CQI_STRUCTURE = [
+export const CQI_STRUCTURE = [
   {
     key: "admin", title: "Administration", weight: 20, accent: "var(--navy)",
     desc: "Governance, documentation and structural compliance.",
@@ -205,7 +205,7 @@ const CQI_STRUCTURE = [
 ];
 
 // Aggregate stats helpers
-function cohortStats(clubs) {
+export function cohortStats(clubs) {
   const total = clubs.length;
   const affComplete = clubs.filter(c => c.affiliation === "complete").length;
   const paid = clubs.filter(c => c.paid).length;
@@ -215,12 +215,12 @@ function cohortStats(clubs) {
   return { total, affComplete, paid, cqiSubmitted, avgCqi, docsComplete };
 }
 
-function docCompletion(club) {
+export function docCompletion(club) {
   const vals = Object.values(club.docs);
   return Math.round(vals.filter(v=>v).length / vals.length * 100);
 }
 
-function overallProgress(club) {
+export function overallProgress(club) {
   // 5 weighted phases: 20% each
   const p1 = club.paid ? 100 : (club.affiliation === "in_progress" ? 40 : 0);
   const p2 = club.affiliation === "complete" ? 100 : 0; // assume league assigned once affiliated
@@ -234,7 +234,7 @@ function overallProgress(club) {
    Haversine great-circle distance between two lat/lon coords (km).
    Round-robin schedule generator.
    Travel cost = round-trip distance × cars × cost per km. */
-function haversineKm(a, b) {
+export function haversineKm(a, b) {
   if (!a || !b) return 0;
   const R = 6371;
   const toRad = x => x * Math.PI / 180;
@@ -244,7 +244,7 @@ function haversineKm(a, b) {
   return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1-s));
 }
 
-function fixtureCost(homeClub, awayClub, costPerKm=4.5, cars=3) {
+export function fixtureCost(homeClub, awayClub, costPerKm=4.5, cars=3) {
   const km = haversineKm(homeClub.ground, awayClub.ground);
   const roundTripKm = km * 2;
   const fuelR = roundTripKm * cars * costPerKm;
@@ -252,7 +252,7 @@ function fixtureCost(homeClub, awayClub, costPerKm=4.5, cars=3) {
 }
 
 // Round-robin: each team plays every other team once. Home/away alternates fairly.
-function generateRoundRobin(teamIds, startDateISO) {
+export function generateRoundRobin(teamIds, startDateISO) {
   if (teamIds.length < 2) return [];
   const teams = [...teamIds];
   if (teams.length % 2 === 1) teams.push(null); // bye
@@ -287,7 +287,7 @@ function generateRoundRobin(teamIds, startDateISO) {
 
 // One pre-made series so the admin lands on populated content
 const _premierTeams = ["ukzn", "clares", "chatsworth", "crusaders", "rhythm", "harlequins", "warriors", "umlazi"];
-const SERIES = [
+export const SERIES = [
   {
     id: "s-prem-26-27",
     name: "Premier League · 2026/27",
