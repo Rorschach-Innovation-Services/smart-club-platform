@@ -4,7 +4,7 @@ import { useState as useStateC, useMemo as useMemoC, useEffect as useEffectC, us
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
-  DISTRICTS, COACHING_LEVELS, REQUIRED_DOCS, CQI_STRUCTURE,
+  DISTRICTS, COACHING_LEVELS, REQUIRED_DOCS, CQI_STRUCTURE, LEAGUE_OPTIONS,
   docCompletion, overallProgress, fixtureCost,
 } from './data.jsx';
 import {
@@ -174,12 +174,12 @@ export function ClubHome({ club, goto, toast, replayOnboarding }) {
               </div>
               <div style={{flex:1}}>
                 <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:13, fontWeight:700, color: club.paid ? "var(--green)" : "var(--ink)"}}>
-                  Affiliation Form &amp; payment
+                  Affiliation Form
                 </div>
                 <div style={{fontSize:11.5, color: club.paid ? "var(--green-mid)" : "var(--muted)"}}>
                   {club.paid
-                    ? "Submitted &amp; paid · R 4,500 · tap to view"
-                    : "Complete the 2026/27 KZNCU & EMCU affiliation form and pay the union fee."}
+                    ? "Submitted · tap to view"
+                    : "Complete the 2026/27 KZNCU & EMCU affiliation form — club details, exco, leagues & coaches."}
                 </div>
               </div>
               {club.paid ? <Pill tone="teal" dot>Completed</Pill> : <Pill tone="coral" dot>Required</Pill>}
@@ -267,7 +267,15 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
       treName: seed("tre").name, treCell: seed("tre").cell, treEmail: seed("tre").email, treGender: seed("tre").gender, treRace: seed("tre").race,
       vcName:  seed("vc").name,  vcCell:  seed("vc").cell,  vcEmail:  seed("vc").email,  vcGender:  seed("vc").gender,  vcRace:  seed("vc").race,
       additionalMembers: stored.length ? stored : [{...EMPTY_MEMBER}],
-      leagues: { premier: true, promotion: false, premierWomen: false, promotionWomen: false, veterans: false, emcuD1: false },
+      // League keys come from LEAGUE_OPTIONS (data.jsx). Pre-tick premier if the club previously
+      // saved league selections, otherwise seed with premier so first-time users see the picker populated.
+      leagues: (() => {
+        const prior = Array.isArray(club.leagues) ? club.leagues : null;
+        return LEAGUE_OPTIONS.reduce((acc, L) => {
+          acc[L.key] = prior ? prior.includes(L.key) : L.key === "premier";
+          return acc;
+        }, {});
+      })(),
       coaches: (club.coaches && club.coaches.length) ? club.coaches : [{...EMPTY_COACH, teams:["premier"]}],
       // Home ground / venue
       groundVenue: ground.venue || "",
@@ -294,6 +302,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
     })}));
   }
   function addCoach() { setData(d => ({...d, coaches:[...d.coaches, {...EMPTY_COACH}]})); }
+  function addCoachForLeague(key) { setData(d => ({...d, coaches:[...d.coaches, {...EMPTY_COACH, teams:[key]}]})); }
   function removeCoach(idx) { setData(d => ({...d, coaches: d.coaches.filter((_,i)=>i!==idx)})); }
 
   function update(k, v) { setData(d => ({...d, [k]:v})); }
@@ -327,6 +336,9 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
   function getCoachesPayload() {
     return data.coaches.filter(c => c.name);
   }
+  function getLeaguesPayload() {
+    return Object.entries(data.leagues).filter(([_,v])=>v).map(([k])=>k);
+  }
 
   const valid = data.clubName && data.chairName && data.chairCell && data.chairEmail;
   const viewOnly = club.paid;  // form locks once payment has been received
@@ -335,7 +347,9 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
   const filledBearers = [data.chairName, data.secName, data.treName, data.vcName, ...data.additionalMembers.map(m=>m.name)].filter(Boolean).length;
   const leaguesCount = Object.values(data.leagues).filter(Boolean).length;
   const coachesCount = data.coaches.filter(c=>c.name).length;
-  const stepLabel = ["Club Details","Executive Committee","Leagues & Coaches","Review & Pay"][step-1];
+  const STEPS = ["Club Details","Executive Committee","Leagues & Coaches"];
+  const TOTAL_STEPS = STEPS.length;
+  const stepLabel = STEPS[step-1];
 
   return (
     <div className={viewOnly ? "aff-locked" : ""}>
@@ -351,8 +365,8 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
         <div className="aff-submitted-banner">
           <div className="aff-submitted-icon"><Icon.Check/></div>
           <div className="aff-submitted-text">
-            <div className="aff-submitted-title">Affiliation submitted &amp; paid</div>
-            <div className="aff-submitted-sub">R 4,500 received · Confirmed by Dolphins office · This form is locked, contact the Union office to request an amendment.</div>
+            <div className="aff-submitted-title">Affiliation submitted</div>
+            <div className="aff-submitted-sub">Confirmed by the Dolphins office · This form is locked, contact the Union office to request an amendment.</div>
           </div>
           <Pill tone="teal" dot>Completed</Pill>
         </div>
@@ -364,10 +378,10 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
 
       {/* step strip */}
       <div style={{display:"flex", gap:0, marginBottom:18, background:"var(--white)", borderRadius:10, border:"1px solid var(--line)", overflow:"hidden"}}>
-        {["Club Details","Executive Committee","Leagues & Coaches","Review & Pay"].map((s,i)=>(
+        {STEPS.map((s,i)=>(
           <button key={i} onClick={()=>setStep(i+1)} style={{
             flex:1, padding:"12px 14px", textAlign:"left",
-            borderRight: i<3 ? "1px solid var(--line)" : "none",
+            borderRight: i<STEPS.length-1 ? "1px solid var(--line)" : "none",
             background: step===i+1 ? "var(--ink)" : i+1 < step ? "var(--teal-pale)" : "var(--white)",
             color: step===i+1 ? "#fff" : i+1 < step ? "var(--teal-deep)" : "var(--ink)",
           }}>
@@ -564,192 +578,207 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
         </Card>
       )}
 
-      {step === 3 && (
-        <Card title="Leagues entered &amp; Head Coaches" sub="Select leagues your club is entering for 2026/27 — coaches captured per league">
+      {step === 3 && (() => {
+        const selectedLeagueKeys = Object.entries(data.leagues).filter(([_,v])=>v).map(([k])=>k);
+        // Group league checkboxes by category so the picker reads cleanly with 12 options.
+        const leagueGroups = LEAGUE_OPTIONS.reduce((acc, L) => {
+          (acc[L.group] = acc[L.group] || []).push(L);
+          return acc;
+        }, {});
+        return (
+        <Card title="Leagues entered &amp; Coaches by Designation" sub="Pick the leagues your club is entering — coaches are then captured under each team designation">
           <div className="field">
             <div className="field-label">Leagues your club is entering <span className="req">*</span></div>
-            <div style={{display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:8}}>
-              {[
-                {k:"premier", l:"Premier League"},
-                {k:"promotion", l:"Promotion League"},
-                {k:"premierWomen", l:"Premier Women"},
-                {k:"promotionWomen", l:"Promotion Women"},
-                {k:"veterans", l:"Veterans League"},
-                {k:"emcuD1", l:"EMCU Division 1"},
-              ].map(lg=>(
-                <button key={lg.k} className={`check-item ${data.leagues[lg.k]?"on":""}`} onClick={()=>updateLeague(lg.k)}>
-                  <div className="box">{data.leagues[lg.k] && <Icon.Check/>}</div>
-                  {lg.l}
-                </button>
-              ))}
-            </div>
+            {Object.entries(leagueGroups).map(([group, opts]) => (
+              <div key={group} style={{marginBottom:12}}>
+                <div style={{fontSize:10.5, letterSpacing:"0.12em", textTransform:"uppercase", color:"var(--muted-2)", fontFamily:"'Montserrat',sans-serif", fontWeight:700, marginBottom:6}}>{group}</div>
+                <div style={{display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:8}}>
+                  {opts.map(L=>(
+                    <button key={L.key} className={`check-item ${data.leagues[L.key]?"on":""}`} onClick={()=>updateLeague(L.key)}>
+                      <div className="box">{data.leagues[L.key] && <Icon.Check/>}</div>
+                      {L.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
 
           <div className="hr"/>
 
-          {/* Coaches — dynamic array with team-tag multi-select */}
-          <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10}}>
+          {/* Coaches grouped by designation — one banner per selected league */}
+          <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14}}>
             <div>
-              <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:13, fontWeight:700, color:"var(--ink)"}}>Coaches</div>
-              <div style={{fontSize:11.5, color:"var(--muted)", marginTop:2}}>Tag each coach to the teams they manage — one coach can cover multiple.</div>
+              <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:13, fontWeight:700, color:"var(--ink)"}}>Coaches by Designation</div>
+              <div style={{fontSize:11.5, color:"var(--muted)", marginTop:2}}>Each league becomes its own banner. Add coaches under the designation they manage — a coach can sit under more than one.</div>
             </div>
-            <Btn tone="outline" size="sm" icon={Icon.Plus} onClick={addCoach}>Add another coach</Btn>
           </div>
 
-          {data.coaches.map((c, idx) => {
-            const selectedTeams = Object.entries(data.leagues).filter(([_,v])=>v).map(([k])=>k);
-            return (
-              <div key={idx} style={{
-                padding:"16px 18px", border:"1px solid var(--line)", borderRadius:10,
-                marginBottom:10, background: c.name ? "rgba(15,143,74,0.04)" : "var(--paper)",
-              }}>
-                <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12}}>
-                  <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:13.5, fontWeight:700, color:"var(--ink)"}}>
-                    Coach <span style={{color:"var(--muted-2)", fontWeight:500}}>#{idx+1}</span>
-                    {c.teams.length>0 && <span style={{marginLeft:10, fontSize:11, fontWeight:500, color:"var(--muted)", fontFamily:"'Montserrat',sans-serif", letterSpacing:"0.08em", textTransform:"uppercase"}}>· {c.teams.length} team{c.teams.length===1?"":"s"}</span>}
-                  </div>
-                  <div style={{display:"flex", alignItems:"center", gap:10}}>
-                    {c.name && <Pill tone="teal" dot>Captured</Pill>}
-                    {data.coaches.length > 1 && <Btn tone="ghost" size="sm" onClick={()=>removeCoach(idx)}>Remove</Btn>}
-                  </div>
-                </div>
-
-                <div className="field-grid-4">
-                  <div className="field" style={{marginBottom:8}}>
-                    <div className="field-label">Coach Name</div>
-                    <input className="field-input" placeholder="Name &amp; surname" value={c.name} onChange={e=>updateCoach(idx,"name",e.target.value)}/>
-                  </div>
-                  <div className="field" style={{marginBottom:8}}>
-                    <div className="field-label">Coaching Body</div>
-                    <select className="field-select" value={c.body} onChange={e=>updateCoach(idx,"body",e.target.value)}>
-                      <option>CSA</option><option>Gary Kirsten</option>
-                    </select>
-                  </div>
-                  <div className="field" style={{marginBottom:8}}>
-                    <div className="field-label">Coaching Level</div>
-                    <select className="field-select" value={c.level} onChange={e=>updateCoach(idx,"level",e.target.value)}>
-                      {COACHING_LEVELS.map(l=><option key={l}>{l}</option>)}
-                    </select>
-                  </div>
-                  <div className="field" style={{marginBottom:8}}>
-                    <div className="field-label">Status</div>
-                    <select className="field-select" value={c.status} onChange={e=>updateCoach(idx,"status",e.target.value)}>
-                      <option>Completed</option><option>In progress</option><option>Not completed</option>
-                    </select>
-                  </div>
-                </div>
-                <div className="field-grid-2">
-                  <div className="field" style={{marginBottom:10}}>
-                    <div className="field-label">Contact Number</div>
-                    <input className="field-input" placeholder="0XX XXX XXXX" value={c.cell} onChange={e=>updateCoach(idx,"cell",e.target.value)}/>
-                  </div>
-                  <div className="field" style={{marginBottom:10}}>
-                    <div className="field-label">Email</div>
-                    <input className="field-input" placeholder="coach@club.co.za" value={c.email} onChange={e=>updateCoach(idx,"email",e.target.value)}/>
-                  </div>
-                </div>
-
-                {/* ─── Team-tag multi-select — bold required block ─── */}
-                {selectedTeams.length === 0 ? (
-                  <div className="trb" style={{background:"var(--white)", borderStyle:"dashed", borderColor:"var(--paper3)"}}>
-                    <div className="trb-head">
-                      <span className="trb-label">Teams managed <span className="req">*</span></span>
+          {selectedLeagueKeys.length === 0 ? (
+            <div style={{
+              border:"1px dashed var(--paper3)", borderRadius:10, padding:"22px 18px",
+              background:"var(--paper)", color:"var(--muted)", textAlign:"center",
+              fontFamily:"'Montserrat',sans-serif", fontSize:12.5,
+            }}>
+              <Icon.Alert/> Select at least one league above — each becomes a banner you can attach coaches to.
+            </div>
+          ) : (
+            selectedLeagueKeys.map(key => {
+              const L = LEAGUE_OPTIONS.find(o => o.key === key);
+              const rows = data.coaches.map((c,i)=>({c,i})).filter(x => x.c.teams.includes(key));
+              return (
+                <div key={key} style={{
+                  border:"1px solid var(--line)", borderRadius:12, marginBottom:14,
+                  overflow:"hidden", background:"var(--white)",
+                }}>
+                  {/* Banner header */}
+                  <div style={{
+                    display:"flex", alignItems:"center", justifyContent:"space-between", gap:14,
+                    padding:"12px 16px", background:"linear-gradient(90deg, var(--ink) 0%, var(--ink2) 100%)",
+                    color:"#fff", borderLeft:"3px solid var(--teal)",
+                  }}>
+                    <div style={{display:"flex", alignItems:"center", gap:14, minWidth:0}}>
+                      <div style={{
+                        width:36, height:36, borderRadius:8, background:"rgba(15,143,74,0.18)",
+                        display:"flex", alignItems:"center", justifyContent:"center", color:"var(--teal)",
+                        flexShrink:0,
+                      }}>
+                        <Icon.Whistle/>
+                      </div>
+                      <div style={{minWidth:0}}>
+                        <div style={{fontSize:10, letterSpacing:"0.12em", textTransform:"uppercase", opacity:0.65, fontFamily:"'Montserrat',sans-serif", fontWeight:700}}>{L.group}</div>
+                        <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:15, fontWeight:700, marginTop:2}}>{L.label}</div>
+                      </div>
                     </div>
-                    <div className="trb-empty-state" style={{color:"var(--muted)"}}>
-                      <Icon.Alert/> Select at least one league above — each one becomes a tag this coach can manage.
-                    </div>
-                  </div>
-                ) : (
-                  <div className="trb" data-empty={c.teams.length === 0}>
-                    <div className="trb-head">
-                      <span className="trb-label">Teams managed <span className="req">*</span></span>
-                      <span className={`trb-count ${c.teams.length===0 ? "empty" : "filled"}`}>
-                        {c.teams.length === 0
-                          ? "Tap a chip to assign →"
-                          : `${c.teams.length} of ${selectedTeams.length} selected`}
+                    <div style={{display:"flex", alignItems:"center", gap:10, flexShrink:0}}>
+                      <span style={{fontSize:11, letterSpacing:"0.08em", textTransform:"uppercase", opacity:0.7, fontFamily:"'Montserrat',sans-serif", fontWeight:600}}>
+                        {rows.length} coach{rows.length===1?"":"es"}
                       </span>
-                    </div>
-                    <div className="trb-chips">
-                      {[
-                        {k:"premier", l:"Premier League"},
-                        {k:"promotion", l:"Promotion League"},
-                        {k:"premierWomen", l:"Premier Women"},
-                        {k:"promotionWomen", l:"Promotion Women"},
-                        {k:"veterans", l:"Veterans League"},
-                        {k:"emcuD1", l:"EMCU Division 1"},
-                      ].filter(lg=>selectedTeams.includes(lg.k)).map(lg => {
-                        const on = c.teams.includes(lg.k);
-                        return (
-                          <button key={lg.k} className={`trb-chip ${on?"on":""}`} onClick={()=>toggleCoachTeam(idx, lg.k)}>
-                            <span className="trb-chip-tick">{on ? <Icon.Check/> : null}</span>
-                            {lg.l}
-                          </button>
-                        );
-                      })}
+                      <Btn tone="teal" size="sm" icon={Icon.Plus} onClick={()=>addCoachForLeague(key)}>Add coach</Btn>
                     </div>
                   </div>
-                )}
-              </div>
-            );
-          })}
-        </Card>
-      )}
 
-      {step === 4 && (
-        <Card title="Review &amp; submit · Affiliation fee" sub="Confirm your details and pay the union affiliation fee">
-          <div style={{background:"var(--paper)", borderRadius:10, padding:"16px 18px", marginBottom:16}}>
-            <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"10px 22px"}}>
-              {[
-                ["Club Name", data.clubName],
-                ["District", data.district],
-                ["Township", data.township === "yes" ? "Yes" : "No"],
-                ["Home ground", data.groundVenue
-                    ? `${data.groundVenue}${data.groundAddress ? " · " + data.groundAddress : ""}`
-                    : "—"],
-                ["Chairperson", data.chairName + " · " + data.chairCell],
-                ["Additional members", data.additionalMembers.filter(m=>m.name).length
-                    ? data.additionalMembers.filter(m=>m.name).map(m=>m.name).join(", ")
-                    : "—"],
-                ["Leagues entered", Object.entries(data.leagues).filter(([_,v])=>v).map(([k])=>k).join(", ") || "—"],
-                ["Coaches", data.coaches.filter(c=>c.name).length
-                    ? data.coaches.filter(c=>c.name).map(c => `${c.name} (${c.body} ${c.level})`).join("; ")
-                    : "—"],
-              ].map(([k,v],i)=>(
-                <div key={i}>
-                  <div style={{fontSize:10, textTransform:"uppercase", letterSpacing:"0.1em", color:"var(--muted-2)", marginBottom:2}}>{k}</div>
-                  <div style={{fontSize:13, color:"var(--ink)", fontWeight:500}}>{v||"—"}</div>
+                  {/* Banner body */}
+                  <div style={{padding:"12px 14px"}}>
+                    {rows.length === 0 ? (
+                      <div style={{padding:"18px 12px", textAlign:"center", color:"var(--muted)", fontSize:12.5}}>
+                        No coach assigned to <strong style={{color:"var(--ink)"}}>{L.label}</strong> yet — click <em>Add coach</em>.
+                      </div>
+                    ) : (
+                      rows.map(({c, i: idx}) => {
+                        const otherTeams = c.teams.filter(t => t !== key);
+                        return (
+                          <div key={idx} style={{
+                            padding:"14px 14px", border:"1px solid var(--line)", borderRadius:10,
+                            marginBottom:10, background: c.name ? "rgba(15,143,74,0.04)" : "var(--paper)",
+                          }}>
+                            <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10}}>
+                              <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:12.5, fontWeight:700, color:"var(--ink)", letterSpacing:"0.04em"}}>
+                                Coach #{idx+1}
+                                {otherTeams.length > 0 && (
+                                  <span style={{marginLeft:10, fontSize:10.5, fontWeight:500, color:"var(--muted)", letterSpacing:"0.08em", textTransform:"uppercase"}}>
+                                    · also: {otherTeams.map(t => LEAGUE_LABEL_BY_KEY[t]).join(", ")}
+                                  </span>
+                                )}
+                              </div>
+                              <div style={{display:"flex", alignItems:"center", gap:8}}>
+                                {c.name && <Pill tone="teal" dot>Captured</Pill>}
+                                <Btn tone="ghost" size="sm" onClick={()=>toggleCoachTeam(idx, key)}>Remove from {L.label}</Btn>
+                              </div>
+                            </div>
+                            <div className="field-grid-4">
+                              <div className="field" style={{marginBottom:8}}>
+                                <div className="field-label">Coach Name</div>
+                                <input className="field-input" placeholder="Name &amp; surname" value={c.name} onChange={e=>updateCoach(idx,"name",e.target.value)}/>
+                              </div>
+                              <div className="field" style={{marginBottom:8}}>
+                                <div className="field-label">Coaching Body</div>
+                                <select className="field-select" value={c.body} onChange={e=>updateCoach(idx,"body",e.target.value)}>
+                                  <option>CSA</option><option>Gary Kirsten</option>
+                                </select>
+                              </div>
+                              <div className="field" style={{marginBottom:8}}>
+                                <div className="field-label">Coaching Level</div>
+                                <select className="field-select" value={c.level} onChange={e=>updateCoach(idx,"level",e.target.value)}>
+                                  {COACHING_LEVELS.map(l=><option key={l}>{l}</option>)}
+                                </select>
+                              </div>
+                              <div className="field" style={{marginBottom:8}}>
+                                <div className="field-label">Status</div>
+                                <select className="field-select" value={c.status} onChange={e=>updateCoach(idx,"status",e.target.value)}>
+                                  <option>Completed</option><option>In progress</option><option>Not completed</option>
+                                </select>
+                              </div>
+                            </div>
+                            <div className="field-grid-2">
+                              <div className="field" style={{marginBottom:10}}>
+                                <div className="field-label">Contact Number</div>
+                                <input className="field-input" placeholder="0XX XXX XXXX" value={c.cell} onChange={e=>updateCoach(idx,"cell",e.target.value)}/>
+                              </div>
+                              <div className="field" style={{marginBottom:10}}>
+                                <div className="field-label">Email</div>
+                                <input className="field-input" placeholder="coach@club.co.za" value={c.email} onChange={e=>updateCoach(idx,"email",e.target.value)}/>
+                              </div>
+                            </div>
+
+                            {/* Cross-tag the same coach to other designations */}
+                            <div className="trb">
+                              <div className="trb-head">
+                                <span className="trb-label">Also coaches</span>
+                                <span className="trb-count filled">{c.teams.length} of {selectedLeagueKeys.length} designations</span>
+                              </div>
+                              <div className="trb-chips">
+                                {selectedLeagueKeys.filter(k => k !== key).map(k => {
+                                  const on = c.teams.includes(k);
+                                  return (
+                                    <button key={k} className={`trb-chip ${on?"on":""}`} onClick={()=>toggleCoachTeam(idx, k)}>
+                                      <span className="trb-chip-tick">{on ? <Icon.Check/> : null}</span>
+                                      {LEAGUE_LABEL_BY_KEY[k]}
+                                    </button>
+                                  );
+                                })}
+                                {selectedLeagueKeys.length === 1 && (
+                                  <span style={{fontSize:11, color:"var(--muted)"}}>Select another league above to cross-tag this coach.</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
                 </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Payment block */}
-          <div className="aff-pay">
-            <div className="aff-pay-icon"><Icon.Money/></div>
-            <div className="aff-pay-text">
-              <div className="aff-pay-eyebrow">Union Affiliation · 2026/27</div>
-              <div className="aff-pay-title">KZNCU &amp; EMCU annual fee</div>
-              <div className="aff-pay-sub">Includes league entry, Medicoach AMS licence and franchise integration.</div>
-            </div>
-            <div className="aff-pay-amount">
-              <div className="aff-pay-amount-n">R 4,500</div>
-              <div className="aff-pay-amount-vat">VAT inclusive</div>
-            </div>
-          </div>
-
-          <div className="aff-pay-actions">
-            <Btn tone="outline" onClick={()=>setStep(3)}>Back</Btn>
-            <Btn tone="gold" icon={Icon.Money} onClick={()=>{ onSubmit({exco: getExcoPayload(), coaches: getCoachesPayload(), ground: getGroundPayload()}); toast("Affiliation submitted &amp; paid · R 4,500 · Exco roster captured"); }}>Pay &amp; submit affiliation</Btn>
-          </div>
+              );
+            })
+          )}
         </Card>
-      )}
+        );
+      })()}
 
-      {step < 4 && (
+      {step < TOTAL_STEPS && (
         <div className="row" style={{marginTop:14, justifyContent:"space-between"}}>
           <Btn tone="ghost" onClick={()=>step>1 && setStep(step-1)} disabled={step===1}>← Back</Btn>
           <div className="row" style={{gap:8}}>
             <Btn tone="outline" size="sm">Save draft</Btn>
             <Btn tone="ink" onClick={()=>setStep(step+1)} disabled={step===1 && !valid}>Continue →</Btn>
+          </div>
+        </div>
+      )}
+
+      {step === TOTAL_STEPS && (
+        <div className="row" style={{marginTop:14, justifyContent:"space-between"}}>
+          <Btn tone="ghost" onClick={()=>step>1 && setStep(step-1)}>← Back</Btn>
+          <div className="row" style={{gap:8}}>
+            <Btn tone="outline" size="sm">Save draft</Btn>
+            <Btn tone="teal" icon={Icon.Check} onClick={()=>{
+              onSubmit({
+                exco: getExcoPayload(),
+                coaches: getCoachesPayload(),
+                ground: getGroundPayload(),
+                leagues: getLeaguesPayload(),
+              });
+              toast("Affiliation submitted · Exco roster & leagues captured");
+            }}>Submit affiliation</Btn>
           </div>
         </div>
       )}
@@ -773,7 +802,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
           <div className="aff-hero-card" style={{backgroundImage:"url('/players/ackerman-green.jpg')"}}>
             <div className="aff-hero-content">
               <div className="aff-hero-badge">
-                <span className="dot"/>Affiliation · Step {step} / 4
+                <span className="dot"/>Affiliation · Step {step} / {TOTAL_STEPS}
               </div>
               <div>
                 <div className="aff-hero-title">Your club, <em>on the same platform</em> as our heroes.</div>
@@ -786,7 +815,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
           </div>
 
           <div className="aff-progress-pill">
-            <div className="aff-progress-num">{step}<span style={{color:"var(--muted-3)", fontSize:13, fontWeight:500}}>/4</span></div>
+            <div className="aff-progress-num">{step}<span style={{color:"var(--muted-3)", fontSize:13, fontWeight:500}}>/{TOTAL_STEPS}</span></div>
             <div className="aff-progress-info">
               <div className="aff-progress-label">You're on</div>
               <div className="aff-progress-sub">{stepLabel}</div>
@@ -821,10 +850,6 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
             <div className="aff-summary-row">
               <div className="aff-summary-label">Coaches</div>
               <div className={`aff-summary-value ${coachesCount===0?"muted":""}`}>{coachesCount ? `${coachesCount} listed` : "—"}</div>
-            </div>
-            <div className="aff-summary-row">
-              <div className="aff-summary-label">Union fee</div>
-              <div className="aff-summary-value">R 4,500</div>
             </div>
             <div className="aff-summary-foot">
               Submitting to the <strong>Dolphins office</strong> · KZNCU &amp; EMCU

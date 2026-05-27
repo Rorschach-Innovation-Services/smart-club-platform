@@ -3,7 +3,7 @@
 import { useState as useStateA, useMemo as useMemoA } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  REQUIRED_DOCS, CQI_STRUCTURE,
+  REQUIRED_DOCS, CQI_STRUCTURE, LEAGUE_OPTIONS,
   cohortStats, docCompletion, overallProgress, fixtureCost, generateRoundRobin,
 } from './data.jsx';
 import {
@@ -473,10 +473,13 @@ function EditFixtureRow({ fixture, teams, onSave, onCancel }) {
   );
 }
 
-/* ─── CreateSeriesForm — long form mirroring the cricclubs structure ─── */
+/* ─── CreateSeriesForm — automated league flow + advanced overrides ─── */
 export function CreateSeriesForm({ clubs, onCreate, onClose }) {
   const [d, setD] = useStateA({
-    name:"", startDate:"", divisions:false, groups:1,
+    leagueKey:"",                     // dropdown: pick a league → auto-fills name + teams
+    name:"", startDate:"", kind:"series",   // "series" or "tournament"
+    bulkSend:true,                    // tick to bulk-send fixtures to stakeholders on create
+    divisions:false, groups:1,
     maxOvers:20, maxPlayers:11, rosterLimit:"No Limit",
     ballType:"Hard Tennis Ball", seriesType:"Twenty20 (16-25 overs)",
     powerPlay:false, category:"Men", level:"Club",
@@ -490,6 +493,8 @@ export function CreateSeriesForm({ clubs, onCreate, onClose }) {
     teams: [],
     costPerKm: 4.5, carsPerAwayTrip: 3,
   });
+  const [showAdvanced, setShowAdvanced] = useStateA(false);
+
   function u(k, v) { setD(prev => ({...prev, [k]: v})); }
   function toggleTeam(id) { setD(prev => ({...prev, teams: prev.teams.includes(id) ? prev.teams.filter(t=>t!==id) : [...prev.teams, id]})); }
   function moveOrder(idx, dir) {
@@ -502,7 +507,26 @@ export function CreateSeriesForm({ clubs, onCreate, onClose }) {
     });
   }
 
-  const eligibleTeams = clubs.filter(c => c.paid);
+  // Teams eligible = paid clubs that registered for the selected league.
+  // Falls back to "all paid clubs" until a league is picked.
+  const teamsForLeague = d.leagueKey
+    ? clubs.filter(c => c.paid && Array.isArray(c.leagues) && c.leagues.includes(d.leagueKey))
+    : [];
+  const eligibleTeams = d.leagueKey ? teamsForLeague : clubs.filter(c => c.paid);
+
+  // When the admin picks a league, auto-fill the name and bulk-select all registered teams.
+  function pickLeague(key) {
+    const L = LEAGUE_OPTIONS.find(o => o.key === key);
+    const filtered = clubs.filter(c => c.paid && Array.isArray(c.leagues) && c.leagues.includes(key));
+    setD(prev => ({
+      ...prev,
+      leagueKey: key,
+      name: L ? `${L.label} · 2026/27` : prev.name,
+      teams: filtered.map(c => c.id),
+      tags: L ? `${L.group}, ${L.label}` : prev.tags,
+    }));
+  }
+
   const canCreate = d.name && d.startDate && d.teams.length >= 2;
 
   function submit() {
@@ -519,15 +543,92 @@ export function CreateSeriesForm({ clubs, onCreate, onClose }) {
 
   return (
     <div className="cs-form">
-      {/* Basic info */}
+      {/* ─── Streamlined basics — dropdown · date · toggle · auto-teams ─── */}
       <div className="cs-row">
         <div className="cs-row-label">Series Name<span className="req">*</span></div>
-        <div className="cs-row-input"><input className="field-input" placeholder="e.g. Premier League T20 · 2026/27" value={d.name} onChange={e=>u("name",e.target.value)}/></div>
+        <div className="cs-row-input">
+          <select
+            className="field-select"
+            value={d.leagueKey}
+            onChange={e=>pickLeague(e.target.value)}
+            style={{minWidth:280}}
+          >
+            <option value="">Select a league / division…</option>
+            {(() => {
+              const groups = LEAGUE_OPTIONS.reduce((acc,L)=>{(acc[L.group]=acc[L.group]||[]).push(L);return acc;},{});
+              return Object.entries(groups).map(([group, opts]) => (
+                <optgroup key={group} label={group}>
+                  {opts.map(L => <option key={L.key} value={L.key}>{L.label} · 2026/27</option>)}
+                </optgroup>
+              ));
+            })()}
+          </select>
+        </div>
       </div>
       <div className="cs-row">
         <div className="cs-row-label">Start Date<span className="req">*</span></div>
         <div className="cs-row-input"><input type="date" value={d.startDate} onChange={e=>u("startDate",e.target.value)}/></div>
       </div>
+      <div className="cs-row">
+        <div className="cs-row-label">Format</div>
+        <div className="cs-row-input">
+          <Choice value={d.kind === "series" ? "Series" : "Standalone tournament"} onChange={v=>u("kind", v === "Series" ? "series" : "tournament")} options={["Series","Standalone tournament"]}/>
+        </div>
+      </div>
+      <div className="cs-row">
+        <div className="cs-row-label">Bulk-send to stakeholders</div>
+        <div className="cs-row-input">
+          <YN value={d.bulkSend} onChange={v=>u("bulkSend",v)}/>
+          <span style={{fontSize:11.5, color:"var(--muted)", marginLeft:10}}>Emails fixture list to chairpersons &amp; coaches once created.</span>
+        </div>
+      </div>
+
+      {/* ─── Auto-populated teams — visible right under the basics ─── */}
+      <div className="cs-section">
+        <div className="cs-section-title">— Teams (auto-populated from registrations)</div>
+      </div>
+      {d.leagueKey ? (
+        <div className="cs-row">
+          <div className="cs-row-label">
+            {teamsForLeague.length} club{teamsForLeague.length===1?"":"s"} registered for <strong>{LEAGUE_LABEL_BY_KEY[d.leagueKey]}</strong>
+          </div>
+          <div className="cs-row-input">
+            <div style={{fontSize:11.5, color:"var(--muted)", marginBottom:8}}>
+              All clubs that selected this league during affiliation are pre-included. Tap a chip to opt one out.
+            </div>
+            <div className="cs-teams-grid">
+              {teamsForLeague.length === 0
+                ? <span style={{fontSize:12, color:"var(--muted)"}}>No registered clubs yet — once clubs affiliate for this league they'll appear here automatically.</span>
+                : teamsForLeague.map(c => {
+                    const on = d.teams.includes(c.id);
+                    return (
+                      <button key={c.id} className={`cs-team-chip ${on?"on":""}`} onClick={()=>toggleTeam(c.id)}>
+                        {on && <Icon.Check/>}{c.name}
+                      </button>
+                    );
+                  })}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="cs-row">
+          <div className="cs-row-label">Pick a league above</div>
+          <div className="cs-row-input">
+            <div style={{fontSize:12, color:"var(--muted)", padding:"10px 0"}}>
+              Once a league is selected, every affiliated club that registered for it will be added automatically.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Advanced overrides (collapsed by default) ─── */}
+      <div className="cs-section" style={{cursor:"pointer", display:"flex", alignItems:"center", gap:8}} onClick={()=>setShowAdvanced(v=>!v)}>
+        <div className="cs-section-title">— Advanced match &amp; scoring settings</div>
+        <span style={{fontSize:11, color:"var(--muted)", letterSpacing:"0.08em", textTransform:"uppercase", fontWeight:700}}>
+          {showAdvanced ? "Hide" : "Defaults applied · click to edit"}
+        </span>
+      </div>
+      {showAdvanced && (<>
       <div className="cs-row">
         <div className="cs-row-label">Series has Divisions?</div>
         <div className="cs-row-input"><YN value={d.divisions} onChange={v=>u("divisions",v)}/></div>
@@ -682,41 +783,28 @@ export function CreateSeriesForm({ clubs, onCreate, onClose }) {
         </div>
       </div>
 
-      {/* Teams */}
-      <div className="cs-section">
-        <div className="cs-section-title">— Teams Entered ({d.teams.length} selected)</div>
-      </div>
-      <div className="cs-row">
-        <div className="cs-row-label">Pick affiliated clubs (paid only)</div>
-        <div className="cs-row-input">
-          <div className="cs-teams-grid">
-            {eligibleTeams.map(c => {
-              const on = d.teams.includes(c.id);
-              return (
-                <button key={c.id} className={`cs-team-chip ${on?"on":""}`} onClick={()=>toggleTeam(c.id)}>
-                  {on && <Icon.Check/>}{c.name}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
       {/* Tags */}
       <div className="cs-row">
         <div className="cs-row-label">Tags <span style={{color:"var(--muted)", fontSize:11, marginLeft:4}}>(comma-separated)</span></div>
         <div className="cs-row-input"><input className="field-input" placeholder="Premier, Men, Round-robin" value={d.tags} onChange={e=>u("tags",e.target.value)}/></div>
       </div>
+      </>)}
 
       <div className="row" style={{marginTop:22, justifyContent:"space-between", gap:10, padding:"12px 0"}}>
         <div style={{fontSize:11.5, color:"var(--muted)", fontFamily:"'Montserrat',sans-serif", fontWeight:500}}>
           {canCreate
-            ? `Ready · will generate ${(d.teams.length * (d.teams.length-1) / 2)} round-robin fixtures from ${d.startDate}`
-            : "Series name, start date and at least 2 teams are required"}
+            ? `Ready · ${d.kind === "tournament" ? "tournament" : "series"} · ${(d.teams.length * (d.teams.length-1) / 2)} round-robin fixtures from ${d.startDate}${d.bulkSend ? " · fixtures will be bulk-sent to stakeholders" : ""}`
+            : !d.leagueKey
+              ? "Pick a league / division to auto-populate teams"
+              : !d.startDate
+                ? "Add a start date"
+                : "At least 2 registered teams are required"}
         </div>
         <div className="row" style={{gap:8}}>
           <Btn tone="outline" onClick={onClose}>Cancel</Btn>
-          <Btn tone="teal" icon={Icon.Check} disabled={!canCreate} onClick={submit}>Create series</Btn>
+          <Btn tone="teal" icon={Icon.Check} disabled={!canCreate} onClick={submit}>
+            {d.bulkSend ? `Create ${d.kind} & send` : `Create ${d.kind}`}
+          </Btn>
         </div>
       </div>
     </div>
@@ -779,7 +867,7 @@ export function AdminDashboard({ clubs, gotoClub, gotoList }) {
       <div className="kpi-strip">
         <KPI label="Total clubs" num={<CountUp to={stats.total}/>} sub="2026/27 season" />
         <KPI tone={statusFor(pct(stats.paid, stats.total))}
-             label="Affiliated &amp; paid"
+             label="Affiliated"
              num={<CountUp to={stats.paid}/>}
              sub={`${pct(stats.paid, stats.total)}% of cohort`}/>
         <KPI tone={statusFor(pct(stats.docsComplete, stats.total))}
@@ -821,9 +909,9 @@ export function AdminDashboard({ clubs, gotoClub, gotoList }) {
             {[
               {who:"Clares CC",       what:"submitted CQI form", when:"2h ago", tone:"teal"},
               {who:"Harlequins CC",   what:"uploaded AGM Minutes", when:"5h ago", tone:"teal"},
-              {who:"UKZN CC",         what:"completed affiliation payment · R 4,500", when:"1d ago", tone:"navy"},
+              {who:"UKZN CC",         what:"submitted 2026/27 affiliation form", when:"1d ago", tone:"navy"},
               {who:"Phoenix CC",      what:"viewed affiliation form but has not submitted", when:"2d ago", tone:"gold"},
-              {who:"Berea Rovers CC", what:"affiliation form started, payment pending", when:"3d ago", tone:"gold"},
+              {who:"Berea Rovers CC", what:"affiliation form in progress · awaiting submission", when:"3d ago", tone:"gold"},
               {who:"Tongaat CC",      what:"has not started — 2 reminders sent", when:"6d ago", tone:"coral"},
             ].map((a,i)=>(
               <div key={i} className="row" style={{padding:"8px 10px", borderRadius:6, background: i%2 ? "var(--paper)":"transparent"}}>
@@ -952,7 +1040,7 @@ function ClubInsights({ clubs }) {
             <span className={`resource-num ${unpaid > clubs.length*0.3 ? "danger" : unpaid > 0 ? "warn" : "good"}`}>
               <CountUp to={unpaid}/>
             </span>
-            <span className="resource-text"><strong>{unpaid === 1 ? "club" : "clubs"}</strong> haven't paid affiliation · R 4,500 each</span>
+            <span className="resource-text"><strong>{unpaid === 1 ? "club" : "clubs"}</strong> haven't submitted the 2026/27 affiliation form</span>
           </div>
           <div className="resource-row">
             <span className={`resource-num ${incompleteDocs > clubs.length*0.3 ? "danger" : incompleteDocs > 0 ? "warn" : "good"}`}>
@@ -1020,7 +1108,7 @@ export function AdminClubsList({ clubs, gotoClub }) {
           {k:"all", label:"All clubs"},
           {k:"complete", label:"Fully integrated"},
           {k:"incomplete", label:"Incomplete"},
-          {k:"not_paid", label:"Affiliation unpaid"},
+          {k:"not_paid", label:"Affiliation outstanding"},
           {k:"no_cqi", label:"CQI not submitted"},
         ].map(f => (
           <button key={f.k} className={`filter-pill ${filter===f.k?"active":""}`} onClick={()=>setFilter(f.k)}>
@@ -1051,7 +1139,7 @@ export function AdminClubsList({ clubs, gotoClub }) {
                 <tr key={c.id} className="clickable" onClick={()=>gotoClub(c.id)}>
                   <td><ClubNameCell club={c}/></td>
                   <td><div style={{fontSize:12.5}}>{c.chair}</div><div style={{fontSize:10.5,color:"var(--muted-2)",fontFamily:"'Montserrat',sans-serif"}}>{c.sub}</div></td>
-                  <td>{affPill(c.affiliation)} {c.paid && <span style={{fontFamily:"'Montserrat',sans-serif", fontSize:10, color:"var(--teal-deep)", marginLeft:6}}>· PAID</span>}</td>
+                  <td>{affPill(c.affiliation)} {c.paid && <span style={{fontFamily:"'Montserrat',sans-serif", fontSize:10, color:"var(--teal-deep)", marginLeft:6}}>· SUBMITTED</span>}</td>
                   <td><ProgChip value={dc} tone={dc===100?"teal":dc>=50?"gold":"coral"}/></td>
                   <td><Pill tone={band.tone}>{band.label}</Pill></td>
                   <td><ProgChip value={op} tone={op>=80?"teal":op>=50?"gold":"coral"}/></td>
@@ -1073,7 +1161,7 @@ export function AdminClubDetail({ club, gotoList }) {
   const band = cqiBand(club.cqi);
 
   const phases = [
-    { n:"01", t:"Affiliation",        done: club.paid, val: club.paid ? 100 : (club.affiliation==="in_progress"?40:0), detail: club.paid ? "Paid R 4,500 · 12 May 2026" : "Awaiting payment" },
+    { n:"01", t:"Affiliation",        done: club.paid, val: club.paid ? 100 : (club.affiliation==="in_progress"?40:0), detail: club.paid ? "Submitted · 12 May 2026" : "Awaiting submission" },
     { n:"02", t:"League & Fixtures",  done: club.affiliation==="complete", val: club.affiliation==="complete"?100:0, detail: club.affiliation==="complete"?`Allocated to ${club.sub==="EMCU"?"EMCU Premier":"Provincial Promotion"}`: "Pending affiliation" },
     { n:"03", t:"Player Registration", done: club.players >= 30, val: Math.min(100, (club.players||0)/60*100), detail: `${club.players||0} players registered` },
     { n:"04", t:"Live Scoring",        done: false, val: club.cqi>0 ? 25 : 0, detail: "Begins round 1 · 02 Aug 2026" },
@@ -1101,7 +1189,7 @@ export function AdminClubDetail({ club, gotoList }) {
 
       <div className="kpi-strip">
         <KPI tone="navy" label="Overall progress"  num={op+"%"}  sub="all phases" />
-        <KPI tone="teal" label="Affiliation"       num={club.paid?"Paid":"Pending"} sub={club.paid?"R 4,500":"R 0 · awaiting"} />
+        <KPI tone="teal" label="Affiliation"       num={club.paid?"Submitted":"Pending"} sub={club.paid?"12 May 2026":"Awaiting submission"} />
         <KPI tone="gold" label="Documents"         num={`${Object.values(club.docs).filter(v=>v).length}/4`} sub="compliance docs" />
         <KPI tone={band.tone==="coral"?"coral":""} label="CQI score" num={club.cqi.toFixed(1)} sub={band.label} />
         <KPI label="Players"                       num={club.players}  sub={`${club.teams} teams · ${club.juniors} junior`} />

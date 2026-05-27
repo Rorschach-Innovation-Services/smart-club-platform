@@ -1,0 +1,2301 @@
+<!DOCTYPE html>
+<!-- saved from url=(0065)file:///Users/niallnaidoo/Downloads/medicoach_fixture_engine.html -->
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Medicoach — Fixture Automation Engine</title>
+<link href="./Medicoach — Fixture Automation Engine_files/css2" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --ink:#0D1117;--ink2:#1C2333;--ink3:#2D3748;
+  --navy:#1B2A4A;--navy-mid:#243356;
+  --gold:#C8A84B;--gold-pale:#F5E8C0;--gold-mid:#E2C47A;
+  --teal:#1D9E75;--teal-pale:#E1F5EE;--teal-mid:#5DCAA5;
+  --coral:#D85A30;--coral-pale:#FAECE7;
+  --paper:#F8F6F1;--paper2:#EFECE5;--paper3:#E5E1D8;
+  --line:rgba(13,17,23,0.1);--line2:rgba(13,17,23,0.06);
+  --white:#FFFFFF;
+  --radius:8px;--radius-lg:14px;
+}
+html{font-size:14px;color:var(--ink);background:var(--paper)}
+body{font-family:'IBM Plex Sans',sans-serif;line-height:1.5;min-height:100vh}
+button,input,select{font-family:inherit;outline:none}
+button{cursor:pointer;border:none}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-thumb{background:var(--paper3);border-radius:2px}
+
+/* ── HEADER ── */
+.header{
+  background:var(--ink);padding:0 36px;height:52px;
+  display:flex;align-items:center;gap:16px;
+  position:sticky;top:0;z-index:200;
+}
+.h-logo{display:flex;align-items:center;gap:10px}
+.h-logo-gem{
+  width:28px;height:28px;background:var(--gold);
+  clip-path:polygon(50% 0,100% 38%,82% 100%,18% 100%,0 38%);
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+}
+.h-logo-name{font-family:'Syne',sans-serif;font-size:15px;font-weight:700;color:var(--white);letter-spacing:0.04em}
+.h-divider{width:1px;height:18px;background:rgba(255,255,255,0.15)}
+.h-sub{font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:0.08em;text-transform:uppercase}
+.h-pill{
+  margin-left:auto;font-family:'IBM Plex Mono',monospace;
+  font-size:10px;font-weight:500;letter-spacing:0.12em;text-transform:uppercase;
+  padding:4px 12px;border-radius:20px;
+  background:rgba(200,168,75,0.18);color:var(--gold-mid);border:1px solid rgba(200,168,75,0.25);
+}
+
+/* ── LAYOUT ── */
+.shell{display:grid;grid-template-columns:320px 1fr;min-height:calc(100vh - 52px)}
+
+/* ── LEFT PANEL ── */
+.panel{
+  background:var(--white);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;
+  position:sticky;top:52px;height:calc(100vh - 52px);overflow-y:auto;
+}
+.panel-body{padding:20px 18px;flex:1}
+.panel-footer{padding:14px 18px;border-top:1px solid var(--line)}
+
+.section{margin-bottom:22px}
+.section-title{
+  font-family:'Syne',sans-serif;font-size:9px;font-weight:700;
+  text-transform:uppercase;letter-spacing:0.18em;color:rgba(13,17,23,0.4);
+  margin-bottom:10px;display:flex;align-items:center;gap:8px;
+}
+.section-title::after{content:'';flex:1;height:1px;background:var(--line2)}
+
+/* Config inputs */
+.field{margin-bottom:10px}
+.field-label{font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:0.1em;color:rgba(13,17,23,0.45);margin-bottom:4px}
+.field-input{
+  width:100%;height:34px;border:1px solid var(--line);border-radius:var(--radius);
+  padding:0 10px;font-size:13px;color:var(--ink);background:var(--paper);
+  transition:border .12s,background .12s;
+}
+.field-input:focus{border-color:var(--navy);background:var(--white)}
+select.field-input{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' fill='none' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:28px}
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+
+/* Teams */
+.teams-list{max-height:200px;overflow-y:auto;margin-bottom:8px}
+.team-row{
+  display:flex;align-items:center;gap:7px;
+  padding:6px 8px;border-radius:6px;
+  border:1px solid var(--line);background:var(--paper);
+  margin-bottom:4px;font-size:12px;cursor:grab;
+  transition:background .1s;
+}
+.team-row:hover{background:var(--paper2)}
+.team-row.dragging{opacity:0.5}
+.team-row.drag-over{border-color:var(--navy);background:rgba(27,42,74,0.04)}
+.tr-num{
+  font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:rgba(13,17,23,0.35);min-width:16px;text-align:center;
+}
+.tr-name{flex:1;font-weight:500;color:var(--ink)}
+.tr-venue{font-size:10px;color:rgba(13,17,23,0.4);max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tr-del{
+  background:none;color:rgba(13,17,23,0.3);font-size:14px;
+  line-height:1;padding:0 2px;flex-shrink:0;
+}
+.tr-del:hover{color:var(--coral)}
+
+.add-row{display:flex;gap:6px}
+.add-input{
+  flex:1;height:30px;border:1px dashed var(--line);border-radius:6px;
+  padding:0 10px;font-size:12px;color:var(--ink);background:transparent;
+}
+.add-input:focus{border-color:var(--navy);border-style:solid;background:var(--white)}
+.add-btn{
+  height:30px;padding:0 12px;border-radius:6px;
+  background:var(--teal-pale);color:var(--teal);font-size:12px;font-weight:500;
+}
+.add-btn:hover{background:var(--teal);color:var(--white)}
+
+.sample-btns{display:flex;gap:5px;margin-top:5px}
+.sample-btn{
+  flex:1;height:24px;border-radius:5px;font-size:10px;font-weight:500;
+  background:var(--paper2);color:rgba(13,17,23,0.5);border:1px solid var(--line);
+}
+.sample-btn:hover{background:var(--paper3);color:var(--ink)}
+
+/* Venues */
+.venue-chips{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px}
+.venue-chip{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:3px 8px;border-radius:20px;font-size:11px;
+  background:var(--paper2);color:var(--ink3);border:1px solid var(--line);
+}
+.vc-del{background:none;color:rgba(13,17,23,0.3);font-size:11px;line-height:1}
+.vc-del:hover{color:var(--coral)}
+
+/* CTA buttons */
+.cta{
+  width:100%;height:40px;border-radius:var(--radius);
+  font-family:'Syne',sans-serif;font-size:13px;font-weight:700;
+  letter-spacing:0.04em;display:flex;align-items:center;justify-content:center;gap:8px;
+  transition:all .15s;
+}
+.cta-primary{background:var(--ink);color:var(--white)}
+.cta-primary:hover{background:var(--ink2)}
+.cta-teal{background:var(--teal);color:var(--white);margin-top:6px}
+.cta-teal:hover{background:#157a5a}
+.cta-outline{background:transparent;color:var(--ink);border:1px solid var(--line);margin-top:6px}
+.cta-outline:hover{background:var(--paper2)}
+
+/* ── MAIN AREA ── */
+.main{padding:24px 28px;overflow-y:auto;min-height:calc(100vh - 52px)}
+
+/* Empty state */
+.empty-wrap{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-height:60vh;text-align:center;
+}
+.empty-graphic{
+  width:120px;height:120px;border-radius:50%;
+  background:var(--paper2);border:2px dashed var(--paper3);
+  display:flex;align-items:center;justify-content:center;margin-bottom:24px;
+}
+.empty-wrap h2{font-family:'Syne',sans-serif;font-size:22px;font-weight:700;margin-bottom:8px;color:var(--ink)}
+.empty-wrap p{font-size:13px;color:rgba(13,17,23,0.5);max-width:380px;line-height:1.7}
+.empty-steps{
+  display:flex;gap:0;margin-top:32px;
+  background:var(--white);border:1px solid var(--line);border-radius:var(--radius-lg);overflow:hidden;
+}
+.empty-step{
+  flex:1;padding:14px 16px;border-right:1px solid var(--line);
+}
+.empty-step:last-child{border-right:none}
+.es-n{
+  font-family:'IBM Plex Mono',monospace;font-size:18px;font-weight:500;
+  color:var(--ink);line-height:1;margin-bottom:4px;
+}
+.es-l{font-size:11px;color:rgba(13,17,23,0.45)}
+
+/* Top bar for generated view */
+.gen-topbar{
+  display:flex;align-items:flex-start;justify-content:space-between;
+  margin-bottom:20px;gap:12px;
+}
+.gen-title{font-family:'Syne',sans-serif;font-size:20px;font-weight:700;color:var(--ink)}
+.gen-sub{font-size:12px;color:rgba(13,17,23,0.45);margin-top:3px;font-family:'IBM Plex Mono',monospace}
+.gen-actions{display:flex;gap:8px;flex-shrink:0}
+
+/* Stats strip */
+.kpi-row{
+  display:grid;grid-template-columns:repeat(5,1fr);gap:1px;
+  background:var(--line);border:1px solid var(--line);border-radius:var(--radius-lg);
+  overflow:hidden;margin-bottom:20px;
+}
+.kpi{background:var(--white);padding:14px 16px}
+.kpi-n{font-family:'Syne',sans-serif;font-size:26px;font-weight:800;color:var(--ink);line-height:1}
+.kpi-l{font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:rgba(13,17,23,0.4);margin-top:3px}
+.kpi.teal .kpi-n{color:var(--teal)}
+.kpi.gold .kpi-n{color:var(--gold)}
+.kpi.coral .kpi-n{color:var(--coral)}
+.kpi.navy .kpi-n{color:var(--navy)}
+
+/* Tabs */
+.tabs-wrap{
+  display:flex;gap:0;margin-bottom:20px;
+  border-bottom:2px solid var(--line);
+}
+.tab-btn{
+  padding:8px 18px 10px;font-family:'Syne',sans-serif;font-size:12px;font-weight:600;
+  letter-spacing:0.06em;text-transform:uppercase;background:none;border:none;
+  color:rgba(13,17,23,0.4);cursor:pointer;transition:color .12s;
+  border-bottom:2px solid transparent;margin-bottom:-2px;
+}
+.tab-btn:hover{color:var(--ink)}
+.tab-btn.active{color:var(--ink);border-bottom-color:var(--ink)}
+.tab-pane{display:none}
+.tab-pane.active{display:block}
+
+/* Round navigator */
+.round-nav{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:16px;align-items:center}
+.rn-label{font-size:10px;text-transform:uppercase;letter-spacing:0.1em;color:rgba(13,17,23,0.4);margin-right:4px}
+.round-pill{
+  padding:4px 14px;border-radius:20px;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;
+  background:var(--white);border:1px solid var(--line);color:rgba(13,17,23,0.5);cursor:pointer;
+  transition:all .12s;position:relative;
+}
+.round-pill:hover{border-color:var(--navy);color:var(--navy)}
+.round-pill.active{background:var(--ink);color:var(--white);border-color:var(--ink)}
+.round-pill.complete{border-color:var(--teal-mid)}
+.round-pill.complete::after{
+  content:'';position:absolute;top:-3px;right:-3px;
+  width:7px;height:7px;border-radius:50%;background:var(--teal);
+  border:1px solid var(--white);
+}
+
+/* Fixture cards */
+.fixtures-list{display:flex;flex-direction:column;gap:6px}
+.fixture-card{
+  background:var(--white);border:1px solid var(--line);border-radius:var(--radius-lg);
+  display:grid;grid-template-columns:1fr 56px 1fr 190px 100px;
+  overflow:hidden;transition:box-shadow .12s;
+}
+.fixture-card:hover{box-shadow:0 2px 12px rgba(0,0,0,0.06)}
+.fc-side{padding:12px 16px;display:flex;flex-direction:column;gap:2px}
+.fc-side.home{text-align:right}
+.fc-name{font-family:'Syne',sans-serif;font-size:13px;font-weight:700;color:var(--ink);line-height:1.2}
+.fc-tag{font-size:10px;color:rgba(13,17,23,0.35);text-transform:uppercase;letter-spacing:0.07em;margin-top:2px}
+.fc-score-wrap{display:flex;align-items:center;justify-content:center;gap:3px;margin-top:8px}
+.score-box{
+  width:32px;height:26px;text-align:center;
+  border:1px solid var(--line);border-radius:5px;
+  font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:500;
+  color:var(--ink);background:var(--paper);padding:0;
+}
+.score-box:focus{border-color:var(--teal);background:var(--white)}
+.score-sep{font-family:'IBM Plex Mono',monospace;font-size:11px;color:rgba(13,17,23,0.3)}
+.fc-mid{
+  border-left:1px solid var(--line);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:8px 4px;background:var(--paper);
+}
+.fc-mid-vs{font-family:'Syne',sans-serif;font-size:10px;font-weight:800;color:rgba(13,17,23,0.3);letter-spacing:0.1em}
+.fc-mid-rd{font-family:'IBM Plex Mono',monospace;font-size:9px;color:rgba(13,17,23,0.3);margin-top:3px}
+.fc-meta{
+  border-left:1px solid var(--line);padding:12px 14px;
+  display:flex;flex-direction:column;justify-content:center;gap:3px;
+}
+.fc-meta-date{font-size:12px;font-weight:500;color:var(--ink)}
+.fc-meta-venue{font-size:11px;color:rgba(13,17,23,0.45);margin-top:1px}
+.fc-date-pick{
+  width:100%;height:22px;border:1px solid var(--line);border-radius:4px;
+  padding:0 5px;font-size:10px;background:var(--paper);color:var(--ink);
+  margin-top:4px;font-family:'IBM Plex Mono',monospace;
+}
+.fc-date-pick:focus{border-color:var(--teal);background:var(--white)}
+.fc-actions{border-left:1px solid var(--line);padding:10px 12px;display:flex;flex-direction:column;gap:6px;justify-content:center}
+.fc-status-badge{
+  text-align:center;padding:3px 8px;border-radius:20px;
+  font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:500;text-transform:uppercase;letter-spacing:0.08em;
+}
+.badge-scheduled{background:rgba(27,42,74,0.07);color:var(--navy)}
+.badge-played{background:var(--teal-pale);color:var(--teal)}
+.badge-live{background:var(--coral-pale);color:var(--coral)}
+.badge-bye{background:var(--paper2);color:rgba(13,17,23,0.4)}
+.fc-save{
+  width:100%;height:26px;border-radius:5px;font-size:11px;font-weight:500;
+  background:var(--teal-pale);color:var(--teal);
+}
+.fc-save:hover{background:var(--teal);color:var(--white)}
+
+/* Bye row */
+.bye-row{
+  background:var(--paper);border:1px dashed var(--paper3);border-radius:var(--radius-lg);
+  padding:10px 16px;display:flex;align-items:center;gap:10px;
+  font-size:12px;color:rgba(13,17,23,0.45);
+}
+.bye-row strong{color:var(--ink3)}
+
+/* Winning highlight */
+.fc-side.winner .fc-name{color:var(--teal)}
+.fc-side.winner{background:rgba(29,158,117,0.03)}
+
+/* Round group header */
+.round-group-header{
+  display:flex;align-items:center;gap:12px;
+  margin:18px 0 10px;
+}
+.rgh-label{font-family:'Syne',sans-serif;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:var(--ink)}
+.rgh-date{font-family:'IBM Plex Mono',monospace;font-size:11px;color:rgba(13,17,23,0.4)}
+.rgh-prog{display:flex;align-items:center;gap:8px;margin-left:auto}
+.rgh-bar{width:80px;height:4px;background:var(--paper2);border-radius:2px;overflow:hidden}
+.rgh-fill{height:100%;background:var(--teal);border-radius:2px;transition:width .3s}
+.rgh-frac{font-family:'IBM Plex Mono',monospace;font-size:10px;color:rgba(13,17,23,0.4)}
+
+/* ── LEAGUE TABLE ── */
+.lt-wrap{border-radius:var(--radius-lg);overflow:hidden;border:1px solid var(--line)}
+table.lt{width:100%;border-collapse:collapse}
+.lt thead tr{background:var(--ink)}
+.lt thead th{
+  font-family:'Syne',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.14em;
+  text-transform:uppercase;color:rgba(255,255,255,0.5);
+  padding:10px 11px;text-align:center;
+}
+.lt thead th:nth-child(2){text-align:left}
+.lt tbody tr{border-bottom:1px solid var(--line2);transition:background .1s}
+.lt tbody tr:last-child{border-bottom:none}
+.lt tbody tr:hover{background:var(--paper)}
+.lt tbody tr.promoted{border-left:3px solid var(--teal)}
+.lt td{padding:10px 11px;font-size:12px;text-align:center;vertical-align:middle}
+.lt td:nth-child(2){text-align:left}
+.lt td.pts{font-family:'Syne',sans-serif;font-size:14px;font-weight:800;color:var(--ink)}
+.pos-pip{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:20px;height:20px;border-radius:50%;
+  font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:500;
+}
+.pip-1{background:var(--gold-pale);color:#7A5E14}
+.pip-2{background:var(--paper3);color:rgba(13,17,23,0.5)}
+.pip-3{background:var(--coral-pale);color:var(--coral)}
+.team-cell{display:flex;align-items:center;gap:8px}
+.team-avatar{
+  width:24px;height:24px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-family:'Syne',sans-serif;font-size:9px;font-weight:800;flex-shrink:0;
+}
+.gd-pos{color:var(--teal);font-weight:500}
+.gd-neg{color:var(--coral);font-weight:500}
+.lt-note{font-size:10px;color:rgba(13,17,23,0.4);margin-top:8px;font-family:'IBM Plex Mono',monospace}
+
+/* ── RESULTS MATRIX ── */
+.matrix-container{overflow-x:auto}
+table.mx{border-collapse:collapse;font-size:11px}
+.mx th,.mx td{border:1px solid var(--line2);padding:7px 10px;text-align:center;min-width:80px;max-width:110px}
+.mx th{
+  background:var(--ink);color:rgba(255,255,255,0.6);
+  font-family:'Syne',sans-serif;font-size:9px;font-weight:700;letter-spacing:0.1em;
+}
+.mx th:first-child{text-align:left;min-width:120px}
+.mx td:first-child{
+  text-align:left;font-weight:500;color:var(--ink);
+  background:var(--paper);font-size:11px;
+}
+.mx-self{background:var(--ink2)!important}
+.mx-played{background:var(--teal-pale);color:var(--teal);font-family:'IBM Plex Mono',monospace;font-weight:500}
+.mx-sched{background:rgba(27,42,74,0.04);color:rgba(27,42,74,0.5);font-family:'IBM Plex Mono',monospace;font-size:10px}
+.mx-na{background:var(--paper2);color:rgba(13,17,23,0.2)}
+
+/* ── HOME/AWAY MATRIX (the xlsm view) ── */
+.xlsm-view{
+  background:var(--white);border:1px solid var(--line);border-radius:var(--radius-lg);padding:18px 20px;
+}
+.xlsm-title{font-family:'Syne',sans-serif;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:rgba(13,17,23,0.5);margin-bottom:14px}
+.xlsm-subtitle{font-size:11px;color:rgba(13,17,23,0.4);margin-bottom:14px;font-family:'IBM Plex Mono',monospace}
+
+/* Export bar */
+.export-bar{
+  display:flex;align-items:center;gap:10px;
+  background:var(--white);border:1px solid var(--line);border-radius:var(--radius-lg);
+  padding:12px 16px;margin-bottom:16px;
+}
+.export-bar-text{flex:1;font-size:12px;color:rgba(13,17,23,0.5)}
+.export-bar-text strong{color:var(--ink)}
+
+/* Action buttons shared */
+.action-btn{
+  padding:7px 14px;border-radius:var(--radius);font-size:12px;font-weight:500;
+  display:inline-flex;align-items:center;gap:5px;cursor:pointer;transition:all .12s;
+}
+.ab-navy{background:var(--ink);color:var(--white);border:none}
+.ab-navy:hover{background:var(--ink2)}
+.ab-teal{background:var(--teal);color:var(--white);border:none}
+.ab-teal:hover{background:#157a5a}
+.ab-gold{background:var(--gold);color:var(--ink);border:none}
+.ab-gold:hover{background:var(--gold-mid)}
+.ab-outline{background:var(--white);color:var(--ink);border:1px solid var(--line)}
+.ab-outline:hover{background:var(--paper)}
+.ab-sm{padding:5px 10px;font-size:11px}
+
+/* Toast */
+.toast{
+  position:fixed;bottom:22px;right:22px;z-index:999;
+  font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:500;
+  padding:10px 18px;border-radius:var(--radius);
+  background:var(--ink);color:var(--white);
+  display:none;animation:toastIn .2s ease;
+}
+.toast.show{display:block}
+.toast.ok{background:var(--teal)}
+.toast.warn{background:var(--gold);color:var(--ink)}
+@keyframes toastIn{from{transform:translateY(6px);opacity:0}to{transform:translateY(0);opacity:1}}
+
+/* Drag ghost */
+.drag-ghost{opacity:0.4}
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header class="header">
+  <div class="h-logo">
+    <div class="h-logo-gem"></div>
+    <span class="h-logo-name">Medicoach</span>
+  </div>
+  <div class="h-divider"></div>
+  <span class="h-sub">Fixture Automation Engine</span>
+  <div class="h-pill">Phase 2 · Smart Club Integration</div>
+</header>
+
+<div class="shell">
+
+  <!-- ═══════════ LEFT PANEL ═══════════ -->
+  <aside class="panel">
+    <div class="panel-body">
+
+      <!-- League config -->
+      <div class="section">
+        <div class="section-title">League Configuration</div>
+        <div class="field">
+          <div class="field-label">League Name</div>
+          <input class="field-input" id="cfg-name" value="WP Premier League T20" placeholder="e.g. WP Premier League">
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <div class="field-label">Province</div>
+            <select class="field-input" id="cfg-prov">
+              <option>Western Province</option><option>Gauteng</option>
+              <option>KwaZulu-Natal</option><option>Eastern Province</option>
+              <option>Free State</option><option>North West</option>
+            </select>
+          </div>
+          <div class="field">
+            <div class="field-label">Season</div>
+            <select class="field-input" id="cfg-season">
+              <option>2025/26</option><option>2026/27</option>
+            </select>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <div class="field-label">Format</div>
+            <select class="field-input" id="cfg-format">
+              <option>T20</option><option>50-over</option><option>T10</option><option>2-day</option>
+            </select>
+          </div>
+          <div class="field">
+            <div class="field-label">Legs</div>
+            <select class="field-input" id="cfg-legs">
+              <option value="1">1 leg</option><option value="2">2 legs</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Schedule -->
+      <div class="section">
+        <div class="section-title">Schedule</div>
+        <div class="field-row">
+          <div class="field">
+            <div class="field-label">Start Date</div>
+            <input class="field-input" type="date" id="cfg-start" value="2026-05-02">
+          </div>
+          <div class="field">
+            <div class="field-label">Interval (days)</div>
+            <select class="field-input" id="cfg-interval">
+              <option value="7">7 · weekly</option>
+              <option value="14">14 · fortnightly</option>
+              <option value="3">3 · biweekly</option>
+            </select>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <div class="field-label">Win pts</div>
+            <input class="field-input" type="number" id="cfg-win" value="3" min="1" max="10">
+          </div>
+          <div class="field">
+            <div class="field-label">Draw pts</div>
+            <input class="field-input" type="number" id="cfg-draw" value="1" min="0" max="5">
+          </div>
+        </div>
+      </div>
+
+      <!-- Teams -->
+      <div class="section">
+        <div class="section-title">
+          Teams
+          <span id="team-count" style="font-family:&#39;IBM Plex Mono&#39;,monospace;font-size:10px;background:var(--ink);color:white;border-radius:10px;padding:1px 7px;text-transform:none;letter-spacing:0">8</span>
+        </div>
+        <div class="teams-list" id="teams-list">
+    <div class="team-row" draggable="true" id="tr-0" ondragstart="dragStart(event,0)" ondragover="dragOver(event,0)" ondrop="dragDrop(event,0)" ondragleave="dragLeave(event,0)">
+      <span class="tr-num">1</span>
+      <span class="tr-name">Tygerberg CC</span>
+      <span class="tr-venue">Boland Park Annex</span>
+      <button class="tr-del" onclick="removeTeam(0)">×</button>
+    </div>
+    <div class="team-row" draggable="true" id="tr-1" ondragstart="dragStart(event,1)" ondragover="dragOver(event,1)" ondrop="dragDrop(event,1)" ondragleave="dragLeave(event,1)">
+      <span class="tr-num">2</span>
+      <span class="tr-name">Durbanville CC</span>
+      <span class="tr-venue">Newlands Ground 2</span>
+      <button class="tr-del" onclick="removeTeam(1)">×</button>
+    </div>
+    <div class="team-row" draggable="true" id="tr-2" ondragstart="dragStart(event,2)" ondragover="dragOver(event,2)" ondrop="dragDrop(event,2)" ondragleave="dragLeave(event,2)">
+      <span class="tr-num">3</span>
+      <span class="tr-name">Ottery CC</span>
+      <span class="tr-venue">Tygerberg Park</span>
+      <button class="tr-del" onclick="removeTeam(2)">×</button>
+    </div>
+    <div class="team-row" draggable="true" id="tr-3" ondragstart="dragStart(event,3)" ondragover="dragOver(event,3)" ondrop="dragDrop(event,3)" ondragleave="dragLeave(event,3)">
+      <span class="tr-num">4</span>
+      <span class="tr-name">Paarl CC</span>
+      <span class="tr-venue">Bellville Oval</span>
+      <button class="tr-del" onclick="removeTeam(3)">×</button>
+    </div>
+    <div class="team-row" draggable="true" id="tr-4" ondragstart="dragStart(event,4)" ondragover="dragOver(event,4)" ondrop="dragDrop(event,4)" ondragleave="dragLeave(event,4)">
+      <span class="tr-num">5</span>
+      <span class="tr-name">Newlands CC</span>
+      <span class="tr-venue">Ottery Sports Ground</span>
+      <button class="tr-del" onclick="removeTeam(4)">×</button>
+    </div>
+    <div class="team-row" draggable="true" id="tr-5" ondragstart="dragStart(event,5)" ondragover="dragOver(event,5)" ondrop="dragDrop(event,5)" ondragleave="dragLeave(event,5)">
+      <span class="tr-num">6</span>
+      <span class="tr-name">Cape Town CC</span>
+      <span class="tr-venue">Newlands Ground 2</span>
+      <button class="tr-del" onclick="removeTeam(5)">×</button>
+    </div>
+    <div class="team-row" draggable="true" id="tr-6" ondragstart="dragStart(event,6)" ondragover="dragOver(event,6)" ondrop="dragDrop(event,6)" ondragleave="dragLeave(event,6)">
+      <span class="tr-num">7</span>
+      <span class="tr-name">Bellville CC</span>
+      <span class="tr-venue">Durbanville CC Ground</span>
+      <button class="tr-del" onclick="removeTeam(6)">×</button>
+    </div>
+    <div class="team-row" draggable="true" id="tr-7" ondragstart="dragStart(event,7)" ondragover="dragOver(event,7)" ondrop="dragDrop(event,7)" ondragleave="dragLeave(event,7)">
+      <span class="tr-num">8</span>
+      <span class="tr-name">Stellenbosch CC</span>
+      <span class="tr-venue">Boland Park Annex</span>
+      <button class="tr-del" onclick="removeTeam(7)">×</button>
+    </div></div>
+        <div class="add-row">
+          <input class="add-input" id="new-team" placeholder="Team name…" onkeydown="if(event.key===&#39;Enter&#39;)addTeam()">
+          <button class="add-btn" onclick="addTeam()">+ Add</button>
+        </div>
+        <div class="sample-btns">
+          <button class="sample-btn" onclick="loadSample(&#39;clubs&#39;)">Cricket clubs</button>
+          <button class="sample-btn" onclick="loadSample(&#39;schools&#39;)">Schools</button>
+          <button class="sample-btn" onclick="loadSample(&#39;xlsm&#39;)">xlsm teams</button>
+        </div>
+      </div>
+
+      <!-- Venues -->
+      <div class="section">
+        <div class="section-title">Venues</div>
+        <div class="venue-chips" id="venue-chips">
+    <div class="venue-chip">Newlands Ground 2<button class="vc-del" onclick="removeVenue(0)">×</button></div>
+    <div class="venue-chip">Boland Park Annex<button class="vc-del" onclick="removeVenue(1)">×</button></div>
+    <div class="venue-chip">Bellville Oval<button class="vc-del" onclick="removeVenue(2)">×</button></div>
+    <div class="venue-chip">Ottery Sports Ground<button class="vc-del" onclick="removeVenue(3)">×</button></div>
+    <div class="venue-chip">Durbanville CC Ground<button class="vc-del" onclick="removeVenue(4)">×</button></div>
+    <div class="venue-chip">Tygerberg Park<button class="vc-del" onclick="removeVenue(5)">×</button></div></div>
+        <div class="add-row">
+          <input class="add-input" id="new-venue" placeholder="Venue name…" onkeydown="if(event.key===&#39;Enter&#39;)addVenue()">
+          <button class="add-btn" onclick="addVenue()">+ Add</button>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Panel footer CTAs -->
+    <div class="panel-footer">
+      <button class="cta cta-primary" onclick="generate()">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1v3M7 10v3M1 7h3M10 7h3M3.05 3.05l2.12 2.12M8.83 8.83l2.12 2.12M3.05 10.95l2.12-2.12M8.83 5.17l2.12-2.12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"></path></svg>
+        Generate Fixtures
+      </button>
+      <button class="cta cta-teal" onclick="randomise()">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 4.5h2L5.5 7 4 9.5H2M12 4.5h-2L8.5 7 10 9.5h2M7 5.5V2M7 12v-2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"></path><circle cx="7" cy="7" r="1.5" fill="currentColor"></circle></svg>
+        Randomise Draw
+      </button>
+      <button class="cta cta-outline" onclick="exportCSV()">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1v8M4.5 6.5L7 9l2.5-2.5M2 11h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+        Export CSV
+      </button>
+    </div>
+  </aside>
+
+  <!-- ═══════════ MAIN ═══════════ -->
+  <main class="main" id="main">
+
+    <!-- EMPTY STATE -->
+    <div class="empty-wrap" id="view-empty" style="display: none;">
+      <div class="empty-graphic">
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+          <rect x="6" y="12" width="36" height="28" rx="4" stroke="#1B2A4A" stroke-width="2" stroke-dasharray="4 3"></rect>
+          <path d="M14 24h20M14 31h12" stroke="#1D9E75" stroke-width="2" stroke-linecap="round"></path>
+          <path d="M24 6v8" stroke="#C8A84B" stroke-width="2" stroke-linecap="round"></path>
+        </svg>
+      </div>
+      <h2>Configure &amp; generate your league</h2>
+      <p>Add your teams on the left, set your schedule preferences, then click <strong>Generate Fixtures</strong>. The engine replicates the exact circle-method algorithm from fixtures_template_.xlsm — every team plays every other team once, no conflicts per round.</p>
+      <div class="empty-steps">
+        <div class="empty-step"><div class="es-n">01</div><div class="es-l">Add teams</div></div>
+        <div class="empty-step"><div class="es-n">02</div><div class="es-l">Set schedule</div></div>
+        <div class="empty-step"><div class="es-n">03</div><div class="es-l">Generate</div></div>
+        <div class="empty-step"><div class="es-n">04</div><div class="es-l">Enter results</div></div>
+        <div class="empty-step" style="border-right:none"><div class="es-n">05</div><div class="es-l">View table</div></div>
+      </div>
+    </div>
+
+    <!-- GENERATED VIEW -->
+    <div id="view-gen" style="display: block;">
+
+      <!-- Top bar -->
+      <div class="gen-topbar">
+        <div>
+          <div class="gen-title" id="gen-title">WP Premier League T20</div>
+          <div class="gen-sub" id="gen-sub">Western Province · T20 · 2025/26 · Single round-robin · Win=3pts, Draw=1pts</div>
+        </div>
+        <div class="gen-actions">
+          <button class="action-btn ab-outline ab-sm" onclick="exportCSV()">↓ CSV</button>
+          <button class="action-btn ab-outline ab-sm" onclick="generate()">↻ Regenerate</button>
+        </div>
+      </div>
+
+      <!-- KPIs -->
+      <div class="kpi-row">
+        <div class="kpi navy"><div class="kpi-n" id="k-teams">8</div><div class="kpi-l">Teams</div></div>
+        <div class="kpi teal"><div class="kpi-n" id="k-fix">28</div><div class="kpi-l">Fixtures</div></div>
+        <div class="kpi gold"><div class="kpi-n" id="k-rounds">7</div><div class="kpi-l">Rounds</div></div>
+        <div class="kpi coral"><div class="kpi-n" id="k-played">0</div><div class="kpi-l">Played</div></div>
+        <div class="kpi"><div class="kpi-n" id="k-remain">28</div><div class="kpi-l">Remaining</div></div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="tabs-wrap">
+        <button class="tab-btn active" onclick="switchTab(this,&#39;pane-fixtures&#39;)">Fixtures</button>
+        <button class="tab-btn" onclick="switchTab(this,&#39;pane-table&#39;)">League Table</button>
+        <button class="tab-btn" onclick="switchTab(this,&#39;pane-matrix&#39;)">Results Matrix</button>
+        <button class="tab-btn" onclick="switchTab(this,&#39;pane-xlsm&#39;)">Home/Away Matrix</button>
+      </div>
+
+      <!-- FIXTURES PANE -->
+      <div class="tab-pane active" id="pane-fixtures">
+        <div class="export-bar">
+          <span class="export-bar-text">
+            Generated using <strong>Berger circle-method</strong> (computergaga xlsm algorithm) ·
+            Each round: no team plays twice · Home/away balanced across legs
+          </span>
+          <button class="action-btn ab-outline ab-sm" onclick="showAllRounds()">All rounds</button>
+        </div>
+        <div class="round-nav" id="round-nav"><span class="rn-label">Round</span>
+    <button class="round-pill active" id="rp-all" onclick="showAllRounds()">All</button><button class="round-pill" id="rp-1-1" onclick="showRound(1,1)">Rd 1</button><button class="round-pill" id="rp-1-2" onclick="showRound(2,1)">Rd 2</button><button class="round-pill" id="rp-1-3" onclick="showRound(3,1)">Rd 3</button><button class="round-pill" id="rp-1-4" onclick="showRound(4,1)">Rd 4</button><button class="round-pill" id="rp-1-5" onclick="showRound(5,1)">Rd 5</button><button class="round-pill" id="rp-1-6" onclick="showRound(6,1)">Rd 6</button><button class="round-pill" id="rp-1-7" onclick="showRound(7,1)">Rd 7</button></div>
+        <div class="fixtures-list" id="fixtures-list"><div class="round-group-header">
+        <span class="rgh-label">Round 1</span>
+        <span class="rgh-date">Fri, 01 May 2026</span>
+        <div class="rgh-prog">
+          <div class="rgh-bar"><div class="rgh-fill" style="width:0%"></div></div>
+          <span class="rgh-frac">0/4</span>
+        </div>
+      </div><div class="fixture-card" id="fc-1">
+    <div class="fc-side home">
+      <div class="fc-name">Tygerberg CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-1" placeholder="—" oninput="scoreInput(1)" onblur="saveScore(1)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd1</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Stellenbosch CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-1" placeholder="—" oninput="scoreInput(1)" onblur="saveScore(1)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 01 May 2026</div>
+      <div class="fc-meta-venue">Boland Park Annex</div>
+      <input class="fc-date-pick" type="date" value="2026-05-01" onchange="updateDate(1,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(1,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-2">
+    <div class="fc-side home">
+      <div class="fc-name">Durbanville CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-2" placeholder="—" oninput="scoreInput(2)" onblur="saveScore(2)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd1</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Bellville CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-2" placeholder="—" oninput="scoreInput(2)" onblur="saveScore(2)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 01 May 2026</div>
+      <div class="fc-meta-venue">Newlands Ground 2</div>
+      <input class="fc-date-pick" type="date" value="2026-05-01" onchange="updateDate(2,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(2,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-3">
+    <div class="fc-side home">
+      <div class="fc-name">Ottery CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-3" placeholder="—" oninput="scoreInput(3)" onblur="saveScore(3)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd1</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Cape Town CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-3" placeholder="—" oninput="scoreInput(3)" onblur="saveScore(3)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 01 May 2026</div>
+      <div class="fc-meta-venue">Tygerberg Park</div>
+      <input class="fc-date-pick" type="date" value="2026-05-01" onchange="updateDate(3,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(3,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-4">
+    <div class="fc-side home">
+      <div class="fc-name">Paarl CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-4" placeholder="—" oninput="scoreInput(4)" onblur="saveScore(4)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd1</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Newlands CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-4" placeholder="—" oninput="scoreInput(4)" onblur="saveScore(4)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 01 May 2026</div>
+      <div class="fc-meta-venue">Bellville Oval</div>
+      <input class="fc-date-pick" type="date" value="2026-05-01" onchange="updateDate(4,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(4,true)">Save</button>
+    </div>
+  </div><div class="round-group-header">
+        <span class="rgh-label">Round 2</span>
+        <span class="rgh-date">Fri, 08 May 2026</span>
+        <div class="rgh-prog">
+          <div class="rgh-bar"><div class="rgh-fill" style="width:0%"></div></div>
+          <span class="rgh-frac">0/4</span>
+        </div>
+      </div><div class="fixture-card" id="fc-5">
+    <div class="fc-side home">
+      <div class="fc-name">Tygerberg CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-5" placeholder="—" oninput="scoreInput(5)" onblur="saveScore(5)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd2</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Bellville CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-5" placeholder="—" oninput="scoreInput(5)" onblur="saveScore(5)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 08 May 2026</div>
+      <div class="fc-meta-venue">Boland Park Annex</div>
+      <input class="fc-date-pick" type="date" value="2026-05-08" onchange="updateDate(5,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(5,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-6">
+    <div class="fc-side home">
+      <div class="fc-name">Stellenbosch CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-6" placeholder="—" oninput="scoreInput(6)" onblur="saveScore(6)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd2</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Cape Town CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-6" placeholder="—" oninput="scoreInput(6)" onblur="saveScore(6)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 08 May 2026</div>
+      <div class="fc-meta-venue">Boland Park Annex</div>
+      <input class="fc-date-pick" type="date" value="2026-05-08" onchange="updateDate(6,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(6,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-7">
+    <div class="fc-side home">
+      <div class="fc-name">Durbanville CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-7" placeholder="—" oninput="scoreInput(7)" onblur="saveScore(7)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd2</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Newlands CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-7" placeholder="—" oninput="scoreInput(7)" onblur="saveScore(7)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 08 May 2026</div>
+      <div class="fc-meta-venue">Newlands Ground 2</div>
+      <input class="fc-date-pick" type="date" value="2026-05-08" onchange="updateDate(7,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(7,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-8">
+    <div class="fc-side home">
+      <div class="fc-name">Ottery CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-8" placeholder="—" oninput="scoreInput(8)" onblur="saveScore(8)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd2</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Paarl CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-8" placeholder="—" oninput="scoreInput(8)" onblur="saveScore(8)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 08 May 2026</div>
+      <div class="fc-meta-venue">Tygerberg Park</div>
+      <input class="fc-date-pick" type="date" value="2026-05-08" onchange="updateDate(8,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(8,true)">Save</button>
+    </div>
+  </div><div class="round-group-header">
+        <span class="rgh-label">Round 3</span>
+        <span class="rgh-date">Fri, 15 May 2026</span>
+        <div class="rgh-prog">
+          <div class="rgh-bar"><div class="rgh-fill" style="width:0%"></div></div>
+          <span class="rgh-frac">0/4</span>
+        </div>
+      </div><div class="fixture-card" id="fc-9">
+    <div class="fc-side home">
+      <div class="fc-name">Tygerberg CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-9" placeholder="—" oninput="scoreInput(9)" onblur="saveScore(9)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd3</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Cape Town CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-9" placeholder="—" oninput="scoreInput(9)" onblur="saveScore(9)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 15 May 2026</div>
+      <div class="fc-meta-venue">Boland Park Annex</div>
+      <input class="fc-date-pick" type="date" value="2026-05-15" onchange="updateDate(9,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(9,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-10">
+    <div class="fc-side home">
+      <div class="fc-name">Bellville CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-10" placeholder="—" oninput="scoreInput(10)" onblur="saveScore(10)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd3</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Newlands CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-10" placeholder="—" oninput="scoreInput(10)" onblur="saveScore(10)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 15 May 2026</div>
+      <div class="fc-meta-venue">Durbanville CC Ground</div>
+      <input class="fc-date-pick" type="date" value="2026-05-15" onchange="updateDate(10,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(10,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-11">
+    <div class="fc-side home">
+      <div class="fc-name">Stellenbosch CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-11" placeholder="—" oninput="scoreInput(11)" onblur="saveScore(11)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd3</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Paarl CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-11" placeholder="—" oninput="scoreInput(11)" onblur="saveScore(11)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 15 May 2026</div>
+      <div class="fc-meta-venue">Boland Park Annex</div>
+      <input class="fc-date-pick" type="date" value="2026-05-15" onchange="updateDate(11,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(11,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-12">
+    <div class="fc-side home">
+      <div class="fc-name">Durbanville CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-12" placeholder="—" oninput="scoreInput(12)" onblur="saveScore(12)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd3</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Ottery CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-12" placeholder="—" oninput="scoreInput(12)" onblur="saveScore(12)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 15 May 2026</div>
+      <div class="fc-meta-venue">Newlands Ground 2</div>
+      <input class="fc-date-pick" type="date" value="2026-05-15" onchange="updateDate(12,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(12,true)">Save</button>
+    </div>
+  </div><div class="round-group-header">
+        <span class="rgh-label">Round 4</span>
+        <span class="rgh-date">Fri, 22 May 2026</span>
+        <div class="rgh-prog">
+          <div class="rgh-bar"><div class="rgh-fill" style="width:0%"></div></div>
+          <span class="rgh-frac">0/4</span>
+        </div>
+      </div><div class="fixture-card" id="fc-13">
+    <div class="fc-side home">
+      <div class="fc-name">Tygerberg CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-13" placeholder="—" oninput="scoreInput(13)" onblur="saveScore(13)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd4</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Newlands CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-13" placeholder="—" oninput="scoreInput(13)" onblur="saveScore(13)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 22 May 2026</div>
+      <div class="fc-meta-venue">Boland Park Annex</div>
+      <input class="fc-date-pick" type="date" value="2026-05-22" onchange="updateDate(13,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(13,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-14">
+    <div class="fc-side home">
+      <div class="fc-name">Cape Town CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-14" placeholder="—" oninput="scoreInput(14)" onblur="saveScore(14)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd4</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Paarl CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-14" placeholder="—" oninput="scoreInput(14)" onblur="saveScore(14)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 22 May 2026</div>
+      <div class="fc-meta-venue">Newlands Ground 2</div>
+      <input class="fc-date-pick" type="date" value="2026-05-22" onchange="updateDate(14,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(14,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-15">
+    <div class="fc-side home">
+      <div class="fc-name">Bellville CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-15" placeholder="—" oninput="scoreInput(15)" onblur="saveScore(15)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd4</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Ottery CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-15" placeholder="—" oninput="scoreInput(15)" onblur="saveScore(15)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 22 May 2026</div>
+      <div class="fc-meta-venue">Durbanville CC Ground</div>
+      <input class="fc-date-pick" type="date" value="2026-05-22" onchange="updateDate(15,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(15,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-16">
+    <div class="fc-side home">
+      <div class="fc-name">Stellenbosch CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-16" placeholder="—" oninput="scoreInput(16)" onblur="saveScore(16)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd4</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Durbanville CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-16" placeholder="—" oninput="scoreInput(16)" onblur="saveScore(16)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 22 May 2026</div>
+      <div class="fc-meta-venue">Boland Park Annex</div>
+      <input class="fc-date-pick" type="date" value="2026-05-22" onchange="updateDate(16,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(16,true)">Save</button>
+    </div>
+  </div><div class="round-group-header">
+        <span class="rgh-label">Round 5</span>
+        <span class="rgh-date">Fri, 29 May 2026</span>
+        <div class="rgh-prog">
+          <div class="rgh-bar"><div class="rgh-fill" style="width:0%"></div></div>
+          <span class="rgh-frac">0/4</span>
+        </div>
+      </div><div class="fixture-card" id="fc-17">
+    <div class="fc-side home">
+      <div class="fc-name">Tygerberg CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-17" placeholder="—" oninput="scoreInput(17)" onblur="saveScore(17)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd5</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Paarl CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-17" placeholder="—" oninput="scoreInput(17)" onblur="saveScore(17)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 29 May 2026</div>
+      <div class="fc-meta-venue">Boland Park Annex</div>
+      <input class="fc-date-pick" type="date" value="2026-05-29" onchange="updateDate(17,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(17,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-18">
+    <div class="fc-side home">
+      <div class="fc-name">Newlands CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-18" placeholder="—" oninput="scoreInput(18)" onblur="saveScore(18)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd5</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Ottery CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-18" placeholder="—" oninput="scoreInput(18)" onblur="saveScore(18)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 29 May 2026</div>
+      <div class="fc-meta-venue">Ottery Sports Ground</div>
+      <input class="fc-date-pick" type="date" value="2026-05-29" onchange="updateDate(18,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(18,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-19">
+    <div class="fc-side home">
+      <div class="fc-name">Cape Town CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-19" placeholder="—" oninput="scoreInput(19)" onblur="saveScore(19)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd5</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Durbanville CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-19" placeholder="—" oninput="scoreInput(19)" onblur="saveScore(19)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 29 May 2026</div>
+      <div class="fc-meta-venue">Newlands Ground 2</div>
+      <input class="fc-date-pick" type="date" value="2026-05-29" onchange="updateDate(19,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(19,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-20">
+    <div class="fc-side home">
+      <div class="fc-name">Bellville CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-20" placeholder="—" oninput="scoreInput(20)" onblur="saveScore(20)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd5</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Stellenbosch CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-20" placeholder="—" oninput="scoreInput(20)" onblur="saveScore(20)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 29 May 2026</div>
+      <div class="fc-meta-venue">Durbanville CC Ground</div>
+      <input class="fc-date-pick" type="date" value="2026-05-29" onchange="updateDate(20,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(20,true)">Save</button>
+    </div>
+  </div><div class="round-group-header">
+        <span class="rgh-label">Round 6</span>
+        <span class="rgh-date">Fri, 05 Jun 2026</span>
+        <div class="rgh-prog">
+          <div class="rgh-bar"><div class="rgh-fill" style="width:0%"></div></div>
+          <span class="rgh-frac">0/4</span>
+        </div>
+      </div><div class="fixture-card" id="fc-21">
+    <div class="fc-side home">
+      <div class="fc-name">Tygerberg CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-21" placeholder="—" oninput="scoreInput(21)" onblur="saveScore(21)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd6</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Ottery CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-21" placeholder="—" oninput="scoreInput(21)" onblur="saveScore(21)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 05 Jun 2026</div>
+      <div class="fc-meta-venue">Boland Park Annex</div>
+      <input class="fc-date-pick" type="date" value="2026-06-05" onchange="updateDate(21,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(21,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-22">
+    <div class="fc-side home">
+      <div class="fc-name">Paarl CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-22" placeholder="—" oninput="scoreInput(22)" onblur="saveScore(22)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd6</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Durbanville CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-22" placeholder="—" oninput="scoreInput(22)" onblur="saveScore(22)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 05 Jun 2026</div>
+      <div class="fc-meta-venue">Bellville Oval</div>
+      <input class="fc-date-pick" type="date" value="2026-06-05" onchange="updateDate(22,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(22,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-23">
+    <div class="fc-side home">
+      <div class="fc-name">Newlands CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-23" placeholder="—" oninput="scoreInput(23)" onblur="saveScore(23)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd6</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Stellenbosch CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-23" placeholder="—" oninput="scoreInput(23)" onblur="saveScore(23)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 05 Jun 2026</div>
+      <div class="fc-meta-venue">Ottery Sports Ground</div>
+      <input class="fc-date-pick" type="date" value="2026-06-05" onchange="updateDate(23,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(23,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-24">
+    <div class="fc-side home">
+      <div class="fc-name">Cape Town CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-24" placeholder="—" oninput="scoreInput(24)" onblur="saveScore(24)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd6</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Bellville CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-24" placeholder="—" oninput="scoreInput(24)" onblur="saveScore(24)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 05 Jun 2026</div>
+      <div class="fc-meta-venue">Newlands Ground 2</div>
+      <input class="fc-date-pick" type="date" value="2026-06-05" onchange="updateDate(24,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(24,true)">Save</button>
+    </div>
+  </div><div class="round-group-header">
+        <span class="rgh-label">Round 7</span>
+        <span class="rgh-date">Fri, 12 Jun 2026</span>
+        <div class="rgh-prog">
+          <div class="rgh-bar"><div class="rgh-fill" style="width:0%"></div></div>
+          <span class="rgh-frac">0/4</span>
+        </div>
+      </div><div class="fixture-card" id="fc-25">
+    <div class="fc-side home">
+      <div class="fc-name">Tygerberg CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-25" placeholder="—" oninput="scoreInput(25)" onblur="saveScore(25)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd7</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Durbanville CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-25" placeholder="—" oninput="scoreInput(25)" onblur="saveScore(25)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 12 Jun 2026</div>
+      <div class="fc-meta-venue">Boland Park Annex</div>
+      <input class="fc-date-pick" type="date" value="2026-06-12" onchange="updateDate(25,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(25,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-26">
+    <div class="fc-side home">
+      <div class="fc-name">Ottery CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-26" placeholder="—" oninput="scoreInput(26)" onblur="saveScore(26)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd7</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Stellenbosch CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-26" placeholder="—" oninput="scoreInput(26)" onblur="saveScore(26)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 12 Jun 2026</div>
+      <div class="fc-meta-venue">Tygerberg Park</div>
+      <input class="fc-date-pick" type="date" value="2026-06-12" onchange="updateDate(26,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(26,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-27">
+    <div class="fc-side home">
+      <div class="fc-name">Paarl CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-27" placeholder="—" oninput="scoreInput(27)" onblur="saveScore(27)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd7</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Bellville CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-27" placeholder="—" oninput="scoreInput(27)" onblur="saveScore(27)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 12 Jun 2026</div>
+      <div class="fc-meta-venue">Bellville Oval</div>
+      <input class="fc-date-pick" type="date" value="2026-06-12" onchange="updateDate(27,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(27,true)">Save</button>
+    </div>
+  </div><div class="fixture-card" id="fc-28">
+    <div class="fc-side home">
+      <div class="fc-name">Newlands CC</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="hs-28" placeholder="—" oninput="scoreInput(28)" onblur="saveScore(28)">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd7</div>
+    </div>
+    <div class="fc-side away">
+      <div class="fc-name">Cape Town CC</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="" id="as-28" placeholder="—" oninput="scoreInput(28)" onblur="saveScore(28)">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">Fri, 12 Jun 2026</div>
+      <div class="fc-meta-venue">Ottery Sports Ground</div>
+      <input class="fc-date-pick" type="date" value="2026-06-12" onchange="updateDate(28,this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge badge-scheduled">Scheduled</span>
+      <button class="fc-save" onclick="saveScore(28,true)">Save</button>
+    </div>
+  </div></div>
+      </div>
+
+      <!-- LEAGUE TABLE PANE -->
+      <div class="tab-pane" id="pane-table">
+        <div class="lt-wrap">
+          <table class="lt">
+            <thead>
+              <tr>
+                <th>#</th><th style="text-align:left">Team</th><th>P</th>
+                <th>W</th><th>D</th><th>L</th>
+                <th>F</th><th>A</th><th>GD</th>
+                <th>HW</th><th>HL</th><th>AW</th><th>AL</th>
+                <th>Pts</th>
+              </tr>
+            </thead>
+            <tbody id="table-body"><tr class=" promoted">
+      <td><span class="pos-pip pip-1">1</span></td>
+      <td><div class="team-cell">
+        <div class="team-avatar" style="background:#FAEEDA;color:#854F0B">TC</div>
+        <strong>Tygerberg CC</strong>
+      </div></td>
+      <td>0</td>
+      <td style="color:var(--teal);font-weight:600">0</td>
+      <td>0</td>
+      <td style="color:var(--coral)">0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td class="pts">0</td>
+    </tr><tr class=" promoted">
+      <td><span class="pos-pip pip-2">2</span></td>
+      <td><div class="team-cell">
+        <div class="team-avatar" style="background:#EAF3DE;color:#3B6D11">DC</div>
+        <strong>Durbanville CC</strong>
+      </div></td>
+      <td>0</td>
+      <td style="color:var(--teal);font-weight:600">0</td>
+      <td>0</td>
+      <td style="color:var(--coral)">0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td class="pts">0</td>
+    </tr><tr class=" promoted">
+      <td><span class="pos-pip pip-3">3</span></td>
+      <td><div class="team-cell">
+        <div class="team-avatar" style="background:#FBEAF0;color:#993556">OC</div>
+        <strong>Ottery CC</strong>
+      </div></td>
+      <td>0</td>
+      <td style="color:var(--teal);font-weight:600">0</td>
+      <td>0</td>
+      <td style="color:var(--coral)">0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td class="pts">0</td>
+    </tr><tr class="">
+      <td><span class="pos-pip ">4</span></td>
+      <td><div class="team-cell">
+        <div class="team-avatar" style="background:#FAECE7;color:#D85A30">PC</div>
+        <strong>Paarl CC</strong>
+      </div></td>
+      <td>0</td>
+      <td style="color:var(--teal);font-weight:600">0</td>
+      <td>0</td>
+      <td style="color:var(--coral)">0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td class="pts">0</td>
+    </tr><tr class="">
+      <td><span class="pos-pip ">5</span></td>
+      <td><div class="team-cell">
+        <div class="team-avatar" style="background:#F5E8C0;color:#8A6E1C">NC</div>
+        <strong>Newlands CC</strong>
+      </div></td>
+      <td>0</td>
+      <td style="color:var(--teal);font-weight:600">0</td>
+      <td>0</td>
+      <td style="color:var(--coral)">0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td class="pts">0</td>
+    </tr><tr class="">
+      <td><span class="pos-pip ">6</span></td>
+      <td><div class="team-cell">
+        <div class="team-avatar" style="background:#E1F5EE;color:#1D9E75">CT</div>
+        <strong>Cape Town CC</strong>
+      </div></td>
+      <td>0</td>
+      <td style="color:var(--teal);font-weight:600">0</td>
+      <td>0</td>
+      <td style="color:var(--coral)">0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td class="pts">0</td>
+    </tr><tr class="">
+      <td><span class="pos-pip ">7</span></td>
+      <td><div class="team-cell">
+        <div class="team-avatar" style="background:#EEEDFE;color:#534AB7">BC</div>
+        <strong>Bellville CC</strong>
+      </div></td>
+      <td>0</td>
+      <td style="color:var(--teal);font-weight:600">0</td>
+      <td>0</td>
+      <td style="color:var(--coral)">0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td class="pts">0</td>
+    </tr><tr class="">
+      <td><span class="pos-pip ">8</span></td>
+      <td><div class="team-cell">
+        <div class="team-avatar" style="background:#E6F1FB;color:#185FA5">SC</div>
+        <strong>Stellenbosch CC</strong>
+      </div></td>
+      <td>0</td>
+      <td style="color:var(--teal);font-weight:600">0</td>
+      <td>0</td>
+      <td style="color:var(--coral)">0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td><td>0</td><td>0</td><td>0</td>
+      <td class="pts">0</td>
+    </tr></tbody>
+          </table>
+        </div>
+        <div class="lt-note" id="lt-note">Win=3pts · Draw=1pts · Loss=0pts · Sorted: Pts → GD → Goals scored</div>
+      </div>
+
+      <!-- RESULTS MATRIX PANE -->
+      <div class="tab-pane" id="pane-matrix">
+        <p style="font-size:12px;color:rgba(13,17,23,0.45);margin-bottom:14px;font-family:&#39;IBM Plex Mono&#39;,monospace">
+          Row = Home team · Column = Away team · Cell = score (home–away) or scheduled round
+        </p>
+        <div class="matrix-container">
+          <table class="mx" id="result-matrix"><tbody><tr><th>Home ↓ / Away →</th><th title="Tygerberg CC">Tygerberg…</th><th title="Durbanville CC">Durbanvil…</th><th title="Ottery CC">Ottery CC</th><th title="Paarl CC">Paarl CC</th><th title="Newlands CC">Newlands …</th><th title="Cape Town CC">Cape Town…</th><th title="Bellville CC">Bellville…</th><th title="Stellenbosch CC">Stellenbo…</th></tr><tr><td>Tygerberg CC</td><td class="mx-self"></td><td class="mx-sched">R7</td><td class="mx-sched">R6</td><td class="mx-sched">R5</td><td class="mx-sched">R4</td><td class="mx-sched">R3</td><td class="mx-sched">R2</td><td class="mx-sched">R1</td></tr><tr><td>Durbanville CC</td><td class="mx-na">—</td><td class="mx-self"></td><td class="mx-sched">R3</td><td class="mx-na">—</td><td class="mx-sched">R2</td><td class="mx-na">—</td><td class="mx-sched">R1</td><td class="mx-na">—</td></tr><tr><td>Ottery CC</td><td class="mx-na">—</td><td class="mx-na">—</td><td class="mx-self"></td><td class="mx-sched">R2</td><td class="mx-na">—</td><td class="mx-sched">R1</td><td class="mx-na">—</td><td class="mx-sched">R7</td></tr><tr><td>Paarl CC</td><td class="mx-na">—</td><td class="mx-sched">R6</td><td class="mx-na">—</td><td class="mx-self"></td><td class="mx-sched">R1</td><td class="mx-na">—</td><td class="mx-sched">R7</td><td class="mx-na">—</td></tr><tr><td>Newlands CC</td><td class="mx-na">—</td><td class="mx-na">—</td><td class="mx-sched">R5</td><td class="mx-na">—</td><td class="mx-self"></td><td class="mx-sched">R7</td><td class="mx-na">—</td><td class="mx-sched">R6</td></tr><tr><td>Cape Town CC</td><td class="mx-na">—</td><td class="mx-sched">R5</td><td class="mx-na">—</td><td class="mx-sched">R4</td><td class="mx-na">—</td><td class="mx-self"></td><td class="mx-sched">R6</td><td class="mx-na">—</td></tr><tr><td>Bellville CC</td><td class="mx-na">—</td><td class="mx-na">—</td><td class="mx-sched">R4</td><td class="mx-na">—</td><td class="mx-sched">R3</td><td class="mx-na">—</td><td class="mx-self"></td><td class="mx-sched">R5</td></tr><tr><td>Stellenbosch C…</td><td class="mx-na">—</td><td class="mx-sched">R4</td><td class="mx-na">—</td><td class="mx-sched">R3</td><td class="mx-na">—</td><td class="mx-sched">R2</td><td class="mx-na">—</td><td class="mx-self"></td></tr></tbody></table>
+        </div>
+      </div>
+
+      <!-- HOME/AWAY MATRIX (xlsm view) -->
+      <div class="tab-pane" id="pane-xlsm">
+        <div class="xlsm-view">
+          <div class="xlsm-title">Home sheet — Round Assignment Matrix</div>
+          <div class="xlsm-subtitle">Replicates fixtures_template_.xlsm → Home sheet · cell value = round number when column-team hosts row-team</div>
+          <div class="matrix-container">
+            <table class="mx" id="xlsm-matrix"><tbody><tr><th>Home → / Away ↓</th><th title="Tygerberg CC">Tygerberg…</th><th title="Durbanville CC">Durbanvil…</th><th title="Ottery CC">Ottery CC</th><th title="Paarl CC">Paarl CC</th><th title="Newlands CC">Newlands …</th><th title="Cape Town CC">Cape Town…</th><th title="Bellville CC">Bellville…</th></tr><tr><td>Durbanville CC</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">7</td><td class="mx-self"></td><td class="mx-self"></td><td class="mx-self"></td><td class="mx-self"></td><td class="mx-self"></td><td class="mx-self"></td></tr><tr><td>Ottery CC</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">6</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">3</td><td class="mx-self"></td><td class="mx-self"></td><td class="mx-self"></td><td class="mx-self"></td><td class="mx-self"></td></tr><tr><td>Paarl CC</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">5</td><td class="mx-na">—</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">2</td><td class="mx-self"></td><td class="mx-self"></td><td class="mx-self"></td><td class="mx-self"></td></tr><tr><td>Newlands CC</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">4</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">2</td><td class="mx-na">—</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">1</td><td class="mx-self"></td><td class="mx-self"></td><td class="mx-self"></td></tr><tr><td>Cape Town CC</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">3</td><td class="mx-na">—</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">1</td><td class="mx-na">—</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">7</td><td class="mx-self"></td><td class="mx-self"></td></tr><tr><td>Bellville CC</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">2</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">1</td><td class="mx-na">—</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">7</td><td class="mx-na">—</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">6</td><td class="mx-self"></td></tr><tr><td>Stellenbosch C…</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">1</td><td class="mx-na">—</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">7</td><td class="mx-na">—</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">6</td><td class="mx-na">—</td><td class="mx-sched" style="font-weight:600;color:var(--navy)">5</td></tr></tbody></table>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast">Draw randomised</div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════════════
+const S = {
+  teams: [],   // [{name, venue, color}]
+  venues: [],
+  fixtures: [], // {id,round,leg,home,away,homeScore,awayScore,date,venue,status,bye}
+  cfg: {},
+  activeRound: 'all',
+  roundMatrix: [],  // [round_idx][match] = {home_pos, away_pos}
+};
+
+// Colour palette for team avatars
+const TEAM_COLORS = [
+  ['#E1F5EE','#1D9E75'],['#E6F1FB','#185FA5'],['#FAECE7','#D85A30'],
+  ['#F5E8C0','#8A6E1C'],['#EEEDFE','#534AB7'],['#FBEAF0','#993556'],
+  ['#EAF3DE','#3B6D11'],['#FAEEDA','#854F0B'],['#E1F5EE','#0F6E56'],
+  ['#F1EFE8','#5F5E5A'],['#FAECE7','#993C1D'],['#E6F1FB','#0C447C'],
+];
+
+const SAMPLES = {
+  clubs: ['Cape Town CC','Stellenbosch CC','Paarl CC','Newlands CC','Bellville CC','Ottery CC','Durbanville CC','Tygerberg CC'],
+  schools: ['St David\'s Marist','KES','St Stithians','St John\'s College','Jeppe HS','Parktown Boys\'','Hilton College','Grey College'],
+  xlsm: ['Crusadeurs 2','Railways','Delta','African Warriors','Harlequins','KwaMashu 2','Phoenix'],
+};
+
+const DEFAULT_VENUES = [
+  'Newlands Ground 2','Boland Park Annex','Bellville Oval','Ottery Sports Ground',
+  'Durbanville CC Ground','Tygerberg Park','Wanderers Oval B','Old Edwardians Ground',
+];
+
+// ═══════════════════════════════════════════════════════
+//  INIT
+// ═══════════════════════════════════════════════════════
+function init(){
+  S.venues = DEFAULT_VENUES.slice(0,6);
+  renderVenues();
+  loadSample('clubs');
+}
+
+// ═══════════════════════════════════════════════════════
+//  SAMPLES
+// ═══════════════════════════════════════════════════════
+function loadSample(key){
+  const names = SAMPLES[key] || [];
+  S.teams = names.map((n,i)=>({
+    name: n,
+    venue: S.venues[i % S.venues.length] || 'TBC',
+    color: TEAM_COLORS[i % TEAM_COLORS.length],
+  }));
+  renderTeams();
+}
+
+// ═══════════════════════════════════════════════════════
+//  TEAM MANAGEMENT
+// ═══════════════════════════════════════════════════════
+function renderTeams(){
+  const el = document.getElementById('teams-list');
+  document.getElementById('team-count').textContent = S.teams.length;
+  el.innerHTML = S.teams.map((t,i)=>`
+    <div class="team-row" draggable="true" id="tr-${i}"
+      ondragstart="dragStart(event,${i})" ondragover="dragOver(event,${i})"
+      ondrop="dragDrop(event,${i})" ondragleave="dragLeave(event,${i})">
+      <span class="tr-num">${i+1}</span>
+      <span class="tr-name">${t.name}</span>
+      <span class="tr-venue">${t.venue}</span>
+      <button class="tr-del" onclick="removeTeam(${i})">×</button>
+    </div>`).join('');
+}
+
+function addTeam(){
+  const inp = document.getElementById('new-team');
+  const name = inp.value.trim(); if(!name) return;
+  const i = S.teams.length;
+  S.teams.push({name, venue: S.venues[i%S.venues.length]||'TBC', color:TEAM_COLORS[i%TEAM_COLORS.length]});
+  inp.value='';
+  renderTeams();
+}
+
+function removeTeam(i){ S.teams.splice(i,1); renderTeams(); }
+
+// Drag reorder
+let dragSrc = null;
+function dragStart(e,i){ dragSrc=i; e.currentTarget.classList.add('dragging'); }
+function dragOver(e,i){ e.preventDefault(); if(i!==dragSrc) document.getElementById('tr-'+i)?.classList.add('drag-over'); }
+function dragLeave(e,i){ document.getElementById('tr-'+i)?.classList.remove('drag-over'); }
+function dragDrop(e,i){
+  e.preventDefault();
+  document.querySelectorAll('.team-row').forEach(r=>r.classList.remove('drag-over','dragging'));
+  if(dragSrc===null||dragSrc===i) return;
+  const t=[...S.teams];
+  const [moved]=t.splice(dragSrc,1);
+  t.splice(i,0,moved);
+  S.teams=t; dragSrc=null; renderTeams();
+}
+
+// ═══════════════════════════════════════════════════════
+//  VENUE MANAGEMENT
+// ═══════════════════════════════════════════════════════
+function renderVenues(){
+  document.getElementById('venue-chips').innerHTML = S.venues.map((v,i)=>`
+    <div class="venue-chip">${v}<button class="vc-del" onclick="removeVenue(${i})">×</button></div>`).join('');
+}
+function addVenue(){
+  const inp=document.getElementById('new-venue');
+  const v=inp.value.trim(); if(!v) return;
+  S.venues.push(v); inp.value=''; renderVenues();
+}
+function removeVenue(i){ S.venues.splice(i,1); renderVenues(); }
+
+// ═══════════════════════════════════════════════════════
+//  CORE: CIRCLE-METHOD ROUND-ROBIN (exact xlsm algorithm)
+//
+//  The fixtures_template_.xlsm Home sheet stores a position-based
+//  round assignment matrix built using the Berger/circle method:
+//    - Fix position 0 (= team at slot 0 after random draw)
+//    - For n teams: if odd, add virtual BYE at slot n
+//    - Each round: pair top[i] (home) vs bottom[i] (away)
+//      top  = [fixed] + rotating[0..half-2]
+//      bottom = rotating[half-1..n-2] reversed
+//    - Rotate: last element moves to front
+//  Then random draw (Random sheet RAND()+RANK) assigns teams
+//  to positions, producing a different schedule each time.
+// ═══════════════════════════════════════════════════════
+function circleMethod(n){
+  // Returns: array of rounds, each round = [{homePos, awayPos}]
+  // BYE = position n (virtual)
+  const nEff = n%2===0 ? n : n+1;
+  const half = nEff/2;
+  const numRounds = nEff-1;
+  const BYE = n; // virtual index
+
+  let rotating = [];
+  for(let i=1;i<nEff;i++) rotating.push(i<n?i:BYE);
+
+  const rounds=[];
+  for(let r=0;r<numRounds;r++){
+    const top    = [0, ...rotating.slice(0, half-1)];
+    const bottom = rotating.slice(half-1).reverse();
+    const matches=[];
+    for(let i=0;i<half;i++){
+      const h=top[i], a=bottom[i];
+      if(h!==BYE && a!==BYE){
+        matches.push({homePos:h, awayPos:a});
+      } else {
+        // BYE match — record which real team has the bye
+        const byeTeam = h===BYE ? a : h;
+        matches.push({homePos:h, awayPos:a, bye:true, byePos:byeTeam});
+      }
+    }
+    rounds.push(matches);
+    // Rotate: move last to front
+    rotating = [rotating[rotating.length-1], ...rotating.slice(0,-1)];
+  }
+  return rounds;
+}
+
+// ═══════════════════════════════════════════════════════
+//  GENERATE
+// ═══════════════════════════════════════════════════════
+function generate(){
+  if(S.teams.length<2){ toast('Add at least 2 teams','warn'); return; }
+
+  // Read config
+  S.cfg = {
+    name:     document.getElementById('cfg-name').value,
+    province: document.getElementById('cfg-prov').value,
+    season:   document.getElementById('cfg-season').value,
+    format:   document.getElementById('cfg-format').value,
+    legs:     parseInt(document.getElementById('cfg-legs').value),
+    start:    document.getElementById('cfg-start').value,
+    interval: parseInt(document.getElementById('cfg-interval').value),
+    winPts:   parseInt(document.getElementById('cfg-win').value)||3,
+    drawPts:  parseInt(document.getElementById('cfg-draw').value)||1,
+  };
+
+  const n = S.teams.length;
+  const roundMatrix = circleMethod(n);  // position-based schedule
+  S.roundMatrix = roundMatrix;
+
+  const numRounds = roundMatrix.length;
+  const startDate = new Date(S.cfg.start+'T00:00:00');
+  const interval  = S.cfg.interval;
+
+  let id=1;
+  S.fixtures=[];
+
+  for(let leg=1; leg<=S.cfg.legs; leg++){
+    for(let ri=0; ri<numRounds; ri++){
+      const roundNum = ri+1;
+      // Date for this round
+      const d = new Date(startDate);
+      d.setDate(d.getDate() + ((leg-1)*numRounds + ri)*interval);
+      const dateStr = d.toISOString().split('T')[0];
+
+      let venueIdx=0;
+      roundMatrix[ri].forEach(m=>{
+        if(m.bye){
+          // Find which team has bye
+          const byeTeamIdx = m.byePos; // position = team index (since no shuffle here — shuffle handled by team order)
+          S.fixtures.push({
+            id:id++, round:roundNum, leg,
+            homePos:m.homePos, awayPos:m.awayPos,
+            bye:true, byeTeamName: S.teams[byeTeamIdx]?.name||'',
+            date:dateStr, venue:'', homeScore:'', awayScore:'', status:'bye',
+          });
+        } else {
+          const homeTeam = S.teams[m.homePos];
+          const awayTeam = S.teams[m.awayPos];
+          const venue = homeTeam?.venue || S.venues[venueIdx++ % S.venues.length] || 'TBC';
+          S.fixtures.push({
+            id:id++, round:roundNum, leg,
+            homePos:m.homePos, awayPos:m.awayPos,
+            homeName: homeTeam.name, awayName: awayTeam.name,
+            bye:false,
+            date:dateStr, venue,
+            homeScore:'', awayScore:'', status:'scheduled',
+          });
+        }
+      });
+    }
+  }
+
+  showGenView();
+  toast(`${S.fixtures.filter(f=>!f.bye).length} fixtures across ${numRounds*S.cfg.legs} rounds`,'ok');
+}
+
+function randomise(){
+  // Fisher-Yates shuffle — replicates xlsm Random sheet RAND()+RANK logic
+  if(S.fixtures.length>0 && !confirm('Regenerate with a new random draw? Entered results will be lost.')) return;
+  const a=[...S.teams];
+  for(let i=a.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [a[i],a[j]]=[a[j],a[i]];
+  }
+  S.teams=a;
+  renderTeams();
+  generate();
+  toast('Draw randomised','ok');
+}
+
+// ═══════════════════════════════════════════════════════
+//  RENDER GENERATED VIEW
+// ═══════════════════════════════════════════════════════
+function showGenView(){
+  document.getElementById('view-empty').style.display='none';
+  document.getElementById('view-gen').style.display='block';
+  document.getElementById('gen-title').textContent = S.cfg.name || 'League Fixtures';
+  document.getElementById('gen-sub').textContent =
+    `${S.cfg.province} · ${S.cfg.format} · ${S.cfg.season} · ${S.cfg.legs===1?'Single':'Double'} round-robin · Win=${S.cfg.winPts}pts, Draw=${S.cfg.drawPts}pts`;
+  document.getElementById('lt-note').textContent =
+    `Win=${S.cfg.winPts}pts · Draw=${S.cfg.drawPts}pts · Loss=0pts · Sorted: Pts → GD → Goals scored`;
+  updateKPIs();
+  buildRoundNav();
+  showAllRounds();
+  renderTable();
+  renderResultMatrix();
+  renderXlsmMatrix();
+}
+
+function updateKPIs(){
+  const total   = S.fixtures.filter(f=>!f.bye).length;
+  const played  = S.fixtures.filter(f=>!f.bye && f.homeScore!=='' && f.awayScore!=='').length;
+  const maxRnd  = S.cfg.legs * (S.roundMatrix.length||0);
+  document.getElementById('k-teams').textContent   = S.teams.length;
+  document.getElementById('k-fix').textContent     = total;
+  document.getElementById('k-rounds').textContent  = maxRnd;
+  document.getElementById('k-played').textContent  = played;
+  document.getElementById('k-remain').textContent  = total-played;
+}
+
+// ═══════════════════════════════════════════════════════
+//  ROUND NAV
+// ═══════════════════════════════════════════════════════
+function buildRoundNav(){
+  const numRounds = S.roundMatrix.length;
+  const legs = S.cfg.legs;
+  let html = `<span class="rn-label">Round</span>
+    <button class="round-pill active" id="rp-all" onclick="showAllRounds()">All</button>`;
+
+  for(let l=1;l<=legs;l++){
+    if(legs>1) html+=`<span class="rn-label" style="margin-left:6px">Leg ${l}</span>`;
+    for(let r=1;r<=numRounds;r++){
+      const fixes = S.fixtures.filter(f=>f.round===r&&f.leg===l&&!f.bye);
+      const played = fixes.filter(f=>f.homeScore!=='').length;
+      const complete = fixes.length>0 && played===fixes.length;
+      html+=`<button class="round-pill${complete?' complete':''}" id="rp-${l}-${r}"
+        onclick="showRound(${r},${l})">Rd ${r}</button>`;
+    }
+  }
+  document.getElementById('round-nav').innerHTML=html;
+}
+
+function showAllRounds(){
+  document.querySelectorAll('.round-pill').forEach(b=>b.classList.remove('active'));
+  document.getElementById('rp-all')?.classList.add('active');
+  S.activeRound='all';
+  renderFixturesList(null,null,true);
+}
+function showRound(r,l){
+  document.querySelectorAll('.round-pill').forEach(b=>b.classList.remove('active'));
+  document.getElementById(`rp-${l}-${r}`)?.classList.add('active');
+  S.activeRound=`${l}-${r}`;
+  renderFixturesList(r,l,false);
+}
+
+// ═══════════════════════════════════════════════════════
+//  FIXTURES LIST
+// ═══════════════════════════════════════════════════════
+function renderFixturesList(round, leg, all){
+  const list = document.getElementById('fixtures-list');
+  const legs = S.cfg.legs;
+
+  let html='';
+  const groups={};
+
+  let src = all ? S.fixtures : S.fixtures.filter(f=>f.round===round&&f.leg===leg);
+
+  src.forEach(f=>{
+    const key=`${f.leg}-${f.round}`;
+    if(!groups[key]) groups[key]={leg:f.leg,round:f.round,items:[]};
+    groups[key].items.push(f);
+  });
+
+  Object.values(groups).forEach(g=>{
+    if(all){
+      const nonBye = g.items.filter(x=>!x.bye);
+      const played = nonBye.filter(x=>x.homeScore!=='').length;
+      const total  = nonBye.length;
+      const pct    = total>0 ? Math.round(played/total*100) : 0;
+      const date   = g.items[0]?.date||'';
+      html+=`<div class="round-group-header">
+        <span class="rgh-label">${legs>1?`Leg ${g.leg} · `:''}Round ${g.round}</span>
+        <span class="rgh-date">${fmtDate(date)}</span>
+        <div class="rgh-prog">
+          <div class="rgh-bar"><div class="rgh-fill" style="width:${pct}%"></div></div>
+          <span class="rgh-frac">${played}/${total}</span>
+        </div>
+      </div>`;
+    }
+    g.items.forEach(f=>{ html+=f.bye ? byeCardHTML(f) : fixtureCardHTML(f); });
+  });
+
+  list.innerHTML = html || '<p style="font-size:12px;color:rgba(13,17,23,0.4);padding:12px 0">No fixtures found.</p>';
+}
+
+function fixtureCardHTML(f){
+  const hs=f.homeScore, as=f.awayScore;
+  const played=hs!==''&&as!=='';
+  const hi=parseInt(hs), ai=parseInt(as);
+  const homeWin=played&&hi>ai, awayWin=played&&ai>hi;
+  const legLabel=S.cfg.legs>1?`/L${f.leg}`:'';
+
+  return `<div class="fixture-card" id="fc-${f.id}">
+    <div class="fc-side home${homeWin?' winner':''}">
+      <div class="fc-name">${f.homeName}</div>
+      <div class="fc-tag">Home</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="${hs}"
+          id="hs-${f.id}" placeholder="—"
+          oninput="scoreInput(${f.id})" onblur="saveScore(${f.id})">
+      </div>
+    </div>
+    <div class="fc-mid">
+      <div class="fc-mid-vs">VS</div>
+      <div class="fc-mid-rd">Rd${f.round}${legLabel}</div>
+    </div>
+    <div class="fc-side away${awayWin?' winner':''}">
+      <div class="fc-name">${f.awayName}</div>
+      <div class="fc-tag">Away</div>
+      <div class="fc-score-wrap">
+        <input class="score-box" type="number" min="0" max="9999" value="${as}"
+          id="as-${f.id}" placeholder="—"
+          oninput="scoreInput(${f.id})" onblur="saveScore(${f.id})">
+      </div>
+    </div>
+    <div class="fc-meta">
+      <div class="fc-meta-date">${fmtDate(f.date)}</div>
+      <div class="fc-meta-venue">${f.venue}</div>
+      <input class="fc-date-pick" type="date" value="${f.date}" onchange="updateDate(${f.id},this.value)">
+    </div>
+    <div class="fc-actions">
+      <span class="fc-status-badge ${played?'badge-played':'badge-scheduled'}">${played?'Result':'Scheduled'}</span>
+      <button class="fc-save" onclick="saveScore(${f.id},true)">${played?'✓ Saved':'Save'}</button>
+    </div>
+  </div>`;
+}
+
+function byeCardHTML(f){
+  return `<div class="bye-row">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.3"/><path d="M7 4.5v3M7 9.5v.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+    <strong>${f.byeTeamName||'Unknown'}</strong> — BYE this round &nbsp;·&nbsp; ${fmtDate(f.date)}
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════════════
+//  SCORE ENTRY
+// ═══════════════════════════════════════════════════════
+function scoreInput(id){
+  // Live update: re-render table silently on each keystroke
+  const f=getF(id); if(!f) return;
+  const hs=document.getElementById('hs-'+id)?.value??'';
+  const as=document.getElementById('as-'+id)?.value??'';
+  f.homeScore=hs; f.awayScore=as;
+  if(hs!==''&&as!==''){
+    f.status='played';
+    renderTable(); renderResultMatrix();
+    updateKPIs(); buildRoundNav();
+  }
+}
+
+function saveScore(id, explicit=false){
+  const f=getF(id); if(!f) return;
+  const hs=document.getElementById('hs-'+id)?.value??'';
+  const as=document.getElementById('as-'+id)?.value??'';
+  f.homeScore=hs; f.awayScore=as;
+  f.status=(hs!==''&&as!=='') ? 'played' : 'scheduled';
+  updateKPIs(); renderTable(); renderResultMatrix(); buildRoundNav();
+  if(explicit && hs!==''&&as!==''){
+    toast(`${f.homeName} ${hs}–${as} ${f.awayName} saved`,'ok');
+    // Re-render card to show ✓ winner styling
+    const R = S.activeRound;
+    if(R==='all') renderFixturesList(null,null,true);
+    else {
+      const [l,r]=R.split('-').map(Number);
+      renderFixturesList(r,l,false);
+    }
+  }
+}
+
+function updateDate(id,val){
+  const f=getF(id); if(f) f.date=val;
+}
+
+function getF(id){ return S.fixtures.find(x=>x.id===id); }
+
+// ═══════════════════════════════════════════════════════
+//  LEAGUE TABLE
+//  Replicates Calculations sheet SUMPRODUCT/SUMIFS formulas:
+//  Col A = home team name, Col B = home score, Col D = away score, Col E = away team name
+// ═══════════════════════════════════════════════════════
+function calcTable(){
+  const wp=S.cfg.winPts||3, dp=S.cfg.drawPts||1;
+  return S.teams.map(t=>{
+    const name=t.name;
+    // Fixtures!$A:$A = homeName, Fixtures!$B:$B = homeScore, Fixtures!$D:$D = awayScore, Fixtures!$E:$E = awayName
+    const hFix = S.fixtures.filter(f=>!f.bye && f.homeName===name && f.homeScore!=='' && f.awayScore!=='');
+    const aFix = S.fixtures.filter(f=>!f.bye && f.awayName===name && f.homeScore!=='' && f.awayScore!=='');
+
+    // Home stats
+    const hW = hFix.filter(f=>+f.homeScore > +f.awayScore).length;   // Fixtures!$B:$B > $D:$D
+    const hD = hFix.filter(f=>+f.homeScore===+f.awayScore).length;
+    const hL = hFix.filter(f=>+f.homeScore < +f.awayScore).length;
+    const hF = hFix.reduce((s,f)=>s+ +f.homeScore,0);                 // SUMIFS Fixtures!$B:$B
+    const hA = hFix.reduce((s,f)=>s+ +f.awayScore,0);                 // SUMIFS Fixtures!$D:$D
+    const hPts= hW*wp + hD*dp;
+
+    // Away stats
+    const aW = aFix.filter(f=>+f.awayScore > +f.homeScore).length;   // Fixtures!$D:$D > $B:$B
+    const aD = aFix.filter(f=>+f.awayScore===+f.homeScore).length;
+    const aL = aFix.filter(f=>+f.awayScore < +f.homeScore).length;
+    const aF = aFix.reduce((s,f)=>s+ +f.awayScore,0);                 // SUMIFS Fixtures!$D:$D
+    const aA = aFix.reduce((s,f)=>s+ +f.homeScore,0);                 // SUMIFS Fixtures!$B:$B
+    const aPts= aW*wp + aD*dp;
+
+    const P=hFix.length+aFix.length, W=hW+aW, D=hD+aD, L=hL+aL;
+    const F=hF+aF, A=hA+aA, GD=F-A, Pts=hPts+aPts;
+    return {name,P,W,D,L,F,A,GD,Pts,hW,hL,aW,aL, color:t.color};
+  })
+  .sort((a,b)=> b.Pts!==a.Pts ? b.Pts-a.Pts : b.GD!==a.GD ? b.GD-a.GD : b.F-a.F);
+}
+
+function renderTable(){
+  const data=calcTable();
+  document.getElementById('table-body').innerHTML=data.map((t,i)=>{
+    const pip=i===0?'pip-1':i===1?'pip-2':i===2?'pip-3':'';
+    const promoted=i<3?' promoted':'';
+    const gdCls=t.GD>0?' class="gd-pos"':t.GD<0?' class="gd-neg"':'';
+    const initials=t.name.split(/\s+/).map(w=>w[0]).join('').toUpperCase().slice(0,2);
+    const [bg,fg]=t.color||['#eee','#333'];
+    return `<tr class="${promoted}">
+      <td><span class="pos-pip ${pip}">${i+1}</span></td>
+      <td><div class="team-cell">
+        <div class="team-avatar" style="background:${bg};color:${fg}">${initials}</div>
+        <strong>${t.name}</strong>
+      </div></td>
+      <td>${t.P}</td>
+      <td style="color:var(--teal);font-weight:600">${t.W}</td>
+      <td>${t.D}</td>
+      <td style="color:var(--coral)">${t.L}</td>
+      <td>${t.F}</td>
+      <td>${t.A}</td>
+      <td${gdCls}>${t.GD>0?'+':''}${t.GD}</td>
+      <td>${t.hW}</td><td>${t.hL}</td><td>${t.aW}</td><td>${t.aL}</td>
+      <td class="pts">${t.Pts}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ═══════════════════════════════════════════════════════
+//  RESULTS MATRIX (full results grid)
+// ═══════════════════════════════════════════════════════
+function renderResultMatrix(){
+  const names=S.teams.map(t=>t.name);
+  const N=names.length;
+
+  // Build lookup for quick access
+  const fx={};
+  S.fixtures.filter(f=>!f.bye).forEach(f=>{ fx[`${f.homeName}|${f.awayName}`]=f; });
+
+  let h=`<tr><th>Home ↓ / Away →</th>`;
+  names.forEach(n=>{ h+=`<th title="${n}">${n.length>9?n.slice(0,9)+'…':n}</th>`; });
+  h+='</tr>';
+
+  names.forEach(home=>{
+    h+=`<tr><td>${home.length>14?home.slice(0,14)+'…':home}</td>`;
+    names.forEach(away=>{
+      if(home===away){ h+=`<td class="mx-self"></td>`; return; }
+      const f=fx[`${home}|${away}`];
+      if(!f){ h+=`<td class="mx-na">—</td>`; return; }
+      if(f.homeScore!==''&&f.awayScore!==''){
+        h+=`<td class="mx-played">${f.homeScore}–${f.awayScore}</td>`;
+      } else {
+        h+=`<td class="mx-sched">R${f.round}</td>`;
+      }
+    });
+    h+='</tr>';
+  });
+  document.getElementById('result-matrix').innerHTML=h;
+}
+
+// ═══════════════════════════════════════════════════════
+//  HOME/AWAY MATRIX — replicates xlsm Home sheet exactly
+//  cell[row][col] = round when col_team (home) hosts row_team (away)
+// ═══════════════════════════════════════════════════════
+function renderXlsmMatrix(){
+  const names=S.teams.map(t=>t.name);
+  const N=names.length;
+
+  // Build round lookup from generated fixtures (single leg)
+  // roundFor[homePos][awayPos] = round
+  const roundFor={};
+  S.fixtures.filter(f=>!f.bye&&f.leg===1).forEach(f=>{
+    roundFor[`${f.homePos}|${f.awayPos}`]=f.round;
+  });
+
+  // xlsm Home sheet format: row headers = col A (away teams, idx 1..N-1)
+  // col headers = row 1 (home teams, idx 0..N-2)
+  // cell[i][j] = round when teams[j](home) vs teams[i](away), where i>j
+
+  let h=`<tr><th>Home → / Away ↓</th>`;
+  // Header: teams[0..N-2] as home columns
+  for(let j=0;j<N-1;j++){
+    h+=`<th title="${names[j]}">${names[j].length>9?names[j].slice(0,9)+'…':names[j]}</th>`;
+  }
+  h+='</tr>';
+
+  // Rows: teams[1..N-1] as away rows
+  for(let i=1;i<N;i++){
+    h+=`<tr><td>${names[i].length>14?names[i].slice(0,14)+'…':names[i]}</td>`;
+    for(let j=0;j<N-1;j++){
+      if(j>=i){
+        // Upper triangle — home team hasn't played this away team yet in this orientation
+        h+=`<td class="mx-self"></td>`;
+      } else {
+        // teams[j](home) vs teams[i](away)
+        const round = roundFor[`${j}|${i}`];
+        if(round!=null){
+          h+=`<td class="mx-sched" style="font-weight:600;color:var(--navy)">${round}</td>`;
+        } else {
+          h+=`<td class="mx-na">—</td>`;
+        }
+      }
+    }
+    h+='</tr>';
+  }
+  document.getElementById('xlsm-matrix').innerHTML=h;
+}
+
+// ═══════════════════════════════════════════════════════
+//  EXPORT CSV
+// ═══════════════════════════════════════════════════════
+function exportCSV(){
+  if(!S.fixtures.length){ toast('Generate fixtures first','warn'); return; }
+  // Replicates Fixtures sheet structure: A=Home, B=HomeScore, C=Date, D=AwayScore, E=Away
+  const rows=['Leg,Round,Home Team,Home Score,Away Score,Away Team,Date,Venue,Status'];
+  S.fixtures.filter(f=>!f.bye).forEach(f=>{
+    rows.push(`${f.leg},${f.round},"${f.homeName}",${f.homeScore||''},${f.awayScore||''},"${f.awayName}",${f.date},"${f.venue}",${f.status}`);
+  });
+  const blob=new Blob([rows.join('\n')],{type:'text/csv'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download=`${(S.cfg.name||'fixtures').replace(/\s+/g,'_')}_${(S.cfg.season||'').replace('/','_')}.csv`;
+  a.click(); URL.revokeObjectURL(url);
+  toast('CSV exported','ok');
+}
+
+// ═══════════════════════════════════════════════════════
+//  UTILITIES
+// ═══════════════════════════════════════════════════════
+function fmtDate(d){
+  if(!d) return '—';
+  try{
+    const dt=new Date(d+'T00:00:00');
+    return dt.toLocaleDateString('en-ZA',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
+  }catch{return d;}
+}
+
+function switchTab(btn, paneId){
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.tab-pane').forEach(p=>p.classList.remove('active'));
+  document.getElementById(paneId)?.classList.add('active');
+}
+
+let _toastT=null;
+function toast(msg, type){
+  const el=document.getElementById('toast');
+  el.textContent=msg; el.className='toast show '+(type||'');
+  if(_toastT) clearTimeout(_toastT);
+  _toastT=setTimeout(()=>el.className='toast',2800);
+}
+
+// ═══════════════════════════════════════════════════════
+//  BOOT
+// ═══════════════════════════════════════════════════════
+init();
+</script>
+
+
+</body></html>
