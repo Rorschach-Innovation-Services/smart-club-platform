@@ -30,12 +30,12 @@ function ProfileSelect({ onSelect, clubs }) {
   return (
     <div className="ps-screen">
       <div className="ps-brand">
-        <img className="ps-brand-logo" src="/dolphins-logo.png" alt="Hollywoodbets Dolphins Pipeline"/>
-        <div className="ps-eyebrow" style={{margin:0, color:"rgba(255,255,255,0.6)", fontSize:11}}>Dolphins Pipeline · KZNCU &amp; EMCU</div>
+        <img className="ps-brand-logo" src="/dolphins-pipeline-logo.png" alt="Hollywoodbets Dolphins Pipeline"/>
+        <div className="ps-eyebrow" style={{margin:0, color:"rgba(255,255,255,0.6)", fontSize:11}}>Smart Club Integration · Cricket Services</div>
       </div>
 
       <div className="ps-intro">
-        <div className="ps-eyebrow">KZNCU &amp; EMCU · 2026 / 27 Season</div>
+        <div className="ps-eyebrow">Dolphins Cricket Services · 2026 / 27 Season</div>
         <h1 className="ps-title">Welcome to <em>Dolphins Pipeline</em></h1>
         <p className="ps-desc">
           Sign in as a Dolphins administrator to manage every affiliated club, or as a Chairperson / Official Club Rep to complete your affiliation, compliance and CQI submissions.
@@ -57,7 +57,7 @@ function ProfileSelect({ onSelect, clubs }) {
             <div className="ps-card-title">Dolphins office</div>
           </div>
           <p className="ps-card-desc">
-            Track the cohort, monitor affiliation payments, review compliance documents and CQI submissions across every KZNCU &amp; EMCU club.
+            Track the cohort, monitor affiliation payments, review compliance documents and CQI submissions across every affiliated club.
           </p>
           <div className="ps-card-meta">
             <div className="ps-card-stat">
@@ -106,7 +106,7 @@ function ProfileSelect({ onSelect, clubs }) {
               <div className="ps-card-stat-l">Steps</div>
             </div>
             <div className="ps-card-stat">
-              <div className="ps-card-stat-n">22 Jun</div>
+              <div className="ps-card-stat-n">21 Jun</div>
               <div className="ps-card-stat-l">Deadline</div>
             </div>
           </div>
@@ -120,7 +120,7 @@ function ProfileSelect({ onSelect, clubs }) {
       <div className="ps-footer">
         <span>v 0.9.0</span>
         <span className="dot"/>
-        <span>KZNCU &amp; EMCU · 2026/27</span>
+        <span>Dolphins Cricket Services · 2026/27</span>
         <span className="dot"/>
         <span>Powered by Medicoach</span>
       </div>
@@ -130,6 +130,68 @@ function ProfileSelect({ onSelect, clubs }) {
 
 /* ─── Main App ─── */
 
+
+/* ─── HelpModal — V2 support guidance + union office contacts ─── */
+const HELP_CONTACTS = [
+  { name: "Jooma", role: "Union office",   email: "jooma@dolphinscricket.co.za" },
+  { name: "Yash",  role: "Union office",   email: "yash@dolphinscricket.co.za"  },
+];
+function HelpModal({ onClose }) {
+  return (
+    <div className="task-modal-backdrop" onClick={e=>e.target===e.currentTarget && onClose()}>
+      <div className="task-modal narrow" style={{maxWidth:560}}>
+        <div className="task-modal-head">
+          <div className="task-modal-head-text">
+            <div className="task-modal-head-eyebrow">Need Help</div>
+            <div className="task-modal-head-title">Support &amp; <em>union office</em></div>
+          </div>
+          <button className="task-modal-close" onClick={onClose} title="Close">
+            <Icon.X/>
+          </button>
+        </div>
+        <div className="task-modal-body">
+          <div style={{
+            background:"var(--paper)", borderRadius:10, padding:"16px 18px", marginBottom:16,
+            border:"1px solid var(--line)",
+          }}>
+            <p style={{margin:0, fontSize:14, lineHeight:1.55, color:"var(--ink)"}}>
+              If your club is missing one of the required documents, reach out to the union office.
+            </p>
+          </div>
+
+          <div style={{fontSize:10.5, letterSpacing:"0.12em", textTransform:"uppercase", color:"var(--muted-2)", fontFamily:"'Montserrat',sans-serif", fontWeight:700, marginBottom:8}}>Contacts</div>
+
+          <div style={{display:"flex", flexDirection:"column", gap:10}}>
+            {HELP_CONTACTS.map(c => (
+              <a key={c.email} href={`mailto:${c.email}`} style={{
+                display:"flex", alignItems:"center", gap:14, padding:"14px 16px",
+                border:"1px solid var(--line)", borderRadius:10, background:"var(--white)",
+                textDecoration:"none", color:"inherit",
+              }}>
+                <div style={{
+                  width:38, height:38, borderRadius:"50%", flexShrink:0,
+                  background:"rgba(15,143,74,0.12)", color:"var(--teal-deep)",
+                  display:"flex", alignItems:"center", justifyContent:"center",
+                  fontFamily:"'Montserrat',sans-serif", fontSize:13, fontWeight:700,
+                }}>{c.name[0]}</div>
+                <div style={{flex:1, minWidth:0}}>
+                  <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:13, fontWeight:700, color:"var(--ink)"}}>{c.name}</div>
+                  <div style={{fontSize:11.5, color:"var(--muted)"}}>{c.role}</div>
+                  <div style={{fontSize:12, color:"var(--teal-deep)", marginTop:2, fontWeight:500}}>{c.email}</div>
+                </div>
+                <span style={{color:"var(--muted-2)"}}><Icon.Mail/></span>
+              </a>
+            ))}
+          </div>
+
+          <div style={{fontSize:11.5, color:"var(--muted)", marginTop:14, fontStyle:"italic"}}>
+            Tip: include your club name and which document is outstanding so the office can help quickly.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* ─── TaskModal — wraps the affiliation form & documents view ─── */
 function TaskModal({ eyebrow, title, sub, onClose, narrow, children }) {
@@ -167,6 +229,7 @@ function AppRoutes() {
   const [onboarded, setOnboarded] = useStateApp({});
   const [showOnboarding, setShowOnboarding] = useStateApp(false);
   const [showCreateSeries, setShowCreateSeries] = useStateApp(false);
+  const [showHelp, setShowHelp] = useStateApp(false);
   const [toastShow, toastNode] = useToast();
   const navigate = useNavigate();
 
@@ -200,6 +263,7 @@ function AppRoutes() {
     clubs, setClubs, allSeries, setAllSeries, toastShow,
     onboarded, setOnboarded, showOnboarding, setShowOnboarding,
     showCreateSeries, setShowCreateSeries,
+    showHelp, setShowHelp,
     updateSeries, deleteSeries, duplicateSeries, setReleased,
   };
 
@@ -217,6 +281,7 @@ function AppRoutes() {
         <Route path="*" element={<Navigate to="/" replace/>}/>
       </Routes>
       {toastNode}
+      {showHelp && <HelpModal onClose={()=>setShowHelp(false)}/>}
     </>
   );
 }
@@ -225,6 +290,7 @@ function Shell({
   role, clubs, setClubs, allSeries, setAllSeries, toastShow,
   onboarded, setOnboarded, showOnboarding, setShowOnboarding,
   showCreateSeries, setShowCreateSeries,
+  showHelp, setShowHelp,
   updateSeries, deleteSeries, duplicateSeries, setReleased,
 }) {
   const navigate = useNavigate();
@@ -331,6 +397,7 @@ function Shell({
     { v:"fixtures",    label:"Fixtures",       icon:Icon.Field,
       dot: hasReleased ? "teal" : activeClub.paid ? "gold" : "muted",
       num: hasReleased ? "NEW" : undefined },
+    { v:"_help",       label:"Need Help?",     icon:Icon.Mail,    action:()=>setShowHelp(true) },
   ];
 
   const nav = role === "admin" ? adminNav : clubNav;
@@ -376,10 +443,10 @@ function Shell({
       {/* ─── Top header ─── */}
       <header className="app-header">
         <div className="h-logo">
-          <img className="h-logo-img" src="/dolphins-logo.png" alt="Hollywoodbets Dolphins"/>
+          <img className="h-logo-img" src="/dolphins-pipeline-logo.png" alt="Hollywoodbets Dolphins Pipeline"/>
         </div>
         <div className="h-divider"/>
-        <span className="h-sub">Smart Club Integration · KZNCU &amp; EMCU</span>
+        <span className="h-sub">Smart Club Integration · Cricket Services</span>
 
         <div className="h-spacer"/>
 
@@ -427,7 +494,10 @@ function Shell({
             <button
               key={n.v}
               className={`nav-item ${view===n.v?"active":""}`}
-              onClick={()=> role === "admin" ? gotoAdminView(n.v) : gotoClubView(n.v)}
+              onClick={()=> {
+                if (n.action) { n.action(); return; }
+                role === "admin" ? gotoAdminView(n.v) : gotoClubView(n.v);
+              }}
             >
               <span className="ni-icon"><n.icon/></span>
               <span className="ni-label">{n.label}</span>
@@ -440,10 +510,10 @@ function Shell({
             <>
               <div className="nav-section" style={{marginTop:18}}>Workspace</div>
               {[
-                {v:"_settings", label:"Settings",       icon:Icon.Shield},
-                {v:"_help",     label:"Help & support", icon:Icon.Mail},
+                {v:"_settings", label:"Settings",       icon:Icon.Shield, action:()=>{}},
+                {v:"_help",     label:"Need Help?",     icon:Icon.Mail,   action:()=>setShowHelp(true)},
               ].map(n=>(
-                <button key={n.v} className="nav-item" onClick={()=>{}}>
+                <button key={n.v} className="nav-item" onClick={n.action}>
                   <span className="ni-icon"><n.icon/></span>
                   <span className="ni-label">{n.label}</span>
                 </button>
@@ -453,7 +523,7 @@ function Shell({
 
           <div className="nav-footer">
             <strong>Dolphins</strong> · Smart Club Integration<br/>
-            v 0.9.0 · KZNCU &amp; EMCU · 2026/27<br/>
+            v 0.9.0 · Cricket Services · 2026/27<br/>
             <span style={{color:"var(--muted-3)"}}>Powered by Medicoach</span>
           </div>
         </aside>
@@ -520,7 +590,7 @@ function Shell({
 
       {role === "admin" && showCreateSeries && (
         <TaskModal
-          eyebrow="Fixtures · KZNCU & EMCU"
+          eyebrow="Fixtures · Cricket Services"
           title={<>Create a new <em>series</em></>}
           onClose={() => setShowCreateSeries(false)}
         >

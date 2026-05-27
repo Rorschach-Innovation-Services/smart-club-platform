@@ -3,7 +3,7 @@
 import { useState as useStateA, useMemo as useMemoA } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  REQUIRED_DOCS, CQI_STRUCTURE, LEAGUE_OPTIONS,
+  REQUIRED_DOCS, CQI_STRUCTURE, LEAGUE_OPTIONS, LEAGUE_LABEL_BY_KEY,
   cohortStats, docCompletion, overallProgress, fixtureCost, generateRoundRobin,
 } from './data.jsx';
 import {
@@ -55,7 +55,7 @@ export function AdminFixtures({ clubs, allSeries, onCreateSeries, onUpdateSeries
         <div className="ph-left">
           <div className="ph-crumb">Dolphins · Admin Console / Fixtures &amp; Venues</div>
           <h1 className="ph-title">Fixtures &amp; <em>Venues</em></h1>
-          <p className="ph-desc">Auto-generated round-robin schedules across each KZNCU &amp; EMCU series. Home venues flow from the affiliation form. Travel distance and fuel cost are calculated for every away fixture.</p>
+          <p className="ph-desc">Auto-generated round-robin schedules across each Cricket Services series. Home venues flow from the affiliation form. Travel distance and fuel cost are calculated for every away fixture.</p>
         </div>
         <div className="ph-actions">
           <Btn tone="outline" icon={Icon.Download} size="sm">Export schedule</Btn>
@@ -834,7 +834,7 @@ export function AdminDashboard({ clubs, gotoClub, gotoList }) {
       {/* Aspirational hero banner */}
       <div className="hero-banner" style={{backgroundImage:"url('/players/ackerman-green.jpg')", height:170}}>
         <div className="hero-content">
-          <div className="hero-eyebrow">Hollywoodbets Dolphins · KZNCU &amp; EMCU</div>
+          <div className="hero-eyebrow">Hollywoodbets Dolphins · Cricket Services</div>
           <h2 className="hero-title">Building the next <em>generation</em>.</h2>
           <p className="hero-sub">Every club below is a feeder for our provincial squad. Track readiness, lift standards, identify talent.</p>
         </div>
@@ -845,7 +845,7 @@ export function AdminDashboard({ clubs, gotoClub, gotoList }) {
         <div className="ph-left">
           <div className="ph-crumb">Dolphins · Admin Console</div>
           <h1 className="ph-title">Club Integration <em>Cohort</em></h1>
-          <p className="ph-desc">86 affiliated clubs across KZNCU &amp; EMCU. Track affiliation, document compliance, CQI scoring and franchise readiness for the 2026/27 season.</p>
+          <p className="ph-desc">86 affiliated clubs across the Dolphins Cricket Services districts. Track affiliation, document compliance, CQI scoring and franchise readiness for the 2026/27 season.</p>
         </div>
         <div className="ph-actions">
           <Btn tone="outline" icon={Icon.Download} size="sm">Export cohort report</Btn>
@@ -857,7 +857,7 @@ export function AdminDashboard({ clubs, gotoClub, gotoList }) {
       <div className="deadline">
         <div className="deadline-icon"><Icon.Clock/></div>
         <div className="deadline-text">
-          <strong>Submission deadline · 22 June 2026.</strong> Clubs must complete affiliation, upload required compliance documents, and submit the CQI form. <span className="days">31 days remaining</span>.
+          <strong>Submission deadline · 21 June 2026.</strong> Clubs must complete affiliation, upload required compliance documents, and submit the CQI form. <span className="days">31 days remaining</span>.
         </div>
         <div className="deadline-cta">
           <Btn tone="outline" size="sm">Edit deadline</Btn>
@@ -1033,7 +1033,7 @@ function ClubInsights({ clubs }) {
       <div className="insights-card">
         <div className="insights-card-head">
           <div className="insights-card-title">Resources Required</div>
-          <div className="insights-card-meta">22 Jun deadline</div>
+          <div className="insights-card-meta">21 Jun deadline</div>
         </div>
         <div className="resource-list">
           <div className="resource-row">
@@ -1056,7 +1056,7 @@ function ClubInsights({ clubs }) {
           </div>
         </div>
         <div className="insights-callout alert">
-          Send <strong>{totalReminders}</strong> reminder{totalReminders===1?"":"s"} before <strong>22 June</strong> — target the at-risk clubs first.
+          Send <strong>{totalReminders}</strong> reminder{totalReminders===1?"":"s"} before <strong>21 June</strong> — target the at-risk clubs first.
         </div>
       </div>
     </div>
@@ -1162,7 +1162,7 @@ export function AdminClubDetail({ club, gotoList }) {
 
   const phases = [
     { n:"01", t:"Affiliation",        done: club.paid, val: club.paid ? 100 : (club.affiliation==="in_progress"?40:0), detail: club.paid ? "Submitted · 12 May 2026" : "Awaiting submission" },
-    { n:"02", t:"League & Fixtures",  done: club.affiliation==="complete", val: club.affiliation==="complete"?100:0, detail: club.affiliation==="complete"?`Allocated to ${club.sub==="EMCU"?"EMCU Premier":"Provincial Promotion"}`: "Pending affiliation" },
+    { n:"02", t:"League & Fixtures",  done: club.affiliation==="complete", val: club.affiliation==="complete"?100:0, detail: club.affiliation==="complete"?`Allocated to ${club.sub==="EMCU"?"EMCU Division 1":"District Division"}`: "Pending affiliation" },
     { n:"03", t:"Player Registration", done: club.players >= 30, val: Math.min(100, (club.players||0)/60*100), detail: `${club.players||0} players registered` },
     { n:"04", t:"Live Scoring",        done: false, val: club.cqi>0 ? 25 : 0, detail: "Begins round 1 · 02 Aug 2026" },
     { n:"05", t:"Compliance",          done: dc===100, val: dc, detail: `${Object.values(club.docs).filter(v=>v).length} of 4 docs uploaded` },
@@ -1223,7 +1223,7 @@ export function AdminClubDetail({ club, gotoList }) {
           </Card>
 
           <Card title="Compliance documents"
-                sub="KZNCU 2026/27 club requirements upload"
+                sub="Cricket Services 2026/27 club requirements upload"
                 action={<Btn tone="outline" size="sm" icon={Icon.Download}>Download bundle</Btn>}>
             {REQUIRED_DOCS.map(d => {
               const up = club.docs[d.key];

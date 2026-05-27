@@ -9,32 +9,83 @@ export const DISTRICTS = [
   "Illembe Cricket District",
 ];
 
-// Canonical league + division catalogue.
-// Used by the club registration form, the coach designation banner,
-// and the admin series-creation dropdown.
-export const LEAGUE_OPTIONS = [
-  { key: "premier",        label: "Premier League",     group: "Senior Men" },
-  { key: "promotion",      label: "Promotion League",   group: "Senior Men" },
-  { key: "premierWomen",   label: "Premier Women",      group: "Women" },
-  { key: "promotionWomen", label: "Promotion Women",    group: "Women" },
-  { key: "veterans",       label: "Veterans League",    group: "Veterans" },
-  { key: "emcuD1",         label: "EMCU Division 1",    group: "EMCU Divisions" },
-  { key: "emcuD2",         label: "EMCU Division 2",    group: "EMCU Divisions" },
-  { key: "emcuD3",         label: "EMCU Division 3",    group: "EMCU Divisions" },
-  { key: "emcuD4",         label: "EMCU Division 4",    group: "EMCU Divisions" },
-  { key: "emcuD5",         label: "EMCU Division 5",    group: "EMCU Divisions" },
-  { key: "u11",            label: "Under 11",           group: "Juniors" },
-  { key: "u13",            label: "Under 13",           group: "Juniors" },
-];
+/* ─── District-aware league catalogue (Smart Club Integration V2) ───
+   Each entry is a selectable league for the club affiliation form. Where the
+   union runs streams (e.g. EMCU Division 3 · Stream 1 / 2) each stream is its
+   own entry so the registered "league" is unambiguous downstream.
+   Juniors that get grouped by numbers carry a `note` describing the rule. */
+export const LEAGUE_OPTIONS_BY_DISTRICT = {
+  "Ethekwini Metro Cricket Union": [
+    { key: "emcuD1",      label: "EMCU Division 1",            group: "EMCU Divisions" },
+    { key: "emcuD2",      label: "EMCU Division 2",            group: "EMCU Divisions" },
+    { key: "emcuD3_s1",   label: "EMCU Division 3 · Stream 1", group: "EMCU Divisions" },
+    { key: "emcuD3_s2",   label: "EMCU Division 3 · Stream 2", group: "EMCU Divisions" },
+    { key: "emcuD4_s1",   label: "EMCU Division 4 · Stream 1", group: "EMCU Divisions" },
+    { key: "emcuD4_s2",   label: "EMCU Division 4 · Stream 2", group: "EMCU Divisions" },
+    { key: "emcuD5_s1",   label: "EMCU Division 5 · Stream 1", group: "EMCU Divisions" },
+    { key: "emcuD5_s2",   label: "EMCU Division 5 · Stream 2", group: "EMCU Divisions" },
+    { key: "emcuU11",     label: "Under 11",                   group: "Juniors",
+      note: "Group placement (1-4) depends on registered numbers; the union assigns the group." },
+    { key: "emcuU13",     label: "Under 13",                   group: "Juniors",
+      note: "Group placement (1-4) depends on registered numbers; the union assigns the group." },
+  ],
+  "Umkhanyakude Cricket District": [
+    { key: "kcSat",       label: "KZN SU King Cetshwayo Saturday League", group: "King Cetshwayo" },
+    { key: "kcD1",        label: "KZN SU King Cetshwayo Division 1",      group: "King Cetshwayo" },
+    { key: "kcWebber",    label: "KZN SU King Cetshwayo Webber Cup",      group: "King Cetshwayo" },
+  ],
+  "KCCD": [
+    { key: "kcSat",       label: "KZN SU King Cetshwayo Saturday League", group: "King Cetshwayo" },
+    { key: "kcD1",        label: "KZN SU King Cetshwayo Division 1",      group: "King Cetshwayo" },
+    { key: "kcWebber",    label: "KZN SU King Cetshwayo Webber Cup",      group: "King Cetshwayo" },
+  ],
+  "Ugu Cricket District": [
+    { key: "snT20",       label: "KZN SU Southern Natal T20",        group: "Southern Natal" },
+    { key: "sn30",        label: "KZN SU Southern Natal 30 Overs",   group: "Southern Natal" },
+    { key: "snAutumn100", label: "KZN SU Southern Natal Autumn 100", group: "Southern Natal" },
+    { key: "umzT20",      label: "KZN SU Umzinto T20",               group: "Umzinto" },
+    { key: "umz100",      label: "KZN SU Umzinto 100",               group: "Umzinto" },
+    { key: "umzLeague30", label: "KZN SU Umzinto League 30 Overs",   group: "Umzinto" },
+    { key: "uguU11",      label: "Under 11",                          group: "Juniors" },
+    { key: "uguU13",      label: "Under 13",                          group: "Juniors" },
+    { key: "uguU15",      label: "Under 15",                          group: "Juniors" },
+  ],
+  "Illembe Cricket District": [
+    { key: "ilembeA30",   label: "KZN SU ILEMBE Senior 30 overs League A", group: "Ilembe Senior" },
+    { key: "ilembeBT20",  label: "KZN SU ILEMBE Senior T20 League B",      group: "Ilembe Senior" },
+  ],
+};
+
+// Flatten all league options (deduped by key) for the admin series-creation
+// dropdown and the cross-reference helpers below.
+export const LEAGUE_OPTIONS = (() => {
+  const seen = {};
+  const out = [];
+  Object.entries(LEAGUE_OPTIONS_BY_DISTRICT).forEach(([district, opts]) => {
+    opts.forEach(o => {
+      if (seen[o.key]) return;
+      seen[o.key] = true;
+      out.push({ ...o, district });
+    });
+  });
+  return out;
+})();
 
 export const LEAGUES = LEAGUE_OPTIONS.map(L => L.label);
 
 export const LEAGUE_LABEL_BY_KEY = LEAGUE_OPTIONS.reduce((acc, L) => { acc[L.key] = L.label; return acc; }, {});
 export const LEAGUE_KEY_BY_LABEL = LEAGUE_OPTIONS.reduce((acc, L) => { acc[L.label] = L.key; return acc; }, {});
 
+// Helper: return options for a given district label, falling back to EMCU
+// (the most-populated district) if the district isn't in the catalogue.
+export function leagueOptionsForDistrict(district) {
+  return LEAGUE_OPTIONS_BY_DISTRICT[district]
+      || LEAGUE_OPTIONS_BY_DISTRICT["Ethekwini Metro Cricket Union"];
+}
+
 export const COACHING_LEVELS = ["Level 1", "Level 2", "Level 3", "Level 4"];
 
-// Required compliance documents (from KZNCU Club Requirements 26-27)
+// Required compliance documents (from Cricket Services Club Requirements 26-27)
 export const REQUIRED_DOCS = [
   { key: "constitution", name: "Club Constitution", desc: "Current signed club constitution document" },
   { key: "agm",          name: "AGM Minutes",       desc: "Minutes of the most recent AGM, signed off" },
@@ -148,16 +199,17 @@ export const SAMPLE_CLUBS = [
 // Decorate each paid club with the league keys they registered for, so the
 // admin series-creation flow can auto-filter teams by league.
 const _LEAGUES_BY_CLUB = {
-  ukzn:       ["premier", "premierWomen"],
-  clares:     ["premier", "veterans", "emcuD1"],
-  chatsworth: ["premier", "emcuD1", "u11", "u13"],
-  umlazi:     ["premier", "u11"],
-  crusaders:  ["premier", "emcuD2", "veterans"],
-  rhythm:     ["premier", "promotionWomen", "u13"],
-  warriors:   ["premier", "emcuD3", "u13"],
-  harlequins: ["premier", "emcuD1", "u11", "u13"],
-  spartan:    ["promotion", "emcuD3"],
-  ilembe:     ["promotion", "emcuD4"],
+  ukzn:       ["emcuD1", "emcuU11"],
+  clares:     ["emcuD1", "emcuD3_s1"],
+  chatsworth: ["emcuD2", "emcuD3_s2", "emcuU11", "emcuU13"],
+  umlazi:     ["emcuD1", "emcuU11"],
+  crusaders:  ["emcuD1", "emcuD2"],
+  rhythm:     ["emcuD2", "emcuD4_s1", "emcuU13"],
+  warriors:   ["emcuD3_s1", "emcuU13"],
+  harlequins: ["emcuD1", "emcuD3_s2", "emcuU11", "emcuU13"],
+  spartan:    ["emcuD2", "emcuD4_s2"],
+  // Ilembe CC lives in the Illembe district — its leagues come from that catalogue.
+  ilembe:     ["ilembeA30", "ilembeBT20"],
   phoenix:    [],
   berea:      [],
   verulam:    [],
@@ -321,8 +373,8 @@ export function generateRoundRobin(teamIds, startDateISO) {
 const _premierTeams = ["ukzn", "clares", "chatsworth", "crusaders", "rhythm", "harlequins", "warriors", "umlazi"];
 export const SERIES = [
   {
-    id: "s-prem-26-27",
-    name: "Premier League · 2026/27",
+    id: "s-emcu-d1-26-27",
+    name: "EMCU Division 1 · 2026/27",
     startDate: "2026-08-01",
     divisions: false,
     groups: 1,
@@ -353,7 +405,7 @@ export const SERIES = [
     hideSeriesDetails: false,
     allowLockedRegistration: false,
     pointsTableOrder: ["Most Points", "NRR", "Head To Head", "Number of Wins", "Win Percentage"],
-    tags: ["Premier", "Men", "Round-robin"],
+    tags: ["EMCU Divisions", "EMCU Division 1", "Round-robin"],
     teams: _premierTeams,
     costPerKm: 4.5,
     carsPerAwayTrip: 3,
@@ -362,8 +414,8 @@ export const SERIES = [
     fixtures: generateRoundRobin(_premierTeams, "2026-08-02"),
   },
   {
-    id: "s-prom-26-27",
-    name: "Promotion League · 2026/27",
+    id: "s-emcu-d2-26-27",
+    name: "EMCU Division 2 · 2026/27",
     startDate: "2026-08-08",
     divisions: false, groups: 1, maxOvers: 50, maxPlayers: 11, rosterLimit: 18,
     ballType: "Cricket Ball", seriesType: "One-Day (40-50 overs)", powerPlay: true,
@@ -374,7 +426,7 @@ export const SERIES = [
     umpireReportsMandatory: false, captainReportsMandatory: true, sendReportEmails: true,
     rankCalculator: "New", hideSeriesDetails: false, allowLockedRegistration: false,
     pointsTableOrder: ["Most Points", "NRR", "Head To Head", "Number of Wins", "Win Percentage"],
-    tags: ["Promotion", "Men"],
+    tags: ["EMCU Divisions", "EMCU Division 2"],
     teams: ["spartan", "ilembe", "verulam", "tongaat"],
     costPerKm: 4.5, carsPerAwayTrip: 3,
     released: false,

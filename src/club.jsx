@@ -4,7 +4,8 @@ import { useState as useStateC, useMemo as useMemoC, useEffect as useEffectC, us
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
-  DISTRICTS, COACHING_LEVELS, REQUIRED_DOCS, CQI_STRUCTURE, LEAGUE_OPTIONS,
+  DISTRICTS, COACHING_LEVELS, REQUIRED_DOCS, CQI_STRUCTURE,
+  LEAGUE_OPTIONS, LEAGUE_LABEL_BY_KEY, leagueOptionsForDistrict,
   docCompletion, overallProgress, fixtureCost,
 } from './data.jsx';
 import {
@@ -120,7 +121,7 @@ export function ClubHome({ club, goto, toast, replayOnboarding }) {
         <div className="ph-left">
           <div className="ph-crumb">Club Portal · {club.name}</div>
           <h1 className="ph-title">Good morning, <em>{club.chair.split(" ")[0]}</em></h1>
-          <p className="ph-desc">Your 2026/27 KZNCU &amp; EMCU club integration sits at <strong style={{color:"var(--ink)"}}>{op}% complete</strong>. {next ? `Next up — ${next.t.toLowerCase()}.` : "All required steps are done — well batted."}</p>
+          <p className="ph-desc">Your 2026/27 Cricket Services club integration sits at <strong style={{color:"var(--ink)"}}>{op}% complete</strong>. {next ? `Next up — ${next.t.toLowerCase()}.` : "All required steps are done — well batted."}</p>
         </div>
         <div className="ph-actions">
           <Btn tone="outline" size="sm" onClick={replayOnboarding}>Walkthrough</Btn>
@@ -131,7 +132,7 @@ export function ClubHome({ club, goto, toast, replayOnboarding }) {
       <div className="deadline">
         <div className="deadline-icon"><Icon.Clock/></div>
         <div className="deadline-text">
-          <strong>Submission deadline · 22 June 2026.</strong> All three forms must reach the Union office before this date. <span className="days">31 days remaining</span>.
+          <strong>Submission deadline · 21 June 2026.</strong> All three forms must reach the Union office before this date. <span className="days">31 days remaining</span>.
         </div>
       </div>
 
@@ -155,7 +156,7 @@ export function ClubHome({ club, goto, toast, replayOnboarding }) {
       </Card>
 
       <div style={{display:"grid", gridTemplateColumns:"1.4fr 1fr", gap:16, marginTop:16}}>
-        <Card title="Outstanding items" sub="Action required before 22 June 2026">
+        <Card title="Outstanding items" sub="Action required before 21 June 2026">
           <div className="stack" style={{gap:8}}>
             <button className="row" style={{
               width:"100%", textAlign:"left", padding:"12px 14px",
@@ -179,7 +180,7 @@ export function ClubHome({ club, goto, toast, replayOnboarding }) {
                 <div style={{fontSize:11.5, color: club.paid ? "var(--green-mid)" : "var(--muted)"}}>
                   {club.paid
                     ? "Submitted · tap to view"
-                    : "Complete the 2026/27 KZNCU & EMCU affiliation form — club details, exco, leagues & coaches."}
+                    : "Complete the 2026/27 Cricket Services affiliation form — club details, exco, leagues & coaches."}
                 </div>
               </div>
               {club.paid ? <Pill tone="teal" dot>Completed</Pill> : <Pill tone="coral" dot>Required</Pill>}
@@ -267,16 +268,17 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
       treName: seed("tre").name, treCell: seed("tre").cell, treEmail: seed("tre").email, treGender: seed("tre").gender, treRace: seed("tre").race,
       vcName:  seed("vc").name,  vcCell:  seed("vc").cell,  vcEmail:  seed("vc").email,  vcGender:  seed("vc").gender,  vcRace:  seed("vc").race,
       additionalMembers: stored.length ? stored : [{...EMPTY_MEMBER}],
-      // League keys come from LEAGUE_OPTIONS (data.jsx). Pre-tick premier if the club previously
-      // saved league selections, otherwise seed with premier so first-time users see the picker populated.
+      // Leagues come from the district-specific catalogue (V2). When the user changes
+      // district in step 1 we wipe and re-seed below so the picker always matches.
       leagues: (() => {
         const prior = Array.isArray(club.leagues) ? club.leagues : null;
-        return LEAGUE_OPTIONS.reduce((acc, L) => {
-          acc[L.key] = prior ? prior.includes(L.key) : L.key === "premier";
+        const opts = leagueOptionsForDistrict("Ethekwini Metro Cricket Union");
+        return opts.reduce((acc, L) => {
+          acc[L.key] = prior ? prior.includes(L.key) : false;
           return acc;
         }, {});
       })(),
-      coaches: (club.coaches && club.coaches.length) ? club.coaches : [{...EMPTY_COACH, teams:["premier"]}],
+      coaches: (club.coaches && club.coaches.length) ? club.coaches : [{...EMPTY_COACH, teams:[]}],
       // Home ground / venue
       groundVenue: ground.venue || "",
       groundAddress: ground.address || "",
@@ -307,6 +309,17 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
 
   function update(k, v) { setData(d => ({...d, [k]:v})); }
   function updateLeague(k) { setData(d => ({...d, leagues:{...d.leagues, [k]: !d.leagues[k]}})); }
+  // Changing district wipes prior league selections — the catalogue is district-specific
+  // (Smart Club Integration V2) so cross-district keys would be invalid.
+  function setDistrict(newDistrict) {
+    setData(d => {
+      const opts = leagueOptionsForDistrict(newDistrict);
+      const freshLeagues = opts.reduce((acc, L) => { acc[L.key] = false; return acc; }, {});
+      const validKeys = new Set(opts.map(o => o.key));
+      const coaches = d.coaches.map(c => ({...c, teams: c.teams.filter(t => validKeys.has(t))}));
+      return {...d, district: newDistrict, leagues: freshLeagues, coaches};
+    });
+  }
 
   function dropGroundPin() {
     setData(d => {
@@ -357,7 +370,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
         <div className="ph-left">
           <div className="ph-crumb"><a onClick={()=>goto("home")}>Home</a> &nbsp;/&nbsp; Affiliation</div>
           <h1 className="ph-title">2026/27 <em>Affiliation Form</em></h1>
-          <p className="ph-desc">KZNCU &amp; EMCU League · Club Registration. All fields marked <span style={{color:"var(--coral)"}}>*</span> are required. The digital form mirrors the official Excel template — your inputs are saved as you go.</p>
+          <p className="ph-desc">Cricket Services · Club Registration. All fields marked <span style={{color:"var(--coral)"}}>*</span> are required. The digital form mirrors the official Excel template — your inputs are saved as you go.</p>
         </div>
       </div>
 
@@ -400,7 +413,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
           <div className="field-grid-2">
             <div className="field">
               <div className="field-label">Municipal District / Sub-Union <span className="req">*</span></div>
-              <select className="field-select" value={data.district} onChange={e=>update("district",e.target.value)}>
+              <select className="field-select" value={data.district} onChange={e=>setDistrict(e.target.value)}>
                 {DISTRICTS.map(d=><option key={d}>{d}</option>)}
               </select>
             </div>
@@ -579,24 +592,34 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
       )}
 
       {step === 3 && (() => {
+        // District-specific league catalogue (Smart Club Integration V2) —
+        // the picker only ever shows leagues that apply to the club's district.
+        const districtOptions = leagueOptionsForDistrict(data.district);
         const selectedLeagueKeys = Object.entries(data.leagues).filter(([_,v])=>v).map(([k])=>k);
-        // Group league checkboxes by category so the picker reads cleanly with 12 options.
-        const leagueGroups = LEAGUE_OPTIONS.reduce((acc, L) => {
+        const leagueGroups = districtOptions.reduce((acc, L) => {
           (acc[L.group] = acc[L.group] || []).push(L);
           return acc;
         }, {});
         return (
-        <Card title="Leagues entered &amp; Coaches by Designation" sub="Pick the leagues your club is entering — coaches are then captured under each team designation">
+        <Card title="Leagues entered &amp; Coaches by Designation" sub={`Leagues are filtered to your selected district — ${data.district}. Pick the ones your club is entering, then capture coaches under each team designation.`}>
           <div className="field">
             <div className="field-label">Leagues your club is entering <span className="req">*</span></div>
+            <div style={{fontSize:11.5, color:"var(--muted)", marginBottom:10}}>
+              Showing leagues for <strong style={{color:"var(--ink)"}}>{data.district}</strong>. Change district in step 1 to see a different catalogue.
+            </div>
             {Object.entries(leagueGroups).map(([group, opts]) => (
               <div key={group} style={{marginBottom:12}}>
                 <div style={{fontSize:10.5, letterSpacing:"0.12em", textTransform:"uppercase", color:"var(--muted-2)", fontFamily:"'Montserrat',sans-serif", fontWeight:700, marginBottom:6}}>{group}</div>
                 <div style={{display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:8}}>
                   {opts.map(L=>(
-                    <button key={L.key} className={`check-item ${data.leagues[L.key]?"on":""}`} onClick={()=>updateLeague(L.key)}>
-                      <div className="box">{data.leagues[L.key] && <Icon.Check/>}</div>
-                      {L.label}
+                    <button key={L.key} className={`check-item ${data.leagues[L.key]?"on":""}`} onClick={()=>updateLeague(L.key)} style={{flexDirection:"column", alignItems:"flex-start", gap:4}}>
+                      <div style={{display:"flex", alignItems:"center", gap:10}}>
+                        <div className="box">{data.leagues[L.key] && <Icon.Check/>}</div>
+                        <span>{L.label}</span>
+                      </div>
+                      {L.note && (
+                        <div style={{fontSize:10.5, color:"var(--muted)", marginLeft:30, fontWeight:500, fontStyle:"italic"}}>{L.note}</div>
+                      )}
                     </button>
                   ))}
                 </div>
@@ -852,7 +875,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
               <div className={`aff-summary-value ${coachesCount===0?"muted":""}`}>{coachesCount ? `${coachesCount} listed` : "—"}</div>
             </div>
             <div className="aff-summary-foot">
-              Submitting to the <strong>Dolphins office</strong> · KZNCU &amp; EMCU
+              Submitting to the <strong>Dolphins office</strong> · Cricket Services
             </div>
           </div>
         </aside>
@@ -1066,7 +1089,7 @@ export function DocumentsView({ club, goto, toast, onUpload, onSaveExco }) {
         <div className="ph-left">
           <div className="ph-crumb"><a onClick={()=>goto("home")}>Home</a> &nbsp;/&nbsp; Compliance Documents</div>
           <h1 className="ph-title">Required <em>compliance documents</em></h1>
-          <p className="ph-desc">Per the 2026/27 KZNCU Club Requirements, three documents must be uploaded and one roster captured directly on the platform. PDFs preferred — max 10 MB per file.</p>
+          <p className="ph-desc">Per the 2026/27 Cricket Services Club Requirements, three documents must be uploaded and one roster captured directly on the platform. PDFs preferred — max 10 MB per file.</p>
         </div>
         <div className="ph-actions">
           <Btn tone="outline" icon={Icon.Download} size="sm">Requirements PDF</Btn>
@@ -1077,7 +1100,7 @@ export function DocumentsView({ club, goto, toast, onUpload, onSaveExco }) {
         <KPI tone="teal" label="Submitted"   num={Object.values(club.docs).filter(v=>v).length}  sub="of 4 required" />
         <KPI tone="coral" label="Outstanding" num={4 - Object.values(club.docs).filter(v=>v).length} sub="needs attention" />
         <KPI label="Completion" num={dc + "%"} sub="overall" />
-        <KPI tone="gold" label="Deadline" num="22 Jun" sub="31 days remaining" />
+        <KPI tone="gold" label="Deadline" num="21 Jun" sub="31 days remaining" />
       </div>
 
       <Card title="Submit your documents" sub="3 file uploads · 1 on-platform form"
@@ -1295,7 +1318,7 @@ export function CQIView({ club, goto, toast, onSubmit }) {
             <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:15, fontWeight:700}}>{submitted ? "Submitted on 16 May 2026" : "Ready to submit?"}</div>
             <div style={{fontSize:12, color:"var(--muted)", marginTop:4}}>
               {submitted
-                ? "Your score has been forwarded to the Dolphins Admin office. You can re-submit any time before 22 June 2026."
+                ? "Your score has been forwarded to the Dolphins Admin office. You can re-submit any time before 21 June 2026."
                 : "Your CQI will be visible to the Dolphins administrators alongside your affiliation and compliance documents."}
             </div>
           </div>

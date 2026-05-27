@@ -83,10 +83,10 @@ function StepWelcome({ club }) {
         <div className="ob-eyebrow">Welcome aboard</div>
         <h2 className="ob-title">Hello {club.chair.split(" ")[0]},<br/><em>welcome to the Dolphins family.</em></h2>
         <p className="ob-desc">
-          You're now the chair of <strong>{club.name}</strong> on the Smart Club platform — the digital home for every cricket club in the KZNCU &amp; EMCU leagues.
+          You're now the chair of <strong>{club.name}</strong> on the Smart Club platform — the digital home for every cricket club in the Dolphins Cricket Services district leagues.
         </p>
         <p className="ob-desc">
-          We'll walk you through what's required before <strong>22 June 2026</strong>, then hand over to your first form. The full setup takes about 8 minutes.
+          We'll walk you through what's required before <strong>21 June 2026</strong>, then hand over to your first form. The full setup takes about 8 minutes.
         </p>
       </div>
     </div>
@@ -103,7 +103,7 @@ function StepSubmissions() {
   return (
     <div className="ob-panel">
       <div className="ob-eyebrow">What we need from you</div>
-      <h2 className="ob-title">Three submissions <em>before 22 June 2026</em></h2>
+      <h2 className="ob-title">Three submissions <em>before 21 June 2026</em></h2>
       <p className="ob-desc" style={{maxWidth:560}}>
         Everything below is a digital form built directly on the platform — no printing, no emailing PDFs. We've pre-filled what we can from the union database.
       </p>
@@ -160,7 +160,7 @@ function StepContact({ contact, setContact, club }) {
         style={{width:"100%", textAlign:"left"}}
       >
         <div className="box">{contact.notify && <Icon.Check/>}</div>
-        Send me email &amp; SMS reminders as the 22 June deadline approaches.
+        Send me email &amp; SMS reminders as the 21 June deadline approaches.
       </button>
 
       <div className="ob-confirm-card">
