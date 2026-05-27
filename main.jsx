@@ -1,27 +1,3 @@
-/* ─── Brand mark: leaping dolphin silhouette ───
-   Stylised stand-in until the user provides the official Hollywoodbets Dolphins logo. */
-function DolphinMark() {
-  return (
-    <svg viewBox="0 0 64 64" fill="currentColor" aria-label="Dolphins emblem">
-      {/* Body: arched leaping dolphin with curled tail */}
-      <path d="M5 44
-        C 5 26, 22 12, 40 14
-        C 48 14.8, 55 16, 60 13
-        L 55 24
-        C 58 31, 53 41, 41 44
-        L 38 38
-        C 30 44, 18 45, 9 44
-        Z"/>
-      {/* Tail fluke */}
-      <path d="M3 46 C 6 47, 10 48, 13 50 L 7 53 C 4 52, 2 49, 3 46 Z"/>
-      {/* Dorsal fin */}
-      <path d="M28 18 L 32 11 L 35 19 Z"/>
-      {/* Eye */}
-      <circle cx="49" cy="22" r="1.6" fill="rgba(255,255,255,0.92)"/>
-    </svg>
-  );
-}
-
 /* ─── Profile Select (entry screen) ─── */
 function ProfileSelect({ onSelect, clubs }) {
   const stats = cohortStats(clubs);
@@ -30,15 +6,15 @@ function ProfileSelect({ onSelect, clubs }) {
   return (
     <div className="ps-screen">
       <div className="ps-brand">
-        <img className="ps-brand-logo" src="dolphins-logo.png?v=8" alt="Hollywoodbets Dolphins"/>
-        <div className="ps-eyebrow" style={{margin:0, color:"rgba(255,255,255,0.6)", fontSize:11}}>Smart Club Integration · KZNCU &amp; EMCU</div>
+        <img className="ps-brand-logo" src="dolphins-logo.png?v=8" alt="Hollywoodbets Dolphins Pipeline"/>
+        <div className="ps-eyebrow" style={{margin:0, color:"rgba(255,255,255,0.6)", fontSize:11}}>Dolphins Pipeline · KZNCU &amp; EMCU</div>
       </div>
 
       <div className="ps-intro">
         <div className="ps-eyebrow">KZNCU &amp; EMCU · 2026 / 27 Season</div>
-        <h1 className="ps-title">Welcome — <em>choose your profile</em></h1>
+        <h1 className="ps-title">Welcome to <em>Dolphins Pipeline</em></h1>
         <p className="ps-desc">
-          Sign in as a Dolphins administrator to manage all affiliated clubs, or as a club delegate to complete your affiliation, compliance and CQI submissions.
+          Sign in as a Dolphins administrator to manage every affiliated club, or as a Chairperson / Official Club Rep to complete your affiliation, compliance and CQI submissions.
         </p>
       </div>
 
@@ -91,7 +67,7 @@ function ProfileSelect({ onSelect, clubs }) {
           </div>
           <div>
             <div className="ps-card-role">Club portal</div>
-            <div className="ps-card-title">Chairperson / Delegate</div>
+            <div className="ps-card-title">Chairperson / Official Club Rep</div>
           </div>
           <p className="ps-card-desc">
             Complete your 2026/27 affiliation form, upload compliance documents and submit the Club Quality Index self-assessment.
@@ -102,8 +78,8 @@ function ProfileSelect({ onSelect, clubs }) {
               <div className="ps-card-stat-l">Submissions</div>
             </div>
             <div className="ps-card-stat">
-              <div className="ps-card-stat-n">R 4,500</div>
-              <div className="ps-card-stat-l">Union fee</div>
+              <div className="ps-card-stat-n">3</div>
+              <div className="ps-card-stat-l">Steps</div>
             </div>
             <div className="ps-card-stat">
               <div className="ps-card-stat-n">22 Jun</div>
@@ -433,6 +409,7 @@ function Shell({ initialProfile, onSwitchProfile }) {
                 exco: payload.exco,
                 coaches: payload.coaches || [],
                 ground: payload.ground || null,
+                leagues: payload.leagues || [],
                 docs: {...activeClub.docs, exco: true},
               });
               setView("home");
@@ -466,7 +443,13 @@ function Shell({ initialProfile, onSwitchProfile }) {
         >
           <CreateSeriesForm
             clubs={clubs}
-            onCreate={(s) => { setAllSeries(prev => [...prev, s]); toastShow(`${s.name} created · ${s.fixtures.length} fixtures generated`); }}
+            onCreate={(s) => {
+              setAllSeries(prev => [...prev, s]);
+              const tail = s.bulkSend
+                ? ` · bulk-sent to ${s.teams.length} club${s.teams.length===1?"":"s"}`
+                : "";
+              toastShow(`${s.name} created · ${s.fixtures.length} fixtures generated${tail}`);
+            }}
             onClose={() => setShowCreateSeries(false)}
           />
         </TaskModal>
@@ -478,7 +461,7 @@ function Shell({ initialProfile, onSwitchProfile }) {
 /* ─── Filtered admin views (Affiliation / Docs / CQI) ─── */
 function AdminFiltered({ clubs, kind, gotoClub }) {
   const titles = {
-    affiliation: { t:"Affiliation tracker", crumb:"Affiliations", desc:"Track which clubs have completed and paid the 2026/27 union affiliation form." },
+    affiliation: { t:"Affiliation tracker", crumb:"Affiliations", desc:"Track which clubs have completed the 2026/27 union affiliation form." },
     docs:        { t:"Compliance docs tracker", crumb:"Compliance Docs", desc:"Monitor uploads of Constitution, AGM Minutes, Financial Statements and Exco Reps Listed." },
     cqi:         { t:"CQI submission tracker", crumb:"CQI Submissions", desc:"Real-time view of CQI self-assessments returned by clubs across all five categories." },
   }[kind];
@@ -519,7 +502,7 @@ function AdminFiltered({ clubs, kind, gotoClub }) {
                   {kind === "affiliation" && <>
                     <td>{affPill(c.affiliation)}</td>
                     <td>{c.paid
-                          ? <Pill tone="teal" dot>Paid · R 4,500</Pill>
+                          ? <Pill tone="teal" dot>Submitted</Pill>
                           : <Pill tone="coral" dot>Outstanding</Pill>}</td>
                     <td><span style={{fontSize:11.5, color:"var(--muted)", fontFamily:"'Montserrat',sans-serif"}}>
                       {c.paid ? "12 May 2026" : c.affiliation==="in_progress" ? "Draft saved" : "—"}

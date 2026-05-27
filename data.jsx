@@ -9,16 +9,29 @@ const DISTRICTS = [
   "Illembe Cricket District",
 ];
 
-const LEAGUES = [
-  "Premier League",
-  "Promotion League",
-  "Premier Women",
-  "Promotion Women",
-  "Veterans League",
-  "EMCU Division 1",
-  "EMCU Division 2",
-  "EMCU Division 3",
+// Canonical league + division catalogue.
+// Used by the club registration form, the coach designation banner,
+// and the admin series-creation dropdown.
+const LEAGUE_OPTIONS = [
+  { key: "premier",        label: "Premier League",     group: "Senior Men" },
+  { key: "promotion",      label: "Promotion League",   group: "Senior Men" },
+  { key: "premierWomen",   label: "Premier Women",      group: "Women" },
+  { key: "promotionWomen", label: "Promotion Women",    group: "Women" },
+  { key: "veterans",       label: "Veterans League",    group: "Veterans" },
+  { key: "emcuD1",         label: "EMCU Division 1",    group: "EMCU Divisions" },
+  { key: "emcuD2",         label: "EMCU Division 2",    group: "EMCU Divisions" },
+  { key: "emcuD3",         label: "EMCU Division 3",    group: "EMCU Divisions" },
+  { key: "emcuD4",         label: "EMCU Division 4",    group: "EMCU Divisions" },
+  { key: "emcuD5",         label: "EMCU Division 5",    group: "EMCU Divisions" },
+  { key: "u11",            label: "Under 11",           group: "Juniors" },
+  { key: "u13",            label: "Under 13",           group: "Juniors" },
 ];
+
+const LEAGUES = LEAGUE_OPTIONS.map(L => L.label);
+
+// Lookup helpers
+const LEAGUE_LABEL_BY_KEY = LEAGUE_OPTIONS.reduce((acc, L) => { acc[L.key] = L.label; return acc; }, {});
+const LEAGUE_KEY_BY_LABEL = LEAGUE_OPTIONS.reduce((acc, L) => { acc[L.label] = L.key; return acc; }, {});
 
 const COACHING_LEVELS = ["Level 1", "Level 2", "Level 3", "Level 4"];
 
@@ -132,6 +145,26 @@ const SAMPLE_CLUBS = [
     ground: { venue:"Tongaat Sports Field", suburb:"Tongaat", lat:-29.5783, lon:31.1149 },
   },
 ];
+
+// Decorate each paid club with the league keys they registered for, so the
+// admin series-creation flow can auto-filter teams by league.
+const _LEAGUES_BY_CLUB = {
+  ukzn:       ["premier", "premierWomen"],
+  clares:     ["premier", "veterans", "emcuD1"],
+  chatsworth: ["premier", "emcuD1", "u11", "u13"],
+  umlazi:     ["premier", "u11"],
+  crusaders:  ["premier", "emcuD2", "veterans"],
+  rhythm:     ["premier", "promotionWomen", "u13"],
+  warriors:   ["premier", "emcuD3", "u13"],
+  harlequins: ["premier", "emcuD1", "u11", "u13"],
+  spartan:    ["promotion", "emcuD3"],
+  ilembe:     ["promotion", "emcuD4"],
+  phoenix:    [],
+  berea:      [],
+  verulam:    [],
+  tongaat:    [],
+};
+SAMPLE_CLUBS.forEach(c => { c.leagues = _LEAGUES_BY_CLUB[c.id] || []; });
 
 // CQI structure — categories, weights, and questions
 // Weighting model: Admin 20 / Teams 20 / Coaching 20 / Facilities 15 / Representation 10 / Financial 15 = 100
@@ -352,7 +385,8 @@ const SERIES = [
 ];
 
 Object.assign(window, {
-  DISTRICTS, LEAGUES, COACHING_LEVELS, REQUIRED_DOCS,
+  DISTRICTS, LEAGUES, LEAGUE_OPTIONS, LEAGUE_LABEL_BY_KEY, LEAGUE_KEY_BY_LABEL,
+  COACHING_LEVELS, REQUIRED_DOCS,
   SAMPLE_CLUBS, CQI_STRUCTURE, SERIES,
   cohortStats, docCompletion, overallProgress,
   haversineKm, fixtureCost, generateRoundRobin,
