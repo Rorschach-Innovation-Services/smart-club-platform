@@ -42,7 +42,7 @@ export default $config({
             files: 'assets/**',
             cacheControl: 'public,max-age=31536000,immutable',
           },
-          { files: 'dolphins-logo.png', cacheControl: 'public,max-age=86400' },
+          { files: '*.png', cacheControl: 'public,max-age=86400' },
           { files: 'players/**', cacheControl: 'public,max-age=86400' },
         ],
       },
