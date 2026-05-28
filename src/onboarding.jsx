@@ -99,7 +99,7 @@ function StepSubmissions() {
   const items = [
     { i:<Icon.Form/>,   t:"2026/27 Affiliation Form",      d:"Club details, executive committee, leagues entered and coaches by designation.", tag:"~ 5 min" },
     { i:<Icon.Upload/>, t:"Compliance documents",          d:"Constitution · AGM Minutes · Financial Statements · Exco Reps Listed (PDF up to 10 MB each).", tag:"~ 3 min" },
-    { i:<Icon.Star/>,   t:"CQI self-assessment",           d:"25 questions across admin, teams, coaching, facilities and representation. Live-scored out of 100.", tag:"~ 8 min" },
+    { i:<Icon.Star/>,   t:"CQI self-assessment",           d:"25 questions across admin, teams, coaching, facilities and representation. Live-scored as a raw quality-index value.", tag:"~ 8 min" },
   ];
   return (
     <div className="ob-panel">

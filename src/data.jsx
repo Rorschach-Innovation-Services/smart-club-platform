@@ -9,6 +9,16 @@ export const DISTRICTS = [
   "Illembe Cricket District",
 ];
 
+/* ─── Cross-district overarching leagues (V3) ───
+   These appear in every district's picker, alongside the district-specific
+   division catalogue. The V3 brief reintroduces these as overarching options. */
+export const CROSS_DISTRICT_LEAGUES = [
+  { key: "premier",        label: "Premier League",         group: "Overarching Leagues" },
+  { key: "promotion",      label: "Promotion League",       group: "Overarching Leagues" },
+  { key: "premierWomen",   label: "Premier Women's League", group: "Overarching Leagues" },
+  { key: "veterans",       label: "Veterans League",        group: "Overarching Leagues" },
+];
+
 /* ─── District-aware league catalogue (Smart Club Integration V2) ───
    Each entry is a selectable league for the club affiliation form. Where the
    union runs streams (e.g. EMCU Division 3 · Stream 1 / 2) each stream is its
@@ -57,10 +67,16 @@ export const LEAGUE_OPTIONS_BY_DISTRICT = {
 };
 
 // Flatten all league options (deduped by key) for the admin series-creation
-// dropdown and the cross-reference helpers below.
+// dropdown and the cross-reference helpers below. Cross-district leagues come
+// first so the dropdown surfaces the overarching options at the top.
 export const LEAGUE_OPTIONS = (() => {
   const seen = {};
   const out = [];
+  CROSS_DISTRICT_LEAGUES.forEach(o => {
+    if (seen[o.key]) return;
+    seen[o.key] = true;
+    out.push({ ...o, district: "All districts" });
+  });
   Object.entries(LEAGUE_OPTIONS_BY_DISTRICT).forEach(([district, opts]) => {
     opts.forEach(o => {
       if (seen[o.key]) return;
@@ -76,11 +92,13 @@ export const LEAGUES = LEAGUE_OPTIONS.map(L => L.label);
 export const LEAGUE_LABEL_BY_KEY = LEAGUE_OPTIONS.reduce((acc, L) => { acc[L.key] = L.label; return acc; }, {});
 export const LEAGUE_KEY_BY_LABEL = LEAGUE_OPTIONS.reduce((acc, L) => { acc[L.label] = L.key; return acc; }, {});
 
-// Helper: return options for a given district label, falling back to EMCU
-// (the most-populated district) if the district isn't in the catalogue.
+// Helper: return options for a given district label, prepending the overarching
+// cross-district leagues so they're available in every district picker (V3).
+// Falls back to EMCU (the most-populated district) if the district isn't in the catalogue.
 export function leagueOptionsForDistrict(district) {
-  return LEAGUE_OPTIONS_BY_DISTRICT[district]
+  const districtSpecific = LEAGUE_OPTIONS_BY_DISTRICT[district]
       || LEAGUE_OPTIONS_BY_DISTRICT["Ethekwini Metro Cricket Union"];
+  return [...CROSS_DISTRICT_LEAGUES, ...districtSpecific];
 }
 
 export const COACHING_LEVELS = ["Level 1", "Level 2", "Level 3", "Level 4"];
@@ -199,17 +217,17 @@ export const SAMPLE_CLUBS = [
 // Decorate each paid club with the league keys they registered for, so the
 // admin series-creation flow can auto-filter teams by league.
 const _LEAGUES_BY_CLUB = {
-  ukzn:       ["emcuD1", "emcuU11"],
-  clares:     ["emcuD1", "emcuD3_s1"],
-  chatsworth: ["emcuD2", "emcuD3_s2", "emcuU11", "emcuU13"],
-  umlazi:     ["emcuD1", "emcuU11"],
-  crusaders:  ["emcuD1", "emcuD2"],
-  rhythm:     ["emcuD2", "emcuD4_s1", "emcuU13"],
-  warriors:   ["emcuD3_s1", "emcuU13"],
-  harlequins: ["emcuD1", "emcuD3_s2", "emcuU11", "emcuU13"],
-  spartan:    ["emcuD2", "emcuD4_s2"],
+  ukzn:       ["premier", "premierWomen", "emcuD1", "emcuU11"],
+  clares:     ["premier", "veterans", "emcuD1", "emcuD3_s1"],
+  chatsworth: ["premier", "emcuD2", "emcuD3_s2", "emcuU11", "emcuU13"],
+  umlazi:     ["promotion", "emcuD1", "emcuU11"],
+  crusaders:  ["premier", "emcuD1", "emcuD2"],
+  rhythm:     ["promotion", "premierWomen", "emcuD2", "emcuD4_s1", "emcuU13"],
+  warriors:   ["promotion", "emcuD3_s1", "emcuU13"],
+  harlequins: ["premier", "veterans", "emcuD1", "emcuD3_s2", "emcuU11", "emcuU13"],
+  spartan:    ["promotion", "emcuD2", "emcuD4_s2"],
   // Ilembe CC lives in the Illembe district — its leagues come from that catalogue.
-  ilembe:     ["ilembeA30", "ilembeBT20"],
+  ilembe:     ["premier", "ilembeA30", "ilembeBT20"],
   phoenix:    [],
   berea:      [],
   verulam:    [],

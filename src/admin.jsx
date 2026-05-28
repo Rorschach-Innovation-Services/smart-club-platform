@@ -825,7 +825,8 @@ export function AdminDashboard({ clubs, gotoClub, gotoList, gotoAdminView, toast
   const phases = [
     { num:"01", label:"Affiliation",   tone:"navy",  done: clubs.filter(c=>c.paid).length, view:"affiliations" },
     { num:"02", label:"League / Fixtures", tone:"teal", done: clubs.filter(c=>c.affiliation==="complete").length, view:"fixtures" },
-    { num:"03", label:"Player Registration", tone:"navy", done: clubs.filter(c=>c.players >= 30).length, view:"clubs_list" },
+    { num:"03", label:"Player Registration", tone:"navy", done: clubs.filter(c=>c.players >= 30).length, view:"clubs_list",
+      future: "Direct player-registration links flow straight into the cohort next phase — clubs and roster metrics auto-update, no manual admin entry." },
     { num:"04", label:"Live Scoring / Talent ID", tone:"teal", done: 0, view:null },
     { num:"05", label:"Compliance Docs", tone:"gold", done: clubs.filter(c=>Object.values(c.docs).every(v=>v)).length, view:"documents" },
   ];
@@ -883,7 +884,7 @@ export function AdminDashboard({ clubs, gotoClub, gotoList, gotoAdminView, toast
         <KPI tone={statusFor(stats.avgCqi, 75, 60)}
              label="Avg CQI score"
              num={<CountUp to={stats.avgCqi} decimals={1}/>}
-             sub="of 100"/>
+             sub="raw score · cohort avg"/>
       </div>
 
       {/* Phase roll-up */}
@@ -891,12 +892,27 @@ export function AdminDashboard({ clubs, gotoClub, gotoList, gotoAdminView, toast
         <div className="phase-track" style={{borderRadius:0, border:"none"}}>
           {phases.map((p,i)=>(
             <div key={i} className="phase-step" style={{padding:"14px 18px", borderRight: i<phases.length-1?"1px solid var(--line)":"none"}} onClick={()=>onPhaseClick(p)}>
-              <div className="ps-n">PHASE {p.num}</div>
+              <div className="ps-n" style={{display:"flex",alignItems:"center",gap:6}}>
+                <span>PHASE {p.num}</span>
+                {p.future && (
+                  <span style={{
+                    fontSize:8.5, letterSpacing:"0.1em", textTransform:"uppercase",
+                    fontWeight:800, padding:"1px 6px", borderRadius:999,
+                    background:"rgba(200,168,75,0.18)", color:"var(--gold-deep, #8a6e1c)",
+                    border:"1px solid rgba(200,168,75,0.45)",
+                  }}>Next phase</span>
+                )}
+              </div>
               <div className="ps-t">{p.label}</div>
               <div style={{display:"flex",alignItems:"center",gap:8,marginTop:10}}>
                 <div style={{flex:1}}><ProgressBar value={pct(p.done, stats.total)} tone={p.tone}/></div>
                 <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:11, color:"var(--muted)"}}>{p.done}/{stats.total}</div>
               </div>
+              {p.future && (
+                <div style={{fontSize:10.5, color:"var(--gold-deep, #8a6e1c)", fontFamily:"'Montserrat',sans-serif", marginTop:8, fontStyle:"italic", lineHeight:1.4}}>
+                  ↗ {p.future}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -1166,7 +1182,7 @@ export function AdminClubDetail({ club, gotoList }) {
   const phases = [
     { n:"01", t:"Affiliation",        done: club.paid, val: club.paid ? 100 : (club.affiliation==="in_progress"?40:0), detail: club.paid ? "Submitted · 12 May 2026" : "Awaiting submission" },
     { n:"02", t:"League & Fixtures",  done: club.affiliation==="complete", val: club.affiliation==="complete"?100:0, detail: club.affiliation==="complete"?`Allocated to ${club.sub==="EMCU"?"EMCU Division 1":"District Division"}`: "Pending affiliation" },
-    { n:"03", t:"Player Registration", done: club.players >= 30, val: Math.min(100, (club.players||0)/60*100), detail: `${club.players||0} players registered` },
+    { n:"03", t:"Player Registration", done: club.players >= 30, val: Math.min(100, (club.players||0)/60*100), detail: `${club.players||0} players registered`, future: "Auto-populates next phase: direct player-registration links will flow straight into the cohort — no manual admin entry." },
     { n:"04", t:"Live Scoring",        done: false, val: club.cqi>0 ? 25 : 0, detail: "Begins round 1 · 02 Aug 2026" },
     { n:"05", t:"Compliance",          done: dc===100, val: dc, detail: `${Object.values(club.docs).filter(v=>v).length} of 4 docs uploaded` },
   ];
@@ -1215,8 +1231,23 @@ export function AdminClubDetail({ club, gotoList }) {
                     fontFamily:"'Montserrat',sans-serif", fontSize:12, fontWeight:800
                   }}>{p.done ? <Icon.Check/> : p.n}</div>
                   <div>
-                    <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:13, fontWeight:700}}>{p.t}</div>
+                    <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:13, fontWeight:700, display:"flex", alignItems:"center", gap:8}}>
+                      {p.t}
+                      {p.future && (
+                        <span style={{
+                          fontSize:9.5, letterSpacing:"0.1em", textTransform:"uppercase",
+                          fontWeight:800, padding:"2px 7px", borderRadius:999,
+                          background:"rgba(200,168,75,0.18)", color:"var(--gold-deep, #8a6e1c)",
+                          border:"1px solid rgba(200,168,75,0.45)",
+                        }}>Next phase</span>
+                      )}
+                    </div>
                     <div style={{fontSize:11, color:"var(--muted)", fontFamily:"'Montserrat',sans-serif", marginTop:2}}>{p.detail}</div>
+                    {p.future && (
+                      <div style={{fontSize:11, color:"var(--gold-deep, #8a6e1c)", fontFamily:"'Montserrat',sans-serif", marginTop:4, fontStyle:"italic", lineHeight:1.4}}>
+                        ↗ {p.future}
+                      </div>
+                    )}
                   </div>
                   <ProgressBar value={p.val} tone={p.done?"teal":"gold"}/>
                   <div style={{textAlign:"right", fontFamily:"'Montserrat',sans-serif", fontSize:12, color:"var(--ink)", fontWeight:500}}>{Math.round(p.val)}%</div>

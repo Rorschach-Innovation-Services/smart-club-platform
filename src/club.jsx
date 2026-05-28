@@ -1239,7 +1239,7 @@ export function CQIView({ club, goto, toast, onSubmit }) {
 
       {/* Live total score */}
       <div className="total-score-block">
-        <div className="tsb-num"><CountUp to={total} decimals={1} duration={600}/><span className="of">/100</span></div>
+        <div className="tsb-num"><CountUp to={total} decimals={1} duration={600}/></div>
         <div className="tsb-mid">
           <div className="tsb-l">Live CQI score · auto-calculated</div>
           <div className="tsb-title">{
@@ -1324,7 +1324,7 @@ export function CQIView({ club, goto, toast, onSubmit }) {
           </div>
           <div className="row" style={{gap:8}}>
             <Btn tone="outline">Save draft</Btn>
-            <Btn tone="teal" icon={Icon.Check} onClick={()=>{onSubmit(total); toast("CQI submitted · "+total.toFixed(1)+"/100");}}>Submit CQI</Btn>
+            <Btn tone="teal" icon={Icon.Check} onClick={()=>{onSubmit(total); toast("CQI submitted · score "+total.toFixed(1));}}>Submit CQI</Btn>
           </div>
         </div>
       </Card>
