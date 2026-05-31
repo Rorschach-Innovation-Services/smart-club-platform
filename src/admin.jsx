@@ -3,7 +3,7 @@
 import { useState as useStateA, useMemo as useMemoA, useEffect as useEffectA } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  DISTRICTS,
+  DISTRICTS, KNOWN_CLUBS,
   REQUIRED_DOCS, CQI_STRUCTURE, LEAGUE_OPTIONS, LEAGUE_LABEL_BY_KEY,
   SUBMISSION_DEADLINE_DEFAULT,
   cohortStats, docCompletion, overallProgress, fixtureCost, generateRoundRobin,
@@ -1216,6 +1216,7 @@ function OnboardNewClubModal({ clubs, onClose, onOnboard, toast }) {
   const [district, setDistrict] = useStateA(DISTRICTS[0]);
   const [createdClub, setCreatedClub] = useStateA(null);
   const [copied, setCopied] = useStateA(false);
+  const [autoFilled, setAutoFilled] = useStateA(null); // null | club name auto-filled from
 
   const trimmedQuery = query.trim();
   const matches = trimmedQuery.length >= 2
@@ -1223,6 +1224,52 @@ function OnboardNewClubModal({ clubs, onClose, onOnboard, toast }) {
     : [];
   const exact = matches.find(c => c.name.toLowerCase() === trimmedQuery.toLowerCase());
   const showForm = trimmedQuery.length >= 2 && !exact;
+
+  // Known-clubs registry: filter against the cohort so already-onboarded clubs
+  // disappear from the picker, and against the typed search.
+  const onboardedNames = new Set(clubs.map(c => c.name.toLowerCase()));
+  const remainingKnown = KNOWN_CLUBS.filter(k => !onboardedNames.has(k.name.toLowerCase()));
+  const filteredKnown = trimmedQuery.length >= 2
+    ? remainingKnown.filter(k =>
+        k.name.toLowerCase().includes(trimmedQuery.toLowerCase()) ||
+        k.chair.toLowerCase().includes(trimmedQuery.toLowerCase()) ||
+        k.chairEmail.toLowerCase().includes(trimmedQuery.toLowerCase()) ||
+        k.chairCell.replace(/\s+/g, "").includes(trimmedQuery.replace(/\s+/g, "")))
+    : remainingKnown;
+
+  function pickKnown(k) {
+    setQuery(k.name);
+    setChair(k.chair);
+    setChairEmail(k.chairEmail);
+    setChairCell(k.chairCell);
+    setDistrict(k.district);
+    setAutoFilled(k.name);
+  }
+
+  // Auto-fill from KNOWN_CLUBS when the admin types an email/cell that exists in the registry.
+  // Triggered on every email/cell change once they're long enough to be meaningful.
+  function handleEmailChange(v) {
+    setChairEmail(v);
+    const lower = v.trim().toLowerCase();
+    if (lower.length < 5) return;
+    const k = remainingKnown.find(x => x.chairEmail.toLowerCase() === lower);
+    if (k && k.name !== autoFilled) {
+      setQuery(k.name); setChair(k.chair); setChairCell(k.chairCell); setDistrict(k.district);
+      setAutoFilled(k.name);
+      toast && toast(`Matched ${k.name} from the records — pre-filled the rest`);
+    }
+  }
+  function handleCellChange(v) {
+    setChairCell(v);
+    const digits = v.replace(/\D+/g, "");
+    if (digits.length < 7) return;
+    const k = remainingKnown.find(x => x.chairCell.replace(/\D+/g, "") === digits);
+    if (k && k.name !== autoFilled) {
+      setQuery(k.name); setChair(k.chair); setChairEmail(k.chairEmail); setDistrict(k.district);
+      setAutoFilled(k.name);
+      toast && toast(`Matched ${k.name} from the records — pre-filled the rest`);
+    }
+  }
 
   const canSubmit = trimmedQuery.length >= 2 && chair.trim() && chairEmail.trim() && chairCell.trim() && !exact;
 
@@ -1274,6 +1321,17 @@ function OnboardNewClubModal({ clubs, onClose, onOnboard, toast }) {
   // ───────────── Step 2: share view ─────────────
   if (createdClub) {
     const wa = waNumber(createdClub.exco?.chair?.cell);
+    const chairEmailValue = createdClub.exco?.chair?.email || "";
+    const mailtoUrl = `mailto:${chairEmailValue}?subject=${encodeURIComponent(`Welcome to Dolphins Pipeline · ${createdClub.name}`)}&body=${encodeURIComponent(emailBody)}`;
+    const waUrl = wa ? `https://wa.me/${wa}?text=${encodeURIComponent(waText)}` : `https://wa.me/?text=${encodeURIComponent(waText)}`;
+    // One click fires both: hand the mail client the mailto AND open the wa.me tab.
+    function sendBoth() {
+      // wa.me first in a new tab so the popup doesn't get blocked behind the mailto handoff
+      try { window.open(waUrl, "_blank", "noopener,noreferrer"); } catch {}
+      // mailto follows — the OS hands this to the mail client without nuking the new tab
+      try { window.location.href = mailtoUrl; } catch {}
+      toast && toast(`Sent to ${createdClub.chair.split(" ")[0]} via email & WhatsApp`);
+    }
     return (
       <div className="task-modal-backdrop" onClick={e=>e.target===e.currentTarget && onClose()}>
         <div className="task-modal narrow" style={{maxWidth:620}}>
@@ -1297,28 +1355,33 @@ function OnboardNewClubModal({ clubs, onClose, onOnboard, toast }) {
                 border:"1px solid var(--line)",
               }}>{url}</div>
               <div style={{fontSize:11, color:"var(--muted)", marginTop:8}}>
-                Chair: <strong style={{color:"var(--ink)"}}>{createdClub.chair}</strong> · {createdClub.exco?.chair?.email} · {createdClub.exco?.chair?.cell}
+                Chair: <strong style={{color:"var(--ink)"}}>{createdClub.chair}</strong> · {chairEmailValue} · {createdClub.exco?.chair?.cell}
               </div>
             </div>
+
+            {/* Primary one-click send: fires email + WhatsApp together */}
+            <Btn tone="teal" icon={Icon.Mail} onClick={sendBoth} style={{width:"100%", justifyContent:"center", marginBottom:8}}>
+              Send via Email + WhatsApp
+            </Btn>
 
             <div style={{display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:8, marginBottom:14}}>
               <Btn tone={copied ? "teal" : "outline"} icon={copied ? Icon.Check : Icon.Form} onClick={doCopy}>
                 {copied ? "Copied" : "Copy link"}
               </Btn>
               <a
-                href={`mailto:${createdClub.exco?.chair?.email || ""}?subject=${encodeURIComponent(`Welcome to Dolphins Pipeline · ${createdClub.name}`)}&body=${encodeURIComponent(emailBody)}`}
+                href={mailtoUrl}
                 className="btn btn-outline"
                 style={{textDecoration:"none", display:"inline-flex", alignItems:"center", justifyContent:"center", gap:6}}
               >
-                <Icon.Mail/> Email
+                <Icon.Mail/> Email only
               </a>
               <a
-                href={wa ? `https://wa.me/${wa}?text=${encodeURIComponent(waText)}` : `https://wa.me/?text=${encodeURIComponent(waText)}`}
+                href={waUrl}
                 target="_blank" rel="noopener noreferrer"
                 className="btn btn-outline"
                 style={{textDecoration:"none", display:"inline-flex", alignItems:"center", justifyContent:"center", gap:6}}
               >
-                <Icon.Arrow/> WhatsApp
+                <Icon.Arrow/> WhatsApp only
               </a>
             </div>
 
@@ -1356,19 +1419,77 @@ function OnboardNewClubModal({ clubs, onClose, onOnboard, toast }) {
         </div>
         <div className="task-modal-body">
           <p style={{margin:"0 0 14px", fontSize:13, color:"var(--muted)", lineHeight:1.5}}>
-            Type the club name. If they're already in the cohort you'll see them below — otherwise add their chairperson's contact details and we'll email + WhatsApp them the onboarding link.
+            Pick a known club from the list below for a one-click onboard, or type a new club name. If their email or cell is already on file we'll auto-fill the rest.
           </p>
 
           <div className="field">
             <div className="field-label">Club name <span className="req">*</span></div>
             <input
               className="field-input"
-              placeholder="Start typing a club name…"
+              placeholder="Search known clubs or type a new name…"
               value={query}
-              onChange={e=>setQuery(e.target.value)}
+              onChange={e=>{ setQuery(e.target.value); if (autoFilled && e.target.value !== autoFilled) setAutoFilled(null); }}
               autoFocus
             />
           </div>
+
+          {/* Known clubs from past records — one-click pre-fill */}
+          {remainingKnown.length > 0 && (
+            <div style={{marginBottom:14}}>
+              <div style={{
+                display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6,
+              }}>
+                <div style={{fontSize:10.5, letterSpacing:"0.12em", textTransform:"uppercase", color:"var(--muted-2)", fontFamily:"'Montserrat',sans-serif", fontWeight:700}}>
+                  Known clubs · {filteredKnown.length} of {remainingKnown.length} not yet onboarded
+                </div>
+                <span style={{fontSize:10.5, color:"var(--muted)", fontStyle:"italic"}}>Click to pre-fill</span>
+              </div>
+              <div style={{
+                maxHeight:208, overflowY:"auto", border:"1px solid var(--line)", borderRadius:10,
+                background:"var(--paper)",
+              }}>
+                {filteredKnown.length === 0 ? (
+                  <div style={{padding:"18px 14px", fontSize:12.5, color:"var(--muted)", textAlign:"center"}}>
+                    No known clubs match — type the chair details below to add as a new club.
+                  </div>
+                ) : filteredKnown.map(k => {
+                  const isPicked = autoFilled === k.name;
+                  return (
+                    <button
+                      key={k.name}
+                      onClick={()=>pickKnown(k)}
+                      style={{
+                        width:"100%", textAlign:"left", display:"block",
+                        padding:"10px 14px", border:"none", borderBottom:"1px solid var(--line)",
+                        background: isPicked ? "rgba(15,143,74,0.08)" : "var(--white)",
+                        cursor:"pointer", font:"inherit",
+                      }}
+                      onMouseEnter={e=>{ if(!isPicked) e.currentTarget.style.background="var(--paper2)"; }}
+                      onMouseLeave={e=>{ if(!isPicked) e.currentTarget.style.background="var(--white)"; }}
+                    >
+                      <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10}}>
+                        <div style={{minWidth:0, flex:1}}>
+                          <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:13, fontWeight:700, color:"var(--ink)", display:"flex", alignItems:"center", gap:8}}>
+                            {k.name}
+                            {isPicked && <span style={{fontSize:9.5, letterSpacing:"0.08em", textTransform:"uppercase", fontWeight:800, padding:"1px 7px", borderRadius:999, background:"rgba(15,143,74,0.15)", color:"var(--teal-deep)", border:"1px solid rgba(15,143,74,0.35)"}}>Pre-filled</span>}
+                          </div>
+                          <div style={{fontSize:11, color:"var(--muted)", marginTop:2}}>
+                            {k.chair} · {k.chairEmail} · {k.chairCell}
+                          </div>
+                          <div style={{fontSize:10.5, color:"var(--muted-2)", marginTop:2, fontFamily:"'Montserrat',sans-serif", letterSpacing:"0.04em"}}>
+                            {k.district}
+                          </div>
+                        </div>
+                        <span style={{fontSize:11, color:"var(--teal-deep)", whiteSpace:"nowrap", fontFamily:"'Montserrat',sans-serif", fontWeight:600}}>
+                          Use details →
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {trimmedQuery.length >= 2 && matches.length > 0 && (
             <div style={{marginBottom:14}}>
@@ -1432,11 +1553,11 @@ function OnboardNewClubModal({ clubs, onClose, onOnboard, toast }) {
               <div className="field-grid-2">
                 <div className="field">
                   <div className="field-label">Chair email <span className="req">*</span></div>
-                  <input className="field-input" type="email" placeholder="chair@club.co.za" value={chairEmail} onChange={e=>setChairEmail(e.target.value)}/>
+                  <input className="field-input" type="email" placeholder="chair@club.co.za" value={chairEmail} onChange={e=>handleEmailChange(e.target.value)}/>
                 </div>
                 <div className="field">
                   <div className="field-label">Chair cell <span className="req">*</span></div>
-                  <input className="field-input" placeholder="0XX XXX XXXX" value={chairCell} onChange={e=>setChairCell(e.target.value)}/>
+                  <input className="field-input" placeholder="0XX XXX XXXX" value={chairCell} onChange={e=>handleCellChange(e.target.value)}/>
                 </div>
               </div>
               <div style={{fontSize:11, color:"var(--muted)", marginTop:4, marginBottom:14}}>
@@ -1594,6 +1715,25 @@ function PlayerRegLinkModal({ club, onClose, onRegenerate, toast }) {
     ? new Date(linkRecord.createdAt).toLocaleString("en-ZA", { day:"numeric", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit" })
     : null;
 
+  // Normalise the chair's cell into wa.me format (digits only, 0→27)
+  function waNumber(cell) {
+    const digits = (cell || "").replace(/\D+/g, "");
+    if (!digits) return "";
+    if (digits.startsWith("0")) return "27" + digits.slice(1);
+    if (digits.startsWith("27")) return digits;
+    return digits;
+  }
+  const chairEmailValue = club.exco?.chair?.email || "";
+  const chairCellValue = club.exco?.chair?.cell || "";
+  const wa = waNumber(chairCellValue);
+  const mailtoUrl = `mailto:${chairEmailValue}?subject=${encodeURIComponent(`${club.name} · Player Registration Link`)}&body=${encodeURIComponent(emailBody())}`;
+  const waUrl = wa ? `https://wa.me/${wa}?text=${encodeURIComponent(whatsappText())}` : `https://wa.me/?text=${encodeURIComponent(whatsappText())}`;
+  function sendBoth() {
+    try { window.open(waUrl, "_blank", "noopener,noreferrer"); } catch {}
+    try { window.location.href = mailtoUrl; } catch {}
+    toast && toast("Player link sent via email & WhatsApp");
+  }
+
   return (
     <div className="task-modal-backdrop" onClick={e=>e.target===e.currentTarget && onClose()}>
       <div className="task-modal narrow" style={{maxWidth:620}}>
@@ -1640,24 +1780,29 @@ function PlayerRegLinkModal({ club, onClose, onRegenerate, toast }) {
                 </div>
               </div>
 
+              {/* Primary one-click send: fires email + WhatsApp together */}
+              <Btn tone="teal" icon={Icon.Mail} onClick={sendBoth} style={{width:"100%", justifyContent:"center", marginBottom:8}}>
+                Send via Email + WhatsApp
+              </Btn>
+
               <div style={{display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:8, marginBottom:14}}>
                 <Btn tone={copied ? "teal" : "outline"} icon={copied ? Icon.Check : Icon.Form} onClick={doCopy}>
                   {copied ? "Copied" : "Copy link"}
                 </Btn>
                 <a
-                  href={`mailto:?subject=${encodeURIComponent(`${club.name} · Player Registration Link`)}&body=${encodeURIComponent(emailBody())}`}
+                  href={mailtoUrl}
                   className="btn btn-outline"
                   style={{textDecoration:"none", display:"inline-flex", alignItems:"center", justifyContent:"center", gap:6}}
                 >
-                  <Icon.Mail/> Email
+                  <Icon.Mail/> Email only
                 </a>
                 <a
-                  href={`https://wa.me/?text=${encodeURIComponent(whatsappText())}`}
+                  href={waUrl}
                   target="_blank" rel="noopener noreferrer"
                   className="btn btn-outline"
                   style={{textDecoration:"none", display:"inline-flex", alignItems:"center", justifyContent:"center", gap:6}}
                 >
-                  <Icon.Arrow/> WhatsApp
+                  <Icon.Arrow/> WhatsApp only
                 </a>
               </div>
 
