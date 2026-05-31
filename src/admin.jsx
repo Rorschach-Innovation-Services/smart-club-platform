@@ -1,6 +1,6 @@
 /* ─── Admin views ─── */
 
-import { useState as useStateA, useMemo as useMemoA } from 'react';
+import { useState as useStateA, useMemo as useMemoA, useEffect as useEffectA } from 'react';
 import { createPortal } from 'react-dom';
 import {
   REQUIRED_DOCS, CQI_STRUCTURE, LEAGUE_OPTIONS, LEAGUE_LABEL_BY_KEY,
@@ -1173,11 +1173,154 @@ export function AdminClubsList({ clubs, gotoClub, toast }) {
   );
 }
 
-export function AdminClubDetail({ club, gotoList }) {
+/* ─── PlayerRegLinkModal — V3 future feature, brought forward ───
+   Admin generates a per-club registration link, copies / shares it, or
+   regenerates it (invalidating the previous token). When a player opens the
+   link in the next phase, their data will flow into the cohort automatically. */
+function PlayerRegLinkModal({ club, onClose, onRegenerate, toast }) {
+  const baseUrl = (typeof window !== "undefined" && window.location.origin) || "";
+  const linkRecord = club.playerRegLink;
+  const url = linkRecord ? `${baseUrl}/register/${club.id}?t=${linkRecord.token}` : "";
+  const [copied, setCopied] = useStateA(false);
+
+  function doCopy() {
+    if (!url) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(() => {
+        setCopied(true);
+        toast && toast("Registration link copied to clipboard");
+      });
+    } else {
+      // Fallback for non-secure contexts
+      const ta = document.createElement("textarea");
+      ta.value = url; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); setCopied(true); toast && toast("Registration link copied"); } catch {}
+      ta.remove();
+    }
+    setTimeout(() => setCopied(false), 2200);
+  }
+
+  function emailBody() {
+    return `Hi ${club.chair || "team"},\n\nPlease share this player-registration link with your members so they can register directly into ${club.name} for the 2026/27 season:\n\n${url}\n\nThe link is unique to your club — each registration flows straight into the Dolphins Pipeline cohort.\n\nThe Dolphins office`;
+  }
+  function whatsappText() {
+    return `${club.name} player registration · 2026/27 season: ${url}`;
+  }
+
+  const createdLabel = linkRecord
+    ? new Date(linkRecord.createdAt).toLocaleString("en-ZA", { day:"numeric", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit" })
+    : null;
+
+  return (
+    <div className="task-modal-backdrop" onClick={e=>e.target===e.currentTarget && onClose()}>
+      <div className="task-modal narrow" style={{maxWidth:620}}>
+        <div className="task-modal-head">
+          <div className="task-modal-head-text">
+            <div className="task-modal-head-eyebrow">Phase 03 · Player Registration</div>
+            <div className="task-modal-head-title">Generate <em>player link</em> · {club.name}</div>
+          </div>
+          <button className="task-modal-close" onClick={onClose} title="Close">
+            <Icon.X/>
+          </button>
+        </div>
+        <div className="task-modal-body">
+          {!linkRecord ? (
+            <div style={{textAlign:"center", padding:"32px 20px"}}>
+              <div style={{
+                width:54, height:54, borderRadius:"50%", margin:"0 auto 14px",
+                background:"rgba(15,143,74,0.12)", color:"var(--teal-deep)",
+                display:"flex", alignItems:"center", justifyContent:"center",
+              }}><Icon.Form/></div>
+              <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:14, fontWeight:700, marginBottom:6}}>
+                No registration link yet
+              </div>
+              <p style={{fontSize:12.5, color:"var(--muted)", maxWidth:420, margin:"0 auto 18px"}}>
+                Generate a unique link for <strong style={{color:"var(--ink)"}}>{club.name}</strong>. Players opening it will register directly into the cohort — their data flows into club statistics and roster metrics automatically.
+              </p>
+              <Btn tone="teal" icon={Icon.Plus} onClick={onRegenerate}>Generate link</Btn>
+            </div>
+          ) : (
+            <>
+              <div style={{
+                background:"var(--paper)", borderRadius:10, padding:"14px 16px", marginBottom:14,
+                border:"1px solid var(--line)",
+              }}>
+                <div style={{fontSize:10.5, letterSpacing:"0.12em", textTransform:"uppercase", color:"var(--muted-2)", fontFamily:"'Montserrat',sans-serif", fontWeight:700, marginBottom:6}}>Registration link</div>
+                <div style={{
+                  fontFamily:"ui-monospace, SFMono-Regular, Menlo, monospace", fontSize:13,
+                  color:"var(--ink)", wordBreak:"break-all", lineHeight:1.45,
+                  padding:"10px 12px", background:"var(--white)", borderRadius:8,
+                  border:"1px solid var(--line)",
+                }}>{url}</div>
+                <div style={{fontSize:11, color:"var(--muted)", marginTop:8}}>
+                  Created {createdLabel} · token <code>{linkRecord.token}</code>
+                </div>
+              </div>
+
+              <div style={{display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:8, marginBottom:14}}>
+                <Btn tone={copied ? "teal" : "outline"} icon={copied ? Icon.Check : Icon.Form} onClick={doCopy}>
+                  {copied ? "Copied" : "Copy link"}
+                </Btn>
+                <a
+                  href={`mailto:?subject=${encodeURIComponent(`${club.name} · Player Registration Link`)}&body=${encodeURIComponent(emailBody())}`}
+                  className="btn btn-outline"
+                  style={{textDecoration:"none", display:"inline-flex", alignItems:"center", justifyContent:"center", gap:6}}
+                >
+                  <Icon.Mail/> Email
+                </a>
+                <a
+                  href={`https://wa.me/?text=${encodeURIComponent(whatsappText())}`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="btn btn-outline"
+                  style={{textDecoration:"none", display:"inline-flex", alignItems:"center", justifyContent:"center", gap:6}}
+                >
+                  <Icon.Arrow/> WhatsApp
+                </a>
+              </div>
+
+              <div style={{
+                background:"rgba(200,168,75,0.08)", border:"1px solid rgba(200,168,75,0.35)",
+                borderRadius:10, padding:"12px 14px", marginBottom:14,
+              }}>
+                <div style={{fontSize:10.5, letterSpacing:"0.12em", textTransform:"uppercase", color:"var(--gold-deep, #8a6e1c)", fontFamily:"'Montserrat',sans-serif", fontWeight:800, marginBottom:4}}>
+                  Next phase — auto-populate
+                </div>
+                <div style={{fontSize:12, color:"var(--ink)", lineHeight:1.5}}>
+                  Player submissions through this link will flow directly into the Dolphins Pipeline cohort. Roster metrics, demographic splits and CQI inputs will update without manual admin entry.
+                </div>
+              </div>
+
+              <div className="row" style={{justifyContent:"space-between", gap:10, paddingTop:6, borderTop:"1px solid var(--line)"}}>
+                <Btn tone="ghost" onClick={onRegenerate}>↻ Regenerate (invalidates old link)</Btn>
+                <Btn tone="ink" onClick={onClose}>Done</Btn>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function AdminClubDetail({ club, gotoList, onGenerateLink, toast }) {
   if (!club) return null;
   const dc = docCompletion(club);
   const op = overallProgress(club);
   const band = cqiBand(club.cqi);
+  const [showLinkModal, setShowLinkModal] = useStateA(false);
+
+  function handleGenerate() {
+    onGenerateLink && onGenerateLink();
+    if (!club.playerRegLink) {
+      toast && toast("Registration link generated · ready to share");
+    } else {
+      toast && toast("New link issued · previous link is now invalid");
+    }
+  }
+  function openModal() {
+    if (!club.playerRegLink && onGenerateLink) onGenerateLink();
+    setShowLinkModal(true);
+  }
 
   const phases = [
     { n:"01", t:"Affiliation",        done: club.paid, val: club.paid ? 100 : (club.affiliation==="in_progress"?40:0), detail: club.paid ? "Submitted · 12 May 2026" : "Awaiting submission" },
@@ -1246,6 +1389,19 @@ export function AdminClubDetail({ club, gotoList }) {
                     {p.future && (
                       <div style={{fontSize:11, color:"var(--gold-deep, #8a6e1c)", fontFamily:"'Montserrat',sans-serif", marginTop:4, fontStyle:"italic", lineHeight:1.4}}>
                         ↗ {p.future}
+                      </div>
+                    )}
+                    {/* Player Registration phase has a live action — generate the link admins share with clubs */}
+                    {p.n === "03" && (
+                      <div style={{marginTop:8}}>
+                        <Btn tone="teal" size="sm" icon={Icon.Plus} onClick={openModal}>
+                          {club.playerRegLink ? "View / share registration link" : "Generate registration link"}
+                        </Btn>
+                        {club.playerRegLink && (
+                          <span style={{marginLeft:10, fontSize:10.5, color:"var(--teal-deep)", fontFamily:"'Montserrat',sans-serif", letterSpacing:"0.06em", textTransform:"uppercase", fontWeight:700}}>
+                            ● Link active
+                          </span>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1352,6 +1508,15 @@ export function AdminClubDetail({ club, gotoList }) {
           </Card>
         </div>
       </div>
+
+      {showLinkModal && (
+        <PlayerRegLinkModal
+          club={club}
+          onClose={()=>setShowLinkModal(false)}
+          onRegenerate={handleGenerate}
+          toast={toast}
+        />
+      )}
     </div>
   );
 }

@@ -376,6 +376,16 @@ function Shell({
       ? {...c, exco: members, docs: {...c.docs, exco: true}}
       : c));
   }
+  // Issue a new player-registration link for an arbitrary club id (admin tool).
+  // Token is short, URL-safe and unique per generation so regenerating invalidates the old one.
+  function generatePlayerRegLink(targetClubId) {
+    const token = Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
+    const createdAt = new Date().toISOString();
+    setClubs(cs => cs.map(c => c.id === targetClubId
+      ? {...c, playerRegLink: { token, createdAt }}
+      : c));
+    return { token, createdAt };
+  }
 
   // — NAV definition —
   const adminNav = [
@@ -410,7 +420,7 @@ function Shell({
       const gotoList = () => gotoAdminView("clubs_list");
       if (view === "dashboard")    return <AdminDashboard clubs={clubs} gotoClub={setActiveClub} gotoList={gotoList} gotoAdminView={gotoAdminView} toast={toastShow} />;
       if (view === "clubs_list")   return <AdminClubsList clubs={clubs} gotoClub={setActiveClub} toast={toastShow} />;
-      if (view === "club_detail")  return <AdminClubDetail club={activeClub} gotoList={gotoList} />;
+      if (view === "club_detail")  return <AdminClubDetail club={activeClub} gotoList={gotoList} onGenerateLink={()=>generatePlayerRegLink(activeClub.id)} toast={toastShow}/>;
       if (view === "affiliations") return <AdminFiltered clubs={clubs} kind="affiliation" gotoClub={setActiveClub}/>;
       if (view === "documents")    return <AdminFiltered clubs={clubs} kind="docs" gotoClub={setActiveClub}/>;
       if (view === "cqi_admin")    return <AdminFiltered clubs={clubs} kind="cqi" gotoClub={setActiveClub}/>;
