@@ -14,7 +14,8 @@
     "deploy": "sst deploy --stage prod",
     "deploy:dev": "sst deploy --stage dev",
     "deploy:remove": "sst remove --stage dev",
-    "dev:sst": "sst dev"
+    "dev:sst": "sst dev",
+    "dev:local": "concurrently -k -n api,web -c blue,green \"npm --prefix packages/api run dev:local\" \"vite\""
   },
   "engines": {
     "node": ">=20"
@@ -29,6 +30,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
     "eslint": "^8.57.1",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-react": "^7.37.2",

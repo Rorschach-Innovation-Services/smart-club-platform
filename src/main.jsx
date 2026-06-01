@@ -301,7 +301,15 @@ function AuthedApp({ tenantConfig }) {
   const dataError = role === 'admin' ? clubsQuery.isError : repClubQueries.some((q) => q.isError);
   if (dataLoading || seriesQuery.isLoading) return <Splash message="Loading your clubs…" />;
   if (dataError || seriesQuery.isError)
-    return <Splash message="Could not load your clubs. Refresh to retry." />;
+    return (
+      <Splash
+        message={
+          import.meta.env.VITE_LOCAL_AUTH === '1'
+            ? 'Could not reach the local API. Is it running? Start it with `npm run dev:local`.'
+            : 'Could not load your clubs. Refresh to retry.'
+        }
+      />
+    );
 
   // ── Series mutations (preserve prototype signatures; back with the API) ──
   const invalidate = (key) => queryClient.invalidateQueries({ queryKey: key });

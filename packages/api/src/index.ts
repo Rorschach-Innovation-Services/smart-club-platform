@@ -60,7 +60,9 @@ app.use(
       }
       return undefined;
     },
-    allowHeaders: ['content-type', 'authorization', 'x-tenant'],
+    // x-dev-auth is the local-dev identity header; harmless in cloud (the API only
+    // trusts it when LOCAL_AUTH=1 — see auth.ts), required for the offline stack.
+    allowHeaders: ['content-type', 'authorization', 'x-tenant', 'x-dev-auth'],
   }),
 );
 

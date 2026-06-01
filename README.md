@@ -37,12 +37,13 @@ VITE_DEFAULT_TENANT=dolphins
 ```
 
 ```bash
-npm --prefix packages/api run dev:local   # terminal 1: local API + dynalite + seed (:3333)
-npm run dev                               # terminal 2: SPA (:3201, or next free port)
+npm run dev:local   # one command: local API + dynalite + seed (:3333) AND the SPA (:3201)
 ```
 
-Open the SPA, pick **Administrator** (or **Club rep** + club ids) — no email/OTP. Everything
-(tenants, clubs, CQI, registration, isolation) runs locally; uploads are stubbed (no S3).
+(Starts both together and stops both on Ctrl-C. To run just the API: `npm --prefix
+packages/api run dev:local`.) Open the SPA, pick **Administrator** (or **Club rep** + club
+ids) — no email/OTP. Everything (tenants, clubs, CQI, registration, isolation) runs locally;
+uploads are stubbed (no S3).
 
 ### Option B — local frontend → deployed dev backend (real Cognito OTP)
 
