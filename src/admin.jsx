@@ -4,7 +4,6 @@ import { useState as useStateA, useMemo as useMemoA, useEffect as useEffectA } f
 import { createPortal } from 'react-dom';
 import {
   DISTRICTS,
-  KNOWN_CLUBS,
   REQUIRED_DOCS,
   CQI_STRUCTURE,
   LEAGUE_OPTIONS,
@@ -1406,6 +1405,67 @@ export function CreateSeriesForm({ clubs, onCreate, onClose }) {
   );
 }
 
+/* ─── Empty-cohort state — shown before any clubs are onboarded ─── */
+function EmptyCohort({ onOnboard }) {
+  return (
+    <div style={{ padding: '8px 0' }}>
+      <div className="page-head">
+        <div className="ph-left">
+          <div className="ph-crumb">Admin Console</div>
+          <h1 className="ph-title">Welcome — let&apos;s get your union set up</h1>
+          <p className="ph-desc">
+            No clubs yet. Onboard your affiliated clubs to start tracking affiliation, compliance
+            and the Club Quality Index. Once clubs are in, your cohort dashboard fills in here.
+          </p>
+        </div>
+      </div>
+      <div
+        style={{
+          background: 'var(--white)',
+          border: '1px solid var(--line)',
+          borderRadius: 14,
+          padding: '56px 40px',
+          textAlign: 'center',
+        }}
+      >
+        <div
+          style={{
+            width: 84,
+            height: 84,
+            margin: '0 auto 18px',
+            borderRadius: '50%',
+            background: 'var(--teal-pale)',
+            color: 'var(--teal-deep)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <Icon.Clubs />
+        </div>
+        <div style={{ fontFamily: "'Montserrat',sans-serif", fontSize: 18, fontWeight: 700 }}>
+          No clubs onboarded yet
+        </div>
+        <div
+          style={{
+            fontSize: 13,
+            color: 'var(--muted)',
+            maxWidth: 440,
+            margin: '8px auto 22px',
+            lineHeight: 1.6,
+          }}
+        >
+          Add your first club to begin. You can onboard them one at a time with the
+          chairperson&apos;s contact details and share their portal link.
+        </div>
+        <Btn tone="teal" icon={Icon.Plus} onClick={onOnboard}>
+          Onboard your first club
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
 export function AdminDashboard({
   clubs,
   gotoClub,
@@ -1416,9 +1476,13 @@ export function AdminDashboard({
   onUpdateDeadline,
 }) {
   const stats = cohortStats(clubs);
-  const pct = (n, d) => Math.round((n / d) * 100);
+  const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0);
   const notify = (m) => (toast ? toast(m, 'warn') : null);
   const [showEditDeadline, setShowEditDeadline] = useStateA(false);
+
+  // Blank tenant: show the onboarding empty state instead of a 0-of-0 dashboard.
+  if (clubs.length === 0) return <EmptyCohort onOnboard={gotoList} />;
+
   const deadlineLong = formatDeadlineLong(submissionDeadline);
   const deadlineMid = formatDeadlineMid(submissionDeadline);
   const daysLeft = daysUntil(submissionDeadline);
@@ -1935,6 +1999,7 @@ export function AdminClubsList({
   submissionDeadline,
   onOnboardClub,
   onBulkOnboardClubs,
+  knownClubs = [],
 }) {
   const notify = (m) => (toast ? toast(m, 'warn') : null);
   const [q, setQ] = useStateA('');
@@ -2007,106 +2072,119 @@ export function AdminClubsList({
         </div>
       </div>
 
-      {/* Cohort insights panel — CQI distribution, document compliance, resources required */}
-      <ClubInsights clubs={clubs} submissionDeadline={submissionDeadline} />
+      {clubs.length === 0 ? (
+        <EmptyCohort onOnboard={() => setShowOnboard(true)} />
+      ) : (
+        <>
+          {/* Cohort insights panel — CQI distribution, document compliance, resources required */}
+          <ClubInsights clubs={clubs} submissionDeadline={submissionDeadline} />
 
-      <div className="filter-row">
-        <input
-          className="search-box"
-          placeholder="Search by club name or chairperson…"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
-        {[
-          { k: 'all', label: 'All clubs' },
-          { k: 'complete', label: 'Fully integrated' },
-          { k: 'incomplete', label: 'Incomplete' },
-          { k: 'not_paid', label: 'Affiliation outstanding' },
-          { k: 'no_cqi', label: 'CQI not submitted' },
-        ].map((f) => (
-          <button
-            key={f.k}
-            className={`filter-pill ${filter === f.k ? 'active' : ''}`}
-            onClick={() => setFilter(f.k)}
-          >
-            {f.label}
-            <span className="count">{counts[f.k]}</span>
-          </button>
-        ))}
-      </div>
+          <div className="filter-row">
+            <input
+              className="search-box"
+              placeholder="Search by club name or chairperson…"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+            {[
+              { k: 'all', label: 'All clubs' },
+              { k: 'complete', label: 'Fully integrated' },
+              { k: 'incomplete', label: 'Incomplete' },
+              { k: 'not_paid', label: 'Affiliation outstanding' },
+              { k: 'no_cqi', label: 'CQI not submitted' },
+            ].map((f) => (
+              <button
+                key={f.k}
+                className={`filter-pill ${filter === f.k ? 'active' : ''}`}
+                onClick={() => setFilter(f.k)}
+              >
+                {f.label}
+                <span className="count">{counts[f.k]}</span>
+              </button>
+            ))}
+          </div>
 
-      <div className="tbl-w">
-        <table className="tbl">
-          <thead>
-            <tr>
-              <th style={{ width: '24%' }}>Club</th>
-              <th>Chairperson</th>
-              <th>Affiliation</th>
-              <th>Docs</th>
-              <th>CQI</th>
-              <th>Overall</th>
-              <th style={{ width: 60 }}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((c) => {
-              const dc = docCompletion(c);
-              const op = overallProgress(c);
-              const band = cqiBand(c.cqi);
-              return (
-                <tr key={c.id} className="clickable" onClick={() => gotoClub(c.id)}>
-                  <td>
-                    <ClubNameCell club={c} />
-                  </td>
-                  <td>
-                    <div style={{ fontSize: 12.5 }}>{c.chair}</div>
-                    <div
-                      style={{
-                        fontSize: 10.5,
-                        color: 'var(--muted-2)',
-                        fontFamily: "'Montserrat',sans-serif",
-                      }}
-                    >
-                      {c.sub}
-                    </div>
-                  </td>
-                  <td>
-                    {affPill(c.affiliation)}{' '}
-                    {c.paid && (
-                      <span
-                        style={{
-                          fontFamily: "'Montserrat',sans-serif",
-                          fontSize: 10,
-                          color: 'var(--teal-deep)',
-                          marginLeft: 6,
-                        }}
-                      >
-                        · SUBMITTED
-                      </span>
-                    )}
-                  </td>
-                  <td>
-                    <ProgChip value={dc} tone={dc === 100 ? 'teal' : dc >= 50 ? 'gold' : 'coral'} />
-                  </td>
-                  <td>
-                    <Pill tone={band.tone}>{band.label}</Pill>
-                  </td>
-                  <td>
-                    <ProgChip value={op} tone={op >= 80 ? 'teal' : op >= 50 ? 'gold' : 'coral'} />
-                  </td>
-                  <td style={{ textAlign: 'right', paddingRight: 18 }}>
-                    <Icon.Arrow />
-                  </td>
+          <div className="tbl-w">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th style={{ width: '24%' }}>Club</th>
+                  <th>Chairperson</th>
+                  <th>Affiliation</th>
+                  <th>Docs</th>
+                  <th>CQI</th>
+                  <th>Overall</th>
+                  <th style={{ width: 60 }}></th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+              </thead>
+              <tbody>
+                {filtered.map((c) => {
+                  const dc = docCompletion(c);
+                  const op = overallProgress(c);
+                  const band = cqiBand(c.cqi);
+                  return (
+                    <tr key={c.id} className="clickable" onClick={() => gotoClub(c.id)}>
+                      <td>
+                        <ClubNameCell club={c} />
+                      </td>
+                      <td>
+                        <div style={{ fontSize: 12.5 }}>{c.chair}</div>
+                        <div
+                          style={{
+                            fontSize: 10.5,
+                            color: 'var(--muted-2)',
+                            fontFamily: "'Montserrat',sans-serif",
+                          }}
+                        >
+                          {c.sub}
+                        </div>
+                      </td>
+                      <td>
+                        {affPill(c.affiliation)}{' '}
+                        {c.paid && (
+                          <span
+                            style={{
+                              fontFamily: "'Montserrat',sans-serif",
+                              fontSize: 10,
+                              color: 'var(--teal-deep)',
+                              marginLeft: 6,
+                            }}
+                          >
+                            · SUBMITTED
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        <ProgChip
+                          value={dc}
+                          tone={dc === 100 ? 'teal' : dc >= 50 ? 'gold' : 'coral'}
+                        />
+                      </td>
+                      <td>
+                        <Pill tone={band.tone}>{band.label}</Pill>
+                      </td>
+                      <td>
+                        <ProgChip
+                          value={op}
+                          tone={op >= 80 ? 'teal' : op >= 50 ? 'gold' : 'coral'}
+                        />
+                      </td>
+                      <td style={{ textAlign: 'right', paddingRight: 18 }}>
+                        <Icon.Arrow />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
 
       {showOnboard && (
         <OnboardNewClubModal
           clubs={clubs}
+          knownClubs={knownClubs}
           onClose={() => setShowOnboard(false)}
           onOnboard={onOnboardClub}
           onBulkOnboard={onBulkOnboardClubs}
@@ -2122,7 +2200,7 @@ export function AdminClubsList({
    accidentally double-onboard. No match → form (chair, email, cell, district).
    Step 2: switches to the share view with the deep link + Copy / Email / WhatsApp.
    The chair's email and cell are pre-filled into the share affordances. */
-function OnboardNewClubModal({ clubs, onClose, onOnboard, onBulkOnboard, toast }) {
+function OnboardNewClubModal({ clubs, knownClubs = [], onClose, onOnboard, onBulkOnboard, toast }) {
   const [query, setQuery] = useStateA('');
   const [chair, setChair] = useStateA('');
   const [chairEmail, setChairEmail] = useStateA('');
@@ -2154,7 +2232,9 @@ function OnboardNewClubModal({ clubs, onClose, onOnboard, onBulkOnboard, toast }
   // Known-clubs registry: filter against the cohort so already-onboarded clubs
   // disappear from the picker, and against the typed search.
   const onboardedNames = new Set(clubs.map((c) => c.name.toLowerCase()));
-  const remainingKnown = KNOWN_CLUBS.filter((k) => !onboardedNames.has(k.name.toLowerCase()));
+  // Onboarding suggestions come from the tenant's config (empty by default, so the
+  // quick-pick is hidden and admins onboard manually).
+  const remainingKnown = knownClubs.filter((k) => !onboardedNames.has(k.name.toLowerCase()));
   const filteredKnown =
     trimmedQuery.length >= 2
       ? remainingKnown.filter(

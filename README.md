@@ -25,9 +25,8 @@ below; create the file with one of these two profiles.
 
 ### Option A — fully offline (no AWS, recommended)
 
-Runs the whole backend on your machine — an in-process DynamoDB (`dynalite`, no Docker/Java),
-the same Hono API, and seeded tenants. Cognito can't run offline, so login is a dev "sign in
-as" picker.
+Runs the whole backend on your machine — an in-process DynamoDB (`dynalite`, no Docker/Java)
+and the same Hono API. Cognito can't run offline, so login is a dev "sign in as" picker.
 
 ```bash
 # .env.development.local
@@ -37,13 +36,15 @@ VITE_DEFAULT_TENANT=dolphins
 ```
 
 ```bash
-npm run dev:local   # one command: local API + dynalite + seed (:3333) AND the SPA (:3201)
+npm run dev:local        # local API + dynalite (:3333) AND the SPA (:3201), BLANK cohort
+npm run dev:local:demo   # same, but pre-loads 14 sample clubs + 2 series to click through
 ```
 
 (Starts both together and stops both on Ctrl-C. To run just the API: `npm --prefix
 packages/api run dev:local`.) Open the SPA, pick **Administrator** (or **Club rep** + club
-ids) — no email/OTP. Everything (tenants, clubs, CQI, registration, isolation) runs locally;
-uploads are stubbed (no S3).
+ids) — no email/OTP. Tenants start **blank** (like production) — onboard a club to begin; use
+`dev:local:demo` if you want the sample cohort. Data persists within a run and resets when you
+restart (dynalite is in-memory); uploads are stubbed (no S3).
 
 ### Option B — local frontend → deployed dev backend (real Cognito OTP)
 

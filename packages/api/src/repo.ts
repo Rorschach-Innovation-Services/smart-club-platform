@@ -470,3 +470,29 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   await batchDelete(keys);
   return keys.length;
 }
+
+/**
+ * Blank a tenant's COHORT (clubs + their player registrations + series) while
+ * KEEPING the tenant config and all users/markers. Used to wipe demo data from a
+ * real tenant. Builds the delete set independently of eraseTenantData (which also
+ * removes config + users) and asserts no config/user key slips in. Idempotent.
+ */
+export async function clearCohort(tenant: string): Promise<number> {
+  const keys: Array<{ pk: string; sk: string }> = [];
+  for (const club of await listClubs(tenant)) {
+    keys.push(clubKey(tenant, club.id));
+    for (const p of await listPlayers(tenant, club.id)) {
+      keys.push(playerKey(tenant, club.id, p.naturalKey));
+    }
+  }
+  for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
+
+  // Safety: never delete the tenant config or any user record.
+  for (const k of keys) {
+    if (k.sk === 'CONFIG' || k.pk.startsWith('USER#')) {
+      throw new Error(`refusing to clear cohort: unexpected key ${k.pk} / ${k.sk}`);
+    }
+  }
+  await batchDelete(keys);
+  return keys.length;
+}

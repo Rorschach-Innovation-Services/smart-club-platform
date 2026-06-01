@@ -9,18 +9,23 @@ one shared stack ([ADR 0002](../architecture/0002-single-tenant-saas-vs-isolated
    key prefix and the subdomain. The seed/create path uses `attribute_not_exists` so a
    duplicate slug is rejected rather than silently merging tenants.
 
-2. **Add branding + seed data.**
-   - Add a branding block for the slug in `packages/api/src/seed.ts` (`name`, `title`,
+2. **Add branding.**
+   - Add a branding block for the slug in `packages/api/src/seed-core.ts` (`name`, `title`,
      `logoUrl`, `colors`, `copy`).
-   - Add `packages/api/seed-data/<slug>.json` with `{ submissionDeadline, knownClubs,
-clubs, series }`. (For an empty union, `clubs: []`, `series: []`.)
+   - Add `packages/api/seed-data/<slug>.json` with at least `{ submissionDeadline }` (the
+     `clubs`/`series` fields are only used by the opt-in `--demo` load).
    - Upload the logo to the Uploads bucket / a CDN path referenced by `logoUrl`.
 
-3. **Seed the tenant:**
+3. **Provision the tenant (blank):**
 
    ```bash
    npx sst shell --stage <stage> -- npm --prefix packages/api run seed -- <slug>
    ```
+
+   This writes only the config (branding + deadline) — the cohort starts **empty** so the
+   union onboards its own clubs/series in the app. (For a demo/set account, append `--demo`
+   to also load the sample clubs + series. To blank a tenant that already has data:
+   `… run clear-cohort -- <slug> --confirm`.)
 
 4. **Point DNS + TLS** (prod): add the subdomain to the StaticSite `domain` config with an
    ACM cert in af-south-1, and the CloudFront Function host→branding mapping. (Dev uses the

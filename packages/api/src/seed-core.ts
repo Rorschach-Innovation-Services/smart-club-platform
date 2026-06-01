@@ -1,7 +1,7 @@
 /**
  * Reusable tenant-seeding logic (no top-level execution), shared by the seed CLI
- * (seed.ts) and the local dev server (local/server.ts). Populates a tenant's
- * config + clubs + series from the snapshots in ../seed-data. Branding lives here.
+ * (seed.ts) and the local dev server (local/server.ts). Tenants are provisioned
+ * BLANK (config only); sample clubs/series are opt-in demo data. Branding lives here.
  */
 import { readFileSync } from 'node:fs';
 import * as repo from './repo.js';
@@ -62,7 +62,12 @@ function loadSnapshot(tenant: string): Snapshot {
   return JSON.parse(readFileSync(path, 'utf8')) as Snapshot;
 }
 
-export async function seedTenant(tenant: string): Promise<{ clubs: number; series: number }> {
+/**
+ * Provision a tenant: write only its config (branding + deadline). The cohort
+ * starts BLANK — real unions onboard their own clubs/series. `knownClubs` is
+ * empty (no hardcoded onboarding suggestions).
+ */
+export async function seedTenantConfig(tenant: string): Promise<void> {
   const branding = BRANDING[tenant];
   if (!branding) throw new Error(`no branding for tenant "${tenant}"`);
   const snap = loadSnapshot(tenant);
@@ -70,9 +75,17 @@ export async function seedTenant(tenant: string): Promise<{ clubs: number; serie
     tenant,
     branding,
     submissionDeadline: snap.submissionDeadline,
-    knownClubs: snap.knownClubs,
+    knownClubs: [],
   };
   await repo.putTenantConfig(config);
+}
+
+/**
+ * Opt-in demo data: load the snapshot's sample clubs + series into a tenant
+ * (for local dev / set demo accounts). Provisioning (config) must run first.
+ */
+export async function seedDemoData(tenant: string): Promise<{ clubs: number; series: number }> {
+  const snap = loadSnapshot(tenant);
   for (const club of snap.clubs) {
     await repo.putClub(tenant, { ...club, version: 1 });
   }

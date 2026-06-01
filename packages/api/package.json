@@ -10,6 +10,7 @@
     "bootstrap-admin": "tsx src/bootstrap-admin.ts",
     "enable-passwordless": "tsx src/enable-passwordless.ts",
     "erase-tenant": "tsx src/erase-tenant.ts",
+    "clear-cohort": "tsx src/clear-cohort.ts",
     "dev:local": "tsx src/local/server.ts"
   },
   "dependencies": {

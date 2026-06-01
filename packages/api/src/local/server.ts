@@ -67,11 +67,17 @@ async function main(): Promise<void> {
   );
   console.log(`· created table ${TABLE}`);
 
-  // 3. Seed tenants.
-  const { seedTenant, SEED_TENANTS } = await import('../seed-core.js');
+  // 3. Provision tenants (blank). SEED_DEMO=1 also loads sample clubs/series.
+  const demo = process.env.SEED_DEMO === '1';
+  const { seedTenantConfig, seedDemoData, SEED_TENANTS } = await import('../seed-core.js');
   for (const t of SEED_TENANTS) {
-    const { clubs, series } = await seedTenant(t);
-    console.log(`· seeded ${t}: ${clubs} clubs, ${series} series`);
+    await seedTenantConfig(t);
+    if (demo) {
+      const { clubs, series } = await seedDemoData(t);
+      console.log(`· provisioned ${t} + demo: ${clubs} clubs, ${series} series`);
+    } else {
+      console.log(`· provisioned ${t} (blank)`);
+    }
   }
 
   // 4. Serve the Hono app.

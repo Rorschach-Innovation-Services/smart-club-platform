@@ -54,15 +54,18 @@ aws cognito-idp describe-user-pool --region af-south-1 --user-pool-id <poolId> \
   --query 'UserPool.Policies.SignInPolicy'   # → AllowedFirstAuthFactors includes EMAIL_OTP
 ```
 
-## 4. Seed the tenants
+## 4. Provision the tenants (blank)
 
 ```bash
-# Resolves the table name from SST and writes Dolphins + Lions tenants.
+# Writes ONLY each tenant's config (branding + deadline). Cohort starts blank —
+# real unions onboard their own clubs/series in the app.
 npx sst shell --stage dev -- npm --prefix packages/api run seed
 ```
 
-Verify in the DynamoDB console (af-south-1) that `TENANT#dolphins#CLUB#…` and
-`TENANT#lions#CLUB#…` items exist, plus `TENANT#dolphins` / `TENANT#lions` CONFIG items.
+Verify the `TENANT#dolphins` / `TENANT#lions` CONFIG items exist (no `CLUB#`/`SERIES#` items —
+the cohort is empty). To load the demo 14 clubs + 2 series into a tenant (set/demo accounts
+only): `… run seed -- dolphins --demo`. To blank a tenant that already has data:
+`… run clear-cohort -- dolphins --confirm` (keeps config + admins).
 
 ## 5. Bootstrap the first admin (per tenant)
 

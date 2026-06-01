@@ -1,23 +1,33 @@
 /**
- * Seed CLI — populates tenants from ../seed-data via the shared seed-core logic.
+ * Seed CLI — provision tenants.
  *
- *   sst shell --stage dev -- npx tsx packages/api/src/seed.ts [tenant ...]
+ *   sst shell --stage <stage> -- npx tsx packages/api/src/seed.ts [tenant ...]
+ *   …                                                              [tenant ...] --demo
  *
- * Idempotent (upserts). Player counts derive from registrations, so seeded clubs
- * show 0 players until people register (see docs/architecture/0005).
+ * Default: writes only each tenant's config (branding + deadline) — the cohort is
+ * BLANK so real unions input their own clubs/series. `--demo` additionally loads
+ * the sample clubs + series (for set/demo accounts). Idempotent (upserts).
  */
-import { seedTenant, BRANDING, SEED_TENANTS } from './seed-core.js';
+import { seedTenantConfig, seedDemoData, BRANDING, SEED_TENANTS } from './seed-core.js';
 
 async function main(): Promise<void> {
-  const requested = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  const demo = args.includes('--demo');
+  const requested = args.filter((a) => !a.startsWith('--'));
   const toSeed = requested.length ? requested : SEED_TENANTS;
+
   for (const t of toSeed) {
     if (!BRANDING[t]) {
       console.warn(`no branding for tenant "${t}", skipping`);
       continue;
     }
-    const { clubs, series } = await seedTenant(t);
-    console.log(`seeded ${t}: ${clubs} clubs, ${series} series`);
+    await seedTenantConfig(t);
+    if (demo) {
+      const { clubs, series } = await seedDemoData(t);
+      console.log(`provisioned ${t} + demo data: ${clubs} clubs, ${series} series`);
+    } else {
+      console.log(`provisioned ${t} (blank cohort)`);
+    }
   }
   console.log('seed complete');
 }

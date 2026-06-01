@@ -725,6 +725,7 @@ function Shell({
             submissionDeadline={submissionDeadline}
             onOnboardClub={onboardClub}
             onBulkOnboardClubs={bulkOnboardClubs}
+            knownClubs={tenantConfig?.knownClubs ?? []}
           />
         );
       if (view === 'club_detail')
