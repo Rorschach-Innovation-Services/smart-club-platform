@@ -13,6 +13,37 @@ import {
   Icon, Pill, Btn, Card, KPI, ClubNameCell, YN, Choice, MoneyInput, NumSlider, CountUp,
   cqiBand, scoreCQI,
 } from './atoms.jsx';
+import { getDocUploadUrl, uploadToPresigned } from './api.js';
+
+/* ─── Compliance doc upload — presigned S3 PUT, then mark uploaded ─── */
+function DocUploadButton({ clubId, docKey, label, onUploaded, toast }) {
+  const inputRef = useRefC(null);
+  const [busy, setBusy] = useStateC(false);
+  async function handleFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBusy(true);
+    try {
+      const { uploadUrl, objectKey } = await getDocUploadUrl(clubId, docKey);
+      await uploadToPresigned(uploadUrl, file);
+      await onUploaded(docKey, { objectKey, size: file.size });
+      toast(`${label} uploaded`);
+    } catch (err) {
+      toast(err?.message || 'Upload failed', 'warn');
+    } finally {
+      setBusy(false);
+      if (inputRef.current) inputRef.current.value = '';
+    }
+  }
+  return (
+    <>
+      <input ref={inputRef} type="file" accept="application/pdf" style={{ display: 'none' }} onChange={handleFile} />
+      <Btn tone="ink" size="sm" icon={Icon.Upload} onClick={() => inputRef.current?.click()}>
+        {busy ? 'Uploading…' : 'Upload'}
+      </Btn>
+    </>
+  );
+}
 
 /* ─── Ground map (Leaflet + OpenStreetMap + Nominatim geocoding) ─── */
 export function GroundMap({ query, onResolved }) {
@@ -334,10 +365,16 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
   }
 
   function getGroundPayload() {
+    // Persist the geocoded coordinates too — travel-cost / haversine math needs
+    // them, and the prototype previously dropped them on submit.
+    const coords = data.groundCoords || club.ground || {};
     return {
       venue: data.groundVenue,
       address: data.groundAddress,
       mapQuery: data.groundMapQuery,
+      suburb: coords.suburb,
+      lat: coords.lat,
+      lon: coords.lon,
     };
   }
 
@@ -359,7 +396,10 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
   }
 
   const valid = data.clubName && data.chairName && data.chairCell && data.chairEmail;
-  const viewOnly = club.paid;  // form locks once payment has been received
+  // Form locks once affiliation is submitted (complete), NOT on payment —
+  // payment is now a separate admin action, so locking on paid would leave a
+  // submitted form editable until an admin toggled it.
+  const viewOnly = club.affiliation === "complete";
 
   // Live summary values for the sidebar
   const filledBearers = [data.chairName, data.secName, data.treName, data.vcName, ...data.additionalMembers.map(m=>m.name)].filter(Boolean).length;
@@ -1146,7 +1186,7 @@ export function DocumentsView({ club, goto, toast, onUpload, onSaveExco, submiss
               ) : (
                 isExco
                   ? <Btn tone="ink" size="sm" icon={Icon.Form} onClick={()=>setShowExcoForm(true)}>Complete form</Btn>
-                  : <Btn tone="ink" size="sm" icon={Icon.Upload} onClick={()=>{onUpload(d.key); toast(`${d.name} uploaded`);}}>Upload</Btn>
+                  : <DocUploadButton clubId={club.id} docKey={d.key} label={d.name} onUploaded={onUpload} toast={toast}/>
               )}
             </div>
           );
@@ -1206,7 +1246,11 @@ export function DocumentsView({ club, goto, toast, onUpload, onSaveExco, submiss
 export function CQIView({ club, goto, toast, onSubmit, submissionDeadline }) {
   const deadlineLong = formatDeadlineLong(submissionDeadline);
   const [answers, setAnswers] = useStateC(()=>{
-    // Prefill from existing data shape
+    // Prefer the real stored answers (persisted on submit). Only fall back to the
+    // score-band approximation for legacy clubs that have a score but no answers.
+    if (club.cqiAnswers && Object.keys(club.cqiAnswers).length) {
+      return { ...club.cqiAnswers };
+    }
     const a = {};
     if (club.cqi > 0) {
       // approximate defaults based on the club's score band
@@ -1333,7 +1377,7 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline }) {
           </div>
           <div className="row" style={{gap:8}}>
             <Btn tone="outline">Save draft</Btn>
-            <Btn tone="teal" icon={Icon.Check} onClick={()=>{onSubmit(total); toast("CQI submitted · score "+total.toFixed(1));}}>Submit CQI</Btn>
+            <Btn tone="teal" icon={Icon.Check} onClick={()=>{onSubmit(total, answers); toast("CQI submitted · score "+total.toFixed(1));}}>Submit CQI</Btn>
           </div>
         </div>
       </Card>

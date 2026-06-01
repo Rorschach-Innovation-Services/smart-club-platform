@@ -1,193 +1,160 @@
 import { useState as useStateApp, useMemo as useMemoApp, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  BrowserRouter, Routes, Route, Navigate,
-  useNavigate, useLocation, useParams,
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+  useNavigate,
+  useLocation,
+  useParams,
 } from 'react-router-dom';
+import { QueryClientProvider, useQuery, useQueries } from '@tanstack/react-query';
+import { queryClient, qk } from './query.js';
+import * as api from './api.js';
+import { ApiError } from './api.js';
+import { resolveTenantSlug, applyTheme } from './config.js';
+import { setActiveTenant } from './api.js';
+import { AuthProvider, useAuth, membershipFor } from './auth.jsx';
+import { Login } from './Login.jsx';
+import { RegisterPage } from './RegisterPage.jsx';
+import { REQUIRED_DOCS, SUBMISSION_DEADLINE_DEFAULT, docCompletion } from './data.jsx';
 import {
-  REQUIRED_DOCS, SAMPLE_CLUBS, SERIES, SUBMISSION_DEADLINE_DEFAULT,
-  cohortStats, docCompletion, formatDeadlineShort,
-} from './data.jsx';
-import {
-  Icon, Pill, Btn, ProgChip, ClubNameCell,
-  affPill, cqiBand, useToast, useEscapeClose,
+  Icon,
+  Pill,
+  Btn,
+  ProgChip,
+  ClubNameCell,
+  affPill,
+  cqiBand,
+  useToast,
+  useEscapeClose,
 } from './atoms.jsx';
 import {
-  AdminDashboard, AdminClubsList, AdminClubDetail, AdminFixtures,
+  AdminDashboard,
+  AdminClubsList,
+  AdminClubDetail,
+  AdminFixtures,
   CreateSeriesForm,
 } from './admin.jsx';
-import {
-  ClubHome, AffiliationForm, DocumentsView, CQIView, ClubFixturesView,
-} from './club.jsx';
+import { ClubHome, AffiliationForm, DocumentsView, CQIView, ClubFixturesView } from './club.jsx';
 import { Onboarding } from './onboarding.jsx';
 
+// Resolve the tenant before any query runs so x-tenant is attached to requests.
+const TENANT_SLUG = resolveTenantSlug();
+setActiveTenant(TENANT_SLUG);
 
-/* ─── Profile Select (entry screen) ─── */
-function ProfileSelect({ onSelect, clubs, submissionDeadline }) {
-  const stats = cohortStats(clubs);
-  const unpaid = clubs.filter(c => !c.paid).length;
-  const deadlineShort = formatDeadlineShort(submissionDeadline);
-
-  return (
-    <div className="ps-screen">
-      <div className="ps-brand">
-        <img className="ps-brand-logo" src="/dolphins-pipeline-logo.png" alt="Hollywoodbets Dolphins Pipeline"/>
-        <div className="ps-eyebrow" style={{margin:0, color:"rgba(255,255,255,0.6)", fontSize:11}}>Smart Club Integration · Cricket Services</div>
-      </div>
-
-      <div className="ps-intro">
-        <div className="ps-eyebrow">Dolphins Cricket Services · 2026 / 27 Season</div>
-        <h1 className="ps-title">Welcome to <em>Dolphins Pipeline</em></h1>
-        <p className="ps-desc">
-          Sign in as a Dolphins administrator to manage every affiliated club, or as a Chairperson / Official Club Rep to complete your affiliation, compliance and CQI submissions.
-        </p>
-      </div>
-
-      <div className="ps-cards">
-        {/* DOLPHINS ADMIN */}
-        <button className="ps-card gold" onClick={() => onSelect("admin")}>
-          <div className="ps-card-icon">
-            <svg viewBox="0 0 28 28" fill="none">
-              <path d="M14 3L4 7v6c0 6 4 9.5 10 11 6-1.5 10-5 10-11V7l-10-4z"
-                    stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round"/>
-              <path d="M9.5 14l3 3 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-          </div>
-          <div>
-            <div className="ps-card-role">Administrator</div>
-            <div className="ps-card-title">Dolphins office</div>
-          </div>
-          <p className="ps-card-desc">
-            Track the cohort, monitor affiliation payments, review compliance documents and CQI submissions across every affiliated club.
-          </p>
-          <div className="ps-card-meta">
-            <div className="ps-card-stat">
-              <div className="ps-card-stat-n">{stats.total}</div>
-              <div className="ps-card-stat-l">Clubs</div>
-            </div>
-            <div className="ps-card-stat">
-              <div className="ps-card-stat-n">{stats.paid}</div>
-              <div className="ps-card-stat-l">Affiliated</div>
-            </div>
-            <div className="ps-card-stat">
-              <div className="ps-card-stat-n">{unpaid}</div>
-              <div className="ps-card-stat-l">Outstanding</div>
-            </div>
-          </div>
-          <div className="ps-card-cta">
-            <span className="ps-card-cta-text">Enter admin console</span>
-            <span className="ps-card-cta-arrow"><Icon.Arrow/></span>
-          </div>
-        </button>
-
-        {/* CLUB */}
-        <button className="ps-card teal" onClick={() => onSelect("club")}>
-          <div className="ps-card-icon">
-            <svg viewBox="0 0 28 28" fill="none">
-              <circle cx="10" cy="11" r="4" stroke="currentColor" strokeWidth="1.8"/>
-              <circle cx="20" cy="12" r="3.2" stroke="currentColor" strokeWidth="1.8"/>
-              <path d="M2 23c1-3.5 4-5.2 8-5.2s7 1.7 8 5.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
-              <path d="M18 23c.5-2.6 2.6-4 5-4s4.5 1.4 5 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
-            </svg>
-          </div>
-          <div>
-            <div className="ps-card-role">Club portal</div>
-            <div className="ps-card-title">Chairperson / Official Club Rep</div>
-          </div>
-          <p className="ps-card-desc">
-            Complete your 2026/27 affiliation form, upload compliance documents and submit the Club Quality Index self-assessment.
-          </p>
-          <div className="ps-card-meta">
-            <div className="ps-card-stat">
-              <div className="ps-card-stat-n">3</div>
-              <div className="ps-card-stat-l">Submissions</div>
-            </div>
-            <div className="ps-card-stat">
-              <div className="ps-card-stat-n">3</div>
-              <div className="ps-card-stat-l">Steps</div>
-            </div>
-            <div className="ps-card-stat">
-              <div className="ps-card-stat-n">{deadlineShort}</div>
-              <div className="ps-card-stat-l">Deadline</div>
-            </div>
-          </div>
-          <div className="ps-card-cta">
-            <span className="ps-card-cta-text">Enter club portal</span>
-            <span className="ps-card-cta-arrow"><Icon.Arrow/></span>
-          </div>
-        </button>
-      </div>
-
-      <div className="ps-footer">
-        <span>v 0.9.0</span>
-        <span className="dot"/>
-        <span>Dolphins Cricket Services · 2026/27</span>
-        <span className="dot"/>
-        <span>Powered by Medicoach</span>
-      </div>
-    </div>
-  );
-}
-
-/* ─── Main App ─── */
-
-
-/* ─── HelpModal — V2 support guidance + union office contacts ─── */
-const HELP_CONTACTS = [
-  { name: "Jooma", role: "Union office",   email: "jooma@dolphinscricket.co.za" },
-  { name: "Yash",  role: "Union office",   email: "yash@dolphinscricket.co.za"  },
-];
-function HelpModal({ onClose }) {
+/* ─── HelpModal — support guidance + union office contacts ─── */
+function HelpModal({ onClose, support }) {
   useEscapeClose(onClose);
+  const contacts = support
+    ? [
+        {
+          name: support.split('·')[0]?.trim() || 'Union office',
+          role: 'Union office',
+          email: (support.match(/[\w.+-]+@[\w.-]+/) || [''])[0],
+        },
+      ]
+    : [{ name: 'Union office', role: 'Support', email: '' }];
   return (
-    <div className="task-modal-backdrop" onClick={e=>e.target===e.currentTarget && onClose()}>
-      <div className="task-modal narrow" style={{maxWidth:560}}>
+    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="task-modal narrow" style={{ maxWidth: 560 }}>
         <div className="task-modal-head">
           <div className="task-modal-head-text">
             <div className="task-modal-head-eyebrow">Need Help</div>
-            <div className="task-modal-head-title">Support &amp; <em>union office</em></div>
+            <div className="task-modal-head-title">
+              Support &amp; <em>union office</em>
+            </div>
           </div>
           <button className="task-modal-close" onClick={onClose} title="Close">
-            <Icon.X/>
+            <Icon.X />
           </button>
         </div>
         <div className="task-modal-body">
-          <div style={{
-            background:"var(--paper)", borderRadius:10, padding:"16px 18px", marginBottom:16,
-            border:"1px solid var(--line)",
-          }}>
-            <p style={{margin:0, fontSize:14, lineHeight:1.55, color:"var(--ink)"}}>
+          <div
+            style={{
+              background: 'var(--paper)',
+              borderRadius: 10,
+              padding: '16px 18px',
+              marginBottom: 16,
+              border: '1px solid var(--line)',
+            }}
+          >
+            <p style={{ margin: 0, fontSize: 14, lineHeight: 1.55, color: 'var(--ink)' }}>
               If your club is missing one of the required documents, reach out to the union office.
             </p>
           </div>
-
-          <div style={{fontSize:10.5, letterSpacing:"0.12em", textTransform:"uppercase", color:"var(--muted-2)", fontFamily:"'Montserrat',sans-serif", fontWeight:700, marginBottom:8}}>Contacts</div>
-
-          <div style={{display:"flex", flexDirection:"column", gap:10}}>
-            {HELP_CONTACTS.map(c => (
-              <a key={c.email} href={`mailto:${c.email}`} style={{
-                display:"flex", alignItems:"center", gap:14, padding:"14px 16px",
-                border:"1px solid var(--line)", borderRadius:10, background:"var(--white)",
-                textDecoration:"none", color:"inherit",
-              }}>
-                <div style={{
-                  width:38, height:38, borderRadius:"50%", flexShrink:0,
-                  background:"rgba(15,143,74,0.12)", color:"var(--teal-deep)",
-                  display:"flex", alignItems:"center", justifyContent:"center",
-                  fontFamily:"'Montserrat',sans-serif", fontSize:13, fontWeight:700,
-                }}>{c.name[0]}</div>
-                <div style={{flex:1, minWidth:0}}>
-                  <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:13, fontWeight:700, color:"var(--ink)"}}>{c.name}</div>
-                  <div style={{fontSize:11.5, color:"var(--muted)"}}>{c.role}</div>
-                  <div style={{fontSize:12, color:"var(--teal-deep)", marginTop:2, fontWeight:500}}>{c.email}</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {contacts.map((c) => (
+              <a
+                key={c.email || c.name}
+                href={c.email ? `mailto:${c.email}` : undefined}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 14,
+                  padding: '14px 16px',
+                  border: '1px solid var(--line)',
+                  borderRadius: 10,
+                  background: 'var(--white)',
+                  textDecoration: 'none',
+                  color: 'inherit',
+                }}
+              >
+                <div
+                  style={{
+                    width: 38,
+                    height: 38,
+                    borderRadius: '50%',
+                    flexShrink: 0,
+                    background: 'rgba(15,143,74,0.12)',
+                    color: 'var(--teal-deep)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontFamily: "'Montserrat',sans-serif",
+                    fontSize: 13,
+                    fontWeight: 700,
+                  }}
+                >
+                  {c.name[0]}
                 </div>
-                <span style={{color:"var(--muted-2)"}}><Icon.Mail/></span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontFamily: "'Montserrat',sans-serif",
+                      fontSize: 13,
+                      fontWeight: 700,
+                      color: 'var(--ink)',
+                    }}
+                  >
+                    {c.name}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--muted)' }}>{c.role}</div>
+                  {c.email && (
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: 'var(--teal-deep)',
+                        marginTop: 2,
+                        fontWeight: 500,
+                      }}
+                    >
+                      {c.email}
+                    </div>
+                  )}
+                </div>
+                <span style={{ color: 'var(--muted-2)' }}>
+                  <Icon.Mail />
+                </span>
               </a>
             ))}
           </div>
-
-          <div style={{fontSize:11.5, color:"var(--muted)", marginTop:14, fontStyle:"italic"}}>
-            Tip: include your club name and which document is outstanding so the office can help quickly.
+          <div
+            style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 14, fontStyle: 'italic' }}
+          >
+            Tip: include your club name and which document is outstanding so the office can help
+            quickly.
           </div>
         </div>
       </div>
@@ -196,390 +163,774 @@ function HelpModal({ onClose }) {
 }
 
 /* ─── TaskModal — wraps the affiliation form & documents view ─── */
-function TaskModal({ eyebrow, title, sub, onClose, narrow, children }) {
+function TaskModal({ eyebrow, title, onClose, narrow, children }) {
   useEscapeClose(onClose);
   return (
-    <div className="task-modal-backdrop" onClick={e=>e.target===e.currentTarget && onClose()}>
-      <div className={`task-modal ${narrow?"narrow":""}`}>
+    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className={`task-modal ${narrow ? 'narrow' : ''}`}>
         <div className="task-modal-head">
           <div className="task-modal-head-text">
             {eyebrow && <div className="task-modal-head-eyebrow">{eyebrow}</div>}
             <div className="task-modal-head-title">{title}</div>
           </div>
-          <button className="task-modal-close" onClick={onClose} title="Close (your inputs are saved)">
-            <Icon.X/>
+          <button
+            className="task-modal-close"
+            onClick={onClose}
+            title="Close (your inputs are saved)"
+          >
+            <Icon.X />
           </button>
         </div>
-        <div className="task-modal-body">
-          {children}
-        </div>
+        <div className="task-modal-body">{children}</div>
       </div>
     </div>
   );
 }
 
+/* ─── Splash / status screens ─── */
+function Splash({ message }) {
+  return (
+    <div className="ps-screen">
+      <div className="ps-intro" style={{ textAlign: 'center' }}>
+        <div className="ps-eyebrow">Smart Club Integration</div>
+        <p className="ps-desc">{message}</p>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Root ─── */
 function App() {
   return (
-    <BrowserRouter>
-      <AppRoutes/>
-    </BrowserRouter>
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <BrowserRouter>
+          <AppRoutes />
+        </BrowserRouter>
+      </AuthProvider>
+    </QueryClientProvider>
   );
 }
 
 function AppRoutes() {
-  const [clubs, setClubs] = useStateApp(SAMPLE_CLUBS);
-  const [allSeries, setAllSeries] = useStateApp(SERIES);
-  const [onboarded, setOnboarded] = useStateApp({});
+  const { status } = useAuth();
+
+  // Tenant branding/config (public). Apply theme as soon as it loads.
+  const tenantQuery = useQuery({ queryKey: qk.tenant(), queryFn: api.getTenant, retry: 0 });
+  useEffect(() => {
+    if (tenantQuery.data?.branding) applyTheme(tenantQuery.data.branding);
+  }, [tenantQuery.data]);
+
+  return (
+    <Routes>
+      {/* Public player registration — available with or without auth. */}
+      <Route path="/register/:clubId" element={<RegisterPage />} />
+      <Route
+        path="/*"
+        element={
+          status === 'loading' ? (
+            <Splash message="Loading…" />
+          ) : status === 'signedIn' ? (
+            <AuthedApp tenantConfig={tenantQuery.data} />
+          ) : (
+            <Login tenantConfig={tenantQuery.data} />
+          )
+        }
+      />
+    </Routes>
+  );
+}
+
+/* ─── Authenticated app: loads tenant-scoped data + builds API-backed handlers ─── */
+function AuthedApp({ tenantConfig }) {
+  const { memberships, email, signOutUser } = useAuth();
+  const [toastShow, toastNode] = useToast();
   const [showOnboarding, setShowOnboarding] = useStateApp(false);
   const [showCreateSeries, setShowCreateSeries] = useStateApp(false);
   const [showHelp, setShowHelp] = useStateApp(false);
-  const [submissionDeadline, setSubmissionDeadline] = useStateApp(SUBMISSION_DEADLINE_DEFAULT);
-  const [toastShow, toastNode] = useToast();
-  const navigate = useNavigate();
 
+  const membership = membershipFor(memberships, TENANT_SLUG);
+  const role = membership?.role === 'admin' ? 'admin' : 'club';
+
+  // ── Data ──
+  const clubsQuery = useQuery({
+    queryKey: qk.clubs(),
+    queryFn: api.getClubs,
+    enabled: !!membership && role === 'admin',
+  });
+  const repClubQueries = useQueries({
+    queries: (membership && role === 'club' ? membership.clubIds : []).map((id) => ({
+      queryKey: qk.club(id),
+      queryFn: () => api.getClub(id),
+    })),
+  });
+  const seriesQuery = useQuery({
+    queryKey: qk.series(),
+    queryFn: api.getSeriesList,
+    enabled: !!membership,
+  });
+  const meQuery = useQuery({ queryKey: qk.me(), queryFn: api.getMe, enabled: !!membership });
+
+  if (!membership) {
+    return (
+      <div className="ps-screen">
+        <div className="ps-intro" style={{ textAlign: 'center' }}>
+          <h1 className="ps-title" style={{ fontSize: 22 }}>
+            No access
+          </h1>
+          <p className="ps-desc">
+            Your account isn&apos;t linked to {tenantConfig?.branding?.name ?? 'this union'}. Ask an
+            administrator to invite you, or sign out and try another account.
+          </p>
+          <Btn tone="ink" size="sm" onClick={signOutUser}>
+            Sign out
+          </Btn>
+        </div>
+      </div>
+    );
+  }
+
+  const clubs =
+    role === 'admin' ? (clubsQuery.data ?? []) : repClubQueries.map((q) => q.data).filter(Boolean);
+  const allSeries = seriesQuery.data ?? [];
+  const onboarded = meQuery.data?.onboardingSeen ?? {};
+  const submissionDeadline = tenantConfig?.submissionDeadline ?? SUBMISSION_DEADLINE_DEFAULT;
+
+  const dataLoading =
+    role === 'admin' ? clubsQuery.isLoading : repClubQueries.some((q) => q.isLoading);
+  const dataError = role === 'admin' ? clubsQuery.isError : repClubQueries.some((q) => q.isError);
+  if (dataLoading || seriesQuery.isLoading) return <Splash message="Loading your clubs…" />;
+  if (dataError || seriesQuery.isError)
+    return <Splash message="Could not load your clubs. Refresh to retry." />;
+
+  // ── Series mutations (preserve prototype signatures; back with the API) ──
+  const invalidate = (key) => queryClient.invalidateQueries({ queryKey: key });
+  async function withToast(fn, errMsg) {
+    try {
+      return await fn();
+    } catch (err) {
+      const conflict = err instanceof ApiError && err.status === 409;
+      toastShow(
+        conflict ? 'Someone else just changed this — refreshing.' : errMsg || err.message,
+        'warn',
+      );
+      if (conflict) {
+        invalidate(qk.clubs());
+        invalidate(qk.series());
+      }
+      throw err;
+    }
+  }
+  // updateSeries keeps the (id, updater) shape: apply the updater to the cached
+  // series, then PATCH the computed value with its version (→ 409 on conflict).
   function updateSeries(seriesId, updater) {
-    setAllSeries(prev => prev.map(s => s.id === seriesId ? updater(s) : s));
+    const cur = allSeries.find((s) => s.id === seriesId);
+    if (!cur) return;
+    const next = updater(cur);
+    withToast(
+      () => api.patchSeries(seriesId, { ...next, version: cur.version }),
+      'Could not save fixtures',
+    )
+      .then(() => invalidate(qk.series()))
+      .catch(() => {});
   }
   function deleteSeries(seriesId) {
-    setAllSeries(prev => prev.filter(s => s.id !== seriesId));
+    withToast(() => api.deleteSeriesReq(seriesId), 'Could not delete series')
+      .then(() => invalidate(qk.series()))
+      .catch(() => {});
   }
   function duplicateSeries(seriesId) {
-    setAllSeries(prev => {
-      const orig = prev.find(s => s.id === seriesId);
-      if (!orig) return prev;
-      const copy = {
-        ...orig,
-        id: "s-" + Date.now(),
-        name: orig.name + " · Copy",
-        released: false, releasedAt: null,
-        fixtures: orig.fixtures.map((f, i) => ({...f, id: "fc" + Date.now() + "_" + i})),
-      };
-      return [...prev, copy];
-    });
+    withToast(() => api.duplicateSeriesReq(seriesId), 'Could not duplicate series')
+      .then(() => invalidate(qk.series()))
+      .catch(() => {});
   }
   function setReleased(seriesId, value) {
-    setAllSeries(prev => prev.map(s => s.id === seriesId
-      ? {...s, released: value, releasedAt: value ? new Date().toISOString() : null}
-      : s));
+    // Send the cached version so release/recall is race-safe (409 on conflict),
+    // not silent last-write-wins.
+    const cur = allSeries.find((s) => s.id === seriesId);
+    withToast(
+      () => api.patchSeries(seriesId, { released: value, version: cur?.version }),
+      'Could not update release',
+    )
+      .then(() => invalidate(qk.series()))
+      .catch(() => {});
   }
-
-  const shellProps = {
-    clubs, setClubs, allSeries, setAllSeries, toastShow,
-    onboarded, setOnboarded, showOnboarding, setShowOnboarding,
-    showCreateSeries, setShowCreateSeries,
-    showHelp, setShowHelp,
-    submissionDeadline, setSubmissionDeadline,
-    updateSeries, deleteSeries, duplicateSeries, setReleased,
-  };
+  function setSubmissionDeadline(iso) {
+    withToast(() => api.putTenantConfig({ submissionDeadline: iso }), 'Could not save deadline')
+      .then(() => invalidate(qk.tenant()))
+      .catch(() => {});
+  }
+  function setOnboarded(updater) {
+    const next = typeof updater === 'function' ? updater(onboarded) : updater;
+    api
+      .patchMe({ onboardingSeen: next })
+      .then(() => invalidate(qk.me()))
+      .catch(() => {});
+  }
+  function onCreateSeries(s) {
+    return withToast(() => api.createSeries(s), 'Could not create series').then((created) => {
+      invalidate(qk.series());
+      return created;
+    });
+  }
 
   return (
     <>
       <Routes>
-        <Route path="/" element={
-          <ProfileSelect
-            clubs={clubs}
-            submissionDeadline={submissionDeadline}
-            onSelect={(r) => navigate(r === "admin" ? "/admin/dashboard" : "/club/phoenix")}
-          />
-        }/>
-        <Route path="/admin/*" element={<Shell role="admin" {...shellProps}/>}/>
-        <Route path="/club/:clubId/*" element={<Shell role="club" {...shellProps}/>}/>
-        <Route path="*" element={<Navigate to="/" replace/>}/>
+        <Route
+          path="/"
+          element={
+            <Navigate
+              to={role === 'admin' ? '/admin/dashboard' : `/club/${membership.clubIds[0] ?? ''}`}
+              replace
+            />
+          }
+        />
+        <Route
+          path="/admin/*"
+          element={
+            role === 'admin' ? (
+              <Shell
+                role="admin"
+                {...{
+                  clubs,
+                  allSeries,
+                  toastShow,
+                  onboarded,
+                  setOnboarded,
+                  showOnboarding,
+                  setShowOnboarding,
+                  showCreateSeries,
+                  setShowCreateSeries,
+                  showHelp,
+                  setShowHelp,
+                  submissionDeadline,
+                  setSubmissionDeadline,
+                  updateSeries,
+                  deleteSeries,
+                  duplicateSeries,
+                  setReleased,
+                  onCreateSeries,
+                  withToast,
+                  invalidate,
+                  membership,
+                  tenantConfig,
+                  userEmail: email,
+                  signOutUser,
+                }}
+              />
+            ) : (
+              <Navigate to={`/club/${membership.clubIds[0] ?? ''}`} replace />
+            )
+          }
+        />
+        <Route
+          path="/club/:clubId/*"
+          element={
+            <Shell
+              role="club"
+              {...{
+                clubs,
+                allSeries,
+                toastShow,
+                onboarded,
+                setOnboarded,
+                showOnboarding,
+                setShowOnboarding,
+                showCreateSeries,
+                setShowCreateSeries,
+                showHelp,
+                setShowHelp,
+                submissionDeadline,
+                setSubmissionDeadline,
+                updateSeries,
+                deleteSeries,
+                duplicateSeries,
+                setReleased,
+                onCreateSeries,
+                withToast,
+                invalidate,
+                membership,
+                tenantConfig,
+                userEmail: email,
+                signOutUser,
+              }}
+            />
+          }
+        />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       {toastNode}
-      {showHelp && <HelpModal onClose={()=>setShowHelp(false)}/>}
+      {showHelp && (
+        <HelpModal
+          onClose={() => setShowHelp(false)}
+          support={tenantConfig?.branding?.copy?.support}
+        />
+      )}
     </>
   );
 }
 
 function Shell({
-  role, clubs, setClubs, allSeries, setAllSeries, toastShow,
-  onboarded, setOnboarded, showOnboarding, setShowOnboarding,
-  showCreateSeries, setShowCreateSeries,
-  showHelp, setShowHelp,
-  submissionDeadline, setSubmissionDeadline,
-  updateSeries, deleteSeries, duplicateSeries, setReleased,
+  role,
+  clubs,
+  allSeries,
+  toastShow,
+  onboarded,
+  setOnboarded,
+  showOnboarding,
+  setShowOnboarding,
+  showCreateSeries,
+  setShowCreateSeries,
+  showHelp,
+  setShowHelp,
+  submissionDeadline,
+  setSubmissionDeadline,
+  updateSeries,
+  deleteSeries,
+  duplicateSeries,
+  setReleased,
+  onCreateSeries,
+  withToast,
+  invalidate,
+  membership,
+  tenantConfig,
+  userEmail,
+  signOutUser,
 }) {
   const navigate = useNavigate();
   const location = useLocation();
   const routeParams = useParams();
+  const branding = tenantConfig?.branding;
 
   // ── Derive clubId from URL ──
   let clubId;
-  if (role === "club") {
+  if (role === 'club') {
     clubId = routeParams.clubId;
   } else {
     const m = location.pathname.match(/^\/admin\/clubs\/([^/]+)/);
-    clubId = m ? m[1] : "phoenix";   // fallback for header avatar before drilling in
+    clubId = m ? m[1] : (clubs[0]?.id ?? '');
   }
 
   const activeClub = useMemoApp(
-    () => clubs.find(c => c.id === clubId) || clubs[0],
-    [clubs, clubId]
+    () => clubs.find((c) => c.id === clubId) || clubs[0],
+    [clubs, clubId],
   );
 
-  // ── Derive view from URL (used for nav highlighting & modal logic) ──
+  // ── Derive view from URL ──
   let view;
-  if (role === "admin") {
-    const seg = location.pathname.replace(/^\/admin\/?/, "");
-    if (seg.startsWith("clubs/")) view = "club_detail";
-    else if (seg === "clubs") view = "clubs_list";
-    else if (seg === "cqi") view = "cqi_admin";
-    else if (seg === "" || seg === "dashboard") view = "dashboard";
-    else view = seg;                 // affiliations | documents | fixtures
+  if (role === 'admin') {
+    const seg = location.pathname.replace(/^\/admin\/?/, '');
+    if (seg.startsWith('clubs/')) view = 'club_detail';
+    else if (seg === 'clubs') view = 'clubs_list';
+    else if (seg === 'cqi') view = 'cqi_admin';
+    else if (seg === '' || seg === 'dashboard') view = 'dashboard';
+    else view = seg;
   } else {
     const base = `/club/${clubId}`;
-    if (location.pathname === base || location.pathname === base + "/") view = "home";
+    if (location.pathname === base || location.pathname === base + '/') view = 'home';
     else view = location.pathname.slice(base.length + 1);
   }
 
   // ── Auto-open onboarding the first time a club portal is entered ──
   useEffect(() => {
-    if (role === "club" && activeClub && !activeClub.paid && !onboarded[clubId]) {
+    if (role === 'club' && activeClub && !activeClub.paid && !onboarded[clubId]) {
       const t = setTimeout(() => setShowOnboarding(true), 350);
       return () => clearTimeout(t);
     }
-  }, [role, clubId]); // re-fire when URL switches club
+  }, [role, clubId]);
 
-  // ── Navigation helpers (replace old setView/setRole/setClubId) ──
+  // ── Navigation helpers ──
   function switchProfile() {
     setShowOnboarding(false);
-    navigate("/");
+    signOutUser();
   }
   function gotoAdminView(v) {
-    const map = { dashboard:"dashboard", clubs_list:"clubs", cqi_admin:"cqi" };
+    const map = { dashboard: 'dashboard', clubs_list: 'clubs', cqi_admin: 'cqi' };
     navigate(`/admin/${map[v] || v}`);
   }
   function gotoClubView(v, cid = clubId) {
-    navigate(v === "home" ? `/club/${cid}` : `/club/${cid}/${v}`);
+    navigate(v === 'home' ? `/club/${cid}` : `/club/${cid}/${v}`);
   }
   function setActiveClub(id) {
-    if (role === "admin") navigate(`/admin/clubs/${id}`);
-    else gotoClubView("home", id);
-  }
-  function changeRole(r) {
-    if (r === "admin") navigate("/admin/dashboard");
-    else navigate(`/club/${clubId}`);
+    if (role === 'admin') navigate(`/admin/clubs/${id}`);
+    else gotoClubView('home', id);
   }
   function changeClub(id) {
     navigate(`/club/${id}`);
-    const c = clubs.find(x => x.id === id);
-    if (!onboarded[id] && c && !c.paid) {
-      setTimeout(() => setShowOnboarding(true), 250);
-    }
+    const c = clubs.find((x) => x.id === id);
+    if (!onboarded[id] && c && !c.paid) setTimeout(() => setShowOnboarding(true), 250);
   }
 
-  // ── Club mutations (curried by current clubId) ──
+  // ── Club mutations (API-backed; curried by current clubId) ──
   function updateClub(updates) {
-    setClubs(cs => cs.map(c => c.id === clubId ? {...c, ...updates} : c));
+    return withToast(
+      () => api.patchClub(clubId, { ...updates, version: activeClub?.version }),
+      'Could not save changes',
+    )
+      .then(() => {
+        invalidate(qk.club(clubId));
+        invalidate(qk.clubs());
+      })
+      .catch(() => {});
   }
-  function uploadDoc(key) {
-    setClubs(cs => cs.map(c => c.id === clubId ? {...c, docs: {...c.docs, [key]: true}} : c));
+  // Compliance doc: DocumentsView uploads to S3 first, then calls this with the
+  // stored object metadata. (No-arg legacy callers just flip the flag server-side.)
+  function uploadDoc(key, meta) {
+    return withToast(
+      () => api.markDocUploaded(clubId, key, meta ?? { objectKey: '', size: 0 }),
+      'Could not record upload',
+    )
+      .then(() => {
+        invalidate(qk.club(clubId));
+        invalidate(qk.clubs());
+      })
+      .catch(() => {});
   }
   function saveExco(members) {
-    setClubs(cs => cs.map(c => c.id === clubId
-      ? {...c, exco: members, docs: {...c.docs, exco: true}}
-      : c));
+    return withToast(() => api.saveExco(clubId, members), 'Could not save exco')
+      .then(() => {
+        invalidate(qk.club(clubId));
+        invalidate(qk.clubs());
+      })
+      .catch(() => {});
   }
-  // Issue a new player-registration link for an arbitrary club id (admin tool).
-  // Token is short, URL-safe and unique per generation so regenerating invalidates the old one.
-  function generatePlayerRegLink(targetClubId) {
-    const token = Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
-    const createdAt = new Date().toISOString();
-    setClubs(cs => cs.map(c => c.id === targetClubId
-      ? {...c, playerRegLink: { token, createdAt }}
-      : c));
-    return { token, createdAt };
+  function setPaid(id, paid) {
+    return withToast(() => api.setPaid(id, paid), 'Could not update payment')
+      .then(() => {
+        invalidate(qk.club(id));
+        invalidate(qk.clubs());
+      })
+      .catch(() => {});
   }
-
-  // Shared helpers for the onboard-club flow.
-  const _SUB_FOR = (d) => d === "Ethekwini Metro Cricket Union" ? "EMCU"
-                      : d === "Illembe Cricket District" ? "Ilembe"
-                      : d === "Ugu Cricket District" ? "Southern Natal"
-                      : d === "KCCD" ? "King Cetshwayo"
-                      : d === "Umkhanyakude Cricket District" ? "King Cetshwayo"
-                      : "—";
-  const _PALETTE = ["#1B2A4A","#1D9E75","#C8A84B","#D85A30","#2E4070","#8A6E1C","#243356"];
-  function _buildClubFromSpec(spec, takenIds, paletteOffset) {
-    const slugBase = (spec.name || "club").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "club";
-    let id = slugBase, n = 2;
-    while (takenIds.has(id)) { id = `${slugBase}-${n++}`; }
-    takenIds.add(id);
-    const district = spec.district || "Ethekwini Metro Cricket Union";
-    return {
-      id, name: spec.name.trim(),
-      district, sub: _SUB_FOR(district),
-      chair: (spec.chair || "").trim() || "—",
-      affiliation: "not_started", paid: false, cqi: 0,
-      docs: { constitution:false, agm:false, financials:false, exco:false },
-      players: 0, teams: 0, women: 0, juniors: 0,
-      color: _PALETTE[paletteOffset % _PALETTE.length],
-      ground: null, leagues: [],
-      exco: { chair: { name: (spec.chair || "").trim(), cell: spec.chairCell || "", email: spec.chairEmail || "" } },
-      onboardedAt: new Date().toISOString(),
-    };
+  // Admin invites a rep/admin: creates the Cognito account + membership server-side.
+  function inviteUser(spec) {
+    return withToast(() => api.inviteUser(spec), 'Could not send invite');
   }
-  // Admin: onboard a brand-new club into the cohort. Returns the created club
-  // so callers can email / WhatsApp the chair the onboarding link straight away.
-  function onboardClub(spec) {
-    const taken = new Set(clubs.map(c => c.id));
-    const newClub = _buildClubFromSpec(spec, taken, clubs.length);
-    setClubs(cs => [...cs, newClub]);
-    return newClub;
+  async function generatePlayerRegLink(targetClubId) {
+    const res = await withToast(() => api.generateRegLink(targetClubId), 'Could not create link');
+    invalidate(qk.club(targetClubId));
+    invalidate(qk.clubs());
+    return res?.playerRegLink;
   }
-  // Admin: bulk onboard. Atomic add — every new club gets a unique id and the
-  // entire batch lands in a single setClubs call so React sees one state change.
-  // Returns the array of created clubs so the share view can render per-row.
-  function bulkOnboardClubs(specs) {
-    if (!Array.isArray(specs) || specs.length === 0) return [];
-    const taken = new Set(clubs.map(c => c.id));
-    const baseOffset = clubs.length;
-    const created = specs.map((s, i) => _buildClubFromSpec(s, taken, baseOffset + i));
-    setClubs(cs => [...cs, ...created]);
+  async function onboardClub(spec) {
+    const created = await withToast(() => api.onboardClub(spec), 'Could not onboard club');
+    invalidate(qk.clubs());
     return created;
   }
+  async function bulkOnboardClubs(specs) {
+    if (!Array.isArray(specs) || specs.length === 0) return [];
+    // The API returns { created, skipped } (per-spec, non-atomic). Surface skips.
+    const res = await withToast(() => api.bulkOnboardClubs(specs), 'Could not onboard clubs');
+    invalidate(qk.clubs());
+    if (res?.skipped?.length) {
+      toastShow(`${res.skipped.length} skipped (duplicate or invalid name)`, 'warn');
+    }
+    return res?.created ?? [];
+  }
 
-  // — NAV definition —
+  if (!activeClub && role === 'club') {
+    return <Splash message="This club isn't available on your account." />;
+  }
+
+  // — NAV —
   const adminNav = [
-    { v:"dashboard",   label:"Cohort Dashboard", icon:Icon.Dashboard },
-    { v:"clubs_list",  label:"All Clubs",        icon:Icon.Clubs, num: clubs.length },
-    { v:"affiliations",label:"Affiliations",     icon:Icon.Form,  num: clubs.filter(c=>c.paid).length+"/"+clubs.length, dot: clubs.filter(c=>!c.paid).length ? "gold" : "teal" },
-    { v:"documents",   label:"Compliance Docs",  icon:Icon.Upload, num: clubs.filter(c=>Object.values(c.docs).every(v=>v)).length+"/"+clubs.length, dot:"gold" },
-    { v:"cqi_admin",   label:"CQI Submissions",  icon:Icon.Star,   num: clubs.filter(c=>c.cqi>0).length+"/"+clubs.length, dot:"gold" },
-    { v:"fixtures",   label:"Fixtures & Venues", icon:Icon.Field,  dot:"teal" },
+    { v: 'dashboard', label: 'Cohort Dashboard', icon: Icon.Dashboard },
+    { v: 'clubs_list', label: 'All Clubs', icon: Icon.Clubs, num: clubs.length },
+    {
+      v: 'affiliations',
+      label: 'Affiliations',
+      icon: Icon.Form,
+      num: clubs.filter((c) => c.paid).length + '/' + clubs.length,
+      dot: clubs.filter((c) => !c.paid).length ? 'gold' : 'teal',
+    },
+    {
+      v: 'documents',
+      label: 'Compliance Docs',
+      icon: Icon.Upload,
+      num: clubs.filter((c) => Object.values(c.docs).every((v) => v)).length + '/' + clubs.length,
+      dot: 'gold',
+    },
+    {
+      v: 'cqi_admin',
+      label: 'CQI Submissions',
+      icon: Icon.Star,
+      num: clubs.filter((c) => c.cqi > 0).length + '/' + clubs.length,
+      dot: 'gold',
+    },
+    { v: 'fixtures', label: 'Fixtures & Venues', icon: Icon.Field, dot: 'teal' },
   ];
 
-  // Has any released series that includes this club?
-  const releasedForMe = allSeries.filter(s => s.released && s.teams.includes(clubId));
+  const releasedForMe = allSeries.filter((s) => s.released && s.teams.includes(clubId));
   const hasReleased = releasedForMe.length > 0;
 
   const clubNav = [
-    { v:"home",        label:"Home",           icon:Icon.Dashboard },
-    { v:"affiliation", label:"Affiliation",    icon:Icon.Form,    dot: activeClub.paid ? "teal" : "coral" },
-    { v:"documents",   label:"Documents",      icon:Icon.Upload,  dot: docCompletion(activeClub)===100 ? "teal" : "gold" },
-    { v:"cqi",         label:"CQI",            icon:Icon.Star,    dot: activeClub.cqi>0 ? "teal" : "muted" },
-    { v:"fixtures",    label:"Fixtures",       icon:Icon.Field,
-      dot: hasReleased ? "teal" : activeClub.paid ? "gold" : "muted",
-      num: hasReleased ? "NEW" : undefined },
-    { v:"_help",       label:"Need Help?",     icon:Icon.Mail,    action:()=>setShowHelp(true) },
+    { v: 'home', label: 'Home', icon: Icon.Dashboard },
+    {
+      v: 'affiliation',
+      label: 'Affiliation',
+      icon: Icon.Form,
+      dot: activeClub.paid ? 'teal' : 'coral',
+    },
+    {
+      v: 'documents',
+      label: 'Documents',
+      icon: Icon.Upload,
+      dot: docCompletion(activeClub) === 100 ? 'teal' : 'gold',
+    },
+    { v: 'cqi', label: 'CQI', icon: Icon.Star, dot: activeClub.cqi > 0 ? 'teal' : 'muted' },
+    {
+      v: 'fixtures',
+      label: 'Fixtures',
+      icon: Icon.Field,
+      dot: hasReleased ? 'teal' : activeClub.paid ? 'gold' : 'muted',
+      num: hasReleased ? 'NEW' : undefined,
+    },
+    { v: '_help', label: 'Need Help?', icon: Icon.Mail, action: () => setShowHelp(true) },
   ];
 
-  const nav = role === "admin" ? adminNav : clubNav;
+  const nav = role === 'admin' ? adminNav : clubNav;
+  const orgName = branding?.name ?? 'Smart Club';
+  const orgFooter = branding?.copy?.footer ?? 'Powered by Medicoach';
 
-  // — render main pane —
   function renderMain() {
-    if (role === "admin") {
-      const gotoList = () => gotoAdminView("clubs_list");
-      if (view === "dashboard")    return <AdminDashboard clubs={clubs} gotoClub={setActiveClub} gotoList={gotoList} gotoAdminView={gotoAdminView} toast={toastShow} submissionDeadline={submissionDeadline} onUpdateDeadline={setSubmissionDeadline} />;
-      if (view === "clubs_list")   return <AdminClubsList clubs={clubs} gotoClub={setActiveClub} toast={toastShow} submissionDeadline={submissionDeadline} onOnboardClub={onboardClub} onBulkOnboardClubs={bulkOnboardClubs} />;
-      if (view === "club_detail")  return <AdminClubDetail club={activeClub} gotoList={gotoList} onGenerateLink={()=>generatePlayerRegLink(activeClub.id)} toast={toastShow}/>;
-      if (view === "affiliations") return <AdminFiltered clubs={clubs} kind="affiliation" gotoClub={setActiveClub}/>;
-      if (view === "documents")    return <AdminFiltered clubs={clubs} kind="docs" gotoClub={setActiveClub}/>;
-      if (view === "cqi_admin")    return <AdminFiltered clubs={clubs} kind="cqi" gotoClub={setActiveClub}/>;
-      if (view === "fixtures")     return <AdminFixtures
-                                              clubs={clubs}
-                                              allSeries={allSeries}
-                                              onCreateSeries={()=>setShowCreateSeries(true)}
-                                              onUpdateSeries={updateSeries}
-                                              onDeleteSeries={deleteSeries}
-                                              onDuplicateSeries={duplicateSeries}
-                                              onSetReleased={setReleased}
-                                              toast={toastShow}
-                                            />;
+    if (role === 'admin') {
+      const gotoList = () => gotoAdminView('clubs_list');
+      if (view === 'dashboard')
+        return (
+          <AdminDashboard
+            clubs={clubs}
+            gotoClub={setActiveClub}
+            gotoList={gotoList}
+            gotoAdminView={gotoAdminView}
+            toast={toastShow}
+            submissionDeadline={submissionDeadline}
+            onUpdateDeadline={setSubmissionDeadline}
+          />
+        );
+      if (view === 'clubs_list')
+        return (
+          <AdminClubsList
+            clubs={clubs}
+            gotoClub={setActiveClub}
+            toast={toastShow}
+            submissionDeadline={submissionDeadline}
+            onOnboardClub={onboardClub}
+            onBulkOnboardClubs={bulkOnboardClubs}
+          />
+        );
+      if (view === 'club_detail')
+        return (
+          <AdminClubDetail
+            club={activeClub}
+            gotoList={gotoList}
+            onGenerateLink={() => generatePlayerRegLink(activeClub.id)}
+            onSetPaid={setPaid}
+            onInvite={inviteUser}
+            toast={toastShow}
+          />
+        );
+      if (view === 'affiliations')
+        return <AdminFiltered clubs={clubs} kind="affiliation" gotoClub={setActiveClub} />;
+      if (view === 'documents')
+        return <AdminFiltered clubs={clubs} kind="docs" gotoClub={setActiveClub} />;
+      if (view === 'cqi_admin')
+        return <AdminFiltered clubs={clubs} kind="cqi" gotoClub={setActiveClub} />;
+      if (view === 'fixtures')
+        return (
+          <AdminFixtures
+            clubs={clubs}
+            allSeries={allSeries}
+            onCreateSeries={() => setShowCreateSeries(true)}
+            onUpdateSeries={updateSeries}
+            onDeleteSeries={deleteSeries}
+            onDuplicateSeries={duplicateSeries}
+            onSetReleased={setReleased}
+            toast={toastShow}
+          />
+        );
     } else {
-      // Affiliation + Documents render in modals layered on top of Home (handled below).
-      // The base content stays Home while those are open.
-      if (view === "home" || view === "affiliation" || view === "documents")
-        return <ClubHome club={activeClub} goto={gotoClubView} toast={toastShow} replayOnboarding={()=>setShowOnboarding(true)} submissionDeadline={submissionDeadline}/>;
-      if (view === "cqi")      return <CQIView club={activeClub} goto={gotoClubView} toast={toastShow}
-                                       submissionDeadline={submissionDeadline}
-                                       onSubmit={(score)=>{ updateClub({cqi: score}); gotoClubView("home"); }}/>;
-      if (view === "fixtures") {
-        // Locked until affiliation is paid
-        if (!activeClub.paid) return <ComingSoon title="Fixtures & Venues" phase="02" unlocked={false} eta="Aug 2026"/>;
-        return <ClubFixturesView club={activeClub} allSeries={allSeries} clubs={clubs} toast={toastShow}/>;
+      if (view === 'home' || view === 'affiliation' || view === 'documents')
+        return (
+          <ClubHome
+            club={activeClub}
+            goto={gotoClubView}
+            toast={toastShow}
+            replayOnboarding={() => setShowOnboarding(true)}
+            submissionDeadline={submissionDeadline}
+          />
+        );
+      if (view === 'cqi')
+        return (
+          <CQIView
+            club={activeClub}
+            goto={gotoClubView}
+            toast={toastShow}
+            submissionDeadline={submissionDeadline}
+            onSubmit={(score, answers) => {
+              updateClub({ cqi: score, cqiAnswers: answers });
+              gotoClubView('home');
+            }}
+          />
+        );
+      if (view === 'fixtures') {
+        if (!activeClub.paid)
+          return (
+            <ComingSoon title="Fixtures & Venues" phase="02" unlocked={false} eta="Aug 2026" />
+          );
+        return (
+          <ClubFixturesView
+            club={activeClub}
+            allSeries={allSeries}
+            clubs={clubs}
+            toast={toastShow}
+          />
+        );
       }
     }
     return null;
   }
 
+  const userName = role === 'admin' ? userEmail || 'Admin' : activeClub.chair;
+  const userInitials =
+    role === 'admin'
+      ? (userEmail || 'A').slice(0, 2).toUpperCase()
+      : activeClub.chair
+          .split(' ')
+          .map((w) => w[0])
+          .slice(0, 2)
+          .join('');
+
   return (
-    <div data-screen-label={role === "admin" ? "Admin · " + view : "Club · " + view}>
-      {/* ─── Top header ─── */}
+    <div data-screen-label={role === 'admin' ? 'Admin · ' + view : 'Club · ' + view}>
       <header className="app-header">
         <div className="h-logo">
-          <img className="h-logo-img" src="/dolphins-pipeline-logo.png" alt="Hollywoodbets Dolphins Pipeline"/>
+          {branding?.logoUrl && <img className="h-logo-img" src={branding.logoUrl} alt={orgName} />}
         </div>
-        <div className="h-divider"/>
+        <div className="h-divider" />
         <span className="h-sub">Smart Club Integration · Cricket Services</span>
 
-        <div className="h-spacer"/>
+        <div className="h-spacer" />
 
-        {/* Role switch */}
-        <div className="role-switch" title="Switch perspective">
-          <button className={`role-btn ${role==="admin"?"active":""}`} onClick={()=>changeRole("admin")}>Admin · Dolphins</button>
-          <button className={`role-btn club ${role==="club"?"active":""}`} onClick={()=>changeRole("club")}>Club</button>
-        </div>
-
-        {/* Club selector for club role */}
-        {role === "club" && (
+        {role === 'club' && clubs.length > 1 && (
           <select
             className="field-select"
-            style={{height:34, width:"auto", minWidth:180, background:"rgba(255,255,255,0.06)", color:"#fff", border:"1px solid rgba(255,255,255,0.08)", paddingRight:30, fontSize:12.5}}
-            value={clubId} onChange={e=>changeClub(e.target.value)}
+            style={{
+              height: 34,
+              width: 'auto',
+              minWidth: 180,
+              background: 'rgba(255,255,255,0.06)',
+              color: '#fff',
+              border: '1px solid rgba(255,255,255,0.08)',
+              paddingRight: 30,
+              fontSize: 12.5,
+            }}
+            value={clubId}
+            onChange={(e) => changeClub(e.target.value)}
           >
-            {clubs.map(c=><option key={c.id} value={c.id} style={{background:"#fff", color:"#000"}}>{c.name}</option>)}
+            {clubs.map((c) => (
+              <option key={c.id} value={c.id} style={{ background: '#fff', color: '#000' }}>
+                {c.name}
+              </option>
+            ))}
           </select>
         )}
 
-        <button className="h-switch" onClick={switchProfile} title="Log out and return to the login page">
-          <svg viewBox="0 0 16 16" fill="none"><path d="M9 2H4a1 1 0 00-1 1v10a1 1 0 001 1h5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/><path d="M11 5l3 3-3 3M7 8h7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
-          Log out
+        <button className="h-switch" onClick={switchProfile} title="Sign out">
+          <svg viewBox="0 0 16 16" fill="none">
+            <path
+              d="M9 2H4a1 1 0 00-1 1v10a1 1 0 001 1h5"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <path
+              d="M11 5l3 3-3 3M7 8h7"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          Sign out
         </button>
 
-        <button className="h-bell"><Icon.Bell/><span className="h-bell-dot"/></button>
+        <button className="h-bell">
+          <Icon.Bell />
+          <span className="h-bell-dot" />
+        </button>
 
         <div className="h-user">
-          <div className="h-avatar" style={{background: role==="admin"?"var(--gold)":"var(--teal)", color: role==="admin"?"var(--ink)":"#fff"}}>
-            {role === "admin" ? "NN" : activeClub.chair.split(" ").map(w=>w[0]).slice(0,2).join("")}
+          <div
+            className="h-avatar"
+            style={{
+              background: role === 'admin' ? 'var(--gold)' : 'var(--teal)',
+              color: role === 'admin' ? 'var(--ink)' : '#fff',
+            }}
+          >
+            {userInitials}
           </div>
           <div>
-            <div className="h-user-name">{role === "admin" ? "Niall Naidoo" : activeClub.chair}</div>
-            <div className="h-user-role">{role === "admin" ? "Dolphins · Admin" : activeClub.name + " · Chair"}</div>
+            <div className="h-user-name">{userName}</div>
+            <div className="h-user-role">
+              {role === 'admin' ? `${orgName} · Admin` : activeClub.name + ' · Chair'}
+            </div>
           </div>
         </div>
       </header>
 
-      {/* ─── Shell ─── */}
       <div className="shell">
-        {/* Left nav */}
         <aside className="nav">
-          <div className="nav-section">{role === "admin" ? "Cohort" : "Integration journey"}</div>
-          {nav.map(n=>(
+          <div className="nav-section">{role === 'admin' ? 'Cohort' : 'Integration journey'}</div>
+          {nav.map((n) => (
             <button
               key={n.v}
-              className={`nav-item ${view===n.v?"active":""}`}
-              onClick={()=> {
-                if (n.action) { n.action(); return; }
-                role === "admin" ? gotoAdminView(n.v) : gotoClubView(n.v);
+              className={`nav-item ${view === n.v ? 'active' : ''}`}
+              onClick={() => {
+                if (n.action) {
+                  n.action();
+                  return;
+                }
+                role === 'admin' ? gotoAdminView(n.v) : gotoClubView(n.v);
               }}
             >
-              <span className="ni-icon"><n.icon/></span>
+              <span className="ni-icon">
+                <n.icon />
+              </span>
               <span className="ni-label">{n.label}</span>
-              {n.num && <span className={`ni-num ${n.num==="NEW"?"new":""}`}>{n.num}</span>}
-              {!n.num && n.dot && <span className={`ni-dot ${n.dot}`}/>}
+              {n.num && <span className={`ni-num ${n.num === 'NEW' ? 'new' : ''}`}>{n.num}</span>}
+              {!n.num && n.dot && <span className={`ni-dot ${n.dot}`} />}
             </button>
           ))}
 
-          {role === "admin" && (
+          {role === 'admin' && (
             <>
-              <div className="nav-section" style={{marginTop:18}}>Workspace</div>
+              <div className="nav-section" style={{ marginTop: 18 }}>
+                Workspace
+              </div>
               {[
-                {v:"_settings", label:"Settings",       icon:Icon.Shield, action:()=>toastShow("Settings coming soon — workspace preferences, notifications and access controls.", "warn")},
-                {v:"_help",     label:"Need Help?",     icon:Icon.Mail,   action:()=>setShowHelp(true)},
-              ].map(n=>(
+                {
+                  v: '_settings',
+                  label: 'Settings',
+                  icon: Icon.Shield,
+                  action: () =>
+                    toastShow(
+                      'Settings coming soon — workspace preferences, notifications and access controls.',
+                      'warn',
+                    ),
+                },
+                {
+                  v: '_help',
+                  label: 'Need Help?',
+                  icon: Icon.Mail,
+                  action: () => setShowHelp(true),
+                },
+              ].map((n) => (
                 <button key={n.v} className="nav-item" onClick={n.action}>
-                  <span className="ni-icon"><n.icon/></span>
+                  <span className="ni-icon">
+                    <n.icon />
+                  </span>
                   <span className="ni-label">{n.label}</span>
                 </button>
               ))}
@@ -587,62 +938,72 @@ function Shell({
           )}
 
           <div className="nav-footer">
-            <strong>Dolphins</strong> · Smart Club Integration<br/>
-            v 0.9.0 · Cricket Services · 2026/27<br/>
-            <span style={{color:"var(--muted-3)"}}>Powered by Medicoach</span>
+            <strong>{orgName}</strong> · Smart Club Integration
+            <br />
+            v 1.0.0 · Cricket Services · 2026/27
+            <br />
+            <span style={{ color: 'var(--muted-3)' }}>{orgFooter}</span>
           </div>
         </aside>
 
-        {/* Main content */}
-        <main className={`main ${view==="fixtures"?"fullbleed":""}`}>{renderMain()}</main>
+        <main className={`main ${view === 'fixtures' ? 'fullbleed' : ''}`}>{renderMain()}</main>
       </div>
 
-      {showOnboarding && role === "club" && (
+      {showOnboarding && role === 'club' && (
         <Onboarding
           club={activeClub}
           submissionDeadline={submissionDeadline}
           onClose={() => setShowOnboarding(false)}
           onComplete={() => {
-            setOnboarded(o => ({...o, [clubId]: true}));
+            setOnboarded((o) => ({ ...o, [clubId]: true }));
             setShowOnboarding(false);
-            toastShow("Welcome, " + activeClub.chair.split(" ")[0] + " · let's get started");
+            toastShow('Welcome, ' + activeClub.chair.split(' ')[0] + " · let's get started");
           }}
-          onStart={() => gotoClubView("affiliation")}
+          onStart={() => gotoClubView('affiliation')}
         />
       )}
 
-      {/* ─── Task modals: Affiliation form & Compliance documents ─── */}
-      {role === "club" && view === "affiliation" && (
+      {role === 'club' && view === 'affiliation' && (
         <TaskModal
           eyebrow={`Phase 01 · ${activeClub.name}`}
-          title={<>2026/27 <em>Affiliation Form</em></>}
-          onClose={() => gotoClubView("home")}
+          title={
+            <>
+              2026/27 <em>Affiliation Form</em>
+            </>
+          }
+          onClose={() => gotoClubView('home')}
         >
           <AffiliationForm
             club={activeClub}
             goto={gotoClubView}
             toast={toastShow}
-            onSubmit={(payload)=>{
+            onSubmit={(payload) => {
+              // Affiliation submit marks the club complete (locking the form) but
+              // does NOT set paid — payment is a separate admin action.
               updateClub({
-                affiliation:"complete", paid:true,
+                affiliation: 'complete',
                 exco: payload.exco,
                 coaches: payload.coaches || [],
-                ground: payload.ground || null,
+                ground: payload.ground || {},
                 leagues: payload.leagues || [],
-                docs: {...activeClub.docs, exco: true},
+                docs: { ...activeClub.docs, exco: true },
               });
-              gotoClubView("home");
+              gotoClubView('home');
             }}
           />
         </TaskModal>
       )}
 
-      {role === "club" && view === "documents" && (
+      {role === 'club' && view === 'documents' && (
         <TaskModal
           narrow
           eyebrow={`Compliance · ${activeClub.name}`}
-          title={<>Required <em>compliance documents</em></>}
-          onClose={() => gotoClubView("home")}
+          title={
+            <>
+              Required <em>compliance documents</em>
+            </>
+          }
+          onClose={() => gotoClubView('home')}
         >
           <DocumentsView
             club={activeClub}
@@ -655,20 +1016,27 @@ function Shell({
         </TaskModal>
       )}
 
-      {role === "admin" && showCreateSeries && (
+      {role === 'admin' && showCreateSeries && (
         <TaskModal
           eyebrow="Fixtures · Cricket Services"
-          title={<>Create a new <em>series</em></>}
+          title={
+            <>
+              Create a new <em>series</em>
+            </>
+          }
           onClose={() => setShowCreateSeries(false)}
         >
           <CreateSeriesForm
             clubs={clubs}
             onCreate={(s) => {
-              setAllSeries(prev => [...prev, s]);
-              const tail = s.bulkSend
-                ? ` · bulk-sent to ${s.teams.length} club${s.teams.length===1?"":"s"}`
-                : "";
-              toastShow(`${s.name} created · ${s.fixtures.length} fixtures generated${tail}`);
+              onCreateSeries(s)
+                .then(() => {
+                  const tail = s.bulkSend
+                    ? ` · bulk-sent to ${s.teams.length} club${s.teams.length === 1 ? '' : 's'}`
+                    : '';
+                  toastShow(`${s.name} created · ${s.fixtures.length} fixtures generated${tail}`);
+                })
+                .catch(() => {});
             }}
             onClose={() => setShowCreateSeries(false)}
           />
@@ -681,22 +1049,38 @@ function Shell({
 /* ─── Filtered admin views (Affiliation / Docs / CQI) ─── */
 function AdminFiltered({ clubs, kind, gotoClub }) {
   const titles = {
-    affiliation: { t:"Affiliation tracker", crumb:"Affiliations", desc:"Track which clubs have completed the 2026/27 union affiliation form." },
-    docs:        { t:"Compliance docs tracker", crumb:"Compliance Docs", desc:"Monitor uploads of Constitution, AGM Minutes, Financial Statements and Exco Reps Listed." },
-    cqi:         { t:"CQI submission tracker", crumb:"CQI Submissions", desc:"Real-time view of CQI self-assessments returned by clubs across all five categories." },
+    affiliation: {
+      t: 'Affiliation tracker',
+      crumb: 'Affiliations',
+      desc: 'Track which clubs have completed the 2026/27 union affiliation form.',
+    },
+    docs: {
+      t: 'Compliance docs tracker',
+      crumb: 'Compliance Docs',
+      desc: 'Monitor uploads of Constitution, AGM Minutes, Financial Statements and Exco Reps Listed.',
+    },
+    cqi: {
+      t: 'CQI submission tracker',
+      crumb: 'CQI Submissions',
+      desc: 'Real-time view of CQI self-assessments returned by clubs across all five categories.',
+    },
   }[kind];
 
   return (
     <div>
       <div className="page-head">
         <div className="ph-left">
-          <div className="ph-crumb">Dolphins · Admin Console / {titles.crumb}</div>
+          <div className="ph-crumb">Admin Console / {titles.crumb}</div>
           <h1 className="ph-title">{titles.t}</h1>
           <p className="ph-desc">{titles.desc}</p>
         </div>
         <div className="ph-actions">
-          <Btn tone="outline" size="sm" icon={Icon.Mail}>Send reminder to outstanding</Btn>
-          <Btn tone="ink" size="sm" icon={Icon.Download}>Export</Btn>
+          <Btn tone="outline" size="sm" icon={Icon.Mail}>
+            Send reminder to outstanding
+          </Btn>
+          <Btn tone="ink" size="sm" icon={Icon.Download}>
+            Export
+          </Btn>
         </div>
       </div>
 
@@ -706,51 +1090,155 @@ function AdminFiltered({ clubs, kind, gotoClub }) {
             <tr>
               <th>Club</th>
               <th>Chair</th>
-              {kind === "affiliation" && <><th>Status</th><th>Payment</th><th>Submitted</th></>}
-              {kind === "docs" && <><th>Constitution</th><th>AGM Minutes</th><th>Financials</th><th>Exco Reps</th><th>Progress</th></>}
-              {kind === "cqi" && <><th>Score</th><th>Band</th><th>Submitted</th><th>Players</th></>}
-              <th style={{width:60}}></th>
+              {kind === 'affiliation' && (
+                <>
+                  <th>Status</th>
+                  <th>Payment</th>
+                  <th>Submitted</th>
+                </>
+              )}
+              {kind === 'docs' && (
+                <>
+                  <th>Constitution</th>
+                  <th>AGM Minutes</th>
+                  <th>Financials</th>
+                  <th>Exco Reps</th>
+                  <th>Progress</th>
+                </>
+              )}
+              {kind === 'cqi' && (
+                <>
+                  <th>Score</th>
+                  <th>Band</th>
+                  <th>Submitted</th>
+                  <th>Players</th>
+                </>
+              )}
+              <th style={{ width: 60 }}></th>
             </tr>
           </thead>
           <tbody>
-            {clubs.map(c=>{
-              return (
-                <tr key={c.id} className="clickable" onClick={()=>gotoClub(c.id)}>
-                  <td><ClubNameCell club={c}/></td>
-                  <td><span style={{fontSize:12.5}}>{c.chair}</span></td>
+            {clubs.map((c) => (
+              <tr key={c.id} className="clickable" onClick={() => gotoClub(c.id)}>
+                <td>
+                  <ClubNameCell club={c} />
+                </td>
+                <td>
+                  <span style={{ fontSize: 12.5 }}>{c.chair}</span>
+                </td>
 
-                  {kind === "affiliation" && <>
+                {kind === 'affiliation' && (
+                  <>
                     <td>{affPill(c.affiliation)}</td>
-                    <td>{c.paid
-                          ? <Pill tone="teal" dot>Submitted</Pill>
-                          : <Pill tone="coral" dot>Outstanding</Pill>}</td>
-                    <td><span style={{fontSize:11.5, color:"var(--muted)", fontFamily:"'Montserrat',sans-serif"}}>
-                      {c.paid ? "12 May 2026" : c.affiliation==="in_progress" ? "Draft saved" : "—"}
-                    </span></td>
-                  </>}
+                    <td>
+                      {c.paid ? (
+                        <Pill tone="teal" dot>
+                          Submitted
+                        </Pill>
+                      ) : (
+                        <Pill tone="coral" dot>
+                          Outstanding
+                        </Pill>
+                      )}
+                    </td>
+                    <td>
+                      <span
+                        style={{
+                          fontSize: 11.5,
+                          color: 'var(--muted)',
+                          fontFamily: "'Montserrat',sans-serif",
+                        }}
+                      >
+                        {c.paid
+                          ? 'Paid'
+                          : c.affiliation === 'complete'
+                            ? 'Submitted'
+                            : c.affiliation === 'in_progress'
+                              ? 'Draft saved'
+                              : '—'}
+                      </span>
+                    </td>
+                  </>
+                )}
 
-                  {kind === "docs" && <>
-                    {REQUIRED_DOCS.map(d=>(
-                      <td key={d.key}>{c.docs[d.key]
-                        ? <Pill tone="teal" dot>Uploaded</Pill>
-                        : <Pill tone="coral" dot>Missing</Pill>}</td>
+                {kind === 'docs' && (
+                  <>
+                    {REQUIRED_DOCS.map((d) => (
+                      <td key={d.key}>
+                        {c.docs[d.key] ? (
+                          <Pill tone="teal" dot>
+                            Uploaded
+                          </Pill>
+                        ) : (
+                          <Pill tone="coral" dot>
+                            Missing
+                          </Pill>
+                        )}
+                      </td>
                     ))}
-                    <td><ProgChip value={docCompletion(c)} tone={docCompletion(c)===100?"teal":docCompletion(c)>0?"gold":"coral"}/></td>
-                  </>}
+                    <td>
+                      <ProgChip
+                        value={docCompletion(c)}
+                        tone={
+                          docCompletion(c) === 100
+                            ? 'teal'
+                            : docCompletion(c) > 0
+                              ? 'gold'
+                              : 'coral'
+                        }
+                      />
+                    </td>
+                  </>
+                )}
 
-                  {kind === "cqi" && <>
-                    <td><span style={{fontFamily:"'Montserrat',sans-serif", fontSize:15, fontWeight:800, color: c.cqi>=80?"var(--teal-deep)" : c.cqi>=65 ? "var(--ink)" : c.cqi>0 ? "#076B36" : "var(--muted-2)"}}>{c.cqi>0?c.cqi.toFixed(1):"—"}</span></td>
-                    <td><Pill tone={cqiBand(c.cqi).tone}>{cqiBand(c.cqi).label}</Pill></td>
-                    <td><span style={{fontSize:11.5, color:"var(--muted)", fontFamily:"'Montserrat',sans-serif"}}>
-                      {c.cqi>0 ? "16 May 2026" : "—"}
-                    </span></td>
-                    <td><span style={{fontFamily:"'Montserrat',sans-serif", fontSize:12}}>{c.players || "—"}</span></td>
-                  </>}
+                {kind === 'cqi' && (
+                  <>
+                    <td>
+                      <span
+                        style={{
+                          fontFamily: "'Montserrat',sans-serif",
+                          fontSize: 15,
+                          fontWeight: 800,
+                          color:
+                            c.cqi >= 80
+                              ? 'var(--teal-deep)'
+                              : c.cqi >= 65
+                                ? 'var(--ink)'
+                                : c.cqi > 0
+                                  ? '#076B36'
+                                  : 'var(--muted-2)',
+                        }}
+                      >
+                        {c.cqi > 0 ? c.cqi.toFixed(1) : '—'}
+                      </span>
+                    </td>
+                    <td>
+                      <Pill tone={cqiBand(c.cqi).tone}>{cqiBand(c.cqi).label}</Pill>
+                    </td>
+                    <td>
+                      <span
+                        style={{
+                          fontSize: 11.5,
+                          color: 'var(--muted)',
+                          fontFamily: "'Montserrat',sans-serif",
+                        }}
+                      >
+                        {c.cqi > 0 ? 'Submitted' : '—'}
+                      </span>
+                    </td>
+                    <td>
+                      <span style={{ fontFamily: "'Montserrat',sans-serif", fontSize: 12 }}>
+                        {c.players || '—'}
+                      </span>
+                    </td>
+                  </>
+                )}
 
-                  <td style={{textAlign:"right",paddingRight:18}}><Icon.Arrow/></td>
-                </tr>
-              );
-            })}
+                <td style={{ textAlign: 'right', paddingRight: 18 }}>
+                  <Icon.Arrow />
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
@@ -758,62 +1246,119 @@ function AdminFiltered({ clubs, kind, gotoClub }) {
   );
 }
 
-/* ─── Coming soon placeholder for non-MVP phase modules ─── */
+/* ─── Coming soon placeholder ─── */
 function ComingSoon({ title, phase, unlocked, eta }) {
-  const headline   = unlocked ? "Coming soon" : "This phase unlocks after affiliation";
+  const headline = unlocked ? 'Coming soon' : 'This phase unlocks after affiliation';
   const detailDesc = unlocked
     ? `Phase ${phase} of the Smart Club Integration journey. Your affiliation is in — this module is in final development and will arrive shortly.`
     : `Phase ${phase} of the Smart Club Integration journey. Activates automatically once your club has completed affiliation and uploaded compliance documents.`;
   const detailBody = unlocked
     ? "We're putting the finishing touches on this module. You'll be notified by email and on your home page the moment it's ready — no action needed from your side."
-    : "Once your club has been confirmed by the Union office, this module activates with live data — fixtures, player registration, scoring, and clinical management — all sourced from the Medicoach platform.";
-  const ring   = unlocked ? "var(--teal)"     : "var(--paper3)";
-  const ringBg = unlocked ? "var(--teal-pale)": "var(--paper)";
-  const ringFg = unlocked ? "var(--teal-deep)": "var(--muted-2)";
+    : 'Once your club has been confirmed by the Union office, this module activates with live data — fixtures, player registration, scoring, and clinical management — all sourced from the Medicoach platform.';
+  const ring = unlocked ? 'var(--teal)' : 'var(--paper3)';
+  const ringBg = unlocked ? 'var(--teal-pale)' : 'var(--paper)';
+  const ringFg = unlocked ? 'var(--teal-deep)' : 'var(--muted-2)';
 
   return (
     <div>
       <div className="page-head">
         <div className="ph-left">
-          <div className="ph-crumb">Phase {phase} {unlocked && <>· <span style={{color:"var(--teal-deep)"}}>Unlocked</span></>}</div>
+          <div className="ph-crumb">
+            Phase {phase}{' '}
+            {unlocked && (
+              <>
+                · <span style={{ color: 'var(--teal-deep)' }}>Unlocked</span>
+              </>
+            )}
+          </div>
           <h1 className="ph-title">{title}</h1>
           <p className="ph-desc">{detailDesc}</p>
         </div>
         {unlocked && (
           <div className="ph-actions">
-            <span className="pill pill-teal" style={{padding:"5px 12px"}}>
-              <span className="sdot teal"/>Available {eta || "Q3 2026"}
+            <span className="pill pill-teal" style={{ padding: '5px 12px' }}>
+              <span className="sdot teal" />
+              Available {eta || 'Q3 2026'}
             </span>
           </div>
         )}
       </div>
 
-      <div style={{background:"var(--white)", border:"1px solid var(--line)", borderRadius:14, padding:"60px 40px", textAlign:"center"}}>
-        <div style={{
-          width:96, height:96, margin:"0 auto 20px", borderRadius:"50%",
-          background:ringBg, border:`2px ${unlocked?"solid":"dashed"} ${ring}`,
-          display:"flex",alignItems:"center",justifyContent:"center", color:ringFg,
-        }}>
+      <div
+        style={{
+          background: 'var(--white)',
+          border: '1px solid var(--line)',
+          borderRadius: 14,
+          padding: '60px 40px',
+          textAlign: 'center',
+        }}
+      >
+        <div
+          style={{
+            width: 96,
+            height: 96,
+            margin: '0 auto 20px',
+            borderRadius: '50%',
+            background: ringBg,
+            border: `2px ${unlocked ? 'solid' : 'dashed'} ${ring}`,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: ringFg,
+          }}
+        >
           {unlocked ? (
             <svg width="36" height="36" viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.5"/>
-              <path d="M12 7v5l3 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.5" />
+              <path
+                d="M12 7v5l3 2"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
             </svg>
           ) : (
             <svg width="36" height="36" viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.5"/>
-              <path d="M12 7v6M12 16v.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.5" />
+              <path
+                d="M12 7v6M12 16v.5"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
             </svg>
           )}
         </div>
-        <div style={{fontFamily:"'Montserrat',sans-serif", fontSize:18, fontWeight:700, marginBottom:8}}>{headline}</div>
-        <div style={{fontSize:13, color:"var(--muted)", maxWidth:460, margin:"0 auto", lineHeight:1.6}}>
+        <div
+          style={{
+            fontFamily: "'Montserrat',sans-serif",
+            fontSize: 18,
+            fontWeight: 700,
+            marginBottom: 8,
+          }}
+        >
+          {headline}
+        </div>
+        <div
+          style={{
+            fontSize: 13,
+            color: 'var(--muted)',
+            maxWidth: 460,
+            margin: '0 auto',
+            lineHeight: 1.6,
+          }}
+        >
           {detailBody}
         </div>
         {unlocked && (
-          <div style={{marginTop:22, display:"inline-flex", alignItems:"center", gap:8}}>
-            <Btn tone="outline" size="sm" icon={Icon.Bell}>Notify me when ready</Btn>
-            <Btn tone="ghost"   size="sm" icon={Icon.Mail}>Talk to the union office</Btn>
+          <div style={{ marginTop: 22, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <Btn tone="outline" size="sm" icon={Icon.Bell}>
+              Notify me when ready
+            </Btn>
+            <Btn tone="ghost" size="sm" icon={Icon.Mail}>
+              Talk to the union office
+            </Btn>
           </div>
         )}
       </div>
@@ -821,61 +1366,4 @@ function ComingSoon({ title, phase, unlocked, eta }) {
   );
 }
 
-/* ─── Embedded Fixture Automation Engine ─── */
-function FixtureEngineEmbed({ role, club }) {
-  const [filter, setFilter] = useStateApp("all"); // for admin: filter dropdown
-  return (
-    <>
-      <div className="embed-bar">
-        <span style={{
-          fontFamily:"'Montserrat',sans-serif", fontSize:10, fontWeight:700,
-          color:"#fff", background:"var(--ink)", padding:"3px 9px", borderRadius:10,
-          letterSpacing:"0.1em",
-        }}>PHASE 02</span>
-        <div>
-          <div className="crumb">
-            {role==="admin"
-              ? "Dolphins · Admin Console / Fixtures & Venues"
-              : `Club Portal · ${club.name} / Fixtures`}
-          </div>
-          <div className="title">
-            {role==="admin"
-              ? "Provincial fixture automation & venue allocation"
-              : "Your league fixtures & venue bookings"}
-          </div>
-        </div>
-        <div className="spacer"/>
-        {role === "admin" && (
-          <select className="field-select" style={{height:30, width:180, fontSize:12}} value={filter} onChange={e=>setFilter(e.target.value)}>
-            <option value="all">All leagues</option>
-            <option value="prem">Premier League</option>
-            <option value="prom">Promotion League</option>
-            <option value="women">Premier Women</option>
-            <option value="vets">Veterans League</option>
-          </select>
-        )}
-        <Btn tone="outline" size="sm" icon={Icon.Download}>Export schedule</Btn>
-        <Btn tone="ink" size="sm" icon={Icon.Arrow} onClick={()=>window.open("Fixture Automation Engine.html","_blank")}>Open full engine</Btn>
-      </div>
-      <iframe
-        className="embed-frame"
-        src="Fixture Automation Engine.html"
-        title="Medicoach Fixture Automation Engine"
-        onLoad={e=>{
-          try {
-            const doc = e.target.contentDocument;
-            const css = doc.createElement("style");
-            css.textContent = `
-              .header{display:none !important}
-              .shell{min-height:100vh !important}
-              .panel{top:0 !important;height:100vh !important}
-            `;
-            doc.head.appendChild(css);
-          } catch(err) { /* cross-origin or other */ }
-        }}
-      />
-    </>
-  );
-}
-
-createRoot(document.getElementById("root")).render(<App/>);
+createRoot(document.getElementById('root')).render(<App />);

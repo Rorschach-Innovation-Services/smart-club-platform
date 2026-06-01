@@ -1,0 +1,741 @@
+{
+  "submissionDeadline": "2026-06-21",
+  "knownClubs": [],
+  "clubs": [
+    {
+      "id": "ukzn",
+      "name": "UKZN CC",
+      "district": "Ethekwini Metro CU",
+      "sub": "EMCU",
+      "chair": "Ashraf Ganie",
+      "affiliation": "complete",
+      "paid": true,
+      "cqi": 91.89,
+      "docs": {
+        "constitution": true,
+        "agm": true,
+        "financials": true,
+        "exco": true
+      },
+      "players": 57,
+      "teams": 3,
+      "women": 0,
+      "juniors": 0,
+      "color": "#1B2A4A",
+      "ground": {
+        "venue": "Howard College Oval",
+        "suburb": "Glenwood",
+        "lat": -29.8666,
+        "lon": 30.9783
+      }
+    },
+    {
+      "id": "clares",
+      "name": "Clares CC",
+      "district": "Ethekwini Metro CU",
+      "sub": "EMCU",
+      "chair": "Rajin Ramsaroop",
+      "affiliation": "complete",
+      "paid": true,
+      "cqi": 87.4,
+      "docs": {
+        "constitution": true,
+        "agm": true,
+        "financials": true,
+        "exco": false
+      },
+      "players": 72,
+      "teams": 6,
+      "women": 1,
+      "juniors": 3,
+      "color": "#1D9E75",
+      "ground": {
+        "venue": "Clares Cricket Field",
+        "suburb": "Glenwood",
+        "lat": -29.8533,
+        "lon": 30.9512
+      }
+    },
+    {
+      "id": "chatsworth",
+      "name": "Chatsworth Sporting CC",
+      "district": "Ethekwini Metro CU",
+      "sub": "EMCU",
+      "chair": "Jason Sathiaseelan",
+      "affiliation": "complete",
+      "paid": true,
+      "cqi": 81.2,
+      "docs": {
+        "constitution": true,
+        "agm": true,
+        "financials": false,
+        "exco": true
+      },
+      "players": 114,
+      "teams": 10,
+      "women": 1,
+      "juniors": 3,
+      "color": "#C8A84B",
+      "ground": {
+        "venue": "Chatsworth Sports Ground",
+        "suburb": "Chatsworth",
+        "lat": -29.9112,
+        "lon": 30.8868
+      }
+    },
+    {
+      "id": "umlazi",
+      "name": "Umlazi CC",
+      "district": "Ethekwini Metro CU",
+      "sub": "EMCU",
+      "chair": "Simphiwe Shangase",
+      "affiliation": "complete",
+      "paid": true,
+      "cqi": 64.8,
+      "docs": {
+        "constitution": true,
+        "agm": false,
+        "financials": false,
+        "exco": true
+      },
+      "players": 58,
+      "teams": 6,
+      "women": 1,
+      "juniors": 3,
+      "color": "#D85A30",
+      "ground": {
+        "venue": "Umlazi Comtech Ground",
+        "suburb": "Umlazi",
+        "lat": -29.9678,
+        "lon": 30.8842
+      }
+    },
+    {
+      "id": "crusaders",
+      "name": "Crusaders CC",
+      "district": "Ethekwini Metro CU",
+      "sub": "EMCU",
+      "chair": "Duncun Miller",
+      "affiliation": "complete",
+      "paid": true,
+      "cqi": 78.5,
+      "docs": {
+        "constitution": true,
+        "agm": true,
+        "financials": true,
+        "exco": true
+      },
+      "players": 88,
+      "teams": 9,
+      "women": 1,
+      "juniors": 3,
+      "color": "#2E4070",
+      "ground": {
+        "venue": "Crusaders Park",
+        "suburb": "Durban North",
+        "lat": -29.7956,
+        "lon": 31.0356
+      }
+    },
+    {
+      "id": "berea",
+      "name": "Berea Rovers CC",
+      "district": "Ethekwini Metro CU",
+      "sub": "EMCU",
+      "chair": "Wayne Scott",
+      "affiliation": "in_progress",
+      "paid": false,
+      "cqi": 0,
+      "docs": {
+        "constitution": false,
+        "agm": false,
+        "financials": false,
+        "exco": false
+      },
+      "players": 0,
+      "teams": 3,
+      "women": 0,
+      "juniors": 1,
+      "color": "#243356",
+      "ground": {
+        "venue": "Berea Rovers Oval",
+        "suburb": "Berea",
+        "lat": -29.8348,
+        "lon": 31.005
+      }
+    },
+    {
+      "id": "rhythm",
+      "name": "Rhythm DHSOB CC",
+      "district": "Ethekwini Metro CU",
+      "sub": "EMCU",
+      "chair": "Mags Reddy",
+      "affiliation": "complete",
+      "paid": true,
+      "cqi": 68.4,
+      "docs": {
+        "constitution": true,
+        "agm": false,
+        "financials": true,
+        "exco": true
+      },
+      "players": 92,
+      "teams": 9,
+      "women": 1,
+      "juniors": 1,
+      "color": "#1D9E75",
+      "ground": {
+        "venue": "DHS Old Boys Field",
+        "suburb": "Stamford Hill",
+        "lat": -29.8205,
+        "lon": 31.0009
+      }
+    },
+    {
+      "id": "warriors",
+      "name": "African Warriors CC",
+      "district": "Ethekwini Metro CU",
+      "sub": "EMCU",
+      "chair": "Knowledge Vilakazi",
+      "affiliation": "complete",
+      "paid": true,
+      "cqi": 72.1,
+      "docs": {
+        "constitution": true,
+        "agm": true,
+        "financials": false,
+        "exco": true
+      },
+      "players": 64,
+      "teams": 5,
+      "women": 2,
+      "juniors": 3,
+      "color": "#1B2A4A",
+      "ground": {
+        "venue": "KwaMashu K-Section Ground",
+        "suburb": "KwaMashu",
+        "lat": -29.7311,
+        "lon": 30.9876
+      }
+    },
+    {
+      "id": "phoenix",
+      "name": "Phoenix CC",
+      "district": "Ethekwini Metro CU",
+      "sub": "EMCU",
+      "chair": "Bradley Chetty",
+      "affiliation": "not_started",
+      "paid": false,
+      "cqi": 0,
+      "docs": {
+        "constitution": false,
+        "agm": false,
+        "financials": false,
+        "exco": false
+      },
+      "players": 0,
+      "teams": 6,
+      "women": 0,
+      "juniors": 2,
+      "color": "#C8A84B",
+      "ground": {
+        "venue": "Phoenix Sports Complex",
+        "suburb": "Phoenix",
+        "lat": -29.7003,
+        "lon": 31.0214
+      }
+    },
+    {
+      "id": "verulam",
+      "name": "Verulam CC",
+      "district": "Ethekwini Metro CU",
+      "sub": "Verulam",
+      "chair": "Kugan Subrayen",
+      "affiliation": "in_progress",
+      "paid": false,
+      "cqi": 38.5,
+      "docs": {
+        "constitution": true,
+        "agm": false,
+        "financials": false,
+        "exco": false
+      },
+      "players": 21,
+      "teams": 1,
+      "women": 0,
+      "juniors": 2,
+      "color": "#D85A30",
+      "ground": {
+        "venue": "Verulam Sports Field",
+        "suburb": "Verulam",
+        "lat": -29.6411,
+        "lon": 31.0498
+      }
+    },
+    {
+      "id": "harlequins",
+      "name": "Harlequins CC",
+      "district": "Ethekwini Metro CU",
+      "sub": "EMCU",
+      "chair": "Eric Cavanagh",
+      "affiliation": "complete",
+      "paid": true,
+      "cqi": 84.2,
+      "docs": {
+        "constitution": true,
+        "agm": true,
+        "financials": true,
+        "exco": true
+      },
+      "players": 96,
+      "teams": 10,
+      "women": 0,
+      "juniors": 2,
+      "color": "#1D9E75",
+      "ground": {
+        "venue": "Kingsmead North",
+        "suburb": "Stamford Hill",
+        "lat": -29.8195,
+        "lon": 31.0308
+      }
+    },
+    {
+      "id": "spartan",
+      "name": "Spartan Sporting CC",
+      "district": "Ethekwini Metro CU",
+      "sub": "EMCU",
+      "chair": "Shafee Ayob",
+      "affiliation": "complete",
+      "paid": true,
+      "cqi": 56.3,
+      "docs": {
+        "constitution": true,
+        "agm": true,
+        "financials": false,
+        "exco": false
+      },
+      "players": 38,
+      "teams": 5,
+      "women": 0,
+      "juniors": 2,
+      "color": "#2E4070",
+      "ground": {
+        "venue": "Spartan Park",
+        "suburb": "Mount Edgecombe",
+        "lat": -29.7256,
+        "lon": 31.0489
+      }
+    },
+    {
+      "id": "ilembe",
+      "name": "Ilembe CC",
+      "district": "Illembe Cricket District",
+      "sub": "Ilembe",
+      "chair": "Naren Singh",
+      "affiliation": "complete",
+      "paid": true,
+      "cqi": 47.6,
+      "docs": {
+        "constitution": true,
+        "agm": false,
+        "financials": true,
+        "exco": false
+      },
+      "players": 28,
+      "teams": 2,
+      "women": 0,
+      "juniors": 0,
+      "color": "#8A6E1C",
+      "ground": {
+        "venue": "KwaDukuza Stadium",
+        "suburb": "KwaDukuza",
+        "lat": -29.3398,
+        "lon": 31.281
+      }
+    },
+    {
+      "id": "tongaat",
+      "name": "Tongaat CC",
+      "district": "Ethekwini Metro CU",
+      "sub": "Tongaat",
+      "chair": "Praven Govender",
+      "affiliation": "not_started",
+      "paid": false,
+      "cqi": 0,
+      "docs": {
+        "constitution": false,
+        "agm": false,
+        "financials": false,
+        "exco": false
+      },
+      "players": 0,
+      "teams": 1,
+      "women": 0,
+      "juniors": 1,
+      "color": "#D85A30",
+      "ground": {
+        "venue": "Tongaat Sports Field",
+        "suburb": "Tongaat",
+        "lat": -29.5783,
+        "lon": 31.1149
+      }
+    }
+  ],
+  "series": [
+    {
+      "id": "s-prem-26-27",
+      "name": "Premier League · 2026/27",
+      "startDate": "2026-08-01",
+      "divisions": false,
+      "groups": 1,
+      "maxOvers": 50,
+      "maxPlayers": 11,
+      "rosterLimit": 18,
+      "ballType": "Cricket Ball",
+      "seriesType": "One-Day (40-50 overs)",
+      "powerPlay": true,
+      "category": "Men",
+      "level": "Club",
+      "winPoints": 4,
+      "bonusPoints": 1,
+      "lossPoints": 0,
+      "tiePoints": 2,
+      "abandonedPoints": 1,
+      "ballsPerOver": 6,
+      "maxBallsPerOver": 8,
+      "minLeagueMatches": 2,
+      "configureExtras": false,
+      "lockAfterLive": true,
+      "lockAfterManual": true,
+      "preventTeamSwitch": true,
+      "umpireReportsMandatory": true,
+      "captainReportsMandatory": true,
+      "sendReportEmails": true,
+      "rankCalculator": "New",
+      "hideSeriesDetails": false,
+      "allowLockedRegistration": false,
+      "pointsTableOrder": [
+        "Most Points",
+        "NRR",
+        "Head To Head",
+        "Number of Wins",
+        "Win Percentage"
+      ],
+      "tags": [
+        "Premier",
+        "Men",
+        "Round-robin"
+      ],
+      "teams": [
+        "ukzn",
+        "clares",
+        "chatsworth",
+        "crusaders",
+        "rhythm",
+        "harlequins",
+        "warriors",
+        "umlazi"
+      ],
+      "costPerKm": 4.5,
+      "carsPerAwayTrip": 3,
+      "released": false,
+      "releasedAt": null,
+      "fixtures": [
+        {
+          "id": "f1",
+          "round": 1,
+          "date": "2026-08-02",
+          "home": "ukzn",
+          "away": "umlazi"
+        },
+        {
+          "id": "f2",
+          "round": 1,
+          "date": "2026-08-02",
+          "home": "clares",
+          "away": "warriors"
+        },
+        {
+          "id": "f3",
+          "round": 1,
+          "date": "2026-08-02",
+          "home": "chatsworth",
+          "away": "harlequins"
+        },
+        {
+          "id": "f4",
+          "round": 1,
+          "date": "2026-08-02",
+          "home": "crusaders",
+          "away": "rhythm"
+        },
+        {
+          "id": "f5",
+          "round": 2,
+          "date": "2026-08-09",
+          "home": "warriors",
+          "away": "ukzn"
+        },
+        {
+          "id": "f6",
+          "round": 2,
+          "date": "2026-08-09",
+          "home": "harlequins",
+          "away": "umlazi"
+        },
+        {
+          "id": "f7",
+          "round": 2,
+          "date": "2026-08-09",
+          "home": "rhythm",
+          "away": "clares"
+        },
+        {
+          "id": "f8",
+          "round": 2,
+          "date": "2026-08-09",
+          "home": "crusaders",
+          "away": "chatsworth"
+        },
+        {
+          "id": "f9",
+          "round": 3,
+          "date": "2026-08-16",
+          "home": "ukzn",
+          "away": "harlequins"
+        },
+        {
+          "id": "f10",
+          "round": 3,
+          "date": "2026-08-16",
+          "home": "warriors",
+          "away": "rhythm"
+        },
+        {
+          "id": "f11",
+          "round": 3,
+          "date": "2026-08-16",
+          "home": "umlazi",
+          "away": "crusaders"
+        },
+        {
+          "id": "f12",
+          "round": 3,
+          "date": "2026-08-16",
+          "home": "clares",
+          "away": "chatsworth"
+        },
+        {
+          "id": "f13",
+          "round": 4,
+          "date": "2026-08-23",
+          "home": "rhythm",
+          "away": "ukzn"
+        },
+        {
+          "id": "f14",
+          "round": 4,
+          "date": "2026-08-23",
+          "home": "crusaders",
+          "away": "harlequins"
+        },
+        {
+          "id": "f15",
+          "round": 4,
+          "date": "2026-08-23",
+          "home": "chatsworth",
+          "away": "warriors"
+        },
+        {
+          "id": "f16",
+          "round": 4,
+          "date": "2026-08-23",
+          "home": "clares",
+          "away": "umlazi"
+        },
+        {
+          "id": "f17",
+          "round": 5,
+          "date": "2026-08-30",
+          "home": "ukzn",
+          "away": "crusaders"
+        },
+        {
+          "id": "f18",
+          "round": 5,
+          "date": "2026-08-30",
+          "home": "rhythm",
+          "away": "chatsworth"
+        },
+        {
+          "id": "f19",
+          "round": 5,
+          "date": "2026-08-30",
+          "home": "harlequins",
+          "away": "clares"
+        },
+        {
+          "id": "f20",
+          "round": 5,
+          "date": "2026-08-30",
+          "home": "warriors",
+          "away": "umlazi"
+        },
+        {
+          "id": "f21",
+          "round": 6,
+          "date": "2026-09-06",
+          "home": "chatsworth",
+          "away": "ukzn"
+        },
+        {
+          "id": "f22",
+          "round": 6,
+          "date": "2026-09-06",
+          "home": "clares",
+          "away": "crusaders"
+        },
+        {
+          "id": "f23",
+          "round": 6,
+          "date": "2026-09-06",
+          "home": "umlazi",
+          "away": "rhythm"
+        },
+        {
+          "id": "f24",
+          "round": 6,
+          "date": "2026-09-06",
+          "home": "warriors",
+          "away": "harlequins"
+        },
+        {
+          "id": "f25",
+          "round": 7,
+          "date": "2026-09-13",
+          "home": "ukzn",
+          "away": "clares"
+        },
+        {
+          "id": "f26",
+          "round": 7,
+          "date": "2026-09-13",
+          "home": "chatsworth",
+          "away": "umlazi"
+        },
+        {
+          "id": "f27",
+          "round": 7,
+          "date": "2026-09-13",
+          "home": "crusaders",
+          "away": "warriors"
+        },
+        {
+          "id": "f28",
+          "round": 7,
+          "date": "2026-09-13",
+          "home": "rhythm",
+          "away": "harlequins"
+        }
+      ]
+    },
+    {
+      "id": "s-prom-26-27",
+      "name": "Promotion League · 2026/27",
+      "startDate": "2026-08-08",
+      "divisions": false,
+      "groups": 1,
+      "maxOvers": 50,
+      "maxPlayers": 11,
+      "rosterLimit": 18,
+      "ballType": "Cricket Ball",
+      "seriesType": "One-Day (40-50 overs)",
+      "powerPlay": true,
+      "category": "Men",
+      "level": "Club",
+      "winPoints": 4,
+      "bonusPoints": 1,
+      "lossPoints": 0,
+      "tiePoints": 2,
+      "abandonedPoints": 1,
+      "ballsPerOver": 6,
+      "maxBallsPerOver": 8,
+      "minLeagueMatches": 2,
+      "configureExtras": false,
+      "lockAfterLive": true,
+      "lockAfterManual": true,
+      "preventTeamSwitch": true,
+      "umpireReportsMandatory": false,
+      "captainReportsMandatory": true,
+      "sendReportEmails": true,
+      "rankCalculator": "New",
+      "hideSeriesDetails": false,
+      "allowLockedRegistration": false,
+      "pointsTableOrder": [
+        "Most Points",
+        "NRR",
+        "Head To Head",
+        "Number of Wins",
+        "Win Percentage"
+      ],
+      "tags": [
+        "Promotion",
+        "Men"
+      ],
+      "teams": [
+        "spartan",
+        "ilembe",
+        "verulam",
+        "tongaat"
+      ],
+      "costPerKm": 4.5,
+      "carsPerAwayTrip": 3,
+      "released": false,
+      "releasedAt": null,
+      "fixtures": [
+        {
+          "id": "f1",
+          "round": 1,
+          "date": "2026-08-08",
+          "home": "spartan",
+          "away": "tongaat"
+        },
+        {
+          "id": "f2",
+          "round": 1,
+          "date": "2026-08-08",
+          "home": "ilembe",
+          "away": "verulam"
+        },
+        {
+          "id": "f3",
+          "round": 2,
+          "date": "2026-08-15",
+          "home": "verulam",
+          "away": "spartan"
+        },
+        {
+          "id": "f4",
+          "round": 2,
+          "date": "2026-08-15",
+          "home": "ilembe",
+          "away": "tongaat"
+        },
+        {
+          "id": "f5",
+          "round": 3,
+          "date": "2026-08-22",
+          "home": "spartan",
+          "away": "ilembe"
+        },
+        {
+          "id": "f6",
+          "round": 3,
+          "date": "2026-08-22",
+          "home": "verulam",
+          "away": "tongaat"
+        }
+      ]
+    }
+  ]
+}
