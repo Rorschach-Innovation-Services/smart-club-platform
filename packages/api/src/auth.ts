@@ -35,11 +35,19 @@ export type HonoEnv = {
   };
 };
 
-const verifier = CognitoJwtVerifier.create({
-  userPoolId: process.env.USER_POOL_ID!,
-  tokenUse: 'id',
-  clientId: process.env.USER_POOL_CLIENT_ID!,
-});
+// Lazily created so the local dev stack (LOCAL_AUTH=1, no USER_POOL_ID) can
+// import this module without constructing a Cognito verifier.
+let _verifier: ReturnType<typeof CognitoJwtVerifier.create> | null = null;
+function getVerifier() {
+  if (!_verifier) {
+    _verifier = CognitoJwtVerifier.create({
+      userPoolId: process.env.USER_POOL_ID!,
+      tokenUse: 'id',
+      clientId: process.env.USER_POOL_CLIENT_ID!,
+    });
+  }
+  return _verifier;
+}
 
 export class HttpError extends Error {
   constructor(
@@ -73,12 +81,32 @@ export function resolveTenant(c: Context): string | null {
 
 /** Parse + verify the bearer token and attach the decoded auth context. */
 export const authenticate: MiddlewareHandler<HonoEnv> = async (c, next) => {
+  // LOCAL-DEV ONLY: when LOCAL_AUTH=1 (offline stack, never set in AWS), trust an
+  // `x-dev-auth` header carrying base64(JSON {sub,email,memberships}) instead of a
+  // real Cognito JWT — Cognito passwordless OTP can't run offline. Strictly gated.
+  if (process.env.LOCAL_AUTH === '1') {
+    const raw = c.req.header('x-dev-auth');
+    if (!raw) throw new HttpError(401, 'missing x-dev-auth (local dev)');
+    try {
+      const dev = JSON.parse(Buffer.from(raw, 'base64').toString('utf8'));
+      c.set('auth', {
+        sub: dev.sub ?? 'dev',
+        email: dev.email ?? 'dev@local',
+        memberships: dev.memberships ?? [],
+      });
+    } catch {
+      throw new HttpError(401, 'invalid x-dev-auth');
+    }
+    await next();
+    return;
+  }
+
   const header = c.req.header('authorization') ?? '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : '';
   if (!token) throw new HttpError(401, 'missing bearer token');
   let payload: Record<string, unknown>;
   try {
-    payload = (await verifier.verify(token)) as unknown as Record<string, unknown>;
+    payload = (await getVerifier().verify(token)) as unknown as Record<string, unknown>;
   } catch {
     throw new HttpError(401, 'invalid token');
   }

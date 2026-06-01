@@ -7,5 +7,5 @@ dist/
 sst-env.d.ts
 *.log
 .env
-.env.local
+.env*.local
 .claude/

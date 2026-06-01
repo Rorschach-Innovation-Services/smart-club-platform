@@ -34,9 +34,21 @@ import type { Club, Series, TenantConfig, UserProfile, PlayerRegistration } from
 import { tableName } from './env.js';
 
 const TABLE = tableName();
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
-  marshallOptions: { removeUndefinedValues: true },
-});
+// DYNAMO_ENDPOINT points at a local DynamoDB (dynalite) for offline dev; any
+// credentials are accepted by the local clone. Unset in AWS (uses the role).
+const localEndpoint = process.env.DYNAMO_ENDPOINT;
+const ddb = DynamoDBDocumentClient.from(
+  new DynamoDBClient(
+    localEndpoint
+      ? {
+          endpoint: localEndpoint,
+          region: 'localhost',
+          credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+        }
+      : {},
+  ),
+  { marshallOptions: { removeUndefinedValues: true } },
+);
 
 /** Thrown when a version-checked write loses a race. Handlers map this to HTTP 409. */
 export class VersionConflictError extends Error {

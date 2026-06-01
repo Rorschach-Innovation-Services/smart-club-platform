@@ -12,25 +12,53 @@ one codebase. Adding another is a config row + seed, not a fork.
 > SST → DynamoDB + Lambda (Hono) + API Gateway + Cognito (passwordless email OTP) + S3 on
 > the back. See [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
-## Quick start (local dev)
+## Run & test locally
 
 ```bash
 npm install
 cd packages/api && npm install && cd ..
-npm run dev            # http://localhost:3201
 ```
 
-The SPA talks to a deployed dev API. Set these in a `.env` (Vite reads `VITE_*`); the deploy
-prints them (see the runbook):
+Local config goes in **`.env.development.local`** (gitignored; loaded only in dev, never in a
+production `build`, so it can't leak into a deploy). A ready-made one is committed-as-example
+below; create the file with one of these two profiles.
 
-```
-VITE_API_URL=https://xxxx.execute-api.af-south-1.amazonaws.com
-VITE_USER_POOL_ID=af-south-1_xxxxxxxxx
-VITE_USER_POOL_CLIENT_ID=xxxxxxxxxxxxxxxxxxxxxxxxxx
-VITE_DEFAULT_TENANT=dolphins      # dev only: which tenant to theme as (prod uses the host)
+### Option A — fully offline (no AWS, recommended)
+
+Runs the whole backend on your machine — an in-process DynamoDB (`dynalite`, no Docker/Java),
+the same Hono API, and seeded tenants. Cognito can't run offline, so login is a dev "sign in
+as" picker.
+
+```bash
+# .env.development.local
+VITE_API_URL=http://localhost:3333
+VITE_LOCAL_AUTH=1
+VITE_DEFAULT_TENANT=dolphins
 ```
 
-Without a backend the app still loads (neutral theme) but sign-in and data won't work.
+```bash
+npm --prefix packages/api run dev:local   # terminal 1: local API + dynalite + seed (:3333)
+npm run dev                               # terminal 2: SPA (:3201, or next free port)
+```
+
+Open the SPA, pick **Administrator** (or **Club rep** + club ids) — no email/OTP. Everything
+(tenants, clubs, CQI, registration, isolation) runs locally; uploads are stubbed (no S3).
+
+### Option B — local frontend → deployed dev backend (real Cognito OTP)
+
+```bash
+# .env.development.local
+VITE_API_URL=https://<api>.execute-api.af-south-1.amazonaws.com
+VITE_USER_POOL_ID=af-south-1_xxxxx
+VITE_USER_POOL_CLIENT_ID=xxxxx
+VITE_DEFAULT_TENANT=dolphins
+```
+
+`npm run dev`, then sign in with a bootstrapped user via real email OTP (the API's CORS
+allowlist permits `localhost`). Use for testing the real auth path. (`npm run dev:sst` also
+runs the API Lambda live against the dev cloud resources.)
+
+`localhost` has no subdomain, so the tenant comes from `VITE_DEFAULT_TENANT` (or `?tenant=lions`).
 
 ## Deploy
 
@@ -66,12 +94,12 @@ npx sst shell --stage dev -- npm --prefix packages/api run bootstrap-admin -- do
 
 ## Project layout
 
-| Path | Purpose |
-|------|---------|
-| `src/` | React SPA. `main.jsx` (shell + routing), `admin.jsx`, `club.jsx`, `atoms.jsx`, `data.jsx` (shared catalogues + compute helpers), `api.js`, `auth.jsx`, `config.js`, `query.js`, `Login.jsx`, `RegisterPage.jsx` |
-| `packages/api/` | Hono API on Lambda: `index.ts` (routes), `repo.ts` (tenant-scoped DynamoDB), `auth.ts` (JWT + tenant middleware), `pre-token-gen.ts`, `seed.ts`, `bootstrap-admin.ts` |
-| `sst.config.ts` | All AWS infra (af-south-1) |
-| `docs/` | [architecture](docs/architecture/) (ADRs, data model), [api](docs/api/) reference, [guides](docs/guides/) (deploy, auth, tenant onboarding, POPIA) |
+| Path            | Purpose                                                                                                                                                                                                         |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/`          | React SPA. `main.jsx` (shell + routing), `admin.jsx`, `club.jsx`, `atoms.jsx`, `data.jsx` (shared catalogues + compute helpers), `api.js`, `auth.jsx`, `config.js`, `query.js`, `Login.jsx`, `RegisterPage.jsx` |
+| `packages/api/` | Hono API on Lambda: `index.ts` (routes), `repo.ts` (tenant-scoped DynamoDB), `auth.ts` (JWT + tenant middleware), `pre-token-gen.ts`, `seed.ts`, `bootstrap-admin.ts`                                           |
+| `sst.config.ts` | All AWS infra (af-south-1)                                                                                                                                                                                      |
+| `docs/`         | [architecture](docs/architecture/) (ADRs, data model), [api](docs/api/) reference, [guides](docs/guides/) (deploy, auth, tenant onboarding, POPIA)                                                              |
 
 ## Quality
 
@@ -81,4 +109,4 @@ npm run format:check
 cd packages/api && npm run typecheck
 ```
 
-*Powered by Medicoach.*
+_Powered by Medicoach._

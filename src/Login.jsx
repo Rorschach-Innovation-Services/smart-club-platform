@@ -6,11 +6,23 @@
  * resolved tenant config.
  */
 import { useState } from 'react';
-import { useAuth } from './auth.jsx';
+import { useAuth, IS_LOCAL_AUTH } from './auth.jsx';
+import { getActiveTenant } from './api.js';
 
 export function Login({ tenantConfig }) {
-  const { startSignIn, submitOtp, status } = useAuth();
+  const auth = useAuth();
   const branding = tenantConfig?.branding;
+  // Local dev: no Cognito — a "sign in as" form sets the identity directly.
+  return IS_LOCAL_AUTH ? (
+    <DevLogin auth={auth} branding={branding} />
+  ) : (
+    <OtpLogin auth={auth} branding={branding} />
+  );
+}
+
+/* ─── Cloud: passwordless email OTP ─── */
+function OtpLogin({ auth, branding }) {
+  const { startSignIn, submitOtp, status } = auth;
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -144,6 +156,76 @@ export function Login({ tenantConfig }) {
         <span>{branding?.name ?? 'Smart Club'}</span>
         <span className="dot" />
         <span>{branding?.copy?.footer ?? 'Powered by Medicoach'}</span>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Local dev "sign in as" (no Cognito) ─── */
+function DevLogin({ auth, branding }) {
+  const tenant = getActiveTenant() || 'dolphins';
+  const [role, setRole] = useState('admin');
+  const [clubIds, setClubIds] = useState('ukzn');
+
+  function go(e) {
+    e.preventDefault();
+    const ids = clubIds
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    auth.devSignIn({
+      sub: `dev-${role}`,
+      email: `${role}@${tenant}.local`,
+      memberships: [{ tenantId: tenant, role, clubIds: role === 'rep' ? ids : [] }],
+    });
+  }
+
+  return (
+    <div className="ps-screen">
+      <div className="ps-intro">
+        <div className="ps-eyebrow">Local dev · {tenant}</div>
+        <h1 className="ps-title">{branding?.copy?.welcome ?? 'Sign in (dev)'}</h1>
+        <p className="ps-desc">
+          Offline mode — no Cognito. Pick a role to sign in as; this sets a dev identity the local
+          API trusts via <code>x-dev-auth</code>.
+        </p>
+      </div>
+      <div className="ps-cards" style={{ justifyContent: 'center' }}>
+        <form className="ps-card" style={{ cursor: 'default', maxWidth: 420 }} onSubmit={go}>
+          <div className="ps-card-role">Local sign-in</div>
+          <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', marginTop: 12 }}>
+            Role
+            <select
+              className="field-select"
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              style={{ width: '100%', marginTop: 4 }}
+            >
+              <option value="admin">Administrator — whole {tenant} union</option>
+              <option value="rep">Club rep — specific club(s)</option>
+            </select>
+          </label>
+          {role === 'rep' && (
+            <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', marginTop: 10 }}>
+              Club IDs (comma-separated)
+              <input
+                className="field-input"
+                value={clubIds}
+                onChange={(e) => setClubIds(e.target.value)}
+                placeholder="ukzn, clares"
+                style={{ width: '100%', marginTop: 4, fontSize: 16 }}
+              />
+            </label>
+          )}
+          <button className="btn btn-ink" type="submit" style={{ width: '100%', marginTop: 14 }}>
+            Enter as {role}
+          </button>
+        </form>
+      </div>
+      <div className="ps-footer">
+        <span>{branding?.name ?? 'Smart Club'}</span>
+        <span className="dot" />
+        <span>local dev</span>
       </div>
     </div>
   );

@@ -533,3 +533,5 @@ app.onError((err, c) => {
 });
 
 export const handler = handle(app);
+// Exported so the local dev server (src/local/server.ts) can serve the same app.
+export { app };

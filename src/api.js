@@ -8,7 +8,10 @@
  * 409 version conflicts and 403 authorization failures in the UI).
  */
 
+import { devAuthHeader } from './devAuth.js';
+
 const BASE = import.meta.env.VITE_API_URL ?? '';
+const LOCAL_AUTH = import.meta.env.VITE_LOCAL_AUTH === '1';
 
 let _tenant = null;
 let _getToken = async () => null;
@@ -44,8 +47,14 @@ async function request(path, { method = 'GET', body, auth = true, query } = {}) 
   const headers = { 'content-type': 'application/json' };
   if (_tenant) headers['x-tenant'] = _tenant;
   if (auth) {
-    const token = await _getToken();
-    if (token) headers.authorization = `Bearer ${token}`;
+    if (LOCAL_AUTH) {
+      // Local dev: send the dev identity instead of a Cognito token.
+      const dev = devAuthHeader();
+      if (dev) headers['x-dev-auth'] = dev;
+    } else {
+      const token = await _getToken();
+      if (token) headers.authorization = `Bearer ${token}`;
+    }
   }
   const res = await fetch(url.toString(), {
     method,
