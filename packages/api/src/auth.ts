@@ -92,7 +92,8 @@ export const authenticate: MiddlewareHandler<HonoEnv> = async (c, next) => {
       c.set('auth', {
         sub: dev.sub ?? 'dev',
         email: dev.email ?? 'dev@local',
-        memberships: dev.memberships ?? [],
+        // Fail closed on a malformed identity rather than passing a non-array shape on.
+        memberships: Array.isArray(dev.memberships) ? dev.memberships : [],
       });
     } catch {
       throw new HttpError(401, 'invalid x-dev-auth');

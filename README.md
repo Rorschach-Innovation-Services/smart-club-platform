@@ -20,8 +20,8 @@ cd packages/api && npm install && cd ..
 ```
 
 Local config goes in **`.env.development.local`** (gitignored; loaded only in dev, never in a
-production `build`, so it can't leak into a deploy). A ready-made one is committed-as-example
-below; create the file with one of these two profiles.
+production `build`, so it can't leak into a deploy). Create the file with one of the two
+profiles below.
 
 ### Option A — fully offline (no AWS, recommended)
 

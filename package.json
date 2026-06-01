@@ -16,7 +16,7 @@
     "deploy:remove": "sst remove --stage dev",
     "dev:sst": "sst dev",
     "dev:local": "concurrently -k -n api,web -c blue,green \"npm --prefix packages/api run dev:local\" \"vite\"",
-    "dev:local:demo": "SEED_DEMO=1 concurrently -k -n api,web -c blue,green \"SEED_DEMO=1 npm --prefix packages/api run dev:local\" \"vite\""
+    "dev:local:demo": "concurrently -k -n api,web -c blue,green \"SEED_DEMO=1 npm --prefix packages/api run dev:local\" \"vite\""
   },
   "engines": {
     "node": ">=20"

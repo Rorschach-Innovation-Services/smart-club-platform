@@ -2255,7 +2255,8 @@ function OnboardNewClubModal({ clubs, knownClubs = [], onClose, onOnboard, onBul
     setAutoFilled(k.name);
   }
 
-  // Auto-fill from KNOWN_CLUBS when the admin types an email/cell that exists in the registry.
+  // Auto-fill from the tenant's known-clubs list (the `knownClubs` prop; empty by
+  // default) when the admin types an email/cell that matches a suggestion.
   // Triggered on every email/cell change once they're long enough to be meaningful.
   function handleEmailChange(v) {
     setChairEmail(v);
