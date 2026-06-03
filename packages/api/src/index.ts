@@ -267,7 +267,14 @@ app.patch('/clubs/:id', async (c) => {
   ) {
     throw new HttpError(403, 'affiliation is locked');
   }
-  const invalid = validateClubPatch(patch);
+  // Valid league keys = the tenant's catalogue plus keys already on the club (so an
+  // admin can still remove a league that was later deleted from the catalogue).
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  const validLeagueKeys = new Set([
+    ...(cfg?.leagues ?? []).map((l) => l.key),
+    ...(current.leagues ?? []),
+  ]);
+  const invalid = validateClubPatch(patch, validLeagueKeys);
   if (invalid) throw new HttpError(400, invalid);
   // `paid` is admin-only (its own route); strip it from general patches.
   delete (patch as { paid?: boolean }).paid;

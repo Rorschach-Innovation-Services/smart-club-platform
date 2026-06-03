@@ -821,6 +821,8 @@ function Shell({
             onSetPaid={setPaid}
             onInvite={inviteUser}
             toast={toastShow}
+            allLeagues={allLeagues}
+            onSetLeagues={(keys) => updateClub({ leagues: keys })}
           />
         );
       if (view === 'affiliations')
