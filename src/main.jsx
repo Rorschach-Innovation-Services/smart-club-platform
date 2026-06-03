@@ -916,6 +916,17 @@ function Shell({
             toast={toastShow}
             allLeagues={allLeagues}
             onSetLeagues={(keys) => updateClub({ leagues: keys }).catch(() => {})}
+            onUpdateChair={({ name, email, cell }) =>
+              updateClub({
+                chair: name,
+                // Shallow-merge on the server replaces the whole exco object, so send the
+                // full exco with siblings preserved and only the chair contact updated.
+                exco: {
+                  ...(activeClub?.exco || {}),
+                  chair: { ...(activeClub?.exco?.chair || {}), name, email, cell },
+                },
+              })
+            }
             onAddNote={addNote}
             onMarkCompliant={() =>
               markComplianceFor(

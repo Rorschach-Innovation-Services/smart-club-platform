@@ -3799,6 +3799,128 @@ function EditSupportContactModal({ current, onClose, onSave, toast }) {
   );
 }
 
+/* ─── ChairContactModal — admin sets/corrects a club's chairperson contact ───
+   Writes name/email/cell into exco.chair (the single source every "email the
+   chair" surface reads) and syncs the top-level club.chair string. Lets admins
+   repair clubs onboarded before chair contact was persisted, and fix typos /
+   chair changes later. Mirrors EditSupportContactModal's EMAIL_RE validation so
+   an invalid address can't be saved into a broken mailto:. */
+function ChairContactModal({ club, onClose, onSave, toast }) {
+  const seed = club.exco?.chair || {};
+  const [name, setName] = useStateA(seed.name || club.chair || '');
+  const [email, setEmail] = useStateA(seed.email || '');
+  const [cell, setCell] = useStateA(seed.cell || '');
+  const [busy, setBusy] = useStateA(false);
+  const cleanName = name.trim();
+  const cleanEmail = email.trim();
+  const cleanCell = cell.trim();
+  const emailOk = EMAIL_RE.test(cleanEmail);
+  const dirty =
+    cleanName !== (seed.name || club.chair || '') ||
+    cleanEmail !== (seed.email || '') ||
+    cleanCell !== (seed.cell || '');
+  // Cell is optional — matches buildInitialExco (server), so an admin who only has the
+  // chair's email can still record it (the repair use-case is email-centric).
+  const canSave = !!cleanName && emailOk && dirty && !busy;
+
+  function save() {
+    if (!canSave) return;
+    setBusy(true);
+    // Resolve(onSave) so a rejected save (e.g. a 409 version conflict surfaced by
+    // the parent's withToast) keeps the modal open for retry rather than closing.
+    Promise.resolve(onSave && onSave({ name: cleanName, email: cleanEmail, cell: cleanCell }))
+      .then(() => {
+        toast && toast(`Chairperson updated · ${cleanEmail}`);
+        onClose && onClose();
+      })
+      .catch(() => setBusy(false));
+  }
+
+  return createPortal(
+    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="task-modal narrow" style={{ maxWidth: 520 }}>
+        <div className="task-modal-head">
+          <div className="task-modal-head-text">
+            <div className="task-modal-head-eyebrow">Club details</div>
+            <div className="task-modal-head-title">
+              Edit <em>chairperson</em> · {club.name}
+            </div>
+          </div>
+          <button className="task-modal-close" onClick={onClose} title="Close">
+            <Icon.X />
+          </button>
+        </div>
+        <div className="task-modal-body">
+          <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
+            The chairperson is this club's primary contact for deadline reminders, the affiliation
+            link and "Email chairperson". Used across the portal once the club refetches.
+          </p>
+
+          <div className="field">
+            <div className="field-label">
+              Full name <span className="req">*</span>
+            </div>
+            <input
+              className="field-input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Chairperson name"
+              autoFocus
+            />
+          </div>
+
+          <div className="field" style={{ marginTop: 12 }}>
+            <div className="field-label">
+              Email <span className="req">*</span>
+            </div>
+            <input
+              type="email"
+              className="field-input"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="chair@club.co.za"
+            />
+            {cleanEmail && !emailOk && (
+              <div style={{ fontSize: 12, color: 'var(--coral)', marginTop: 6 }}>
+                Enter a valid email address.
+              </div>
+            )}
+          </div>
+
+          <div className="field" style={{ marginTop: 12 }}>
+            <div className="field-label">Cell number</div>
+            <input
+              className="field-input"
+              value={cell}
+              onChange={(e) => setCell(e.target.value)}
+              placeholder="083 000 0000"
+            />
+          </div>
+
+          <div
+            className="row"
+            style={{
+              justifyContent: 'flex-end',
+              gap: 8,
+              paddingTop: 16,
+              marginTop: 18,
+              borderTop: '1px solid var(--line)',
+            }}
+          >
+            <Btn tone="outline" onClick={onClose}>
+              Cancel
+            </Btn>
+            <Btn tone="teal" icon={Icon.Check} disabled={!canSave} onClick={save}>
+              {busy ? 'Saving…' : 'Save chairperson'}
+            </Btn>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 /* ─── PlayerRegLinkModal — V3 future feature, brought forward ───
    Admin generates a per-club registration link, copies / shares it, or
    regenerates it (invalidating the previous token). When a player opens the
@@ -4182,12 +4304,14 @@ export function AdminClubDetail({
   onMarkCompliant,
   onRevertDoc,
   onAddNote,
+  onUpdateChair,
 }) {
   // Hooks must run unconditionally — keep state before any early return.
   const [showLinkModal, setShowLinkModal] = useStateA(false);
   const [showInvite, setShowInvite] = useStateA(false);
   const [showCqi, setShowCqi] = useStateA(false);
   const [showCompliant, setShowCompliant] = useStateA(false);
+  const [showChairEdit, setShowChairEdit] = useStateA(false);
   const [noteText, setNoteText] = useStateA('');
   const [noteBusy, setNoteBusy] = useStateA(false);
   if (!club) return null;
@@ -4219,7 +4343,12 @@ export function AdminClubDetail({
   }
   function emailChair() {
     const e = club.exco?.chair?.email;
-    if (!e) return toast?.('No chairperson email on file');
+    // No email on file → open the editor so the admin can add it right away,
+    // rather than dead-ending on a toast.
+    if (!e) {
+      toast?.('No chairperson email on file — add one to send mail');
+      return setShowChairEdit(true);
+    }
     window.location.href = `mailto:${e}?subject=${encodeURIComponent(
       `${club.name} — Smart Club Integration`,
     )}`;
@@ -4378,6 +4507,9 @@ export function AdminClubDetail({
           </div>
         </div>
         <div className="ph-actions">
+          <Btn tone="outline" icon={Icon.Form} size="sm" onClick={() => setShowChairEdit(true)}>
+            Edit chairperson
+          </Btn>
           <Btn tone="outline" icon={Icon.Mail} size="sm" onClick={emailChair}>
             Email chairperson
           </Btn>
@@ -4838,6 +4970,14 @@ export function AdminClubDetail({
             onMarkCompliant && onMarkCompliant();
           }}
           onClose={() => setShowCompliant(false)}
+        />
+      )}
+      {showChairEdit && (
+        <ChairContactModal
+          club={club}
+          toast={toast}
+          onClose={() => setShowChairEdit(false)}
+          onSave={(c) => Promise.resolve(onUpdateChair?.(c)).then(() => setShowChairEdit(false))}
         />
       )}
     </div>

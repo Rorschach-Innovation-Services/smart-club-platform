@@ -263,3 +263,92 @@ describe('POST /clubs', () => {
     assert.equal(club.exco, undefined);
   });
 });
+
+describe('PATCH /clubs/:id — chair contact (repair existing clubs)', () => {
+  type ExcoFull = {
+    chair?: string;
+    version?: number;
+    exco?: {
+      chair?: { name?: string; email?: string; cell?: string };
+      sec?: { name?: string; email?: string };
+    };
+  };
+
+  const mkClub = (id: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    name: id,
+    district: 'Test District',
+    sub: '',
+    chair: 'Carlton',
+    affiliation: 'not_started' as const,
+    paid: false,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#123456',
+    ground: {},
+    leagues: [],
+    version: 1,
+    ...extra,
+  });
+
+  test('sets exco.chair on a club created without any exco (the Westlake case)', async () => {
+    await repo.createClub('dolphins', mkClub('repairme'));
+    const res = await app.request('/clubs/repairme', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        chair: 'Carlton',
+        exco: { chair: { name: 'Carlton', email: 'carlton@repair.co.za', cell: '083 111 2222' } },
+        version: 1,
+      }),
+    });
+    assert.equal(res.status, 200);
+    const club = (await res.json()) as ExcoFull;
+    assert.equal(club.chair, 'Carlton');
+    assert.equal(club.exco?.chair?.email, 'carlton@repair.co.za');
+    assert.equal(club.exco?.chair?.cell, '083 111 2222');
+  });
+
+  test('a full-exco patch preserves sibling members (sec)', async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('hassec', { exco: { sec: { name: 'Sam Sec', email: 'sam@sec.co.za' } } }),
+    );
+    // Client sends the FULL exco (sibling merged in) because the server shallow-merges.
+    const res = await app.request('/clubs/hassec', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        chair: 'New Chair',
+        exco: {
+          sec: { name: 'Sam Sec', email: 'sam@sec.co.za' },
+          chair: { name: 'New Chair', email: 'chair@hassec.co.za', cell: '082 000 0000' },
+        },
+        version: 1,
+      }),
+    });
+    assert.equal(res.status, 200);
+    const club = (await res.json()) as ExcoFull;
+    assert.equal(club.exco?.chair?.email, 'chair@hassec.co.za');
+    assert.equal(club.exco?.sec?.name, 'Sam Sec');
+    assert.equal(club.exco?.sec?.email, 'sam@sec.co.za');
+  });
+
+  test('a stale version is rejected with 409 (modal stays open for retry)', async () => {
+    await repo.createClub('dolphins', mkClub('staleclub')); // version 1
+    const res = await app.request('/clubs/staleclub', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        chair: 'Carlton',
+        exco: { chair: { name: 'Carlton', email: 'c@stale.co.za', cell: '' } },
+        version: 99, // mismatched → conflict
+      }),
+    });
+    assert.equal(res.status, 409);
+  });
+});
