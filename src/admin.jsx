@@ -4180,6 +4180,7 @@ export function AdminClubDetail({
   allLeagues = [],
   onSetLeagues,
   onMarkCompliant,
+  onRevertDoc,
   onAddNote,
 }) {
   // Hooks must run unconditionally — keep state before any early return.
@@ -4188,6 +4189,7 @@ export function AdminClubDetail({
   const [showCqi, setShowCqi] = useStateA(false);
   const [showCompliant, setShowCompliant] = useStateA(false);
   const [noteText, setNoteText] = useStateA('');
+  const [noteBusy, setNoteBusy] = useStateA(false);
   if (!club) return null;
   const dc = docCompletion(club);
   const op = overallProgress(club);
@@ -4293,13 +4295,17 @@ export function AdminClubDetail({
   }
   function submitNote() {
     const t = noteText.trim();
-    if (!t || !onAddNote) return;
+    // Guard against double-submit (Enter + click, or rapid Enter): the backend
+    // appends via list_append, so each duplicate POST lands as a separate note.
+    if (!t || !onAddNote || noteBusy) return;
+    setNoteBusy(true);
     onAddNote(t)
       .then(() => {
         setNoteText('');
         toast?.('Note added');
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setNoteBusy(false));
   }
 
   const phases = [
@@ -4588,9 +4594,24 @@ export function AdminClubDetail({
                     </div>
                   </div>
                   {up ? (
-                    <Pill tone={override ? 'gold' : 'teal'} dot>
-                      {override ? 'Override' : 'Approved'}
-                    </Pill>
+                    <div className="doc-row-actions">
+                      <Pill tone={override ? 'gold' : 'teal'} dot>
+                        {override ? 'Override' : 'Approved'}
+                      </Pill>
+                      {/* Override = compliant with no file on record; offer a
+                          lossless revert back to Missing. Real uploads (Approved)
+                          never show this — their file can't be reverted away. */}
+                      {override && onRevertDoc && (
+                        <Btn
+                          tone="ghost"
+                          size="sm"
+                          onClick={() => onRevertDoc(d.key)}
+                          title="Remove this override — sets the document back to Missing"
+                        >
+                          Revert
+                        </Btn>
+                      )}
+                    </div>
                   ) : (
                     <Pill tone="coral" dot>
                       Missing
@@ -4738,7 +4759,13 @@ export function AdminClubDetail({
                 onKeyDown={(e) => e.key === 'Enter' && submitNote()}
                 style={{ flex: 1, fontSize: 13 }}
               />
-              <Btn tone="outline" size="sm" icon={Icon.Plus} onClick={submitNote}>
+              <Btn
+                tone="outline"
+                size="sm"
+                icon={Icon.Plus}
+                onClick={submitNote}
+                disabled={noteBusy || !noteText.trim()}
+              >
                 Add
               </Btn>
             </div>

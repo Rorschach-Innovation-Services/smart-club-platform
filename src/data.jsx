@@ -469,6 +469,46 @@ export function docCompletion(club) {
   return Math.round((vals.filter((v) => v).length / vals.length) * 100);
 }
 
+// ── Reversible "Mark as compliant" — pure doc/meta computation ──
+// Kept here (UI-free) so the override-safety invariants can be unit-tested.
+// `at` is passed in (not generated) to keep these deterministic.
+
+// Mark `keys` compliant. Sets each doc true and stamps a {markedCompliant}
+// sentinel — EXCEPT docs that already have a real uploaded file (objectKey),
+// which are left untouched so an upload is never overwritten. `flipped` lists
+// the docs that were previously Missing — exactly the set a matching Undo
+// should revert (already-Override docs are excluded so Undo can't over-revert).
+export function computeMarkCompliance(club, keys, at) {
+  const docs = { ...club.docs };
+  const docMeta = { ...(club.docMeta ?? {}) };
+  const flipped = [];
+  for (const k of keys) {
+    if (club.docMeta?.[k]?.objectKey) continue; // real upload → leave as-is
+    if (!club.docs?.[k]) flipped.push(k); // was Missing → track for Undo
+    docs[k] = true;
+    docMeta[k] = { markedCompliant: true, at };
+  }
+  return { docs, docMeta, flipped };
+}
+
+// Revert ONLY override-only docs (markedCompliant && no uploaded file). Real
+// uploads are structurally untouchable. `reverted` lists the docs actually
+// flipped back to Missing (empty when nothing qualifies → caller can no-op).
+export function computeRevertCompliance(club, keys) {
+  const docs = { ...club.docs };
+  const docMeta = { ...(club.docMeta ?? {}) };
+  const reverted = [];
+  for (const k of keys) {
+    const m = docMeta[k];
+    if (m && m.markedCompliant && !m.objectKey) {
+      docs[k] = false;
+      delete docMeta[k];
+      reverted.push(k);
+    }
+  }
+  return { docs, docMeta, reverted };
+}
+
 export function overallProgress(club) {
   // 5 weighted phases: 20% each
   const p1 = club.paid ? 100 : club.affiliation === 'in_progress' ? 40 : 0;

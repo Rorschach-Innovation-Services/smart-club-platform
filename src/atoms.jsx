@@ -580,10 +580,25 @@ export function useEscapeClose(onClose) {
 export function useToast() {
   const [msg, setMsg] = useState(null);
   const [tone, setTone] = useState('ok');
-  function show(m, t = 'ok') {
+  // Optional inline action (e.g. an Undo button) carried by a toast.
+  const [action, setAction] = useState(null);
+  // Single timer ref so a new toast clears any pending dismissal — otherwise the
+  // previous toast's timeout could clear a fresh message early, or leave a stale
+  // action button rendered on an unrelated message.
+  const timer = useRef(null);
+  function clear() {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    setMsg(null);
+    setAction(null);
+  }
+  function show(m, t = 'ok', act = null) {
+    if (timer.current) clearTimeout(timer.current);
     setMsg(m);
     setTone(t);
-    setTimeout(() => setMsg(null), 2400);
+    setAction(act);
+    // Give action toasts longer so there's time to click (e.g. Undo).
+    timer.current = setTimeout(clear, act ? 6000 : 2400);
   }
   const node = msg ? (
     <div
@@ -593,6 +608,9 @@ export function useToast() {
         bottom: 24,
         right: 24,
         zIndex: 999,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 14,
         fontFamily: "'Montserrat',sans-serif",
         fontSize: 12,
         fontWeight: 500,
@@ -602,7 +620,31 @@ export function useToast() {
         color: tone === 'warn' ? 'var(--ink)' : '#fff',
       }}
     >
-      {msg}
+      <span>{msg}</span>
+      {action && (
+        <button
+          type="button"
+          onClick={() => {
+            clear();
+            action.onClick && action.onClick();
+          }}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            padding: '2px 4px',
+            margin: 0,
+            cursor: 'pointer',
+            font: 'inherit',
+            fontWeight: 700,
+            color: 'inherit',
+            textDecoration: 'underline',
+            textUnderlineOffset: 2,
+            opacity: 0.95,
+          }}
+        >
+          {action.label}
+        </button>
+      )}
     </div>
   ) : null;
   return [show, node];

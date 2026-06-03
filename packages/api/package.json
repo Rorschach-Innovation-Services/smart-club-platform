@@ -6,6 +6,7 @@
   "description": "Smart Club Platform — multi-tenant API (Hono on Lambda) + tenant repo, auth, seed",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
     "seed": "tsx src/seed.ts",
     "bootstrap-admin": "tsx src/bootstrap-admin.ts",
     "enable-passwordless": "tsx src/enable-passwordless.ts",

@@ -395,9 +395,12 @@ function AuthedApp({ tenantConfig }) {
       .catch(() => {});
   }
   function setSupportContact({ name, email }) {
-    return withToast(() => api.putSupportContact({ name, email }), 'Could not save support contact')
-      .then(() => invalidate(qk.tenant()))
-      .catch(() => {});
+    // Return the chain raw (no .catch swallow) so the edit modal's own .catch
+    // sees a failed save — otherwise it would show "updated" and close on error.
+    return withToast(
+      () => api.putSupportContact({ name, email }),
+      'Could not save support contact',
+    ).then(() => invalidate(qk.tenant()));
   }
   function setOnboarded(updater) {
     const next = typeof updater === 'function' ? updater(onboarded) : updater;
@@ -594,9 +597,9 @@ function Shell({
   const location = useLocation();
   const routeParams = useParams();
   const branding = tenantConfig?.branding;
-  // Union office email for mailto actions — extracted from the tenant support copy
-  // slot (same regex the HelpModal uses), so it stays correct per tenant.
-  const unionEmail = (branding?.copy?.support?.match(/[\w.+-]+@[\w.-]+/) || [''])[0];
+  // Union office email for mailto actions — parsed from the tenant support copy
+  // slot via the shared parseSupport helper, so it stays correct per tenant.
+  const unionEmail = parseSupport(branding?.copy?.support).email;
 
   // ── Derive clubId from URL ──
   let clubId;
@@ -669,6 +672,76 @@ function Shell({
       invalidate(qk.club(clubId));
       invalidate(qk.clubs());
     });
+  }
+
+  // ── Compliance override mark / revert (reversible "Mark as compliant") ──
+  // Patch with an EXPLICIT base version (not activeClub's) and resolve to the
+  // server's fresh club, so a chained Undo carries the correct (incremented)
+  // version. Without this, a fast Undo would race the post-write refetch and
+  // send a stale version → 409 ("Someone else just changed this") and no-op.
+  function patchClubAt(version, updates) {
+    return withToast(
+      () => api.patchClub(clubId, { ...updates, version }),
+      'Could not save changes',
+    ).then((updated) => {
+      invalidate(qk.club(clubId));
+      invalidate(qk.clubs());
+      return updated;
+    });
+  }
+  // Mark `keys` compliant. Preserves the original "set all four true" behaviour;
+  // only docs WITHOUT an uploaded file get a {markedCompliant} sentinel, and real
+  // uploads (objectKey) are left untouched. `flipped` = docs that were previously
+  // Missing — exactly the set a matching Undo should revert.
+  function markComplianceFor(club, keys) {
+    if (!club) return Promise.resolve(club);
+    const docs = { ...club.docs };
+    const docMeta = { ...(club.docMeta ?? {}) };
+    const at = new Date().toISOString();
+    const flipped = [];
+    for (const k of keys) {
+      if (club.docMeta?.[k]?.objectKey) continue; // real upload → leave as-is
+      if (!club.docs?.[k]) flipped.push(k); // was Missing → track for Undo
+      docs[k] = true;
+      docMeta[k] = { markedCompliant: true, at };
+    }
+    return patchClubAt(club.version, { docs, docMeta })
+      .then((updated) => {
+        if (flipped.length)
+          toastShow('Marked compliant', 'ok', {
+            label: 'Undo',
+            onClick: () => revertComplianceFor(updated ?? activeClub, flipped),
+          });
+        return updated;
+      })
+      .catch(() => {});
+  }
+  // Revert ONLY override-only docs (markedCompliant && no uploaded file), computed
+  // against the freshest known club. Relies on repo.updateClub replacing docMeta
+  // wholesale (shallow merge), so a deleted key does not resurrect server-side.
+  function revertComplianceFor(club, keys) {
+    if (!club) return Promise.resolve(club);
+    const docs = { ...club.docs };
+    const docMeta = { ...(club.docMeta ?? {}) };
+    const reverted = [];
+    for (const k of keys) {
+      const m = docMeta[k];
+      if (m && m.markedCompliant && !m.objectKey) {
+        docs[k] = false;
+        delete docMeta[k];
+        reverted.push(k);
+      }
+    }
+    if (!reverted.length) return Promise.resolve(club);
+    return patchClubAt(club.version, { docs, docMeta })
+      .then((updated) => {
+        toastShow('Compliance override removed', 'ok', {
+          label: 'Undo',
+          onClick: () => markComplianceFor(updated ?? activeClub, reverted),
+        });
+        return updated;
+      })
+      .catch(() => {});
   }
   // Admin appends a note to the active club's communication log (server-side
   // list_append, so concurrent notes don't clobber each other).
@@ -846,20 +919,12 @@ function Shell({
             onSetLeagues={(keys) => updateClub({ leagues: keys }).catch(() => {})}
             onAddNote={addNote}
             onMarkCompliant={() =>
-              updateClub({
-                docs: { constitution: true, agm: true, financials: true, exco: true },
-                docMeta: {
-                  ...(activeClub?.docMeta ?? {}),
-                  ...Object.fromEntries(
-                    ['constitution', 'agm', 'financials', 'exco']
-                      .filter((k) => !activeClub?.docMeta?.[k]?.objectKey)
-                      .map((k) => [k, { markedCompliant: true, at: new Date().toISOString() }]),
-                  ),
-                },
-              })
-                .then(() => toastShow('Marked compliant'))
-                .catch(() => {})
+              markComplianceFor(
+                activeClub,
+                REQUIRED_DOCS.map((d) => d.key),
+              )
             }
+            onRevertDoc={(key) => revertComplianceFor(activeClub, [key])}
           />
         );
       if (view === 'affiliations')

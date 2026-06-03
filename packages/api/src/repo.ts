@@ -95,7 +95,14 @@ export async function putTenantConfig(config: TenantConfig): Promise<void> {
  * Update only the support-contact copy slot. Uses a targeted UpdateExpression
  * (not a whole-config read-modify-write) so it physically cannot clobber a
  * concurrent leagues/deadline write — TenantConfig has no version guard.
- * Throws ConditionalCheckFailedException if the config row doesn't exist.
+ * Throws ConditionalCheckFailedException if the config row doesn't exist
+ * (handler maps that to 404).
+ *
+ * Precondition: the `branding.copy` map must already exist on the row — setting
+ * a nested path can't create its parent. This holds for every config we write
+ * (the TenantConfig type makes `branding.copy` required and seed-core always
+ * populates it), so a missing parent would mean a malformed/hand-edited row; it
+ * would surface as a ValidationException → unmapped 500 rather than the 404.
  */
 export async function updateSupportCopy(tenant: string, support: string): Promise<void> {
   await ddb.send(
@@ -217,6 +224,11 @@ export async function updateClub(
  * instead of clobbering each other — there is no version guard precisely so two
  * simultaneous appends both land. The version still bumps for audit/OCC of other
  * writers. Guards on row existence (handler does the 404 with a clearer message).
+ *
+ * Caveat: because the bump is unconditional (no `version = :v` guard), an append
+ * can invalidate the OCC token of a concurrent version-guarded updateClub, handing
+ * it a spurious 409. The UI mitigates this by invalidating the club query right
+ * after a note add, so the next edit re-reads the bumped version.
  */
 export async function appendClubNote(
   tenant: string,
