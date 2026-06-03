@@ -54,20 +54,27 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+
+/**
+ * True if `origin` (scheme://host[:port]) is a trusted app origin: localhost (dev),
+ * any *.cloudfront.net, or an explicit ALLOWED_ORIGINS entry (custom tenant domains).
+ * Shared by CORS and the invite-link host check so an admin can't send an invite
+ * pointing at an arbitrary/phishing domain.
+ */
+function originAllowed(origin: string): boolean {
+  if (ALLOWED_ORIGINS.includes(origin)) return true;
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === 'localhost' || hostname.endsWith('.cloudfront.net');
+  } catch {
+    return false;
+  }
+}
+
 app.use(
   '*',
   cors({
-    origin: (origin) => {
-      if (!origin) return undefined;
-      if (ALLOWED_ORIGINS.includes(origin)) return origin;
-      try {
-        const { hostname } = new URL(origin);
-        if (hostname === 'localhost' || hostname.endsWith('.cloudfront.net')) return origin;
-      } catch {
-        /* malformed origin */
-      }
-      return undefined;
-    },
+    origin: (origin) => (origin && originAllowed(origin) ? origin : undefined),
     // x-dev-auth is the local-dev identity header; harmless in cloud (the API only
     // trusts it when LOCAL_AUTH=1 — see auth.ts), required for the offline stack.
     allowHeaders: ['content-type', 'authorization', 'x-tenant', 'x-dev-auth'],
@@ -431,7 +438,19 @@ app.post('/clubs/:id/send-invite', requireAdmin, async (c) => {
     throw new HttpError(400, 'channels required');
   const unknown = channels.find((ch) => ch !== 'email' && ch !== 'whatsapp');
   if (unknown) throw new HttpError(400, `unknown channel: ${unknown}`);
-  if (!link || !/^https?:\/\//.test(link)) throw new HttpError(400, 'valid link required');
+  // The link is client-supplied (so it carries the tenant's own origin). Validate it
+  // parses as http(s), points at a trusted app origin, and targets THIS club's
+  // onboarding path — so an admin can't have the invite carry an arbitrary URL.
+  let linkUrl: URL;
+  try {
+    linkUrl = new URL(link ?? '');
+  } catch {
+    throw new HttpError(400, 'valid link required');
+  }
+  if (linkUrl.protocol !== 'http:' && linkUrl.protocol !== 'https:')
+    throw new HttpError(400, 'valid link required');
+  if (!originAllowed(linkUrl.origin)) throw new HttpError(400, 'link host not allowed');
+  if (linkUrl.pathname !== `/club/${id}`) throw new HttpError(400, 'link must target this club');
   if (!idempotencyKey) throw new HttpError(400, 'idempotencyKey required');
 
   const club = await repo.getClub(ra.tenant, id);
@@ -443,7 +462,7 @@ app.post('/clubs/:id/send-invite', requireAdmin, async (c) => {
   const prior = await repo.claimInviteSend(ra.tenant, id, idempotencyKey, channels);
   if (prior) return c.json({ results: prior.results, deduped: true, pending: prior.pending });
 
-  const { results } = await sendClubInvite({ club, channels, link });
+  const { results } = await sendClubInvite({ club, channels, link: linkUrl.href });
   try {
     await repo.appendClubCommEvents(
       ra.tenant,
@@ -608,15 +627,15 @@ async function applyClubPatch(
   }
 }
 
-/** Map a per-channel send outcome into a comm-log event row. */
+/** Map a per-channel send outcome into a comm-log event row (omitting empty fields). */
 function buildCommEvent(r: SendResult, by: string, idempotencyKey: string): ClubCommEvent {
   return {
     id: randomUUID(),
     channel: r.channel,
-    to: r.to,
     status: r.status,
-    messageId: r.messageId,
-    error: r.error,
+    ...(r.to ? { to: r.to } : {}),
+    ...(r.messageId ? { messageId: r.messageId } : {}),
+    ...(r.error ? { error: r.error } : {}),
     at: now(),
     by,
     idempotencyKey,

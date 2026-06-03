@@ -394,9 +394,10 @@ describe('POST /clubs/:id/send-invite', () => {
       body: JSON.stringify(body),
     });
 
+  // Link must be a trusted origin (localhost in dev) AND target this club's path.
   const valid = {
     channels: ['email', 'whatsapp'],
-    link: 'https://x.test/club/invitee',
+    link: 'http://localhost:3201/club/invitee',
     idempotencyKey: 'k1',
   };
 
@@ -422,19 +423,23 @@ describe('POST /clubs/:id/send-invite', () => {
   test('missing chair contact yields skipped (not failed) per channel', async () => {
     const res = await send('nocontact', {
       channels: ['email', 'whatsapp'],
-      link: 'https://x.test/club/nocontact',
+      link: 'http://localhost:3201/club/nocontact',
       idempotencyKey: 'k-nocontact',
     });
     assert.equal(res.status, 201);
-    const body = (await res.json()) as { results: { status: string; error?: string }[] };
+    const body = (await res.json()) as {
+      results: { status: string; error?: string; to?: string }[];
+    };
     assert.ok(body.results.every((r) => r.status === 'skipped'));
     assert.ok(body.results.every((r) => !!r.error));
+    // #6: a skip with no value on file must not persist an empty `to`.
+    assert.ok(body.results.every((r) => r.to === undefined));
   });
 
   test('empty channels is rejected (400)', async () => {
     const res = await send('invitee', {
       channels: [],
-      link: 'https://x.test',
+      link: 'http://localhost:3201/club/invitee',
       idempotencyKey: 'k2',
     });
     assert.equal(res.status, 400);
@@ -443,7 +448,7 @@ describe('POST /clubs/:id/send-invite', () => {
   test('unknown channel is rejected (400)', async () => {
     const res = await send('invitee', {
       channels: ['sms'],
-      link: 'https://x.test',
+      link: 'http://localhost:3201/club/invitee',
       idempotencyKey: 'k3',
     });
     assert.equal(res.status, 400);
@@ -458,8 +463,29 @@ describe('POST /clubs/:id/send-invite', () => {
     assert.equal(res.status, 400);
   });
 
+  test('#5: link on an untrusted host is rejected (400)', async () => {
+    const res = await send('invitee', {
+      channels: ['email'],
+      link: 'https://evil.example.com/club/invitee',
+      idempotencyKey: 'k-host',
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test('#5: link targeting a different club path is rejected (400)', async () => {
+    const res = await send('invitee', {
+      channels: ['email'],
+      link: 'http://localhost:3201/club/some-other-club',
+      idempotencyKey: 'k-path',
+    });
+    assert.equal(res.status, 400);
+  });
+
   test('missing idempotencyKey is rejected (400)', async () => {
-    const res = await send('invitee', { channels: ['email'], link: 'https://x.test' });
+    const res = await send('invitee', {
+      channels: ['email'],
+      link: 'http://localhost:3201/club/invitee',
+    });
     assert.equal(res.status, 400);
   });
 
@@ -469,7 +495,11 @@ describe('POST /clubs/:id/send-invite', () => {
   });
 
   test('unknown club yields 404', async () => {
-    const res = await send('ghost', { ...valid, idempotencyKey: 'k5' });
+    const res = await send('ghost', {
+      ...valid,
+      link: 'http://localhost:3201/club/ghost',
+      idempotencyKey: 'k5',
+    });
     assert.equal(res.status, 404);
   });
 });

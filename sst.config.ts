@@ -38,6 +38,10 @@ export default $config({
       globalIndexes: {
         gsi1: { hashKey: 'gsi1pk', rangeKey: 'gsi1sk' },
       },
+      // Self-expire only items that carry `expiresAt` (epoch seconds) — currently just
+      // the INVITE# idempotency markers, so they don't accumulate. Clubs/players/series
+      // have no `expiresAt`, so TTL never touches them.
+      ttl: 'expiresAt',
     });
 
     // ── Uploads: private compliance PDFs + tenant logos (presigned access) ──

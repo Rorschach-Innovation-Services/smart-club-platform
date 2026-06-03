@@ -105,8 +105,8 @@ export type Channel = 'email' | 'whatsapp';
 export interface SendResult {
   channel: Channel;
   status: 'sent' | 'failed' | 'skipped';
-  /** Resolved recipient (email address or E.164 cell) the send targeted. */
-  to: string;
+  /** Recipient the send targeted (email / E.164 cell). Omitted on a skip with no value on file. */
+  to?: string;
   messageId?: string;
   error?: string;
 }
@@ -115,8 +115,8 @@ export interface SendResult {
 export interface ClubCommEvent {
   id: string;
   channel: 'email' | 'whatsapp';
-  /** Resolved recipient (email address or E.164 cell) the send targeted. */
-  to: string;
+  /** Recipient the send targeted (email / E.164 cell). Omitted on a skip with no value on file. */
+  to?: string;
   status: 'sent' | 'failed' | 'skipped';
   /** Provider message id when sent (SES MessageId / Meta message id). */
   messageId?: string;

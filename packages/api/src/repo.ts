@@ -332,6 +332,10 @@ export async function claimInviteSend(
   channels: string[],
 ): Promise<InviteSendReplay | null> {
   const startedAt = new Date().toISOString();
+  // TTL (epoch seconds): the marker only needs to outlive a lost-response retry window,
+  // so let DynamoDB reap it after ~72h instead of accumulating one item per send forever.
+  // (Tenant/cohort erasure still deletes any that haven't expired — see listClubInviteKeys.)
+  const expiresAt = Math.floor(Date.now() / 1000) + 72 * 60 * 60;
   try {
     await ddb.send(
       new PutCommand({
@@ -341,6 +345,7 @@ export async function claimInviteSend(
           channels,
           status: 'in_progress',
           startedAt,
+          expiresAt,
         },
         ConditionExpression: 'attribute_not_exists(pk)',
       }),

@@ -43,10 +43,11 @@ async function sendEmailChannel(
   link: string,
 ): Promise<SendResult> {
   if (!EMAIL_RE.test(contact.email)) {
+    // Keep an invalid-but-present value for diagnostics; omit `to` entirely when blank.
     return {
       channel: 'email',
       status: 'skipped',
-      to: contact.email,
+      ...(contact.email ? { to: contact.email } : {}),
       error: 'no valid chair email on file',
     };
   }
@@ -73,7 +74,7 @@ async function sendWhatsAppChannel(
     return {
       channel: 'whatsapp',
       status: 'skipped',
-      to: contact.cell,
+      ...(contact.cell ? { to: contact.cell } : {}),
       error: 'no valid chair cell on file',
     };
   }
