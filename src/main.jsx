@@ -188,12 +188,13 @@ function TaskModal({ eyebrow, title, onClose, narrow, children }) {
 }
 
 /* ─── Splash / status screens ─── */
-function Splash({ message }) {
+function Splash({ message, action }) {
   return (
     <div className="ps-screen">
       <div className="ps-intro" style={{ textAlign: 'center' }}>
         <div className="ps-eyebrow">Smart Club Integration</div>
         <p className="ps-desc">{message}</p>
+        {action}
       </div>
     </div>
   );
@@ -299,14 +300,27 @@ function AuthedApp({ tenantConfig }) {
   const dataLoading =
     role === 'admin' ? clubsQuery.isLoading : repClubQueries.some((q) => q.isLoading);
   const dataError = role === 'admin' ? clubsQuery.isError : repClubQueries.some((q) => q.isError);
+  // A 404 means the requested club is gone (deleted, or a stale membership) — not an outage.
+  const dataErrorObj =
+    role === 'admin' ? clubsQuery.error : repClubQueries.find((q) => q.isError)?.error;
+  const clubNotFound = dataErrorObj instanceof ApiError && dataErrorObj.status === 404;
   if (dataLoading || seriesQuery.isLoading) return <Splash message="Loading your clubs…" />;
   if (dataError || seriesQuery.isError)
     return (
       <Splash
         message={
-          import.meta.env.VITE_LOCAL_AUTH === '1'
-            ? 'Could not reach the local API. Is it running? Start it with `npm run dev:local`.'
-            : 'Could not load your clubs. Refresh to retry.'
+          clubNotFound
+            ? 'That club could not be found — it may have been removed. Sign out and choose another account.'
+            : import.meta.env.VITE_LOCAL_AUTH === '1'
+              ? 'Could not reach the local API. Is it running? Start it with `npm run dev:local`.'
+              : 'Could not load your clubs. Refresh to retry.'
+        }
+        action={
+          clubNotFound ? (
+            <Btn tone="ink" size="sm" onClick={signOutUser}>
+              Sign out
+            </Btn>
+          ) : null
         }
       />
     );

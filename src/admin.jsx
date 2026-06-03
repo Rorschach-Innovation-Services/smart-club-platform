@@ -2780,8 +2780,9 @@ function OnboardNewClubModal({ clubs, knownClubs = [], onClose, onOnboard, onBul
         </div>
         <div className="task-modal-body">
           <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
-            Pick a known club from the list below for a one-click onboard, or type a new club name.
-            If their email or cell is already on file we'll auto-fill the rest.
+            {remainingKnown.length > 0
+              ? "Pick a known club from the list below for a one-click onboard, or type a new club name. If their email or cell is already on file we'll auto-fill the rest."
+              : "Type the new club's name, then capture the chairperson's contact details below."}
           </p>
 
           <div className="field">
@@ -2790,7 +2791,11 @@ function OnboardNewClubModal({ clubs, knownClubs = [], onClose, onOnboard, onBul
             </div>
             <input
               className="field-input"
-              placeholder="Search known clubs or type a new name…"
+              placeholder={
+                remainingKnown.length > 0
+                  ? 'Search known clubs or type a new name…'
+                  : 'Type the club name…'
+              }
               value={query}
               onChange={(e) => {
                 setQuery(e.target.value);
@@ -3170,7 +3175,9 @@ function OnboardNewClubModal({ clubs, knownClubs = [], onClose, onOnboard, onBul
               {selectedCount > 0
                 ? `${selectedCount} club${selectedCount === 1 ? '' : 's'} ticked — bulk onboards them in one go`
                 : !trimmedQuery
-                  ? 'Tick clubs above for a bulk onboard, or type a name to add a new one'
+                  ? remainingKnown.length > 0
+                    ? 'Tick clubs above for a bulk onboard, or type a name to add a new one'
+                    : 'Type a club name to add it'
                   : exact
                     ? 'Already onboarded — cancel and open their record'
                     : showForm && !canSubmit
