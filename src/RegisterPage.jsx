@@ -131,7 +131,12 @@ export function RegisterPage() {
           />
         )}
         {error && <div style={{ color: 'var(--coral)', fontSize: 12.5 }}>{error}</div>}
-        <button className="btn btn-ink" type="submit" disabled={busy} style={{ width: '100%' }}>
+        <button
+          className="btn btn-teal"
+          type="submit"
+          disabled={busy}
+          style={{ width: '100%', marginTop: 4 }}
+        >
           {busy ? 'Submitting…' : 'Register'}
         </button>
       </form>
@@ -143,7 +148,7 @@ function CenterCard({ children, wide }) {
   return (
     <div className="ps-screen">
       <div className="ps-cards" style={{ justifyContent: 'center' }}>
-        <div className="ps-card" style={{ cursor: 'default', maxWidth: wide ? 520 : 420 }}>
+        <div className="ps-card reg-card" style={{ maxWidth: wide ? 520 : 420 }}>
           {children}
         </div>
       </div>
@@ -157,15 +162,18 @@ function Row({ children }) {
 
 function Field({ label, type = 'text', required, value, onChange }) {
   return (
-    <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)' }}>
-      {label}
+    <label style={{ display: 'block' }}>
+      <span className="reg-label">
+        {label}
+        {required && <span className="req">*</span>}
+      </span>
       <input
         className="field-input"
         type={type}
         required={required}
         value={value}
         onChange={onChange}
-        style={{ width: '100%', marginTop: 4, fontSize: 16 }}
+        style={{ width: '100%', fontSize: 16 }}
       />
     </label>
   );

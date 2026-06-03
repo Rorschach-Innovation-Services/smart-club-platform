@@ -1220,6 +1220,21 @@
   .ps-card.gold{--accent:rgba(31,170,92,0.12);--accent-border:rgba(31,170,92,0.5)}
   .ps-card.teal{--accent:rgba(15,143,74,0.14);--accent-border:rgba(15,143,74,0.5)}
 
+  /* Public player-registration form: a solid scrim so the form reads clearly over the
+     photo, with legible light labels. It's a form — not a clickable splash card — so the
+     hover-lift and decorative corner glow are suppressed. */
+  .ps-card.reg-card{
+    background:rgba(12,17,22,0.9);border-color:rgba(255,255,255,0.16);
+    backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);cursor:default;
+  }
+  .ps-card.reg-card:hover{transform:none;border-color:rgba(255,255,255,0.16);background:rgba(12,17,22,0.9)}
+  .ps-card.reg-card::after{display:none}
+  .reg-label{
+    display:block;font-family:'Montserrat',sans-serif;font-size:11px;font-weight:600;
+    letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.66);margin-bottom:7px;
+  }
+  .reg-label .req{color:var(--green-bright);font-weight:700;margin-left:3px}
+
   .ps-card-icon{
     width:56px;height:56px;border-radius:14px;
     display:flex;align-items:center;justify-content:center;
