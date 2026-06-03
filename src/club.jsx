@@ -82,11 +82,20 @@ function DocUploadButton({ clubId, docKey, label, onUploaded, toast }) {
 
 /* ─── Ground map (Leaflet + OpenStreetMap + Nominatim geocoding) ─── */
 
-export function GroundMap({ query, onResolved, onAddressPicked }) {
+export function GroundMap({ query, coords: savedPin, onResolved, onAddressPicked }) {
   const elRef = useRefC(null);
   const mapRef = useRefC(null);
   const markerRef = useRefC(null);
-  const [coords, setCoords] = useStateC(null);
+  // A persisted pin is only restorable when it carries finite coords. A truthy-but-
+  // malformed pin must be ignored: it would feed undefined into setView/placeMarker and
+  // make the coords badge's `.toFixed` throw. Invalid → fall through to forward-geocode.
+  const validPin =
+    savedPin && Number.isFinite(savedPin.lat) && Number.isFinite(savedPin.lon) ? savedPin : null;
+  const [coords, setCoords] = useStateC(validPin);
+  // True only when we mounted with a valid saved pin. Used once to skip the mount-time
+  // forward-geocode so a remount (e.g. returning to step 1) restores the dropped pin
+  // instead of re-geocoding `query` and clobbering it. Re-arms on each fresh mount.
+  const hydratedRef = useRefC(Boolean(validPin));
   const [loading, setLoading] = useStateC(false);
   const [notFound, setNotFound] = useStateC(false); // geocode returned no result
   const [loadError, setLoadError] = useStateC(false); // request itself failed (network / rate-limit)
@@ -114,6 +123,7 @@ export function GroundMap({ query, onResolved, onAddressPicked }) {
   // shows the resolved place name; clicks stay quiet — coords + field report it).
   function placeMarker(lat, lon, label) {
     if (!mapRef.current || !L) return;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
     if (markerRef.current) markerRef.current.remove();
     const icon = L.divIcon({
       className: '',
@@ -179,13 +189,18 @@ export function GroundMap({ query, onResolved, onAddressPicked }) {
     const map = L.map(elRef.current, {
       scrollWheelZoom: false,
       attributionControl: true,
-    }).setView([-29.85, 31.02], 11); // Durban default
+    }).setView(
+      validPin ? [validPin.lat, validPin.lon] : [-29.85, 31.02], // saved pin, else Durban default
+      validPin ? 16 : 11,
+    );
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 18,
       attribution: '© OpenStreetMap contributors',
     }).addTo(map);
     map.on('click', (e) => handleMapClick(e.latlng.lat, e.latlng.lng));
     mapRef.current = map;
+    // Restore the previously dropped pin so a remount (returning to step 1) keeps it.
+    if (validPin) placeMarker(validPin.lat, validPin.lon);
     return () => {
       if (reverseTimerRef.current) clearTimeout(reverseTimerRef.current);
       if (reverseCtrlRef.current) reverseCtrlRef.current.abort();
@@ -197,6 +212,13 @@ export function GroundMap({ query, onResolved, onAddressPicked }) {
   // Forward-geocode + drop marker whenever the typed query changes
   useEffectC(() => {
     if (!query || !mapRef.current || !L) return;
+    // On a mount that restored a saved pin, skip this first (stale-query) geocode so the
+    // restored pin survives. The pin click may never have updated `query`, so re-running
+    // it here would relocate the marker and overwrite the real coords via onResolved.
+    if (hydratedRef.current) {
+      hydratedRef.current = false;
+      return;
+    }
     const id = ++reqRef.current;
     // A typed search supersedes any pending/in-flight click lookup.
     if (reverseTimerRef.current) clearTimeout(reverseTimerRef.current);
@@ -684,6 +706,12 @@ export function AffiliationForm({ club, goto, toast, onSubmit, allLeagues = [] }
       groundVenue: ground.venue || '',
       groundAddress: ground.address || '',
       groundMapQuery: ground.mapQuery || 'Durban, KwaZulu-Natal, South Africa',
+      // Restore the persisted pin so the map opens on it (and survives step round-trips)
+      // instead of re-geocoding `mapQuery`. Only seed when real coords were saved.
+      groundCoords:
+        Number.isFinite(ground.lat) && Number.isFinite(ground.lon)
+          ? { lat: ground.lat, lon: ground.lon, suburb: ground.suburb, name: ground.address }
+          : null,
       // True when groundAddress came from clicking the map (reverse-geocode).
       // Suppresses re-geocoding on blur so a clicked pin isn't relocated.
       groundAddressFromPin: false,
@@ -1035,8 +1063,12 @@ export function AffiliationForm({ club, goto, toast, onSubmit, allLeagues = [] }
                         Drop pin
                       </Btn>
                     </div>
+                    {/* GroundMap restores `coords` on mount and is wrapped in `step === 1`,
+                        so it unmounts on step change and re-arms its hydration on return.
+                        If steps ever switch to CSS hide instead of unmount, that restore breaks. */}
                     <GroundMap
                       query={data.groundMapQuery}
+                      coords={data.groundCoords}
                       onResolved={(c) => update('groundCoords', c)}
                       onAddressPicked={(addr) =>
                         setData((d) => ({
