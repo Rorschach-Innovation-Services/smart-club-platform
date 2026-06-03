@@ -360,6 +360,8 @@ function AuthedApp({ tenantConfig }) {
         invalidate(qk.series());
         invalidate(qk.tenant());
       }
+      // Flag so callers that rethrow (e.g. an upload UI) don't toast this a second time.
+      if (err && typeof err === 'object') err.alreadyToasted = true;
       throw err;
     }
   }
@@ -756,15 +758,15 @@ function Shell({
   // Compliance doc: DocumentsView uploads to S3 first, then calls this with the
   // stored object metadata. (No-arg legacy callers just flip the flag server-side.)
   function uploadDoc(key, meta) {
+    // Rejects on failure (withToast rethrows, flagged alreadyToasted) so the upload UI
+    // doesn't report a false success.
     return withToast(
       () => api.markDocUploaded(clubId, key, meta ?? { objectKey: '', size: 0 }),
       'Could not record upload',
-    )
-      .then(() => {
-        invalidate(qk.club(clubId));
-        invalidate(qk.clubs());
-      })
-      .catch(() => {});
+    ).then(() => {
+      invalidate(qk.club(clubId));
+      invalidate(qk.clubs());
+    });
   }
   function saveExco(members) {
     return withToast(() => api.saveExco(clubId, members), 'Could not save exco')

@@ -14,7 +14,12 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { handle } from 'hono/aws-lambda';
 import { randomUUID } from 'node:crypto';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { ensurePasswordlessUser } from './cognito-users.js';
@@ -356,6 +361,20 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
   const current = await repo.getClub(ra.tenant, id);
   if (!current) throw new HttpError(404, 'club not found');
   const docMeta = (current as { docMeta?: Record<string, unknown> }).docMeta ?? {};
+  // Replacing a wrongly-uploaded file: best-effort delete the previous S3 object so a
+  // stale PDF (PII) isn't orphaned in the bucket (POPIA data-minimisation). A failed
+  // delete must never fail the replace, and we skip non-S3 keys (e.g. local dev).
+  const prev = docMeta[key] as { objectKey?: string } | undefined;
+  const prevKey = prev?.objectKey;
+  if (prevKey && prevKey !== meta.objectKey && !prevKey.startsWith('local/')) {
+    try {
+      await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: prevKey }));
+    } catch (err) {
+      // Orphaned object is recoverable via a bucket lifecycle rule; don't block the replace.
+      // Log once so accumulation is observable rather than silent.
+      console.warn(`docs replace: failed to delete prior object ${prevKey}`, err);
+    }
+  }
   const updated = await applyClubPatch(
     ra.tenant,
     id,
@@ -366,6 +385,31 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
     ra.email,
   );
   return c.json(updated);
+});
+
+/** Mint a presigned GET so a rep or admin can preview a stored compliance PDF inline. */
+app.post('/clubs/:id/docs/:key/view-url', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const key = c.req.param('key');
+  assertClubAccess(ra, id);
+  const club = await repo.getClub(ra.tenant, id);
+  if (!club) throw new HttpError(404, 'club not found');
+  const docMeta = (club as { docMeta?: Record<string, unknown> }).docMeta ?? {};
+  const meta = docMeta[key] as { objectKey?: string } | undefined;
+  // Only real uploads have an objectKey; admin "mark compliant" overrides do not.
+  if (!meta?.objectKey) throw new HttpError(404, 'no file on record for this document');
+  const url = await getSignedUrl(
+    s3,
+    new GetObjectCommand({
+      Bucket: UPLOADS_BUCKET,
+      Key: meta.objectKey,
+      ResponseContentType: 'application/pdf',
+      ResponseContentDisposition: 'inline',
+    }),
+    { expiresIn: 900 },
+  );
+  return c.json({ viewUrl: url });
 });
 
 /** Generate a fresh player-registration link (admin or rep). Server-side token. */

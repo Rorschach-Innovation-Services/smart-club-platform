@@ -104,6 +104,8 @@ export const getDocUploadUrl = (id, key) =>
   request(`/clubs/${id}/docs/${key}/upload-url`, { method: 'POST' });
 export const markDocUploaded = (id, key, meta) =>
   request(`/clubs/${id}/docs/${key}`, { method: 'PATCH', body: meta });
+export const getDocViewUrl = (id, key) =>
+  request(`/clubs/${id}/docs/${key}/view-url`, { method: 'POST' });
 export const addClubNote = (id, text) =>
   request(`/clubs/${id}/notes`, { method: 'POST', body: { text } });
 /**

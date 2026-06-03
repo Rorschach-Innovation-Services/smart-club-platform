@@ -13,6 +13,7 @@ import {
   COACHING_LEVELS,
   REQUIRED_DOCS,
   CQI_STRUCTURE,
+  docFileMeta,
   docCompletion,
   overallProgress,
   affiliationSubmitted,
@@ -40,11 +41,13 @@ import {
   scoreCQI,
 } from './atoms.jsx';
 import { getDocUploadUrl, uploadToPresigned } from './api.js';
+import { DocPreviewModal } from './DocPreviewModal.jsx';
 
 /* ─── Compliance doc upload — presigned S3 PUT, then mark uploaded ─── */
-function DocUploadButton({ clubId, docKey, label, onUploaded, toast }) {
+function DocUploadButton({ clubId, docKey, label, onUploaded, toast, variant = 'button' }) {
   const inputRef = useRefC(null);
   const [busy, setBusy] = useStateC(false);
+  const isReplace = variant === 'link';
   async function handleFile(e) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -58,9 +61,13 @@ function DocUploadButton({ clubId, docKey, label, onUploaded, toast }) {
         await uploadToPresigned(uploadUrl, file);
         await onUploaded(docKey, { objectKey, size: file.size });
       }
-      toast(`${label} uploaded`);
+      // onUploaded rejects if the server-side record failed, so this only fires on
+      // real success (and the failure toast is surfaced by the caller's withToast).
+      toast(`${label} ${isReplace ? 'replaced' : 'uploaded'}`);
     } catch (err) {
-      toast(err?.message || 'Upload failed', 'warn');
+      // The mark-uploaded step toasts its own error (err.alreadyToasted); only the
+      // presigned-upload steps (getDocUploadUrl / uploadToPresigned) need surfacing here.
+      if (err && !err.alreadyToasted) toast(err.message || 'Upload failed', 'warn');
     } finally {
       setBusy(false);
       if (inputRef.current) inputRef.current.value = '';
@@ -75,9 +82,28 @@ function DocUploadButton({ clubId, docKey, label, onUploaded, toast }) {
         style={{ display: 'none' }}
         onChange={handleFile}
       />
-      <Btn tone="ink" size="sm" icon={Icon.Upload} onClick={() => inputRef.current?.click()}>
-        {busy ? 'Uploading…' : 'Upload'}
-      </Btn>
+      {isReplace ? (
+        <button
+          type="button"
+          disabled={busy}
+          aria-busy={busy}
+          onClick={() => inputRef.current?.click()}
+          style={{
+            background: 'none',
+            border: 'none',
+            padding: 0,
+            font: 'inherit',
+            color: 'var(--teal-deep)',
+            cursor: busy ? 'default' : 'pointer',
+          }}
+        >
+          {busy ? 'Replacing…' : 'Replace'}
+        </button>
+      ) : (
+        <Btn tone="ink" size="sm" icon={Icon.Upload} onClick={() => inputRef.current?.click()}>
+          {busy ? 'Uploading…' : 'Upload'}
+        </Btn>
+      )}
     </>
   );
 }
@@ -2404,6 +2430,7 @@ export function DocumentsView({
         : `${daysLeft} days remaining`;
   const dc = docCompletion(club);
   const [showExcoForm, setShowExcoForm] = useStateC(false);
+  const [preview, setPreview] = useStateC(null);
   const excoBearerCount = (() => {
     if (!club.exco) return 0;
     const fixed = FIXED_EXCO_ROLES.filter((r) => club.exco[r.key]?.name).length;
@@ -2449,6 +2476,12 @@ export function DocumentsView({
         {REQUIRED_DOCS.map((d) => {
           const up = club.docs[d.key];
           const isExco = d.key === 'exco';
+          // Real uploads carry docMeta with an objectKey; an admin "mark compliant"
+          // override sets the flag with no file. Demo/local mode has no docMeta at all
+          // but should still preview the bundled sample.
+          const meta = club.docMeta?.[d.key];
+          const demo = import.meta.env.VITE_LOCAL_AUTH === '1';
+          const { real, metaText } = docFileMeta(meta);
           return (
             <div key={d.key} className={`doc-row ${up ? 'uploaded' : ''}`}>
               <div className="doc-icon">{isExco ? <Icon.Form /> : <Icon.Doc />}</div>
@@ -2489,8 +2522,15 @@ export function DocumentsView({
                       </span>
                     ) : (
                       <span>
-                        {d.key}_2026.pdf · 1.2 MB · uploaded 14 May 2026 ·{' '}
-                        <a style={{ color: 'var(--teal-deep)' }}>Replace</a>
+                        {metaText || 'PDF document'} ·{' '}
+                        <DocUploadButton
+                          clubId={club.id}
+                          docKey={d.key}
+                          label={d.name}
+                          onUploaded={onUpload}
+                          toast={toast}
+                          variant="link"
+                        />
                       </span>
                     )
                   ) : isExco ? (
@@ -2513,7 +2553,15 @@ export function DocumentsView({
                   <Pill tone="teal" dot>
                     {isExco ? 'Completed' : 'Uploaded'}
                   </Pill>
-                  <Btn tone="ghost" size="sm" icon={Icon.Eye} />
+                  {!isExco && (real || demo) && (
+                    <Btn
+                      tone="ghost"
+                      size="sm"
+                      icon={Icon.Eye}
+                      title={`View ${d.name}`}
+                      onClick={() => setPreview(d.key)}
+                    />
+                  )}
                 </>
               ) : isExco ? (
                 <Btn tone="ink" size="sm" icon={Icon.Form} onClick={() => setShowExcoForm(true)}>
@@ -2545,6 +2593,17 @@ export function DocumentsView({
               `Exco roster ${club.docs.exco ? 'updated' : 'submitted'} · ${count} bearer${count === 1 ? '' : 's'}`,
             );
           }}
+        />
+      )}
+
+      {preview && (
+        <DocPreviewModal
+          clubId={club.id}
+          docKey={preview}
+          docName={REQUIRED_DOCS.find((d) => d.key === preview)?.name || 'Document'}
+          clubName={club.name}
+          meta={club.docMeta?.[preview]}
+          onClose={() => setPreview(null)}
         />
       )}
 

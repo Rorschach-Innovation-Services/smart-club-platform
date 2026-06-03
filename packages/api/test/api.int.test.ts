@@ -22,6 +22,12 @@ process.env.LOCAL_AUTH = '1';
 process.env.STAGE = 'local';
 process.env.USER_POOL_ID = 'test-pool';
 process.env.AWS_REGION ??= 'localhost';
+// Compliance-doc view-url presigns locally (no network); dummy creds let SigV4 sign.
+// A failed delete-on-replace must not hang the suite — cap S3 retries.
+process.env.UPLOADS_BUCKET = 'test-uploads';
+process.env.AWS_ACCESS_KEY_ID ??= 'test';
+process.env.AWS_SECRET_ACCESS_KEY ??= 'test';
+process.env.AWS_MAX_ATTEMPTS = '1';
 
 const devAuth = (memberships: unknown) =>
   Buffer.from(JSON.stringify({ sub: 'u', email: 'admin@test', memberships })).toString('base64');
@@ -650,5 +656,87 @@ describe('POST /clubs — progression default', () => {
     assert.equal(res.status, 201);
     const club = (await res.json()) as { progressionMode?: string };
     assert.equal(club.progressionMode, 'submission');
+  });
+});
+
+describe('compliance doc view-url + replace', () => {
+  const baseClub = {
+    id: 'docclub',
+    name: 'Doc Club CC',
+    district: 'Test District',
+    sub: 'sub-1',
+    chair: 'Chair',
+    affiliation: 'not_started' as const,
+    paid: false,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#123456',
+    ground: {},
+    leagues: [],
+    version: 1,
+  };
+  const DOC_REP = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['docclub'] }]);
+  const OTHER_REP = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['elsewhere'] }]);
+
+  before(async () => {
+    await repo.createClub('dolphins', baseClub);
+  });
+
+  test('mark a doc uploaded, then mint a presigned view-url (admin)', async () => {
+    const up = await app.request('/clubs/docclub/docs/constitution', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ objectKey: 'dolphins/docclub/constitution-a.pdf', size: 1000 }),
+    });
+    assert.equal(up.status, 200);
+
+    const res = await app.request('/clubs/docclub/docs/constitution/view-url', {
+      method: 'POST',
+      headers: headers(ADMIN),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { viewUrl?: string };
+    assert.ok(body.viewUrl?.startsWith('https://'), 'returns a presigned https URL');
+  });
+
+  test('owning rep can mint a view-url', async () => {
+    const res = await app.request('/clubs/docclub/docs/constitution/view-url', {
+      method: 'POST',
+      headers: headers(DOC_REP),
+    });
+    assert.equal(res.status, 200);
+  });
+
+  test('view-url is 404 when the document has no file on record', async () => {
+    const res = await app.request('/clubs/docclub/docs/agm/view-url', {
+      method: 'POST',
+      headers: headers(ADMIN),
+    });
+    assert.equal(res.status, 404);
+  });
+
+  test('a rep without access to the club is rejected (403)', async () => {
+    const res = await app.request('/clubs/docclub/docs/constitution/view-url', {
+      method: 'POST',
+      headers: headers(OTHER_REP),
+    });
+    assert.equal(res.status, 403);
+  });
+
+  test('replacing a doc updates the stored objectKey (delete-on-replace path)', async () => {
+    const res = await app.request('/clubs/docclub/docs/constitution', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ objectKey: 'dolphins/docclub/constitution-b.pdf', size: 2000 }),
+    });
+    assert.equal(res.status, 200);
+    const club = (await repo.getClub('dolphins', 'docclub')) as {
+      docMeta?: Record<string, { objectKey?: string }>;
+    };
+    assert.equal(club.docMeta?.constitution?.objectKey, 'dolphins/docclub/constitution-b.pdf');
   });
 });

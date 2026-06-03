@@ -75,6 +75,46 @@ export const REQUIRED_DOCS = [
   },
 ];
 
+/**
+ * Derive display fields for an uploaded compliance document from its `docMeta` entry.
+ * A real upload carries an `objectKey`; an admin "mark compliant" override (or a sample
+ * club) has none, so `real` is false and the file fields are null. Single source of truth
+ * for the club portal row, the admin row, and the preview modal header.
+ */
+export function docFileMeta(meta) {
+  const real = !!(meta && meta.objectKey);
+  const fileName = real ? String(meta.objectKey).split('/').pop() : null;
+  const uploadedDate =
+    real && meta.uploadedAt
+      ? new Date(meta.uploadedAt).toLocaleDateString('en-GB', {
+          day: 'numeric',
+          month: 'short',
+          year: 'numeric',
+        })
+      : null;
+  const sizeMB = real && meta.size ? `${(meta.size / 1e6).toFixed(1)} MB` : null;
+  const metaText = [fileName, uploadedDate && `uploaded ${uploadedDate}`, sizeMB]
+    .filter(Boolean)
+    .join(' · ');
+  return { real, fileName, uploadedDate, sizeMB, metaText };
+}
+
+/**
+ * Decide what a document preview should render, so a real-but-fileless doc is never
+ * misrepresented by the demo sample:
+ *  - 'real' → a stored S3 file exists; mint a presigned GET and show it.
+ *  - 'demo' → local/demo mode; show the bundled sample PDF (sample clubs have no docMeta).
+ *  - 'none' → production doc with no usable file (admin override / empty key); show an
+ *             explicit "no file on record" state, NOT the sample.
+ */
+export function resolvePreviewSource(meta, isLocalDemo) {
+  const objectKey = meta?.objectKey;
+  const hasRealFile = !!objectKey && !String(objectKey).startsWith('local/');
+  if (hasRealFile && !isLocalDemo) return 'real';
+  if (isLocalDemo) return 'demo';
+  return 'none';
+}
+
 // Sample clubs — names drawn from the actual Dolphins CQI list
 // Each carries denormalised submission state so the admin views can score them.
 export const SAMPLE_CLUBS = [

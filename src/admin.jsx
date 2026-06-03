@@ -8,6 +8,7 @@ import {
   CQI_STRUCTURE,
   SUBMISSION_DEADLINE_DEFAULT,
   cohortStats,
+  docFileMeta,
   docCompletion,
   overallProgress,
   affiliationSubmitted,
@@ -30,6 +31,7 @@ import { exportRowsToXlsx, clubExportRow } from './exportXlsx.js';
 import { openBccReminder } from './mailto.js';
 import { EMAIL_RE } from './api.js';
 import { parseSupport } from './support.js';
+import { DocPreviewModal } from './DocPreviewModal.jsx';
 import {
   Icon,
   Pill,
@@ -4377,6 +4379,7 @@ export function AdminClubDetail({
   const [showInvite, setShowInvite] = useStateA(false);
   const [showCqi, setShowCqi] = useStateA(false);
   const [showAffiliation, setShowAffiliation] = useStateA(false);
+  const [showDocPreview, setShowDocPreview] = useStateA(null);
   const [showCompliant, setShowCompliant] = useStateA(false);
   const [showChairEdit, setShowChairEdit] = useStateA(false);
   const [noteText, setNoteText] = useStateA('');
@@ -4716,20 +4719,10 @@ export function AdminClubDetail({
               const up = club.docs[d.key];
               // Real uploads carry docMeta with an objectKey; an admin "Mark as
               // compliant" override sets the flag true with a markedCompliant
-              // sentinel (no file). Never fabricate a filename for the latter.
+              // sentinel (no file). docFileMeta never fabricates a filename for the latter.
               const meta = club.docMeta?.[d.key];
-              const real = !!(meta && meta.objectKey);
+              const { real, metaText } = docFileMeta(meta);
               const override = up && !real;
-              const fileName = real ? String(meta.objectKey).split('/').pop() : null;
-              const uploadedDate =
-                real && meta.uploadedAt
-                  ? new Date(meta.uploadedAt).toLocaleDateString('en-GB', {
-                      day: 'numeric',
-                      month: 'short',
-                      year: 'numeric',
-                    })
-                  : null;
-              const sizeMB = real && meta.size ? `${(meta.size / 1e6).toFixed(1)} MB` : null;
               return (
                 <div key={d.key} className={`doc-row ${up ? 'uploaded' : ''}`}>
                   <div className="doc-icon">
@@ -4742,9 +4735,7 @@ export function AdminClubDetail({
                     </div>
                     <div className="doc-meta">
                       {real
-                        ? [fileName, uploadedDate && `uploaded ${uploadedDate}`, sizeMB]
-                            .filter(Boolean)
-                            .join(' · ')
+                        ? metaText
                         : override
                           ? 'Marked compliant — no file on record'
                           : 'Not yet uploaded · awaiting club'}
@@ -4755,6 +4746,17 @@ export function AdminClubDetail({
                       <Pill tone={override ? 'gold' : 'teal'} dot>
                         {override ? 'Override' : 'Approved'}
                       </Pill>
+                      {/* Only real uploads (with a stored file) can be previewed;
+                          overrides have no file on record. */}
+                      {real && (
+                        <Btn
+                          tone="ghost"
+                          size="sm"
+                          icon={Icon.Eye}
+                          title={`View ${d.name}`}
+                          onClick={() => setShowDocPreview(d.key)}
+                        />
+                      )}
                       {/* Override = compliant with no file on record; offer a
                           lossless revert back to Missing. Real uploads (Approved)
                           never show this — their file can't be reverted away. */}
@@ -5000,6 +5002,16 @@ export function AdminClubDetail({
         />
       )}
       {showCqi && <CqiViewModal club={club} onClose={() => setShowCqi(false)} />}
+      {showDocPreview && (
+        <DocPreviewModal
+          clubId={club.id}
+          docKey={showDocPreview}
+          docName={REQUIRED_DOCS.find((d) => d.key === showDocPreview)?.name || 'Document'}
+          clubName={club.name}
+          meta={club.docMeta?.[showDocPreview]}
+          onClose={() => setShowDocPreview(null)}
+        />
+      )}
       {showAffiliation && (
         <AffiliationViewModal
           club={club}
