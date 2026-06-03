@@ -258,6 +258,24 @@ export function Card({ title, sub, action, children, style }) {
   );
 }
 
+// Centered empty-state card — shared by admin pages that can render with no data
+// (blank cohort: clubs, fixtures, affiliations, docs, CQI). Uses the .club-fix-empty
+// design-system classes so every empty surface looks identical.
+export function EmptyState({ icon: I, title, sub, action }) {
+  return (
+    <div className="club-fix-empty">
+      {I && (
+        <div className="club-fix-empty-icon">
+          <I />
+        </div>
+      )}
+      <div className="club-fix-empty-title">{title}</div>
+      {sub && <div className="club-fix-empty-sub">{sub}</div>}
+      {action}
+    </div>
+  );
+}
+
 export function KPI({ label, num, sub, tone = '' }) {
   return (
     <div className={`kpi ${tone}`}>

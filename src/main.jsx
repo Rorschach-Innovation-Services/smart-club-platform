@@ -1,5 +1,6 @@
 import { useState as useStateApp, useMemo as useMemoApp, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
+import { createPortal } from 'react-dom';
 import {
   BrowserRouter,
   Routes,
@@ -23,6 +24,7 @@ import {
   Icon,
   Pill,
   Btn,
+  EmptyState,
   ProgChip,
   ClubNameCell,
   affPill,
@@ -56,7 +58,7 @@ function HelpModal({ onClose, support }) {
         },
       ]
     : [{ name: 'Union office', role: 'Support', email: '' }];
-  return (
+  return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="task-modal narrow" style={{ maxWidth: 560 }}>
         <div className="task-modal-head">
@@ -158,14 +160,17 @@ function HelpModal({ onClose, support }) {
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
 /* ─── TaskModal — wraps the affiliation form & documents view ─── */
 function TaskModal({ eyebrow, title, onClose, narrow, children }) {
   useEscapeClose(onClose);
-  return (
+  // Portal to document.body so the fixed backdrop centers against the viewport, not the
+  // residual transform left on `.main > *` by the fadeUp animation (see admin.jsx fix-confirm).
+  return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className={`task-modal ${narrow ? 'narrow' : ''}`}>
         <div className="task-modal-head">
@@ -183,7 +188,8 @@ function TaskModal({ eyebrow, title, onClose, narrow, children }) {
         </div>
         <div className="task-modal-body">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -760,11 +766,32 @@ function Shell({
           />
         );
       if (view === 'affiliations')
-        return <AdminFiltered clubs={clubs} kind="affiliation" gotoClub={setActiveClub} />;
+        return (
+          <AdminFiltered
+            clubs={clubs}
+            kind="affiliation"
+            gotoClub={setActiveClub}
+            onOnboard={() => gotoAdminView('clubs_list')}
+          />
+        );
       if (view === 'documents')
-        return <AdminFiltered clubs={clubs} kind="docs" gotoClub={setActiveClub} />;
+        return (
+          <AdminFiltered
+            clubs={clubs}
+            kind="docs"
+            gotoClub={setActiveClub}
+            onOnboard={() => gotoAdminView('clubs_list')}
+          />
+        );
       if (view === 'cqi_admin')
-        return <AdminFiltered clubs={clubs} kind="cqi" gotoClub={setActiveClub} />;
+        return (
+          <AdminFiltered
+            clubs={clubs}
+            kind="cqi"
+            gotoClub={setActiveClub}
+            onOnboard={() => gotoAdminView('clubs_list')}
+          />
+        );
       if (view === 'fixtures')
         return (
           <AdminFixtures
@@ -975,7 +1002,9 @@ function Shell({
           </div>
         </aside>
 
-        <main className={`main ${view === 'fixtures' ? 'fullbleed' : ''}`}>{renderMain()}</main>
+        <main className={`main ${view === 'fixtures' && allSeries.length > 0 ? 'fullbleed' : ''}`}>
+          {renderMain()}
+        </main>
       </div>
 
       {showOnboarding && role === 'club' && (
@@ -1076,22 +1105,30 @@ function Shell({
 }
 
 /* ─── Filtered admin views (Affiliation / Docs / CQI) ─── */
-function AdminFiltered({ clubs, kind, gotoClub }) {
+function AdminFiltered({ clubs, kind, gotoClub, onOnboard }) {
   const titles = {
     affiliation: {
       t: 'Affiliation tracker',
       crumb: 'Affiliations',
       desc: 'Track which clubs have completed the 2026/27 union affiliation form.',
+      icon: Icon.Form,
+      empty: 'Onboard your clubs to start tracking who has completed the 2026/27 affiliation form.',
     },
     docs: {
       t: 'Compliance docs tracker',
       crumb: 'Compliance Docs',
       desc: 'Monitor uploads of Constitution, AGM Minutes, Financial Statements and Exco Reps Listed.',
+      icon: Icon.Upload,
+      empty:
+        'Onboard your clubs to start monitoring Constitution, AGM Minutes, Financials and Exco Reps uploads.',
     },
     cqi: {
       t: 'CQI submission tracker',
       crumb: 'CQI Submissions',
       desc: 'Real-time view of CQI self-assessments returned by clubs across all five categories.',
+      icon: Icon.Star,
+      empty:
+        'Onboard your clubs to start collecting CQI self-assessments across all five categories.',
     },
   }[kind];
 
@@ -1113,164 +1150,177 @@ function AdminFiltered({ clubs, kind, gotoClub }) {
         </div>
       </div>
 
-      <div className="tbl-w">
-        <table className="tbl">
-          <thead>
-            <tr>
-              <th>Club</th>
-              <th>Chair</th>
-              {kind === 'affiliation' && (
-                <>
-                  <th>Status</th>
-                  <th>Payment</th>
-                  <th>Submitted</th>
-                </>
-              )}
-              {kind === 'docs' && (
-                <>
-                  <th>Constitution</th>
-                  <th>AGM Minutes</th>
-                  <th>Financials</th>
-                  <th>Exco Reps</th>
-                  <th>Progress</th>
-                </>
-              )}
-              {kind === 'cqi' && (
-                <>
-                  <th>Score</th>
-                  <th>Band</th>
-                  <th>Submitted</th>
-                  <th>Players</th>
-                </>
-              )}
-              <th style={{ width: 60 }}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {clubs.map((c) => (
-              <tr key={c.id} className="clickable" onClick={() => gotoClub(c.id)}>
-                <td>
-                  <ClubNameCell club={c} />
-                </td>
-                <td>
-                  <span style={{ fontSize: 12.5 }}>{c.chair}</span>
-                </td>
-
+      {clubs.length === 0 ? (
+        <EmptyState
+          icon={titles.icon}
+          title="No clubs in your cohort yet"
+          sub={titles.empty}
+          action={
+            <Btn tone="teal" icon={Icon.Plus} onClick={onOnboard}>
+              Onboard your first club
+            </Btn>
+          }
+        />
+      ) : (
+        <div className="tbl-w">
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Club</th>
+                <th>Chair</th>
                 {kind === 'affiliation' && (
                   <>
-                    <td>{affPill(c.affiliation)}</td>
-                    <td>
-                      {c.paid ? (
-                        <Pill tone="teal" dot>
-                          Submitted
-                        </Pill>
-                      ) : (
-                        <Pill tone="coral" dot>
-                          Outstanding
-                        </Pill>
-                      )}
-                    </td>
-                    <td>
-                      <span
-                        style={{
-                          fontSize: 11.5,
-                          color: 'var(--muted)',
-                          fontFamily: "'Montserrat',sans-serif",
-                        }}
-                      >
-                        {c.paid
-                          ? 'Paid'
-                          : c.affiliation === 'complete'
-                            ? 'Submitted'
-                            : c.affiliation === 'in_progress'
-                              ? 'Draft saved'
-                              : '—'}
-                      </span>
-                    </td>
+                    <th>Status</th>
+                    <th>Payment</th>
+                    <th>Submitted</th>
                   </>
                 )}
-
                 {kind === 'docs' && (
                   <>
-                    {REQUIRED_DOCS.map((d) => (
-                      <td key={d.key}>
-                        {c.docs[d.key] ? (
+                    <th>Constitution</th>
+                    <th>AGM Minutes</th>
+                    <th>Financials</th>
+                    <th>Exco Reps</th>
+                    <th>Progress</th>
+                  </>
+                )}
+                {kind === 'cqi' && (
+                  <>
+                    <th>Score</th>
+                    <th>Band</th>
+                    <th>Submitted</th>
+                    <th>Players</th>
+                  </>
+                )}
+                <th style={{ width: 60 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {clubs.map((c) => (
+                <tr key={c.id} className="clickable" onClick={() => gotoClub(c.id)}>
+                  <td>
+                    <ClubNameCell club={c} />
+                  </td>
+                  <td>
+                    <span style={{ fontSize: 12.5 }}>{c.chair}</span>
+                  </td>
+
+                  {kind === 'affiliation' && (
+                    <>
+                      <td>{affPill(c.affiliation)}</td>
+                      <td>
+                        {c.paid ? (
                           <Pill tone="teal" dot>
-                            Uploaded
+                            Submitted
                           </Pill>
                         ) : (
                           <Pill tone="coral" dot>
-                            Missing
+                            Outstanding
                           </Pill>
                         )}
                       </td>
-                    ))}
-                    <td>
-                      <ProgChip
-                        value={docCompletion(c)}
-                        tone={
-                          docCompletion(c) === 100
-                            ? 'teal'
-                            : docCompletion(c) > 0
-                              ? 'gold'
-                              : 'coral'
-                        }
-                      />
-                    </td>
-                  </>
-                )}
+                      <td>
+                        <span
+                          style={{
+                            fontSize: 11.5,
+                            color: 'var(--muted)',
+                            fontFamily: "'Montserrat',sans-serif",
+                          }}
+                        >
+                          {c.paid
+                            ? 'Paid'
+                            : c.affiliation === 'complete'
+                              ? 'Submitted'
+                              : c.affiliation === 'in_progress'
+                                ? 'Draft saved'
+                                : '—'}
+                        </span>
+                      </td>
+                    </>
+                  )}
 
-                {kind === 'cqi' && (
-                  <>
-                    <td>
-                      <span
-                        style={{
-                          fontFamily: "'Montserrat',sans-serif",
-                          fontSize: 15,
-                          fontWeight: 800,
-                          color:
-                            c.cqi >= 80
-                              ? 'var(--teal-deep)'
-                              : c.cqi >= 65
-                                ? 'var(--ink)'
-                                : c.cqi > 0
-                                  ? '#076B36'
-                                  : 'var(--muted-2)',
-                        }}
-                      >
-                        {c.cqi > 0 ? c.cqi.toFixed(1) : '—'}
-                      </span>
-                    </td>
-                    <td>
-                      <Pill tone={cqiBand(c.cqi).tone}>{cqiBand(c.cqi).label}</Pill>
-                    </td>
-                    <td>
-                      <span
-                        style={{
-                          fontSize: 11.5,
-                          color: 'var(--muted)',
-                          fontFamily: "'Montserrat',sans-serif",
-                        }}
-                      >
-                        {c.cqi > 0 ? 'Submitted' : '—'}
-                      </span>
-                    </td>
-                    <td>
-                      <span style={{ fontFamily: "'Montserrat',sans-serif", fontSize: 12 }}>
-                        {c.players || '—'}
-                      </span>
-                    </td>
-                  </>
-                )}
+                  {kind === 'docs' && (
+                    <>
+                      {REQUIRED_DOCS.map((d) => (
+                        <td key={d.key}>
+                          {c.docs[d.key] ? (
+                            <Pill tone="teal" dot>
+                              Uploaded
+                            </Pill>
+                          ) : (
+                            <Pill tone="coral" dot>
+                              Missing
+                            </Pill>
+                          )}
+                        </td>
+                      ))}
+                      <td>
+                        <ProgChip
+                          value={docCompletion(c)}
+                          tone={
+                            docCompletion(c) === 100
+                              ? 'teal'
+                              : docCompletion(c) > 0
+                                ? 'gold'
+                                : 'coral'
+                          }
+                        />
+                      </td>
+                    </>
+                  )}
 
-                <td style={{ textAlign: 'right', paddingRight: 18 }}>
-                  <Icon.Arrow />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+                  {kind === 'cqi' && (
+                    <>
+                      <td>
+                        <span
+                          style={{
+                            fontFamily: "'Montserrat',sans-serif",
+                            fontSize: 15,
+                            fontWeight: 800,
+                            color:
+                              c.cqi >= 80
+                                ? 'var(--teal-deep)'
+                                : c.cqi >= 65
+                                  ? 'var(--ink)'
+                                  : c.cqi > 0
+                                    ? '#076B36'
+                                    : 'var(--muted-2)',
+                          }}
+                        >
+                          {c.cqi > 0 ? c.cqi.toFixed(1) : '—'}
+                        </span>
+                      </td>
+                      <td>
+                        <Pill tone={cqiBand(c.cqi).tone}>{cqiBand(c.cqi).label}</Pill>
+                      </td>
+                      <td>
+                        <span
+                          style={{
+                            fontSize: 11.5,
+                            color: 'var(--muted)',
+                            fontFamily: "'Montserrat',sans-serif",
+                          }}
+                        >
+                          {c.cqi > 0 ? 'Submitted' : '—'}
+                        </span>
+                      </td>
+                      <td>
+                        <span style={{ fontFamily: "'Montserrat',sans-serif", fontSize: 12 }}>
+                          {c.players || '—'}
+                        </span>
+                      </td>
+                    </>
+                  )}
+
+                  <td style={{ textAlign: 'right', paddingRight: 18 }}>
+                    <Icon.Arrow />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

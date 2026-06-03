@@ -24,6 +24,7 @@ import {
   Pill,
   Btn,
   Card,
+  EmptyState,
   KPI,
   ProgressBar,
   ProgChip,
@@ -129,84 +130,99 @@ export function AdminFixtures({
         </div>
       </div>
 
-      {/* Series cards strip — each card has its own quick release/recall button */}
-      <div className="series-strip">
-        {allSeries.map((s) => {
-          const agg = seriesAgg(s);
-          return (
-            <div
-              key={s.id}
-              className={`series-card ${s.id === activeId ? 'active' : ''}`}
-              onClick={() => setActiveId(s.id)}
-              role="button"
-              tabIndex={0}
-            >
-              <div className="series-card-head">
-                <div className="series-card-name">{s.name}</div>
-                {s.released ? (
-                  <div className="series-card-released">Released</div>
-                ) : (
-                  <div className="series-card-draft">Draft</div>
-                )}
-              </div>
-              <div
-                style={{
-                  fontSize: 11,
-                  color: 'var(--muted)',
-                  fontWeight: 500,
-                  fontFamily: "'Montserrat',sans-serif",
-                }}
-              >
-                {s.teams.length} teams · {s.fixtures.length} fixtures · {s.maxOvers} ov · start{' '}
-                {new Date(s.startDate).toLocaleDateString('en-GB', {
-                  day: 'numeric',
-                  month: 'short',
-                })}
-              </div>
-              <div className="series-card-meta">
-                <div className="series-card-stat">
-                  <div className="series-card-stat-l">Total km</div>
-                  <div className="series-card-stat-n">
-                    {Math.round(agg.totalKm).toLocaleString()}
-                  </div>
-                </div>
-                <div className="series-card-stat">
-                  <div className="series-card-stat-l">Travel</div>
-                  <div className="series-card-stat-n" style={{ color: 'var(--green)' }}>
-                    R {Math.round(agg.totalCost).toLocaleString()}
-                  </div>
-                </div>
-              </div>
-              {/* Quick action — stops card click so it doesn't also switch tab */}
-              <div className="series-card-cta" onClick={(e) => e.stopPropagation()}>
-                {s.released ? (
-                  <button className="series-card-btn recall" onClick={() => askRecall(s)}>
-                    ↺ Recall draft
-                  </button>
-                ) : (
-                  <button className="series-card-btn release" onClick={() => askRelease(s)}>
-                    Release to clubs →
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Active series drill-down */}
-      {active && (
-        <FixtureTable
-          series={active}
-          clubs={clubs}
-          onUpdateSeries={onUpdateSeries}
-          onDeleteSeries={onDeleteSeries}
-          onDuplicateSeries={onDuplicateSeries}
-          onSetReleased={onSetReleased}
-          onAskRelease={askRelease}
-          onAskRecall={askRecall}
-          toast={toast}
+      {allSeries.length === 0 ? (
+        <EmptyState
+          icon={Icon.Field}
+          title="No series yet"
+          sub="Create your first fixture series to auto-generate round-robin schedules and calculate travel cost for every away fixture."
+          action={
+            <Btn tone="teal" icon={Icon.Plus} onClick={onCreateSeries}>
+              Create your first series
+            </Btn>
+          }
         />
+      ) : (
+        <>
+          {/* Series cards strip — each card has its own quick release/recall button */}
+          <div className="series-strip">
+            {allSeries.map((s) => {
+              const agg = seriesAgg(s);
+              return (
+                <div
+                  key={s.id}
+                  className={`series-card ${s.id === activeId ? 'active' : ''}`}
+                  onClick={() => setActiveId(s.id)}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <div className="series-card-head">
+                    <div className="series-card-name">{s.name}</div>
+                    {s.released ? (
+                      <div className="series-card-released">Released</div>
+                    ) : (
+                      <div className="series-card-draft">Draft</div>
+                    )}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: 'var(--muted)',
+                      fontWeight: 500,
+                      fontFamily: "'Montserrat',sans-serif",
+                    }}
+                  >
+                    {s.teams.length} teams · {s.fixtures.length} fixtures · {s.maxOvers} ov · start{' '}
+                    {new Date(s.startDate).toLocaleDateString('en-GB', {
+                      day: 'numeric',
+                      month: 'short',
+                    })}
+                  </div>
+                  <div className="series-card-meta">
+                    <div className="series-card-stat">
+                      <div className="series-card-stat-l">Total km</div>
+                      <div className="series-card-stat-n">
+                        {Math.round(agg.totalKm).toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="series-card-stat">
+                      <div className="series-card-stat-l">Travel</div>
+                      <div className="series-card-stat-n" style={{ color: 'var(--green)' }}>
+                        R {Math.round(agg.totalCost).toLocaleString()}
+                      </div>
+                    </div>
+                  </div>
+                  {/* Quick action — stops card click so it doesn't also switch tab */}
+                  <div className="series-card-cta" onClick={(e) => e.stopPropagation()}>
+                    {s.released ? (
+                      <button className="series-card-btn recall" onClick={() => askRecall(s)}>
+                        ↺ Recall draft
+                      </button>
+                    ) : (
+                      <button className="series-card-btn release" onClick={() => askRelease(s)}>
+                        Release to clubs →
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Active series drill-down */}
+          {active && (
+            <FixtureTable
+              series={active}
+              clubs={clubs}
+              onUpdateSeries={onUpdateSeries}
+              onDeleteSeries={onDeleteSeries}
+              onDuplicateSeries={onDuplicateSeries}
+              onSetReleased={onSetReleased}
+              onAskRelease={askRelease}
+              onAskRecall={askRecall}
+              toast={toast}
+            />
+          )}
+        </>
       )}
 
       {/* Shared confirmation modal — portaled to document.body so it escapes the
@@ -661,42 +677,45 @@ export function FixtureTable({
         </div>
       </div>
 
-      {/* Confirmation modal */}
-      {confirm && (
-        <div
-          className="fix-confirm"
-          onClick={(e) => e.target === e.currentTarget && setConfirm(null)}
-        >
-          <div className="fix-confirm-box">
-            <div className="fix-confirm-icon">
-              <svg viewBox="0 0 24 24" fill="none">
-                <path
-                  d="M12 2L22 21H2L12 2z"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d="M12 9v5M12 17v.5"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                />
-              </svg>
+      {/* Confirmation modal — portaled to document.body to escape the residual transform
+          on .main > * (same fix as the shared confirm modal above). */}
+      {confirm &&
+        createPortal(
+          <div
+            className="fix-confirm"
+            onClick={(e) => e.target === e.currentTarget && setConfirm(null)}
+          >
+            <div className="fix-confirm-box">
+              <div className="fix-confirm-icon">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M12 2L22 21H2L12 2z"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M12 9v5M12 17v.5"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </div>
+              <div className="fix-confirm-title">{confirm.title}</div>
+              <div className="fix-confirm-body">{confirm.body}</div>
+              <div className="fix-confirm-actions">
+                <Btn tone="outline" onClick={() => setConfirm(null)}>
+                  Cancel
+                </Btn>
+                <Btn tone="ink" onClick={confirm.onYes}>
+                  Yes, continue
+                </Btn>
+              </div>
             </div>
-            <div className="fix-confirm-title">{confirm.title}</div>
-            <div className="fix-confirm-body">{confirm.body}</div>
-            <div className="fix-confirm-actions">
-              <Btn tone="outline" onClick={() => setConfirm(null)}>
-                Cancel
-              </Btn>
-              <Btn tone="ink" onClick={confirm.onYes}>
-                Yes, continue
-              </Btn>
-            </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -1419,49 +1438,16 @@ function EmptyCohort({ onOnboard }) {
           </p>
         </div>
       </div>
-      <div
-        style={{
-          background: 'var(--white)',
-          border: '1px solid var(--line)',
-          borderRadius: 14,
-          padding: '56px 40px',
-          textAlign: 'center',
-        }}
-      >
-        <div
-          style={{
-            width: 84,
-            height: 84,
-            margin: '0 auto 18px',
-            borderRadius: '50%',
-            background: 'var(--teal-pale)',
-            color: 'var(--teal-deep)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <Icon.Clubs />
-        </div>
-        <div style={{ fontFamily: "'Montserrat',sans-serif", fontSize: 18, fontWeight: 700 }}>
-          No clubs onboarded yet
-        </div>
-        <div
-          style={{
-            fontSize: 13,
-            color: 'var(--muted)',
-            maxWidth: 440,
-            margin: '8px auto 22px',
-            lineHeight: 1.6,
-          }}
-        >
-          Add your first club to begin. You can onboard them one at a time with the
-          chairperson&apos;s contact details and share their portal link.
-        </div>
-        <Btn tone="teal" icon={Icon.Plus} onClick={onOnboard}>
-          Onboard your first club
-        </Btn>
-      </div>
+      <EmptyState
+        icon={Icon.Clubs}
+        title="No clubs onboarded yet"
+        sub="Add your first club to begin. You can onboard them one at a time with the chairperson's contact details and share their portal link."
+        action={
+          <Btn tone="teal" icon={Icon.Plus} onClick={onOnboard}>
+            Onboard your first club
+          </Btn>
+        }
+      />
     </div>
   );
 }
@@ -2404,7 +2390,7 @@ function OnboardNewClubModal({ clubs, knownClubs = [], onClose, onOnboard, onBul
       toast && toast(`Sent ${bulkCreated.length} welcome emails + opened WhatsApp tabs`);
     };
 
-    return (
+    return createPortal(
       <div
         className="task-modal-backdrop"
         onClick={(e) => e.target === e.currentTarget && onClose()}
@@ -2575,7 +2561,8 @@ function OnboardNewClubModal({ clubs, knownClubs = [], onClose, onOnboard, onBul
             </div>
           </div>
         </div>
-      </div>
+      </div>,
+      document.body,
     );
   }
 
@@ -2599,7 +2586,7 @@ function OnboardNewClubModal({ clubs, knownClubs = [], onClose, onOnboard, onBul
       } catch {}
       toast && toast(`Sent to ${createdClub.chair.split(' ')[0]} via email & WhatsApp`);
     };
-    return (
+    return createPortal(
       <div
         className="task-modal-backdrop"
         onClick={(e) => e.target === e.currentTarget && onClose()}
@@ -2759,12 +2746,13 @@ function OnboardNewClubModal({ clubs, knownClubs = [], onClose, onOnboard, onBul
             </div>
           </div>
         </div>
-      </div>
+      </div>,
+      document.body,
     );
   }
 
   // ───────────── Step 1: search + form ─────────────
-  return (
+  return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="task-modal narrow" style={{ maxWidth: 620 }}>
         <div className="task-modal-head">
@@ -3201,7 +3189,8 @@ function OnboardNewClubModal({ clubs, knownClubs = [], onClose, onOnboard, onBul
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -3237,7 +3226,7 @@ function EditDeadlineModal({ currentISO, defaultISO, onClose, onSave, toast }) {
     setValue(defaultISO);
   }
 
-  return (
+  return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="task-modal narrow" style={{ maxWidth: 520 }}>
         <div className="task-modal-head">
@@ -3338,7 +3327,8 @@ function EditDeadlineModal({ currentISO, defaultISO, onClose, onSave, toast }) {
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -3417,7 +3407,7 @@ function PlayerRegLinkModal({ club, onClose, onRegenerate, toast }) {
     toast && toast('Player link sent via email & WhatsApp');
   }
 
-  return (
+  return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="task-modal narrow" style={{ maxWidth: 620 }}>
         <div className="task-modal-head">
@@ -3624,7 +3614,8 @@ function PlayerRegLinkModal({ club, onClose, onRegenerate, toast }) {
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -4133,7 +4124,7 @@ function InviteRepModal({ club, onClose, onInvite, toast }) {
     }
   }
 
-  return (
+  return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="task-modal narrow" style={{ maxWidth: 480 }}>
         <div className="task-modal-head">
@@ -4196,6 +4187,7 @@ function InviteRepModal({ club, onClose, onInvite, toast }) {
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
