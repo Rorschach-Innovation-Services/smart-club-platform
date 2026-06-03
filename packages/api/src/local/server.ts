@@ -73,8 +73,10 @@ async function main(): Promise<void> {
   for (const t of SEED_TENANTS) {
     await seedTenantConfig(t);
     if (demo) {
-      const { clubs, series } = await seedDemoData(t);
-      console.log(`· provisioned ${t} + demo: ${clubs} clubs, ${series} series`);
+      const { clubs, series, leagues } = await seedDemoData(t);
+      console.log(
+        `· provisioned ${t} + demo: ${clubs} clubs, ${series} series, ${leagues} leagues`,
+      );
     } else {
       console.log(`· provisioned ${t} (blank)`);
     }

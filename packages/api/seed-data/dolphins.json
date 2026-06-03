@@ -90,7 +90,7 @@
     {
       "id": "ukzn",
       "name": "UKZN CC",
-      "district": "Ethekwini Metro CU",
+      "district": "Ethekwini Metro Cricket Union",
       "sub": "EMCU",
       "chair": "Ashraf Ganie",
       "affiliation": "complete",
@@ -113,17 +113,12 @@
         "lat": -29.8666,
         "lon": 30.9783
       },
-      "leagues": [
-        "premier",
-        "premierWomen",
-        "emcuD1",
-        "emcuU11"
-      ]
+      "leagues": ["premier", "premierWomen", "emcuD1", "emcuU11"]
     },
     {
       "id": "clares",
       "name": "Clares CC",
-      "district": "Ethekwini Metro CU",
+      "district": "Ethekwini Metro Cricket Union",
       "sub": "EMCU",
       "chair": "Rajin Ramsaroop",
       "affiliation": "complete",
@@ -146,17 +141,12 @@
         "lat": -29.8533,
         "lon": 30.9512
       },
-      "leagues": [
-        "premier",
-        "veterans",
-        "emcuD1",
-        "emcuD3_s1"
-      ]
+      "leagues": ["premier", "veterans", "emcuD1", "emcuD3_s1"]
     },
     {
       "id": "chatsworth",
       "name": "Chatsworth Sporting CC",
-      "district": "Ethekwini Metro CU",
+      "district": "Ethekwini Metro Cricket Union",
       "sub": "EMCU",
       "chair": "Jason Sathiaseelan",
       "affiliation": "complete",
@@ -179,18 +169,12 @@
         "lat": -29.9112,
         "lon": 30.8868
       },
-      "leagues": [
-        "premier",
-        "emcuD2",
-        "emcuD3_s2",
-        "emcuU11",
-        "emcuU13"
-      ]
+      "leagues": ["premier", "emcuD2", "emcuD3_s2", "emcuU11", "emcuU13"]
     },
     {
       "id": "umlazi",
       "name": "Umlazi CC",
-      "district": "Ethekwini Metro CU",
+      "district": "Ethekwini Metro Cricket Union",
       "sub": "EMCU",
       "chair": "Simphiwe Shangase",
       "affiliation": "complete",
@@ -213,16 +197,12 @@
         "lat": -29.9678,
         "lon": 30.8842
       },
-      "leagues": [
-        "promotion",
-        "emcuD1",
-        "emcuU11"
-      ]
+      "leagues": ["promotion", "emcuD1", "emcuU11"]
     },
     {
       "id": "crusaders",
       "name": "Crusaders CC",
-      "district": "Ethekwini Metro CU",
+      "district": "Ethekwini Metro Cricket Union",
       "sub": "EMCU",
       "chair": "Duncun Miller",
       "affiliation": "complete",
@@ -245,16 +225,12 @@
         "lat": -29.7956,
         "lon": 31.0356
       },
-      "leagues": [
-        "premier",
-        "emcuD1",
-        "emcuD2"
-      ]
+      "leagues": ["premier", "emcuD1", "emcuD2"]
     },
     {
       "id": "berea",
       "name": "Berea Rovers CC",
-      "district": "Ethekwini Metro CU",
+      "district": "Ethekwini Metro Cricket Union",
       "sub": "EMCU",
       "chair": "Wayne Scott",
       "affiliation": "in_progress",
@@ -282,7 +258,7 @@
     {
       "id": "rhythm",
       "name": "Rhythm DHSOB CC",
-      "district": "Ethekwini Metro CU",
+      "district": "Ethekwini Metro Cricket Union",
       "sub": "EMCU",
       "chair": "Mags Reddy",
       "affiliation": "complete",
@@ -305,18 +281,12 @@
         "lat": -29.8205,
         "lon": 31.0009
       },
-      "leagues": [
-        "promotion",
-        "premierWomen",
-        "emcuD2",
-        "emcuD4_s1",
-        "emcuU13"
-      ]
+      "leagues": ["promotion", "premierWomen", "emcuD2", "emcuD4_s1", "emcuU13"]
     },
     {
       "id": "warriors",
       "name": "African Warriors CC",
-      "district": "Ethekwini Metro CU",
+      "district": "Ethekwini Metro Cricket Union",
       "sub": "EMCU",
       "chair": "Knowledge Vilakazi",
       "affiliation": "complete",
@@ -339,16 +309,12 @@
         "lat": -29.7311,
         "lon": 30.9876
       },
-      "leagues": [
-        "promotion",
-        "emcuD3_s1",
-        "emcuU13"
-      ]
+      "leagues": ["promotion", "emcuD3_s1", "emcuU13"]
     },
     {
       "id": "phoenix",
       "name": "Phoenix CC",
-      "district": "Ethekwini Metro CU",
+      "district": "Ethekwini Metro Cricket Union",
       "sub": "EMCU",
       "chair": "Bradley Chetty",
       "affiliation": "not_started",
@@ -376,7 +342,7 @@
     {
       "id": "verulam",
       "name": "Verulam CC",
-      "district": "Ethekwini Metro CU",
+      "district": "Ethekwini Metro Cricket Union",
       "sub": "EMCU",
       "chair": "Kugan Subrayen",
       "affiliation": "in_progress",
@@ -404,7 +370,7 @@
     {
       "id": "harlequins",
       "name": "Harlequins CC",
-      "district": "Ethekwini Metro CU",
+      "district": "Ethekwini Metro Cricket Union",
       "sub": "EMCU",
       "chair": "Eric Cavanagh",
       "affiliation": "complete",
@@ -427,19 +393,12 @@
         "lat": -29.8195,
         "lon": 31.0308
       },
-      "leagues": [
-        "premier",
-        "veterans",
-        "emcuD1",
-        "emcuD3_s2",
-        "emcuU11",
-        "emcuU13"
-      ]
+      "leagues": ["premier", "veterans", "emcuD1", "emcuD3_s2", "emcuU11", "emcuU13"]
     },
     {
       "id": "spartan",
       "name": "Spartan Sporting CC",
-      "district": "Ethekwini Metro CU",
+      "district": "Ethekwini Metro Cricket Union",
       "sub": "EMCU",
       "chair": "Shafee Ayob",
       "affiliation": "complete",
@@ -462,11 +421,7 @@
         "lat": -29.7256,
         "lon": 31.0489
       },
-      "leagues": [
-        "promotion",
-        "emcuD2",
-        "emcuD4_s2"
-      ]
+      "leagues": ["promotion", "emcuD2", "emcuD4_s2"]
     },
     {
       "id": "ilembe",
@@ -494,16 +449,12 @@
         "lat": -29.3398,
         "lon": 31.281
       },
-      "leagues": [
-        "premier",
-        "ilembeA30",
-        "ilembeBT20"
-      ]
+      "leagues": ["premier", "ilembeA30", "ilembeBT20"]
     },
     {
       "id": "tongaat",
       "name": "Tongaat CC",
-      "district": "Ethekwini Metro CU",
+      "district": "Ethekwini Metro Cricket Union",
       "sub": "EMCU",
       "chair": "Praven Govender",
       "affiliation": "not_started",
@@ -569,11 +520,7 @@
         "Number of Wins",
         "Win Percentage"
       ],
-      "tags": [
-        "EMCU Divisions",
-        "EMCU Division 1",
-        "Round-robin"
-      ],
+      "tags": ["EMCU Divisions", "EMCU Division 1", "Round-robin"],
       "teams": [
         "ukzn",
         "clares",
@@ -826,16 +773,8 @@
         "Number of Wins",
         "Win Percentage"
       ],
-      "tags": [
-        "EMCU Divisions",
-        "EMCU Division 2"
-      ],
-      "teams": [
-        "spartan",
-        "ilembe",
-        "verulam",
-        "tongaat"
-      ],
+      "tags": ["EMCU Divisions", "EMCU Division 2"],
+      "teams": ["spartan", "ilembe", "verulam", "tongaat"],
       "costPerKm": 4.5,
       "carsPerAwayTrip": 3,
       "released": false,
@@ -884,6 +823,178 @@
           "away": "tongaat"
         }
       ]
+    }
+  ],
+  "leagues": [
+    {
+      "key": "premier",
+      "label": "Premier League",
+      "group": "Overarching Leagues",
+      "district": "All districts"
+    },
+    {
+      "key": "promotion",
+      "label": "Promotion League",
+      "group": "Overarching Leagues",
+      "district": "All districts"
+    },
+    {
+      "key": "premierWomen",
+      "label": "Premier Women’s League",
+      "group": "Overarching Leagues",
+      "district": "All districts"
+    },
+    {
+      "key": "veterans",
+      "label": "Veterans League",
+      "group": "Overarching Leagues",
+      "district": "All districts"
+    },
+    {
+      "key": "emcuD1",
+      "label": "EMCU Division 1",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD2",
+      "label": "EMCU Division 2",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD3_s1",
+      "label": "EMCU Division 3 · Stream 1",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD3_s2",
+      "label": "EMCU Division 3 · Stream 2",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD4_s1",
+      "label": "EMCU Division 4 · Stream 1",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD4_s2",
+      "label": "EMCU Division 4 · Stream 2",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD5_s1",
+      "label": "EMCU Division 5 · Stream 1",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD5_s2",
+      "label": "EMCU Division 5 · Stream 2",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuU11",
+      "label": "Under 11",
+      "group": "Juniors",
+      "district": "Ethekwini Metro Cricket Union",
+      "note": "Group placement (1-4) depends on registered numbers; the union assigns the group."
+    },
+    {
+      "key": "emcuU13",
+      "label": "Under 13",
+      "group": "Juniors",
+      "district": "Ethekwini Metro Cricket Union",
+      "note": "Group placement (1-4) depends on registered numbers; the union assigns the group."
+    },
+    {
+      "key": "kcSat",
+      "label": "KZN SU King Cetshwayo Saturday League",
+      "group": "King Cetshwayo",
+      "district": "Umkhanyakude Cricket District"
+    },
+    {
+      "key": "kcD1",
+      "label": "KZN SU King Cetshwayo Division 1",
+      "group": "King Cetshwayo",
+      "district": "Umkhanyakude Cricket District"
+    },
+    {
+      "key": "kcWebber",
+      "label": "KZN SU King Cetshwayo Webber Cup",
+      "group": "King Cetshwayo",
+      "district": "Umkhanyakude Cricket District"
+    },
+    {
+      "key": "snT20",
+      "label": "KZN SU Southern Natal T20",
+      "group": "Southern Natal",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "sn30",
+      "label": "KZN SU Southern Natal 30 Overs",
+      "group": "Southern Natal",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "snAutumn100",
+      "label": "KZN SU Southern Natal Autumn 100",
+      "group": "Southern Natal",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "umzT20",
+      "label": "KZN SU Umzinto T20",
+      "group": "Umzinto",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "umz100",
+      "label": "KZN SU Umzinto 100",
+      "group": "Umzinto",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "umzLeague30",
+      "label": "KZN SU Umzinto League 30 Overs",
+      "group": "Umzinto",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "uguU11",
+      "label": "Under 11",
+      "group": "Juniors",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "uguU13",
+      "label": "Under 13",
+      "group": "Juniors",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "uguU15",
+      "label": "Under 15",
+      "group": "Juniors",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "ilembeA30",
+      "label": "KZN SU ILEMBE Senior 30 overs League A",
+      "group": "Ilembe Senior",
+      "district": "Illembe Cricket District"
+    },
+    {
+      "key": "ilembeBT20",
+      "label": "KZN SU ILEMBE Senior T20 League B",
+      "group": "Ilembe Senior",
+      "district": "Illembe Cricket District"
     }
   ]
 }

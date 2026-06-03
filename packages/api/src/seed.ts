@@ -23,8 +23,10 @@ async function main(): Promise<void> {
     }
     await seedTenantConfig(t);
     if (demo) {
-      const { clubs, series } = await seedDemoData(t);
-      console.log(`provisioned ${t} + demo data: ${clubs} clubs, ${series} series`);
+      const { clubs, series, leagues } = await seedDemoData(t);
+      console.log(
+        `provisioned ${t} + demo data: ${clubs} clubs, ${series} series, ${leagues} leagues`,
+      );
     } else {
       console.log(`provisioned ${t} (blank cohort)`);
     }

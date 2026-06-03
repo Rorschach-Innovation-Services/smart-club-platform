@@ -81,11 +81,14 @@ app.get('/tenant', async (c) => {
   if (!tenant) throw new HttpError(400, 'unknown tenant');
   const config = await repo.getTenantConfig(tenant);
   if (!config) throw new HttpError(404, 'tenant not found');
-  // Only branding + deadline are public; knownClubs/requiredDocs gate behind auth.
+  // Only branding + deadline + the league catalogue are public; knownClubs/requiredDocs
+  // gate behind auth. Leagues are non-sensitive (names only) and the affiliation picker
+  // needs them, so they ride the already-fetched tenant payload.
   return c.json({
     tenant: config.tenant,
     branding: config.branding,
     submissionDeadline: config.submissionDeadline,
+    leagues: config.leagues ?? [],
   });
 });
 
@@ -436,6 +439,13 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   const patch = await c.req.json<Partial<TenantConfig>>();
   const current = await repo.getTenantConfig(tenant);
   if (!current) throw new HttpError(404, 'tenant not found');
+  // Guard the league catalogue: keys are the matching token stored on clubs, so they
+  // must be unique and present. Reject a patch that would introduce a duplicate/blank key.
+  if (patch.leagues !== undefined) {
+    const keys = patch.leagues.map((l) => l.key);
+    if (keys.some((k) => !k)) throw new HttpError(400, 'every league needs a key');
+    if (new Set(keys).size !== keys.length) throw new HttpError(409, 'duplicate league key');
+  }
   const next = { ...current, ...patch, tenant };
   await repo.putTenantConfig(next);
   return c.json(next);

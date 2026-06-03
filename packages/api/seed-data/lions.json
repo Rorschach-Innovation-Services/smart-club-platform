@@ -421,11 +421,7 @@
         "Number of Wins",
         "Win Percentage"
       ],
-      "tags": [
-        "Premier",
-        "Men",
-        "Round-robin"
-      ],
+      "tags": ["Premier", "Men", "Round-robin"],
       "teams": [
         "ukzn",
         "clares",
@@ -678,16 +674,8 @@
         "Number of Wins",
         "Win Percentage"
       ],
-      "tags": [
-        "Promotion",
-        "Men"
-      ],
-      "teams": [
-        "spartan",
-        "ilembe",
-        "verulam",
-        "tongaat"
-      ],
+      "tags": ["Promotion", "Men"],
+      "teams": ["spartan", "ilembe", "verulam", "tongaat"],
       "costPerKm": 4.5,
       "carsPerAwayTrip": 3,
       "released": false,
@@ -737,5 +725,6 @@
         }
       ]
     }
-  ]
+  ],
+  "leagues": []
 }

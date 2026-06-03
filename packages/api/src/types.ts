@@ -16,6 +16,20 @@ export interface UserProfile {
   onboardingSeen: Record<string, boolean>;
 }
 
+/**
+ * An admin-defined competition a club can register for during affiliation. Lives
+ * inside TenantConfig (low-cardinality, admin-managed setup data — not cohort data).
+ * `key` is the stable, immutable matching token stored in `Club.leagues`.
+ */
+export interface League {
+  key: string;
+  label: string;
+  group: string;
+  /** A DISTRICTS value, or the 'All districts' sentinel for overarching leagues. */
+  district: string;
+  note?: string;
+}
+
 export interface TenantConfig {
   tenant: string;
   branding: {
@@ -30,6 +44,8 @@ export interface TenantConfig {
   };
   submissionDeadline: string;
   knownClubs: unknown[];
+  /** Admin-managed league catalogue clubs opt into. Empty for a fresh tenant. */
+  leagues?: League[];
   /** Optional per-tenant required-docs override; falls back to shared default. */
   requiredDocs?: unknown[];
 }

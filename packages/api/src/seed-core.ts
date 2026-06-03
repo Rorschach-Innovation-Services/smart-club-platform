@@ -5,13 +5,14 @@
  */
 import { readFileSync } from 'node:fs';
 import * as repo from './repo.js';
-import type { Club, Series, TenantConfig } from './types.js';
+import type { Club, Series, TenantConfig, League } from './types.js';
 
 interface Snapshot {
   submissionDeadline: string;
   knownClubs: unknown[];
   clubs: Club[];
   series: Series[];
+  leagues?: League[];
 }
 
 // Shared color palette (Dolphins and Lions use the same green theme today).
@@ -76,6 +77,7 @@ export async function seedTenantConfig(tenant: string): Promise<void> {
     branding,
     submissionDeadline: snap.submissionDeadline,
     knownClubs: [],
+    leagues: [],
   };
   await repo.putTenantConfig(config);
 }
@@ -84,7 +86,9 @@ export async function seedTenantConfig(tenant: string): Promise<void> {
  * Opt-in demo data: load the snapshot's sample clubs + series into a tenant
  * (for local dev / set demo accounts). Provisioning (config) must run first.
  */
-export async function seedDemoData(tenant: string): Promise<{ clubs: number; series: number }> {
+export async function seedDemoData(
+  tenant: string,
+): Promise<{ clubs: number; series: number; leagues: number }> {
   const snap = loadSnapshot(tenant);
   for (const club of snap.clubs) {
     await repo.putClub(tenant, { ...club, version: 1 });
@@ -92,5 +96,11 @@ export async function seedDemoData(tenant: string): Promise<{ clubs: number; ser
   for (const series of snap.series) {
     await repo.putSeries(tenant, { ...series, version: 1 });
   }
-  return { clubs: snap.clubs.length, series: snap.series.length };
+  // Leagues live in tenant config — patch the catalogue onto the (already provisioned) config.
+  const leagues = snap.leagues ?? [];
+  if (leagues.length) {
+    const config = await repo.getTenantConfig(tenant);
+    if (config) await repo.putTenantConfig({ ...config, leagues });
+  }
+  return { clubs: snap.clubs.length, series: snap.series.length, leagues: leagues.length };
 }
