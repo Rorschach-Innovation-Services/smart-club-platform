@@ -89,3 +89,61 @@ export async function sendInviteEmail(input: InviteEmailInput): Promise<{ messag
   );
   return { messageId: res.MessageId ?? '' };
 }
+
+export interface FixturesEmailInput {
+  to: string;
+  playerName: string;
+  clubName: string;
+  season: string;
+  /** Pre-built plain-text schedule (newline-separated). Rendered verbatim into the body. */
+  scheduleText: string;
+}
+
+/**
+ * Send a player the club's released fixtures. Unlike the invite, the full schedule
+ * travels in the body (players can't open the auth-gated portal), so there is no link.
+ */
+export async function sendFixturesEmail(input: FixturesEmailInput): Promise<{ messageId: string }> {
+  const { to, playerName, clubName, season, scheduleText } = input;
+  const subject = `${clubName} · ${season} fixtures released`;
+  const greetName = playerName || 'there';
+
+  const text =
+    `Hi ${greetName},\n\n` +
+    `${clubName}'s ${season} fixtures have been released. Here's the full schedule:\n\n` +
+    `${scheduleText}\n\n` +
+    `Travel distances are round-trip estimates. See you on the field,\n${clubName}`;
+
+  const safeName = escapeHtml(greetName);
+  const safeClub = escapeHtml(clubName);
+  const safeSeason = escapeHtml(season);
+  const safeSchedule = escapeHtml(scheduleText).replace(/\n/g, '<br/>');
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hi ${safeName},</p>` +
+    `<p><strong>${safeClub}</strong>'s ${safeSeason} fixtures have been released. Here's the full schedule:</p>` +
+    `<p style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13.5px;white-space:pre-wrap">${safeSchedule}</p>` +
+    `<p style="color:#5A6B8C;font-size:13px">Travel distances are round-trip estimates.</p>` +
+    `<p>See you on the field,<br/>${safeClub}</p>` +
+    `</div>`;
+
+  if (EMAIL_DRY_RUN) {
+    console.log(`[notify:email dry-run] would send fixtures to ${to} for ${clubName}`);
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [to] },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}

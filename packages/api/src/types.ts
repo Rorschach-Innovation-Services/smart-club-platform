@@ -114,14 +114,17 @@ export interface SendResult {
   /** Recipient the send targeted (email / E.164 cell). Omitted on a skip with no value on file. */
   to?: string;
   messageId?: string;
+  /** Reason a send did not succeed (validation skip or provider error). Never set on success. */
   error?: string;
+  /** Aggregate, human-readable outcome for a broadcast summary row (e.g. "8 sent · 2 skipped"). */
+  summary?: string;
 }
 
-/** One real outbound onboarding-invite send, recorded in the club's comm log. */
+/** One real outbound send (onboarding invite or fixtures broadcast), recorded in the club's comm log. */
 export interface ClubCommEvent {
   id: string;
   channel: 'email' | 'whatsapp';
-  /** Recipient the send targeted (email / E.164 cell). Omitted on a skip with no value on file. */
+  /** Recipient the send targeted (email / E.164 cell). Omitted on a skip with no value on file, and on broadcast summaries (which never name an individual). */
   to?: string;
   status: 'sent' | 'failed' | 'skipped';
   /** Provider message id when sent (SES MessageId / Meta message id). */
@@ -132,6 +135,13 @@ export interface ClubCommEvent {
   by: string;
   /** Ties the event back to the idempotency-keyed send attempt. */
   idempotencyKey: string;
+  /**
+   * What was sent. Absent ⇒ 'invite' (back-compat with pre-existing rows). A 'fixtures'
+   * broadcast is recorded as one PII-free summary event per channel, not one row per player.
+   */
+  kind?: 'invite' | 'fixtures';
+  /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
+  summary?: string;
 }
 
 /** Onboard payload: a Club plus the flat chair contact fields the admin form sends. */

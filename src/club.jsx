@@ -2945,11 +2945,43 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline }) {
 }
 
 /* ─── Phase 2 · Club Fixtures (only shown once admin has released) ─── */
-export function ClubFixturesView({ club, allSeries, clubs, toast }) {
+export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures }) {
   const clubBy = (id) => clubs.find((c) => c.id === id);
 
   // Only series this club is in AND that have been released by the Dolphins office
   const myReleased = (allSeries || []).filter((s) => s.released && s.teams.includes(club.id));
+
+  // Share-with-players modal state. Hooks must run before the early return below.
+  const [shareOpen, setShareOpen] = useStateC(false);
+  const [shareCh, setShareCh] = useStateC({ email: true, whatsapp: true });
+  const [sharing, setSharing] = useStateC(false);
+  const playerCount = club.players || 0;
+
+  // Broadcast the released schedule to the club's registered players. The schedule is
+  // built server-side; we only pick channels. A fresh idempotency key per click lets a
+  // legitimate re-share (e.g. after a new series is released) through, while the disabled
+  // state guards against an in-flight double-submit.
+  async function doShareFixtures() {
+    const channels = ['email', 'whatsapp'].filter((c) => shareCh[c]);
+    if (!channels.length) return toast?.('Pick at least one channel', 'warn');
+    setSharing(true);
+    try {
+      const idempotencyKey =
+        globalThis.crypto?.randomUUID?.() || `fx-${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+      const res = await onSendFixtures?.(club.id, { channels, idempotencyKey });
+      const results = res?.results || [];
+      const detail = results
+        .map((r) => `${r.channel === 'email' ? 'Email' : 'WhatsApp'} — ${r.summary || r.status}`)
+        .join(' · ');
+      const anySent = results.some((r) => r.status === 'sent');
+      toast?.(detail || 'Fixtures shared with players', anySent ? 'ok' : 'warn');
+      setShareOpen(false);
+    } catch (e) {
+      toast?.(e?.message || 'Could not share fixtures', 'warn');
+    } finally {
+      setSharing(false);
+    }
+  }
 
   // No releases yet — elegant placeholder
   if (!myReleased.length) {
@@ -2990,7 +3022,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast }) {
           <div className="club-fix-empty-sub">
             Once the union office signs off on the 2026/27 fixture list, every match you're playing
             — round, date, opponent, venue and travel costs — will populate here automatically.
-            You'll also receive an email &amp; SMS the moment it goes live.
+            You'll also receive an email &amp; WhatsApp the moment it goes live.
           </div>
           <div className="club-fix-empty-meta">
             <span className="sdot" /> Status: <strong>Draft · awaiting release</strong>
@@ -3048,7 +3080,18 @@ export function ClubFixturesView({ club, allSeries, clubs, toast }) {
           </p>
         </div>
         <div className="ph-actions">
-          <Btn tone="outline" size="sm" icon={Icon.Mail}>
+          <Btn
+            tone="outline"
+            size="sm"
+            icon={Icon.Mail}
+            disabled={!playerCount}
+            title={
+              playerCount
+                ? 'Email & WhatsApp the schedule to your registered players'
+                : 'No registered players yet'
+            }
+            onClick={() => setShareOpen(true)}
+          >
             Share with players
           </Btn>
         </div>
@@ -3293,6 +3336,51 @@ export function ClubFixturesView({ club, allSeries, clubs, toast }) {
         {myReleased[0]?.carsPerAwayTrip || 3} cars per away trip — published with the fixture
         release. Adjustments to schedule require a Dolphins office sign-off.
       </div>
+
+      {/* Share-with-players modal */}
+      {shareOpen && (
+        <div
+          className="fix-confirm"
+          onClick={(e) => e.target === e.currentTarget && !sharing && setShareOpen(false)}
+        >
+          <div className="fix-confirm-box">
+            <div className="fix-confirm-icon go">
+              <Icon.Mail />
+            </div>
+            <div className="fix-confirm-title">Share fixtures with players</div>
+            <div className="fix-confirm-body">
+              Email the full schedule and send a WhatsApp heads-up to your{' '}
+              <strong>{playerCount}</strong> registered player{playerCount === 1 ? '' : 's'}.
+              Players registered as minors are skipped. Choose how to reach them:
+            </div>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 4 }}>
+              {[
+                { k: 'email', label: 'Email' },
+                { k: 'whatsapp', label: 'WhatsApp' },
+              ].map(({ k, label }) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => setShareCh((s) => ({ ...s, [k]: !s[k] }))}
+                  className={`check-item ${shareCh[k] ? 'on' : ''}`}
+                  style={{ padding: '8px 16px', width: 'auto' }}
+                >
+                  <div className="box">{shareCh[k] && <Icon.Check />}</div>
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="fix-confirm-actions" style={{ marginTop: 22 }}>
+              <Btn tone="outline" onClick={() => !sharing && setShareOpen(false)}>
+                Cancel
+              </Btn>
+              <Btn tone="teal" onClick={doShareFixtures} disabled={sharing}>
+                {sharing ? 'Sending…' : 'Send to players'}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

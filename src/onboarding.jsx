@@ -255,7 +255,7 @@ function StepContact({ contact, setContact, club, deadlineMid }) {
         style={{ width: '100%', textAlign: 'left' }}
       >
         <div className="box">{contact.notify && <Icon.Check />}</div>
-        Send me email &amp; SMS reminders as the {deadlineMid} deadline approaches.
+        Send me email &amp; WhatsApp reminders as the {deadlineMid} deadline approaches.
       </button>
 
       <div className="ob-confirm-card">

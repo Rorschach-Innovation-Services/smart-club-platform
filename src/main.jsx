@@ -48,6 +48,7 @@ import {
   AdminClubDetail,
   AdminFixtures,
   AdminLeagues,
+  AdminSettingsView,
   LeagueForm,
   CreateSeriesForm,
 } from './admin.jsx';
@@ -404,6 +405,16 @@ function AuthedApp({ tenantConfig }) {
       .then(() => invalidate(qk.tenant()))
       .catch(() => {});
   }
+  function saveOrgName(name) {
+    const trimmed = (name || '').trim();
+    if (!trimmed) return Promise.reject(new Error('name required'));
+    // Branding is replaced wholesale by PUT /tenant/config (shallow merge), so spread the
+    // current branding (incl. copy.support) and override only the name to avoid clobbering.
+    return withToast(
+      () => api.putTenantConfig({ branding: { ...tenantConfig?.branding, name: trimmed } }),
+      'Could not save organisation name',
+    ).then(() => invalidate(qk.tenant()));
+  }
   function setSupportContact({ name, email }) {
     // Return the chain raw (no .catch swallow) so the edit modal's own .catch
     // sees a failed save — otherwise it would show "updated" and close on error.
@@ -494,6 +505,7 @@ function AuthedApp({ tenantConfig }) {
                   submissionDeadline,
                   setSubmissionDeadline,
                   setSupportContact,
+                  saveOrgName,
                   updateSeries,
                   deleteSeries,
                   duplicateSeries,
@@ -538,6 +550,7 @@ function AuthedApp({ tenantConfig }) {
                 submissionDeadline,
                 setSubmissionDeadline,
                 setSupportContact,
+                saveOrgName,
                 updateSeries,
                 deleteSeries,
                 duplicateSeries,
@@ -588,6 +601,7 @@ function Shell({
   submissionDeadline,
   setSubmissionDeadline,
   setSupportContact,
+  saveOrgName,
   updateSeries,
   deleteSeries,
   duplicateSeries,
@@ -819,6 +833,14 @@ function Shell({
     invalidate(qk.clubs());
     return res;
   }
+  // Share released fixtures with the club's players (email/WhatsApp). Like sendClubInvite,
+  // the modal owns the result toast, so this just refreshes the comm log on success.
+  async function sendFixtures(targetClubId, payload) {
+    const res = await api.sendClubFixtures(targetClubId, payload);
+    invalidate(qk.club(targetClubId));
+    invalidate(qk.clubs());
+    return res;
+  }
   async function bulkOnboardClubs(specs) {
     if (!Array.isArray(specs) || specs.length === 0) return [];
     // The API returns { created, skipped } (per-spec, non-atomic). Surface skips.
@@ -1018,6 +1040,18 @@ function Shell({
             toast={toastShow}
           />
         );
+      if (view === 'settings')
+        return (
+          <AdminSettingsView
+            orgName={orgName}
+            submissionDeadline={submissionDeadline}
+            support={branding?.copy?.support}
+            onSaveOrg={saveOrgName}
+            onUpdateDeadline={setSubmissionDeadline}
+            onUpdateSupport={setSupportContact}
+            toast={toastShow}
+          />
+        );
     } else {
       if (view === 'home' || view === 'affiliation' || view === 'documents')
         return (
@@ -1053,6 +1087,7 @@ function Shell({
             allSeries={allSeries}
             clubs={clubs}
             toast={toastShow}
+            onSendFixtures={sendFixtures}
           />
         );
       }
@@ -1125,11 +1160,6 @@ function Shell({
           Sign out
         </button>
 
-        <button className="h-bell">
-          <Icon.Bell />
-          <span className="h-bell-dot" />
-        </button>
-
         <div className="h-user">
           <div
             className="h-avatar"
@@ -1180,14 +1210,10 @@ function Shell({
               </div>
               {[
                 {
-                  v: '_settings',
+                  v: 'settings',
                   label: 'Settings',
                   icon: Icon.Shield,
-                  action: () =>
-                    toastShow(
-                      'Settings coming soon — workspace preferences, notifications and access controls.',
-                      'warn',
-                    ),
+                  action: () => gotoAdminView('settings'),
                 },
                 {
                   v: '_help',
@@ -1196,7 +1222,11 @@ function Shell({
                   action: () => setShowHelp(true),
                 },
               ].map((n) => (
-                <button key={n.v} className="nav-item" onClick={n.action}>
+                <button
+                  key={n.v}
+                  className={`nav-item ${view === n.v ? 'active' : ''}`}
+                  onClick={n.action}
+                >
                   <span className="ni-icon">
                     <n.icon />
                   </span>

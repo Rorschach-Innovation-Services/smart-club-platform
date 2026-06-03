@@ -21,6 +21,11 @@ const TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const TEMPLATE = process.env.WHATSAPP_INVITE_TEMPLATE ?? 'club_onboarding_invite';
 const TEMPLATE_LANG = process.env.WHATSAPP_INVITE_TEMPLATE_LANG ?? 'en';
+// Fixtures broadcast uses its own approved Utility template — {{1}} player name,
+// {{2}} club name, {{3}} season. Season is a variable so the template scales each
+// year with no re-approval. See the plan appendix for the template to create.
+const FIXTURES_TEMPLATE = process.env.WHATSAPP_FIXTURES_TEMPLATE ?? 'club_fixtures_released';
+const FIXTURES_TEMPLATE_LANG = process.env.WHATSAPP_FIXTURES_TEMPLATE_LANG ?? 'en';
 const GRAPH_VERSION = 'v22.0';
 export const WHATSAPP_DRY_RUN = process.env.NOTIFY_DRY_RUN === '1' || !TOKEN || !PHONE_NUMBER_ID;
 
@@ -53,39 +58,34 @@ export function toE164(cell: string | undefined | null): string | null {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export interface InviteWhatsAppInput {
-  to: string; // already E.164 (see toE164)
-  chairName: string;
-  clubName: string;
-  link: string;
-}
+/** A WhatsApp template body parameter (positional `{{n}}`). */
+type TemplateParam = { type: 'text'; text: string };
 
-export async function sendInviteWhatsApp(
-  input: InviteWhatsAppInput,
+/**
+ * POST a pre-approved template message to the Cloud API with rate-limit retry.
+ * Shared by the invite and fixtures senders so the auth/retry/dry-run handling
+ * lives in exactly one place.
+ */
+async function sendTemplate(
+  to: string,
+  templateName: string,
+  templateLang: string,
+  params: TemplateParam[],
+  dryRunLabel: string,
 ): Promise<{ messageId: string }> {
-  const { to, chairName, clubName, link } = input;
   const payload = {
     messaging_product: 'whatsapp',
     to,
     type: 'template',
     template: {
-      name: TEMPLATE,
-      language: { code: TEMPLATE_LANG },
-      components: [
-        {
-          type: 'body',
-          parameters: [
-            { type: 'text', text: chairName || 'there' },
-            { type: 'text', text: clubName },
-            { type: 'text', text: link },
-          ],
-        },
-      ],
+      name: templateName,
+      language: { code: templateLang },
+      components: [{ type: 'body', parameters: params }],
     },
   };
 
   if (WHATSAPP_DRY_RUN) {
-    console.log(`[notify:whatsapp dry-run] would send invite to ${to} for ${clubName}`);
+    console.log(`[notify:whatsapp dry-run] would send ${dryRunLabel} to ${to}`);
     return { messageId: `dry-run-${randomUUID()}` };
   }
 
@@ -116,4 +116,57 @@ export async function sendInviteWhatsApp(
       `WhatsApp send failed (${code ?? res.status}): ${data.error?.message ?? res.statusText}`,
     );
   }
+}
+
+export interface InviteWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  chairName: string;
+  clubName: string;
+  link: string;
+}
+
+export async function sendInviteWhatsApp(
+  input: InviteWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const { to, chairName, clubName, link } = input;
+  return sendTemplate(
+    to,
+    TEMPLATE,
+    TEMPLATE_LANG,
+    [
+      { type: 'text', text: chairName || 'there' },
+      { type: 'text', text: clubName },
+      { type: 'text', text: link },
+    ],
+    `invite for ${clubName}`,
+  );
+}
+
+export interface FixturesWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  playerName: string;
+  clubName: string;
+  season: string;
+}
+
+/**
+ * Fixtures heads-up to a player. Players aren't portal users and the portal is
+ * auth-gated, so the template carries no link — the full schedule rides in the
+ * email; this just tells them it's out.
+ */
+export async function sendFixturesWhatsApp(
+  input: FixturesWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const { to, playerName, clubName, season } = input;
+  return sendTemplate(
+    to,
+    FIXTURES_TEMPLATE,
+    FIXTURES_TEMPLATE_LANG,
+    [
+      { type: 'text', text: playerName || 'there' },
+      { type: 'text', text: clubName },
+      { type: 'text', text: season },
+    ],
+    `fixtures for ${clubName}`,
+  );
 }

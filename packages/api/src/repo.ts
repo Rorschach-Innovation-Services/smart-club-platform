@@ -330,6 +330,7 @@ export async function claimInviteSend(
   clubId: string,
   idempotencyKey: string,
   channels: string[],
+  kind: 'invite' | 'fixtures' = 'invite',
 ): Promise<InviteSendReplay | null> {
   const startedAt = new Date().toISOString();
   // TTL (epoch seconds): the marker only needs to outlive a lost-response retry window,
@@ -342,6 +343,9 @@ export async function claimInviteSend(
         TableName: TABLE,
         Item: {
           ...clubInviteKey(tenant, clubId, idempotencyKey),
+          // Markers for both sends share the INVITE# sk prefix (so erasure finds both);
+          // `kind` keeps a fixtures marker distinguishable from an onboarding invite.
+          kind,
           channels,
           status: 'in_progress',
           startedAt,
@@ -356,11 +360,41 @@ export async function claimInviteSend(
       const res = await ddb.send(
         new GetCommand({ TableName: TABLE, Key: clubInviteKey(tenant, clubId, idempotencyKey) }),
       );
-      const item = res.Item as { status?: string; results?: SendResult[] } | undefined;
+      const item = res.Item as
+        | { status?: string; results?: SendResult[]; kind?: string }
+        | undefined;
+      // The invite/fixtures markers share the INVITE# keyspace; `kind` disambiguates them.
+      // A key reused across kinds must never replay the wrong send's results — refuse it.
+      const priorKind = (item?.kind as 'invite' | 'fixtures') ?? 'invite';
+      if (priorKind !== kind) {
+        throw new Error(
+          `idempotency key ${idempotencyKey} already used for a ${priorKind} send (got ${kind})`,
+        );
+      }
       return { pending: item?.status !== 'completed', results: item?.results ?? [] };
     }
     throw err;
   }
+}
+
+/**
+ * Delete an idempotency marker so the key can be reclaimed fresh. Used when a send
+ * aborts AFTER the claim but BEFORE completion (e.g. a validation 409), so the failed
+ * attempt doesn't poison a legitimate retry for the full 72h TTL.
+ *
+ * Safe to call unconditionally: only the request that WON the `attribute_not_exists`
+ * claim reaches this path. A concurrent retry on the same key lost the claim (got a
+ * pending/completed replay) and never created a marker of its own, so there is no
+ * sibling marker for this delete to clobber — the shared key serializes ownership.
+ */
+export async function releaseInviteClaim(
+  tenant: string,
+  clubId: string,
+  idempotencyKey: string,
+): Promise<void> {
+  await ddb.send(
+    new DeleteCommand({ TableName: TABLE, Key: clubInviteKey(tenant, clubId, idempotencyKey) }),
+  );
 }
 
 /** Record the outcome on the idempotency marker so a replay returns the same results. */

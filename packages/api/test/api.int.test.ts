@@ -510,6 +510,170 @@ describe('POST /clubs/:id/send-invite', () => {
   });
 });
 
+describe('POST /clubs/:id/send-fixtures', () => {
+  // FROM_EMAIL / WHATSAPP_* unset ⇒ notify/ runs dry-run (synthetic ids, no real sends).
+  // REP is scoped to clubIds ['testers'] (module-level), so it may share for 'testers'.
+  const OTHER_REP = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['elsewhere'] }]);
+
+  const club = (id: string) => ({
+    id,
+    name: `${id} CC`,
+    district: 'Test District',
+    sub: 's',
+    chair: 'Chair',
+    affiliation: 'not_started' as const,
+    paid: false,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#123456',
+    ground: { venue: `${id} Oval`, lat: -29.85, lon: 31.02 },
+    leagues: [],
+    version: 1,
+  });
+
+  const player = (clubId: string, n: string, extra: Record<string, unknown>) => ({
+    naturalKey: n,
+    clubId,
+    firstName: n,
+    lastName: 'Player',
+    dob: '1995-01-01',
+    isMinor: false,
+    consentAt: '2026-05-01T00:00:00.000Z',
+    createdAt: '2026-05-01T00:00:00.000Z',
+    ...extra,
+  });
+
+  before(async () => {
+    // 'testers' already exists (created by the notes suite) and REP is scoped to it.
+    await repo.createClub('dolphins', club('rivals'));
+    await repo.createClub('dolphins', club('emptyfix')); // no released series → 409
+    await repo.putSeries('dolphins', {
+      id: 'fx-series',
+      name: 'Premier League · 2026/27',
+      startDate: '2026-06-01',
+      teams: ['testers', 'rivals'],
+      fixtures: [{ home: 'rivals', away: 'testers', date: '2026-06-01', round: 1 }],
+      released: true,
+      releasedAt: '2026-06-01T00:00:00.000Z',
+      version: 1,
+    });
+    // 3 players: one reachable, one minor (skipped — no guardian contact), one with no contact.
+    await repo.createPlayer(
+      'dolphins',
+      player('testers', 'Reachable', { email: 'reach@testers.co.za', cell: '0768563601' }),
+    );
+    await repo.createPlayer(
+      'dolphins',
+      player('testers', 'Minor', {
+        email: 'kid@testers.co.za',
+        cell: '0760000000',
+        isMinor: true,
+        guardianName: 'Guardian',
+      }),
+    );
+    await repo.createPlayer('dolphins', player('testers', 'Nocontact', {}));
+  });
+
+  const send = (id: string, body: unknown, auth: string) =>
+    app.request(`/clubs/${id}/send-fixtures`, {
+      method: 'POST',
+      headers: headers(auth),
+      body: JSON.stringify(body),
+    });
+
+  test('rep shares released fixtures with players (201) — minors/no-contact skipped', async () => {
+    const res = await send(
+      'testers',
+      { channels: ['email', 'whatsapp'], idempotencyKey: 'fx1' },
+      REP,
+    );
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as {
+      results: { channel: string; status: string; summary?: string }[];
+    };
+    // One PII-free summary row per channel (not one per recipient); the count lives in
+    // `summary`, never `error`.
+    assert.equal(body.results.length, 2);
+    const email = body.results.find((r) => r.channel === 'email');
+    // 1 reachable sent; minor + no-contact skipped → "1 sent · 2 skipped" (no failure denom).
+    assert.equal(email?.status, 'sent');
+    assert.equal(email?.summary, '1 sent · 2 skipped');
+    // Comm log records the broadcast as kind:'fixtures' summaries with no recipient PII.
+    const stored = await repo.getClub('dolphins', 'testers');
+    assert.equal(stored?.commLog?.length, 2);
+    assert.ok(stored?.commLog?.every((e) => e.kind === 'fixtures'));
+    assert.ok(stored?.commLog?.every((e) => e.to === undefined));
+  });
+
+  test('same idempotency key replays without re-sending or re-logging', async () => {
+    const res = await send(
+      'testers',
+      { channels: ['email', 'whatsapp'], idempotencyKey: 'fx1' },
+      REP,
+    );
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { deduped?: boolean };
+    assert.equal(body.deduped, true);
+    const stored = await repo.getClub('dolphins', 'testers');
+    assert.equal(stored?.commLog?.length, 2, 'no extra comm-log entries on replay');
+  });
+
+  test('a rep scoped to another club is forbidden (403)', async () => {
+    const res = await send('testers', { channels: ['email'], idempotencyKey: 'fx-403' }, OTHER_REP);
+    assert.equal(res.status, 403);
+  });
+
+  test('unknown channel is rejected (400)', async () => {
+    const res = await send('testers', { channels: ['sms'], idempotencyKey: 'fx-sms' }, REP);
+    assert.equal(res.status, 400);
+  });
+
+  test('missing idempotencyKey is rejected (400)', async () => {
+    const res = await send('testers', { channels: ['email'] }, REP);
+    assert.equal(res.status, 400);
+  });
+
+  test('no released fixtures yields 409', async () => {
+    // Admin passes assertClubAccess for any club; emptyfix has no released series.
+    const res = await send('emptyfix', { channels: ['email'], idempotencyKey: 'fx-empty' }, ADMIN);
+    assert.equal(res.status, 409);
+  });
+
+  test('unknown club yields 404', async () => {
+    const res = await send('ghostclub', { channels: ['email'], idempotencyKey: 'fx-ghost' }, ADMIN);
+    assert.equal(res.status, 404);
+  });
+
+  test('replay survives the series being un-released (idempotency beats state change)', async () => {
+    const key = 'fx-replay';
+    // First send while the series is released → succeeds and stores a summary.
+    const first = await send('testers', { channels: ['email'], idempotencyKey: key }, REP);
+    assert.equal(first.status, 201);
+    // Admin un-releases the only series this club is in.
+    await repo.putSeries('dolphins', {
+      id: 'fx-series',
+      name: 'Premier League · 2026/27',
+      startDate: '2026-06-01',
+      teams: ['testers', 'rivals'],
+      fixtures: [{ home: 'rivals', away: 'testers', date: '2026-06-01', round: 1 }],
+      released: false,
+      releasedAt: null,
+      version: 1,
+    });
+    // Retry with the SAME key must REPLAY the stored summary (200/deduped), not 409 —
+    // the claim now precedes the "no released fixtures" gate.
+    const retry = await send('testers', { channels: ['email'], idempotencyKey: key }, REP);
+    assert.equal(retry.status, 200);
+    const body = (await retry.json()) as { deduped?: boolean; results: unknown[] };
+    assert.equal(body.deduped, true);
+    assert.equal(body.results.length, 1);
+  });
+});
+
 describe('eraseTenantData removes INVITE# idempotency markers', () => {
   // Regression guard: markers carry recipient contact and aren't in the gsi1 club
   // listing, so erasure must enumerate them explicitly (repo.listClubInviteKeys).

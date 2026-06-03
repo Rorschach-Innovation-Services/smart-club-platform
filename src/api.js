@@ -119,6 +119,18 @@ export const sendClubInvite = (id, { channels, link, idempotencyKey }) =>
     method: 'POST',
     body: { channels, link, idempotencyKey },
   });
+/**
+ * Share the club's released fixtures with its registered players over the given
+ * channels (['email'] | ['whatsapp'] | both). The schedule is built server-side; this
+ * just selects channels. idempotencyKey makes a lost-response retry replay instead of
+ * re-broadcasting. Resolves to { results: [{ channel, status, summary }] } — one
+ * PII-free per-channel row whose `summary` carries the counts (e.g. "8 sent · 2 skipped").
+ */
+export const sendClubFixtures = (id, { channels, idempotencyKey }) =>
+  request(`/clubs/${id}/send-fixtures`, {
+    method: 'POST',
+    body: { channels, idempotencyKey },
+  });
 
 // ── Series ──
 export const getSeriesList = () => request('/series');

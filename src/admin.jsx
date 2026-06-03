@@ -127,7 +127,7 @@ export function AdminFixtures({
   function askRelease(s) {
     setConfirm({
       title: `Release ${s.fixtures.length} fixtures to the league?`,
-      body: `This publishes the full ${s.name} schedule to all ${s.teams.length} affiliated clubs. They'll see it in their portals immediately and receive email + SMS notifications.`,
+      body: `This publishes the full ${s.name} schedule to all ${s.teams.length} affiliated clubs. They'll see it in their portals immediately and receive email + WhatsApp notifications.`,
       onYes: () => {
         onSetReleased(s.id, true);
         setConfirm(null);
@@ -712,7 +712,7 @@ export function FixtureTable({
                   hour: '2-digit',
                   minute: '2-digit',
                 })}{' '}
-                · every club portal now shows their schedule + travel costs · email + SMS
+                · every club portal now shows their schedule + travel costs · email + WhatsApp
                 notifications sent
               </div>
             </>
@@ -722,7 +722,7 @@ export function FixtureTable({
               <div className="fix-release-text-title">Visible only to the Dolphins office</div>
               <div className="fix-release-text-sub">
                 Once released, every fixture goes live in every club portal, the Athlete Management
-                System is notified, and email/SMS reminders go out to chairs &amp; captains.
+                System is notified, and email/WhatsApp reminders go out to chairs &amp; captains.
               </div>
             </>
           )}
@@ -2211,6 +2211,163 @@ export function AdminDashboard({
               </button>
             ))}
           </div>
+        </Card>
+      </div>
+
+      {showEditDeadline && (
+        <EditDeadlineModal
+          currentISO={submissionDeadline}
+          defaultISO={SUBMISSION_DEADLINE_DEFAULT}
+          onClose={() => setShowEditDeadline(false)}
+          onSave={(iso) => onUpdateDeadline && onUpdateDeadline(iso)}
+          toast={toast}
+        />
+      )}
+      {showEditSupport && (
+        <EditSupportContactModal
+          current={support}
+          onClose={() => setShowEditSupport(false)}
+          onSave={(c) => onUpdateSupport && onUpdateSupport(c)}
+          toast={toast}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ─── AdminSettingsView — consolidated workspace config: org, deadline, support, notifications ─── */
+export function AdminSettingsView({
+  orgName,
+  submissionDeadline,
+  support,
+  onSaveOrg,
+  onUpdateDeadline,
+  onUpdateSupport,
+  toast,
+}) {
+  const [name, setName] = useStateA(orgName || '');
+  const [savingOrg, setSavingOrg] = useStateA(false);
+  const [showEditDeadline, setShowEditDeadline] = useStateA(false);
+  const [showEditSupport, setShowEditSupport] = useStateA(false);
+  const sup = parseSupport(support);
+  const deadlineMid = formatDeadlineMid(submissionDeadline);
+  const dirty = (name || '').trim() !== (orgName || '').trim();
+
+  async function saveOrg() {
+    if (!dirty || !name.trim()) return;
+    setSavingOrg(true);
+    try {
+      await onSaveOrg?.(name.trim());
+    } catch {
+      /* onSaveOrg surfaces its own error toast */
+    } finally {
+      setSavingOrg(false);
+    }
+  }
+
+  const rowStyle = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 14,
+  };
+  const valStyle = { fontFamily: "'Montserrat',sans-serif", fontWeight: 700, fontSize: 14 };
+  const chip = (on) => ({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '5px 12px',
+    borderRadius: 999,
+    fontSize: 11.5,
+    fontWeight: 700,
+    fontFamily: "'Montserrat',sans-serif",
+    background: on ? 'var(--green-pale)' : 'var(--line2)',
+    color: on ? 'var(--green)' : 'var(--muted-2)',
+  });
+
+  return (
+    <div>
+      <div className="page-head">
+        <div className="ph-left">
+          <div className="ph-crumb">{orgName} · Admin Console / Settings</div>
+          <h1 className="ph-title">
+            Workspace <em>Settings</em>
+          </h1>
+          <p className="ph-desc">
+            Organisation details, the affiliation submission deadline, the union support contact,
+            and how clubs and players are notified.
+          </p>
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+          gap: 16,
+          alignItems: 'start',
+        }}
+      >
+        <Card title="Organisation" sub="Shown across club portals, emails and the sign-in screen.">
+          <div className="field">
+            <div className="field-label">Organisation name</div>
+            <input
+              className="field-input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Hollywoodbets Dolphins"
+            />
+          </div>
+          <Btn tone="teal" size="sm" onClick={saveOrg} disabled={!dirty || savingOrg}>
+            {savingOrg ? 'Saving…' : 'Save name'}
+          </Btn>
+        </Card>
+
+        <Card
+          title="Affiliation deadline"
+          sub="The date clubs must submit affiliation, documents and CQI by."
+        >
+          <div style={rowStyle}>
+            <div style={valStyle}>{deadlineMid}</div>
+            <Btn
+              tone="outline"
+              size="sm"
+              icon={Icon.Form}
+              onClick={() => setShowEditDeadline(true)}
+            >
+              Change deadline
+            </Btn>
+          </div>
+        </Card>
+
+        <Card
+          title="Union support contact"
+          sub="Surfaced to clubs as the office to reach for help."
+        >
+          <div style={rowStyle}>
+            <div>
+              <div style={valStyle}>{sup.name || 'Not set'}</div>
+              {sup.email && <div style={{ fontSize: 12, color: 'var(--muted)' }}>{sup.email}</div>}
+            </div>
+            <Btn tone="outline" size="sm" icon={Icon.Mail} onClick={() => setShowEditSupport(true)}>
+              Edit contact
+            </Btn>
+          </div>
+        </Card>
+
+        <Card
+          title="Notifications"
+          sub="How clubs and players are reached. Managed by the platform."
+        >
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+            <span style={chip(true)}>Email</span>
+            <span style={chip(true)}>WhatsApp</span>
+            <span style={chip(false)}>SMS · not used</span>
+          </div>
+          <p style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.6, margin: 0 }}>
+            Fixture releases, onboarding invites and player broadcasts go out over email and
+            WhatsApp. No SMS is sent.
+          </p>
         </Card>
       </div>
 
@@ -4941,14 +5098,22 @@ export function AdminClubDetail({
                   d: `${fmtDate(n.at)} · ${n.author}`,
                   _at: n.at,
                 }));
-                const sendItems = (club.commLog || []).map((e) => ({
-                  tone: e.status === 'sent' ? 'teal' : 'gold',
-                  t: `Onboarding invite ${e.status} · ${e.channel === 'email' ? 'Email' : 'WhatsApp'}${
-                    e.to ? ` → ${e.to}` : ''
-                  }${e.error ? ` (${e.error})` : ''}`,
-                  d: `${fmtDate(e.at)} · ${e.by}`,
-                  _at: e.at,
-                }));
+                const sendItems = (club.commLog || []).map((e) => {
+                  const isFixtures = e.kind === 'fixtures';
+                  const label = isFixtures ? 'Fixtures shared with players' : 'Onboarding invite';
+                  // Fixtures broadcasts carry a PII-free count summary; invites name the recipient.
+                  const detail = isFixtures
+                    ? e.summary
+                      ? ` · ${e.summary}`
+                      : ''
+                    : `${e.to ? ` → ${e.to}` : ''}${e.error ? ` (${e.error})` : ''}`;
+                  return {
+                    tone: e.status === 'sent' ? 'teal' : 'gold',
+                    t: `${label} ${e.status} · ${e.channel === 'email' ? 'Email' : 'WhatsApp'}${detail}`,
+                    d: `${fmtDate(e.at)} · ${e.by}`,
+                    _at: e.at,
+                  };
+                });
                 const notes = [...noteItems, ...sendItems].sort((a, b) =>
                   a._at < b._at ? 1 : a._at > b._at ? -1 : 0,
                 );

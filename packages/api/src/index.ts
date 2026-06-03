@@ -35,7 +35,7 @@ import {
 import * as repo from './repo.js';
 import { VersionConflictError } from './repo.js';
 import { validateClubPatch } from './catalogue.js';
-import { sendClubInvite, type Channel, type SendResult } from './notify/index.js';
+import { sendClubInvite, sendClubFixtures, type Channel, type SendResult } from './notify/index.js';
 import type {
   Club,
   ClubCommEvent,
@@ -536,6 +536,73 @@ app.post('/clubs/:id/send-invite', requireAdmin, async (c) => {
   return c.json({ results }, 201);
 });
 
+/**
+ * Share the club's released fixtures with its registered players over email and/or
+ * WhatsApp. Triggered by the club CHAIR (a rep), so guarded by assertClubAccess ONLY —
+ * NOT requireAdmin, which would 403 the chair (its only user). Email carries the full
+ * schedule (built server-side, never trusted from the client); WhatsApp sends a
+ * pre-approved templated heads-up (no link — players aren't portal users and the portal
+ * is auth-gated). Idempotency-keyed like send-invite. Minors are skipped (no guardian
+ * contact on file). Per-recipient outcomes are summarized — the response and the comm
+ * log carry PII-free aggregate counts only.
+ */
+app.post('/clubs/:id/send-fixtures', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const { channels, idempotencyKey } = await c.req.json<{
+    channels?: Channel[];
+    idempotencyKey?: string;
+  }>();
+  if (!Array.isArray(channels) || channels.length === 0)
+    throw new HttpError(400, 'channels required');
+  const unknown = channels.find((ch) => ch !== 'email' && ch !== 'whatsapp');
+  if (unknown) throw new HttpError(400, `unknown channel: ${unknown}`);
+  if (!idempotencyKey) throw new HttpError(400, 'idempotencyKey required');
+
+  const club = await repo.getClub(ra.tenant, id);
+  if (!club) throw new HttpError(404, 'club not found');
+
+  // Claim the idempotency key FIRST so a lost-response retry replays the stored summary
+  // even if the mutable state below has since changed (e.g. the admin un-released the
+  // series). A prior/concurrent claim short-circuits before any re-derivation.
+  const prior = await repo.claimInviteSend(ra.tenant, id, idempotencyKey, channels, 'fixtures');
+  if (prior) return c.json({ results: prior.results, deduped: true, pending: prior.pending });
+
+  // Build the schedule from THIS club's released series, server-side — never trust the
+  // client for what gets broadcast. If there's nothing to share, release the just-claimed
+  // marker so this 409 doesn't poison a legitimate retry once fixtures are released.
+  const allSeries = await repo.listSeries(ra.tenant);
+  const releasedSeries = allSeries.filter(
+    (s) => s.released && Array.isArray(s.teams) && s.teams.includes(id),
+  );
+  if (releasedSeries.length === 0) {
+    await repo.releaseInviteClaim(ra.tenant, id, idempotencyKey);
+    throw new HttpError(409, 'no released fixtures to share');
+  }
+  const clubsById = new Map((await repo.listClubs(ra.tenant)).map((cl) => [cl.id, cl]));
+  const { text: scheduleText, season } = buildClubSchedule(club, releasedSeries, clubsById);
+
+  const players = await repo.listPlayers(ra.tenant, id);
+
+  const { results } = await sendClubFixtures({ club, players, channels, scheduleText, season });
+  // Summarize per-recipient results into ≤2 PII-free per-channel rows. Per-recipient
+  // outcomes never leave the request (POPIA minimisation); the chair only needs counts.
+  const { summaryResults, commEvents } = summarizeFixtures(
+    results,
+    channels,
+    ra.email,
+    idempotencyKey,
+  );
+  try {
+    await repo.appendClubCommEvents(ra.tenant, id, commEvents);
+  } catch (err) {
+    console.error('comm-log append failed after fixtures send', err);
+  }
+  await repo.completeInviteSend(ra.tenant, id, idempotencyKey, summaryResults);
+  return c.json({ results: summaryResults }, 201);
+});
+
 // ───────────────────────── Series ─────────────────────────
 
 app.get('/series', async (c) => {
@@ -698,6 +765,146 @@ function buildCommEvent(r: SendResult, by: string, idempotencyKey: string): Club
     by,
     idempotencyKey,
   };
+}
+
+/** Minimal view of an embedded fixture (the rest of the series payload is opaque here). */
+interface FixtureLite {
+  home?: string;
+  away?: string;
+  date?: string;
+  round?: number;
+}
+
+type LatLon = { lat?: number; lon?: number } | undefined;
+
+/** Great-circle distance in km (mirrors the frontend `haversineKm`); 0 when coords are missing. */
+function haversineKm(a: LatLon, b: LatLon): number {
+  if (!a || !b || a.lat == null || a.lon == null || b.lat == null || b.lon == null) return 0;
+  const R = 6371;
+  const toRad = (x: number) => (x * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+}
+
+const seasonLabel = (year: number) => `${year}/${String((year + 1) % 100).padStart(2, '0')}`;
+
+/**
+ * Resolve the season label dynamically so it scales every year with no code change:
+ * prefer a "YYYY/YY" token embedded in a series name (what the UI shows), else derive
+ * it from the earliest start date, else the current year. Never returns '' — an empty
+ * label would break the email copy and (worse) be rejected as an empty WhatsApp
+ * template parameter.
+ */
+function seasonFromSeries(series: Series[]): string {
+  for (const s of series) {
+    const m = /\b(\d{4}\/\d{2})\b/.exec(typeof s.name === 'string' ? s.name : '');
+    if (m) return m[1];
+  }
+  const starts = series
+    .map((s) => s.startDate)
+    .filter((d): d is string => typeof d === 'string' && d.length > 0)
+    .sort();
+  if (starts[0]) {
+    const y = new Date(starts[0]).getUTCFullYear();
+    if (!Number.isNaN(y)) return seasonLabel(y);
+  }
+  return seasonLabel(new Date().getUTCFullYear());
+}
+
+function fmtFixtureDate(iso?: string): string {
+  if (!iso) return 'Date TBA';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-GB', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
+/**
+ * Build the plain-text schedule for a club across its released series, mirroring the
+ * frontend's ClubFixturesView (round, date, H/A, opponent, venue, away round-trip km).
+ * Returns the dynamic season alongside.
+ */
+function buildClubSchedule(
+  club: Club,
+  releasedSeries: Series[],
+  clubsById: Map<string, Club>,
+): { text: string; season: string } {
+  const season = seasonFromSeries(releasedSeries);
+  const blocks: string[] = [];
+  for (const s of releasedSeries) {
+    const fixtures = ((s.fixtures as FixtureLite[]) ?? [])
+      .filter((f) => f.home === club.id || f.away === club.id)
+      .sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
+    if (fixtures.length === 0) continue;
+    const lines = [String(s.name ?? 'Series')];
+    for (const f of fixtures) {
+      const isHome = f.home === club.id;
+      const opp = clubsById.get((isHome ? f.away : f.home) ?? '');
+      const oppName = opp?.name ?? 'TBA';
+      const venue = isHome
+        ? club.ground?.venue || 'Home ground TBA'
+        : opp?.ground?.venue || 'Opponent ground TBA';
+      let line = `  R${f.round ?? '?'} · ${fmtFixtureDate(f.date)} · ${isHome ? 'Home' : 'Away'} vs ${oppName} · ${venue}`;
+      if (!isHome && opp) {
+        const km = Math.round(haversineKm(opp.ground, club.ground) * 2);
+        if (km > 0) line += ` · ${km.toLocaleString()} km round-trip`;
+      }
+      lines.push(line);
+    }
+    blocks.push(lines.join('\n'));
+  }
+  return { text: blocks.join('\n\n'), season };
+}
+
+/**
+ * Collapse per-recipient fixtures results into <=2 PII-free per-channel rows: one
+ * `SendResult` (returned to the chair + stored on the idempotency marker for replay,
+ * carrying the count in its dedicated `summary` field — never in `error`) and one
+ * matching `ClubCommEvent` (kind: 'fixtures', no recipient `to`). Keeps the
+ * marker/comm-log small and free of player PII. The summary counts only — it omits a
+ * total denominator so a roster of mostly-minors (all legitimately skipped) doesn't
+ * read as a partial failure.
+ */
+function summarizeFixtures(
+  results: SendResult[],
+  channels: Channel[],
+  by: string,
+  idempotencyKey: string,
+): { summaryResults: SendResult[]; commEvents: ClubCommEvent[] } {
+  const at = now();
+  const summaryResults: SendResult[] = [];
+  const commEvents: ClubCommEvent[] = [];
+  for (const channel of channels) {
+    const forCh = results.filter((r) => r.channel === channel);
+    const sent = forCh.filter((r) => r.status === 'sent').length;
+    const failed = forCh.filter((r) => r.status === 'failed').length;
+    const skipped = forCh.filter((r) => r.status === 'skipped').length;
+    const status: SendResult['status'] = sent > 0 ? 'sent' : failed > 0 ? 'failed' : 'skipped';
+    const parts = [`${sent} sent`];
+    if (skipped) parts.push(`${skipped} skipped`);
+    if (failed) parts.push(`${failed} failed`);
+    const summary = parts.join(' · ');
+    summaryResults.push({ channel, status, summary });
+    commEvents.push({
+      id: randomUUID(),
+      channel,
+      status,
+      at,
+      by,
+      idempotencyKey,
+      kind: 'fixtures',
+      summary,
+    });
+  }
+  return { summaryResults, commEvents };
 }
 
 function affiliationFieldsTouched(patch: Partial<Club>): boolean {
