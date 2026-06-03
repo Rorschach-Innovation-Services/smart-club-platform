@@ -1082,6 +1082,7 @@ function Shell({
             club={activeClub}
             goto={gotoClubView}
             toast={toastShow}
+            allLeagues={allLeagues}
             onSubmit={(payload) => {
               // Affiliation submit marks the club complete (locking the form) but
               // does NOT set paid — payment is a separate admin action.
@@ -1133,6 +1134,7 @@ function Shell({
         >
           <CreateSeriesForm
             clubs={clubs}
+            allLeagues={allLeagues}
             onCreate={(s) => {
               onCreateSeries(s)
                 .then(() => {

@@ -6,8 +6,6 @@ import {
   DISTRICTS,
   REQUIRED_DOCS,
   CQI_STRUCTURE,
-  LEAGUE_OPTIONS,
-  LEAGUE_LABEL_BY_KEY,
   SUBMISSION_DEADLINE_DEFAULT,
   cohortStats,
   docCompletion,
@@ -19,6 +17,7 @@ import {
   formatDeadlineMid,
   daysUntil,
 } from './data.jsx';
+import { optionsGroupedByGroup, findByKey } from './leagues.js';
 import {
   Icon,
   Pill,
@@ -806,7 +805,7 @@ function EditFixtureRow({ fixture, teams, onSave, onCancel }) {
 }
 
 /* ─── CreateSeriesForm — automated league flow + advanced overrides ─── */
-export function CreateSeriesForm({ clubs, onCreate, onClose }) {
+export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) {
   const [d, setD] = useStateA({
     leagueKey: '', // dropdown: pick a league → auto-fills name + teams
     name: '',
@@ -877,7 +876,7 @@ export function CreateSeriesForm({ clubs, onCreate, onClose }) {
 
   // When the admin picks a league, auto-fill the name and bulk-select all registered teams.
   function pickLeague(key) {
-    const L = LEAGUE_OPTIONS.find((o) => o.key === key);
+    const L = findByKey(allLeagues, key);
     const filtered = clubs.filter(
       (c) => c.paid && Array.isArray(c.leagues) && c.leagues.includes(key),
     );
@@ -925,10 +924,7 @@ export function CreateSeriesForm({ clubs, onCreate, onClose }) {
           >
             <option value="">Select a league / division…</option>
             {(() => {
-              const groups = LEAGUE_OPTIONS.reduce((acc, L) => {
-                (acc[L.group] = acc[L.group] || []).push(L);
-                return acc;
-              }, {});
+              const groups = optionsGroupedByGroup(allLeagues);
               return Object.entries(groups).map(([group, opts]) => (
                 <optgroup key={group} label={group}>
                   {opts.map((L) => (
@@ -978,7 +974,7 @@ export function CreateSeriesForm({ clubs, onCreate, onClose }) {
         <div className="cs-row">
           <div className="cs-row-label">
             {teamsForLeague.length} club{teamsForLeague.length === 1 ? '' : 's'} registered for{' '}
-            <strong>{LEAGUE_LABEL_BY_KEY[d.leagueKey]}</strong>
+            <strong>{findByKey(allLeagues, d.leagueKey)?.label ?? d.leagueKey}</strong>
           </div>
           <div className="cs-row-input">
             <div style={{ fontSize: 11.5, color: 'var(--muted)', marginBottom: 8 }}>

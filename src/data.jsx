@@ -48,6 +48,11 @@ export const DISTRICTS = [
   'Illembe Cricket District',
 ];
 
+/* ─── Static league catalogue — SEED-AUTHORING ONLY (no client runtime use) ───
+   Leagues are now admin-managed per-tenant config (TenantConfig.leagues), read via
+   src/leagues.js helpers. The arrays below are retained only as the source the demo
+   seed (packages/api/seed-data/dolphins.json) was authored from. DISTRICTS stays live. */
+
 /* ─── Cross-district overarching leagues (V3) ───
    These appear in every district's picker, alongside the district-specific
    division catalogue. The V3 brief reintroduces these as overarching options. */

@@ -13,9 +13,6 @@ import {
   COACHING_LEVELS,
   REQUIRED_DOCS,
   CQI_STRUCTURE,
-  LEAGUE_OPTIONS,
-  LEAGUE_LABEL_BY_KEY,
-  leagueOptionsForDistrict,
   docCompletion,
   overallProgress,
   fixtureCost,
@@ -23,6 +20,7 @@ import {
   formatDeadlineShort,
   daysUntil,
 } from './data.jsx';
+import { leagueOptionsForDistrict, findByKey } from './leagues.js';
 import {
   Icon,
   Pill,
@@ -522,7 +520,7 @@ const EMPTY_COACH = {
   teams: [],
 };
 
-export function AffiliationForm({ club, goto, toast, onSubmit }) {
+export function AffiliationForm({ club, goto, toast, onSubmit, allLeagues = [] }) {
   const [data, setData] = useStateC(() => {
     // Pre-fill exco from club.exco (single source of truth shared with the exco roster doc)
     const ex = club.exco || {};
@@ -549,7 +547,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
     const ground = club.ground || {};
     return {
       clubName: club.name,
-      district: 'Ethekwini Metro Cricket Union',
+      district: club.district || DISTRICTS[0],
       township: 'no',
       chairName: chairSeed.name,
       chairCell: chairSeed.cell,
@@ -576,7 +574,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
       // district in step 1 we wipe and re-seed below so the picker always matches.
       leagues: (() => {
         const prior = Array.isArray(club.leagues) ? club.leagues : null;
-        const opts = leagueOptionsForDistrict('Ethekwini Metro Cricket Union');
+        const opts = leagueOptionsForDistrict(allLeagues, club.district || DISTRICTS[0]);
         return opts.reduce((acc, L) => {
           acc[L.key] = prior ? prior.includes(L.key) : false;
           return acc;
@@ -642,7 +640,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
   // (Smart Club Integration V2) so cross-district keys would be invalid.
   function setDistrict(newDistrict) {
     setData((d) => {
-      const opts = leagueOptionsForDistrict(newDistrict);
+      const opts = leagueOptionsForDistrict(allLeagues, newDistrict);
       const freshLeagues = opts.reduce((acc, L) => {
         acc[L.key] = false;
         return acc;
@@ -1183,7 +1181,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
               (() => {
                 // District-specific league catalogue (Smart Club Integration V2) —
                 // the picker only ever shows leagues that apply to the club's district.
-                const districtOptions = leagueOptionsForDistrict(data.district);
+                const districtOptions = leagueOptionsForDistrict(allLeagues, data.district);
                 const selectedLeagueKeys = Object.entries(data.leagues)
                   .filter(([_, v]) => v)
                   .map(([k]) => k);
@@ -1309,7 +1307,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
                       </div>
                     ) : (
                       selectedLeagueKeys.map((key) => {
-                        const L = LEAGUE_OPTIONS.find((o) => o.key === key);
+                        const L = findByKey(allLeagues, key);
                         const rows = data.coaches
                           .map((c, i) => ({ c, i }))
                           .filter((x) => x.c.teams.includes(key));
@@ -1479,7 +1477,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
                                             >
                                               · also:{' '}
                                               {otherTeams
-                                                .map((t) => LEAGUE_LABEL_BY_KEY[t])
+                                                .map((t) => findByKey(allLeagues, t)?.label ?? t)
                                                 .join(', ')}
                                             </span>
                                           )}
@@ -1603,7 +1601,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit }) {
                                                   <span className="trb-chip-tick">
                                                     {on ? <Icon.Check /> : null}
                                                   </span>
-                                                  {LEAGUE_LABEL_BY_KEY[k]}
+                                                  {findByKey(allLeagues, k)?.label ?? k}
                                                 </button>
                                               );
                                             })}
