@@ -21,6 +21,7 @@ import {
   daysUntil,
 } from './data.jsx';
 import { leagueOptionsForDistrict, findByKey } from './leagues.js';
+import { shortAddress, suburbOf } from './geocode.js';
 import {
   Icon,
   Pill,
@@ -80,15 +81,99 @@ function DocUploadButton({ clubId, docKey, label, onUploaded, toast }) {
 }
 
 /* ─── Ground map (Leaflet + OpenStreetMap + Nominatim geocoding) ─── */
-export function GroundMap({ query, onResolved }) {
+
+export function GroundMap({ query, onResolved, onAddressPicked }) {
   const elRef = useRefC(null);
   const mapRef = useRefC(null);
   const markerRef = useRefC(null);
   const [coords, setCoords] = useStateC(null);
   const [loading, setLoading] = useStateC(false);
-  const [notFound, setNotFound] = useStateC(false);
+  const [notFound, setNotFound] = useStateC(false); // geocode returned no result
+  const [loadError, setLoadError] = useStateC(false); // request itself failed (network / rate-limit)
 
-  // Initialise the map once
+  // Latest parent callbacks, kept in refs so the mount-once click handler and
+  // the captured reverseGeocode never close over a stale version.
+  const onResolvedRef = useRefC(onResolved);
+  const onAddressRef = useRefC(onAddressPicked);
+  // Intentionally NO dependency array — this must run on every render to keep the
+  // refs current. Do not add `[]`: that would reintroduce the stale-closure bug
+  // the refs exist to prevent.
+  useEffectC(() => {
+    onResolvedRef.current = onResolved;
+    onAddressRef.current = onAddressPicked;
+  });
+
+  // Monotonic request token shared by BOTH the forward (query) and reverse
+  // (click) paths so the most recent interaction always wins, no matter which
+  // request resolves last. Reverse requests are also abortable + debounced.
+  const reqRef = useRefC(0);
+  const reverseCtrlRef = useRefC(null);
+  const reverseTimerRef = useRefC(null);
+
+  // Drop / move the single ground marker. Popup is opt-in (forward-geocode
+  // shows the resolved place name; clicks stay quiet — coords + field report it).
+  function placeMarker(lat, lon, label) {
+    if (!mapRef.current || !L) return;
+    if (markerRef.current) markerRef.current.remove();
+    const icon = L.divIcon({
+      className: '',
+      html: '<div class="ground-marker"></div>',
+      iconSize: [24, 24],
+      iconAnchor: [12, 12],
+    });
+    markerRef.current = L.marker([lat, lon], { icon }).addTo(mapRef.current);
+    if (label) markerRef.current.bindPopup(`<strong>${label}</strong>`).openPopup();
+  }
+
+  // Map click → drop the pin and store coords *immediately* for instant feedback,
+  // then debounce the reverse-geocode lookup so a burst of clicks coalesces into
+  // a single Nominatim request (their usage policy caps at ~1 req/s).
+  function handleMapClick(lat, lon) {
+    if (!mapRef.current || !L) return;
+    const id = ++reqRef.current; // this click is now the latest interaction
+    setNotFound(false);
+    setLoadError(false);
+    setLoading(true);
+    placeMarker(lat, lon);
+    setCoords({ lat, lon, name: null });
+    onResolvedRef.current?.({ lat, lon });
+    if (reverseTimerRef.current) clearTimeout(reverseTimerRef.current);
+    reverseTimerRef.current = setTimeout(() => reverseGeocode(lat, lon, id), 600);
+  }
+
+  // Reverse-geocode the clicked point → prefill the address. `id` is the token
+  // taken when the click happened, so a later interaction discards this result.
+  function reverseGeocode(lat, lon, id) {
+    if (id !== reqRef.current || !mapRef.current || !L) return;
+    if (reverseCtrlRef.current) reverseCtrlRef.current.abort();
+    const ctrl = new AbortController();
+    reverseCtrlRef.current = ctrl;
+    fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=json&addressdetails=1&lat=${lat}&lon=${lon}`,
+      { signal: ctrl.signal, headers: { 'Accept-Language': 'en' } },
+    )
+      .then((r) => {
+        if (!r.ok) throw new Error(`Nominatim reverse failed: ${r.status}`);
+        return r.json();
+      })
+      .then((r) => {
+        if (id !== reqRef.current) return; // a newer interaction superseded this
+        setLoading(false);
+        const addr = shortAddress(r); // '' when no readable address resolves
+        onResolvedRef.current?.({ lat, lon, name: r?.display_name || null, suburb: suburbOf(r) });
+        // Only fill the field with a real address — never a raw lat/lon string.
+        if (addr) onAddressRef.current?.(addr);
+      })
+      .catch((e) => {
+        if (e.name === 'AbortError' || id !== reqRef.current) return;
+        // Keep the click as an authoritative pin (already placed + coords stored);
+        // we just couldn't resolve an address. Surface it instead of inventing one.
+        console.warn('Reverse geocode failed', e);
+        setLoading(false);
+      });
+  }
+
+  // Initialise the map once + wire click-to-drop-pin
   useEffectC(() => {
     if (mapRef.current || !elRef.current || !L) return;
     const map = L.map(elRef.current, {
@@ -99,24 +184,40 @@ export function GroundMap({ query, onResolved }) {
       maxZoom: 18,
       attribution: '© OpenStreetMap contributors',
     }).addTo(map);
+    map.on('click', (e) => handleMapClick(e.latlng.lat, e.latlng.lng));
     mapRef.current = map;
+    return () => {
+      if (reverseTimerRef.current) clearTimeout(reverseTimerRef.current);
+      if (reverseCtrlRef.current) reverseCtrlRef.current.abort();
+      map.remove();
+      mapRef.current = null;
+    };
   }, []);
 
-  // Geocode + drop marker whenever the query changes
+  // Forward-geocode + drop marker whenever the typed query changes
   useEffectC(() => {
     if (!query || !mapRef.current || !L) return;
+    const id = ++reqRef.current;
+    // A typed search supersedes any pending/in-flight click lookup.
+    if (reverseTimerRef.current) clearTimeout(reverseTimerRef.current);
+    if (reverseCtrlRef.current) reverseCtrlRef.current.abort();
     const ctrl = new AbortController();
     setLoading(true);
     setNotFound(false);
+    setLoadError(false);
     fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(query)}`,
+      `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(query)}`,
       {
         signal: ctrl.signal,
         headers: { 'Accept-Language': 'en' },
       },
     )
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`Nominatim search failed: ${r.status}`);
+        return r.json();
+      })
       .then((results) => {
+        if (id !== reqRef.current) return; // a newer interaction superseded this
         setLoading(false);
         if (!results || !results.length) {
           setCoords(null);
@@ -127,27 +228,19 @@ export function GroundMap({ query, onResolved }) {
         const lat = parseFloat(r.lat),
           lon = parseFloat(r.lon);
         mapRef.current.flyTo([lat, lon], 16, { duration: 0.8 });
-        if (markerRef.current) markerRef.current.remove();
-        const icon = L.divIcon({
-          className: '',
-          html: '<div class="ground-marker"></div>',
-          iconSize: [24, 24],
-          iconAnchor: [12, 12],
-        });
-        markerRef.current = L.marker([lat, lon], { icon }).addTo(mapRef.current);
-        markerRef.current
-          .bindPopup(`<strong>${r.display_name.split(',').slice(0, 2).join(',')}</strong>`)
-          .openPopup();
+        placeMarker(lat, lon, r.display_name.split(',').slice(0, 2).join(','));
         setNotFound(false);
         setCoords({ lat, lon, name: r.display_name });
-        onResolved?.({ lat, lon, name: r.display_name });
+        onResolvedRef.current?.({ lat, lon, name: r.display_name, suburb: suburbOf(r) });
       })
       .catch((e) => {
+        if (e.name === 'AbortError' || id !== reqRef.current) return;
+        // Distinguish "no such place" (refine search) from "lookup unavailable"
+        // (network / rate-limit) so a 429 doesn't masquerade as not-found.
+        console.warn('Forward geocode failed', e);
         setLoading(false);
-        if (e.name !== 'AbortError') {
-          setCoords(null);
-          setNotFound(true);
-        }
+        setCoords(null);
+        setLoadError(true);
       });
     return () => ctrl.abort();
   }, [query]);
@@ -161,16 +254,22 @@ export function GroundMap({ query, onResolved }) {
           Finding location…
         </div>
       )}
-      {!loading && coords && !notFound && (
+      {!loading && coords && !notFound && !loadError && (
         <div className="ground-coords">
           <Icon.Field />
           {coords.lat.toFixed(4)}, {coords.lon.toFixed(4)}
         </div>
       )}
-      {!loading && notFound && (
+      {!loading && !loadError && notFound && (
         <div className="ground-coords" style={{ background: 'var(--ink)' }}>
           <Icon.Alert />
           Address not found — refine your search
+        </div>
+      )}
+      {!loading && loadError && (
+        <div className="ground-coords" style={{ background: 'var(--ink)' }}>
+          <Icon.Alert />
+          Location lookup unavailable — try again
         </div>
       )}
     </div>
@@ -585,6 +684,9 @@ export function AffiliationForm({ club, goto, toast, onSubmit, allLeagues = [] }
       groundVenue: ground.venue || '',
       groundAddress: ground.address || '',
       groundMapQuery: ground.mapQuery || 'Durban, KwaZulu-Natal, South Africa',
+      // True when groundAddress came from clicking the map (reverse-geocode).
+      // Suppresses re-geocoding on blur so a clicked pin isn't relocated.
+      groundAddressFromPin: false,
     };
   });
   const [step, setStep] = useStateC(1);
@@ -656,6 +758,9 @@ export function AffiliationForm({ club, goto, toast, onSubmit, allLeagues = [] }
 
   function dropGroundPin() {
     setData((d) => {
+      // A clicked pin is authoritative — don't re-geocode the typed address
+      // (which would jump the marker off the point the user picked).
+      if (d.groundAddressFromPin) return d;
       const q = [d.groundVenue, d.groundAddress].filter(Boolean).join(', ');
       return { ...d, groundMapQuery: q || 'Durban, KwaZulu-Natal, South Africa' };
     });
@@ -864,7 +969,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit, allLeagues = [] }
                     </div>
                     <div className="ground-section-sub">
                       Pin your ground location so fixtures, venue allocations and travel times are
-                      accurate. Type the venue and address, then drop the pin.
+                      accurate. Type the venue and address, or click the map, to drop the pin.
                     </div>
                   </div>
 
@@ -877,7 +982,15 @@ export function AffiliationForm({ club, goto, toast, onSubmit, allLeagues = [] }
                         className="field-input"
                         placeholder="e.g. Berea Rovers Oval"
                         value={data.groundVenue}
-                        onChange={(e) => update('groundVenue', e.target.value)}
+                        onChange={(e) =>
+                          // Editing the venue re-enables typed-address geocoding,
+                          // so a venue change after a map click still updates the map.
+                          setData((d) => ({
+                            ...d,
+                            groundVenue: e.target.value,
+                            groundAddressFromPin: false,
+                          }))
+                        }
                         onBlur={dropGroundPin}
                       />
                     </div>
@@ -889,7 +1002,14 @@ export function AffiliationForm({ club, goto, toast, onSubmit, allLeagues = [] }
                         className="field-input"
                         placeholder="Street, suburb, city"
                         value={data.groundAddress}
-                        onChange={(e) => update('groundAddress', e.target.value)}
+                        onChange={(e) =>
+                          // Manual edit re-enables typed-address geocoding.
+                          setData((d) => ({
+                            ...d,
+                            groundAddress: e.target.value,
+                            groundAddressFromPin: false,
+                          }))
+                        }
                         onBlur={dropGroundPin}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') {
@@ -918,6 +1038,13 @@ export function AffiliationForm({ club, goto, toast, onSubmit, allLeagues = [] }
                     <GroundMap
                       query={data.groundMapQuery}
                       onResolved={(c) => update('groundCoords', c)}
+                      onAddressPicked={(addr) =>
+                        setData((d) => ({
+                          ...d,
+                          groundAddress: addr,
+                          groundAddressFromPin: true,
+                        }))
+                      }
                     />
                   </div>
                 </div>

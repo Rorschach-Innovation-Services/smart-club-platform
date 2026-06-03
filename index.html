@@ -1986,6 +1986,11 @@
     width:100%;height:280px;display:block;
     z-index:1;
   }
+  /* Signal the map is clickable (click to drop / move the ground pin).
+     Leaflet applies .leaflet-container/.leaflet-grab to the .ground-map element
+     itself, so these must be compound selectors, not descendants. */
+  .ground-map.leaflet-container,
+  .ground-map.leaflet-grab{cursor:crosshair}
   .ground-map .leaflet-control-attribution{
     font-size:9px;background:rgba(255,255,255,0.85);font-family:'Montserrat',sans-serif;
   }
