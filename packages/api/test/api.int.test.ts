@@ -574,3 +574,81 @@ describe('eraseTenantData removes INVITE# idempotency markers', () => {
     );
   });
 });
+
+describe('PATCH /clubs/:id/progression', () => {
+  before(async () => {
+    await repo.createClub('dolphins', {
+      id: 'progclub',
+      name: 'Prog CC',
+      district: 'Test District',
+      sub: 'sub-1',
+      chair: 'Chair',
+      affiliation: 'not_started',
+      paid: false,
+      cqi: 0,
+      docs: {},
+      players: 0,
+      teams: 0,
+      women: 0,
+      juniors: 0,
+      color: '#123456',
+      ground: {},
+      leagues: [],
+      version: 1,
+    });
+  });
+
+  test('admin can switch a club to payment-gated; it persists', async () => {
+    const res = await app.request('/clubs/progclub/progression', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ progressionMode: 'payment' }),
+    });
+    assert.equal(res.status, 200);
+    const club = (await res.json()) as { progressionMode?: string };
+    assert.equal(club.progressionMode, 'payment');
+    // Round-trips through the store, not just the response.
+    const stored = await repo.getClub('dolphins', 'progclub');
+    assert.equal((stored as { progressionMode?: string })?.progressionMode, 'payment');
+  });
+
+  test('club rep is forbidden (403)', async () => {
+    const res = await app.request('/clubs/progclub/progression', {
+      method: 'PATCH',
+      headers: headers(REP),
+      body: JSON.stringify({ progressionMode: 'submission' }),
+    });
+    assert.equal(res.status, 403);
+  });
+
+  test('invalid mode is rejected (400)', async () => {
+    const res = await app.request('/clubs/progclub/progression', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ progressionMode: 'whenever' }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test('malformed/empty body is a 400, not a 500', async () => {
+    const res = await app.request('/clubs/progclub/progression', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: 'not json',
+    });
+    assert.equal(res.status, 400);
+  });
+});
+
+describe('POST /clubs — progression default', () => {
+  test('onboarded club defaults to submission-driven progression', async () => {
+    const res = await app.request('/clubs', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ name: 'Default Prog FC', district: 'Test District' }),
+    });
+    assert.equal(res.status, 201);
+    const club = (await res.json()) as { progressionMode?: string };
+    assert.equal(club.progressionMode, 'submission');
+  });
+});

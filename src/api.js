@@ -97,6 +97,8 @@ export const patchClub = (id, patch) => request(`/clubs/${id}`, { method: 'PATCH
 export const saveExco = (id, exco) => request(`/clubs/${id}/exco`, { method: 'POST', body: exco });
 export const setPaid = (id, paid) =>
   request(`/clubs/${id}/paid`, { method: 'PATCH', body: { paid } });
+export const setProgression = (id, progressionMode) =>
+  request(`/clubs/${id}/progression`, { method: 'PATCH', body: { progressionMode } });
 export const generateRegLink = (id) => request(`/clubs/${id}/reg-link`, { method: 'POST' });
 export const getDocUploadUrl = (id, key) =>
   request(`/clubs/${id}/docs/${key}/upload-url`, { method: 'POST' });

@@ -23,6 +23,8 @@ import {
   REQUIRED_DOCS,
   SUBMISSION_DEADLINE_DEFAULT,
   docCompletion,
+  affiliationSubmitted,
+  journeyUnlocked,
   computeMarkCompliance,
   computeRevertCompliance,
 } from './data.jsx';
@@ -638,7 +640,7 @@ function Shell({
 
   // ── Auto-open onboarding the first time a club portal is entered ──
   useEffect(() => {
-    if (role === 'club' && activeClub && !activeClub.paid && !onboarded[clubId]) {
+    if (role === 'club' && activeClub && !affiliationSubmitted(activeClub) && !onboarded[clubId]) {
       const t = setTimeout(() => setShowOnboarding(true), 350);
       return () => clearTimeout(t);
     }
@@ -663,7 +665,8 @@ function Shell({
   function changeClub(id) {
     navigate(`/club/${id}`);
     const c = clubs.find((x) => x.id === id);
-    if (!onboarded[id] && c && !c.paid) setTimeout(() => setShowOnboarding(true), 250);
+    if (!onboarded[id] && c && !affiliationSubmitted(c))
+      setTimeout(() => setShowOnboarding(true), 250);
   }
 
   // ── Club mutations (API-backed; curried by current clubId) ──
@@ -779,6 +782,17 @@ function Shell({
       })
       .catch(() => {});
   }
+  function setProgression(id, progressionMode) {
+    return withToast(
+      () => api.setProgression(id, progressionMode),
+      'Could not update progression mode',
+    )
+      .then(() => {
+        invalidate(qk.club(id));
+        invalidate(qk.clubs());
+      })
+      .catch(() => {});
+  }
   // Admin invites a rep/admin: creates the Cognito account + membership server-side.
   function inviteUser(spec) {
     return withToast(() => api.inviteUser(spec), 'Could not send invite');
@@ -826,8 +840,8 @@ function Shell({
       v: 'affiliations',
       label: 'Affiliations',
       icon: Icon.Form,
-      num: clubs.filter((c) => c.paid).length + '/' + clubs.length,
-      dot: clubs.filter((c) => !c.paid).length ? 'gold' : 'teal',
+      num: clubs.filter((c) => affiliationSubmitted(c)).length + '/' + clubs.length,
+      dot: clubs.filter((c) => !affiliationSubmitted(c)).length ? 'gold' : 'teal',
     },
     {
       v: 'documents',
@@ -861,7 +875,7 @@ function Shell({
             v: 'affiliation',
             label: 'Affiliation',
             icon: Icon.Form,
-            dot: activeClub.paid ? 'teal' : 'coral',
+            dot: affiliationSubmitted(activeClub) ? 'teal' : 'coral',
           },
           {
             v: 'documents',
@@ -874,7 +888,7 @@ function Shell({
             v: 'fixtures',
             label: 'Fixtures',
             icon: Icon.Field,
-            dot: hasReleased ? 'teal' : activeClub.paid ? 'gold' : 'muted',
+            dot: hasReleased ? 'teal' : journeyUnlocked(activeClub) ? 'gold' : 'muted',
             num: hasReleased ? 'NEW' : undefined,
           },
           { v: '_help', label: 'Need Help?', icon: Icon.Mail, action: () => setShowHelp(true) },
@@ -922,6 +936,7 @@ function Shell({
             gotoList={gotoList}
             onGenerateLink={() => generatePlayerRegLink(activeClub.id)}
             onSetPaid={setPaid}
+            onSetProgression={setProgression}
             onInvite={inviteUser}
             toast={toastShow}
             allLeagues={allLeagues}
@@ -1026,7 +1041,7 @@ function Shell({
           />
         );
       if (view === 'fixtures') {
-        if (!activeClub.paid)
+        if (!journeyUnlocked(activeClub))
           return (
             <ComingSoon title="Fixtures & Venues" phase="02" unlocked={false} eta="Aug 2026" />
           );
@@ -1378,11 +1393,11 @@ function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
     },
   }[kind];
 
-  // "Outstanding" depends on the tracker: unpaid (affiliation), any missing doc
-  // (docs), or no CQI submission (cqi).
+  // "Outstanding" depends on the tracker: affiliation not submitted (affiliation),
+  // any missing doc (docs), or no CQI submission (cqi).
   const isOutstanding = (c) =>
     kind === 'affiliation'
-      ? !c.paid
+      ? !affiliationSubmitted(c)
       : kind === 'docs'
         ? !Object.values(c.docs).every(Boolean)
         : c.cqi === 0;
@@ -1407,14 +1422,12 @@ function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
         return {
           ...base,
           Status: c.affiliation,
-          Payment: c.paid ? 'Submitted' : 'Outstanding',
-          Submitted: c.paid
-            ? 'Paid'
-            : c.affiliation === 'complete'
-              ? 'Submitted'
-              : c.affiliation === 'in_progress'
-                ? 'Draft saved'
-                : '—',
+          Payment: c.paid ? 'Paid' : 'Outstanding',
+          Submitted: affiliationSubmitted(c)
+            ? 'Submitted'
+            : c.affiliation === 'in_progress'
+              ? 'Draft saved'
+              : '—',
         };
       if (kind === 'docs')
         return {
@@ -1514,7 +1527,7 @@ function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
                     <>
                       <td>{affPill(c.affiliation)}</td>
                       <td>
-                        {c.paid ? (
+                        {affiliationSubmitted(c) ? (
                           <Pill tone="teal" dot>
                             Submitted
                           </Pill>

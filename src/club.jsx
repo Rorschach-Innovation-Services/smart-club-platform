@@ -15,6 +15,8 @@ import {
   CQI_STRUCTURE,
   docCompletion,
   overallProgress,
+  affiliationSubmitted,
+  journeyUnlocked,
   fixtureCost,
   formatDeadlineLong,
   formatDeadlineShort,
@@ -312,13 +314,15 @@ export function ClubHome({ club, goto, toast, replayOnboarding, submissionDeadli
   const dc = docCompletion(club);
   const op = overallProgress(club);
   const band = cqiBand(club.cqi);
+  // "Submitted" is the form fact (affiliation === 'complete'), never payment.
+  const affDone = affiliationSubmitted(club);
 
   const phases = [
     {
       n: '01',
       t: 'Affiliation',
       key: 'affiliation',
-      done: club.paid,
+      done: affDone,
       action: 'Open form',
       target: 'affiliation',
     },
@@ -326,10 +330,15 @@ export function ClubHome({ club, goto, toast, replayOnboarding, submissionDeadli
       n: '02',
       t: 'Fixtures',
       key: 'fixtures',
-      done: club.affiliation === 'complete',
+      done: journeyUnlocked(club),
       action: 'View leagues',
       target: 'fixtures',
-      lock: !club.paid,
+      lock: !journeyUnlocked(club),
+      // Submitted but payment-gated → distinguish "awaiting payment" from "finish phase 1".
+      lockReason:
+        affDone && !journeyUnlocked(club)
+          ? 'Locked — awaiting affiliation payment'
+          : 'Locked — finish phase 1 first',
     },
     {
       n: '03',
@@ -418,7 +427,11 @@ export function ClubHome({ club, goto, toast, replayOnboarding, submissionDeadli
               <div className="ps-n">PHASE {p.n}</div>
               <div className="ps-t">{p.t}</div>
               <div className="ps-l">
-                {p.done ? 'Complete' : p.lock ? 'Locked — finish phase 1 first' : 'Pending'}
+                {p.done
+                  ? 'Complete'
+                  : p.lock
+                    ? p.lockReason || 'Locked — finish phase 1 first'
+                    : 'Pending'}
               </div>
               {p.done && (
                 <div className="ps-tick">
@@ -439,8 +452,8 @@ export function ClubHome({ club, goto, toast, replayOnboarding, submissionDeadli
                 width: '100%',
                 textAlign: 'left',
                 padding: '12px 14px',
-                border: '1px solid ' + (club.paid ? 'rgba(15,77,46,0.25)' : 'var(--line)'),
-                background: club.paid ? 'var(--green-pale)' : 'var(--white)',
+                border: '1px solid ' + (affDone ? 'rgba(15,77,46,0.25)' : 'var(--line)'),
+                background: affDone ? 'var(--green-pale)' : 'var(--white)',
                 borderRadius: 8,
                 gap: 12,
               }}
@@ -451,15 +464,15 @@ export function ClubHome({ club, goto, toast, replayOnboarding, submissionDeadli
                   width: 32,
                   height: 32,
                   borderRadius: '50%',
-                  background: club.paid ? 'var(--green)' : 'var(--coral-pale)',
-                  color: club.paid ? '#fff' : 'var(--coral)',
+                  background: affDone ? 'var(--green)' : 'var(--coral-pale)',
+                  color: affDone ? '#fff' : 'var(--coral)',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  boxShadow: club.paid ? '0 3px 10px rgba(15,77,46,0.25)' : 'none',
+                  boxShadow: affDone ? '0 3px 10px rgba(15,77,46,0.25)' : 'none',
                 }}
               >
-                {club.paid ? <Icon.Check /> : <Icon.Form />}
+                {affDone ? <Icon.Check /> : <Icon.Form />}
               </div>
               <div style={{ flex: 1 }}>
                 <div
@@ -467,20 +480,20 @@ export function ClubHome({ club, goto, toast, replayOnboarding, submissionDeadli
                     fontFamily: "'Montserrat',sans-serif",
                     fontSize: 13,
                     fontWeight: 700,
-                    color: club.paid ? 'var(--green)' : 'var(--ink)',
+                    color: affDone ? 'var(--green)' : 'var(--ink)',
                   }}
                 >
                   Affiliation Form
                 </div>
                 <div
-                  style={{ fontSize: 11.5, color: club.paid ? 'var(--green-mid)' : 'var(--muted)' }}
+                  style={{ fontSize: 11.5, color: affDone ? 'var(--green-mid)' : 'var(--muted)' }}
                 >
-                  {club.paid
+                  {affDone
                     ? 'Submitted · tap to view'
                     : 'Complete the 2026/27 Cricket Services affiliation form — club details, exco, leagues & coaches.'}
                 </div>
               </div>
-              {club.paid ? (
+              {affDone ? (
                 <Pill tone="teal" dot>
                   Completed
                 </Pill>
@@ -575,7 +588,7 @@ export function ClubHome({ club, goto, toast, replayOnboarding, submissionDeadli
                 </Pill>
               </button>
             )}
-            {club.paid && dc === 100 && club.cqi > 0 && (
+            {affDone && dc === 100 && club.cqi > 0 && (
               <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--muted)' }}>
                 Everything submitted. Your club has been forwarded to the Dolphins administrators
                 for review.

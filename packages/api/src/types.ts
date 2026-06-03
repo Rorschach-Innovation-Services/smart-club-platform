@@ -59,6 +59,12 @@ export interface Club {
   chair: string;
   affiliation: 'not_started' | 'in_progress' | 'complete';
   paid: boolean;
+  /**
+   * Per-club journey gate. 'submission' (default): the journey advances once the
+   * affiliation form is submitted. 'payment': Fixtures stay locked until an admin
+   * also marks the club paid. Display of "submitted" status is unaffected by this.
+   */
+  progressionMode?: 'submission' | 'payment';
   cqi: number;
   cqiAnswers?: Record<string, unknown>;
   docs: Record<string, boolean>;

@@ -399,6 +399,20 @@ app.patch('/clubs/:id/paid', requireAdmin, async (c) => {
   return c.json(withPlayerCount(updated));
 });
 
+/** Set per-club progression mode (admin only) — audited. */
+app.patch('/clubs/:id/progression', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  // A malformed/empty body parses to null and falls into the same 400 below,
+  // rather than surfacing as an unhandled 500.
+  const body = await c.req.json<{ progressionMode?: 'submission' | 'payment' }>().catch(() => null);
+  const progressionMode = body?.progressionMode;
+  if (progressionMode !== 'submission' && progressionMode !== 'payment')
+    throw new HttpError(400, 'invalid progressionMode');
+  const updated = await applyClubPatch(ra.tenant, id, { progressionMode }, ra.email);
+  return c.json(withPlayerCount(updated));
+});
+
 /** Append a note to the club's communication log (admin only) — audited. */
 app.post('/clubs/:id/notes', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
@@ -677,6 +691,7 @@ function buildClubFromSpec(spec: ClubSpec): Club {
     chair: spec.chair ?? '',
     affiliation: 'not_started',
     paid: false,
+    progressionMode: 'submission',
     cqi: 0,
     docs: { constitution: false, agm: false, financials: false, exco: false },
     players: 0,

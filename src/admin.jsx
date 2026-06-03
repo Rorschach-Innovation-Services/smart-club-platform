@@ -10,6 +10,8 @@ import {
   cohortStats,
   docCompletion,
   overallProgress,
+  affiliationSubmitted,
+  journeyUnlocked,
   fixtureCost,
   generateRoundRobin,
   formatDeadlineLong,
@@ -916,18 +918,20 @@ export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) 
     });
   }
 
-  // Teams eligible = paid clubs that registered for the selected league.
-  // Falls back to "all paid clubs" until a league is picked.
+  // Teams eligible = clubs past the phase-1 gate that registered for the selected
+  // league. Falls back to "all unlocked clubs" until a league is picked.
   const teamsForLeague = d.leagueKey
-    ? clubs.filter((c) => c.paid && Array.isArray(c.leagues) && c.leagues.includes(d.leagueKey))
+    ? clubs.filter(
+        (c) => journeyUnlocked(c) && Array.isArray(c.leagues) && c.leagues.includes(d.leagueKey),
+      )
     : [];
-  const eligibleTeams = d.leagueKey ? teamsForLeague : clubs.filter((c) => c.paid);
+  const eligibleTeams = d.leagueKey ? teamsForLeague : clubs.filter((c) => journeyUnlocked(c));
 
   // When the admin picks a league, auto-fill the name and bulk-select all registered teams.
   function pickLeague(key) {
     const L = findByKey(allLeagues, key);
     const filtered = clubs.filter(
-      (c) => c.paid && Array.isArray(c.leagues) && c.leagues.includes(key),
+      (c) => journeyUnlocked(c) && Array.isArray(c.leagues) && c.leagues.includes(key),
     );
     setD((prev) => ({
       ...prev,
@@ -1767,9 +1771,10 @@ export function AdminDashboard({
   const [showEditSupport, setShowEditSupport] = useStateA(false);
 
   // Open a bcc mail draft to the chairs of every club still missing a submission
-  // (unpaid, no CQI, or any compliance doc outstanding).
+  // (affiliation not submitted, no CQI, or any compliance doc outstanding).
   function remindBulk() {
-    const behind = (c) => !c.paid || c.cqi === 0 || !Object.values(c.docs).every(Boolean);
+    const behind = (c) =>
+      !affiliationSubmitted(c) || c.cqi === 0 || !Object.values(c.docs).every(Boolean);
     openBccReminder({
       emails: clubs.filter(behind).map((c) => c.exco?.chair?.email),
       subject: 'Smart Club Integration — outstanding submissions',
@@ -1804,14 +1809,14 @@ export function AdminDashboard({
       num: '01',
       label: 'Affiliation',
       tone: 'navy',
-      done: clubs.filter((c) => c.paid).length,
+      done: clubs.filter((c) => affiliationSubmitted(c)).length,
       view: 'affiliations',
     },
     {
       num: '02',
       label: 'League / Fixtures',
       tone: 'teal',
-      done: clubs.filter((c) => c.affiliation === 'complete').length,
+      done: clubs.filter((c) => journeyUnlocked(c)).length,
       view: 'fixtures',
     },
     {
@@ -1919,10 +1924,10 @@ export function AdminDashboard({
       <div className="kpi-strip">
         <KPI label="Total clubs" num={<CountUp to={stats.total} />} sub="2026/27 season" />
         <KPI
-          tone={statusFor(pct(stats.paid, stats.total))}
+          tone={statusFor(pct(stats.affComplete, stats.total))}
           label="Affiliated"
-          num={<CountUp to={stats.paid} />}
-          sub={`${pct(stats.paid, stats.total)}% of cohort`}
+          num={<CountUp to={stats.affComplete} />}
+          sub={`${pct(stats.affComplete, stats.total)}% of cohort`}
         />
         <KPI
           tone={statusFor(pct(stats.docsComplete, stats.total))}
@@ -2188,11 +2193,11 @@ function ClubInsights({ clubs, submissionDeadline }) {
   const mostMissing = [...docStats].sort((a, b) => a.count - b.count)[0];
   const docTone = (pct) => (pct >= 70 ? '' : pct >= 40 ? 'warn' : 'danger');
 
-  // Resources required
-  const unpaid = clubs.filter((c) => !c.paid).length;
+  // Resources required — "behind" is keyed on the form fact, not payment.
+  const notAffiliated = clubs.filter((c) => !affiliationSubmitted(c)).length;
   const incompleteDocs = clubs.filter((c) => !Object.values(c.docs).every((v) => v)).length;
   const noCqi = clubs.filter((c) => c.cqi === 0).length;
-  const totalReminders = unpaid + noCqi;
+  const totalReminders = notAffiliated + noCqi;
 
   return (
     <div className="insights-panel">
@@ -2260,13 +2265,13 @@ function ClubInsights({ clubs, submissionDeadline }) {
         <div className="resource-list">
           <div className="resource-row">
             <span
-              className={`resource-num ${unpaid > clubs.length * 0.3 ? 'danger' : unpaid > 0 ? 'warn' : 'good'}`}
+              className={`resource-num ${notAffiliated > clubs.length * 0.3 ? 'danger' : notAffiliated > 0 ? 'warn' : 'good'}`}
             >
-              <CountUp to={unpaid} />
+              <CountUp to={notAffiliated} />
             </span>
             <span className="resource-text">
-              <strong>{unpaid === 1 ? 'club' : 'clubs'}</strong> haven't submitted the 2026/27
-              affiliation form
+              <strong>{notAffiliated === 1 ? 'club' : 'clubs'}</strong> haven't submitted the
+              2026/27 affiliation form
             </span>
           </div>
           <div className="resource-row">
@@ -2466,7 +2471,7 @@ export function AdminClubsList({
                               marginLeft: 6,
                             }}
                           >
-                            · SUBMITTED
+                            · PAID
                           </span>
                         )}
                       </td>
@@ -3410,7 +3415,7 @@ function OnboardNewClubModal({
                       </div>
                       <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
                         {c.district} · {c.chair} ·{' '}
-                        {c.paid
+                        {affiliationSubmitted(c)
                           ? 'Affiliated'
                           : c.affiliation === 'in_progress'
                             ? 'In progress'
@@ -4357,6 +4362,7 @@ export function AdminClubDetail({
   gotoList,
   onGenerateLink,
   onSetPaid,
+  onSetProgression,
   onInvite,
   toast,
   allLeagues = [],
@@ -4402,6 +4408,20 @@ export function AdminClubDetail({
     onSetPaid(club.id, !club.paid);
     toast && toast(club.paid ? 'Marked as unpaid' : 'Marked as paid');
   }
+  // Per-club journey gate: 'submission' advances on form submit; 'payment' keeps
+  // Fixtures locked until marked paid. Audited server-side.
+  const paymentGated = (club.progressionMode ?? 'submission') === 'payment';
+  function toggleProgression() {
+    if (!onSetProgression) return;
+    const next = paymentGated ? 'submission' : 'payment';
+    onSetProgression(club.id, next);
+    toast &&
+      toast(
+        next === 'payment'
+          ? 'Journey now payment-gated — Fixtures unlock once paid'
+          : 'Journey now submission-driven — Fixtures unlock on submission',
+      );
+  }
   function emailChair() {
     const e = club.exco?.chair?.email;
     // No email on file → open the editor so the admin can add it right away,
@@ -4433,19 +4453,19 @@ export function AdminClubDetail({
     {
       n: '01',
       t: 'Affiliation',
-      done: club.paid,
-      val: club.paid ? 100 : club.affiliation === 'in_progress' ? 40 : 0,
-      detail: club.paid ? 'Submitted · 12 May 2026' : 'Awaiting submission',
+      done: affiliationSubmitted(club),
+      val: affiliationSubmitted(club) ? 100 : club.affiliation === 'in_progress' ? 40 : 0,
+      detail: affiliationSubmitted(club) ? 'Submitted' : 'Awaiting submission',
     },
     {
       n: '02',
       t: 'League & Fixtures',
-      done: club.affiliation === 'complete',
-      val: club.affiliation === 'complete' ? 100 : 0,
-      detail:
-        club.affiliation === 'complete'
-          ? `Allocated to ${club.sub === 'EMCU' ? 'EMCU Division 1' : 'District Division'}`
-          : 'Pending affiliation',
+      done: journeyUnlocked(club),
+      val: journeyUnlocked(club) ? 100 : 0,
+      // Allocation is a fact once affiliated; only the done/progress track the gate.
+      detail: affiliationSubmitted(club)
+        ? `Allocated to ${club.sub === 'EMCU' ? 'EMCU Division 1' : 'District Division'}`
+        : 'Pending affiliation',
     },
     {
       n: '03',
@@ -4506,6 +4526,19 @@ export function AdminClubDetail({
             Email chairperson
           </Btn>
           <Btn
+            tone="outline"
+            icon={Icon.Shield}
+            size="sm"
+            onClick={toggleProgression}
+            title={
+              paymentGated
+                ? 'Fixtures stay locked until this club is marked paid'
+                : 'Fixtures unlock as soon as the club submits affiliation'
+            }
+          >
+            {paymentGated ? 'Journey: Payment-gated' : 'Journey: Submission'}
+          </Btn>
+          <Btn
             tone={club.paid ? 'outline' : 'teal'}
             icon={Icon.Check}
             size="sm"
@@ -4521,8 +4554,8 @@ export function AdminClubDetail({
         <KPI
           tone="teal"
           label="Affiliation"
-          num={club.paid ? 'Submitted' : 'Pending'}
-          sub={club.paid ? '12 May 2026' : 'Awaiting submission'}
+          num={affiliationSubmitted(club) ? 'Submitted' : 'Pending'}
+          sub={affiliationSubmitted(club) ? 'Form complete' : 'Awaiting submission'}
         />
         <KPI
           tone="gold"

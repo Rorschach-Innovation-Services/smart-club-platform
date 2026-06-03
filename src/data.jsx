@@ -509,10 +509,25 @@ export function computeRevertCompliance(club, keys) {
   return { docs, docMeta, reverted };
 }
 
+// Canonical "did the club submit its affiliation form" — the form fact,
+// independent of payment. Never read `paid` for this.
+export function affiliationSubmitted(club) {
+  return club.affiliation === 'complete';
+}
+
+// Has the club cleared phase 1 to advance (Fixtures unlock, onboarding closes)?
+// Per-club: 'payment' mode requires BOTH submission AND paid — `paid` alone must
+// never unlock an unaffiliated club (togglePaid has no affiliation guard).
+export function journeyUnlocked(club) {
+  return (club.progressionMode ?? 'submission') === 'payment'
+    ? affiliationSubmitted(club) && club.paid
+    : affiliationSubmitted(club);
+}
+
 export function overallProgress(club) {
   // 5 weighted phases: 20% each
-  const p1 = club.paid ? 100 : club.affiliation === 'in_progress' ? 40 : 0;
-  const p2 = club.affiliation === 'complete' ? 100 : 0; // assume league assigned once affiliated
+  const p1 = affiliationSubmitted(club) ? 100 : club.affiliation === 'in_progress' ? 40 : 0;
+  const p2 = journeyUnlocked(club) ? 100 : 0; // fixtures phase clears once the journey unlocks
   const p3 = Math.min(100, ((club.players || 0) / 60) * 100);
   const p4 = club.cqi > 60 ? 100 : club.cqi > 0 ? 50 : 0;
   const p5 = docCompletion(club);
