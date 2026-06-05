@@ -63,6 +63,50 @@ export const DISTRICTS = [
 
 export const COACHING_LEVELS = ['Level 1', 'Level 2', 'Level 3', 'Level 4'];
 
+// ── Player registration profile vocabularies (mirror the official Union form) ──
+export const BATTING_TYPES = ['Top Order', 'Mid Order', 'Low Order', 'WK Batsman', 'Bat All Round'];
+export const BOWLER_TYPES = ['Fast', 'Medium Fast', 'Medium', 'Slow', 'Finger Spin', 'Wrist Spin'];
+export const HANDS = ['Right', 'Left'];
+export const RACES = ['African', 'Indian', 'Coloured', 'White', 'Other'];
+export const GENDERS = ['Male', 'Female', 'Non-binary'];
+
+// How many days a source club has to action a clearance before the union may override.
+export const CLEARANCE_WINDOW_DAYS = 14;
+
+/**
+ * Derive an ISO date of birth from a 13-digit RSA ID (YYMMDD…), matching the server
+ * (see packages/api/src/index.ts `dobFromSaId`). The century digit is absent, so we pivot
+ * year-relative (not on a frozen constant): assume the 2000s, fall back to the 1900s only
+ * if that would be in the future. Self-updates each year. Returns '' if it isn't a real,
+ * non-future date — so the register form can show/hide the DOB preview safely.
+ */
+export function dobFromSaId(idNumber) {
+  if (!/^\d{13}$/.test(idNumber)) return '';
+  const yy = parseInt(idNumber.slice(0, 2), 10);
+  const mm = parseInt(idNumber.slice(2, 4), 10);
+  const dd = parseInt(idNumber.slice(4, 6), 10);
+  const currentYear = new Date().getFullYear();
+  const year = 2000 + yy <= currentYear ? 2000 + yy : 1900 + yy;
+  if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return '';
+  const iso = `${year}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+  const d = new Date(iso + 'T00:00:00');
+  if (isNaN(d.getTime()) || d.getTime() > Date.now()) return '';
+  if (d.getMonth() + 1 !== mm || d.getDate() !== dd) return '';
+  return iso;
+}
+
+/** Whole days elapsed since an ISO timestamp — clearance overdue/remaining math. */
+export function daysSinceIso(iso) {
+  if (!iso) return 0;
+  return Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
+}
+export function clearanceOverdue(req) {
+  return req.status === 'pending' && daysSinceIso(req.requestedAt) >= CLEARANCE_WINDOW_DAYS;
+}
+export function clearanceDaysRemaining(req) {
+  return Math.max(0, CLEARANCE_WINDOW_DAYS - daysSinceIso(req.requestedAt));
+}
+
 // Required compliance documents (from Cricket Services Club Requirements 26-27)
 export const REQUIRED_DOCS = [
   {

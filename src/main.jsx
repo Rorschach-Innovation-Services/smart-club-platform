@@ -27,6 +27,7 @@ import {
   journeyUnlocked,
   computeMarkCompliance,
   computeRevertCompliance,
+  clearanceOverdue,
 } from './data.jsx';
 import { exportRowsToXlsx } from './exportXlsx.js';
 import { openBccReminder } from './mailto.js';
@@ -50,11 +51,22 @@ import {
   AdminLeagues,
   AdminSettingsView,
   AdminTeamAccessView,
+  AdminClearances,
   LeagueForm,
   CreateSeriesForm,
 } from './admin.jsx';
 import { parseSupport } from './support.js';
-import { ClubHome, AffiliationForm, DocumentsView, CQIView, ClubFixturesView } from './club.jsx';
+import {
+  ClubHome,
+  AffiliationForm,
+  DocumentsView,
+  CQIView,
+  ClubFixturesView,
+  ClubPlayersView,
+  RegisterPlayerForm,
+  RequestPlayerForm,
+  ClubClearancesView,
+} from './club.jsx';
 import { Onboarding } from './onboarding.jsx';
 
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
@@ -656,6 +668,37 @@ function Shell({
     [clubs, clubId],
   );
 
+  // ── Player roster + clearance state/data (lives here, where clubId is known) ──
+  const [showRegisterPlayer, setShowRegisterPlayer] = useStateApp(false);
+  const [showRequestPlayer, setShowRequestPlayer] = useStateApp(false);
+  const [registerBusy, setRegisterBusy] = useStateApp(false);
+  const [busyClearanceId, setBusyClearanceId] = useStateApp(null);
+
+  const playersQuery = useQuery({
+    queryKey: qk.players(clubId),
+    queryFn: () => api.getPlayers(clubId),
+    enabled: role === 'club' && !!clubId,
+  });
+  const clearancesQuery = useQuery({
+    queryKey: qk.clearances(clubId),
+    queryFn: () => api.getClearances(clubId),
+    enabled: role === 'club' && !!clubId,
+  });
+  const clubDirectoryQuery = useQuery({
+    queryKey: qk.clubDirectory(),
+    queryFn: api.getClubDirectory,
+    enabled: role === 'club',
+  });
+  const allClearancesQuery = useQuery({
+    queryKey: qk.allClearances(),
+    queryFn: api.getAllClearances,
+    enabled: role === 'admin',
+  });
+  const players = playersQuery.data ?? [];
+  const clearances = clearancesQuery.data ?? { incoming: [], outbound: [] };
+  const clubDirectory = clubDirectoryQuery.data ?? [];
+  const allClearances = allClearancesQuery.data ?? [];
+
   // ── Derive view from URL ──
   let view;
   if (role === 'admin') {
@@ -799,6 +842,117 @@ function Shell({
       invalidate(qk.clubs());
     });
   }
+  // ── Player roster + clearances (club role) ──
+  // Register a player via the chair form, then upload + record the ID document.
+  async function registerPlayer(payload, idFile) {
+    setRegisterBusy(true);
+    try {
+      const player = await withToast(
+        () => api.registerPlayer(clubId, payload),
+        'Could not register player',
+        { rawConflict: true },
+      );
+      try {
+        const ct = idFile.type || 'application/pdf';
+        const { uploadUrl, objectKey, contentType } = await api.getPlayerIdDocUploadUrl(
+          clubId,
+          player.naturalKey,
+          ct,
+        );
+        await api.uploadToPresigned(uploadUrl, idFile, contentType);
+        await api.markPlayerIdDoc(clubId, player.naturalKey, {
+          objectKey,
+          size: idFile.size,
+          contentType,
+        });
+      } catch {
+        // The player is registered even if the ID upload fails; surface it but don't block.
+        toastShow(
+          'Player registered, but the ID document upload failed — re-upload later.',
+          'warn',
+        );
+      }
+      invalidate(qk.players(clubId));
+      invalidate(qk.club(clubId));
+      invalidate(qk.clubs());
+      setShowRegisterPlayer(false);
+      toastShow(`${payload.firstName} ${payload.lastName} registered`);
+    } catch {
+      /* withToast already surfaced it */
+    } finally {
+      setRegisterBusy(false);
+    }
+  }
+  // Destination club initiates a clearance request for a player at another club.
+  // busyClearanceId === 'new' disables the request form's submit so a double-click
+  // can't fire two POSTs (which would race the duplicate-pending guard).
+  function requestClearance({ fromClubId, idNumber, note }) {
+    setBusyClearanceId('new');
+    return withToast(
+      () => api.createClearance(clubId, { fromClubId, idNumber, note }),
+      'Could not request clearance',
+      { rawConflict: true },
+    )
+      .then(() => {
+        invalidate(qk.clearances(clubId));
+        setShowRequestPlayer(false);
+        toastShow('Clearance requested — the source club has 14 days to action it.');
+      })
+      .catch(() => {})
+      .finally(() => setBusyClearanceId(null));
+  }
+  // Source club toggles a fees/misconduct confirmation on an incoming request.
+  function toggleClearanceFlag(req, field) {
+    setBusyClearanceId(req.id);
+    return withToast(
+      () =>
+        api.patchClearance(req.fromClubId, req.id, {
+          [field]: !req[field],
+          version: req.version,
+        }),
+      'Could not update clearance',
+    )
+      .then(() => invalidate(qk.clearances(clubId)))
+      .catch(() => {})
+      .finally(() => setBusyClearanceId(null));
+  }
+  // Source club issues the clearance (both confirmations done) → the player moves.
+  function approveClearance(req) {
+    setBusyClearanceId(req.id);
+    return withToast(
+      () =>
+        api.patchClearance(req.fromClubId, req.id, {
+          action: 'issue',
+          feesCleared: true,
+          misconductCleared: true,
+          version: req.version,
+        }),
+      'Could not issue clearance',
+      { rawConflict: true },
+    )
+      .then(() => {
+        invalidate(qk.clearances(clubId));
+        invalidate(qk.players(clubId));
+        toastShow(`${req.playerName} cleared to ${req.toClubName}`);
+      })
+      .catch(() => {})
+      .finally(() => setBusyClearanceId(null));
+  }
+  // Admin overrides an overdue request, issuing it on the source club's behalf.
+  function overrideClearance(req) {
+    setBusyClearanceId(req.id);
+    return withToast(
+      () => api.overrideClearance(req.id, { fromClubId: req.fromClubId, version: req.version }),
+      'Could not override clearance',
+      { rawConflict: true },
+    )
+      .then(() => {
+        invalidate(qk.allClearances());
+        toastShow(`${req.playerName} cleared to ${req.toClubName} · Union override`);
+      })
+      .catch(() => {})
+      .finally(() => setBusyClearanceId(null));
+  }
   function saveExco(members) {
     return withToast(() => api.saveExco(clubId, members), 'Could not save exco')
       .then(() => {
@@ -905,6 +1059,16 @@ function Shell({
   }
 
   // — NAV —
+  // Clearance badge counts: admin sees cohort-wide; a club counts only requests it must action.
+  const adminOverdueClearances = allClearances.filter((r) => clearanceOverdue(r)).length;
+  const adminPendingClearances = allClearances.filter(
+    (r) => r.status === 'pending' && !clearanceOverdue(r),
+  ).length;
+  const myIncomingClearances = (clearances.incoming ?? []).filter((r) => r.status === 'pending');
+  const myPendingClearances = myIncomingClearances.length;
+  const myOverdueClearances = myIncomingClearances.filter((r) => clearanceOverdue(r)).length;
+  const myPlayerCount = players.length;
+
   const adminNav = [
     { v: 'dashboard', label: 'Cohort Dashboard', icon: Icon.Dashboard },
     { v: 'clubs_list', label: 'All Clubs', icon: Icon.Clubs, num: clubs.length },
@@ -931,6 +1095,13 @@ function Shell({
     },
     { v: 'leagues', label: 'Leagues', icon: Icon.Shield, num: allLeagues.length },
     { v: 'fixtures', label: 'Fixtures & Venues', icon: Icon.Field, dot: 'teal' },
+    {
+      v: 'clearances',
+      label: 'Clearances',
+      icon: Icon.Shield,
+      num: adminOverdueClearances || adminPendingClearances || undefined,
+      dot: adminOverdueClearances ? 'coral' : adminPendingClearances ? 'gold' : 'teal',
+    },
     { v: 'team', label: 'Team & Access', icon: Icon.Users, num: users.length || undefined },
   ];
 
@@ -957,6 +1128,20 @@ function Shell({
             dot: docCompletion(activeClub) === 100 ? 'teal' : 'gold',
           },
           { v: 'cqi', label: 'CQI', icon: Icon.Star, dot: activeClub.cqi > 0 ? 'teal' : 'muted' },
+          {
+            v: 'players',
+            label: 'Players',
+            icon: Icon.Clubs,
+            num: myPlayerCount || undefined,
+            dot: myPlayerCount ? 'teal' : 'muted',
+          },
+          {
+            v: 'clearances',
+            label: 'Clearances',
+            icon: Icon.Shield,
+            num: myPendingClearances || undefined,
+            dot: myOverdueClearances ? 'coral' : myPendingClearances ? 'gold' : 'muted',
+          },
           {
             v: 'fixtures',
             label: 'Fixtures',
@@ -1091,6 +1276,15 @@ function Shell({
             toast={toastShow}
           />
         );
+      if (view === 'clearances')
+        return (
+          <AdminClearances
+            clearances={allClearances}
+            leagues={allLeagues}
+            onOverride={overrideClearance}
+            busyId={busyClearanceId}
+          />
+        );
       if (view === 'team')
         return (
           <AdminTeamAccessView
@@ -1156,6 +1350,29 @@ function Shell({
           />
         );
       }
+      if (view === 'players')
+        return (
+          <ClubPlayersView
+            club={activeClub}
+            players={players}
+            clearances={clearances}
+            leagues={allLeagues}
+            onOpenRegister={() => setShowRegisterPlayer(true)}
+          />
+        );
+      if (view === 'clearances')
+        return (
+          <ClubClearancesView
+            club={activeClub}
+            clearances={clearances}
+            leagues={allLeagues}
+            onClearFees={(req) => toggleClearanceFlag(req, 'feesCleared')}
+            onClearMisconduct={(req) => toggleClearanceFlag(req, 'misconductCleared')}
+            onApprove={approveClearance}
+            onOpenRequest={() => setShowRequestPlayer(true)}
+            busyId={busyClearanceId}
+          />
+        );
     }
     return null;
   }
@@ -1400,6 +1617,48 @@ function Shell({
             onSaveExco={saveExco}
             submissionDeadline={submissionDeadline}
             unionEmail={unionEmail}
+          />
+        </TaskModal>
+      )}
+
+      {role === 'club' && showRegisterPlayer && activeClub && (
+        <TaskModal
+          eyebrow={`Phase 03 · ${activeClub.name}`}
+          title={
+            <>
+              Register a new <em>player</em>
+            </>
+          }
+          onClose={() => setShowRegisterPlayer(false)}
+        >
+          <RegisterPlayerForm
+            club={activeClub}
+            leagues={allLeagues}
+            toast={toastShow}
+            busy={registerBusy}
+            onSubmit={registerPlayer}
+            onCancel={() => setShowRegisterPlayer(false)}
+          />
+        </TaskModal>
+      )}
+
+      {role === 'club' && showRequestPlayer && activeClub && (
+        <TaskModal
+          narrow
+          eyebrow={`Clearances · ${activeClub.name}`}
+          title={
+            <>
+              Request a <em>player</em>
+            </>
+          }
+          onClose={() => setShowRequestPlayer(false)}
+        >
+          <RequestPlayerForm
+            club={activeClub}
+            directory={clubDirectory}
+            busy={busyClearanceId === 'new'}
+            onSubmit={requestClearance}
+            onCancel={() => setShowRequestPlayer(false)}
           />
         </TaskModal>
       )}

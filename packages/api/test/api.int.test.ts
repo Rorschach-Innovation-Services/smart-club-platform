@@ -1467,3 +1467,305 @@ describe('seedLeaguesOnly (manual leagues backfill repair)', () => {
     assert.equal(after.length, before.length, 'existing catalogue left untouched');
   });
 });
+
+describe('POST /clubs/:id/players (chair registration)', () => {
+  const REP_PLY = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['plyclub'] }]);
+  let teamKey: string;
+
+  before(async () => {
+    await repo.createClub('dolphins', {
+      id: 'plyclub',
+      name: 'Players CC',
+      district: 'Test District',
+      sub: 's',
+      chair: 'Chair',
+      affiliation: 'not_started',
+      paid: true,
+      cqi: 0,
+      docs: {},
+      players: 0,
+      teams: 0,
+      women: 0,
+      juniors: 0,
+      color: '#abcdef',
+      ground: {},
+      leagues: [],
+      version: 1,
+    });
+    teamKey = ((await repo.getTenantConfig('dolphins'))?.leagues ?? [])[0]?.key ?? '';
+    assert.ok(teamKey, 'precondition: tenant has a league catalogue');
+  });
+
+  const reg = (extra: Record<string, unknown>, auth = REP_PLY) =>
+    app.request('/clubs/plyclub/players', {
+      method: 'POST',
+      headers: headers(auth),
+      body: JSON.stringify({
+        firstName: 'Sanele',
+        lastName: 'Mthembu',
+        idNumber: '0107224082088',
+        race: 'African',
+        gender: 'Male',
+        cell: '0829014421',
+        team: teamKey,
+        district: 'Ethekwini',
+        ...extra,
+      }),
+    });
+
+  test('registers a player and derives DOB from the RSA ID', async () => {
+    const res = await reg({});
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { dob: string; status: string; registeredVia: string };
+    assert.equal(body.dob, '2001-07-22');
+    assert.equal(body.status, 'active');
+    assert.equal(body.registeredVia, 'portal');
+  });
+
+  test('duplicate (same naturalKey) is rejected (409)', async () => {
+    const res = await reg({});
+    assert.equal(res.status, 409);
+  });
+
+  test('invalid ID number is rejected (400)', async () => {
+    const res = await reg({ idNumber: '123', cell: '0820000001' });
+    assert.equal(res.status, 400);
+  });
+
+  test('missing required field is rejected (400)', async () => {
+    const res = await app.request('/clubs/plyclub/players', {
+      method: 'POST',
+      headers: headers(REP_PLY),
+      body: JSON.stringify({ firstName: 'No', lastName: 'Team' }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test('unknown team/league is rejected (400)', async () => {
+    const res = await reg({ team: 'not-a-real-league', cell: '0820000002' });
+    assert.equal(res.status, 400);
+  });
+
+  test('a rep for another club cannot register here (403)', async () => {
+    const other = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['testers'] }]);
+    const res = await reg({ cell: '0820000003' }, other);
+    assert.equal(res.status, 403);
+  });
+});
+
+describe('Player clearances (inter-club transfer + move)', () => {
+  const REP_SRC = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['clr-src'] }]);
+  const REP_DST = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['clr-dst'] }]);
+
+  const mkClub = (id: string, name: string) => ({
+    id,
+    name,
+    district: 'Test District',
+    sub: 's',
+    chair: 'Chair',
+    affiliation: 'not_started' as const,
+    paid: true,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#abcdef',
+    ground: {},
+    leagues: [],
+    version: 1,
+  });
+  const mkPlayer = (clubId: string, nk: string) => ({
+    naturalKey: nk,
+    clubId,
+    firstName: 'Move',
+    lastName: 'Me',
+    dob: '1995-01-01',
+    isMinor: false,
+    status: 'active' as const,
+    consentAt: '2026-05-01T00:00:00.000Z',
+    createdAt: '2026-05-01T00:00:00.000Z',
+  });
+
+  before(async () => {
+    await repo.createClub('dolphins', mkClub('clr-src', 'Source CC'));
+    await repo.createClub('dolphins', mkClub('clr-dst', 'Destination CC'));
+    await repo.createPlayer('dolphins', mkPlayer('clr-src', 'mover'));
+  });
+
+  const create = (auth: string, body: unknown) =>
+    app.request('/clubs/clr-dst/clearances', {
+      method: 'POST',
+      headers: headers(auth),
+      body: JSON.stringify(body),
+    });
+
+  test('the destination club initiates; the source player goes clearance-pending', async () => {
+    const res = await create(REP_DST, { fromClubId: 'clr-src', playerNaturalKey: 'mover' });
+    assert.equal(res.status, 201);
+    const player = await repo.getPlayer('dolphins', 'clr-src', 'mover');
+    assert.equal(player?.status, 'clearance-pending');
+  });
+
+  test('cross-club guard: a rep who does not own the destination is forbidden (403)', async () => {
+    const res = await create(REP_SRC, { fromClubId: 'clr-src', playerNaturalKey: 'mover' });
+    assert.equal(res.status, 403);
+  });
+
+  test('a duplicate pending request for the same player is rejected (409)', async () => {
+    const res = await create(REP_DST, { fromClubId: 'clr-src', playerNaturalKey: 'mover' });
+    assert.equal(res.status, 409);
+  });
+
+  test('referencing a player who is not at the source club yields 404', async () => {
+    const res = await create(REP_DST, { fromClubId: 'clr-src', playerNaturalKey: 'ghost' });
+    assert.equal(res.status, 404);
+  });
+
+  test('source club lists the request as incoming; destination sees it as outbound', async () => {
+    const srcRes = await app.request('/clubs/clr-src/clearances', { headers: headers(REP_SRC) });
+    const src = (await srcRes.json()) as { incoming: unknown[]; outbound: unknown[] };
+    assert.equal(src.incoming.length, 1);
+    const dstRes = await app.request('/clubs/clr-dst/clearances', { headers: headers(REP_DST) });
+    const dst = (await dstRes.json()) as { incoming: unknown[]; outbound: unknown[] };
+    assert.equal(dst.outbound.length, 1);
+  });
+
+  test('source rep cannot read the destination club’s clearances (403)', async () => {
+    const res = await app.request('/clubs/clr-dst/clearances', { headers: headers(REP_SRC) });
+    assert.equal(res.status, 403);
+  });
+
+  test('issuing moves the player to the destination and resolves the request', async () => {
+    const list = (await (
+      await app.request('/clubs/clr-src/clearances', { headers: headers(REP_SRC) })
+    ).json()) as { incoming: { id: string }[] };
+    const cid = list.incoming[0].id;
+    const res = await app.request(`/clubs/clr-src/clearances/${cid}`, {
+      method: 'PATCH',
+      headers: headers(REP_SRC),
+      body: JSON.stringify({ feesCleared: true, misconductCleared: true, action: 'issue' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { status: string };
+    assert.equal(body.status, 'approved');
+    assert.equal(await repo.getPlayer('dolphins', 'clr-src', 'mover'), null);
+    const moved = await repo.getPlayer('dolphins', 'clr-dst', 'mover');
+    assert.equal(moved?.status, 'active');
+    assert.equal(moved?.clubId, 'clr-dst');
+  });
+
+  test('issuing without both confirmations is rejected (400)', async () => {
+    await repo.createPlayer('dolphins', mkPlayer('clr-src', 'mover2'));
+    await create(REP_DST, { fromClubId: 'clr-src', playerNaturalKey: 'mover2' });
+    const list = (await (
+      await app.request('/clubs/clr-src/clearances', { headers: headers(REP_SRC) })
+    ).json()) as { incoming: { id: string; playerNaturalKey: string; status: string }[] };
+    const cid = list.incoming.find(
+      (x) => x.playerNaturalKey === 'mover2' && x.status === 'pending',
+    )!.id;
+    const res = await app.request(`/clubs/clr-src/clearances/${cid}`, {
+      method: 'PATCH',
+      headers: headers(REP_SRC),
+      body: JSON.stringify({ feesCleared: true, action: 'issue' }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test('admin override refuses a request still inside the 14-day window (409)', async () => {
+    const list = (await (
+      await app.request('/clubs/clr-src/clearances', { headers: headers(REP_SRC) })
+    ).json()) as { incoming: { id: string; playerNaturalKey: string; status: string }[] };
+    const cid = list.incoming.find(
+      (x) => x.playerNaturalKey === 'mover2' && x.status === 'pending',
+    )!.id;
+    const res = await app.request(`/admin/clearances/${cid}/override`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'clr-src' }),
+    });
+    assert.equal(res.status, 409);
+  });
+
+  test('admin override issues an overdue request directly', async () => {
+    // Seed an overdue clearance straight through the repo (requestedAt 21 days ago).
+    await repo.createPlayer('dolphins', mkPlayer('clr-src', 'mover3'));
+    const old = new Date(Date.now() - 21 * 86_400_000).toISOString();
+    await repo.createClearance('dolphins', {
+      id: 'clr-overdue',
+      playerNaturalKey: 'mover3',
+      playerName: 'Move Me',
+      fromClubId: 'clr-src',
+      toClubId: 'clr-dst',
+      fromClubName: 'Source CC',
+      toClubName: 'Destination CC',
+      requestedAt: old,
+      feesCleared: false,
+      misconductCleared: false,
+      status: 'pending',
+      clubApprovedAt: null,
+      adminOverrideAt: null,
+      version: 0,
+    });
+    const res = await app.request('/admin/clearances/clr-overdue/override', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'clr-src' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { status: string };
+    assert.equal(body.status, 'admin-override');
+    const moved = await repo.getPlayer('dolphins', 'clr-dst', 'mover3');
+    assert.equal(moved?.clubId, 'clr-dst');
+  });
+
+  test('the move rejects when the player already exists at the destination (409)', async () => {
+    await repo.createPlayer('dolphins', mkPlayer('clr-src', 'mover4'));
+    await repo.createPlayer('dolphins', mkPlayer('clr-dst', 'mover4')); // collision at destination
+    await create(REP_DST, { fromClubId: 'clr-src', playerNaturalKey: 'mover4' });
+    const list = (await (
+      await app.request('/clubs/clr-src/clearances', { headers: headers(REP_SRC) })
+    ).json()) as { incoming: { id: string; playerNaturalKey: string; status: string }[] };
+    const cid = list.incoming.find(
+      (x) => x.playerNaturalKey === 'mover4' && x.status === 'pending',
+    )!.id;
+    const res = await app.request(`/clubs/clr-src/clearances/${cid}`, {
+      method: 'PATCH',
+      headers: headers(REP_SRC),
+      body: JSON.stringify({ feesCleared: true, misconductCleared: true, action: 'issue' }),
+    });
+    assert.equal(res.status, 409);
+    // The player must NOT have been removed from the source (no half-move).
+    assert.ok(await repo.getPlayer('dolphins', 'clr-src', 'mover4'));
+  });
+
+  test('createClearance is race-safe: a second create for an already-pending player is rejected', async () => {
+    // Drives repo.createClearance directly to bypass the handler's TOCTOU list-check and
+    // exercise the atomic player-status guard (#s <> :pending) — the real invariant.
+    await repo.createPlayer('dolphins', mkPlayer('clr-src', 'racer'));
+    const base = {
+      playerNaturalKey: 'racer',
+      playerName: 'Move Me',
+      fromClubId: 'clr-src',
+      toClubId: 'clr-dst',
+      fromClubName: 'Source CC',
+      toClubName: 'Destination CC',
+      requestedAt: new Date().toISOString(),
+      feesCleared: false,
+      misconductCleared: false,
+      status: 'pending' as const,
+      clubApprovedAt: null,
+      adminOverrideAt: null,
+      version: 0,
+    };
+    await repo.createClearance('dolphins', { ...base, id: 'race-1' });
+    await assert.rejects(
+      () => repo.createClearance('dolphins', { ...base, id: 'race-2' }),
+      (err: Error) => err.name === 'DuplicatePendingClearanceError',
+    );
+    // Only the first clearance landed — no orphaned canonical/mirror from the rejected create.
+    const src = await repo.listClearancesForSource('dolphins', 'clr-src');
+    assert.equal(src.filter((x) => x.playerNaturalKey === 'racer').length, 1);
+  });
+});

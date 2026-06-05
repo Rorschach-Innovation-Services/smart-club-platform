@@ -7,7 +7,7 @@
  * See docs/architecture/data-model.md for the full access-pattern → key mapping.
  */
 
-export type EntityType = 'CLUB' | 'SERIES' | 'USER';
+export type EntityType = 'CLUB' | 'SERIES' | 'USER' | 'CLEARANCE';
 
 const tenantPrefix = (tenant: string) => `TENANT#${tenant}`;
 
@@ -70,6 +70,44 @@ export const playersListKey = (tenant: string, clubId: string) => ({
   pk: `${tenantPrefix(tenant)}#CLUB#${clubId}`,
   skPrefix: 'PLAYER#',
 });
+
+/**
+ * Player clearance (inter-club transfer). Stored as two items:
+ *  - canonical, under the SOURCE club, carries the gsi1 entry (admin-wide listing);
+ *  - mirror, under the DESTINATION club, has NO gsi1 (so admin lists each once).
+ * Keeping the clearance in each club's own partition means a rep only ever queries
+ * their own pk — no tenant-wide scan/filter, no cross-club read.
+ */
+export const clearanceKey = (tenant: string, fromClubId: string, clearanceId: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${fromClubId}`,
+  sk: `CLEARANCE#${clearanceId}`,
+});
+
+export const inboundClearanceKey = (tenant: string, toClubId: string, clearanceId: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${toClubId}`,
+  sk: `INBOUND_CLEARANCE#${clearanceId}`,
+});
+
+/** pk + sk-prefix to query the clearances a club must action (it is the source). */
+export const clearancesListKey = (tenant: string, fromClubId: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${fromClubId}`,
+  skPrefix: 'CLEARANCE#',
+});
+
+/** pk + sk-prefix to query the inbound clearances for a club (it is the destination). */
+export const inboundClearancesListKey = (tenant: string, toClubId: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${toClubId}`,
+  skPrefix: 'INBOUND_CLEARANCE#',
+});
+
+/** gsi1 attributes that make the canonical clearance listable tenant-wide (admin). */
+export const clearanceGsi1 = (tenant: string, requestedAt: string) => ({
+  gsi1pk: `${tenantPrefix(tenant)}#TYPE#CLEARANCE`,
+  gsi1sk: requestedAt ?? '',
+});
+
+/** gsi1pk used to query every clearance in a tenant (admin console). */
+export const clearancesListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#CLEARANCE`;
 
 /**
  * Registration-link token. GLOBAL (not tenant-prefixed) and self-describing:

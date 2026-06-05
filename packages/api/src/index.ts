@@ -156,10 +156,7 @@ app.post('/register/:clubId', async (c) => {
   if (isMinor && !body.guardianName) {
     throw new HttpError(400, 'guardianName required for minors (POPIA)');
   }
-  // naturalKey gives idempotent dedup: a person can register once per club.
-  const naturalKey = (body.email || body.cell || `${body.firstName}-${body.lastName}-${body.dob}`)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-');
+  const naturalKey = playerNaturalKey(body);
   const player: PlayerRegistration = {
     naturalKey,
     clubId: resolved.clubId,
@@ -191,6 +188,43 @@ function computeIsMinor(dob: string): boolean {
   eighteen.setFullYear(eighteen.getFullYear() + 18);
   return eighteen.getTime() > Date.now();
 }
+
+/**
+ * Idempotent dedup key for a person within a club. SHARED by the public-link path
+ * and the in-portal chair form so the same person can't be registered twice (once
+ * per path). Keys on email/cell/name-dob — NOT idNumber (the public path has no
+ * idNumber, so an idNumber-based key would let both paths create distinct rows).
+ */
+function playerNaturalKey(body: Partial<PlayerRegistration>): string {
+  return (body.email || body.cell || `${body.firstName}-${body.lastName}-${body.dob}`)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-');
+}
+
+/**
+ * Derive an ISO date of birth from a 13-digit RSA ID (YYMMDD…). The century digit is
+ * absent, so we pivot year-relative (not on a frozen constant): assume the 2000s, and
+ * fall back to the 1900s only if that lands in the future. This self-updates each year,
+ * so it never silently rots. Returns null if the digits don't form a real date.
+ */
+function dobFromSaId(idNumber: string): string | null {
+  if (!/^\d{13}$/.test(idNumber)) return null;
+  const yy = Number(idNumber.slice(0, 2));
+  const mm = Number(idNumber.slice(2, 4));
+  const dd = Number(idNumber.slice(4, 6));
+  const currentYear = new Date().getFullYear();
+  const year = 2000 + yy <= currentYear ? 2000 + yy : 1900 + yy;
+  if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
+  const iso = `${year}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime()) || d.getTime() > Date.now()) return null;
+  // Guard against rollover (e.g. 0230 → Mar 02): the parsed date must match the inputs.
+  if (d.getUTCMonth() + 1 !== mm || d.getUTCDate() !== dd) return null;
+  return iso;
+}
+
+const MAX_ID_DOC_BYTES = 5 * 1024 * 1024; // 5 MB — ID photos/scans
+const ID_DOC_TYPES = new Set(['image/jpeg', 'image/png', 'application/pdf']);
 
 // ───────────────────── Authenticated routes ─────────────────────
 
@@ -278,6 +312,18 @@ app.post('/clubs/bulk', requireAdmin, async (c) => {
 });
 
 /** Get one club (rep may only read their own). */
+/**
+ * Lightweight club directory for reps — {id, name} only. Reps need a list of sibling
+ * clubs (for clearance from/to selection) but must NOT see the full Club record (paid
+ * status, chair, cqi, docs). Admin-only `GET /clubs` returns everything; this is the
+ * rep-safe projection. Registered before `/clubs/:id` so the static path wins.
+ */
+app.get('/clubs/directory', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const clubs = await repo.listClubs(ra.tenant);
+  return c.json(clubs.map((cl) => ({ id: cl.id, name: cl.name })));
+});
+
 app.get('/clubs/:id', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
@@ -324,6 +370,302 @@ app.get('/clubs/:id/players', async (c) => {
   const id = c.req.param('id');
   assertClubAccess(ra, id);
   return c.json(await repo.listPlayers(ra.tenant, id));
+});
+
+/**
+ * Register a player directly from the club portal (chair-filled Union form). Unlike the
+ * public token link, this is authenticated + club-scoped. Shares the naturalKey dedup with
+ * the public path so a person can't be registered twice. Required fields mirror the Union
+ * form; `dob` is derived from the 13-digit RSA ID.
+ */
+app.post('/clubs/:id/players', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const body = await c.req.json<Partial<PlayerRegistration>>();
+  const required: Array<keyof PlayerRegistration> = [
+    'firstName',
+    'lastName',
+    'idNumber',
+    'race',
+    'gender',
+    'cell',
+    'team',
+    'district',
+  ];
+  const missing = required.filter((k) => !body[k]);
+  if (missing.length) throw new HttpError(400, `missing required fields: ${missing.join(', ')}`);
+  const dob = dobFromSaId(body.idNumber!);
+  if (!dob) throw new HttpError(400, 'idNumber must be a valid 13-digit RSA ID');
+  // Team must be a real league key in the tenant catalogue.
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  const leagueKeys = new Set((cfg?.leagues ?? []).map((l) => l.key));
+  if (leagueKeys.size && !leagueKeys.has(body.team!)) {
+    throw new HttpError(400, 'unknown team/league');
+  }
+  const isMinor = computeIsMinor(dob);
+  if (isMinor && !body.guardianName) {
+    throw new HttpError(400, 'guardianName required for minors (POPIA)');
+  }
+  const naturalKey = playerNaturalKey({ ...body, dob });
+  const player: PlayerRegistration = {
+    naturalKey,
+    clubId: id,
+    firstName: body.firstName!,
+    lastName: body.lastName!,
+    dob,
+    cell: body.cell,
+    email: body.email,
+    isMinor,
+    guardianName: body.guardianName,
+    idNumber: body.idNumber,
+    race: body.race,
+    gender: body.gender,
+    postalAddress: body.postalAddress,
+    postalCode: body.postalCode,
+    team: body.team,
+    district: body.district,
+    lastClub: body.lastClub,
+    battingHand: body.battingHand,
+    bowlingHand: body.bowlingHand,
+    battingType: body.battingType,
+    bowlerType: body.bowlerType,
+    isAllRounder: body.isAllRounder ?? false,
+    isWk: body.isWk ?? false,
+    status: 'active',
+    registeredBy: ra.email,
+    registeredVia: 'portal',
+    version: 0,
+    consentAt: now(),
+    createdAt: now(),
+  };
+  try {
+    await repo.createPlayer(ra.tenant, player);
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      throw new HttpError(409, 'a player with these details is already registered for this club');
+    }
+    throw err;
+  }
+  return c.json(player, 201);
+});
+
+/** Mint a presigned PUT for a player's ID document (image or PDF). */
+app.post('/clubs/:id/players/:nk/id-doc/upload-url', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const nk = c.req.param('nk');
+  assertClubAccess(ra, id);
+  const { contentType } = await c.req
+    .json<{ contentType?: string }>()
+    .catch(() => ({ contentType: undefined }));
+  const ct = contentType && ID_DOC_TYPES.has(contentType) ? contentType : 'application/pdf';
+  const ext = ct === 'image/jpeg' ? 'jpg' : ct === 'image/png' ? 'png' : 'pdf';
+  const objectKey = `${ra.tenant}/${id}/player-${nk}-id-${randomUUID()}.${ext}`;
+  const url = await getSignedUrl(
+    s3,
+    new PutObjectCommand({ Bucket: UPLOADS_BUCKET, Key: objectKey, ContentType: ct }),
+    { expiresIn: 300 },
+  );
+  return c.json({ uploadUrl: url, objectKey, contentType: ct });
+});
+
+/** Record an uploaded ID document on the player (stores idDocMeta). */
+app.patch('/clubs/:id/players/:nk/id-doc', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const nk = c.req.param('nk');
+  assertClubAccess(ra, id);
+  const meta = await c.req.json<{ objectKey: string; size: number; contentType?: string }>();
+  if (!meta.objectKey) throw new HttpError(400, 'objectKey required');
+  if (typeof meta.size !== 'number' || meta.size <= 0 || meta.size > MAX_ID_DOC_BYTES) {
+    throw new HttpError(400, 'file must be a non-empty image/PDF under 5 MB');
+  }
+  const current = await repo.getPlayer(ra.tenant, id, nk);
+  if (!current) throw new HttpError(404, 'player not found');
+  // Best-effort delete of a replaced object (POPIA data-minimisation), never blocking.
+  const prevKey = current.idDocMeta?.objectKey;
+  if (prevKey && prevKey !== meta.objectKey && !prevKey.startsWith('local/')) {
+    try {
+      await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: prevKey }));
+    } catch (err) {
+      console.warn(`id-doc replace: failed to delete prior object ${prevKey}`, err);
+    }
+  }
+  try {
+    const updated = await repo.updatePlayer(ra.tenant, id, nk, {
+      idDocMeta: {
+        objectKey: meta.objectKey,
+        size: meta.size,
+        contentType: meta.contentType,
+        uploadedAt: now(),
+      },
+      version: current.version,
+    });
+    return c.json(updated);
+  } catch (err) {
+    if (err instanceof VersionConflictError) throw new HttpError(409, 'player changed; refetch');
+    throw err;
+  }
+});
+
+/** Mint a presigned GET so a rep or admin can preview a player's stored ID document. */
+app.post('/clubs/:id/players/:nk/id-doc/view-url', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const nk = c.req.param('nk');
+  assertClubAccess(ra, id);
+  const player = await repo.getPlayer(ra.tenant, id, nk);
+  const objectKey = player?.idDocMeta?.objectKey;
+  if (!objectKey) throw new HttpError(404, 'no ID document on record');
+  const url = await getSignedUrl(
+    s3,
+    new GetObjectCommand({
+      Bucket: UPLOADS_BUCKET,
+      Key: objectKey,
+      ResponseContentType: player!.idDocMeta?.contentType ?? 'application/pdf',
+      ResponseContentDisposition: 'inline',
+    }),
+    { expiresIn: 900 },
+  );
+  return c.json({ viewUrl: url });
+});
+
+// ── Player clearances (inter-club transfers) ──
+
+/**
+ * Initiate a clearance request. The DESTINATION club initiates (it wants a player who
+ * currently sits at another club). Because this is a deliberate cross-club write,
+ * assertClubAccess(:id) alone is insufficient — it only proves the rep owns the path club.
+ * We require the path club to be the destination and load the referenced player to confirm
+ * it exists at fromClubId; we never read the rest of the source roster.
+ */
+app.post('/clubs/:id/clearances', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const toClubId = c.req.param('id');
+  assertClubAccess(ra, toClubId);
+  const body = await c.req.json<{
+    fromClubId?: string;
+    playerNaturalKey?: string;
+    idNumber?: string;
+    note?: string;
+  }>();
+  // The destination rep identifies the player by ID number (they don't know the
+  // source club's internal naturalKey); playerNaturalKey is also accepted directly.
+  if (!body.fromClubId || (!body.playerNaturalKey && !body.idNumber)) {
+    throw new HttpError(400, 'fromClubId and a player idNumber (or playerNaturalKey) are required');
+  }
+  if (body.fromClubId === toClubId)
+    throw new HttpError(400, 'source and destination are the same club');
+  const [fromClub, toClub] = await Promise.all([
+    repo.getClub(ra.tenant, body.fromClubId),
+    repo.getClub(ra.tenant, toClubId),
+  ]);
+  if (!fromClub || !toClub) throw new HttpError(404, 'club not found');
+  // Resolve the player at the source club — by naturalKey if given, else by ID number.
+  // Only the matched player is read; the rest of the source roster is never exposed.
+  let player = null;
+  if (body.playerNaturalKey) {
+    player = await repo.getPlayer(ra.tenant, body.fromClubId, body.playerNaturalKey);
+  } else {
+    const roster = await repo.listPlayers(ra.tenant, body.fromClubId);
+    player = roster.find((p) => p.idNumber === body.idNumber) ?? null;
+  }
+  if (!player) throw new HttpError(404, 'player not found at source club');
+  // Reject a duplicate active request for the same player (already pending elsewhere).
+  const existing = await repo.listClearancesForSource(ra.tenant, body.fromClubId);
+  if (existing.some((x) => x.playerNaturalKey === player.naturalKey && x.status === 'pending')) {
+    throw new HttpError(409, 'a clearance request for this player is already pending');
+  }
+  const clearance = {
+    id: randomUUID(),
+    playerNaturalKey: player.naturalKey,
+    playerName: `${player.firstName} ${player.lastName}`,
+    idNumber: player.idNumber,
+    team: player.team,
+    fromClubId: body.fromClubId,
+    toClubId,
+    fromClubName: fromClub.name,
+    toClubName: toClub.name,
+    requestedAt: now(),
+    requestedBy: ra.email,
+    note: body.note,
+    feesCleared: false,
+    misconductCleared: false,
+    status: 'pending' as const,
+    clubApprovedAt: null,
+    adminOverrideAt: null,
+    version: 0,
+  };
+  try {
+    await repo.createClearance(ra.tenant, clearance);
+  } catch (err) {
+    // Race-safe backstop for the TOCTOU window above: two concurrent creates for the
+    // same player both pass the listClearancesForSource check; the atomic guard rejects
+    // the loser.
+    if (err instanceof repo.DuplicatePendingClearanceError) throw new HttpError(409, err.message);
+    throw err;
+  }
+  return c.json(clearance, 201);
+});
+
+/** A club's clearances: ones it must action (source) + ones moving to it (destination). */
+app.get('/clubs/:id/clearances', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const [incoming, outbound] = await Promise.all([
+    repo.listClearancesForSource(ra.tenant, id),
+    repo.listInboundForDest(ra.tenant, id),
+  ]);
+  return c.json({ incoming, outbound });
+});
+
+/**
+ * The source club acts on a clearance: toggle fees/misconduct, or (when both are
+ * confirmed) issue it — which moves the player to the destination. Only the source
+ * club may act. `action: 'issue'` requires both confirmations.
+ */
+app.patch('/clubs/:id/clearances/:cid', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const cid = c.req.param('cid');
+  assertClubAccess(ra, id);
+  const current = await repo.getClearance(ra.tenant, id, cid);
+  if (!current) throw new HttpError(404, 'clearance not found');
+  if (current.fromClubId !== id)
+    throw new HttpError(403, 'only the source club may action this clearance');
+  if (current.status !== 'pending') throw new HttpError(409, 'clearance already resolved');
+  const body = await c.req.json<{
+    feesCleared?: boolean;
+    misconductCleared?: boolean;
+    action?: 'issue';
+    version?: number;
+  }>();
+  try {
+    if (body.action === 'issue') {
+      const fees = body.feesCleared ?? current.feesCleared;
+      const misconduct = body.misconductCleared ?? current.misconductCleared;
+      if (!fees || !misconduct)
+        throw new HttpError(400, 'confirm fees and misconduct before issuing');
+      const resolved = await repo.resolveClearance(ra.tenant, id, cid, {
+        mode: 'club',
+        at: now(),
+        expectedVersion: body.version,
+      });
+      return c.json(resolved);
+    }
+    const updated = await repo.updateClearanceFlags(ra.tenant, id, cid, {
+      feesCleared: body.feesCleared,
+      misconductCleared: body.misconductCleared,
+      expectedVersion: body.version,
+    });
+    return c.json(updated);
+  } catch (err) {
+    if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
+    if (err instanceof repo.PlayerExistsAtDestinationError) throw new HttpError(409, err.message);
+    throw err;
+  }
 });
 
 /** Save the exec committee; also flips docs.exco true. */
@@ -946,6 +1288,54 @@ app.post('/admin/users/:sub/resend', async (c) => {
     link: loginUrl,
   });
   return c.json({ results });
+});
+
+// ───────────────────── Admin: player clearances ─────────────────────
+
+const CLEARANCE_WINDOW_DAYS = 14;
+
+/** Whole days elapsed since an ISO timestamp (server clock). */
+function daysSince(iso: string): number {
+  return Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
+}
+
+/** Every clearance in the tenant (cohort-wide), for the admin console. */
+app.get('/admin/clearances', async (c) => {
+  const ra = c.get('requestAuth')!;
+  return c.json(await repo.listAllClearances(ra.tenant));
+});
+
+/**
+ * Union override: approve a clearance the source club left unactioned past the 14-day
+ * window, issuing it on their behalf. Admin-only (the /admin/* middleware enforces it).
+ * Refuses to override a request that isn't yet overdue.
+ */
+app.post('/admin/clearances/:cid/override', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cid = c.req.param('cid');
+  const body = await c.req.json<{ fromClubId?: string; version?: number }>();
+  if (!body.fromClubId) throw new HttpError(400, 'fromClubId required');
+  const current = await repo.getClearance(ra.tenant, body.fromClubId, cid);
+  if (!current) throw new HttpError(404, 'clearance not found');
+  if (current.status !== 'pending') throw new HttpError(409, 'clearance already resolved');
+  if (daysSince(current.requestedAt) < CLEARANCE_WINDOW_DAYS) {
+    throw new HttpError(
+      409,
+      `the source club still has time (under ${CLEARANCE_WINDOW_DAYS} days)`,
+    );
+  }
+  try {
+    const resolved = await repo.resolveClearance(ra.tenant, body.fromClubId, cid, {
+      mode: 'admin',
+      at: now(),
+      expectedVersion: body.version,
+    });
+    return c.json(resolved);
+  } catch (err) {
+    if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
+    if (err instanceof repo.PlayerExistsAtDestinationError) throw new HttpError(409, err.message);
+    throw err;
+  }
 });
 
 // ───────────────────── User-management helpers ─────────────────────

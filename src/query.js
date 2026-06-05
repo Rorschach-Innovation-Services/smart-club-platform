@@ -27,4 +27,8 @@ export const qk = {
   club: (id) => ['club', t(), id],
   series: () => ['series', t()],
   users: () => ['users', t()],
+  players: (clubId) => ['players', t(), clubId],
+  clearances: (clubId) => ['clearances', t(), clubId],
+  allClearances: () => ['clearances-all', t()],
+  clubDirectory: () => ['club-directory', t()],
 };

@@ -22,8 +22,16 @@ import {
   formatDeadlineLong,
   formatDeadlineShort,
   daysUntil,
+  BATTING_TYPES,
+  BOWLER_TYPES,
+  HANDS,
+  RACES,
+  GENDERS,
+  dobFromSaId,
+  clearanceOverdue,
+  clearanceDaysRemaining,
 } from './data.jsx';
-import { leagueOptionsForDistrict, findByKey } from './leagues.js';
+import { leagueOptionsForDistrict, findByKey, labelByKey } from './leagues.js';
 import { shortAddress, suburbOf } from './geocode.js';
 import {
   Icon,
@@ -3385,4 +3393,878 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
   );
 }
 
-Object.assign(window, { ClubHome, AffiliationForm, DocumentsView, CQIView, ClubFixturesView });
+/* ─── Phase 03 · Player roster ─── */
+const fmtDay = (iso) =>
+  iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '';
+
+export function ClubPlayersView({ club, players, clearances, leagues, onOpenRegister }) {
+  const teamLabel = labelByKey(leagues);
+  const label = (key) => teamLabel[key] || key || '—';
+  const mine = players ?? [];
+  // Players leaving this club appear as `incoming` clearances (this club is the source).
+  const leaving = (clearances?.incoming ?? []).filter((r) => r.status === 'pending');
+  const leavingFor = (nk) => leaving.find((r) => r.playerNaturalKey === nk);
+
+  const allRounders = mine.filter((p) => p.isAllRounder).length;
+  const wks = mine.filter((p) => p.isWk).length;
+  const pendingClearance = mine.filter((p) => p.status === 'clearance-pending').length;
+
+  return (
+    <div>
+      <div className="page-head">
+        <div className="ph-left">
+          <div className="ph-crumb">Club Portal · {club.name} / Players</div>
+          <h1 className="ph-title">
+            Player <em>Roster</em>
+          </h1>
+          <p className="ph-desc">
+            Register and maintain {club.name}'s playing members for the 2026/27 season. All
+            registrations sync with the Union office and your fixtures.
+          </p>
+        </div>
+        <div className="ph-actions">
+          <Btn tone="teal" size="sm" icon={Icon.Plus} onClick={onOpenRegister}>
+            Register player
+          </Btn>
+        </div>
+      </div>
+
+      <div className="players-stats">
+        <div className="players-stat">
+          <div className="players-stat-l">Registered</div>
+          <div className="players-stat-n">{mine.length}</div>
+        </div>
+        <div className="players-stat">
+          <div className="players-stat-l">All-rounders</div>
+          <div className="players-stat-n">{allRounders}</div>
+        </div>
+        <div className="players-stat">
+          <div className="players-stat-l">WK keepers</div>
+          <div className="players-stat-n">{wks}</div>
+        </div>
+        <div className="players-stat">
+          <div className="players-stat-l">Awaiting clearance</div>
+          <div
+            className="players-stat-n"
+            style={{ color: pendingClearance ? 'var(--coral)' : 'var(--ink)' }}
+          >
+            {pendingClearance}
+          </div>
+        </div>
+      </div>
+
+      <div className="tbl-w" style={{ marginTop: 14 }}>
+        <table className="tbl">
+          <thead>
+            <tr>
+              <th>Player</th>
+              <th>ID number</th>
+              <th>Team</th>
+              <th>Role</th>
+              <th>Bowler type</th>
+              <th>ID doc</th>
+              <th>Status</th>
+              <th style={{ width: 140 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {mine.map((p) => {
+              const outbound = leavingFor(p.naturalKey);
+              const roleBits = [
+                p.battingHand ? p.battingHand + ' hand' : null,
+                p.battingType,
+                p.isAllRounder ? 'All-rounder' : null,
+                p.isWk ? 'WK' : null,
+              ]
+                .filter(Boolean)
+                .join(' · ');
+              return (
+                <tr key={p.naturalKey}>
+                  <td>
+                    <div className="rost-name">
+                      {p.firstName} {p.lastName}
+                    </div>
+                    <div className="rost-sub">
+                      {p.district || '—'} · {p.gender || '—'}
+                    </div>
+                  </td>
+                  <td>
+                    <span className="rost-id">{p.idNumber || '—'}</span>
+                  </td>
+                  <td>
+                    {p.team ? (
+                      <Pill tone="navy">{label(p.team)}</Pill>
+                    ) : (
+                      <span className="rost-sub">—</span>
+                    )}
+                  </td>
+                  <td>
+                    <span className="rost-sub">{roleBits || '—'}</span>
+                  </td>
+                  <td>
+                    <span className="rost-sub">{p.bowlerType || '—'}</span>
+                  </td>
+                  <td>
+                    {p.idDocMeta ? (
+                      <Pill tone="teal" dot>
+                        Uploaded
+                      </Pill>
+                    ) : (
+                      <Pill tone="coral" dot>
+                        Missing
+                      </Pill>
+                    )}
+                  </td>
+                  <td>
+                    {p.status === 'clearance-pending' ? (
+                      <Pill tone="gold" dot>
+                        Clearance pending
+                      </Pill>
+                    ) : p.status === 'inactive' ? (
+                      <Pill tone="muted">Inactive</Pill>
+                    ) : (
+                      <Pill tone="teal" dot>
+                        Active
+                      </Pill>
+                    )}
+                  </td>
+                  <td style={{ textAlign: 'right', paddingRight: 14 }}>
+                    {outbound && <span className="rost-sub">→ {outbound.toClubName}</span>}
+                  </td>
+                </tr>
+              );
+            })}
+            {mine.length === 0 && (
+              <tr>
+                <td
+                  colSpan="8"
+                  style={{ padding: 28, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}
+                >
+                  No players registered yet — click <strong>Register player</strong> to add your
+                  first.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+const EMPTY_PLAYER = {
+  surname: '',
+  firstNames: '',
+  idNumber: '',
+  race: '',
+  gender: '',
+  postalAddress: '',
+  postalCode: '',
+  phone: '',
+  email: '',
+  team: '',
+  district: '',
+  lastClub: '',
+  battingHand: 'Right',
+  battingType: 'Mid Order',
+  bowlingHand: 'Right',
+  isAllRounder: false,
+  isWk: false,
+  bowlerType: '',
+  consentChecked: false,
+};
+
+/**
+ * In-portal chair registration form (the official Union form). Collects the full field
+ * set; `onSubmit(payload, idFile)` hands back backend-shaped fields plus the chosen ID
+ * document File (main.jsx creates the player then presigns + uploads the doc). `leagues`
+ * is the tenant catalogue — Team options come from it so the value is a valid league key.
+ */
+export function RegisterPlayerForm({ club, leagues, onSubmit, onCancel, toast, busy }) {
+  const [d, setD] = useStateC(EMPTY_PLAYER);
+  const [idFile, setIdFile] = useStateC(null);
+  const set = (k, v) => setD((prev) => ({ ...prev, [k]: v }));
+
+  const teamOptions = leagueOptionsForDistrict(leagues, club.district);
+  const dob = dobFromSaId(d.idNumber);
+  const idValid = /^\d{13}$/.test(d.idNumber);
+  const required = [
+    'surname',
+    'firstNames',
+    'idNumber',
+    'race',
+    'gender',
+    'phone',
+    'team',
+    'district',
+  ];
+  const missing = required.filter((k) => !d[k]);
+  const canSubmit =
+    missing.length === 0 && idValid && !!dob && !!idFile && d.consentChecked && !busy;
+
+  function pickFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      toast?.('ID document must be under 5 MB', 'warn');
+      return;
+    }
+    setIdFile(file);
+    toast?.(`ID document attached · ${file.name}`);
+  }
+
+  function submit() {
+    if (!canSubmit) {
+      toast?.('Fill all required fields, upload ID, accept consent', 'warn');
+      return;
+    }
+    onSubmit(
+      {
+        firstName: d.firstNames.trim(),
+        lastName: d.surname.trim(),
+        idNumber: d.idNumber,
+        race: d.race,
+        gender: d.gender,
+        cell: d.phone,
+        email: d.email || undefined,
+        postalAddress: d.postalAddress || undefined,
+        postalCode: d.postalCode || undefined,
+        team: d.team,
+        district: d.district,
+        lastClub: d.lastClub || undefined,
+        battingHand: d.battingHand,
+        bowlingHand: d.bowlingHand,
+        battingType: d.battingType,
+        bowlerType: d.bowlerType || undefined,
+        isAllRounder: d.isAllRounder,
+        isWk: d.isWk,
+      },
+      idFile,
+    );
+  }
+
+  return (
+    <div className="rp-form">
+      <div className="rp-section">
+        <div className="rp-section-head">
+          <div className="rp-section-eyebrow">Section 01</div>
+          <div className="rp-section-title">Club &amp; Team</div>
+        </div>
+        <div className="field-grid-2">
+          <div>
+            <label className="field-label">Club</label>
+            <input className="field-input" value={club.name} disabled />
+          </div>
+          <div>
+            <label className="field-label">
+              Team <span className="req">*</span>
+            </label>
+            <select
+              className="field-select"
+              value={d.team}
+              onChange={(e) => set('team', e.target.value)}
+            >
+              <option value="">Select team</option>
+              {teamOptions.map((l) => (
+                <option key={l.key} value={l.key}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="rp-section">
+        <div className="rp-section-head">
+          <div className="rp-section-eyebrow">Section 02</div>
+          <div className="rp-section-title">Player identity</div>
+        </div>
+        <div className="field-grid-2">
+          <div>
+            <label className="field-label">
+              Surname <span className="req">*</span>
+            </label>
+            <input
+              className="field-input"
+              value={d.surname}
+              onChange={(e) => set('surname', e.target.value)}
+              placeholder="e.g. Mthembu"
+            />
+          </div>
+          <div>
+            <label className="field-label">
+              First name(s) <span className="req">*</span>
+            </label>
+            <input
+              className="field-input"
+              value={d.firstNames}
+              onChange={(e) => set('firstNames', e.target.value)}
+              placeholder="e.g. Sanele"
+            />
+          </div>
+        </div>
+        <div className="field-grid-2" style={{ marginTop: 12 }}>
+          <div>
+            <label className="field-label">
+              ID number <span className="req">*</span>
+            </label>
+            <input
+              className="field-input"
+              value={d.idNumber}
+              onChange={(e) => set('idNumber', e.target.value.replace(/\D/g, '').slice(0, 13))}
+              placeholder="13-digit RSA ID"
+              style={{ fontVariantNumeric: 'tabular-nums' }}
+            />
+            {d.idNumber && !idValid && (
+              <div className="rp-hint err">Must be exactly 13 digits.</div>
+            )}
+            {dob && (
+              <div className="rp-hint">
+                ✓ Date of birth: <strong style={{ color: 'var(--ink)' }}>{dob}</strong>
+              </div>
+            )}
+          </div>
+          <div>
+            <label className="field-label">
+              Race <span className="req">*</span>
+            </label>
+            <select
+              className="field-select"
+              value={d.race}
+              onChange={(e) => set('race', e.target.value)}
+            >
+              <option value="">Select</option>
+              {RACES.map((r) => (
+                <option key={r}>{r}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="field-grid-2" style={{ marginTop: 12 }}>
+          <div>
+            <label className="field-label">
+              Gender <span className="req">*</span>
+            </label>
+            <select
+              className="field-select"
+              value={d.gender}
+              onChange={(e) => set('gender', e.target.value)}
+            >
+              <option value="">Select</option>
+              {GENDERS.map((g) => (
+                <option key={g}>{g}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="field-label">
+              Phone <span className="req">*</span>
+            </label>
+            <input
+              className="field-input"
+              type="tel"
+              value={d.phone}
+              onChange={(e) => set('phone', e.target.value)}
+              placeholder="065 299 1365"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="rp-section">
+        <div className="rp-section-head">
+          <div className="rp-section-eyebrow">Section 03</div>
+          <div className="rp-section-title">Address &amp; contact</div>
+        </div>
+        <div>
+          <label className="field-label">Postal address</label>
+          <input
+            className="field-input"
+            value={d.postalAddress}
+            onChange={(e) => set('postalAddress', e.target.value)}
+            placeholder="67 Fiona Street, Mobeni Heights"
+          />
+        </div>
+        <div className="field-grid-2" style={{ marginTop: 12 }}>
+          <div>
+            <label className="field-label">Postal code</label>
+            <input
+              className="field-input"
+              value={d.postalCode}
+              onChange={(e) => set('postalCode', e.target.value.replace(/\D/g, '').slice(0, 4))}
+              placeholder="4092"
+            />
+          </div>
+          <div>
+            <label className="field-label">Email</label>
+            <input
+              className="field-input"
+              type="email"
+              value={d.email}
+              onChange={(e) => set('email', e.target.value)}
+              placeholder="player@example.com"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="rp-section">
+        <div className="rp-section-head">
+          <div className="rp-section-eyebrow">Section 04</div>
+          <div className="rp-section-title">Playing profile</div>
+        </div>
+        <div className="field-grid-2">
+          <div>
+            <label className="field-label">Batting hand</label>
+            <div className="seg">
+              {HANDS.map((h) => (
+                <button
+                  key={h}
+                  type="button"
+                  className={`seg-btn ${d.battingHand === h ? 'on' : ''}`}
+                  onClick={() => set('battingHand', h)}
+                >
+                  {h} hander
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="field-label">Bowling hand</label>
+            <div className="seg">
+              {HANDS.map((h) => (
+                <button
+                  key={h}
+                  type="button"
+                  className={`seg-btn ${d.bowlingHand === h ? 'on' : ''}`}
+                  onClick={() => set('bowlingHand', h)}
+                >
+                  {h} hander
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="field-grid-2" style={{ marginTop: 12 }}>
+          <div>
+            <label className="field-label">Batting type</label>
+            <select
+              className="field-select"
+              value={d.battingType}
+              onChange={(e) => set('battingType', e.target.value)}
+            >
+              {BATTING_TYPES.map((b) => (
+                <option key={b}>{b}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="field-label">Bowler type</label>
+            <select
+              className="field-select"
+              value={d.bowlerType}
+              onChange={(e) => set('bowlerType', e.target.value)}
+            >
+              <option value="">— Not a bowler —</option>
+              {BOWLER_TYPES.map((b) => (
+                <option key={b}>{b}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="row" style={{ marginTop: 12, gap: 14, flexWrap: 'wrap' }}>
+          <label className="rp-check">
+            <input
+              type="checkbox"
+              checked={d.isAllRounder}
+              onChange={(e) => set('isAllRounder', e.target.checked)}
+            />
+            <span>All-rounder</span>
+          </label>
+          <label className="rp-check">
+            <input
+              type="checkbox"
+              checked={d.isWk}
+              onChange={(e) => set('isWk', e.target.checked)}
+            />
+            <span>Wicket-keeper</span>
+          </label>
+        </div>
+      </div>
+
+      <div className="rp-section">
+        <div className="rp-section-head">
+          <div className="rp-section-eyebrow">Section 05</div>
+          <div className="rp-section-title">Registration history</div>
+        </div>
+        <div className="field-grid-2">
+          <div>
+            <label className="field-label">Club for which last registered</label>
+            <input
+              className="field-input"
+              value={d.lastClub}
+              onChange={(e) => set('lastClub', e.target.value)}
+              placeholder="Previous club, or — if first registration"
+            />
+          </div>
+          <div>
+            <label className="field-label">
+              District <span className="req">*</span>
+            </label>
+            <input
+              className="field-input"
+              value={d.district}
+              onChange={(e) => set('district', e.target.value)}
+              placeholder="e.g. Chatsworth"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="rp-section">
+        <div className="rp-section-head">
+          <div className="rp-section-eyebrow">Section 06</div>
+          <div className="rp-section-title">
+            ID document upload{' '}
+            <span style={{ color: 'var(--coral)', fontWeight: 700, fontSize: 11, marginLeft: 6 }}>
+              REQUIRED
+            </span>
+          </div>
+        </div>
+        <div className={`rp-upload ${idFile ? 'uploaded' : ''}`}>
+          <input
+            id="rp-id-file"
+            type="file"
+            accept="image/jpeg,image/png,application/pdf"
+            onChange={pickFile}
+            style={{ display: 'none' }}
+          />
+          <label htmlFor="rp-id-file" className="rp-upload-inner">
+            {idFile ? (
+              <>
+                <div className="rp-upload-icon ok">
+                  <Icon.Check />
+                </div>
+                <div>
+                  <div className="rp-upload-title">{idFile.name}</div>
+                  <div className="rp-upload-sub">
+                    Click to replace · The Union office reviews ID documents on submission.
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="rp-upload-icon">
+                  <Icon.Upload />
+                </div>
+                <div>
+                  <div className="rp-upload-title">Tap to attach ID document</div>
+                  <div className="rp-upload-sub">
+                    SA ID book photo or scan · JPG, PNG or PDF · max ~5MB
+                  </div>
+                </div>
+              </>
+            )}
+          </label>
+        </div>
+      </div>
+
+      <div className="rp-section rp-consent">
+        <label className="rp-check">
+          <input
+            type="checkbox"
+            checked={d.consentChecked}
+            onChange={(e) => set('consentChecked', e.target.checked)}
+          />
+          <span>
+            I, on behalf of <strong>{club.name}</strong>, request to register the above player under
+            the <strong>Union Rules and Byelaws</strong>. I declare that the player is not being
+            paid by the club for their services as a cricketer.
+          </span>
+        </label>
+      </div>
+
+      <div className="rp-actions">
+        <Btn tone="outline" onClick={onCancel}>
+          Cancel
+        </Btn>
+        <Btn tone="teal" icon={Icon.Check} onClick={submit} disabled={!canSubmit}>
+          {busy ? 'Submitting…' : 'Submit registration'}
+        </Btn>
+      </div>
+      {!canSubmit && !busy && (missing.length || !idFile || !d.consentChecked) && (
+        <div className="rp-validation">
+          {missing.length > 0 && <>Missing: {missing.join(', ')}. </>}
+          {!idFile && <>Attach ID. </>}
+          {!d.consentChecked && <>Consent required.</>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Destination-initiated clearance request: pick the source club + the player's ID. */
+export function RequestPlayerForm({ club, directory, onSubmit, onCancel, busy }) {
+  const [fromClubId, setFromClubId] = useStateC('');
+  const [idNumber, setIdNumber] = useStateC('');
+  const [note, setNote] = useStateC('');
+  const others = (directory ?? []).filter((c) => c.id !== club.id);
+  const canSubmit = fromClubId && /^\d{13}$/.test(idNumber) && !busy;
+
+  return (
+    <div className="rp-form">
+      <div className="rp-section">
+        <div className="rp-section-head">
+          <div className="rp-section-eyebrow">Incoming transfer</div>
+          <div className="rp-section-title">Request a player for {club.name}</div>
+        </div>
+        <p className="ph-desc" style={{ marginBottom: 12 }}>
+          The player&apos;s current club has 14 days to confirm fees + misconduct cleared, then
+          issue the clearance. After that the Union office may override.
+        </p>
+        <div className="field-grid-2">
+          <div>
+            <label className="field-label">
+              Current club <span className="req">*</span>
+            </label>
+            <select
+              className="field-select"
+              value={fromClubId}
+              onChange={(e) => setFromClubId(e.target.value)}
+            >
+              <option value="">Select club</option>
+              {others.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="field-label">
+              Player ID number <span className="req">*</span>
+            </label>
+            <input
+              className="field-input"
+              value={idNumber}
+              onChange={(e) => setIdNumber(e.target.value.replace(/\D/g, '').slice(0, 13))}
+              placeholder="13-digit RSA ID"
+              style={{ fontVariantNumeric: 'tabular-nums' }}
+            />
+          </div>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <label className="field-label">Note (optional)</label>
+          <input
+            className="field-input"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="e.g. Player relocating — joining us for 2026/27."
+          />
+        </div>
+      </div>
+      <div className="rp-actions">
+        <Btn tone="outline" onClick={onCancel}>
+          Cancel
+        </Btn>
+        <Btn
+          tone="teal"
+          icon={Icon.Arrow}
+          disabled={!canSubmit}
+          onClick={() => onSubmit({ fromClubId, idNumber, note: note || undefined })}
+        >
+          {busy ? 'Sending…' : 'Send request'}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Phase 04 · Clearances (club side) ─── */
+export function ClubClearancesView({
+  club,
+  clearances,
+  leagues,
+  onClearFees,
+  onClearMisconduct,
+  onApprove,
+  onOpenRequest,
+  busyId,
+}) {
+  const teamLabel = labelByKey(leagues);
+  const incoming = clearances?.incoming ?? [];
+  const outgoing = clearances?.outbound ?? [];
+  const incomingPending = incoming.filter((r) => r.status === 'pending');
+  const incomingResolved = incoming.filter((r) => r.status !== 'pending');
+
+  return (
+    <div>
+      <div className="page-head">
+        <div className="ph-left">
+          <div className="ph-crumb">Club Portal · {club.name} / Clearances</div>
+          <h1 className="ph-title">
+            Player <em>Clearance Requests</em>
+          </h1>
+          <p className="ph-desc">
+            Players leaving {club.name} need a clearance certificate. Confirm{' '}
+            <strong>fees cleared</strong> and <strong>misconduct charges cleared</strong> within{' '}
+            <strong>14 days</strong>, or the Union office may override and approve on your behalf.
+          </p>
+        </div>
+        <div className="ph-actions">
+          <Btn tone="outline" size="sm" icon={Icon.Plus} onClick={onOpenRequest}>
+            Request a player
+          </Btn>
+        </div>
+      </div>
+
+      <Card
+        title="Incoming requests"
+        sub={`Players asking to leave ${club.name}. You have 14 days to action each one.`}
+      >
+        {incomingPending.length === 0 && incomingResolved.length === 0 && (
+          <div
+            style={{
+              padding: '24px 16px',
+              textAlign: 'center',
+              color: 'var(--muted)',
+              fontSize: 13,
+            }}
+          >
+            No clearance requests pending. Players will appear here when they apply to move clubs.
+          </div>
+        )}
+        <div className="clr-list">
+          {incomingPending.map((req) => {
+            const daysLeft = clearanceDaysRemaining(req);
+            const overdue = clearanceOverdue(req);
+            const busy = busyId === req.id;
+            return (
+              <div key={req.id} className={`clr-card ${overdue ? 'overdue' : ''}`}>
+                <div className="clr-card-head">
+                  <div>
+                    <div className="clr-eyebrow">
+                      {overdue
+                        ? '⚠ Overdue · Union may override'
+                        : `${daysLeft} ${daysLeft === 1 ? 'day' : 'days'} remaining`}
+                    </div>
+                    <div className="clr-name">{req.playerName}</div>
+                    <div className="clr-meta">
+                      {teamLabel[req.team] || req.team || '—'} · ID {req.idNumber || '—'} ·
+                      Requested {fmtDay(req.requestedAt)}
+                    </div>
+                  </div>
+                  <div className="clr-route">
+                    <div className="clr-route-from">{req.fromClubName}</div>
+                    <Icon.Arrow />
+                    <div className="clr-route-to">{req.toClubName}</div>
+                  </div>
+                </div>
+                {req.note && <div className="clr-note">"{req.note}"</div>}
+                <div className="clr-checklist">
+                  <button
+                    className={`clr-check ${req.feesCleared ? 'on' : ''}`}
+                    disabled={busy}
+                    onClick={() => onClearFees(req)}
+                  >
+                    <span className="clr-check-box">{req.feesCleared && <Icon.Check />}</span>
+                    <span className="clr-check-label">Fees cleared</span>
+                    <span className="clr-check-sub">
+                      All monies due to {club.name} paid in full
+                    </span>
+                  </button>
+                  <button
+                    className={`clr-check ${req.misconductCleared ? 'on' : ''}`}
+                    disabled={busy}
+                    onClick={() => onClearMisconduct(req)}
+                  >
+                    <span className="clr-check-box">{req.misconductCleared && <Icon.Check />}</span>
+                    <span className="clr-check-label">Misconduct cleared</span>
+                    <span className="clr-check-sub">No outstanding disciplinary charges</span>
+                  </button>
+                </div>
+                {req.feesCleared && req.misconductCleared && (
+                  <div className="clr-ready">
+                    <span className="clr-ready-msg">
+                      ✓ Both checks complete. Issue clearance certificate.
+                    </span>
+                    <Btn
+                      tone="teal"
+                      size="sm"
+                      icon={Icon.Arrow}
+                      disabled={busy}
+                      onClick={() => onApprove(req)}
+                    >
+                      {busy ? 'Issuing…' : `Issue clearance to ${req.toClubName}`}
+                    </Btn>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {incomingResolved.map((req) => (
+            <div key={req.id} className="clr-card resolved">
+              <div className="clr-card-head">
+                <div>
+                  <div className="clr-eyebrow" style={{ color: 'var(--green)' }}>
+                    {req.status === 'admin-override' ? 'Union override' : 'Issued'} ·{' '}
+                    {fmtDay(req.clubApprovedAt || req.adminOverrideAt)}
+                  </div>
+                  <div className="clr-name">{req.playerName}</div>
+                  <div className="clr-meta">Now at {req.toClubName}</div>
+                </div>
+                <Pill tone="teal" dot>
+                  {req.status === 'admin-override' ? 'Union approved' : 'Cleared'}
+                </Pill>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {outgoing.length > 0 && (
+        <Card title="Players moving to your club" sub="Awaiting clearance from their current club">
+          <div className="clr-list">
+            {outgoing.map((req) => (
+              <div key={req.id} className="clr-card incoming">
+                <div className="clr-card-head">
+                  <div>
+                    <div className="clr-eyebrow">
+                      Incoming · {req.status === 'pending' ? 'Pending source club' : 'Cleared'}
+                    </div>
+                    <div className="clr-name">{req.playerName}</div>
+                    <div className="clr-meta">
+                      From <strong>{req.fromClubName}</strong> · Requested {fmtDay(req.requestedAt)}
+                    </div>
+                  </div>
+                  {req.status === 'pending' ? (
+                    <Pill tone="gold" dot>
+                      Waiting on {req.fromClubName}
+                    </Pill>
+                  ) : (
+                    <Pill tone="teal" dot>
+                      Cleared
+                    </Pill>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+Object.assign(window, {
+  ClubHome,
+  AffiliationForm,
+  DocumentsView,
+  CQIView,
+  ClubFixturesView,
+  ClubPlayersView,
+  RegisterPlayerForm,
+  RequestPlayerForm,
+  ClubClearancesView,
+});

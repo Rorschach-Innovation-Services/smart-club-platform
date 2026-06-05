@@ -14,6 +14,7 @@ import {
   BatchWriteCommand,
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { S3Client, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import {
   clubKey,
   clubInviteKey,
@@ -24,6 +25,12 @@ import {
   seriesListGsi1pk,
   playerKey,
   playersListKey,
+  clearanceKey,
+  inboundClearanceKey,
+  clearancesListKey,
+  inboundClearancesListKey,
+  clearanceGsi1,
+  clearancesListGsi1pk,
   tokenKey,
   tenantConfigKey,
   userKey,
@@ -40,6 +47,7 @@ import type {
   TenantConfig,
   UserProfile,
   PlayerRegistration,
+  PlayerClearance,
 } from './types.js';
 
 import { tableName } from './env.js';
@@ -60,6 +68,35 @@ const ddb = DynamoDBDocumentClient.from(
   ),
   { marshallOptions: { removeUndefinedValues: true } },
 );
+
+const s3 = new S3Client({});
+const UPLOADS_BUCKET = process.env.UPLOADS_BUCKET;
+
+/**
+ * Best-effort delete of stored upload objects (compliance PDFs, player ID docs) during
+ * tenant/cohort erasure — so a POPIA "right to erasure" actually removes the files, not
+ * just the DynamoDB rows. Skips local-dev keys and never throws: a failed object delete is
+ * logged (recoverable via a bucket lifecycle rule) and must not abort the erase.
+ */
+async function deleteUploadObjects(objectKeys: string[]): Promise<void> {
+  if (!UPLOADS_BUCKET) return;
+  for (const key of objectKeys) {
+    if (!key || key.startsWith('local/')) continue;
+    try {
+      await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: key }));
+    } catch (err) {
+      console.warn(`erase: failed to delete upload object ${key}`, err);
+    }
+  }
+}
+
+/** Pull every stored objectKey off a club (docMeta) — used to purge S3 on erasure. */
+function clubDocObjectKeys(club: Club): string[] {
+  const docMeta = (club.docMeta ?? {}) as Record<string, { objectKey?: string } | undefined>;
+  return Object.values(docMeta)
+    .map((m) => m?.objectKey)
+    .filter((k): k is string => typeof k === 'string');
+}
 
 /** Thrown when a version-checked write loses a race. Handlers map this to HTTP 409. */
 export class VersionConflictError extends Error {
@@ -609,6 +646,392 @@ export async function createPlayer(tenant: string, player: PlayerRegistration): 
   );
 }
 
+export async function getPlayer(
+  tenant: string,
+  clubId: string,
+  naturalKey: string,
+): Promise<PlayerRegistration | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: playerKey(tenant, clubId, naturalKey) }),
+  );
+  return stripKeys<PlayerRegistration>(res.Item);
+}
+
+/**
+ * Apply a partial update to a player registration under optimistic concurrency
+ * (same version convention as updateClub: a client may pass an expected version;
+ * legacy rows without one are treated as 0). Used by the ID-doc mark and roster
+ * edits. A lost race throws VersionConflictError (→ 409).
+ */
+export async function updatePlayer(
+  tenant: string,
+  clubId: string,
+  naturalKey: string,
+  patch: Partial<PlayerRegistration>,
+): Promise<PlayerRegistration> {
+  const current = await getPlayer(tenant, clubId, naturalKey);
+  if (!current) throw new Error('player not found');
+  const expectedVersion = patch.version ?? current.version ?? 0;
+  const next: PlayerRegistration = {
+    ...current,
+    ...patch,
+    naturalKey,
+    clubId,
+    version: expectedVersion + 1,
+  };
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...playerKey(tenant, clubId, naturalKey), ...next },
+        ConditionExpression:
+          'attribute_exists(sk) AND (version = :v OR attribute_not_exists(version))',
+        ExpressionAttributeValues: { ':v': expectedVersion },
+      }),
+    );
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      throw new VersionConflictError();
+    }
+    throw err;
+  }
+  return next;
+}
+
+// ── Player clearances (inter-club transfers) ──
+
+/** Strip the gsi1 keys but keep nothing else removed — clearance has no extra system fields. */
+export async function getClearance(
+  tenant: string,
+  fromClubId: string,
+  id: string,
+): Promise<PlayerClearance | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: clearanceKey(tenant, fromClubId, id) }),
+  );
+  return stripKeys<PlayerClearance>(res.Item);
+}
+
+/** Clearances a club must action (it is the source/current club). */
+export async function listClearancesForSource(
+  tenant: string,
+  clubId: string,
+): Promise<PlayerClearance[]> {
+  const { pk, skPrefix } = clearancesListKey(tenant, clubId);
+  const res = await ddb.send(
+    new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+      ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    }),
+  );
+  return (res.Items ?? []).map((i) => stripKeys<PlayerClearance>(i)!);
+}
+
+/** Clearances incoming to a club (it is the destination) — read from its own mirror items. */
+export async function listInboundForDest(
+  tenant: string,
+  clubId: string,
+): Promise<PlayerClearance[]> {
+  const { pk, skPrefix } = inboundClearancesListKey(tenant, clubId);
+  const res = await ddb.send(
+    new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+      ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    }),
+  );
+  return (res.Items ?? []).map((i) => stripKeys<PlayerClearance>(i)!);
+}
+
+/** Every clearance in the tenant (admin console) — one row per request via the gsi1. */
+export async function listAllClearances(tenant: string): Promise<PlayerClearance[]> {
+  const res = await ddb.send(
+    new QueryCommand({
+      TableName: TABLE,
+      IndexName: 'gsi1',
+      KeyConditionExpression: 'gsi1pk = :p',
+      ExpressionAttributeValues: { ':p': clearancesListGsi1pk(tenant) },
+    }),
+  );
+  return (res.Items ?? []).map((i) => stripKeys<PlayerClearance>(i)!);
+}
+
+/** The canonical (source) + mirror (destination) put items for a clearance. */
+function clearanceItems(tenant: string, c: PlayerClearance) {
+  return {
+    canonical: {
+      ...clearanceKey(tenant, c.fromClubId, c.id),
+      ...clearanceGsi1(tenant, c.requestedAt),
+      ...c,
+    },
+    mirror: {
+      ...inboundClearanceKey(tenant, c.toClubId, c.id),
+      ...c,
+    },
+  };
+}
+
+/**
+ * Create a pending clearance: write the canonical (source) + mirror (destination)
+ * items and flip the player's status to 'clearance-pending', atomically.
+ *
+ * The player-status update is the RACE-SAFE dedup guard: `#s <> :pending` makes the
+ * write fail if the player already has a pending clearance, so two concurrent creates
+ * for the same player can't both succeed (the handler's prior `listClearancesForSource`
+ * check is only a friendly fast-path, not the invariant). A failed guard surfaces as
+ * {@link DuplicatePendingClearanceError} (→ 409). The canonical put's attribute_not_exists
+ * additionally stops a replayed id from double-writing.
+ *
+ * The dynalite (offline/test) path has no TransactWriteItems → sequential fallback. There
+ * the GUARD MUST RUN FIRST so a duplicate aborts before any clearance item is written
+ * (otherwise a rejected create would orphan the canonical/mirror pair). Production uses
+ * the all-or-nothing transaction, where ordering is irrelevant.
+ */
+export async function createClearance(tenant: string, c: PlayerClearance): Promise<void> {
+  const { canonical, mirror } = clearanceItems(tenant, c);
+  const playerStatusUpdate = {
+    TableName: TABLE,
+    Key: playerKey(tenant, c.fromClubId, c.playerNaturalKey),
+    UpdateExpression: 'SET #s = :pending ADD version :one',
+    ConditionExpression: 'attribute_exists(sk) AND #s <> :pending',
+    ExpressionAttributeNames: { '#s': 'status' },
+    ExpressionAttributeValues: { ':pending': 'clearance-pending', ':one': 1 },
+  };
+  try {
+    if (localEndpoint) {
+      // Guard FIRST (see doc): a duplicate fails here before any clearance item lands.
+      await ddb.send(new UpdateCommand(playerStatusUpdate));
+      await ddb.send(
+        new PutCommand({
+          TableName: TABLE,
+          Item: canonical,
+          ConditionExpression: 'attribute_not_exists(sk)',
+        }),
+      );
+      await ddb.send(new PutCommand({ TableName: TABLE, Item: mirror }));
+      return;
+    }
+    await ddb.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: TABLE,
+              Item: canonical,
+              ConditionExpression: 'attribute_not_exists(sk)',
+            },
+          },
+          { Put: { TableName: TABLE, Item: mirror } },
+          { Update: playerStatusUpdate },
+        ],
+      }),
+    );
+  } catch (err: unknown) {
+    const name = (err as { name?: string }).name;
+    if (name === 'ConditionalCheckFailedException' || name === 'TransactionCanceledException') {
+      throw new DuplicatePendingClearanceError();
+    }
+    throw err;
+  }
+}
+
+/**
+ * Toggle the source club's fees/misconduct confirmations on a still-pending clearance.
+ * Version-guarded (OCC); touches only the canonical item — the mirror tracks `status`,
+ * which doesn't change until approval. A lost race throws VersionConflictError (→ 409).
+ */
+export async function updateClearanceFlags(
+  tenant: string,
+  fromClubId: string,
+  id: string,
+  patch: { feesCleared?: boolean; misconductCleared?: boolean; expectedVersion?: number },
+): Promise<PlayerClearance> {
+  const current = await getClearance(tenant, fromClubId, id);
+  if (!current) throw new Error('clearance not found');
+  const expectedVersion = patch.expectedVersion ?? current.version ?? 0;
+  const next: PlayerClearance = {
+    ...current,
+    feesCleared: patch.feesCleared ?? current.feesCleared,
+    misconductCleared: patch.misconductCleared ?? current.misconductCleared,
+    version: expectedVersion + 1,
+  };
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...clearanceKey(tenant, fromClubId, id),
+          ...clearanceGsi1(tenant, next.requestedAt),
+          ...next,
+        },
+        ConditionExpression: 'version = :v',
+        ExpressionAttributeValues: { ':v': expectedVersion },
+      }),
+    );
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      throw new VersionConflictError();
+    }
+    throw err;
+  }
+  return next;
+}
+
+/** Raised when a clearance move can't run because the player already exists at the destination. */
+export class PlayerExistsAtDestinationError extends Error {
+  constructor() {
+    super('player already registered at destination club');
+    this.name = 'PlayerExistsAtDestinationError';
+  }
+}
+
+/** Raised when a clearance create races another for the same player (already pending). */
+export class DuplicatePendingClearanceError extends Error {
+  constructor() {
+    super('a clearance request for this player is already pending');
+    this.name = 'DuplicatePendingClearanceError';
+  }
+}
+
+/**
+ * Resolve a clearance (club approval or admin override) and MOVE the player from the
+ * source club to the destination, atomically:
+ *   put player at destination (guarded attribute_not_exists) · delete player at source ·
+ *   playerCount -1 source / +1 destination · canonical clearance status · mirror status.
+ *
+ * The destination put guard rejects the whole move when the player already has a
+ * registration there (a returning player), surfaced as PlayerExistsAtDestinationError
+ * (→ 409) — the clearance stays pending rather than half-applying. The canonical
+ * clearance is version-guarded so a double approve/override can't run twice.
+ *
+ * dynalite (offline/test) has no TransactWriteItems → sequential fallback in the same
+ * order, with the same destination guard. Production uses the transaction.
+ */
+export async function resolveClearance(
+  tenant: string,
+  fromClubId: string,
+  id: string,
+  opts: { mode: 'club' | 'admin'; at: string; expectedVersion?: number },
+): Promise<PlayerClearance> {
+  const current = await getClearance(tenant, fromClubId, id);
+  if (!current) throw new Error('clearance not found');
+  const player = await getPlayer(tenant, fromClubId, current.playerNaturalKey);
+  if (!player) throw new Error('player not found for clearance');
+
+  const expectedVersion = opts.expectedVersion ?? current.version ?? 0;
+  const status: PlayerClearance['status'] = opts.mode === 'admin' ? 'admin-override' : 'approved';
+  const next: PlayerClearance = {
+    ...current,
+    status,
+    feesCleared: opts.mode === 'admin' ? current.feesCleared : true,
+    misconductCleared: opts.mode === 'admin' ? current.misconductCleared : true,
+    clubApprovedAt: opts.mode === 'club' ? opts.at : (current.clubApprovedAt ?? null),
+    adminOverrideAt: opts.mode === 'admin' ? opts.at : (current.adminOverrideAt ?? null),
+    version: expectedVersion + 1,
+  };
+
+  const movedPlayer: PlayerRegistration = {
+    ...player,
+    clubId: current.toClubId,
+    status: 'active',
+    version: (player.version ?? 0) + 1,
+  };
+  const { canonical, mirror } = clearanceItems(tenant, next);
+
+  const destPut = {
+    TableName: TABLE,
+    Item: { ...playerKey(tenant, current.toClubId, player.naturalKey), ...movedPlayer },
+    ConditionExpression: 'attribute_not_exists(sk)',
+  };
+  const sourceDelete = {
+    TableName: TABLE,
+    Key: playerKey(tenant, fromClubId, player.naturalKey),
+  };
+  const sourceCount = {
+    TableName: TABLE,
+    Key: clubKey(tenant, fromClubId),
+    UpdateExpression: 'ADD playerCount :neg',
+    ExpressionAttributeValues: { ':neg': -1 },
+  };
+  const destCount = {
+    TableName: TABLE,
+    Key: clubKey(tenant, current.toClubId),
+    UpdateExpression: 'ADD playerCount :one',
+    ExpressionAttributeValues: { ':one': 1 },
+  };
+  const canonicalPut = {
+    TableName: TABLE,
+    Item: canonical,
+    ConditionExpression: 'version = :v',
+    ExpressionAttributeValues: { ':v': expectedVersion },
+  };
+  const mirrorPut = { TableName: TABLE, Item: mirror };
+
+  if (localEndpoint) {
+    // Offline: enforce the destination collision guard FIRST so a returning player
+    // aborts before anything is mutated, then apply the rest sequentially.
+    try {
+      await ddb.send(new PutCommand(destPut));
+    } catch (err: unknown) {
+      if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+        throw new PlayerExistsAtDestinationError();
+      }
+      throw err;
+    }
+    try {
+      await ddb.send(new PutCommand(canonicalPut));
+    } catch (err: unknown) {
+      // Roll back the dest put so a lost OCC race doesn't leave the player in both clubs.
+      await ddb.send(
+        new DeleteCommand({
+          TableName: TABLE,
+          Key: playerKey(tenant, current.toClubId, player.naturalKey),
+        }),
+      );
+      if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+        throw new VersionConflictError();
+      }
+      throw err;
+    }
+    await ddb.send(new DeleteCommand(sourceDelete));
+    await ddb.send(new UpdateCommand(sourceCount));
+    await ddb.send(new UpdateCommand(destCount));
+    await ddb.send(new PutCommand(mirrorPut));
+    return next;
+  }
+
+  try {
+    await ddb.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          { Put: destPut },
+          { Delete: sourceDelete },
+          { Update: sourceCount },
+          { Update: destCount },
+          { Put: canonicalPut },
+          { Put: mirrorPut },
+        ],
+      }),
+    );
+  } catch (err: unknown) {
+    const name = (err as { name?: string }).name;
+    if (name === 'ConditionalCheckFailedException' || name === 'TransactionCanceledException') {
+      // Either the destination guard (player already there) or the version guard (raced)
+      // failed. Best-effort disambiguation by re-reading the destination: a present player
+      // is reported as a collision. Note this can't perfectly distinguish a genuine version
+      // race that a CONCURRENT successful resolve just won (which also lands the player at
+      // the destination) — that edge is mislabelled as a collision. Both map to HTTP 409, so
+      // only the message differs; the caller is told to refetch either way.
+      const atDest = await getPlayer(tenant, current.toClubId, player.naturalKey);
+      if (atDest) throw new PlayerExistsAtDestinationError();
+      throw new VersionConflictError();
+    }
+    throw err;
+  }
+  return next;
+}
+
 // ── Registration tokens (global, self-describing) ──
 
 export async function getToken(
@@ -990,12 +1413,25 @@ async function batchDelete(keys: Array<{ pk: string; sk: string }>): Promise<voi
  */
 export async function eraseTenantData(tenant: string): Promise<number> {
   const keys: Array<{ pk: string; sk: string }> = [tenantConfigKey(tenant)];
+  const objectKeys: string[] = [];
 
   const clubs = await listClubs(tenant);
   for (const club of clubs) {
     keys.push(clubKey(tenant, club.id));
+    objectKeys.push(...clubDocObjectKeys(club));
     const players = await listPlayers(tenant, club.id);
-    for (const p of players) keys.push(playerKey(tenant, club.id, p.naturalKey));
+    for (const p of players) {
+      keys.push(playerKey(tenant, club.id, p.naturalKey));
+      if (p.idDocMeta?.objectKey) objectKeys.push(p.idDocMeta.objectKey);
+    }
+    // Clearance items (canonical CLEARANCE# + mirror INBOUND_CLEARANCE#) live under club
+    // pks but carry no gsi1/META listing, so enumerate them per club explicitly.
+    for (const x of await listClearancesForSource(tenant, club.id)) {
+      keys.push(clearanceKey(tenant, club.id, x.id));
+    }
+    for (const x of await listInboundForDest(tenant, club.id)) {
+      keys.push(inboundClearanceKey(tenant, club.id, x.id));
+    }
     // Invite markers aren't in the gsi1 listing — enumerate + delete them explicitly.
     for (const k of await listClubInviteKeys(tenant, club.id)) keys.push(k);
   }
@@ -1003,6 +1439,7 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   for (const u of await listTenantUsers(tenant)) keys.push(userTenantMarkerKey(u.sub, tenant));
 
   await batchDelete(keys);
+  await deleteUploadObjects(objectKeys);
   return keys.length;
 }
 
@@ -1014,10 +1451,19 @@ export async function eraseTenantData(tenant: string): Promise<number> {
  */
 export async function clearCohort(tenant: string): Promise<number> {
   const keys: Array<{ pk: string; sk: string }> = [];
+  const objectKeys: string[] = [];
   for (const club of await listClubs(tenant)) {
     keys.push(clubKey(tenant, club.id));
+    objectKeys.push(...clubDocObjectKeys(club));
     for (const p of await listPlayers(tenant, club.id)) {
       keys.push(playerKey(tenant, club.id, p.naturalKey));
+      if (p.idDocMeta?.objectKey) objectKeys.push(p.idDocMeta.objectKey);
+    }
+    for (const x of await listClearancesForSource(tenant, club.id)) {
+      keys.push(clearanceKey(tenant, club.id, x.id));
+    }
+    for (const x of await listInboundForDest(tenant, club.id)) {
+      keys.push(inboundClearanceKey(tenant, club.id, x.id));
     }
     for (const k of await listClubInviteKeys(tenant, club.id)) keys.push(k);
   }
@@ -1030,5 +1476,6 @@ export async function clearCohort(tenant: string): Promise<number> {
     }
   }
   await batchDelete(keys);
+  await deleteUploadObjects(objectKeys);
   return keys.length;
 }

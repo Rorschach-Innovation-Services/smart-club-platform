@@ -132,6 +132,36 @@ export const sendClubFixtures = (id, { channels, idempotencyKey }) =>
     body: { channels, idempotencyKey },
   });
 
+// ── Players (roster) ──
+export const getPlayers = (clubId) => request(`/clubs/${clubId}/players`);
+export const registerPlayer = (clubId, body) =>
+  request(`/clubs/${clubId}/players`, { method: 'POST', body });
+export const getPlayerIdDocUploadUrl = (clubId, naturalKey, contentType) =>
+  request(`/clubs/${clubId}/players/${naturalKey}/id-doc/upload-url`, {
+    method: 'POST',
+    body: { contentType },
+  });
+export const markPlayerIdDoc = (clubId, naturalKey, meta) =>
+  request(`/clubs/${clubId}/players/${naturalKey}/id-doc`, { method: 'PATCH', body: meta });
+export const getPlayerIdDocViewUrl = (clubId, naturalKey) =>
+  request(`/clubs/${clubId}/players/${naturalKey}/id-doc/view-url`, { method: 'POST' });
+
+// Rep-safe {id,name} list of sibling clubs (for clearance source/destination choice).
+export const getClubDirectory = () => request('/clubs/directory');
+
+// ── Player clearances (inter-club transfers) ──
+// Returns { incoming, outbound } for a club: incoming = it must action (source),
+// outbound = players moving to it (destination).
+export const getClearances = (clubId) => request(`/clubs/${clubId}/clearances`);
+// Destination club initiates: body { fromClubId, idNumber | playerNaturalKey, note? }.
+export const createClearance = (toClubId, body) =>
+  request(`/clubs/${toClubId}/clearances`, { method: 'POST', body });
+export const patchClearance = (fromClubId, clearanceId, body) =>
+  request(`/clubs/${fromClubId}/clearances/${clearanceId}`, { method: 'PATCH', body });
+export const getAllClearances = () => request('/admin/clearances');
+export const overrideClearance = (clearanceId, body) =>
+  request(`/admin/clearances/${clearanceId}/override`, { method: 'POST', body });
+
 // ── Series ──
 export const getSeriesList = () => request('/series');
 export const createSeries = (series) => request('/series', { method: 'POST', body: series });
@@ -159,11 +189,15 @@ export const getRegistration = (clubId, token) =>
 export const submitRegistration = (clubId, token, body) =>
   request(`/register/${clubId}`, { method: 'POST', auth: false, query: { t: token }, body });
 
-/** Upload a file directly to a presigned S3 URL (not the API). */
-export async function uploadToPresigned(uploadUrl, file) {
+/**
+ * Upload a file directly to a presigned S3 URL (not the API). The content-type must
+ * match what the URL was signed with (compliance docs sign as application/pdf; player
+ * ID docs sign as the file's image/PDF type — pass it explicitly there).
+ */
+export async function uploadToPresigned(uploadUrl, file, contentType = 'application/pdf') {
   const res = await fetch(uploadUrl, {
     method: 'PUT',
-    headers: { 'content-type': 'application/pdf' },
+    headers: { 'content-type': contentType },
     body: file,
   });
   if (!res.ok) throw new ApiError(res.status, 'upload failed');

@@ -21,12 +21,16 @@ import {
   formatDeadlineMid,
   daysUntil,
   daysAgo,
+  clearanceOverdue,
+  daysSinceIso,
+  clearanceDaysRemaining,
 } from './data.jsx';
 import {
   leagueOptionsForDistrict,
   optionsGroupedByGroup,
   findByKey,
   slugifyLeagueKey,
+  labelByKey,
   OVERARCHING_DISTRICT,
 } from './leagues.js';
 import { exportRowsToXlsx, clubExportRow } from './exportXlsx.js';
@@ -6342,6 +6346,256 @@ export function AdminTeamAccessView({
                 </Btn>
                 <Btn tone="ink" onClick={confirm.onYes}>
                   Remove access
+                </Btn>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
+}
+
+/* ─── AdminClearances — oversight of every clearance across the cohort ─── */
+export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
+  const [confirm, setConfirm] = useStateA(null);
+  const [filter, setFilter] = useStateA('all');
+  const teamLabel = labelByKey(leagues ?? []);
+  const fmtDay = (iso) =>
+    iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '';
+
+  const all = clearances ?? [];
+  const overdue = all.filter((r) => clearanceOverdue(r));
+  const pending = all.filter((r) => r.status === 'pending' && !clearanceOverdue(r));
+  const resolved = all.filter((r) => r.status !== 'pending');
+
+  const list =
+    filter === 'overdue'
+      ? overdue
+      : filter === 'pending'
+        ? pending
+        : filter === 'resolved'
+          ? resolved
+          : all;
+
+  return (
+    <div>
+      <div className="page-head">
+        <div className="ph-left">
+          <div className="ph-crumb">Admin Console / Clearances</div>
+          <h1 className="ph-title">
+            Player <em>Clearances</em>
+          </h1>
+          <p className="ph-desc">
+            Every clearance request across the cohort. Source clubs have 14 days to confirm fees +
+            misconduct. After that window, the Union office can override and approve on the source
+            club's behalf.
+          </p>
+        </div>
+        <div className="ph-actions">
+          {/* Not yet wired to export / the SES reminder pipeline — disabled so the console
+              doesn't advertise capabilities it doesn't have (follow-up). */}
+          <Btn tone="outline" size="sm" icon={Icon.Download} disabled title="Coming soon">
+            Export
+          </Btn>
+          <Btn tone="outline" size="sm" icon={Icon.Mail} disabled title="Coming soon">
+            Remind overdue clubs
+          </Btn>
+        </div>
+      </div>
+
+      <div className="players-stats">
+        <div className="players-stat">
+          <div className="players-stat-l">All requests</div>
+          <div className="players-stat-n">{all.length}</div>
+        </div>
+        <div className="players-stat">
+          <div className="players-stat-l">Pending</div>
+          <div className="players-stat-n" style={{ color: 'var(--gold)' }}>
+            {pending.length}
+          </div>
+        </div>
+        <div className="players-stat">
+          <div className="players-stat-l">Overdue (&gt; 14 days)</div>
+          <div className="players-stat-n" style={{ color: 'var(--coral)' }}>
+            {overdue.length}
+          </div>
+        </div>
+        <div className="players-stat">
+          <div className="players-stat-l">Resolved</div>
+          <div className="players-stat-n" style={{ color: 'var(--green)' }}>
+            {resolved.length}
+          </div>
+        </div>
+      </div>
+
+      <div className="filter-row" style={{ marginTop: 14 }}>
+        {[
+          { k: 'all', l: 'All', n: all.length },
+          { k: 'overdue', l: 'Overdue', n: overdue.length },
+          { k: 'pending', l: 'Pending', n: pending.length },
+          { k: 'resolved', l: 'Resolved', n: resolved.length },
+        ].map((b) => (
+          <button
+            key={b.k}
+            className={`filter-pill ${filter === b.k ? 'active' : ''}`}
+            onClick={() => setFilter(b.k)}
+          >
+            {b.l} <span style={{ opacity: 0.7, marginLeft: 4 }}>{b.n}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="clr-list" style={{ marginTop: 14 }}>
+        {list.length === 0 && (
+          <div
+            style={{
+              padding: '40px 16px',
+              textAlign: 'center',
+              color: 'var(--muted)',
+              fontSize: 13,
+              background: 'var(--white)',
+              border: '1px solid var(--line)',
+              borderRadius: 'var(--radius-lg)',
+            }}
+          >
+            No clearance requests match this filter.
+          </div>
+        )}
+        {list.map((req) => {
+          const overdueReq = clearanceOverdue(req);
+          const elapsed = daysSinceIso(req.requestedAt);
+          const daysLeft = clearanceDaysRemaining(req);
+          const busy = busyId === req.id;
+          return (
+            <div
+              key={req.id}
+              className={`clr-card admin ${overdueReq ? 'overdue' : ''} ${req.status !== 'pending' ? 'resolved' : ''}`}
+            >
+              <div className="clr-card-head">
+                <div>
+                  <div className="clr-eyebrow">
+                    {req.status === 'admin-override'
+                      ? '✓ Union override'
+                      : req.status === 'approved'
+                        ? `✓ Cleared by ${req.fromClubName}`
+                        : overdueReq
+                          ? `⚠ Overdue · ${elapsed} days`
+                          : `Pending · ${daysLeft} days remaining`}
+                  </div>
+                  <div className="clr-name">{req.playerName}</div>
+                  <div className="clr-meta">
+                    ID {req.idNumber || '—'} · {teamLabel[req.team] || req.team || '—'} · Requested{' '}
+                    {fmtDay(req.requestedAt)}
+                  </div>
+                </div>
+                <div className="clr-route">
+                  <div className="clr-route-from">{req.fromClubName}</div>
+                  <Icon.Arrow />
+                  <div className="clr-route-to">{req.toClubName}</div>
+                </div>
+              </div>
+
+              {req.note && <div className="clr-note">"{req.note}"</div>}
+
+              <div className="clr-status-strip">
+                <div className={`clr-status ${req.feesCleared ? 'on' : ''}`}>
+                  <span className="clr-status-dot" />
+                  Fees {req.feesCleared ? 'cleared' : 'pending'}
+                </div>
+                <div className={`clr-status ${req.misconductCleared ? 'on' : ''}`}>
+                  <span className="clr-status-dot" />
+                  Misconduct {req.misconductCleared ? 'cleared' : 'pending'}
+                </div>
+              </div>
+
+              {overdueReq && req.status === 'pending' && (
+                <div className="clr-override">
+                  <div className="clr-override-text">
+                    <div className="clr-override-title">
+                      {req.fromClubName} hasn't actioned this in {elapsed} days.
+                    </div>
+                    <div className="clr-override-sub">
+                      The Union office can override the source club's approval and issue the
+                      clearance directly to {req.toClubName}.
+                    </div>
+                  </div>
+                  <Btn
+                    tone="teal"
+                    icon={Icon.Arrow}
+                    disabled={busy}
+                    onClick={() =>
+                      setConfirm({
+                        title: 'Override and approve clearance?',
+                        body: `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, bypassing ${req.fromClubName}. Both clubs will be notified.`,
+                        onYes: () => {
+                          onOverride(req);
+                          setConfirm(null);
+                        },
+                      })
+                    }
+                  >
+                    {busy ? 'Overriding…' : 'Override & approve'}
+                  </Btn>
+                </div>
+              )}
+
+              {req.status !== 'pending' && (
+                <div className="clr-resolved-bar">
+                  <Pill tone="teal" dot>
+                    {req.status === 'admin-override' ? 'Union override' : 'Cleared by source club'}
+                  </Pill>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      color: 'var(--muted)',
+                      fontFamily: "'Montserrat',sans-serif",
+                    }}
+                  >
+                    {req.clubApprovedAt || req.adminOverrideAt
+                      ? new Date(req.clubApprovedAt || req.adminOverrideAt).toLocaleDateString(
+                          'en-GB',
+                          {
+                            day: 'numeric',
+                            month: 'short',
+                            year: 'numeric',
+                          },
+                        )
+                      : ''}
+                  </span>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {confirm &&
+        createPortal(
+          <div
+            className="fix-confirm"
+            onClick={(e) => e.target === e.currentTarget && setConfirm(null)}
+          >
+            <div className="fix-confirm-box">
+              <div className="fix-confirm-icon go">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M4 12l5 5L20 6"
+                    stroke="currentColor"
+                    strokeWidth="2.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </div>
+              <div className="fix-confirm-title">{confirm.title}</div>
+              <div className="fix-confirm-body">{confirm.body}</div>
+              <div className="fix-confirm-actions">
+                <Btn tone="outline" onClick={() => setConfirm(null)}>
+                  Cancel
+                </Btn>
+                <Btn tone="teal" icon={Icon.Arrow} onClick={confirm.onYes}>
+                  Yes, override
                 </Btn>
               </div>
             </div>

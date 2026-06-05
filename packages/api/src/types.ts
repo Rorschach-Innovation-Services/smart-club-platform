@@ -181,6 +181,17 @@ export interface Series {
   [key: string]: unknown;
 }
 
+/** Stored object metadata for a player's uploaded ID document (parallels club docMeta). */
+export interface PlayerIdDocMeta {
+  objectKey: string;
+  size: number;
+  uploadedAt: string;
+  /** MIME type the file was signed/stored as (ID docs allow image/* or PDF). */
+  contentType?: string;
+}
+
+export type PlayerStatus = 'active' | 'clearance-pending' | 'inactive';
+
 export interface PlayerRegistration {
   naturalKey: string;
   clubId: string;
@@ -193,4 +204,72 @@ export interface PlayerRegistration {
   guardianName?: string;
   consentAt: string;
   createdAt: string;
+  // ── Official Union registration fields ──
+  // All optional: absent on legacy rows and on public-link self-registrations,
+  // which collect only the minimal POPIA-consent set. The in-portal chair form
+  // (POST /clubs/:id/players) populates them.
+  /** 13-digit RSA ID. `dob` is derived from it on the portal path. */
+  idNumber?: string;
+  race?: string;
+  gender?: string;
+  postalAddress?: string;
+  postalCode?: string;
+  /** League key the player is registered for (e.g. a 'Premier Men' catalogue key). */
+  team?: string;
+  district?: string;
+  /** Club the player was last registered for ('—' if first registration). */
+  lastClub?: string;
+  battingHand?: 'Right' | 'Left';
+  bowlingHand?: 'Right' | 'Left';
+  battingType?: string;
+  /** Empty string ⇒ not a bowler. */
+  bowlerType?: string;
+  isAllRounder?: boolean;
+  isWk?: boolean;
+  idDocMeta?: PlayerIdDocMeta;
+  /** Roster lifecycle. Absent ⇒ treated as 'active'. */
+  status?: PlayerStatus;
+  /** Email of the chair/admin who registered the player via the portal. */
+  registeredBy?: string;
+  /** Which path created the row. Absent ⇒ 'link' (back-compat with pre-existing rows). */
+  registeredVia?: 'link' | 'portal';
+  /**
+   * Optimistic-concurrency version for portal/admin edits and the clearance move.
+   * Absent on legacy rows → treated as 0 (same convention as Club.version).
+   */
+  version?: number;
+}
+
+export type ClearanceStatus = 'pending' | 'approved' | 'admin-override';
+
+/**
+ * An inter-club transfer/clearance request. Stored as TWO items written together:
+ * the canonical item under the SOURCE club (sk `CLEARANCE#<id>`, carries the gsi1
+ * entry so admins list every request in one query) and a mirror under the
+ * DESTINATION club (sk `INBOUND_CLEARANCE#<id>`, no gsi1) so each club reads only
+ * its own partition — never a tenant-wide scan. The source club confirms fees +
+ * misconduct within 14 days of `requestedAt`; after that the union office may
+ * override and approve. "Overdue" is computed from `requestedAt`, never stored.
+ */
+export interface PlayerClearance {
+  id: string;
+  playerNaturalKey: string;
+  /** Denormalized "First Last" for display + audit (survives the player move). */
+  playerName: string;
+  idNumber?: string;
+  team?: string;
+  fromClubId: string;
+  toClubId: string;
+  fromClubName: string;
+  toClubName: string;
+  requestedAt: string;
+  /** Email of the destination-club rep who initiated the request. */
+  requestedBy?: string;
+  note?: string;
+  feesCleared: boolean;
+  misconductCleared: boolean;
+  status: ClearanceStatus;
+  clubApprovedAt?: string | null;
+  adminOverrideAt?: string | null;
+  version: number;
 }
