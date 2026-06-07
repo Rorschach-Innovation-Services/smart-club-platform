@@ -2253,9 +2253,11 @@ export function AdminSettingsView({
   orgName,
   submissionDeadline,
   support,
+  registrationAccess = 'open',
   onSaveOrg,
   onUpdateDeadline,
   onUpdateSupport,
+  onUpdateRegistrationAccess,
   onManageTeam,
   toast,
 }) {
@@ -2382,6 +2384,34 @@ export function AdminSettingsView({
             </div>
             <Btn tone="outline" size="sm" icon={Icon.Users} onClick={() => onManageTeam?.()}>
               Manage team
+            </Btn>
+          </div>
+        </Card>
+
+        <Card
+          title="Player registration access"
+          sub="When locked, a club's Players & Clearances pages stay closed until the Union office marks it paid."
+        >
+          <div style={rowStyle}>
+            <div>
+              <div style={valStyle}>
+                {registrationAccess === 'paid' ? 'Locked until paid' : 'Open to all clubs'}
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                {registrationAccess === 'paid'
+                  ? 'Only paid-up clubs can register players or run clearances.'
+                  : 'Every club can register players and run clearances immediately.'}
+              </div>
+            </div>
+            <Btn
+              tone={registrationAccess === 'paid' ? 'outline' : 'teal'}
+              size="sm"
+              icon={Icon.Shield}
+              onClick={() =>
+                onUpdateRegistrationAccess?.(registrationAccess === 'paid' ? 'open' : 'paid')
+              }
+            >
+              {registrationAccess === 'paid' ? 'Open to all clubs' : 'Lock until paid'}
             </Btn>
           </div>
         </Card>

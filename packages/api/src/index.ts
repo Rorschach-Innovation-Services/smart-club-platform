@@ -124,6 +124,8 @@ app.get('/tenant', async (c) => {
     branding: config.branding,
     submissionDeadline: config.submissionDeadline,
     leagues: config.leagues ?? [],
+    // Tenant-wide Players/Clearances gating policy — the client gates those pages on it.
+    registrationAccess: config.registrationAccess ?? 'open',
   });
 });
 
@@ -148,6 +150,11 @@ app.post('/register/:clubId', async (c) => {
   if (!resolved || resolved.clubId !== c.req.param('clubId')) {
     throw new HttpError(404, 'invalid registration link');
   }
+  // Tenant gate: a locked, unpaid club can't take public registrations either (so the
+  // self-registration link can't bypass the lock the in-portal register enforces).
+  const regClub = await repo.getClub(resolved.tenant, resolved.clubId);
+  if (!regClub) throw new HttpError(404, 'club not found');
+  assertRegistrationUnlocked(await repo.getTenantConfig(resolved.tenant), regClub);
   const body = await c.req.json<Partial<PlayerRegistration>>();
   if (!body.firstName || !body.lastName || !body.dob) {
     throw new HttpError(400, 'firstName, lastName and dob are required');
@@ -225,6 +232,19 @@ function dobFromSaId(idNumber: string): string | null {
 
 const MAX_ID_DOC_BYTES = 5 * 1024 * 1024; // 5 MB — ID photos/scans
 const ID_DOC_TYPES = new Set(['image/jpeg', 'image/png', 'application/pdf']);
+
+/**
+ * Enforce the tenant-wide registration gate: when `registrationAccess === 'paid'`, a club may only
+ * gain players (in-portal register, public reg-link, or a NEW clearance request into it) once it is
+ * `paid`. 'open' (the default, absent on legacy tenants) never blocks. The frontend mirrors this in
+ * `registrationUnlocked`. Deliberately NOT applied to issuing/overriding an already-requested
+ * clearance, so an in-flight transfer never strands — only new additions to an unpaid club block.
+ */
+function assertRegistrationUnlocked(cfg: TenantConfig | null, club: Club): void {
+  if ((cfg?.registrationAccess ?? 'open') === 'paid' && !club.paid) {
+    throw new HttpError(403, 'this club must be paid up before players can be added');
+  }
+}
 
 // ───────────────────── Authenticated routes ─────────────────────
 
@@ -382,6 +402,12 @@ app.post('/clubs/:id/players', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   assertClubAccess(ra, id);
+  // Authorization-style gate first (before validating the payload): a locked, unpaid club
+  // can't take new players. cfg is also reused for league validation below — one read each.
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  const club = await repo.getClub(ra.tenant, id);
+  if (!club) throw new HttpError(404, 'club not found');
+  assertRegistrationUnlocked(cfg, club);
   const body = await c.req.json<Partial<PlayerRegistration>>();
   const required: Array<keyof PlayerRegistration> = [
     'firstName',
@@ -398,7 +424,6 @@ app.post('/clubs/:id/players', async (c) => {
   const dob = dobFromSaId(body.idNumber!);
   if (!dob) throw new HttpError(400, 'idNumber must be a valid 13-digit RSA ID');
   // Team must be a real league key in the tenant catalogue.
-  const cfg = await repo.getTenantConfig(ra.tenant);
   const leagueKeys = new Set((cfg?.leagues ?? []).map((l) => l.key));
   if (leagueKeys.size && !leagueKeys.has(body.team!)) {
     throw new HttpError(400, 'unknown team/league');
@@ -562,6 +587,9 @@ app.post('/clubs/:id/clearances', async (c) => {
     repo.getClub(ra.tenant, toClubId),
   ]);
   if (!fromClub || !toClub) throw new HttpError(404, 'club not found');
+  // Registration gate: a locked, unpaid DESTINATION can't request new players in.
+  // (Issuing an already-pending clearance is intentionally NOT gated — see PATCH below.)
+  assertRegistrationUnlocked(await repo.getTenantConfig(ra.tenant), toClub);
   // Resolve the player at the source club — by naturalKey if given, else by ID number.
   // Only the matched player is read; the rest of the source roster is never exposed.
   let player = null;

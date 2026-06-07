@@ -1769,3 +1769,149 @@ describe('Player clearances (inter-club transfer + move)', () => {
     assert.equal(src.filter((x) => x.playerNaturalKey === 'racer').length, 1);
   });
 });
+
+describe('registrationAccess gate (lock Players/Clearances until paid)', () => {
+  // Runs against a THROWAWAY tenant so flipping registrationAccess can't leak into other
+  // suites (no shared-config mutation, no after()-restore, no positional coupling).
+  const GATE = 'gatetenant';
+  const gHeaders = (auth: string) => ({
+    'x-tenant': GATE,
+    'x-dev-auth': auth,
+    'content-type': 'application/json',
+  });
+  const REP_SRC = devAuth([{ tenantId: GATE, role: 'rep', clubIds: ['gate-src'] }]);
+  const REP_DST = devAuth([{ tenantId: GATE, role: 'rep', clubIds: ['gate-dst'] }]);
+  const REP_DSTP = devAuth([{ tenantId: GATE, role: 'rep', clubIds: ['gate-dst-paid'] }]);
+  let teamKey: string;
+
+  const club = (id: string, paid: boolean) => ({
+    id,
+    name: id,
+    district: 'Test District',
+    sub: 's',
+    chair: 'Chair',
+    affiliation: 'not_started' as const,
+    paid,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#abcdef',
+    ground: {},
+    leagues: [],
+    version: 1,
+  });
+  const player = (clubId: string, nk: string, id13: string) => ({
+    naturalKey: nk,
+    clubId,
+    firstName: 'Gate',
+    lastName: nk,
+    dob: '1995-01-01',
+    idNumber: id13,
+    isMinor: false,
+    status: 'active' as const,
+    consentAt: '2026-05-01T00:00:00.000Z',
+    createdAt: '2026-05-01T00:00:00.000Z',
+  });
+
+  before(async () => {
+    // Stand up a separate tenant locked to 'paid', reusing dolphins' league catalogue.
+    const dolCfg = (await repo.getTenantConfig('dolphins'))!;
+    teamKey = (dolCfg.leagues ?? [])[0]?.key ?? '';
+    assert.ok(teamKey, 'expected a seeded league catalogue to derive a team key from');
+    await repo.putTenantConfig({ ...dolCfg, tenant: GATE, registrationAccess: 'paid' });
+    await repo.createClub(GATE, club('gate-src', true));
+    await repo.createClub(GATE, club('gate-dst', false)); // unpaid → locked destination
+    await repo.createClub(GATE, club('gate-dst-paid', true));
+    await repo.createPlayer(GATE, player('gate-src', 'gp1', '9001011111111'));
+    await repo.createPlayer(GATE, player('gate-src', 'gp2', '9001012222222'));
+  });
+
+  const regBody = (idNumber: string) => ({
+    firstName: 'New',
+    lastName: 'Player',
+    idNumber,
+    race: 'African',
+    gender: 'Male',
+    cell: '0820000000',
+    team: teamKey,
+    district: 'Ethekwini',
+  });
+
+  test('authed register is blocked at an unpaid club (403)', async () => {
+    const res = await app.request('/clubs/gate-dst/players', {
+      method: 'POST',
+      headers: gHeaders(REP_DST),
+      body: JSON.stringify(regBody('9203035034089')),
+    });
+    assert.equal(res.status, 403);
+  });
+
+  test('authed register succeeds at a paid club (proves it is the gate, not a block)', async () => {
+    const res = await app.request('/clubs/gate-src/players', {
+      method: 'POST',
+      headers: gHeaders(REP_SRC),
+      body: JSON.stringify(regBody('9203035034089')),
+    });
+    assert.equal(res.status, 201);
+  });
+
+  test('public registration link is blocked at an unpaid club (403)', async () => {
+    await repo.putToken('gate-tok', GATE, 'gate-dst', '2026-06-01T00:00:00.000Z');
+    const res = await app.request('/register/gate-dst?t=gate-tok', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-tenant': GATE },
+      body: JSON.stringify({ firstName: 'Pub', lastName: 'Reg', dob: '1995-01-01' }),
+    });
+    assert.equal(res.status, 403);
+  });
+
+  test('clearance request into an unpaid destination is blocked (403)', async () => {
+    const res = await app.request('/clubs/gate-dst/clearances', {
+      method: 'POST',
+      headers: gHeaders(REP_DST),
+      body: JSON.stringify({ fromClubId: 'gate-src', playerNaturalKey: 'gp1' }),
+    });
+    assert.equal(res.status, 403);
+  });
+
+  test('clearance request into a paid destination succeeds (201)', async () => {
+    const res = await app.request('/clubs/gate-dst-paid/clearances', {
+      method: 'POST',
+      headers: gHeaders(REP_DSTP),
+      body: JSON.stringify({ fromClubId: 'gate-src', playerNaturalKey: 'gp1' }),
+    });
+    assert.equal(res.status, 201);
+  });
+
+  test('carve-out: an already-pending clearance can still be issued into an unpaid destination', async () => {
+    // Seed a request straight to the repo (bypassing the create gate), simulating one made
+    // before the destination was locked, then issue it from the source.
+    await repo.createClearance(GATE, {
+      id: 'gate-inflight',
+      playerNaturalKey: 'gp2',
+      playerName: 'Gate gp2',
+      fromClubId: 'gate-src',
+      toClubId: 'gate-dst', // unpaid/locked
+      fromClubName: 'gate-src',
+      toClubName: 'gate-dst',
+      requestedAt: new Date().toISOString(),
+      feesCleared: false,
+      misconductCleared: false,
+      status: 'pending',
+      clubApprovedAt: null,
+      adminOverrideAt: null,
+      version: 0,
+    });
+    const res = await app.request('/clubs/gate-src/clearances/gate-inflight', {
+      method: 'PATCH',
+      headers: gHeaders(REP_SRC),
+      body: JSON.stringify({ feesCleared: true, misconductCleared: true, action: 'issue' }),
+    });
+    assert.equal(res.status, 200);
+    const moved = await repo.getPlayer(GATE, 'gate-dst', 'gp2');
+    assert.equal(moved?.clubId, 'gate-dst'); // landed in the unpaid club — carve-out holds
+  });
+});

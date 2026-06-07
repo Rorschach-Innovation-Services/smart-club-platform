@@ -616,6 +616,13 @@ export function journeyUnlocked(club) {
     : affiliationSubmitted(club);
 }
 
+// Tenant-wide gate for the Players + Clearances pages, mirroring the backend
+// `assertRegistrationUnlocked`. 'open' (default) is always unlocked; 'paid' requires the
+// club to be marked paid. Keep in sync with packages/api/src/index.ts.
+export function registrationUnlocked(club, tenantConfig) {
+  return (tenantConfig?.registrationAccess ?? 'open') === 'paid' ? !!club?.paid : true;
+}
+
 export function overallProgress(club) {
   // 5 weighted phases: 20% each
   const p1 = affiliationSubmitted(club) ? 100 : club.affiliation === 'in_progress' ? 40 : 0;

@@ -54,6 +54,12 @@ export interface TenantConfig {
   };
   submissionDeadline: string;
   knownClubs: unknown[];
+  /**
+   * Tenant-wide policy for the Players + Clearances pages. 'open' (default, absent on legacy
+   * tenants) ⇒ always available. 'paid' ⇒ a club can only add players (in-portal register,
+   * public reg-link, or initiate a clearance) once it is marked `paid`. Admin-toggled in Settings.
+   */
+  registrationAccess?: 'open' | 'paid';
   /** Admin-managed league catalogue clubs opt into. Empty for a fresh tenant. */
   leagues?: League[];
   /** Optional per-tenant required-docs override; falls back to shared default. */

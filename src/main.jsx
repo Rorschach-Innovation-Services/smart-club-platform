@@ -25,6 +25,7 @@ import {
   docCompletion,
   affiliationSubmitted,
   journeyUnlocked,
+  registrationUnlocked,
   computeMarkCompliance,
   computeRevertCompliance,
   clearanceOverdue,
@@ -345,7 +346,11 @@ function AuthedApp({ tenantConfig }) {
   const dataErrorObj =
     role === 'admin' ? clubsQuery.error : repClubQueries.find((q) => q.isError)?.error;
   const clubNotFound = dataErrorObj instanceof ApiError && dataErrorObj.status === 404;
-  if (dataLoading || seriesQuery.isLoading) return <Splash message="Loading your clubs…" />;
+  // Wait for `me` too so `onboardingSeen` is known before the club portal's auto-open
+  // onboarding effect runs — otherwise it races an unresolved /me, reads an empty map, and
+  // re-opens the walkthrough every visit even after it's been dismissed/completed.
+  if (dataLoading || seriesQuery.isLoading || meQuery.isLoading)
+    return <Splash message="Loading your clubs…" />;
   if (dataError || seriesQuery.isError)
     return (
       <Splash
@@ -429,6 +434,15 @@ function AuthedApp({ tenantConfig }) {
   }
   function setSubmissionDeadline(iso) {
     withToast(() => api.putTenantConfig({ submissionDeadline: iso }), 'Could not save deadline')
+      .then(() => invalidate(qk.tenant()))
+      .catch(() => {});
+  }
+  // Tenant-wide policy: 'paid' locks Players/Clearances until a club is paid; 'open' = always on.
+  function setRegistrationAccess(mode) {
+    withToast(
+      () => api.putTenantConfig({ registrationAccess: mode }),
+      'Could not save access policy',
+    )
       .then(() => invalidate(qk.tenant()))
       .catch(() => {});
   }
@@ -532,6 +546,7 @@ function AuthedApp({ tenantConfig }) {
                   setShowHelp,
                   submissionDeadline,
                   setSubmissionDeadline,
+                  setRegistrationAccess,
                   setSupportContact,
                   saveOrgName,
                   updateSeries,
@@ -577,6 +592,7 @@ function AuthedApp({ tenantConfig }) {
                 setShowHelp,
                 submissionDeadline,
                 setSubmissionDeadline,
+                setRegistrationAccess,
                 setSupportContact,
                 saveOrgName,
                 updateSeries,
@@ -629,6 +645,7 @@ function Shell({
   setShowHelp,
   submissionDeadline,
   setSubmissionDeadline,
+  setRegistrationAccess,
   setSupportContact,
   saveOrgName,
   updateSeries,
@@ -716,11 +733,22 @@ function Shell({
 
   // ── Auto-open onboarding the first time a club portal is entered ──
   useEffect(() => {
-    if (role === 'club' && activeClub && !affiliationSubmitted(activeClub) && !onboarded[clubId]) {
+    // Only for a club the rep actually owns — never on a foreign/cross-club URL (which
+    // renders the access-denied splash; onboarding must not pop over it for the wrong club).
+    const ownsClub = clubs.some((c) => c.id === clubId);
+    if (
+      role === 'club' &&
+      ownsClub &&
+      activeClub &&
+      !affiliationSubmitted(activeClub) &&
+      !onboarded[clubId]
+    ) {
       const t = setTimeout(() => setShowOnboarding(true), 350);
       return () => clearTimeout(t);
     }
-  }, [role, clubId]);
+    // `onboarded[clubId]` in deps: a later /me refetch that flips it to seen re-runs this
+    // and clears any pending open, so a dismissed walkthrough never re-pops.
+  }, [role, clubId, onboarded[clubId]]);
 
   // ── Navigation helpers ──
   function switchProfile() {
@@ -1068,6 +1096,10 @@ function Shell({
   const myPendingClearances = myIncomingClearances.length;
   const myOverdueClearances = myIncomingClearances.filter((r) => clearanceOverdue(r)).length;
   const myPlayerCount = players.length;
+  // Tenant policy may lock the Players/Clearances pages until the club is paid. When locked,
+  // the nav entries drop their count badge + use a muted dot, and the views render ComingSoon.
+  const regLocked =
+    role === 'club' && activeClub && !registrationUnlocked(activeClub, tenantConfig);
 
   const adminNav = [
     { v: 'dashboard', label: 'Cohort Dashboard', icon: Icon.Dashboard },
@@ -1132,15 +1164,21 @@ function Shell({
             v: 'players',
             label: 'Players',
             icon: Icon.Clubs,
-            num: myPlayerCount || undefined,
-            dot: myPlayerCount ? 'teal' : 'muted',
+            num: regLocked ? undefined : myPlayerCount || undefined,
+            dot: regLocked ? 'muted' : myPlayerCount ? 'teal' : 'muted',
           },
           {
             v: 'clearances',
             label: 'Clearances',
             icon: Icon.Shield,
-            num: myPendingClearances || undefined,
-            dot: myOverdueClearances ? 'coral' : myPendingClearances ? 'gold' : 'muted',
+            num: regLocked ? undefined : myPendingClearances || undefined,
+            dot: regLocked
+              ? 'muted'
+              : myOverdueClearances
+                ? 'coral'
+                : myPendingClearances
+                  ? 'gold'
+                  : 'muted',
           },
           {
             v: 'fixtures',
@@ -1304,9 +1342,11 @@ function Shell({
             orgName={orgName}
             submissionDeadline={submissionDeadline}
             support={branding?.copy?.support}
+            registrationAccess={tenantConfig?.registrationAccess ?? 'open'}
             onSaveOrg={saveOrgName}
             onUpdateDeadline={setSubmissionDeadline}
             onUpdateSupport={setSupportContact}
+            onUpdateRegistrationAccess={setRegistrationAccess}
             onManageTeam={() => gotoAdminView('team')}
             toast={toastShow}
           />
@@ -1350,7 +1390,9 @@ function Shell({
           />
         );
       }
-      if (view === 'players')
+      if (view === 'players') {
+        if (regLocked)
+          return <ComingSoon title="Player Roster" phase="03" unlocked={false} reason="paid" />;
         return (
           <ClubPlayersView
             club={activeClub}
@@ -1360,7 +1402,10 @@ function Shell({
             onOpenRegister={() => setShowRegisterPlayer(true)}
           />
         );
-      if (view === 'clearances')
+      }
+      if (view === 'clearances') {
+        if (regLocked)
+          return <ComingSoon title="Player Clearances" phase="03" unlocked={false} reason="paid" />;
         return (
           <ClubClearancesView
             club={activeClub}
@@ -1373,8 +1418,35 @@ function Shell({
             busyId={busyClearanceId}
           />
         );
+      }
     }
     return null;
+  }
+
+  // Explicit cross-club denial: a rep on a URL for a club not in their membership. Returned
+  // here — after all hooks, before any chrome — so it's a clean FULL-SCREEN denial (not the
+  // rep's own header/sidebar wrapped around an access-denied panel). Safe from a loading
+  // false-positive: AuthedApp only renders Shell past its dataLoading gate, and a rep's
+  // `clubs` come from repClubQueries keyed on membership.clubIds, so only a genuinely-foreign
+  // clubId fails this check. Admins are unaffected (role-scoped).
+  if (role === 'club' && clubId && !clubs.some((c) => c.id === clubId)) {
+    const ownClub = membership?.clubIds?.[0];
+    return (
+      <Splash
+        message="You don't have access to that club."
+        action={
+          ownClub ? (
+            <Btn tone="ink" size="sm" onClick={() => navigate(`/club/${ownClub}`)}>
+              Go to my club
+            </Btn>
+          ) : (
+            <Btn tone="ink" size="sm" onClick={signOutUser}>
+              Sign out
+            </Btn>
+          )
+        }
+      />
+    );
   }
 
   const userName = role === 'admin' ? userEmail || 'Admin' : activeClub.chair;
@@ -1536,7 +1608,13 @@ function Shell({
         <Onboarding
           club={activeClub}
           submissionDeadline={submissionDeadline}
-          onClose={() => setShowOnboarding(false)}
+          onClose={() => {
+            // Dismissing also marks the walkthrough seen (persisted via setOnboarded →
+            // patchMe), so it doesn't re-auto-open on every visit. The Home "Walkthrough"
+            // button still lets the chair replay it intentionally.
+            setOnboarded((o) => ({ ...o, [clubId]: true }));
+            setShowOnboarding(false);
+          }}
           onComplete={(contact) => {
             setOnboarded((o) => ({ ...o, [clubId]: true }));
             setShowOnboarding(false);
@@ -2000,14 +2078,25 @@ function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
 }
 
 /* ─── Coming soon placeholder ─── */
-function ComingSoon({ title, phase, unlocked, eta }) {
-  const headline = unlocked ? 'Coming soon' : 'This phase unlocks after affiliation';
+function ComingSoon({ title, phase, unlocked, eta, reason }) {
+  // `reason="paid"` is the tenant registration-gate variant: the page is built and ready,
+  // it just unlocks once the club's affiliation fee is paid (vs the generic phase-locked copy).
+  const paidGate = reason === 'paid';
+  const headline = unlocked
+    ? 'Coming soon'
+    : paidGate
+      ? 'Unlocks once your club is paid up'
+      : 'This phase unlocks after affiliation';
   const detailDesc = unlocked
     ? `Phase ${phase} of the Smart Club Integration journey. Your affiliation is in — this module is in final development and will arrive shortly.`
-    : `Phase ${phase} of the Smart Club Integration journey. Activates automatically once your club has completed affiliation and uploaded compliance documents.`;
+    : paidGate
+      ? `Phase ${phase} of the Smart Club Integration journey. Player registration and clearances open as soon as the Union office records your affiliation fee as paid.`
+      : `Phase ${phase} of the Smart Club Integration journey. Activates automatically once your club has completed affiliation and uploaded compliance documents.`;
   const detailBody = unlocked
     ? "We're putting the finishing touches on this module. You'll be notified by email and on your home page the moment it's ready — no action needed from your side."
-    : 'Once your club has been confirmed by the Union office, this module activates with live data — fixtures, player registration, scoring, and clinical management — all sourced from the Medicoach platform.';
+    : paidGate
+      ? "Once your club's affiliation fee reflects as paid with the Union office, this page unlocks automatically — register players and manage clearances from here."
+      : 'Once your club has been confirmed by the Union office, this module activates with live data — fixtures, player registration, scoring, and clinical management — all sourced from the Medicoach platform.';
   const ring = unlocked ? 'var(--teal)' : 'var(--paper3)';
   const ringBg = unlocked ? 'var(--teal-pale)' : 'var(--paper)';
   const ringFg = unlocked ? 'var(--teal-deep)' : 'var(--muted-2)';
