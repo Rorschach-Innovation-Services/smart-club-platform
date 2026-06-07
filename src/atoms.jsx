@@ -416,7 +416,7 @@ export function Choice({ value, onChange, options }) {
 }
 
 /* Money — currency input with prefix and value formatting */
-export function MoneyInput({ value, onChange, currency = 'R' }) {
+export function MoneyInput({ value, onChange, currency = 'R', suffix = '/ member' }) {
   return (
     <div className="money-input">
       <span className="money-currency">{currency}</span>
@@ -429,7 +429,7 @@ export function MoneyInput({ value, onChange, currency = 'R' }) {
         value={value ?? ''}
         onChange={(e) => onChange(e.target.value === '' ? '' : parseFloat(e.target.value) || 0)}
       />
-      <span className="money-suffix">/ member</span>
+      <span className="money-suffix">{suffix}</span>
     </div>
   );
 }
@@ -550,6 +550,12 @@ export function scoreCQI(answers) {
   for (const cat of CQI_STRUCTURE) {
     let earned = 0,
       possible = 0;
+    // Representation 'count' questions score on each race's SHARE of the category
+    // total (head-count ÷ total counted), so the diversity weighting is preserved
+    // even though the input is now a raw count rather than a percentage.
+    const countTotal = cat.questions
+      .filter((q) => q.kind === 'count')
+      .reduce((s, q) => s + (parseFloat(answers[q.key]) || 0), 0);
     for (const q of cat.questions) {
       possible += q.pts;
       const v = answers[q.key];
@@ -559,13 +565,12 @@ export function scoreCQI(answers) {
         const max = q.max || 10;
         const num = Math.max(0, Math.min(max, parseFloat(v) || 0));
         earned += (num / max) * q.pts;
-      } else if (q.kind === 'pct') {
-        // Representation: fraction of points from a club's diversity
-        // Score = pts * (% / 100) — encouraging representation across cats
-        const num = Math.max(0, Math.min(100, parseFloat(v) || 0));
-        // Weighted toward Black African + Generic Black as per spreadsheet
+      } else if (q.kind === 'count') {
+        // Representation: each race earns points in proportion to its share of the
+        // club's counted players. Black African is weighted 1.5× per the spreadsheet.
+        const share = countTotal > 0 ? (parseFloat(v) || 0) / countTotal : 0;
         const weight = q.key === 'pctBA' ? 1.5 : 1.0;
-        earned += Math.min(q.pts, (num / 100) * q.pts * weight);
+        earned += Math.min(q.pts, share * q.pts * weight);
       } else if (q.kind === 'choice') {
         // Any option selected = full points
         if (v) earned += q.pts;
@@ -674,26 +679,29 @@ export function useToast() {
   return [show, node];
 }
 
-Object.assign(window, {
-  Icon,
-  Pill,
-  Btn,
-  Card,
-  KPI,
-  ProgressBar,
-  ProgChip,
-  ClubAvatar,
-  ClubNameCell,
-  YN,
-  NumStep,
-  NumSlider,
-  Choice,
-  MoneyInput,
-  CountUp,
-  statusFor,
-  affPill,
-  cqiBand,
-  scoreCQI,
-  useToast,
-  useEscapeClose,
-});
+// Expose atoms on window for the legacy inline prototype; guarded so importing
+// this module in a non-browser context (tests, SSR) doesn't throw.
+if (typeof window !== 'undefined')
+  Object.assign(window, {
+    Icon,
+    Pill,
+    Btn,
+    Card,
+    KPI,
+    ProgressBar,
+    ProgChip,
+    ClubAvatar,
+    ClubNameCell,
+    YN,
+    NumStep,
+    NumSlider,
+    Choice,
+    MoneyInput,
+    CountUp,
+    statusFor,
+    affPill,
+    cqiBand,
+    scoreCQI,
+    useToast,
+    useEscapeClose,
+  });

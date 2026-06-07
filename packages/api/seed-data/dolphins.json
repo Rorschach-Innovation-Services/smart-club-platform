@@ -100,7 +100,10 @@
         "constitution": true,
         "agm": true,
         "financials": true,
-        "exco": true
+        "exco": true,
+        "codeOfConduct": true,
+        "clubInventory": true,
+        "safeguarding": true
       },
       "players": 57,
       "teams": 3,
@@ -128,7 +131,10 @@
         "constitution": true,
         "agm": true,
         "financials": true,
-        "exco": false
+        "exco": false,
+        "codeOfConduct": false,
+        "clubInventory": false,
+        "safeguarding": false
       },
       "players": 72,
       "teams": 6,
@@ -156,7 +162,10 @@
         "constitution": true,
         "agm": true,
         "financials": false,
-        "exco": true
+        "exco": true,
+        "codeOfConduct": false,
+        "clubInventory": false,
+        "safeguarding": false
       },
       "players": 114,
       "teams": 10,
@@ -184,7 +193,10 @@
         "constitution": true,
         "agm": false,
         "financials": false,
-        "exco": true
+        "exco": true,
+        "codeOfConduct": false,
+        "clubInventory": false,
+        "safeguarding": false
       },
       "players": 58,
       "teams": 6,
@@ -212,7 +224,10 @@
         "constitution": true,
         "agm": true,
         "financials": true,
-        "exco": true
+        "exco": true,
+        "codeOfConduct": true,
+        "clubInventory": true,
+        "safeguarding": true
       },
       "players": 88,
       "teams": 9,
@@ -240,7 +255,10 @@
         "constitution": false,
         "agm": false,
         "financials": false,
-        "exco": false
+        "exco": false,
+        "codeOfConduct": false,
+        "clubInventory": false,
+        "safeguarding": false
       },
       "players": 0,
       "teams": 3,
@@ -268,7 +286,10 @@
         "constitution": true,
         "agm": false,
         "financials": true,
-        "exco": true
+        "exco": true,
+        "codeOfConduct": false,
+        "clubInventory": false,
+        "safeguarding": false
       },
       "players": 92,
       "teams": 9,
@@ -296,7 +317,10 @@
         "constitution": true,
         "agm": true,
         "financials": false,
-        "exco": true
+        "exco": true,
+        "codeOfConduct": false,
+        "clubInventory": false,
+        "safeguarding": false
       },
       "players": 64,
       "teams": 5,
@@ -324,7 +348,10 @@
         "constitution": false,
         "agm": false,
         "financials": false,
-        "exco": false
+        "exco": false,
+        "codeOfConduct": false,
+        "clubInventory": false,
+        "safeguarding": false
       },
       "players": 0,
       "teams": 6,
@@ -352,7 +379,10 @@
         "constitution": true,
         "agm": false,
         "financials": false,
-        "exco": false
+        "exco": false,
+        "codeOfConduct": false,
+        "clubInventory": false,
+        "safeguarding": false
       },
       "players": 21,
       "teams": 1,
@@ -380,7 +410,10 @@
         "constitution": true,
         "agm": true,
         "financials": true,
-        "exco": true
+        "exco": true,
+        "codeOfConduct": true,
+        "clubInventory": true,
+        "safeguarding": true
       },
       "players": 96,
       "teams": 10,
@@ -408,7 +441,10 @@
         "constitution": true,
         "agm": true,
         "financials": false,
-        "exco": false
+        "exco": false,
+        "codeOfConduct": false,
+        "clubInventory": false,
+        "safeguarding": false
       },
       "players": 38,
       "teams": 5,
@@ -436,7 +472,10 @@
         "constitution": true,
         "agm": false,
         "financials": true,
-        "exco": false
+        "exco": false,
+        "codeOfConduct": false,
+        "clubInventory": false,
+        "safeguarding": false
       },
       "players": 28,
       "teams": 2,
@@ -464,7 +503,10 @@
         "constitution": false,
         "agm": false,
         "financials": false,
-        "exco": false
+        "exco": false,
+        "codeOfConduct": false,
+        "clubInventory": false,
+        "safeguarding": false
       },
       "players": 0,
       "teams": 1,

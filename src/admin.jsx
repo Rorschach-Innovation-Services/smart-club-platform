@@ -10,6 +10,8 @@ import {
   cohortStats,
   docFileMeta,
   docCompletion,
+  docsUploadedCount,
+  docsAllComplete,
   overallProgress,
   affiliationSubmitted,
   journeyUnlocked,
@@ -1855,8 +1857,7 @@ export function AdminDashboard({
   // Open a bcc mail draft to the chairs of every club still missing a submission
   // (affiliation not submitted, no CQI, or any compliance doc outstanding).
   function remindBulk() {
-    const behind = (c) =>
-      !affiliationSubmitted(c) || c.cqi === 0 || !Object.values(c.docs).every(Boolean);
+    const behind = (c) => !affiliationSubmitted(c) || c.cqi === 0 || !docsAllComplete(c);
     openBccReminder({
       emails: clubs.filter(behind).map((c) => c.exco?.chair?.email),
       subject: 'Smart Club Integration — outstanding submissions',
@@ -1915,7 +1916,7 @@ export function AdminDashboard({
       num: '05',
       label: 'Compliance Docs',
       tone: 'gold',
-      done: clubs.filter((c) => Object.values(c.docs).every((v) => v)).length,
+      done: clubs.filter((c) => docsAllComplete(c)).length,
       view: 'documents',
     },
   ];
@@ -2482,7 +2483,7 @@ function ClubInsights({ clubs, submissionDeadline }) {
 
   // Resources required — "behind" is keyed on the form fact, not payment.
   const notAffiliated = clubs.filter((c) => !affiliationSubmitted(c)).length;
-  const incompleteDocs = clubs.filter((c) => !Object.values(c.docs).every((v) => v)).length;
+  const incompleteDocs = clubs.filter((c) => !docsAllComplete(c)).length;
   const noCqi = clubs.filter((c) => c.cqi === 0).length;
   const totalReminders = notAffiliated + noCqi;
 
@@ -2617,14 +2618,9 @@ export function AdminClubsList({
           c.chair.toLowerCase().includes(q.toLowerCase()),
       );
     if (filter === 'complete')
-      cs = cs.filter(
-        (c) => c.affiliation === 'complete' && Object.values(c.docs).every((v) => v) && c.cqi > 0,
-      );
+      cs = cs.filter((c) => c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0);
     if (filter === 'incomplete')
-      cs = cs.filter(
-        (c) =>
-          !(c.affiliation === 'complete' && Object.values(c.docs).every((v) => v) && c.cqi > 0),
-      );
+      cs = cs.filter((c) => !(c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0));
     if (filter === 'not_paid') cs = cs.filter((c) => !c.paid);
     if (filter === 'no_cqi') cs = cs.filter((c) => c.cqi === 0);
     return cs;
@@ -2633,12 +2629,10 @@ export function AdminClubsList({
   const counts = useMemoA(
     () => ({
       all: clubs.length,
-      complete: clubs.filter(
-        (c) => c.affiliation === 'complete' && Object.values(c.docs).every((v) => v) && c.cqi > 0,
-      ).length,
+      complete: clubs.filter((c) => c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0)
+        .length,
       incomplete: clubs.filter(
-        (c) =>
-          !(c.affiliation === 'complete' && Object.values(c.docs).every((v) => v) && c.cqi > 0),
+        (c) => !(c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0),
       ).length,
       not_paid: clubs.filter((c) => !c.paid).length,
       no_cqi: clubs.filter((c) => c.cqi === 0).length,
@@ -4790,7 +4784,7 @@ export function AdminClubDetail({
       t: 'Compliance',
       done: dc === 100,
       val: dc,
-      detail: `${Object.values(club.docs).filter((v) => v).length} of 4 docs uploaded`,
+      detail: `${docsUploadedCount(club)} of ${REQUIRED_DOCS.length} docs uploaded`,
     },
   ];
 
@@ -4862,7 +4856,7 @@ export function AdminClubDetail({
         <KPI
           tone="gold"
           label="Documents"
-          num={`${Object.values(club.docs).filter((v) => v).length}/4`}
+          num={`${docsUploadedCount(club)}/${REQUIRED_DOCS.length}`}
           sub="compliance docs"
         />
         <KPI
@@ -5331,7 +5325,7 @@ export function AdminClubDetail({
       {showCompliant && (
         <ConfirmModal
           title="Mark all documents compliant?"
-          body="This overrides the four compliance documents as present for this club — without an uploaded file on record. Use only when you've verified compliance offline."
+          body="This overrides the compliance documents as present for this club — without an uploaded file on record. Use only when you've verified compliance offline."
           confirmLabel="Mark compliant"
           onConfirm={() => {
             setShowCompliant(false);
@@ -5396,7 +5390,6 @@ function CqiViewModal({ club, onClose }) {
     const v = answers[q.key];
     if (v == null || v === '') return '—';
     if (q.kind === 'yn') return v ? 'Yes' : 'No';
-    if (q.kind === 'pct') return `${v}%`;
     if (q.kind === 'money') return `${q.currency || 'R'} ${Number(v).toLocaleString()}`;
     return String(v);
   };

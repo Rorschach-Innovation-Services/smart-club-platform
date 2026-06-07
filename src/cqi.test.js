@@ -1,0 +1,59 @@
+import { describe, it, expect } from 'vitest';
+import { scoreCQI } from './atoms.jsx';
+import { REQUIRED_DOCS, docsUploadedCount, docsAllComplete, docCompletion } from './data.jsx';
+
+// Representation moved from percentages to raw head-counts (slider 0–15). Scoring
+// now derives each race's SHARE of the counted total and keeps the Black African
+// 1.5× weight. These tests pin that re-baselined behaviour so future changes are
+// intentional rather than accidental.
+describe('scoreCQI · representation by head-count', () => {
+  const repOf = (answers) => scoreCQI(answers).byCat.representation.earned;
+
+  it('scores each race in proportion to its share of the counted total', () => {
+    // counts 7/9/5/2 → total 23. earned =
+    //   min(4, 7/23·4·1.5) + min(2, 9/23·2) + min(2, 5/23·2) + min(2, 2/23·2)
+    //   = 1.8261 + 0.7826 + 0.4348 + 0.1739 ≈ 3.217 (section weight 10, possible 10)
+    const earned = repOf({ pctBA: 7, pctIN: 9, pctCO: 5, pctWH: 2 });
+    expect(earned).toBeCloseTo(3.217, 2);
+  });
+
+  it('weights Black African 1.5× — equal counts do NOT earn equal points', () => {
+    // 5/5/5/5 → share 0.25 each. BA: min(4,0.25·4·1.5)=1.5; others 0.25·2=0.5 each.
+    // earned = 1.5 + 0.5·3 = 3.0
+    expect(repOf({ pctBA: 5, pctIN: 5, pctCO: 5, pctWH: 5 })).toBeCloseTo(3.0, 5);
+  });
+
+  it('earns zero when no players are counted (no divide-by-zero)', () => {
+    expect(repOf({})).toBe(0);
+    expect(repOf({ pctBA: 0, pctIN: 0, pctCO: 0, pctWH: 0 })).toBe(0);
+  });
+});
+
+// Doc completion is now driven entirely by REQUIRED_DOCS so the count can't drift
+// across call sites and tolerates clubs whose `docs` predate a newly-added key.
+describe('compliance-doc helpers · REQUIRED_DOCS-driven', () => {
+  const allTrue = Object.fromEntries(REQUIRED_DOCS.map((d) => [d.key, true]));
+  const total = REQUIRED_DOCS.length;
+
+  it('counts a fully-compliant club as complete', () => {
+    const club = { docs: allTrue };
+    expect(docsUploadedCount(club)).toBe(total);
+    expect(docsAllComplete(club)).toBe(true);
+    expect(docCompletion(club)).toBe(100);
+  });
+
+  it('computes a correct fraction for a partial club', () => {
+    const docs = { ...allTrue, [REQUIRED_DOCS[0].key]: false };
+    const club = { docs };
+    expect(docsUploadedCount(club)).toBe(total - 1);
+    expect(docsAllComplete(club)).toBe(false);
+    expect(docCompletion(club)).toBe(Math.round(((total - 1) / total) * 100));
+  });
+
+  it('treats an empty docs object as zero/incomplete (was vacuously true before)', () => {
+    const club = { docs: {} };
+    expect(docsUploadedCount(club)).toBe(0);
+    expect(docsAllComplete(club)).toBe(false);
+    expect(docCompletion(club)).toBe(0);
+  });
+});

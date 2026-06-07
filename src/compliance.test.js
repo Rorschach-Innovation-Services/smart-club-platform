@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { computeMarkCompliance, computeRevertCompliance } from './data.jsx';
 
-// The four required compliance docs.
+// A subset of compliance-doc keys — these helpers operate on the keys passed in,
+// not on REQUIRED_DOCS, so this stays a fixed list independent of the full set.
 const KEYS = ['constitution', 'agm', 'financials', 'exco'];
 const AT = '2026-06-03T10:00:00.000Z';
 

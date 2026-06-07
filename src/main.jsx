@@ -23,6 +23,7 @@ import {
   REQUIRED_DOCS,
   SUBMISSION_DEADLINE_DEFAULT,
   docCompletion,
+  docsAllComplete,
   affiliationSubmitted,
   journeyUnlocked,
   registrationUnlocked,
@@ -1115,7 +1116,7 @@ function Shell({
       v: 'documents',
       label: 'Compliance Docs',
       icon: Icon.Upload,
-      num: clubs.filter((c) => Object.values(c.docs).every((v) => v)).length + '/' + clubs.length,
+      num: clubs.filter(docsAllComplete).length + '/' + clubs.length,
       dot: 'gold',
     },
     {
@@ -1812,10 +1813,9 @@ function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
     docs: {
       t: 'Compliance docs tracker',
       crumb: 'Compliance Docs',
-      desc: 'Monitor uploads of Constitution, AGM Minutes, Financial Statements and Exco Reps Listed.',
+      desc: 'Monitor compliance document uploads across all clubs.',
       icon: Icon.Upload,
-      empty:
-        'Onboard your clubs to start monitoring Constitution, AGM Minutes, Financials and Exco Reps uploads.',
+      empty: 'Onboard your clubs to start monitoring compliance document uploads.',
     },
     cqi: {
       t: 'CQI submission tracker',
@@ -1833,7 +1833,7 @@ function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
     kind === 'affiliation'
       ? !affiliationSubmitted(c)
       : kind === 'docs'
-        ? !Object.values(c.docs).every(Boolean)
+        ? !docsAllComplete(c)
         : c.cqi === 0;
 
   function remindOutstanding() {
@@ -1929,10 +1929,9 @@ function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
                 )}
                 {kind === 'docs' && (
                   <>
-                    <th>Constitution</th>
-                    <th>AGM Minutes</th>
-                    <th>Financials</th>
-                    <th>Exco Reps</th>
+                    {REQUIRED_DOCS.map((d) => (
+                      <th key={d.key}>{d.name}</th>
+                    ))}
                     <th>Progress</th>
                   </>
                 )}

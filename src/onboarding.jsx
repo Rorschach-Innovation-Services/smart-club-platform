@@ -150,7 +150,7 @@ function StepSubmissions({ deadlineLong }) {
     {
       i: <Icon.Upload />,
       t: 'Compliance documents',
-      d: 'Constitution · AGM Minutes · Financial Statements · Exco Reps Listed (PDF up to 10 MB each).',
+      d: 'Constitution · AGM Minutes · Financial Statements · Exco Reps Listed · Code of Conduct · Club Inventory · Safeguarding Certificate (PDF up to 10 MB each).',
       tag: '~ 3 min',
     },
     {

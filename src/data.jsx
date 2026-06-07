@@ -125,7 +125,28 @@ export const REQUIRED_DOCS = [
     name: 'Exco Reps Listed',
     desc: 'Full list of executive committee representatives with contact details',
   },
+  {
+    key: 'codeOfConduct',
+    name: 'Code of Conduct',
+    desc: 'Club code of conduct governing player & member behaviour',
+  },
+  {
+    key: 'clubInventory',
+    name: 'Club Inventory',
+    desc: 'Current inventory of club assets and equipment',
+  },
+  {
+    key: 'safeguarding',
+    name: 'Safeguarding Certificate',
+    desc: 'Valid safeguarding / child-protection certificate',
+  },
 ];
+
+// Doc-completion helpers — the single source of truth for every count/gate so the
+// definition can't drift across call sites. Both are driven by REQUIRED_DOCS and
+// tolerate clubs whose `docs` object predates a newly-added key (treated as missing).
+export const docsUploadedCount = (club) => REQUIRED_DOCS.filter((d) => club.docs?.[d.key]).length;
+export const docsAllComplete = (club) => REQUIRED_DOCS.every((d) => !!club.docs?.[d.key]);
 
 /**
  * Derive display fields for an uploaded compliance document from its `docMeta` entry.
@@ -179,7 +200,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'complete',
     paid: true,
     cqi: 91.89,
-    docs: { constitution: true, agm: true, financials: true, exco: true },
+    docs: {
+      constitution: true,
+      agm: true,
+      financials: true,
+      exco: true,
+      codeOfConduct: true,
+      clubInventory: true,
+      safeguarding: true,
+    },
     players: 57,
     teams: 3,
     women: 0,
@@ -196,7 +225,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'complete',
     paid: true,
     cqi: 87.4,
-    docs: { constitution: true, agm: true, financials: true, exco: false },
+    docs: {
+      constitution: true,
+      agm: true,
+      financials: true,
+      exco: false,
+      codeOfConduct: false,
+      clubInventory: false,
+      safeguarding: false,
+    },
     players: 72,
     teams: 6,
     women: 1,
@@ -213,7 +250,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'complete',
     paid: true,
     cqi: 81.2,
-    docs: { constitution: true, agm: true, financials: false, exco: true },
+    docs: {
+      constitution: true,
+      agm: true,
+      financials: false,
+      exco: true,
+      codeOfConduct: false,
+      clubInventory: false,
+      safeguarding: false,
+    },
     players: 114,
     teams: 10,
     women: 1,
@@ -235,7 +280,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'complete',
     paid: true,
     cqi: 64.8,
-    docs: { constitution: true, agm: false, financials: false, exco: true },
+    docs: {
+      constitution: true,
+      agm: false,
+      financials: false,
+      exco: true,
+      codeOfConduct: false,
+      clubInventory: false,
+      safeguarding: false,
+    },
     players: 58,
     teams: 6,
     women: 1,
@@ -252,7 +305,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'complete',
     paid: true,
     cqi: 78.5,
-    docs: { constitution: true, agm: true, financials: true, exco: true },
+    docs: {
+      constitution: true,
+      agm: true,
+      financials: true,
+      exco: true,
+      codeOfConduct: true,
+      clubInventory: true,
+      safeguarding: true,
+    },
     players: 88,
     teams: 9,
     women: 1,
@@ -269,7 +330,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'in_progress',
     paid: false,
     cqi: 0,
-    docs: { constitution: false, agm: false, financials: false, exco: false },
+    docs: {
+      constitution: false,
+      agm: false,
+      financials: false,
+      exco: false,
+      codeOfConduct: false,
+      clubInventory: false,
+      safeguarding: false,
+    },
     players: 0,
     teams: 3,
     women: 0,
@@ -286,7 +355,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'complete',
     paid: true,
     cqi: 68.4,
-    docs: { constitution: true, agm: false, financials: true, exco: true },
+    docs: {
+      constitution: true,
+      agm: false,
+      financials: true,
+      exco: true,
+      codeOfConduct: false,
+      clubInventory: false,
+      safeguarding: false,
+    },
     players: 92,
     teams: 9,
     women: 1,
@@ -303,7 +380,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'complete',
     paid: true,
     cqi: 72.1,
-    docs: { constitution: true, agm: true, financials: false, exco: true },
+    docs: {
+      constitution: true,
+      agm: true,
+      financials: false,
+      exco: true,
+      codeOfConduct: false,
+      clubInventory: false,
+      safeguarding: false,
+    },
     players: 64,
     teams: 5,
     women: 2,
@@ -320,7 +405,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'not_started',
     paid: false,
     cqi: 0,
-    docs: { constitution: false, agm: false, financials: false, exco: false },
+    docs: {
+      constitution: false,
+      agm: false,
+      financials: false,
+      exco: false,
+      codeOfConduct: false,
+      clubInventory: false,
+      safeguarding: false,
+    },
     players: 0,
     teams: 6,
     women: 0,
@@ -337,7 +430,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'in_progress',
     paid: false,
     cqi: 38.5,
-    docs: { constitution: true, agm: false, financials: false, exco: false },
+    docs: {
+      constitution: true,
+      agm: false,
+      financials: false,
+      exco: false,
+      codeOfConduct: false,
+      clubInventory: false,
+      safeguarding: false,
+    },
     players: 21,
     teams: 1,
     women: 0,
@@ -354,7 +455,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'complete',
     paid: true,
     cqi: 84.2,
-    docs: { constitution: true, agm: true, financials: true, exco: true },
+    docs: {
+      constitution: true,
+      agm: true,
+      financials: true,
+      exco: true,
+      codeOfConduct: true,
+      clubInventory: true,
+      safeguarding: true,
+    },
     players: 96,
     teams: 10,
     women: 0,
@@ -371,7 +480,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'complete',
     paid: true,
     cqi: 56.3,
-    docs: { constitution: true, agm: true, financials: false, exco: false },
+    docs: {
+      constitution: true,
+      agm: true,
+      financials: false,
+      exco: false,
+      codeOfConduct: false,
+      clubInventory: false,
+      safeguarding: false,
+    },
     players: 38,
     teams: 5,
     women: 0,
@@ -388,7 +505,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'complete',
     paid: true,
     cqi: 47.6,
-    docs: { constitution: true, agm: false, financials: true, exco: false },
+    docs: {
+      constitution: true,
+      agm: false,
+      financials: true,
+      exco: false,
+      codeOfConduct: false,
+      clubInventory: false,
+      safeguarding: false,
+    },
     players: 28,
     teams: 2,
     women: 0,
@@ -405,7 +530,15 @@ export const SAMPLE_CLUBS = [
     affiliation: 'not_started',
     paid: false,
     cqi: 0,
-    docs: { constitution: false, agm: false, financials: false, exco: false },
+    docs: {
+      constitution: false,
+      agm: false,
+      financials: false,
+      exco: false,
+      codeOfConduct: false,
+      clubInventory: false,
+      safeguarding: false,
+    },
     players: 0,
     teams: 1,
     women: 0,
@@ -499,8 +632,20 @@ export const CQI_STRUCTURE = [
       { key: 'boundary', label: 'Adequate boundary rope available', kind: 'yn', pts: 2 },
       { key: 'scoreboard', label: 'Scoreboard available', kind: 'yn', pts: 2 },
       { key: 'ownFacility', label: 'Responsible for own facility', kind: 'yn', pts: 2 },
-      { key: 'fieldsGrass', label: 'Number of Grass fields', kind: 'num', max: 10, pts: 3 },
-      { key: 'fieldsArt', label: 'Number of Artificial fields', kind: 'num', max: 10, pts: 1 },
+      {
+        key: 'fieldsGrass',
+        label: 'Number of Grass fields or auxiliary fields',
+        kind: 'num',
+        max: 10,
+        pts: 3,
+      },
+      {
+        key: 'fieldsArt',
+        label: 'Number of Artificial fields or auxiliary fields',
+        kind: 'num',
+        max: 10,
+        pts: 1,
+      },
       { key: 'netsGrass', label: 'Number of Grass nets', kind: 'num', max: 12, pts: 2 },
       { key: 'netsArt', label: 'Number of Artificial nets', kind: 'num', max: 12, pts: 1 },
     ],
@@ -510,12 +655,12 @@ export const CQI_STRUCTURE = [
     title: 'Representation',
     weight: 10,
     accent: 'var(--navy-light)',
-    desc: 'Player demographics across the club (must sum to 100%).',
+    desc: 'Player demographics across the club.',
     questions: [
-      { key: 'pctBA', label: '% Black African', kind: 'pct', pts: 4 },
-      { key: 'pctIN', label: '% Indian', kind: 'pct', pts: 2 },
-      { key: 'pctCO', label: '% Coloured', kind: 'pct', pts: 2 },
-      { key: 'pctWH', label: '% White', kind: 'pct', pts: 2 },
+      { key: 'pctBA', label: 'Black African', kind: 'count', max: 15, pts: 4 },
+      { key: 'pctIN', label: 'Indian', kind: 'count', max: 15, pts: 2 },
+      { key: 'pctCO', label: 'Coloured', kind: 'count', max: 15, pts: 2 },
+      { key: 'pctWH', label: 'White', kind: 'count', max: 15, pts: 2 },
     ],
   },
   {
@@ -534,7 +679,7 @@ export const CQI_STRUCTURE = [
       },
       {
         key: 'subAmount',
-        label: 'Subscription cost per member',
+        label: 'Subscription cost per player',
         kind: 'money',
         currency: 'R',
         pts: 4,
@@ -552,13 +697,12 @@ export function cohortStats(clubs) {
   const cqiSubmitted = clubs.filter((c) => c.cqi > 0).length;
   const avgCqi =
     clubs.filter((c) => c.cqi > 0).reduce((s, c) => s + c.cqi, 0) / Math.max(1, cqiSubmitted);
-  const docsComplete = clubs.filter((c) => Object.values(c.docs).every((v) => v)).length;
+  const docsComplete = clubs.filter(docsAllComplete).length;
   return { total, affComplete, paid, cqiSubmitted, avgCqi, docsComplete };
 }
 
 export function docCompletion(club) {
-  const vals = Object.values(club.docs);
-  return Math.round((vals.filter((v) => v).length / vals.length) * 100);
+  return Math.round((docsUploadedCount(club) / REQUIRED_DOCS.length) * 100);
 }
 
 // ── Reversible "Mark as compliant" — pure doc/meta computation ──

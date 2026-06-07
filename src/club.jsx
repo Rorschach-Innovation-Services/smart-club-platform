@@ -15,6 +15,7 @@ import {
   CQI_STRUCTURE,
   docFileMeta,
   docCompletion,
+  docsUploadedCount,
   overallProgress,
   affiliationSubmitted,
   journeyUnlocked,
@@ -571,8 +572,8 @@ export function ClubHome({ club, goto, toast, replayOnboarding, submissionDeadli
                     Compliance documents
                   </div>
                   <div style={{ fontSize: 11.5, color: 'var(--muted)' }}>
-                    Upload Constitution, AGM Minutes, Financials and Exco Reps. (
-                    {4 - Object.values(club.docs).filter((v) => v).length} remaining)
+                    Upload your compliance documents. (
+                    {REQUIRED_DOCS.length - docsUploadedCount(club)} remaining)
                   </div>
                 </div>
                 <Pill tone="gold" dot>
@@ -2457,8 +2458,9 @@ export function DocumentsView({
             Required <em>compliance documents</em>
           </h1>
           <p className="ph-desc">
-            Per the 2026/27 Cricket Services Club Requirements, three documents must be uploaded and
-            one roster captured directly on the platform. PDFs preferred — max 10 MB per file.
+            Per the 2026/27 Cricket Services Club Requirements, {REQUIRED_DOCS.length - 1} documents
+            must be uploaded and one roster captured directly on the platform. PDFs preferred — max
+            10 MB per file.
           </p>
         </div>
       </div>
@@ -2467,20 +2469,23 @@ export function DocumentsView({
         <KPI
           tone="teal"
           label="Submitted"
-          num={Object.values(club.docs).filter((v) => v).length}
-          sub="of 4 required"
+          num={docsUploadedCount(club)}
+          sub={`of ${REQUIRED_DOCS.length} required`}
         />
         <KPI
           tone="coral"
           label="Outstanding"
-          num={4 - Object.values(club.docs).filter((v) => v).length}
+          num={REQUIRED_DOCS.length - docsUploadedCount(club)}
           sub="needs attention"
         />
         <KPI label="Completion" num={dc + '%'} sub="overall" />
         <KPI tone="gold" label="Deadline" num={deadlineShort} sub={daysLabel} />
       </div>
 
-      <Card title="Submit your documents" sub="3 file uploads · 1 on-platform form">
+      <Card
+        title="Submit your documents"
+        sub={`${REQUIRED_DOCS.length - 1} file uploads · 1 on-platform form`}
+      >
         {REQUIRED_DOCS.map((d) => {
           const up = club.docs[d.key];
           const isExco = d.key === 'exco';
@@ -2757,10 +2762,10 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline }) {
       a.fieldsArt = 0;
       a.netsGrass = 4;
       a.netsArt = 2;
-      a.pctBA = 30;
-      a.pctIN = 40;
-      a.pctWH = 20;
-      a.pctCO = 10;
+      a.pctBA = 7;
+      a.pctIN = 9;
+      a.pctWH = 5;
+      a.pctCO = 2;
     }
     return a;
   });
@@ -2773,8 +2778,8 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline }) {
   const band = cqiBand(total || 0.0001);
   const submitted = club.cqi > 0;
 
-  // Validate representation total
-  const repTotal =
+  // Total players counted across demographics — informational only (no sum constraint).
+  const repCount =
     (parseFloat(answers.pctBA) || 0) +
     (parseFloat(answers.pctIN) || 0) +
     (parseFloat(answers.pctCO) || 0) +
@@ -2866,12 +2871,12 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline }) {
                 <div className="cqi-q-hint">
                   {q.kind === 'num'
                     ? `Number · max ${q.max}`
-                    : q.kind === 'pct'
-                      ? 'Enter percentage 0–100'
+                    : q.kind === 'count'
+                      ? `Number of players · max ${q.max}`
                       : q.kind === 'choice'
                         ? 'Select one'
                         : q.kind === 'money'
-                          ? 'Currency · amount per member'
+                          ? 'Currency · amount per player'
                           : 'Yes / No'}
                 </div>
               </div>
@@ -2879,13 +2884,8 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline }) {
               {q.kind === 'num' && (
                 <NumSlider value={answers[q.key]} onChange={(v) => setA(q.key, v)} max={q.max} />
               )}
-              {q.kind === 'pct' && (
-                <NumSlider
-                  value={answers[q.key]}
-                  onChange={(v) => setA(q.key, v)}
-                  max={100}
-                  suffix="%"
-                />
+              {q.kind === 'count' && (
+                <NumSlider value={answers[q.key]} onChange={(v) => setA(q.key, v)} max={q.max} />
               )}
               {q.kind === 'choice' && (
                 <Choice
@@ -2899,23 +2899,23 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline }) {
                   value={answers[q.key]}
                   onChange={(v) => setA(q.key, v)}
                   currency={q.currency || 'R'}
+                  suffix="/ player"
                 />
               )}
             </div>
           ))}
 
-          {/* Representation total check */}
+          {/* Representation total — informational headcount, no sum constraint */}
           {cat.key === 'representation' && (
             <div
               style={{
                 padding: '8px 18px',
                 fontSize: 11.5,
                 fontFamily: "'Montserrat',sans-serif",
-                color: Math.abs(repTotal - 100) < 0.5 ? 'var(--teal-deep)' : 'var(--coral)',
+                color: 'var(--muted)',
               }}
             >
-              Representation total: {repTotal.toFixed(0)}% / 100%{' '}
-              {Math.abs(repTotal - 100) < 0.5 ? '✓' : ' · must sum to 100%'}
+              Total players counted: {repCount.toFixed(0)} across demographics
             </div>
           )}
         </div>

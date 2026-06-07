@@ -13,9 +13,6 @@ export const VALID_DISTRICTS = new Set([
   'Illembe Cricket District',
 ]);
 
-/** CQI representation answer keys that must sum to ~100%. */
-const REP_KEYS = ['pctBA', 'pctIN', 'pctCO', 'pctWH'] as const;
-
 /**
  * Validate an affiliation/CQI patch. Throws a message string on failure
  * (callers map to HTTP 400). Only checks fields present in the patch.
@@ -28,6 +25,8 @@ export function validateClubPatch(
   patch: {
     district?: string;
     leagues?: string[];
+    // Accepted as part of a club patch but no longer validated here — the
+    // representation sum-to-100 rule was removed when those fields became head-counts.
     cqiAnswers?: Record<string, unknown>;
   },
   validLeagueKeys: Set<string>,
@@ -38,12 +37,6 @@ export function validateClubPatch(
   if (patch.leagues) {
     const bad = patch.leagues.filter((k) => !validLeagueKeys.has(k));
     if (bad.length) return `unknown league keys: ${bad.join(', ')}`;
-  }
-  if (patch.cqiAnswers && REP_KEYS.some((k) => k in patch.cqiAnswers!)) {
-    const total = REP_KEYS.reduce((s, k) => s + (Number(patch.cqiAnswers![k]) || 0), 0);
-    if (Math.abs(total - 100) > 0.5) {
-      return `representation percentages must sum to 100 (got ${total})`;
-    }
   }
   return null;
 }
