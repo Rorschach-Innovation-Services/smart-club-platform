@@ -2,10 +2,12 @@
  * Authed, tenant-aware API client for the Smart Club Platform.
  *
  * Every request carries the Cognito ID token (Authorization: Bearer) and the
- * tenant (x-tenant in dev; the host carries it in prod). The token provider and
- * active tenant are injected by the auth/config modules to avoid React imports
- * here. Non-2xx responses throw ApiError carrying the status (used to surface
- * 409 version conflicts and 403 authorization failures in the UI).
+ * tenant (x-tenant in dev; the host carries it in prod). The token provider,
+ * auth-lost handler, and active tenant are injected by the auth/config modules to
+ * avoid React imports here. Non-2xx responses throw ApiError carrying the status
+ * (used to surface 409 version conflicts and 403 authorization failures in the
+ * UI); a missing/rejected token additionally triggers the auth-lost handler so
+ * the app can fall back to the login screen.
  */
 
 import { devAuthHeader } from './devAuth.js';
@@ -28,6 +30,18 @@ export function getActiveTenant() {
 export function setTokenProvider(fn) {
   _getToken = fn;
 }
+
+/**
+ * Set by the AuthProvider; called when an authed request finds no session (or the
+ * API rejects the token) so the UI can revalidate and fall back to the login
+ * screen. Must be idempotent — query retries can fire it several times per expiry.
+ */
+let _onAuthLost = null;
+export function setAuthLostHandler(fn) {
+  _onAuthLost = fn;
+}
+
+const SESSION_EXPIRED = 'Your session has expired — please sign in again.';
 
 export class ApiError extends Error {
   constructor(status, message) {
@@ -52,8 +66,15 @@ async function request(path, { method = 'GET', body, auth = true, query } = {}) 
       const dev = devAuthHeader();
       if (dev) headers['x-dev-auth'] = dev;
     } else {
+      // The provider returns null only when the session is definitively gone
+      // (it rethrows transient refresh errors) — don't send an unauthenticated
+      // request the API will 401 anyway; surface the expiry instead.
       const token = await _getToken();
-      if (token) headers.authorization = `Bearer ${token}`;
+      if (token == null) {
+        _onAuthLost?.();
+        throw new ApiError(401, SESSION_EXPIRED);
+      }
+      headers.authorization = `Bearer ${token}`;
     }
   }
   const res = await fetch(url.toString(), {
@@ -68,6 +89,15 @@ async function request(path, { method = 'GET', body, auth = true, query } = {}) 
       message = data.error || message;
     } catch {
       /* non-JSON error body */
+    }
+    // Token present but rejected (expired/revoked server-side): revalidate the
+    // session, and replace the API's raw copy ("missing bearer token") with the
+    // same friendly message as the pre-flight check — it's what callers surface.
+    // The handler only signs out if the local session is really gone, so a
+    // systemic 401 (e.g. config mismatch) can't cause a sign-in loop.
+    if (res.status === 401 && auth && !LOCAL_AUTH) {
+      _onAuthLost?.();
+      message = SESSION_EXPIRED;
     }
     throw new ApiError(res.status, message);
   }

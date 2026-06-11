@@ -37,22 +37,58 @@ url:               https://xxxx.cloudfront.net
 > **Spike outcome (resolved):** Essentials tier deploys fine, but `EMAIL_OTP` as a first
 > auth factor (`Policies.SignInPolicy.AllowedFirstAuthFactors`) **cannot** be set via SST —
 > it only exists in pulumi-aws 7.x and SST 3.x bundles 6.x, so the IaC silently dropped it.
-> It's enabled by the post-deploy script in step 3 instead. (Cognito's built-in email is
-> used — no SES setup needed.) The CUSTOM_AUTH fallback (old step 6) is therefore not needed.
+> It's enabled by the post-deploy script in step 3 instead. The CUSTOM_AUTH fallback (old
+> step 6) is therefore not needed.
+>
+> **OTP email (2026-06):** Cognito's built-in sender (`COGNITO_DEFAULT`,
+> `no-reply@verificationemail.com`, 50/day cap) gets Gmail-spam-binned, so codes never
+> arrive. The fix is SES `DEVELOPER` mode with `info@medicoach.co.za` — but Cognito
+> **requires the SES identity in the pool's own region** (af-south-1; an eu-west-1 ARN is
+> rejected with `InvalidParameterException`), and this account's af-south-1 SES starts
+> sandboxed. The step-3 script applies the email config automatically once af-south-1 SES
+> is ready (identity verified + production access); until then it leaves the default
+> sender alone, because a sandboxed `DEVELOPER` config would reject OTP mail outright.
+> One-time SES setup (then re-run step 3):
+>
+> ```bash
+> # 1. Create + verify the identity (click the link AWS emails to the address):
+> aws sesv2 create-email-identity --email-identity info@medicoach.co.za \
+>   --region af-south-1 --profile medicoach
+> # 2. Request production access (AWS reviews, typically within 24h):
+> aws sesv2 put-account-details --region af-south-1 --profile medicoach \
+>   --production-access-enabled --mail-type TRANSACTIONAL \
+>   --website-url https://medicoach.co.za \
+>   --use-case-description "Transactional email for the Smart Club Platform (multi-tenant cricket-union administration SaaS): one-time sign-in codes via Amazon Cognito and onboarding invites to club officials. Low volume (tens/day), opt-in recipients (invited staff), no marketing."
+> # 3. Check status:
+> aws sesv2 get-account --region af-south-1 --profile medicoach \
+>   --query '{Production:ProductionAccessEnabled}'
+> ```
 
-## 3. Enable passwordless email OTP (required post-deploy step)
+## 3. Pool post-deploy config: passwordless OTP + SES email (required)
 
 ```bash
 npx sst shell --stage dev -- npm --prefix packages/api run enable-passwordless
 ```
 
-This sets `AllowedFirstAuthFactors=[PASSWORD, EMAIL_OTP]` on the pool via the AWS API
-(idempotent). **Re-run it after any deploy that recreates the user pool.** Confirm with:
+This sets `AllowedFirstAuthFactors=[PASSWORD, EMAIL_OTP]` and — once af-south-1 SES is
+ready (see above) — the SES `DEVELOPER` email configuration, in one atomic
+`UpdateUserPool` call (idempotent). **Re-run it after any deploy that updates or
+recreates the user pool** — a pool update from pulumi resets the sign-in policy back to
+`[PASSWORD]` (pulumi-aws 6.x can't express it) and the email config back to
+`COGNITO_DEFAULT`, which breaks OTP login until this script runs. Confirm with:
 
 ```bash
 aws cognito-idp describe-user-pool --region af-south-1 --user-pool-id <poolId> \
-  --query 'UserPool.Policies.SignInPolicy'   # → AllowedFirstAuthFactors includes EMAIL_OTP
+  --query 'UserPool.{Email:EmailConfiguration,SignIn:Policies.SignInPolicy}'
+# → AllowedFirstAuthFactors includes EMAIL_OTP;
+#   EmailSendingAccount=DEVELOPER, SourceArn ends ...af-south-1...identity/info@medicoach.co.za
+#   (EmailSendingAccount stays COGNITO_DEFAULT until the SES setup above is complete)
 ```
+
+The first switch to `DEVELOPER` auto-creates the
+`AWSServiceRoleForAmazonCognitoIdpEmailService` service-linked role; if the deploying
+principal lacks `iam:CreateServiceLinkedRole`, pre-create it with
+`aws iam create-service-linked-role --aws-service-name email.cognito-idp.amazonaws.com`.
 
 ## 4. Provision the tenants (blank)
 

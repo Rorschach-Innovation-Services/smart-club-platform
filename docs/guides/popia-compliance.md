@@ -19,12 +19,20 @@ One flow is a **deliberate, documented exception** to the residency rule: the on
 **invite** to a club chairperson. When an admin sends it (`POST /clubs/:id/send-invite`,
 `packages/api/src/notify/`), the chair's **name, email and cell** are transmitted to:
 
-- **Amazon SES in `eu-west-1` (Ireland)** for the email — SES is not available in af-south-1,
-  so email cannot be sent from the residency region at all; and
+- **Amazon SES in `eu-west-1` (Ireland)** for the email — this account's verified sending
+  identity with production access lives in eu-west-1 (af-south-1 SES exists but is
+  sandboxed for this account, so it cannot send to unverified recipients); and
 - **Meta Platforms (WhatsApp Cloud API, global/US)** for the WhatsApp message — an inherently
   global processor.
 
-This is a cross-border transfer of personal information under **POPIA s72**. Basis and controls:
+**Sign-in (OTP) email is not part of this exception**: Cognito requires its SES identity
+to live in the pool's own region, so OTP codes are sent from SES **af-south-1** (set by
+`packages/api/src/enable-passwordless.ts` once that region's identity is verified and
+production access is granted) — staff emails stay in the residency region. Until then the
+pool uses Cognito's default sender, also region-local.
+
+The invite flow is a cross-border transfer of personal information under **POPIA s72**.
+Basis and controls:
 
 - **Lawful basis:** operational communication necessary to deliver the service the club is
   being onboarded into (the chair provides these details for exactly this purpose). Confirm
@@ -43,9 +51,11 @@ This is a cross-border transfer of personal information under **POPIA s72**. Bas
   set (`FROM_EMAIL`, `WHATSAPP_*`), so nothing leaves the region until this is signed off.
 
 **Residency-improving follow-up:** a Dolphins-owned SES identity + WhatsApp Business account
-do not change the regions involved (SES still can't run in af-south-1; WhatsApp is still
-global), so the long-term option for strict residency is a South-Africa-resident messaging
-provider. Tracked as tech debt.
+do not change the regions involved by themselves (WhatsApp is inherently global), but SES
+**is** available in af-south-1 — once that region has production access (already required
+for Cognito OTP email, see deploy guide step 3), pointing the notify module's `SES_REGION`
+at af-south-1 would bring invite email back into the residency region too. Tracked as tech
+debt.
 
 ## Lawful processing & consent
 

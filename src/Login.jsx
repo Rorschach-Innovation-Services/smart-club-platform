@@ -22,7 +22,7 @@ export function Login({ tenantConfig }) {
 
 /* ─── Cloud: passwordless email OTP ─── */
 function OtpLogin({ auth, branding }) {
-  const { startSignIn, submitOtp, status } = auth;
+  const { startSignIn, submitOtp, status, signedOutReason } = auth;
   const [email, setEmail] = useState(
     () => new URLSearchParams(window.location.search).get('email') ?? '',
   );
@@ -84,6 +84,22 @@ function OtpLogin({ auth, branding }) {
         <div className="ps-card" style={{ cursor: 'default', maxWidth: 420 }}>
           {!awaitingOtp ? (
             <form onSubmit={handleEmail}>
+              {signedOutReason === 'expired' && (
+                <div
+                  role="status"
+                  style={{
+                    // Matches the .kpi.warn palette (index.html) — no warn token exists yet.
+                    background: '#F5EFD8',
+                    color: '#6E5618',
+                    borderRadius: 8,
+                    padding: '8px 12px',
+                    fontSize: 12.5,
+                    marginBottom: 14,
+                  }}
+                >
+                  You were signed out — your session expired. Sign in again to continue.
+                </div>
+              )}
               <div className="ps-card-role">Step 1 of 2</div>
               <div className="ps-card-title" style={{ marginBottom: 14 }}>
                 Your email

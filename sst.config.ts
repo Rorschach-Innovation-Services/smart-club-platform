@@ -52,6 +52,13 @@ export default $config({
     // These args ride the underlying aws.cognito.UserPool via transform; if the
     // provider rejects userPoolTier/signInPolicy in af-south-1, fall back to
     // CUSTOM_AUTH triggers (see docs/architecture/0003 and the auth spike runbook).
+    // OTP email: Cognito's default sender (no-reply@verificationemail.com, 50/day)
+    // gets spam-binned by Gmail, so the pool should send via SES DEVELOPER mode.
+    // That config is NOT set here: Cognito requires an af-south-1 SES identity
+    // (cross-region ARNs are rejected) and this account's af-south-1 SES starts
+    // sandboxed — so enable-passwordless.ts applies it once SES is ready. Deploys
+    // that update the pool reset it (UpdateUserPool omits = resets); re-run the
+    // script after every deploy. See docs/guides/deploy-and-spike.md step 3.
     const userPool = new sst.aws.CognitoUserPool('Auth', {
       usernames: ['email'],
       // PreTokenGeneration stamps `memberships` onto the ID token from the USER# record.
@@ -144,7 +151,9 @@ export default $config({
         STAGE: $app.stage,
         // Comma-separated extra CORS origins (custom tenant domains in prod).
         ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS ?? '',
-        // Outbound messaging. SES_REGION must NOT be af-south-1 (SES unavailable there).
+        // Outbound messaging. SES_REGION must stay eu-west-1 — that's where the
+        // verified identity with production access lives (this account's af-south-1
+        // SES exists but is sandboxed: unverified recipients are rejected).
         SES_REGION: 'eu-west-1',
         FROM_EMAIL: fromEmail.value,
         WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,

@@ -383,8 +383,11 @@ function AuthedApp({ tenantConfig }) {
       // 409s ("user already active…", "cannot remove the last admin") carry actionable copy
       // the admin must see, so those callers pass `rawConflict` to surface err.message.
       const rawConflict = conflict && opts.rawConflict;
+      // 401s carry the session-expired copy from api.js — more useful than errMsg.
+      // (When auth is truly lost the app flips to Login anyway; this covers the rest.)
+      const authError = err instanceof ApiError && err.status === 401;
       toastShow(
-        rawConflict
+        rawConflict || authError
           ? err.message
           : conflict
             ? 'Someone else just changed this — refreshing.'
