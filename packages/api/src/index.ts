@@ -1677,7 +1677,6 @@ function buildClubFromSpec(spec: ClubSpec): Club {
       financials: false,
       exco: false,
       codeOfConduct: false,
-      clubInventory: false,
       safeguarding: false,
     },
     players: 0,

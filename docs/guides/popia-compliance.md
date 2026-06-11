@@ -94,6 +94,25 @@ For an individual erasure request (a single player/official), delete that item b
 Define a retention period per season and schedule deletion of stale player registrations.
 Not automated in v1 — flagged as an operational follow-up.
 
+### Retired document types
+
+When a compliance document type is removed from `REQUIRED_DOCS`, already-uploaded PDFs
+become unreachable from the product (the UI only renders `REQUIRED_DOCS`) and would sit
+orphaned in the uploads bucket — the same data-minimisation problem as replaced files.
+Run the matching cleanup script per tenant, a day or two **after** the frontend deploy
+(stale pre-deploy SPA tabs can still upload to the retired key):
+
+```sh
+# dry-run first, then with --confirm
+sst shell --stage <stage> -- npx tsx packages/api/src/cleanup-club-inventory.ts <tenant>
+sst shell --stage <stage> -- npx tsx packages/api/src/cleanup-club-inventory.ts <tenant> --confirm
+```
+
+Done for Club Inventory (retired from the 2026/27 requirements, June 2026). Note the
+removal also retroactively shifts doc-completion counts: clubs missing only the retired
+document flip to complete on deploy, and tracker exports lose that column — flag this to
+the union office if reports were already circulated.
+
 ## Auditability
 
 Club `paid` and affiliation changes record `changedBy`/`changedAt`. Consider extending

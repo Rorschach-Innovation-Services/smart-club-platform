@@ -25,3 +25,9 @@ export function userPoolId(): string {
   if (!v) throw new Error('USER_POOL_ID not set (run under sst shell or set USER_POOL_ID)');
   return v;
 }
+
+export function uploadsBucket(): string {
+  const v = process.env.UPLOADS_BUCKET ?? fromSstResource('Uploads', 'name');
+  if (!v) throw new Error('UPLOADS_BUCKET not set (run under sst shell or set UPLOADS_BUCKET)');
+  return v;
+}

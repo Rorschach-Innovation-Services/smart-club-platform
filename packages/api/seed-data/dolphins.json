@@ -102,7 +102,6 @@
         "financials": true,
         "exco": true,
         "codeOfConduct": true,
-        "clubInventory": true,
         "safeguarding": true
       },
       "players": 57,
@@ -133,7 +132,6 @@
         "financials": true,
         "exco": false,
         "codeOfConduct": false,
-        "clubInventory": false,
         "safeguarding": false
       },
       "players": 72,
@@ -164,7 +162,6 @@
         "financials": false,
         "exco": true,
         "codeOfConduct": false,
-        "clubInventory": false,
         "safeguarding": false
       },
       "players": 114,
@@ -195,7 +192,6 @@
         "financials": false,
         "exco": true,
         "codeOfConduct": false,
-        "clubInventory": false,
         "safeguarding": false
       },
       "players": 58,
@@ -226,7 +222,6 @@
         "financials": true,
         "exco": true,
         "codeOfConduct": true,
-        "clubInventory": true,
         "safeguarding": true
       },
       "players": 88,
@@ -257,7 +252,6 @@
         "financials": false,
         "exco": false,
         "codeOfConduct": false,
-        "clubInventory": false,
         "safeguarding": false
       },
       "players": 0,
@@ -288,7 +282,6 @@
         "financials": true,
         "exco": true,
         "codeOfConduct": false,
-        "clubInventory": false,
         "safeguarding": false
       },
       "players": 92,
@@ -319,7 +312,6 @@
         "financials": false,
         "exco": true,
         "codeOfConduct": false,
-        "clubInventory": false,
         "safeguarding": false
       },
       "players": 64,
@@ -350,7 +342,6 @@
         "financials": false,
         "exco": false,
         "codeOfConduct": false,
-        "clubInventory": false,
         "safeguarding": false
       },
       "players": 0,
@@ -381,7 +372,6 @@
         "financials": false,
         "exco": false,
         "codeOfConduct": false,
-        "clubInventory": false,
         "safeguarding": false
       },
       "players": 21,
@@ -412,7 +402,6 @@
         "financials": true,
         "exco": true,
         "codeOfConduct": true,
-        "clubInventory": true,
         "safeguarding": true
       },
       "players": 96,
@@ -443,7 +432,6 @@
         "financials": false,
         "exco": false,
         "codeOfConduct": false,
-        "clubInventory": false,
         "safeguarding": false
       },
       "players": 38,
@@ -474,7 +462,6 @@
         "financials": true,
         "exco": false,
         "codeOfConduct": false,
-        "clubInventory": false,
         "safeguarding": false
       },
       "players": 28,
@@ -505,7 +492,6 @@
         "financials": false,
         "exco": false,
         "codeOfConduct": false,
-        "clubInventory": false,
         "safeguarding": false
       },
       "players": 0,
