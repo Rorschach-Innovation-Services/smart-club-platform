@@ -198,8 +198,13 @@ export default $config({
 
       // ── Cache headers ──
       // Only Vite's hashed assets/** are immutable; unhashed public files get 1 day.
+      // ⚠️ fileOptions REPLACES the platform's default '**' upload: a file matching
+      // no entry is silently never uploaded. The list is processed in reverse with
+      // first-processed-wins dedupe, so the catch-all must come FIRST and the
+      // specific overrides after it.
       assets: {
         fileOptions: [
+          { files: '**', cacheControl: 'public,max-age=86400' },
           {
             files: '**/*.html',
             cacheControl: 'max-age=0,no-cache,no-store,must-revalidate',
@@ -208,8 +213,6 @@ export default $config({
             files: 'assets/**',
             cacheControl: 'public,max-age=31536000,immutable',
           },
-          { files: '*.png', cacheControl: 'public,max-age=86400' },
-          { files: 'players/**', cacheControl: 'public,max-age=86400' },
         ],
       },
     });
