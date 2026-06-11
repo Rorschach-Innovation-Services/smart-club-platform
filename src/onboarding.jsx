@@ -107,7 +107,7 @@ function StepWelcome({ club, deadlineLong }) {
     <div className="ob-hero">
       <div
         className="ob-hero-photo"
-        style={{ backgroundImage: "url('/players/ackerman-green.jpg')" }}
+        style={{ backgroundImage: "url('/venues/kingsmead-stadium.jpg')" }}
       >
         <div className="ob-hero-overlay">
           <div className="ob-hero-badge">

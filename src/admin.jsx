@@ -1932,7 +1932,7 @@ export function AdminDashboard({
       {/* Aspirational hero banner */}
       <div
         className="hero-banner"
-        style={{ backgroundImage: "url('/players/ackerman-green.jpg')", height: 170 }}
+        style={{ backgroundImage: "url('/venues/kingsmead-stadium.jpg')", height: 170 }}
       >
         <div className="hero-content">
           <div className="hero-eyebrow">Hollywoodbets Dolphins · Cricket Services</div>

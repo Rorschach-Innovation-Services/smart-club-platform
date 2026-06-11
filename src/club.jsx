@@ -393,7 +393,7 @@ export function ClubHome({ club, goto, toast, replayOnboarding, submissionDeadli
       {/* Aspirational hero banner */}
       <div
         className="hero-banner"
-        style={{ backgroundImage: "url('/players/ackerman-green.jpg')" }}
+        style={{ backgroundImage: "url('/venues/kingsmead-stadium.jpg')" }}
       >
         <div className="hero-content">
           <div className="hero-eyebrow">Hollywoodbets Dolphins · 2026/27 Season</div>
@@ -1941,7 +1941,7 @@ export function AffiliationForm({
         <aside className="aff-side">
           <div
             className="aff-hero-card"
-            style={{ backgroundImage: "url('/players/ackerman-green.jpg')" }}
+            style={{ backgroundImage: "url('/venues/kingsmead-stadium.jpg')" }}
           >
             <div className="aff-hero-content">
               <div className="aff-hero-badge">
