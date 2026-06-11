@@ -29,6 +29,7 @@ function OtpLogin({ auth, branding }) {
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [resent, setResent] = useState(false);
 
   const awaitingOtp = status === 'otp';
 
@@ -48,11 +49,35 @@ function OtpLogin({ auth, branding }) {
   async function handleOtp(e) {
     e.preventDefault();
     setError('');
+    setResent(false);
     setBusy(true);
     try {
       await submitOtp(code.trim());
     } catch (err) {
-      setError(err?.message || 'Invalid or expired code. Request a new one.');
+      // Cognito's sign-in session times out (15 min) — its raw copy ("Invalid
+      // session for the user, session is expired.") gives no recovery path.
+      const expired = /session is expired|invalid session/i.test(err?.message ?? '');
+      setError(
+        expired
+          ? 'That code took too long — send a new one below and use it right away.'
+          : err?.message || 'Invalid or expired code. Request a new one.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // New Cognito sign-in session + new email; previous codes stop working.
+  async function handleResend() {
+    setError('');
+    setResent(false);
+    setCode('');
+    setBusy(true);
+    try {
+      await startSignIn(email.trim().toLowerCase());
+      setResent(true);
+    } catch (err) {
+      setError(err?.message || 'Could not send a new code. Try again.');
     } finally {
       setBusy(false);
     }
@@ -157,6 +182,14 @@ function OtpLogin({ auth, branding }) {
                   {error}
                 </div>
               )}
+              {resent && (
+                <div
+                  role="status"
+                  style={{ color: 'var(--muted)', fontSize: 12.5, marginBottom: 10 }}
+                >
+                  New code sent — check your email (including spam / “Other”).
+                </div>
+              )}
               <button
                 className="btn btn-ink"
                 type="submit"
@@ -164,6 +197,23 @@ function OtpLogin({ auth, branding }) {
                 style={{ width: '100%' }}
               >
                 {busy ? 'Verifying…' : 'Verify & sign in'}
+              </button>
+              <button
+                type="button"
+                onClick={handleResend}
+                disabled={busy}
+                style={{
+                  width: '100%',
+                  marginTop: 10,
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  color: 'var(--muted)',
+                  fontSize: 12.5,
+                  textDecoration: 'underline',
+                }}
+              >
+                Didn&apos;t get it? Send a new code
               </button>
             </form>
           )}

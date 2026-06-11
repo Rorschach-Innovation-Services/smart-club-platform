@@ -92,6 +92,10 @@ export default $config({
         client: (args) => {
           args.explicitAuthFlows = ['ALLOW_USER_AUTH', 'ALLOW_REFRESH_TOKEN_AUTH'];
           args.generateSecret = false;
+          // OTP sign-in session window (minutes, max 15). The default 3 min expires
+          // before slow OTP email lands — "Invalid session for the user, session
+          // is expired" on every code typed from a late-arriving email.
+          args.authSessionValidity = 15;
         },
       },
     });
