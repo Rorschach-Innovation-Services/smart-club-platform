@@ -894,6 +894,84 @@ describe('compliance doc view-url + replace', () => {
     assert.equal(res.status, 403);
   });
 
+  test('unknown/retired doc keys are rejected on all three routes (400)', async () => {
+    // 'clubInventory' was retired from REQUIRED_DOCS for 2026/27 — a stale SPA tab
+    // or direct call must not be able to repopulate it after cleanup-club-inventory.
+    for (const key of ['clubInventory', 'notARealDoc']) {
+      const upload = await app.request(`/clubs/docclub/docs/${key}/upload-url`, {
+        method: 'POST',
+        headers: headers(ADMIN),
+      });
+      assert.equal(upload.status, 400, `${key} upload-url`);
+
+      const patch = await app.request(`/clubs/docclub/docs/${key}`, {
+        method: 'PATCH',
+        headers: headers(ADMIN),
+        body: JSON.stringify({ objectKey: `dolphins/docclub/${key}-x.pdf`, size: 1000 }),
+      });
+      assert.equal(patch.status, 400, `${key} patch`);
+
+      const view = await app.request(`/clubs/docclub/docs/${key}/view-url`, {
+        method: 'POST',
+        headers: headers(ADMIN),
+      });
+      assert.equal(view.status, 400, `${key} view-url`);
+    }
+  });
+
+  test('generic club PATCH rejects unknown doc keys but allows carrying existing ones', async () => {
+    // A stale pre-deploy admin tab's "mark all compliant" sends docs/docMeta wholesale —
+    // it must not be able to (re)introduce a retired key via the generic PATCH route.
+    const bad = await app.request('/clubs/docclub', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ docs: { clubInventory: true } }),
+    });
+    assert.equal(bad.status, 400);
+
+    // Keys already on the club remain patchable so pre-cleanup records can still be
+    // carried or cleared. Seed the retired key at the repo layer (bypassing the API
+    // gate) to simulate a club that uploaded before the key was retired.
+    const seeded = (await repo.getClub('dolphins', 'docclub')) as {
+      docs: Record<string, boolean>;
+    };
+    await repo.updateClub(
+      'dolphins',
+      'docclub',
+      { docs: { ...seeded.docs, clubInventory: true } },
+      'test-seed',
+      new Date().toISOString(),
+    );
+
+    const club = (await repo.getClub('dolphins', 'docclub')) as { docs: Record<string, boolean> };
+    assert.equal(club.docs.clubInventory, true, 'retired key seeded');
+    const carry = await app.request('/clubs/docclub', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ docs: { ...club.docs, agm: true } }),
+    });
+    assert.equal(carry.status, 200, 'carrying an existing retired key is allowed');
+
+    // Clearing the retired key (sending docs without it) is also allowed…
+    const { clubInventory: _retired, ...withoutRetired } = club.docs;
+    const clear = await app.request('/clubs/docclub', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ docs: { ...withoutRetired, agm: true } }),
+    });
+    assert.equal(clear.status, 200, 'clearing the retired key is allowed');
+
+    // …and once cleared, the key is gone from the record and can no longer be reintroduced.
+    const after = (await repo.getClub('dolphins', 'docclub')) as { docs: Record<string, boolean> };
+    assert.equal('clubInventory' in after.docs, false, 'retired key cleared from record');
+    const reintroduce = await app.request('/clubs/docclub', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ docs: { ...after.docs, clubInventory: true } }),
+    });
+    assert.equal(reintroduce.status, 400, 'cleared retired key cannot be reintroduced');
+  });
+
   test('replacing a doc updates the stored objectKey (delete-on-replace path)', async () => {
     const res = await app.request('/clubs/docclub/docs/constitution', {
       method: 'PATCH',

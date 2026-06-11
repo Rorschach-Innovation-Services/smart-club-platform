@@ -99,8 +99,9 @@ Not automated in v1 — flagged as an operational follow-up.
 When a compliance document type is removed from `REQUIRED_DOCS`, already-uploaded PDFs
 become unreachable from the product (the UI only renders `REQUIRED_DOCS`) and would sit
 orphaned in the uploads bucket — the same data-minimisation problem as replaced files.
-Run the matching cleanup script per tenant, a day or two **after** the frontend deploy
-(stale pre-deploy SPA tabs can still upload to the retired key):
+Run the matching cleanup script per tenant **after** the API deploy. The API rejects doc
+keys outside its `DOC_KEYS` allowlist (plus keys already on the club record), so once the
+backend ships, stale pre-deploy SPA tabs cannot repopulate the retired key:
 
 ```sh
 # dry-run first, then with --confirm

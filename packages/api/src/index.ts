@@ -41,7 +41,7 @@ import {
 } from './auth.js';
 import * as repo from './repo.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
-import { validateClubPatch } from './catalogue.js';
+import { validateClubPatch, DOC_KEYS } from './catalogue.js';
 import {
   sendClubInvite,
   sendClubFixtures,
@@ -65,6 +65,11 @@ const cognito = new CognitoIdentityProviderClient({});
 const UPLOADS_BUCKET = process.env.UPLOADS_BUCKET!;
 const USER_POOL_ID = process.env.USER_POOL_ID!;
 const MAX_DOC_BYTES = 10 * 1024 * 1024; // 10 MB
+
+/** Reject unknown/retired compliance-doc keys before any S3 or record work. */
+function assertDocKey(key: string): void {
+  if (!DOC_KEYS.has(key)) throw new HttpError(400, `unknown document key "${key}"`);
+}
 
 const app = new Hono<HonoEnv>();
 
@@ -376,7 +381,15 @@ app.patch('/clubs/:id', async (c) => {
     ...(cfg?.leagues ?? []).map((l) => l.key),
     ...(current.leagues ?? []),
   ]);
-  const invalid = validateClubPatch(patch, validLeagueKeys);
+  // Same union for doc keys: a patch may carry/clear a retired key already on the
+  // club (pre-cleanup state) but can never introduce one — e.g. a stale pre-deploy
+  // admin tab's "mark all compliant" must not repopulate keys after cleanup.
+  const validDocKeys = new Set([
+    ...DOC_KEYS,
+    ...Object.keys(current.docs ?? {}),
+    ...Object.keys(current.docMeta ?? {}),
+  ]);
+  const invalid = validateClubPatch(patch, validLeagueKeys, validDocKeys);
   if (invalid) throw new HttpError(400, invalid);
   // `paid` is admin-only (its own route); strip it from general patches.
   delete (patch as { paid?: boolean }).paid;
@@ -718,6 +731,7 @@ app.post('/clubs/:id/docs/:key/upload-url', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   const key = c.req.param('key');
+  assertDocKey(key);
   assertClubAccess(ra, id);
   const objectKey = `${ra.tenant}/${id}/${key}-${randomUUID()}.pdf`;
   const url = await getSignedUrl(
@@ -737,6 +751,7 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   const key = c.req.param('key');
+  assertDocKey(key);
   assertClubAccess(ra, id);
   const meta = await c.req.json<{ objectKey: string; size: number }>();
   if (!meta.objectKey) throw new HttpError(400, 'objectKey required');
@@ -745,7 +760,7 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
   }
   const current = await repo.getClub(ra.tenant, id);
   if (!current) throw new HttpError(404, 'club not found');
-  const docMeta = (current as { docMeta?: Record<string, unknown> }).docMeta ?? {};
+  const docMeta = current.docMeta ?? {};
   // Replacing a wrongly-uploaded file: best-effort delete the previous S3 object so a
   // stale PDF (PII) isn't orphaned in the bucket (POPIA data-minimisation). A failed
   // delete must never fail the replace, and we skip non-S3 keys (e.g. local dev).
@@ -765,7 +780,7 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
     id,
     {
       docs: { ...current.docs, [key]: true },
-      ...({ docMeta: { ...docMeta, [key]: { ...meta, uploadedAt: now() } } } as Partial<Club>),
+      docMeta: { ...docMeta, [key]: { ...meta, uploadedAt: now() } },
     },
     ra.email,
   );
@@ -777,10 +792,11 @@ app.post('/clubs/:id/docs/:key/view-url', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   const key = c.req.param('key');
+  assertDocKey(key);
   assertClubAccess(ra, id);
   const club = await repo.getClub(ra.tenant, id);
   if (!club) throw new HttpError(404, 'club not found');
-  const docMeta = (club as { docMeta?: Record<string, unknown> }).docMeta ?? {};
+  const docMeta = club.docMeta ?? {};
   const meta = docMeta[key] as { objectKey?: string } | undefined;
   // Only real uploads have an objectKey; admin "mark compliant" overrides do not.
   if (!meta?.objectKey) throw new HttpError(404, 'no file on record for this document');

@@ -9,8 +9,10 @@
  *   sst shell --stage <stage> -- npx tsx packages/api/src/cleanup-club-inventory.ts <tenant>            (dry-run)
  *   sst shell --stage <stage> -- npx tsx packages/api/src/cleanup-club-inventory.ts <tenant> --confirm
  *
- * Idempotent. Run a day or two AFTER the frontend deploy — a stale SPA tab
- * opened pre-deploy can still upload to the key (the doc routes accept any key).
+ * Idempotent. Run AFTER the API deploy — the doc routes and the generic club
+ * PATCH now reject keys outside DOC_KEYS (plus keys already on the club), so
+ * once the backend ships, a stale pre-deploy SPA tab can no longer repopulate
+ * the retired key.
  */
 import { S3Client, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import * as repo from './repo.js';
