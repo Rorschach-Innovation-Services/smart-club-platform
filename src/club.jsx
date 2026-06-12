@@ -27,7 +27,6 @@ import {
   docsUploadedCount,
   overallProgress,
   affiliationSubmitted,
-  journeyUnlocked,
   fixtureCost,
   formatDeadlineLong,
   formatDeadlineShort,
@@ -427,7 +426,7 @@ export function ClubHome({
   // Team counts derive from the leagues entered on the affiliation form
   // (one side per league); club.teams/juniors are stale admin-era fields.
   const tc = teamCounts(club.leagues, allLeagues);
-  // "Submitted" is the form fact (affiliation === 'complete'), never payment.
+  // "Submitted" is the form fact (affiliation === 'complete').
   const affDone = affiliationSubmitted(club);
 
   const phases = [
@@ -443,15 +442,11 @@ export function ClubHome({
       n: '02',
       t: 'Fixtures',
       key: 'fixtures',
-      done: journeyUnlocked(club),
+      done: affDone,
       action: 'View leagues',
       target: 'fixtures',
-      lock: !journeyUnlocked(club),
-      // Submitted but payment-gated → distinguish "awaiting payment" from "finish phase 1".
-      lockReason:
-        affDone && !journeyUnlocked(club)
-          ? 'Locked — awaiting affiliation payment'
-          : 'Locked — finish phase 1 first',
+      lock: !affDone,
+      lockReason: 'Locked — finish phase 1 first',
     },
     {
       n: '03',
@@ -977,9 +972,7 @@ export function AffiliationForm({
   }
 
   const valid = data.clubName && data.chairName && data.chairCell && data.chairEmail;
-  // Form locks once affiliation is submitted (complete), NOT on payment —
-  // payment is now a separate admin action, so locking on paid would leave a
-  // submitted form editable until an admin toggled it.
+  // Form locks once affiliation is submitted (complete).
   const viewOnly = club.affiliation === 'complete';
 
   // Live summary values for the sidebar

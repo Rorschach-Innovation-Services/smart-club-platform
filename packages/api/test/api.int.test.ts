@@ -163,7 +163,6 @@ describe('POST /clubs/:id/notes', () => {
     sub: 'sub-1',
     chair: 'Chair',
     affiliation: 'not_started' as const,
-    paid: false,
     cqi: 0,
     docs: {},
     players: 0,
@@ -221,58 +220,6 @@ describe('POST /clubs/:id/notes', () => {
   });
 });
 
-describe('POST /clubs', () => {
-  type ExcoChair = {
-    chair?: string;
-    exco?: { chair?: { name?: string; email?: string; cell?: string } };
-  };
-
-  test('admin onboard persists chair contact into exco.chair', async () => {
-    const res = await app.request('/clubs', {
-      method: 'POST',
-      headers: headers(ADMIN),
-      body: JSON.stringify({
-        name: 'Verify FC',
-        chair: 'Carlton',
-        chairEmail: 'carlton@verifyfc.co.za',
-        chairCell: '083 456 7890',
-        district: 'Test District',
-      }),
-    });
-    assert.equal(res.status, 201);
-    const club = (await res.json()) as ExcoChair;
-    // Both the top-level chair name and the nested exco.chair contact are populated.
-    assert.equal(club.chair, 'Carlton');
-    assert.equal(club.exco?.chair?.name, 'Carlton');
-    assert.equal(club.exco?.chair?.email, 'carlton@verifyfc.co.za');
-    assert.equal(club.exco?.chair?.cell, '083 456 7890');
-  });
-
-  test('chair name only defaults email/cell to empty strings (not undefined)', async () => {
-    const res = await app.request('/clubs', {
-      method: 'POST',
-      headers: headers(ADMIN),
-      body: JSON.stringify({ name: 'Partial FC', chair: 'Solo', district: 'Test District' }),
-    });
-    assert.equal(res.status, 201);
-    const club = (await res.json()) as ExcoChair;
-    assert.equal(club.exco?.chair?.name, 'Solo');
-    assert.equal(club.exco?.chair?.email, '');
-    assert.equal(club.exco?.chair?.cell, '');
-  });
-
-  test('name-only onboard leaves exco undefined (no fake data)', async () => {
-    const res = await app.request('/clubs', {
-      method: 'POST',
-      headers: headers(ADMIN),
-      body: JSON.stringify({ name: 'Bare Club', district: 'Test District' }),
-    });
-    assert.equal(res.status, 201);
-    const club = (await res.json()) as ExcoChair;
-    assert.equal(club.exco, undefined);
-  });
-});
-
 describe('PATCH /clubs/:id — chair contact (repair existing clubs)', () => {
   type ExcoFull = {
     chair?: string;
@@ -290,7 +237,6 @@ describe('PATCH /clubs/:id — chair contact (repair existing clubs)', () => {
     sub: '',
     chair: 'Carlton',
     affiliation: 'not_started' as const,
-    paid: false,
     cqi: 0,
     docs: {},
     players: 0,
@@ -362,157 +308,6 @@ describe('PATCH /clubs/:id — chair contact (repair existing clubs)', () => {
   });
 });
 
-describe('POST /clubs/:id/send-invite', () => {
-  // FROM_EMAIL / WHATSAPP_* are unset in the test env, so notify/ runs in dry-run:
-  // sends "succeed" with synthetic ids and no real SES/Meta calls are made.
-  const base = (id: string, exco?: Record<string, unknown>) => ({
-    id,
-    name: `${id} CC`,
-    district: 'Test District',
-    sub: 's',
-    chair: 'Chair',
-    affiliation: 'not_started' as const,
-    paid: false,
-    cqi: 0,
-    docs: {},
-    players: 0,
-    teams: 0,
-    women: 0,
-    juniors: 0,
-    color: '#123456',
-    ground: {},
-    leagues: [],
-    version: 1,
-    ...(exco ? { exco } : {}),
-  });
-
-  before(async () => {
-    await repo.createClub(
-      'dolphins',
-      base('invitee', {
-        chair: { name: 'Carlton', email: 'carlton@invitee.co.za', cell: '0768563601' },
-      }),
-    );
-    await repo.createClub('dolphins', base('nocontact'));
-  });
-
-  const send = (id: string, body: unknown, auth = ADMIN) =>
-    app.request(`/clubs/${id}/send-invite`, {
-      method: 'POST',
-      headers: headers(auth),
-      body: JSON.stringify(body),
-    });
-
-  // Link must be a trusted origin (localhost in dev) AND target this club's path.
-  const valid = {
-    channels: ['email', 'whatsapp'],
-    link: 'http://localhost:3201/club/invitee',
-    idempotencyKey: 'k1',
-  };
-
-  test('dry-run sends both channels and records the comm log', async () => {
-    const res = await send('invitee', valid);
-    assert.equal(res.status, 201);
-    const body = (await res.json()) as { results: { channel: string; status: string }[] };
-    assert.equal(body.results.length, 2);
-    assert.ok(body.results.every((r) => r.status === 'sent'));
-    const club = await repo.getClub('dolphins', 'invitee');
-    assert.equal(club?.commLog?.length, 2);
-  });
-
-  test('same idempotency key replays without re-sending or re-logging', async () => {
-    const res = await send('invitee', valid); // same key 'k1'
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as { deduped?: boolean; results: unknown[] };
-    assert.equal(body.deduped, true);
-    const club = await repo.getClub('dolphins', 'invitee');
-    assert.equal(club?.commLog?.length, 2, 'no extra comm-log entries on replay');
-  });
-
-  test('missing chair contact yields skipped (not failed) per channel', async () => {
-    const res = await send('nocontact', {
-      channels: ['email', 'whatsapp'],
-      link: 'http://localhost:3201/club/nocontact',
-      idempotencyKey: 'k-nocontact',
-    });
-    assert.equal(res.status, 201);
-    const body = (await res.json()) as {
-      results: { status: string; error?: string; to?: string }[];
-    };
-    assert.ok(body.results.every((r) => r.status === 'skipped'));
-    assert.ok(body.results.every((r) => !!r.error));
-    // #6: a skip with no value on file must not persist an empty `to`.
-    assert.ok(body.results.every((r) => r.to === undefined));
-  });
-
-  test('empty channels is rejected (400)', async () => {
-    const res = await send('invitee', {
-      channels: [],
-      link: 'http://localhost:3201/club/invitee',
-      idempotencyKey: 'k2',
-    });
-    assert.equal(res.status, 400);
-  });
-
-  test('unknown channel is rejected (400)', async () => {
-    const res = await send('invitee', {
-      channels: ['sms'],
-      link: 'http://localhost:3201/club/invitee',
-      idempotencyKey: 'k3',
-    });
-    assert.equal(res.status, 400);
-  });
-
-  test('non-http link is rejected (400)', async () => {
-    const res = await send('invitee', {
-      channels: ['email'],
-      link: 'javascript:alert(1)',
-      idempotencyKey: 'k4',
-    });
-    assert.equal(res.status, 400);
-  });
-
-  test('#5: link on an untrusted host is rejected (400)', async () => {
-    const res = await send('invitee', {
-      channels: ['email'],
-      link: 'https://evil.example.com/club/invitee',
-      idempotencyKey: 'k-host',
-    });
-    assert.equal(res.status, 400);
-  });
-
-  test('#5: link targeting a different club path is rejected (400)', async () => {
-    const res = await send('invitee', {
-      channels: ['email'],
-      link: 'http://localhost:3201/club/some-other-club',
-      idempotencyKey: 'k-path',
-    });
-    assert.equal(res.status, 400);
-  });
-
-  test('missing idempotencyKey is rejected (400)', async () => {
-    const res = await send('invitee', {
-      channels: ['email'],
-      link: 'http://localhost:3201/club/invitee',
-    });
-    assert.equal(res.status, 400);
-  });
-
-  test('club rep is forbidden (403)', async () => {
-    const res = await send('invitee', valid, REP);
-    assert.equal(res.status, 403);
-  });
-
-  test('unknown club yields 404', async () => {
-    const res = await send('ghost', {
-      ...valid,
-      link: 'http://localhost:3201/club/ghost',
-      idempotencyKey: 'k5',
-    });
-    assert.equal(res.status, 404);
-  });
-});
-
 describe('POST /clubs/:id/send-fixtures', () => {
   // FROM_EMAIL / WHATSAPP_* unset ⇒ notify/ runs dry-run (synthetic ids, no real sends).
   // REP is scoped to clubIds ['testers'] (module-level), so it may share for 'testers'.
@@ -525,7 +320,6 @@ describe('POST /clubs/:id/send-fixtures', () => {
     sub: 's',
     chair: 'Chair',
     affiliation: 'not_started' as const,
-    paid: false,
     cqi: 0,
     docs: {},
     players: 0,
@@ -689,7 +483,6 @@ describe('eraseTenantData removes INVITE# idempotency markers', () => {
       sub: 's',
       chair: 'Chair',
       affiliation: 'not_started' as const,
-      paid: false,
       cqi: 0,
       docs: {},
       players: 0,
@@ -725,7 +518,6 @@ describe('eraseTenantData removes INVITE# idempotency markers', () => {
       sub: 's',
       chair: 'Chair',
       affiliation: 'not_started' as const,
-      paid: false,
       cqi: 0,
       docs: {},
       players: 0,
@@ -748,84 +540,6 @@ describe('eraseTenantData removes INVITE# idempotency markers', () => {
   });
 });
 
-describe('PATCH /clubs/:id/progression', () => {
-  before(async () => {
-    await repo.createClub('dolphins', {
-      id: 'progclub',
-      name: 'Prog CC',
-      district: 'Test District',
-      sub: 'sub-1',
-      chair: 'Chair',
-      affiliation: 'not_started',
-      paid: false,
-      cqi: 0,
-      docs: {},
-      players: 0,
-      teams: 0,
-      women: 0,
-      juniors: 0,
-      color: '#123456',
-      ground: {},
-      leagues: [],
-      version: 1,
-    });
-  });
-
-  test('admin can switch a club to payment-gated; it persists', async () => {
-    const res = await app.request('/clubs/progclub/progression', {
-      method: 'PATCH',
-      headers: headers(ADMIN),
-      body: JSON.stringify({ progressionMode: 'payment' }),
-    });
-    assert.equal(res.status, 200);
-    const club = (await res.json()) as { progressionMode?: string };
-    assert.equal(club.progressionMode, 'payment');
-    // Round-trips through the store, not just the response.
-    const stored = await repo.getClub('dolphins', 'progclub');
-    assert.equal((stored as { progressionMode?: string })?.progressionMode, 'payment');
-  });
-
-  test('club rep is forbidden (403)', async () => {
-    const res = await app.request('/clubs/progclub/progression', {
-      method: 'PATCH',
-      headers: headers(REP),
-      body: JSON.stringify({ progressionMode: 'submission' }),
-    });
-    assert.equal(res.status, 403);
-  });
-
-  test('invalid mode is rejected (400)', async () => {
-    const res = await app.request('/clubs/progclub/progression', {
-      method: 'PATCH',
-      headers: headers(ADMIN),
-      body: JSON.stringify({ progressionMode: 'whenever' }),
-    });
-    assert.equal(res.status, 400);
-  });
-
-  test('malformed/empty body is a 400, not a 500', async () => {
-    const res = await app.request('/clubs/progclub/progression', {
-      method: 'PATCH',
-      headers: headers(ADMIN),
-      body: 'not json',
-    });
-    assert.equal(res.status, 400);
-  });
-});
-
-describe('POST /clubs — progression default', () => {
-  test('onboarded club defaults to submission-driven progression', async () => {
-    const res = await app.request('/clubs', {
-      method: 'POST',
-      headers: headers(ADMIN),
-      body: JSON.stringify({ name: 'Default Prog FC', district: 'Test District' }),
-    });
-    assert.equal(res.status, 201);
-    const club = (await res.json()) as { progressionMode?: string };
-    assert.equal(club.progressionMode, 'submission');
-  });
-});
-
 describe('compliance doc view-url + replace', () => {
   const baseClub = {
     id: 'docclub',
@@ -834,7 +548,6 @@ describe('compliance doc view-url + replace', () => {
     sub: 'sub-1',
     chair: 'Chair',
     affiliation: 'not_started' as const,
-    paid: false,
     cqi: 0,
     docs: {},
     players: 0,
@@ -1063,7 +776,6 @@ describe('safeguarding multi-file certificates', () => {
     sub: 'sub-1',
     chair: 'Chair',
     affiliation: 'not_started' as const,
-    paid: false,
     cqi: 0,
     docs: {},
     players: 0,
@@ -1838,7 +1550,6 @@ describe('POST /clubs/:id/players (chair registration)', () => {
       sub: 's',
       chair: 'Chair',
       affiliation: 'not_started',
-      paid: true,
       cqi: 0,
       docs: {},
       players: 0,
@@ -1922,7 +1633,6 @@ describe('Player clearances (inter-club transfer + move)', () => {
     sub: 's',
     chair: 'Chair',
     affiliation: 'not_started' as const,
-    paid: true,
     cqi: 0,
     docs: {},
     players: 0,
@@ -2128,148 +1838,445 @@ describe('Player clearances (inter-club transfer + move)', () => {
   });
 });
 
-describe('registrationAccess gate (lock Players/Clearances until paid)', () => {
-  // Runs against a THROWAWAY tenant so flipping registrationAccess can't leak into other
-  // suites (no shared-config mutation, no after()-restore, no positional coupling).
-  const GATE = 'gatetenant';
-  const gHeaders = (auth: string) => ({
-    'x-tenant': GATE,
+describe('/admin/club-signup-link (lifecycle)', () => {
+  // Dedicated tenant so minting/revoking links can't leak into the public-signup suite.
+  const T = 'linktenant';
+  const lHeaders = (auth: string) => ({
+    'x-tenant': T,
     'x-dev-auth': auth,
     'content-type': 'application/json',
   });
-  const REP_SRC = devAuth([{ tenantId: GATE, role: 'rep', clubIds: ['gate-src'] }]);
-  const REP_DST = devAuth([{ tenantId: GATE, role: 'rep', clubIds: ['gate-dst'] }]);
-  const REP_DSTP = devAuth([{ tenantId: GATE, role: 'rep', clubIds: ['gate-dst-paid'] }]);
-  let teamKey: string;
+  const LADMIN = devAuthAs('caller-link-admin', 'link-admin@link.test', [
+    { tenantId: T, role: 'admin', clubIds: [] },
+  ]);
+  const LREP = devAuthAs('caller-link-rep', 'link-rep@link.test', [
+    { tenantId: T, role: 'rep', clubIds: ['c1'] },
+  ]);
 
-  const club = (id: string, paid: boolean) => ({
-    id,
-    name: id,
-    district: 'Test District',
-    sub: 's',
-    chair: 'Chair',
-    affiliation: 'not_started' as const,
-    paid,
-    cqi: 0,
-    docs: {},
-    players: 0,
-    teams: 0,
-    women: 0,
-    juniors: 0,
-    color: '#abcdef',
-    ground: {},
-    leagues: [],
-    version: 1,
+  const adminGet = (auth = LADMIN) =>
+    app.request('/admin/club-signup-link', { headers: lHeaders(auth) });
+  const adminPost = (auth = LADMIN) =>
+    app.request('/admin/club-signup-link', { method: 'POST', headers: lHeaders(auth) });
+  const adminDelete = (auth = LADMIN) =>
+    app.request('/admin/club-signup-link', { method: 'DELETE', headers: lHeaders(auth) });
+  // Public endpoint: no auth headers at all (the token self-describes the tenant).
+  const publicGet = (token: string) => app.request(`/club-signup?t=${token}`);
+
+  type LinkBody = { clubSignupLink: { token: string; createdAt: string } | null };
+
+  before(async () => {
+    await repo.putTenantConfig({
+      tenant: T,
+      branding: { name: 'Link Test Union', title: 'Link Test', logoUrl: '', colors: {}, copy: {} },
+      submissionDeadline: '2026-12-31',
+      knownClubs: [],
+      leagues: [],
+    });
   });
-  const player = (clubId: string, nk: string, id13: string) => ({
-    naturalKey: nk,
-    clubId,
-    firstName: 'Gate',
-    lastName: nk,
-    dob: '1995-01-01',
-    idNumber: id13,
-    isMinor: false,
-    status: 'active' as const,
-    consentAt: '2026-05-01T00:00:00.000Z',
-    createdAt: '2026-05-01T00:00:00.000Z',
+
+  test('GET returns null before any link is minted', async () => {
+    const res = await adminGet();
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { clubSignupLink: null });
+  });
+
+  test('POST mints a link; GET returns it and the TOKEN# resolves on the public endpoint', async () => {
+    const res = await adminPost();
+    assert.equal(res.status, 200);
+    const { clubSignupLink } = (await res.json()) as LinkBody;
+    assert.ok(clubSignupLink?.token, 'a token was minted');
+    assert.ok(clubSignupLink?.createdAt, 'createdAt is stamped');
+
+    const got = (await (await adminGet()).json()) as LinkBody;
+    assert.deepEqual(got.clubSignupLink, clubSignupLink, 'GET round-trips the stored pointer');
+
+    const pub = await publicGet(clubSignupLink!.token);
+    assert.equal(pub.status, 200, 'the public signup endpoint resolves the token');
+  });
+
+  test('rotation: a second POST issues a new token and the old one stops working', async () => {
+    const oldToken = ((await (await adminGet()).json()) as LinkBody).clubSignupLink!.token;
+    const res = await adminPost();
+    assert.equal(res.status, 200);
+    const next = ((await res.json()) as LinkBody).clubSignupLink!;
+    assert.notEqual(next.token, oldToken, 'rotation mints a fresh token');
+
+    assert.equal((await publicGet(next.token)).status, 200, 'new token works');
+    assert.equal((await publicGet(oldToken)).status, 404, 'old token is revoked');
+    assert.equal(await repo.getToken(oldToken), null, 'old TOKEN# item is gone');
+  });
+
+  test('PUT /tenant/config cannot clobber the server-owned pointer', async () => {
+    const stored = ((await (await adminGet()).json()) as LinkBody).clubSignupLink!;
+    const res = await app.request('/tenant/config', {
+      method: 'PUT',
+      headers: lHeaders(LADMIN),
+      body: JSON.stringify({
+        submissionDeadline: '2027-01-31',
+        clubSignupLink: { token: 'forged-token', createdAt: '2026-01-01T00:00:00.000Z' },
+      }),
+    });
+    assert.equal(res.status, 200);
+    // The whole-config save landed, but the signup-link pointer was stripped from it.
+    const after = ((await (await adminGet()).json()) as LinkBody).clubSignupLink;
+    assert.deepEqual(after, stored, 'stored pointer survives a whole-config save');
+    assert.equal((await publicGet('forged-token')).status, 404);
+    const cfg = await repo.getTenantConfig(T);
+    assert.equal(cfg?.submissionDeadline, '2027-01-31', 'the rest of the patch applied');
+  });
+
+  test('DELETE revokes the link (public 404, pointer cleared) and is idempotent', async () => {
+    const token = ((await (await adminGet()).json()) as LinkBody).clubSignupLink!.token;
+    const res = await adminDelete();
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+
+    assert.equal((await publicGet(token)).status, 404, 'revoked token no longer opens signup');
+    assert.equal(await repo.getToken(token), null, 'TOKEN# item deleted');
+    assert.deepEqual(await (await adminGet()).json(), { clubSignupLink: null });
+    assert.equal((await repo.getTenantConfig(T))?.clubSignupLink, undefined, 'pointer cleared');
+
+    const again = await adminDelete();
+    assert.equal(again.status, 200, 'a second DELETE is a harmless no-op');
+  });
+
+  test('a TOKEN# item orphaned from the config pointer is inert (404)', async () => {
+    // Simulate a partial rotation/revoke failure: the token item survives but the
+    // pointer write was lost. The pointer match in resolveSignupTenant must make the
+    // orphan inert rather than a live, invisible, irrevocable signup credential.
+    const minted = ((await (await adminPost()).json()) as LinkBody).clubSignupLink!;
+    assert.equal((await publicGet(minted.token)).status, 200, 'freshly minted token works');
+
+    await repo.updateClubSignupLink(T, null);
+    assert.ok(await repo.getToken(minted.token), 'TOKEN# item still exists');
+    assert.equal((await publicGet(minted.token)).status, 404, 'pointer mismatch → inert');
+  });
+
+  test('a club rep is forbidden (403) on all three admin routes', async () => {
+    assert.equal((await adminGet(LREP)).status, 403);
+    assert.equal((await adminPost(LREP)).status, 403);
+    assert.equal((await adminDelete(LREP)).status, 403);
+  });
+
+  test('anonymous requests are unauthenticated (401)', async () => {
+    for (const method of ['GET', 'POST', 'DELETE']) {
+      const res = await app.request('/admin/club-signup-link', {
+        method,
+        headers: { 'x-tenant': T, 'content-type': 'application/json' },
+      });
+      assert.equal(res.status, 401, `${method} without credentials`);
+    }
+  });
+});
+
+describe('public club self-registration (/club-signup)', () => {
+  // Dedicated tenant; the link is minted through the real admin route in before().
+  const T = 'signuptenant';
+  const sHeaders = (auth: string) => ({
+    'x-tenant': T,
+    'x-dev-auth': auth,
+    'content-type': 'application/json',
+  });
+  const SADMIN = devAuthAs('caller-signup-admin', 'signup-admin@su.test', [
+    { tenantId: T, role: 'admin', clubIds: [] },
+  ]);
+  let token: string;
+
+  // Deterministic offline sub for an email — mirrors cognito-users.localSub so the
+  // membership ensurePasswordlessUser creates can be read back via repo.getUser.
+  const subFor = async (email: string) => {
+    const { createHash } = await import('node:crypto');
+    return `local-${createHash('sha1').update(email.trim().toLowerCase()).digest('hex')}`;
+  };
+
+  /** Mint a signup link via the real admin route (any tenant). */
+  const mintLink = async (tenant: string, adminAuth: string): Promise<string> => {
+    const res = await app.request('/admin/club-signup-link', {
+      method: 'POST',
+      headers: { 'x-tenant': tenant, 'x-dev-auth': adminAuth, 'content-type': 'application/json' },
+    });
+    assert.equal(res.status, 200, 'precondition: link minted');
+    const body = (await res.json()) as { clubSignupLink: { token: string } };
+    return body.clubSignupLink.token;
+  };
+
+  const signupGet = (t?: string) => app.request(`/club-signup${t ? `?t=${t}` : ''}`);
+  const signupPost = (body: unknown, t = token) =>
+    app.request(`/club-signup?t=${t}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  const validBody = (over: Record<string, unknown> = {}) => ({
+    clubName: 'Sharks CC',
+    district: 'KCCD',
+    repName: 'Robin Rep',
+    repEmail: 'robin@sharks.test',
+    repCell: '083 555 0001',
+    consent: true,
+    ...over,
   });
 
   before(async () => {
-    // Stand up a separate tenant locked to 'paid', reusing dolphins' league catalogue.
-    const dolCfg = (await repo.getTenantConfig('dolphins'))!;
-    teamKey = (dolCfg.leagues ?? [])[0]?.key ?? '';
-    assert.ok(teamKey, 'expected a seeded league catalogue to derive a team key from');
-    await repo.putTenantConfig({ ...dolCfg, tenant: GATE, registrationAccess: 'paid' });
-    await repo.createClub(GATE, club('gate-src', true));
-    await repo.createClub(GATE, club('gate-dst', false)); // unpaid → locked destination
-    await repo.createClub(GATE, club('gate-dst-paid', true));
-    await repo.createPlayer(GATE, player('gate-src', 'gp1', '9001011111111'));
-    await repo.createPlayer(GATE, player('gate-src', 'gp2', '9001012222222'));
+    await repo.putTenantConfig({
+      tenant: T,
+      branding: { name: 'Signup Union', title: 'Signup', logoUrl: '', colors: {}, copy: {} },
+      submissionDeadline: '2026-12-31',
+      knownClubs: [],
+      leagues: [],
+    });
+    token = await mintLink(T, SADMIN);
   });
 
-  const regBody = (idNumber: string) => ({
-    firstName: 'New',
-    lastName: 'Player',
-    idNumber,
-    race: 'African',
-    gender: 'Male',
-    cell: '0820000000',
-    team: teamKey,
-    district: 'Ethekwini',
-  });
-
-  test('authed register is blocked at an unpaid club (403)', async () => {
-    const res = await app.request('/clubs/gate-dst/players', {
-      method: 'POST',
-      headers: gHeaders(REP_DST),
-      body: JSON.stringify(regBody('9203035034089')),
-    });
-    assert.equal(res.status, 403);
-  });
-
-  test('authed register succeeds at a paid club (proves it is the gate, not a block)', async () => {
-    const res = await app.request('/clubs/gate-src/players', {
-      method: 'POST',
-      headers: gHeaders(REP_SRC),
-      body: JSON.stringify(regBody('9203035034089')),
-    });
-    assert.equal(res.status, 201);
-  });
-
-  test('public registration link is blocked at an unpaid club (403)', async () => {
-    await repo.putToken('gate-tok', GATE, 'gate-dst', '2026-06-01T00:00:00.000Z');
-    const res = await app.request('/register/gate-dst?t=gate-tok', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-tenant': GATE },
-      body: JSON.stringify({ firstName: 'Pub', lastName: 'Reg', dob: '1995-01-01' }),
-    });
-    assert.equal(res.status, 403);
-  });
-
-  test('clearance request into an unpaid destination is blocked (403)', async () => {
-    const res = await app.request('/clubs/gate-dst/clearances', {
-      method: 'POST',
-      headers: gHeaders(REP_DST),
-      body: JSON.stringify({ fromClubId: 'gate-src', playerNaturalKey: 'gp1' }),
-    });
-    assert.equal(res.status, 403);
-  });
-
-  test('clearance request into a paid destination succeeds (201)', async () => {
-    const res = await app.request('/clubs/gate-dst-paid/clearances', {
-      method: 'POST',
-      headers: gHeaders(REP_DSTP),
-      body: JSON.stringify({ fromClubId: 'gate-src', playerNaturalKey: 'gp1' }),
-    });
-    assert.equal(res.status, 201);
-  });
-
-  test('carve-out: an already-pending clearance can still be issued into an unpaid destination', async () => {
-    // Seed a request straight to the repo (bypassing the create gate), simulating one made
-    // before the destination was locked, then issue it from the source.
-    await repo.createClearance(GATE, {
-      id: 'gate-inflight',
-      playerNaturalKey: 'gp2',
-      playerName: 'Gate gp2',
-      fromClubId: 'gate-src',
-      toClubId: 'gate-dst', // unpaid/locked
-      fromClubName: 'gate-src',
-      toClubName: 'gate-dst',
-      requestedAt: new Date().toISOString(),
-      feesCleared: false,
-      misconductCleared: false,
-      status: 'pending',
-      clubApprovedAt: null,
-      adminOverrideAt: null,
-      version: 0,
-    });
-    const res = await app.request('/clubs/gate-src/clearances/gate-inflight', {
-      method: 'PATCH',
-      headers: gHeaders(REP_SRC),
-      body: JSON.stringify({ feesCleared: true, misconductCleared: true, action: 'issue' }),
-    });
+  test('GET with a valid token returns the tenant, org name and district choices', async () => {
+    const res = await signupGet(token);
     assert.equal(res.status, 200);
-    const moved = await repo.getPlayer(GATE, 'gate-dst', 'gp2');
-    assert.equal(moved?.clubId, 'gate-dst'); // landed in the unpaid club — carve-out holds
+    const body = (await res.json()) as { tenant: string; orgName: string; districts: string[] };
+    assert.equal(body.tenant, T);
+    assert.equal(body.orgName, 'Signup Union');
+    assert.ok(body.districts.includes('KCCD'), 'districts carry the catalogue values');
+  });
+
+  test('GET without a token is a 400', async () => {
+    assert.equal((await signupGet()).status, 400);
+  });
+
+  test('POST without a token is a 400', async () => {
+    const res = await app.request('/club-signup', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(validBody()),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test('GET with an unknown token is a 404', async () => {
+    assert.equal((await signupGet('not-a-real-token')).status, 404);
+  });
+
+  test('a player reg-link token cannot open signup (404)', async () => {
+    // A reg-link token shares the TOKEN# keyspace but has clubId instead of kind.
+    await repo.putToken('player-reg-tok', T, 'some-club', '2026-06-01T00:00:00.000Z');
+    assert.equal((await signupGet('player-reg-tok')).status, 404);
+    assert.equal((await signupPost(validBody(), 'player-reg-tok')).status, 404);
+  });
+
+  test('happy path: creates the club with provenance and the rep login (201)', async () => {
+    const res = await signupPost(validBody());
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { clubId: string; clubName: string; email: string };
+    assert.equal(body.clubId, 'sharks-cc');
+    assert.equal(body.clubName, 'Sharks CC');
+    assert.equal(body.email, 'robin@sharks.test');
+
+    // Admin view: the club exists with chair contact + signup provenance.
+    const clubRes = await app.request('/clubs/sharks-cc', { headers: sHeaders(SADMIN) });
+    assert.equal(clubRes.status, 200);
+    const club = (await clubRes.json()) as {
+      chair: string;
+      district: string;
+      exco?: { chair?: { name: string; email: string; cell: string } };
+      onboardedVia?: string;
+      signupConsentAt?: string;
+      changedBy?: string;
+    };
+    assert.equal(club.chair, 'Robin Rep');
+    assert.equal(club.district, 'KCCD');
+    assert.equal(club.exco?.chair?.name, 'Robin Rep');
+    assert.equal(club.exco?.chair?.email, 'robin@sharks.test');
+    assert.equal(club.exco?.chair?.cell, '083 555 0001');
+    assert.equal(club.onboardedVia, 'self-signup');
+    assert.ok(club.signupConsentAt, 'POPIA consent timestamp stamped');
+    assert.equal(club.changedBy, 'robin@sharks.test');
+
+    // The rep's USER# membership was created (deterministic LOCAL_AUTH sub).
+    const user = await repo.getUser(await subFor('robin@sharks.test'));
+    const m = user?.memberships.find((mm) => mm.tenantId === T);
+    assert.equal(m?.role, 'rep');
+    assert.deepEqual(m?.clubIds, ['sharks-cc']);
+    assert.equal(m?.invitedBy, 'self-signup');
+  });
+
+  test('replay (same club + same chair email) is a 200 with no duplicate membership', async () => {
+    const res = await signupPost(validBody());
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { clubId: string; replayed?: boolean };
+    assert.equal(body.clubId, 'sharks-cc');
+    assert.equal(body.replayed, true);
+
+    const user = await repo.getUser(await subFor('robin@sharks.test'));
+    const m = user?.memberships.find((mm) => mm.tenantId === T);
+    assert.deepEqual(m?.clubIds, ['sharks-cc'], 'clubId appears exactly once after replay');
+  });
+
+  test('the same name from a different email is a 409 name_taken', async () => {
+    const res = await signupPost(validBody({ repEmail: 'imposter@sharks.test' }));
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as { code?: string };
+    assert.equal(body.code, 'name_taken');
+    // The name check ran before ensurePasswordlessUser — no account minted.
+    assert.equal(await repo.getUser(await subFor('imposter@sharks.test')), null);
+  });
+
+  test('a slug collision (different name, same id) is a 409 with no orphan club or user', async () => {
+    const first = await signupPost(
+      validBody({ clubName: 'Kingsmead-CC', repEmail: 'kc1@kings.test' }),
+    );
+    assert.equal(first.status, 201);
+    assert.equal(((await first.json()) as { clubId: string }).clubId, 'kingsmead-cc');
+
+    // "Kingsmead CC" differs as a name but slugs to the SAME id → name_taken, not a 500.
+    const second = await signupPost(
+      validBody({ clubName: 'Kingsmead CC', repEmail: 'kc2@kings.test' }),
+    );
+    assert.equal(second.status, 409);
+    assert.equal(((await second.json()) as { code?: string }).code, 'name_taken');
+
+    assert.equal(await repo.getUser(await subFor('kc2@kings.test')), null, 'no orphan user');
+    const club = await repo.getClub(T, 'kingsmead-cc');
+    assert.equal(club?.name, 'Kingsmead-CC', 'the original club is untouched');
+  });
+
+  test('invalid input is rejected (400) before any club or account is created', async () => {
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['name slugs to empty', validBody({ clubName: '!!!', repEmail: 'bad1@su.test' })],
+      ['bad email', validBody({ repEmail: 'not-an-email' })],
+      ['unknown district', validBody({ district: 'Atlantis District', repEmail: 'bad2@su.test' })],
+      ['missing consent', { ...validBody({ repEmail: 'bad3@su.test' }), consent: undefined }],
+      ['consent false', validBody({ consent: false, repEmail: 'bad4@su.test' })],
+      ['over-length name', validBody({ clubName: 'X'.repeat(81), repEmail: 'bad5@su.test' })],
+      ['over-length cell', validBody({ repCell: '0'.repeat(21), repEmail: 'bad6@su.test' })],
+    ];
+    for (const [label, body] of cases) {
+      assert.equal((await signupPost(body)).status, 400, label);
+    }
+    // None of the rejects minted a login.
+    for (const email of ['bad1@su.test', 'bad3@su.test', 'bad5@su.test']) {
+      assert.equal(await repo.getUser(await subFor(email)), null, `${email} not minted`);
+    }
+  });
+
+  test('an existing rep signing up a second club gains the clubId exactly once; other tenants intact', async () => {
+    const email = 'multi@rep.test';
+    const sub = await subFor(email);
+    await repo.putUser({
+      sub,
+      email,
+      memberships: [
+        { tenantId: T, role: 'rep', clubIds: ['old-club'] },
+        { tenantId: 'dolphins', role: 'rep', clubIds: ['testers'] },
+      ],
+      onboardingSeen: {},
+    });
+
+    const res = await signupPost(validBody({ clubName: 'Second CC', repEmail: email }));
+    assert.equal(res.status, 201);
+
+    const user = await repo.getUser(sub);
+    const m = user?.memberships.find((mm) => mm.tenantId === T);
+    assert.deepEqual(m?.clubIds, ['old-club', 'second-cc'], 'new clubId appended');
+    assert.deepEqual(
+      user?.memberships.find((mm) => mm.tenantId === 'dolphins'),
+      { tenantId: 'dolphins', role: 'rep', clubIds: ['testers'] },
+      'other-tenant membership untouched',
+    );
+
+    // A replay of the same signup must not append the clubId again.
+    const replay = await signupPost(validBody({ clubName: 'Second CC', repEmail: email }));
+    assert.equal(replay.status, 200);
+    const after = await repo.getUser(sub);
+    assert.deepEqual(
+      after?.memberships.find((mm) => mm.tenantId === T)?.clubIds,
+      ['old-club', 'second-cc'],
+      'clubIds appended exactly once',
+    );
+  });
+
+  test('an existing admin signing up a club keeps their admin membership untouched', async () => {
+    const email = 'boss@union.test';
+    const sub = await subFor(email);
+    await repo.putUser({
+      sub,
+      email,
+      memberships: [{ tenantId: T, role: 'admin', clubIds: [] }],
+      onboardingSeen: {},
+    });
+
+    const res = await signupPost(validBody({ clubName: 'Boss CC', repEmail: email }));
+    assert.equal(res.status, 201);
+    assert.ok(await repo.getClub(T, 'boss-cc'), 'the club was created');
+
+    const user = await repo.getUser(sub);
+    assert.equal(user?.memberships.length, 1);
+    const m = user?.memberships.find((mm) => mm.tenantId === T);
+    assert.equal(m?.role, 'admin', 'admin role survives a self-signup');
+    assert.deepEqual(m?.clubIds, [], 'admins keep whole-union scope (no clubId pinned)');
+  });
+
+  test('rate cap: the signup after the hourly limit is refused (429)', async () => {
+    // Isolated tenant so burning the budget can't starve the other tests. The route's
+    // limit is SIGNUPS_PER_HOUR = 30 (index.ts); consume 29 slots via the repo counter
+    // (same atomic path the route takes), then prove #30 passes and #31 is capped.
+    const RT = 'ratecaptenant';
+    await repo.putTenantConfig({
+      tenant: RT,
+      branding: { name: 'Rate Cap Union', title: 'RC', logoUrl: '', colors: {}, copy: {} },
+      submissionDeadline: '2026-12-31',
+      knownClubs: [],
+      leagues: [],
+    });
+    const RTADMIN = devAuthAs('caller-rc-admin', 'rc-admin@rc.test', [
+      { tenantId: RT, role: 'admin', clubIds: [] },
+    ]);
+    const rcToken = await mintLink(RT, RTADMIN);
+
+    const nowIso = new Date().toISOString();
+    for (let i = 0; i < 29; i++) {
+      assert.equal(await repo.bumpSignupTokenCounter(rcToken, nowIso, 30), true, `slot ${i + 1}`);
+    }
+    const within = await signupPost(
+      validBody({ clubName: 'Last Within Cap CC', repEmail: 'cap30@rc.test' }),
+      rcToken,
+    );
+    assert.equal(within.status, 201, 'signup #30 is still within the cap');
+
+    const over = await signupPost(
+      validBody({ clubName: 'Over Cap CC', repEmail: 'cap31@rc.test' }),
+      rcToken,
+    );
+    assert.equal(over.status, 429, 'signup #31 hits the hourly cap');
+    assert.equal(await repo.getUser(await subFor('cap31@rc.test')), null, 'no account minted');
+    assert.equal(await repo.getClub(RT, 'over-cap-cc'), null, 'no club created');
+
+    // Window expiry: the counter takes nowIso, so age the window out and the same
+    // token admits signups again without any admin action.
+    const twoHoursLater = new Date(Date.parse(nowIso) + 2 * 60 * 60 * 1000).toISOString();
+    assert.equal(
+      await repo.bumpSignupTokenCounter(rcToken, twoHoursLater, 30),
+      true,
+      'an aged-out window resets and admits the next signup',
+    );
+  });
+
+  test('an erased tenant kills its signup link: GET/POST 404 and the token is revoked', async () => {
+    const ET = 'erasesignup';
+    await repo.putTenantConfig({
+      tenant: ET,
+      branding: { name: 'Erase Union', title: 'EU', logoUrl: '', colors: {}, copy: {} },
+      submissionDeadline: '2026-12-31',
+      knownClubs: [],
+      leagues: [],
+    });
+    const ETADMIN = devAuthAs('caller-erase-admin', 'erase-admin@eu.test', [
+      { tenantId: ET, role: 'admin', clubIds: [] },
+    ]);
+    const etToken = await mintLink(ET, ETADMIN);
+    assert.equal((await signupGet(etToken)).status, 200, 'link works before erasure');
+
+    await repo.eraseTenantData(ET);
+
+    assert.equal((await signupGet(etToken)).status, 404);
+    assert.equal((await signupPost(validBody({ repEmail: 'late@eu.test' }), etToken)).status, 404);
+    assert.equal(await repo.getToken(etToken), null, 'erase revoked the TOKEN# item');
   });
 });

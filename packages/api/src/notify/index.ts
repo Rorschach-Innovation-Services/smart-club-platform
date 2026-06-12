@@ -1,18 +1,13 @@
 /**
- * Invite-send orchestrator. Resolves the chair contact off the club, validates per
- * channel, and fans email + WhatsApp out concurrently (each channel never throws —
- * failures become a `failed`/`skipped` result so one bad channel can't sink the
- * other). The HTTP route records these results in the comm log and returns them to
- * the admin verbatim, so the toast reflects reality instead of optimism.
+ * Notification orchestrator. Validates recipients per channel and fans email +
+ * WhatsApp out concurrently (each channel never throws — failures become a
+ * `failed`/`skipped` result so one bad channel can't sink the other). The HTTP
+ * routes record these results and return them to the caller verbatim, so the
+ * toast reflects reality instead of optimism.
  */
 import type { Club, Channel, SendResult, PlayerRegistration } from '../types.js';
-import { sendInviteEmail, sendStaffInviteEmail, sendFixturesEmail } from './email.js';
-import {
-  sendInviteWhatsApp,
-  sendStaffInviteWhatsApp,
-  sendFixturesWhatsApp,
-  toE164,
-} from './whatsapp.js';
+import { sendStaffInviteEmail, sendFixturesEmail } from './email.js';
+import { sendStaffInviteWhatsApp, sendFixturesWhatsApp, toE164 } from './whatsapp.js';
 
 // Re-export so existing import sites (index.ts) keep resolving these from here.
 export type { Channel, SendResult } from '../types.js';
@@ -21,44 +16,18 @@ export type { Channel, SendResult } from '../types.js';
 // passes the form can't be rejected here.
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 
-/** A generic recipient for a single-recipient invite (club chair or staff member). */
+/** The staff (admin/rep) invite recipient. */
 interface Contact {
   name: string;
   email: string;
   cell: string;
 }
 
-/**
- * Which invite copy/template a channel send should use. 'invite' = the club-onboarding
- * invite (chair); 'staff' = the generic admin/rep "you've been added to {org}" invite.
- * `label` carries the club name (invite) or org name (staff) used in copy + skip errors.
- */
-interface InviteKind {
-  kind: 'invite' | 'staff';
-  label: string;
-}
-
-/** Read the chair contact off `exco.chair`, tolerating a totally-absent object. */
-function chairContact(club: Club): Contact {
-  const exco = (club.exco ?? {}) as {
-    chair?: { name?: string; email?: string; cell?: string };
-  };
-  const chair = exco.chair ?? {};
-  return {
-    name: (chair.name || club.chair || '').trim(),
-    email: (chair.email || '').trim(),
-    cell: (chair.cell || '').trim(),
-  };
-}
-
 const errMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
-
-/** Noun used in a skip reason ("chair" for a club invite, "staff" for a staff invite). */
-const subject = (k: InviteKind): string => (k.kind === 'invite' ? 'chair' : 'staff');
 
 async function sendEmailChannel(
   contact: Contact,
-  kind: InviteKind,
+  orgName: string,
   link: string,
 ): Promise<SendResult> {
   if (!EMAIL_RE.test(contact.email)) {
@@ -67,24 +36,16 @@ async function sendEmailChannel(
       channel: 'email',
       status: 'skipped',
       ...(contact.email ? { to: contact.email } : {}),
-      error: `no valid ${subject(kind)} email on file`,
+      error: 'no valid staff email on file',
     };
   }
   try {
-    const { messageId } =
-      kind.kind === 'invite'
-        ? await sendInviteEmail({
-            to: contact.email,
-            chairName: contact.name,
-            clubName: kind.label,
-            link,
-          })
-        : await sendStaffInviteEmail({
-            to: contact.email,
-            name: contact.name,
-            orgName: kind.label,
-            link,
-          });
+    const { messageId } = await sendStaffInviteEmail({
+      to: contact.email,
+      name: contact.name,
+      orgName,
+      link,
+    });
     return { channel: 'email', status: 'sent', to: contact.email, messageId };
   } catch (err) {
     return { channel: 'email', status: 'failed', to: contact.email, error: errMessage(err) };
@@ -93,7 +54,7 @@ async function sendEmailChannel(
 
 async function sendWhatsAppChannel(
   contact: Contact,
-  kind: InviteKind,
+  orgName: string,
   link: string,
 ): Promise<SendResult> {
   const e164 = toE164(contact.cell);
@@ -102,64 +63,27 @@ async function sendWhatsAppChannel(
       channel: 'whatsapp',
       status: 'skipped',
       ...(contact.cell ? { to: contact.cell } : {}),
-      error: `no valid ${subject(kind)} cell on file`,
+      error: 'no valid staff cell on file',
     };
   }
   try {
-    const { messageId } =
-      kind.kind === 'invite'
-        ? await sendInviteWhatsApp({
-            to: e164,
-            chairName: contact.name,
-            clubName: kind.label,
-            link,
-          })
-        : await sendStaffInviteWhatsApp({
-            to: e164,
-            name: contact.name,
-            orgName: kind.label,
-            link,
-          });
+    const { messageId } = await sendStaffInviteWhatsApp({
+      to: e164,
+      name: contact.name,
+      orgName,
+      link,
+    });
     return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
   } catch (err) {
     return { channel: 'whatsapp', status: 'failed', to: e164, error: errMessage(err) };
   }
 }
 
-/** Fan an invite out across the requested channels for a single recipient. */
-async function fanOut(
-  contact: Contact,
-  kind: InviteKind,
-  channels: Channel[],
-  link: string,
-): Promise<{ results: SendResult[] }> {
-  // Concurrent fan-out keeps worst-case latency to the slowest single channel rather
-  // than the sum (only ≤2 calls — one recipient × ≤2 channels). Order is preserved.
-  // Note: WhatsApp retries on rate-limit; SES (email) does not.
-  const results = await Promise.all(
-    channels.map((channel) =>
-      channel === 'email'
-        ? sendEmailChannel(contact, kind, link)
-        : sendWhatsAppChannel(contact, kind, link),
-    ),
-  );
-  return { results };
-}
-
-export async function sendClubInvite(args: {
-  club: Club;
-  channels: Channel[];
-  link: string;
-}): Promise<{ results: SendResult[] }> {
-  const { club, channels, link } = args;
-  return fanOut(chairContact(club), { kind: 'invite', label: club.name }, channels, link);
-}
-
 /**
  * Send the generic staff (admin/rep) invite — "you've been added to {orgName}" — over
- * email and/or WhatsApp. Mirrors sendClubInvite's non-throwing per-channel result shape
- * (a bad/blank contact becomes a `skipped`/`failed` result, never sinking the other
- * channel). Email is the primary staff channel; WhatsApp is best-effort.
+ * email and/or WhatsApp. Non-throwing per-channel results (a bad/blank contact becomes
+ * a `skipped`/`failed` result, never sinking the other channel). Email is the primary
+ * staff channel; WhatsApp is best-effort.
  */
 export async function sendStaffInvite(args: {
   email: string;
@@ -175,7 +99,17 @@ export async function sendStaffInvite(args: {
     email: (email ?? '').trim(),
     cell: (cell ?? '').trim(),
   };
-  return fanOut(contact, { kind: 'staff', label: orgName }, channels, link);
+  // Concurrent fan-out keeps worst-case latency to the slowest single channel rather
+  // than the sum (only ≤2 calls — one recipient × ≤2 channels). Order is preserved.
+  // Note: WhatsApp retries on rate-limit; SES (email) does not.
+  const results = await Promise.all(
+    channels.map((channel) =>
+      channel === 'email'
+        ? sendEmailChannel(contact, orgName, link)
+        : sendWhatsAppChannel(contact, orgName, link),
+    ),
+  );
+  return { results };
 }
 
 // ───────────────────────── Fixtures broadcast ─────────────────────────

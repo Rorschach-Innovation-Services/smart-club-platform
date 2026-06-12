@@ -1,12 +1,11 @@
 /**
- * WhatsApp invite via the Meta WhatsApp Cloud API (Graph API).
+ * WhatsApp sends via the Meta WhatsApp Cloud API (Graph API).
  *
- * Business-initiated messages (this invite — the club hasn't messaged us first)
+ * Business-initiated messages (these — the recipient hasn't messaged us first)
  * MUST use a pre-approved template; free-form text is rejected outside the 24h
- * customer-care window. We send the `WHATSAPP_INVITE_TEMPLATE` Utility template
- * with three body parameters: {{1}} chair name, {{2}} club name, {{3}} the link.
- * (URL-in-body is valid for Utility templates and avoids URL-button dynamic-suffix
- * coupling.) The template must be created + approved under the WABA that owns
+ * customer-care window. Templates carry positional body parameters; URL-in-body
+ * is valid for Utility templates and avoids URL-button dynamic-suffix coupling.
+ * Each template must be created + approved under the WABA that owns
  * WHATSAPP_PHONE_NUMBER_ID before real sends work.
  *
  * Credentials are reused from medicoach's WABA (token + phone-number id). Recipients
@@ -19,6 +18,8 @@ import { randomUUID } from 'node:crypto';
 
 const TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
+// The approved onboarding-invite template survives as the staff-template DEV default
+// only — the chair-invite send itself was removed with admin club onboarding.
 const TEMPLATE = process.env.WHATSAPP_INVITE_TEMPLATE ?? 'club_onboarding_invite';
 const TEMPLATE_LANG = process.env.WHATSAPP_INVITE_TEMPLATE_LANG ?? 'en';
 // Fixtures broadcast uses its own approved Utility template — {{1}} player name,
@@ -70,8 +71,8 @@ type TemplateParam = { type: 'text'; text: string };
 
 /**
  * POST a pre-approved template message to the Cloud API with rate-limit retry.
- * Shared by the invite and fixtures senders so the auth/retry/dry-run handling
- * lives in exactly one place.
+ * Shared by the staff-invite and fixtures senders so the auth/retry/dry-run
+ * handling lives in exactly one place.
  */
 async function sendTemplate(
   to: string,
@@ -123,30 +124,6 @@ async function sendTemplate(
       `WhatsApp send failed (${code ?? res.status}): ${data.error?.message ?? res.statusText}`,
     );
   }
-}
-
-export interface InviteWhatsAppInput {
-  to: string; // already E.164 (see toE164)
-  chairName: string;
-  clubName: string;
-  link: string;
-}
-
-export async function sendInviteWhatsApp(
-  input: InviteWhatsAppInput,
-): Promise<{ messageId: string }> {
-  const { to, chairName, clubName, link } = input;
-  return sendTemplate(
-    to,
-    TEMPLATE,
-    TEMPLATE_LANG,
-    [
-      { type: 'text', text: chairName || 'there' },
-      { type: 'text', text: clubName },
-      { type: 'text', text: link },
-    ],
-    `invite for ${clubName}`,
-  );
 }
 
 export interface StaffInviteWhatsAppInput {

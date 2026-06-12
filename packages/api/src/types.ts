@@ -55,11 +55,12 @@ export interface TenantConfig {
   submissionDeadline: string;
   knownClubs: unknown[];
   /**
-   * Tenant-wide policy for the Players + Clearances pages. 'open' (default, absent on legacy
-   * tenants) ⇒ always available. 'paid' ⇒ a club can only add players (in-portal register,
-   * public reg-link, or initiate a clearance) once it is marked `paid`. Admin-toggled in Settings.
+   * Pointer to the tenant-wide club self-signup token (TOKEN# item, kind 'club-signup').
+   * Single active link per tenant; regenerating revokes the prior token. Written ONLY via
+   * repo.updateClubSignupLink (targeted update) — PUT /tenant/config strips it from patches
+   * so a concurrent Settings save can't resurrect a revoked link.
    */
-  registrationAccess?: 'open' | 'paid';
+  clubSignupLink?: { token: string; createdAt: string };
   /** Admin-managed league catalogue clubs opt into. Empty for a fresh tenant. */
   leagues?: League[];
   /** Optional per-tenant required-docs override; falls back to shared default. */
@@ -81,13 +82,6 @@ export interface Club {
   sub: string;
   chair: string;
   affiliation: 'not_started' | 'in_progress' | 'complete';
-  paid: boolean;
-  /**
-   * Per-club journey gate. 'submission' (default): the journey advances once the
-   * affiliation form is submitted. 'payment': Fixtures stay locked until an admin
-   * also marks the club paid. Display of "submitted" status is unaffected by this.
-   */
-  progressionMode?: 'submission' | 'payment';
   cqi: number;
   cqiAnswers?: Record<string, unknown>;
   docs: Record<string, boolean>;
@@ -126,6 +120,10 @@ export interface Club {
   /** Marks a club loaded from the demo snapshot; gates illustrative-only UI (e.g. seeded comm-log events). */
   demo?: boolean;
   onboardedAt?: string;
+  /** Provenance: set when the club was created via the public signup link, not by an admin. */
+  onboardedVia?: 'self-signup';
+  /** When the signing-up rep ticked the POPIA consent line (ISO). Only on self-signups. */
+  signupConsentAt?: string;
   /** Optimistic-concurrency version + audit trail. */
   version: number;
   changedBy?: string;

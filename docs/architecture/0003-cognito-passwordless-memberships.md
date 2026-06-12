@@ -23,8 +23,10 @@ union (cross-district clubs already exist in the domain).
 Use **Amazon Cognito with passwordless email OTP** (the `USER_AUTH` flow). Identity and
 authorization are carried in a **`memberships` claim**: `[{ tenantId, role, clubIds[] }]`,
 stamped onto the token by a **PreTokenGeneration Lambda** that reads the user's `USER#<sub>`
-record. Self-signup is disabled (admin-create-only). A platform super-admin bootstraps each new
-tenant's first admin out-of-band; admins then invite reps.
+record. Cognito's open self-signup is disabled — accounts are created server-side: by the
+public club-signup flow (a rep registering their club provisions their account + membership;
+the admin-issued signup token is the gate), by an admin invite, or by the platform bootstrap
+script for each new tenant's first admin.
 
 ## Why
 

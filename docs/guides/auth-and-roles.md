@@ -6,8 +6,12 @@ How identity, tenancy, and permissions fit together. Decisions:
 ## Sign-in (passwordless email OTP)
 
 Users sign in with their email and a one-time code — no passwords. Cognito's `USER_AUTH`
-flow with `EMAIL_OTP` (Essentials feature plan). Self-signup is disabled: accounts are
-created by an admin invite (`POST /admin/users`) or the platform bootstrap script.
+flow with `EMAIL_OTP` (Essentials feature plan). Accounts are created three ways: a club
+rep **self-registers** through the tenant's signup link (registering a club provisions the
+account + membership in one step — see [signup.md](../api/signup.md)), an admin invite
+(`POST /admin/users`) for additional admins/reps, or the platform bootstrap script for a
+new tenant's first admin. Cognito's own open self-signup stays disabled — every account is
+created server-side through one of those three gates.
 
 If passwordless isn't available in af-south-1, the fallback is a `CUSTOM_AUTH` OTP via
 Lambda triggers (same token shape, app unaffected) — see
@@ -27,10 +31,10 @@ Because authorization is a DB record (not a fixed Cognito attribute):
 
 ## Roles
 
-| Role    | Scope                                                                                    |
-| ------- | ---------------------------------------------------------------------------------------- |
-| `admin` | Everything in their tenant: all clubs, series, onboarding, invites, config, paid toggle. |
-| `rep`   | Only the clubs in their `clubIds`: read/patch that club, exco, docs, reg-link.           |
+| Role    | Scope                                                                                 |
+| ------- | ------------------------------------------------------------------------------------- |
+| `admin` | Everything in their tenant: all clubs, series, the club signup link, invites, config. |
+| `rep`   | Only the clubs in their `clubIds`: read/patch that club, exco, docs, reg-link.        |
 
 ## Tenant resolution & isolation
 
@@ -47,6 +51,5 @@ logical isolation (one table, one region) is sufficient here.
 
 ## Affiliation lock
 
-The affiliation form is read-only once `affiliation === "complete"` (not once `paid`,
-since payments are deferred and `paid` is a manual admin toggle). The server rejects rep
-edits to affiliation fields on a completed club with `403`.
+The affiliation form is read-only once `affiliation === "complete"`. The server rejects
+rep edits to affiliation fields on a completed club with `403`.

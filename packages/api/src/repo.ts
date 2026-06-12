@@ -1034,9 +1034,15 @@ export async function resolveClearance(
 
 // ── Registration tokens (global, self-describing) ──
 
+/**
+ * Two token shapes share the TOKEN# keyspace: player reg-links carry a `clubId`
+ * (no `kind`), club signup links carry `kind: 'club-signup'` (no clubId). Each
+ * consumer checks the field it requires, so neither token works on the other's
+ * endpoints.
+ */
 export async function getToken(
   token: string,
-): Promise<{ tenant: string; clubId: string; createdAt: string } | null> {
+): Promise<{ tenant: string; clubId?: string; kind?: 'club-signup'; createdAt: string } | null> {
   const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: tokenKey(token) }));
   return stripKeys(res.Item);
 }
@@ -1055,9 +1061,103 @@ export async function putToken(
   );
 }
 
+/** Store a tenant-wide club self-signup token (kind-tagged, no clubId). */
+export async function putSignupToken(
+  token: string,
+  tenant: string,
+  createdAt: string,
+): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...tokenKey(token), tenant, kind: 'club-signup', createdAt },
+    }),
+  );
+}
+
 /** Revoke a token so a regenerated reg-link invalidates the previous one. */
 export async function deleteToken(token: string): Promise<void> {
   await ddb.send(new DeleteCommand({ TableName: TABLE, Key: tokenKey(token) }));
+}
+
+const SIGNUP_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * Hourly signup rate cap, kept on the TOKEN# item itself (no extra row to revoke).
+ * Returns whether this signup is allowed. Two conditional updates, no read:
+ *   1. start a fresh window (count = 1) when none exists or the current one aged out;
+ *   2. otherwise increment under `signupCount < limit`.
+ * Both writes are condition-guarded so concurrent requests can't blow past the cap
+ * mid-window. At a window boundary two racers can both "win" the reset (the second
+ * overwrites count back to 1) — that under-counts by the race width, which only ever
+ * ADMITS a request the cap might have refused; it never blocks a legitimate one.
+ * `attribute_exists(pk)` in step 1 (and the attribute reads in step 2) make a revoked
+ * token fail both conditions → false. The caller surfaces false as a 429, so a token
+ * revoked between route validation and this bump reads as "try later" rather than
+ * "link dead" — a one-request-wide race, denied either way; the next attempt 404s
+ * at validation.
+ */
+export async function bumpSignupTokenCounter(
+  token: string,
+  nowIso: string,
+  limit: number,
+): Promise<boolean> {
+  const cutoff = new Date(new Date(nowIso).getTime() - SIGNUP_WINDOW_MS).toISOString();
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: tokenKey(token),
+        UpdateExpression: 'SET signupWindowStart = :now, signupCount = :one',
+        ConditionExpression:
+          'attribute_exists(pk) AND (attribute_not_exists(signupWindowStart) OR signupWindowStart < :cutoff)',
+        ExpressionAttributeValues: { ':now': nowIso, ':one': 1, ':cutoff': cutoff },
+      }),
+    );
+    return true;
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: tokenKey(token),
+        UpdateExpression: 'SET signupCount = signupCount + :one',
+        ConditionExpression: 'signupWindowStart >= :cutoff AND signupCount < :limit',
+        ExpressionAttributeValues: { ':one': 1, ':cutoff': cutoff, ':limit': limit },
+      }),
+    );
+    return true;
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
+/**
+ * SET or REMOVE the tenant's club-signup-link pointer via a targeted UpdateExpression
+ * (modeled on updateSupportCopy) — never a whole-config read-modify-write, so a
+ * concurrent Settings save can't clobber it (TenantConfig has no version guard).
+ * Throws ConditionalCheckFailedException when the CONFIG row doesn't exist.
+ */
+export async function updateClubSignupLink(
+  tenant: string,
+  link: { token: string; createdAt: string } | null,
+): Promise<void> {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: tenantConfigKey(tenant),
+      ...(link
+        ? {
+            UpdateExpression: 'SET clubSignupLink = :v',
+            ExpressionAttributeValues: { ':v': link },
+          }
+        : { UpdateExpression: 'REMOVE clubSignupLink' }),
+      ConditionExpression: 'attribute_exists(pk)',
+    }),
+  );
 }
 
 // ── Users ──
@@ -1404,14 +1504,20 @@ async function batchDelete(keys: Array<{ pk: string; sk: string }>): Promise<voi
 /**
  * Delete a tenant's data without a table Scan: query each known partition/index
  * (config, clubs+players, series, user markers) and batch-delete. Returns the
- * count removed. Reg-link TOKEN# items are global and not tenant-enumerable —
- * they harmlessly resolve to a now-deleted club (404) after erasure.
+ * count removed. Player reg-link TOKEN# items are global and not tenant-enumerable —
+ * they harmlessly resolve to a now-deleted club (404) after erasure. The club
+ * SIGNUP token, unlike those, IS tenant-enumerable via the CONFIG pointer, and
+ * left alive it would still pass the signup GET's token lookup — so it's revoked
+ * here, before the CONFIG row (and with it the pointer) is deleted.
  *
  * Note: this deletes only the tenant's marker for a user, not the user's META
  * record or Cognito account — a multi-union user keeps their other memberships.
  * The erase-tenant CLI removes single-tenant users' accounts separately.
  */
 export async function eraseTenantData(tenant: string): Promise<number> {
+  const config = await getTenantConfig(tenant);
+  if (config?.clubSignupLink?.token) await deleteToken(config.clubSignupLink.token);
+
   const keys: Array<{ pk: string; sk: string }> = [tenantConfigKey(tenant)];
   const objectKeys: string[] = [];
 

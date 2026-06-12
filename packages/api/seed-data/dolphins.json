@@ -94,7 +94,6 @@
       "sub": "EMCU",
       "chair": "Ashraf Ganie",
       "affiliation": "complete",
-      "paid": true,
       "cqi": 91.89,
       "docs": {
         "constitution": true,
@@ -124,7 +123,6 @@
       "sub": "EMCU",
       "chair": "Rajin Ramsaroop",
       "affiliation": "complete",
-      "paid": true,
       "cqi": 87.4,
       "docs": {
         "constitution": true,
@@ -154,7 +152,6 @@
       "sub": "EMCU",
       "chair": "Jason Sathiaseelan",
       "affiliation": "complete",
-      "paid": true,
       "cqi": 81.2,
       "docs": {
         "constitution": true,
@@ -184,7 +181,6 @@
       "sub": "EMCU",
       "chair": "Simphiwe Shangase",
       "affiliation": "complete",
-      "paid": true,
       "cqi": 64.8,
       "docs": {
         "constitution": true,
@@ -214,7 +210,6 @@
       "sub": "EMCU",
       "chair": "Duncun Miller",
       "affiliation": "complete",
-      "paid": true,
       "cqi": 78.5,
       "docs": {
         "constitution": true,
@@ -244,7 +239,6 @@
       "sub": "EMCU",
       "chair": "Wayne Scott",
       "affiliation": "in_progress",
-      "paid": false,
       "cqi": 0,
       "docs": {
         "constitution": false,
@@ -274,7 +268,6 @@
       "sub": "EMCU",
       "chair": "Mags Reddy",
       "affiliation": "complete",
-      "paid": true,
       "cqi": 68.4,
       "docs": {
         "constitution": true,
@@ -304,7 +297,6 @@
       "sub": "EMCU",
       "chair": "Knowledge Vilakazi",
       "affiliation": "complete",
-      "paid": true,
       "cqi": 72.1,
       "docs": {
         "constitution": true,
@@ -334,7 +326,6 @@
       "sub": "EMCU",
       "chair": "Bradley Chetty",
       "affiliation": "not_started",
-      "paid": false,
       "cqi": 0,
       "docs": {
         "constitution": false,
@@ -364,7 +355,6 @@
       "sub": "EMCU",
       "chair": "Kugan Subrayen",
       "affiliation": "in_progress",
-      "paid": false,
       "cqi": 38.5,
       "docs": {
         "constitution": true,
@@ -394,7 +384,6 @@
       "sub": "EMCU",
       "chair": "Eric Cavanagh",
       "affiliation": "complete",
-      "paid": true,
       "cqi": 84.2,
       "docs": {
         "constitution": true,
@@ -424,7 +413,6 @@
       "sub": "EMCU",
       "chair": "Shafee Ayob",
       "affiliation": "complete",
-      "paid": true,
       "cqi": 56.3,
       "docs": {
         "constitution": true,
@@ -454,7 +442,6 @@
       "sub": "ICD",
       "chair": "Naren Singh",
       "affiliation": "complete",
-      "paid": true,
       "cqi": 47.6,
       "docs": {
         "constitution": true,
@@ -484,7 +471,6 @@
       "sub": "EMCU",
       "chair": "Praven Govender",
       "affiliation": "not_started",
-      "paid": false,
       "cqi": 0,
       "docs": {
         "constitution": false,

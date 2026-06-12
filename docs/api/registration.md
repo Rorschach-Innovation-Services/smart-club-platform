@@ -1,6 +1,7 @@
 # API — Player registration (public)
 
-The only routes open to the world. A union admin/rep issues a link
+Open to the world (alongside the club-signup routes — see [signup.md](signup.md)). A union
+admin/rep issues a link
 (`POST /clubs/:id/reg-link`) and shares it; members register without an account. The
 registration token is global and **self-describes its tenant**, so these routes never
 trust the request host for authorization. See

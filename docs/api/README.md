@@ -22,20 +22,21 @@ tenant-scoped CRUD (see [ADR 0004](../architecture/0004-thin-crud-client-side-co
 
 ## Resources
 
-| File                               | Routes                                               |
-| ---------------------------------- | ---------------------------------------------------- |
-| [tenant.md](tenant.md)             | `GET /tenant`, `PUT /tenant/config`, `GET/PATCH /me` |
-| [clubs.md](clubs.md)               | `GET/POST /clubs`, `/clubs/:id` and sub-resources    |
-| [series.md](series.md)             | `GET/POST /series`, `/series/:id`, duplicate         |
-| [registration.md](registration.md) | public `GET/POST /register/:clubId`                  |
-| [users.md](users.md)               | `POST /admin/users` (invite)                         |
+| File                               | Routes                                                    |
+| ---------------------------------- | --------------------------------------------------------- |
+| [tenant.md](tenant.md)             | `GET /tenant`, `PUT /tenant/config`, `GET/PATCH /me`      |
+| [clubs.md](clubs.md)               | `GET /clubs`, `/clubs/:id` and sub-resources              |
+| [signup.md](signup.md)             | public `GET/POST /club-signup`, `/admin/club-signup-link` |
+| [series.md](series.md)             | `GET/POST /series`, `/series/:id`, duplicate              |
+| [registration.md](registration.md) | public `GET/POST /register/:clubId`                       |
+| [users.md](users.md)               | `POST /admin/users` (invite)                              |
 
 ## Authorization matrix
 
 | Route group                                            | Public | Rep (own club) | Admin |
 | ------------------------------------------------------ | :----: | :------------: | :---: |
-| `GET /tenant`, `/register/*`                           |   ✓    |       ✓        |   ✓   |
+| `GET /tenant`, `/register/*`, `/club-signup`           |   ✓    |       ✓        |   ✓   |
 | `GET/PATCH /me`                                        |   —    |       ✓        |   ✓   |
 | `GET/PATCH /clubs/:id`, exco, docs, reg-link           |   —    |    own only    |   ✓   |
-| `GET /clubs`, `POST /clubs*`, `PATCH /clubs/:id/paid`  |   —    |       —        |   ✓   |
+| `GET /clubs`, `/admin/club-signup-link`                |   —    |       —        |   ✓   |
 | all `/series` writes, `/tenant/config`, `/admin/users` |   —    |       —        |   ✓   |

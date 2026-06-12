@@ -54,7 +54,6 @@ export function clubExportRow(c, { docCompletion, overallProgress, cqiBand }) {
     District: c.district || c.sub,
     Chairperson: c.chair,
     Affiliation: c.affiliation,
-    Paid: c.paid ? 'Yes' : 'No',
     'Docs %': docCompletion(c),
     'CQI Score': c.cqi,
     'CQI Band': cqiBand(c.cqi).label,

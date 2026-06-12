@@ -43,13 +43,13 @@ import * as repo from './repo.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
 import {
   validateClubPatch,
+  VALID_DISTRICTS,
   DOC_KEYS,
   DOC_CONTENT_TYPES,
   MIN_SAFEGUARDING_FILES,
   MAX_SAFEGUARDING_FILES,
 } from './catalogue.js';
 import {
-  sendClubInvite,
   sendClubFixtures,
   sendStaffInvite,
   type Channel,
@@ -205,8 +205,6 @@ app.get('/tenant', async (c) => {
     branding: config.branding,
     submissionDeadline: config.submissionDeadline,
     leagues: config.leagues ?? [],
-    // Tenant-wide Players/Clearances gating policy — the client gates those pages on it.
-    registrationAccess: config.registrationAccess ?? 'open',
   });
 });
 
@@ -214,11 +212,13 @@ app.get('/tenant', async (c) => {
 app.get('/register/:clubId', async (c) => {
   const token = c.req.query('t');
   if (!token) throw new HttpError(400, 'missing token');
+  const clubId = c.req.param('clubId');
   const resolved = await repo.getToken(token);
-  if (!resolved || resolved.clubId !== c.req.param('clubId')) {
+  // A club-signup token has no clubId, so it fails this match — reg links only.
+  if (!resolved || resolved.clubId !== clubId) {
     throw new HttpError(404, 'invalid registration link');
   }
-  const club = await repo.getClub(resolved.tenant, resolved.clubId);
+  const club = await repo.getClub(resolved.tenant, clubId);
   if (!club) throw new HttpError(404, 'club not found');
   return c.json({ tenant: resolved.tenant, clubId: club.id, clubName: club.name });
 });
@@ -227,15 +227,13 @@ app.get('/register/:clubId', async (c) => {
 app.post('/register/:clubId', async (c) => {
   const token = c.req.query('t');
   if (!token) throw new HttpError(400, 'missing token');
+  const clubId = c.req.param('clubId');
   const resolved = await repo.getToken(token);
-  if (!resolved || resolved.clubId !== c.req.param('clubId')) {
+  if (!resolved || resolved.clubId !== clubId) {
     throw new HttpError(404, 'invalid registration link');
   }
-  // Tenant gate: a locked, unpaid club can't take public registrations either (so the
-  // self-registration link can't bypass the lock the in-portal register enforces).
-  const regClub = await repo.getClub(resolved.tenant, resolved.clubId);
+  const regClub = await repo.getClub(resolved.tenant, clubId);
   if (!regClub) throw new HttpError(404, 'club not found');
-  assertRegistrationUnlocked(await repo.getTenantConfig(resolved.tenant), regClub);
   const body = await c.req.json<Partial<PlayerRegistration>>();
   if (!body.firstName || !body.lastName || !body.dob) {
     throw new HttpError(400, 'firstName, lastName and dob are required');
@@ -247,7 +245,7 @@ app.post('/register/:clubId', async (c) => {
   const naturalKey = playerNaturalKey(body);
   const player: PlayerRegistration = {
     naturalKey,
-    clubId: resolved.clubId,
+    clubId,
     firstName: body.firstName,
     lastName: body.lastName,
     dob: body.dob,
@@ -268,6 +266,202 @@ app.post('/register/:clubId', async (c) => {
   }
   return c.json({ ok: true }, 201);
 });
+
+// ───────────────────── Club self-registration (public) ─────────────────────
+
+const SIGNUPS_PER_HOUR = 30;
+const SIGNUP_NAME_MAX = 80;
+const SIGNUP_CELL_MAX = 20;
+
+/**
+ * Resolve a club-signup token to its tenant config, or 404. Requires
+ * `kind === 'club-signup'` (a player reg-link token never opens signup), a live
+ * config — an erased tenant's signup token must die with it even if the TOKEN#
+ * item somehow survived erasure — AND that the token matches the config's
+ * `clubSignupLink` pointer. The pointer match makes the pointer the single
+ * source of validity: a TOKEN# item orphaned by a partial rotation/revoke
+ * failure (put succeeded, pointer write didn't) is inert rather than a live,
+ * invisible, irrevocable signup credential.
+ */
+async function resolveSignupTenant(token: string | undefined): Promise<TenantConfig> {
+  if (!token) throw new HttpError(400, 'missing token');
+  const resolved = await repo.getToken(token);
+  if (!resolved || resolved.kind !== 'club-signup') {
+    throw new HttpError(404, 'invalid signup link');
+  }
+  const cfg = await repo.getTenantConfig(resolved.tenant);
+  if (!cfg || cfg.clubSignupLink?.token !== token) {
+    throw new HttpError(404, 'invalid signup link');
+  }
+  return cfg;
+}
+
+/** Validate a club signup link → org name + the district choices for the form. */
+app.get('/club-signup', async (c) => {
+  const cfg = await resolveSignupTenant(c.req.query('t'));
+  return c.json({
+    tenant: cfg.tenant,
+    // Same fallback chain as tenantOrgName, inlined — resolveSignupTenant already
+    // fetched this config; no second read per link validation.
+    orgName: cfg.branding?.name || cfg.branding?.title || cfg.tenant,
+    districts: [...VALID_DISTRICTS],
+  });
+});
+
+/**
+ * Club self-registration: one POST creates the club AND the rep's login account
+ * (they then sign in via the normal email OTP). The unguessable, admin-revocable
+ * token is the primary abuse gate; the hourly cap on the token item is a cheap
+ * backstop for a leaked link. Validation (and the name/slug pre-check) runs
+ * BEFORE ensurePasswordlessUser so junk-name spam never mints Cognito accounts.
+ */
+app.post('/club-signup', async (c) => {
+  const token = c.req.query('t');
+  const cfg = await resolveSignupTenant(token);
+  const tenant = cfg.tenant;
+
+  const body = await c.req
+    .json<{
+      clubName?: string;
+      district?: string;
+      repName?: string;
+      repEmail?: string;
+      repCell?: string;
+      consent?: boolean;
+    }>()
+    .catch(() => null);
+  if (!body) throw new HttpError(400, 'invalid request body');
+  const clubName = (body.clubName ?? '').trim();
+  const repName = (body.repName ?? '').trim();
+  const repCell = (body.repCell ?? '').trim();
+  const district = body.district ?? '';
+  const email = (body.repEmail ?? '').trim().toLowerCase();
+  if (!clubName || !district || !repName || !email) {
+    throw new HttpError(400, 'clubName, district, repName and repEmail are required');
+  }
+  if (body.consent !== true) throw new HttpError(400, 'consent required (POPIA)');
+  if (!EMAIL_RE.test(email)) throw new HttpError(400, 'valid repEmail required');
+  if (!VALID_DISTRICTS.has(district)) throw new HttpError(400, `unknown district: ${district}`);
+  if (clubName.length > SIGNUP_NAME_MAX || repName.length > SIGNUP_NAME_MAX) {
+    throw new HttpError(400, `names must be ${SIGNUP_NAME_MAX} characters or fewer`);
+  }
+  if (repCell.length > SIGNUP_CELL_MAX) throw new HttpError(400, 'repCell too long');
+  // The slug becomes the club id; a name like "!!!" slugs to '' and must not fall
+  // through to buildClubFromSpec's defaults (public input never gets fallbacks).
+  const slug = clubIdFromName(clubName);
+  if (!slug) throw new HttpError(400, 'club name must contain letters or numbers');
+
+  const allowed = await repo.bumpSignupTokenCounter(token!, now(), SIGNUPS_PER_HOUR);
+  if (!allowed) throw new HttpError(429, 'too many signups — please try again later');
+
+  // Name AND slug collision pre-check: "Kingsmead-CC" vs "Kingsmead CC" differ as
+  // names but collide on id, so a name check alone would die on createClub's guard.
+  const existing = await repo.listClubs(tenant);
+  const nameKey = clubName.toLowerCase();
+  const colliding = existing.find(
+    (cl) => cl.id === slug || cl.name.trim().toLowerCase() === nameKey,
+  );
+  if (colliding) return signupReplayOr409(c, tenant, colliding, email);
+
+  const sub = await ensurePasswordlessUser(cognito, USER_POOL_ID, email);
+  const club = buildClubFromSpec({
+    name: clubName,
+    district,
+    chair: repName,
+    chairEmail: email,
+    chairCell: repCell || undefined,
+  });
+  club.onboardedVia = 'self-signup';
+  club.signupConsentAt = now();
+  club.changedBy = email;
+  try {
+    await repo.createClub(tenant, club);
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      // A concurrent signup won the id between our pre-check and this put — re-run
+      // the replay heuristic against the club that actually landed at that id.
+      const winner = await repo.getClub(tenant, club.id);
+      if (winner) return signupReplayOr409(c, tenant, winner, email);
+      throw err;
+    }
+    throw err;
+  }
+  await ensureSignupMembership(tenant, sub, email, club.id);
+  return c.json({ clubId: club.id, clubName: club.name, email }, 201);
+});
+
+/**
+ * Replay vs name-taken. A resubmit by the SAME chair (the colliding club's
+ * exco.chair.email matches the submitted email) is a replay of their own signup —
+ * return 200 with the existing clubId and re-ensure the membership idempotently,
+ * so a lost-response retry converges instead of erroring. Anyone else gets a 409
+ * carrying `code: 'name_taken'`, which the SPA branches on to show "choose a
+ * different name" inline (never the sign-in route). The chair-email oracle this
+ * implies is mild, token-gated, and accepted.
+ */
+async function signupReplayOr409(
+  c: Context<HonoEnv>,
+  tenant: string,
+  club: Club,
+  email: string,
+): Promise<Response> {
+  const exco = (club.exco ?? {}) as { chair?: { email?: string } };
+  const chairEmail = (exco.chair?.email ?? '').trim().toLowerCase();
+  if (chairEmail && chairEmail === email) {
+    const sub = await ensurePasswordlessUser(cognito, USER_POOL_ID, email);
+    await ensureSignupMembership(tenant, sub, email, club.id);
+    return c.json({ clubId: club.id, replayed: true });
+  }
+  return c.json(
+    {
+      error: 'a club with that name is already registered — choose a different name',
+      code: 'name_taken',
+    },
+    409,
+  );
+}
+
+/**
+ * Idempotently ensure the signing-up rep can see their club: an existing admin
+ * membership in the tenant is left untouched (admins see every club), an existing
+ * rep membership gains the clubId only if absent, and a brand-new user gets a rep
+ * membership stamped 'self-signup'. Filter-then-reattach so memberships in OTHER
+ * tenants are preserved (same rule as the admin user-management routes).
+ *
+ * Read-modify-write with no version guard, like those admin routes: two
+ * concurrent signups by one email (or a racing Team & Access edit) can drop a
+ * clubIds append. Accepted — the loser's rep just resubmits and the replay path
+ * re-ensures the membership.
+ */
+async function ensureSignupMembership(
+  tenant: string,
+  sub: string,
+  email: string,
+  clubId: string,
+): Promise<void> {
+  const existing = await repo.getUser(sub);
+  const current = existing?.memberships.find((m) => m.tenantId === tenant);
+  if (current?.role === 'admin') return;
+  if (current?.clubIds.includes(clubId)) return;
+  const others = (existing?.memberships ?? []).filter((m) => m.tenantId !== tenant);
+  const membership: Membership = current
+    ? { ...current, clubIds: [...current.clubIds, clubId] }
+    : {
+        tenantId: tenant,
+        role: 'rep',
+        clubIds: [clubId],
+        invitedAt: now(),
+        invitedBy: 'self-signup',
+      };
+  const next: UserProfile = {
+    sub,
+    email: existing?.email ?? email,
+    memberships: [...others, membership],
+    onboardingSeen: existing?.onboardingSeen ?? {},
+    ...(existing?.lastLoginAt ? { lastLoginAt: existing.lastLoginAt } : {}),
+  };
+  await writeUserGuarded(tenant, next, 0);
+}
 
 function computeIsMinor(dob: string): boolean {
   const born = new Date(dob);
@@ -314,19 +508,6 @@ function dobFromSaId(idNumber: string): string | null {
 const MAX_ID_DOC_BYTES = 5 * 1024 * 1024; // 5 MB — ID photos/scans
 const ID_DOC_TYPES = new Set(['image/jpeg', 'image/png', 'application/pdf']);
 
-/**
- * Enforce the tenant-wide registration gate: when `registrationAccess === 'paid'`, a club may only
- * gain players (in-portal register, public reg-link, or a NEW clearance request into it) once it is
- * `paid`. 'open' (the default, absent on legacy tenants) never blocks. The frontend mirrors this in
- * `registrationUnlocked`. Deliberately NOT applied to issuing/overriding an already-requested
- * clearance, so an in-flight transfer never strands — only new additions to an unpaid club block.
- */
-function assertRegistrationUnlocked(cfg: TenantConfig | null, club: Club): void {
-  if ((cfg?.registrationAccess ?? 'open') === 'paid' && !club.paid) {
-    throw new HttpError(403, 'this club must be paid up before players can be added');
-  }
-}
-
 // ───────────────────── Authenticated routes ─────────────────────
 
 app.use('/me', authenticate);
@@ -371,52 +552,11 @@ app.get('/clubs', requireAdmin, async (c) => {
   return c.json(withCounts);
 });
 
-/** Onboard a new club (admin). Rejects a duplicate name within the tenant. */
-app.post('/clubs', requireAdmin, async (c) => {
-  const { tenant } = c.get('requestAuth')!;
-  const spec = await c.req.json<ClubSpec>();
-  const existing = await repo.listClubs(tenant);
-  if (nameTaken(existing, spec.name))
-    throw new HttpError(409, `a club named "${spec.name}" already exists`);
-  const club = buildClubFromSpec(spec);
-  await repo.createClub(tenant, club);
-  return c.json(club, 201);
-});
-
-/**
- * Bulk onboard (admin). Per-spec so one duplicate/failure doesn't abort the rest
- * or misreport success: returns { created, skipped } instead of throwing midway.
- */
-app.post('/clubs/bulk', requireAdmin, async (c) => {
-  const { tenant } = c.get('requestAuth')!;
-  const specs = await c.req.json<ClubSpec[]>();
-  const existing = await repo.listClubs(tenant);
-  const names = new Set(existing.map((cl) => cl.name.trim().toLowerCase()));
-  const created: Club[] = [];
-  const skipped: Array<{ name?: string; reason: string }> = [];
-  for (const spec of specs) {
-    const key = (spec.name ?? '').trim().toLowerCase();
-    if (!key || names.has(key)) {
-      skipped.push({ name: spec.name, reason: 'duplicate or missing name' });
-      continue;
-    }
-    try {
-      const club = buildClubFromSpec(spec);
-      await repo.createClub(tenant, club);
-      created.push(club);
-      names.add(key);
-    } catch {
-      skipped.push({ name: spec.name, reason: 'could not create' });
-    }
-  }
-  return c.json({ created, skipped }, 201);
-});
-
 /** Get one club (rep may only read their own). */
 /**
  * Lightweight club directory for reps — {id, name} only. Reps need a list of sibling
- * clubs (for clearance from/to selection) but must NOT see the full Club record (paid
- * status, chair, cqi, docs). Admin-only `GET /clubs` returns everything; this is the
+ * clubs (for clearance from/to selection) but must NOT see the full Club record
+ * (chair contact, cqi, docs). Admin-only `GET /clubs` returns everything; this is the
  * rep-safe projection. Registered before `/clubs/:id` so the static path wins.
  */
 app.get('/clubs/directory', async (c) => {
@@ -468,8 +608,6 @@ app.patch('/clubs/:id', async (c) => {
   const invalid = validateClubPatch(patch, validLeagueKeys, validDocKeys);
   if (invalid) throw new HttpError(400, invalid);
   if (patch.docMeta) assertDocMetaObjectKeys(ra.tenant, id, patch.docMeta);
-  // `paid` is admin-only (its own route); strip it from general patches.
-  delete (patch as { paid?: boolean }).paid;
   // Stale-client guard: docMeta is replaced wholesale (see repo.updateClub), so a
   // pre-multi-file client's "mark compliant" (bare sentinel) or revert (key omitted)
   // would erase the safeguarding files array — uploaded certificates must survive
@@ -524,12 +662,10 @@ app.post('/clubs/:id/players', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   assertClubAccess(ra, id);
-  // Authorization-style gate first (before validating the payload): a locked, unpaid club
-  // can't take new players. cfg is also reused for league validation below — one read each.
+  // cfg feeds the league-key validation below; the club read is the 404 check.
   const cfg = await repo.getTenantConfig(ra.tenant);
   const club = await repo.getClub(ra.tenant, id);
   if (!club) throw new HttpError(404, 'club not found');
-  assertRegistrationUnlocked(cfg, club);
   const body = await c.req.json<Partial<PlayerRegistration>>();
   const required: Array<keyof PlayerRegistration> = [
     'firstName',
@@ -709,9 +845,6 @@ app.post('/clubs/:id/clearances', async (c) => {
     repo.getClub(ra.tenant, toClubId),
   ]);
   if (!fromClub || !toClub) throw new HttpError(404, 'club not found');
-  // Registration gate: a locked, unpaid DESTINATION can't request new players in.
-  // (Issuing an already-pending clearance is intentionally NOT gated — see PATCH below.)
-  assertRegistrationUnlocked(await repo.getTenantConfig(ra.tenant), toClub);
   // Resolve the player at the source club — by naturalKey if given, else by ID number.
   // Only the matched player is read; the rest of the source roster is never exposed.
   let player = null;
@@ -1066,29 +1199,6 @@ app.post('/clubs/:id/reg-link', async (c) => {
   return c.json({ playerRegLink: updated.playerRegLink });
 });
 
-/** Toggle paid (admin only) — audited. */
-app.patch('/clubs/:id/paid', requireAdmin, async (c) => {
-  const ra = c.get('requestAuth')!;
-  const id = c.req.param('id');
-  const { paid } = await c.req.json<{ paid: boolean }>();
-  const updated = await applyClubPatch(ra.tenant, id, { paid }, ra.email);
-  return c.json(withPlayerCount(updated));
-});
-
-/** Set per-club progression mode (admin only) — audited. */
-app.patch('/clubs/:id/progression', requireAdmin, async (c) => {
-  const ra = c.get('requestAuth')!;
-  const id = c.req.param('id');
-  // A malformed/empty body parses to null and falls into the same 400 below,
-  // rather than surfacing as an unhandled 500.
-  const body = await c.req.json<{ progressionMode?: 'submission' | 'payment' }>().catch(() => null);
-  const progressionMode = body?.progressionMode;
-  if (progressionMode !== 'submission' && progressionMode !== 'payment')
-    throw new HttpError(400, 'invalid progressionMode');
-  const updated = await applyClubPatch(ra.tenant, id, { progressionMode }, ra.email);
-  return c.json(withPlayerCount(updated));
-});
-
 /** Append a note to the club's communication log (admin only) — audited. */
 app.post('/clubs/:id/notes', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
@@ -1106,66 +1216,6 @@ app.post('/clubs/:id/notes', requireAdmin, async (c) => {
       throw new HttpError(404, 'club not found');
     throw err;
   }
-});
-
-/**
- * Send the onboarding invite to the club's chair over email and/or WhatsApp (admin).
- * The link is built client-side from the tenant's own origin and passed in, so this
- * stays correct for multi-tenant custom domains. Idempotency-keyed so a lost-response
- * retry replays the prior outcome instead of double-sending. Per-channel results are
- * recorded in the comm log and returned verbatim so the UI toast tells the truth.
- */
-app.post('/clubs/:id/send-invite', requireAdmin, async (c) => {
-  const ra = c.get('requestAuth')!;
-  const id = c.req.param('id');
-  assertClubAccess(ra, id);
-  const { channels, link, idempotencyKey } = await c.req.json<{
-    channels?: Channel[];
-    link?: string;
-    idempotencyKey?: string;
-  }>();
-  if (!Array.isArray(channels) || channels.length === 0)
-    throw new HttpError(400, 'channels required');
-  const unknown = channels.find((ch) => ch !== 'email' && ch !== 'whatsapp');
-  if (unknown) throw new HttpError(400, `unknown channel: ${unknown}`);
-  // The link is client-supplied (so it carries the tenant's own origin). Validate it
-  // parses as http(s), points at a trusted app origin, and targets THIS club's
-  // onboarding path — so an admin can't have the invite carry an arbitrary URL.
-  let linkUrl: URL;
-  try {
-    linkUrl = new URL(link ?? '');
-  } catch {
-    throw new HttpError(400, 'valid link required');
-  }
-  if (linkUrl.protocol !== 'http:' && linkUrl.protocol !== 'https:')
-    throw new HttpError(400, 'valid link required');
-  if (!originAllowed(linkUrl.origin)) throw new HttpError(400, 'link host not allowed');
-  if (linkUrl.pathname !== `/club/${id}`) throw new HttpError(400, 'link must target this club');
-  if (!idempotencyKey) throw new HttpError(400, 'idempotencyKey required');
-
-  const club = await repo.getClub(ra.tenant, id);
-  if (!club) throw new HttpError(404, 'club not found');
-
-  // Claim the idempotency key before sending; a prior/concurrent claim replays.
-  // `pending` distinguishes "first attempt still in flight" (no results yet) from a
-  // completed replay, so the UI can show "already sending" instead of a silent no-op.
-  const prior = await repo.claimInviteSend(ra.tenant, id, idempotencyKey, channels);
-  if (prior) return c.json({ results: prior.results, deduped: true, pending: prior.pending });
-
-  const { results } = await sendClubInvite({ club, channels, link: linkUrl.href });
-  try {
-    await repo.appendClubCommEvents(
-      ra.tenant,
-      id,
-      results.map((r) => buildCommEvent(r, ra.email, idempotencyKey)),
-    );
-  } catch (err) {
-    // The messages already went out — a comm-log write failure must not fail the
-    // request (that would invite a double-send on retry). Log and move on.
-    console.error('comm-log append failed after invite send', err);
-  }
-  await repo.completeInviteSend(ra.tenant, id, idempotencyKey, results);
-  return c.json({ results }, 201);
 });
 
 /**
@@ -1302,6 +1352,11 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   const patch = await c.req.json<Partial<TenantConfig>>();
   const current = await repo.getTenantConfig(tenant);
   if (!current) throw new HttpError(404, 'tenant not found');
+  // clubSignupLink is server-owned and written only via its targeted routes — a stale
+  // Settings tab's whole-config save must not resurrect a revoked link. registrationAccess
+  // is retired; strip it too so an old client can't write it back onto the row.
+  delete (patch as { clubSignupLink?: unknown }).clubSignupLink;
+  delete (patch as { registrationAccess?: unknown }).registrationAccess;
   // Guard the league catalogue: keys are the matching token stored on clubs, so they
   // must be unique and present. Reject a patch that would introduce a duplicate/blank key.
   if (patch.leagues !== undefined) {
@@ -1565,6 +1620,44 @@ app.post('/admin/users/:sub/resend', async (c) => {
   return c.json({ results });
 });
 
+// ───────────────── Admin: club self-registration link ─────────────────
+
+/** The tenant's active club signup link, or null. SPA builds the /signup?t= URL. */
+app.get('/admin/club-signup-link', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  return c.json({ clubSignupLink: cfg.clubSignupLink ?? null });
+});
+
+/**
+ * Mint a fresh club signup link. Single active link per tenant: the prior token
+ * is revoked once the new one is stored, and the CONFIG pointer is written via a
+ * targeted update so a concurrent Settings save can't clobber or resurrect it.
+ */
+app.post('/admin/club-signup-link', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const token = randomUUID();
+  const createdAt = now();
+  await repo.putSignupToken(token, ra.tenant, createdAt);
+  const oldToken = cfg.clubSignupLink?.token;
+  if (oldToken && oldToken !== token) await repo.deleteToken(oldToken);
+  await repo.updateClubSignupLink(ra.tenant, { token, createdAt });
+  return c.json({ clubSignupLink: { token, createdAt } });
+});
+
+/** Revoke the club signup link (token + pointer). Idempotent. */
+app.delete('/admin/club-signup-link', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  if (cfg.clubSignupLink?.token) await repo.deleteToken(cfg.clubSignupLink.token);
+  await repo.updateClubSignupLink(ra.tenant, null);
+  return c.json({ ok: true });
+});
+
 // ───────────────────── Admin: player clearances ─────────────────────
 
 const CLEARANCE_WINDOW_DAYS = 14;
@@ -1706,12 +1799,6 @@ async function ensureAdminCount(tenant: string): Promise<void> {
 
 // ───────────────────────── Helpers ─────────────────────────
 
-/** Case-insensitive per-tenant club-name collision check. */
-function nameTaken(existing: Club[], name?: string): boolean {
-  const key = (name ?? '').trim().toLowerCase();
-  return !!key && existing.some((cl) => cl.name.trim().toLowerCase() === key);
-}
-
 async function applyClubPatch(
   tenant: string,
   id: string,
@@ -1724,21 +1811,6 @@ async function applyClubPatch(
     if (err instanceof VersionConflictError) throw new HttpError(409, 'club changed; refetch');
     throw err;
   }
-}
-
-/** Map a per-channel send outcome into a comm-log event row (omitting empty fields). */
-function buildCommEvent(r: SendResult, by: string, idempotencyKey: string): ClubCommEvent {
-  return {
-    id: randomUUID(),
-    channel: r.channel,
-    status: r.status,
-    ...(r.to ? { to: r.to } : {}),
-    ...(r.messageId ? { messageId: r.messageId } : {}),
-    ...(r.error ? { error: r.error } : {}),
-    at: now(),
-    by,
-    idempotencyKey,
-  };
 }
 
 /** Minimal view of an embedded fixture (the rest of the series payload is opaque here). */
@@ -1901,13 +1973,20 @@ function buildInitialExco(spec: ClubSpec): Record<string, unknown> | undefined {
   return { chair: { name: name ?? '', email: email ?? '', cell: cell ?? '' } };
 }
 
+/**
+ * Canonical club id from a name. Shared by buildClubFromSpec and the public
+ * signup's collision pre-check, which MUST slug exactly the way the id is built
+ * ("Kingsmead-CC" and "Kingsmead CC" are distinct names but the same id).
+ */
+function clubIdFromName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
 function buildClubFromSpec(spec: ClubSpec): Club {
-  const id =
-    spec.id ??
-    (spec.name ?? 'club')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '');
+  const id = spec.id ?? clubIdFromName(spec.name ?? 'club');
   return {
     id,
     name: spec.name ?? 'New Club',
@@ -1915,8 +1994,6 @@ function buildClubFromSpec(spec: ClubSpec): Club {
     sub: spec.sub ?? '',
     chair: spec.chair ?? '',
     affiliation: 'not_started',
-    paid: false,
-    progressionMode: 'submission',
     cqi: 0,
     docs: {
       constitution: false,

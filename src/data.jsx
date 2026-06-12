@@ -264,7 +264,6 @@ export const SAMPLE_CLUBS = [
     sub: 'EMCU',
     chair: 'Ashraf Ganie',
     affiliation: 'complete',
-    paid: true,
     cqi: 91.89,
     docs: {
       constitution: true,
@@ -288,7 +287,6 @@ export const SAMPLE_CLUBS = [
     sub: 'EMCU',
     chair: 'Rajin Ramsaroop',
     affiliation: 'complete',
-    paid: true,
     cqi: 87.4,
     docs: {
       constitution: true,
@@ -312,7 +310,6 @@ export const SAMPLE_CLUBS = [
     sub: 'EMCU',
     chair: 'Jason Sathiaseelan',
     affiliation: 'complete',
-    paid: true,
     cqi: 81.2,
     docs: {
       constitution: true,
@@ -341,7 +338,6 @@ export const SAMPLE_CLUBS = [
     sub: 'EMCU',
     chair: 'Simphiwe Shangase',
     affiliation: 'complete',
-    paid: true,
     cqi: 64.8,
     docs: {
       constitution: true,
@@ -365,7 +361,6 @@ export const SAMPLE_CLUBS = [
     sub: 'EMCU',
     chair: 'Duncun Miller',
     affiliation: 'complete',
-    paid: true,
     cqi: 78.5,
     docs: {
       constitution: true,
@@ -389,7 +384,6 @@ export const SAMPLE_CLUBS = [
     sub: 'EMCU',
     chair: 'Wayne Scott',
     affiliation: 'in_progress',
-    paid: false,
     cqi: 0,
     docs: {
       constitution: false,
@@ -413,7 +407,6 @@ export const SAMPLE_CLUBS = [
     sub: 'EMCU',
     chair: 'Mags Reddy',
     affiliation: 'complete',
-    paid: true,
     cqi: 68.4,
     docs: {
       constitution: true,
@@ -437,7 +430,6 @@ export const SAMPLE_CLUBS = [
     sub: 'EMCU',
     chair: 'Knowledge Vilakazi',
     affiliation: 'complete',
-    paid: true,
     cqi: 72.1,
     docs: {
       constitution: true,
@@ -461,7 +453,6 @@ export const SAMPLE_CLUBS = [
     sub: 'EMCU',
     chair: 'Bradley Chetty',
     affiliation: 'not_started',
-    paid: false,
     cqi: 0,
     docs: {
       constitution: false,
@@ -485,7 +476,6 @@ export const SAMPLE_CLUBS = [
     sub: 'EMCU',
     chair: 'Kugan Subrayen',
     affiliation: 'in_progress',
-    paid: false,
     cqi: 38.5,
     docs: {
       constitution: true,
@@ -509,7 +499,6 @@ export const SAMPLE_CLUBS = [
     sub: 'EMCU',
     chair: 'Eric Cavanagh',
     affiliation: 'complete',
-    paid: true,
     cqi: 84.2,
     docs: {
       constitution: true,
@@ -533,7 +522,6 @@ export const SAMPLE_CLUBS = [
     sub: 'EMCU',
     chair: 'Shafee Ayob',
     affiliation: 'complete',
-    paid: true,
     cqi: 56.3,
     docs: {
       constitution: true,
@@ -557,7 +545,6 @@ export const SAMPLE_CLUBS = [
     sub: 'ICD',
     chair: 'Naren Singh',
     affiliation: 'complete',
-    paid: true,
     cqi: 47.6,
     docs: {
       constitution: true,
@@ -581,7 +568,6 @@ export const SAMPLE_CLUBS = [
     sub: 'EMCU',
     chair: 'Praven Govender',
     affiliation: 'not_started',
-    paid: false,
     cqi: 0,
     docs: {
       constitution: false,
@@ -600,7 +586,7 @@ export const SAMPLE_CLUBS = [
   },
 ];
 
-// Decorate each paid club with the league keys they registered for, so the
+// Decorate each club with the league keys they registered for, so the
 // admin series-creation flow can auto-filter teams by league.
 const _LEAGUES_BY_CLUB = {
   ukzn: ['premier', 'premierWomen', 'emcuD1', 'emcuU11'],
@@ -745,12 +731,11 @@ export const CQI_STRUCTURE = [
 export function cohortStats(clubs) {
   const total = clubs.length;
   const affComplete = clubs.filter((c) => c.affiliation === 'complete').length;
-  const paid = clubs.filter((c) => c.paid).length;
   const cqiSubmitted = clubs.filter((c) => c.cqi > 0).length;
   const avgCqi =
     clubs.filter((c) => c.cqi > 0).reduce((s, c) => s + c.cqi, 0) / Math.max(1, cqiSubmitted);
   const docsComplete = clubs.filter(docsAllComplete).length;
-  return { total, affComplete, paid, cqiSubmitted, avgCqi, docsComplete };
+  return { total, affComplete, cqiSubmitted, avgCqi, docsComplete };
 }
 
 export function docCompletion(club) {
@@ -823,32 +808,15 @@ export function computeRevertCompliance(club, keys) {
   return { docs, docMeta, reverted };
 }
 
-// Canonical "did the club submit its affiliation form" — the form fact,
-// independent of payment. Never read `paid` for this.
+// Canonical "did the club submit its affiliation form" — the form fact.
 export function affiliationSubmitted(club) {
   return club.affiliation === 'complete';
-}
-
-// Has the club cleared phase 1 to advance (Fixtures unlock, onboarding closes)?
-// Per-club: 'payment' mode requires BOTH submission AND paid — `paid` alone must
-// never unlock an unaffiliated club (togglePaid has no affiliation guard).
-export function journeyUnlocked(club) {
-  return (club.progressionMode ?? 'submission') === 'payment'
-    ? affiliationSubmitted(club) && club.paid
-    : affiliationSubmitted(club);
-}
-
-// Tenant-wide gate for the Players + Clearances pages, mirroring the backend
-// `assertRegistrationUnlocked`. 'open' (default) is always unlocked; 'paid' requires the
-// club to be marked paid. Keep in sync with packages/api/src/index.ts.
-export function registrationUnlocked(club, tenantConfig) {
-  return (tenantConfig?.registrationAccess ?? 'open') === 'paid' ? !!club?.paid : true;
 }
 
 export function overallProgress(club) {
   // 5 weighted phases: 20% each
   const p1 = affiliationSubmitted(club) ? 100 : club.affiliation === 'in_progress' ? 40 : 0;
-  const p2 = journeyUnlocked(club) ? 100 : 0; // fixtures phase clears once the journey unlocks
+  const p2 = affiliationSubmitted(club) ? 100 : 0; // fixtures phase clears once affiliation is in
   const p3 = Math.min(100, ((club.players || 0) / 60) * 100);
   const p4 = club.cqi > 60 ? 100 : club.cqi > 0 ? 50 : 0;
   const p5 = docCompletion(club);

@@ -19,14 +19,13 @@ import { setActiveTenant } from './api.js';
 import { AuthProvider, useAuth, membershipFor } from './auth.jsx';
 import { Login } from './Login.jsx';
 import { RegisterPage } from './RegisterPage.jsx';
+import { ClubSignupPage } from './ClubSignupPage.jsx';
 import {
   REQUIRED_DOCS,
   SUBMISSION_DEADLINE_DEFAULT,
   docCompletion,
   docsAllComplete,
   affiliationSubmitted,
-  journeyUnlocked,
-  registrationUnlocked,
   computeMarkCompliance,
   computeRevertCompliance,
   clearanceOverdue,
@@ -257,6 +256,8 @@ function AppRoutes() {
     <Routes>
       {/* Public player registration — available with or without auth. */}
       <Route path="/register/:clubId" element={<RegisterPage />} />
+      {/* Public club self-registration — the tenant-wide signup link. */}
+      <Route path="/signup" element={<ClubSignupPage />} />
       <Route
         path="/*"
         element={
@@ -441,15 +442,6 @@ function AuthedApp({ tenantConfig }) {
       .then(() => invalidate(qk.tenant()))
       .catch(() => {});
   }
-  // Tenant-wide policy: 'paid' locks Players/Clearances until a club is paid; 'open' = always on.
-  function setRegistrationAccess(mode) {
-    withToast(
-      () => api.putTenantConfig({ registrationAccess: mode }),
-      'Could not save access policy',
-    )
-      .then(() => invalidate(qk.tenant()))
-      .catch(() => {});
-  }
   function saveOrgName(name) {
     const trimmed = (name || '').trim();
     if (!trimmed) return Promise.reject(new Error('name required'));
@@ -550,7 +542,6 @@ function AuthedApp({ tenantConfig }) {
                   setShowHelp,
                   submissionDeadline,
                   setSubmissionDeadline,
-                  setRegistrationAccess,
                   setSupportContact,
                   saveOrgName,
                   updateSeries,
@@ -596,7 +587,6 @@ function AuthedApp({ tenantConfig }) {
                 setShowHelp,
                 submissionDeadline,
                 setSubmissionDeadline,
-                setRegistrationAccess,
                 setSupportContact,
                 saveOrgName,
                 updateSeries,
@@ -649,7 +639,6 @@ function Shell({
   setShowHelp,
   submissionDeadline,
   setSubmissionDeadline,
-  setRegistrationAccess,
   setSupportContact,
   saveOrgName,
   updateSeries,
@@ -694,6 +683,10 @@ function Shell({
   const [showRequestPlayer, setShowRequestPlayer] = useStateApp(false);
   const [registerBusy, setRegisterBusy] = useStateApp(false);
   const [busyClearanceId, setBusyClearanceId] = useStateApp(null);
+  // Signup-link share modal, lifted to Shell (which persists across admin views)
+  // so empty-state buttons can open it in one click: set true + route to the
+  // clubs list, where AdminClubsList renders it.
+  const [showShareLink, setShowShareLink] = useStateApp(false);
 
   const playersQuery = useQuery({
     queryKey: qk.players(clubId),
@@ -715,10 +708,17 @@ function Shell({
     queryFn: api.getAllClearances,
     enabled: role === 'admin',
   });
+  // Tenant-wide club signup link (admin) — drives the share modal + Settings card.
+  const signupLinkQuery = useQuery({
+    queryKey: qk.signupLink(),
+    queryFn: api.getClubSignupLink,
+    enabled: role === 'admin',
+  });
   const players = playersQuery.data ?? [];
   const clearances = clearancesQuery.data ?? { incoming: [], outbound: [] };
   const clubDirectory = clubDirectoryQuery.data ?? [];
   const allClearances = allClearancesQuery.data ?? [];
+  const signupLink = signupLinkQuery.data?.clubSignupLink ?? null;
 
   // ── Derive view from URL ──
   let view;
@@ -762,6 +762,11 @@ function Shell({
   function gotoAdminView(v) {
     const map = { dashboard: 'dashboard', clubs_list: 'clubs', cqi_admin: 'cqi' };
     navigate(`/admin/${map[v] || v}`);
+  }
+  // One-click path to the signup-link share modal from any admin view.
+  function openShareLink() {
+    setShowShareLink(true);
+    gotoAdminView('clubs_list');
   }
   function gotoClubView(v, cid = clubId) {
     navigate(v === 'home' ? `/club/${cid}` : `/club/${cid}/${v}`);
@@ -1010,25 +1015,6 @@ function Shell({
       })
       .catch(() => {});
   }
-  function setPaid(id, paid) {
-    return withToast(() => api.setPaid(id, paid), 'Could not update payment')
-      .then(() => {
-        invalidate(qk.club(id));
-        invalidate(qk.clubs());
-      })
-      .catch(() => {});
-  }
-  function setProgression(id, progressionMode) {
-    return withToast(
-      () => api.setProgression(id, progressionMode),
-      'Could not update progression mode',
-    )
-      .then(() => {
-        invalidate(qk.club(id));
-        invalidate(qk.clubs());
-      })
-      .catch(() => {});
-  }
   // Admin invites a rep/admin: creates the Cognito account + membership server-side. The
   // spec carries { email, role, clubIds?, channels?, link? }; the modal owns the success view
   // (login link + per-channel results) off the returned { sub, email, loginUrl, results? }.
@@ -1070,37 +1056,28 @@ function Shell({
     invalidate(qk.clubs());
     return res?.playerRegLink;
   }
-  async function onboardClub(spec) {
-    const created = await withToast(() => api.onboardClub(spec), 'Could not onboard club');
-    invalidate(qk.clubs());
-    return created;
+  // Mint (or replace) the tenant-wide club signup link. The server revokes any
+  // prior token in the same call, so the old link dies the moment this resolves.
+  function generateSignupLink() {
+    return withToast(() => api.generateClubSignupLink(), 'Could not generate signup link').then(
+      (res) => {
+        invalidate(qk.signupLink());
+        return res?.clubSignupLink;
+      },
+    );
   }
-  // Send the real onboarding invite (email/WhatsApp). The modal owns the per-channel
-  // toasts off the returned results, so this doesn't wrap in withToast — it just
-  // refreshes the comm log on success and lets the caller surface failures.
-  async function sendClubInvite(targetClubId, payload) {
-    const res = await api.sendClubInvite(targetClubId, payload);
-    invalidate(qk.club(targetClubId));
-    invalidate(qk.clubs());
-    return res;
+  function revokeSignupLink() {
+    return withToast(() => api.revokeClubSignupLink(), 'Could not revoke signup link').then(() =>
+      invalidate(qk.signupLink()),
+    );
   }
-  // Share released fixtures with the club's players (email/WhatsApp). Like sendClubInvite,
-  // the modal owns the result toast, so this just refreshes the comm log on success.
+  // Share released fixtures with the club's players (email/WhatsApp). The modal owns
+  // the result toast, so this just refreshes the comm log on success.
   async function sendFixtures(targetClubId, payload) {
     const res = await api.sendClubFixtures(targetClubId, payload);
     invalidate(qk.club(targetClubId));
     invalidate(qk.clubs());
     return res;
-  }
-  async function bulkOnboardClubs(specs) {
-    if (!Array.isArray(specs) || specs.length === 0) return [];
-    // The API returns { created, skipped } (per-spec, non-atomic). Surface skips.
-    const res = await withToast(() => api.bulkOnboardClubs(specs), 'Could not onboard clubs');
-    invalidate(qk.clubs());
-    if (res?.skipped?.length) {
-      toastShow(`${res.skipped.length} skipped (duplicate or invalid name)`, 'warn');
-    }
-    return res?.created ?? [];
   }
 
   if (!activeClub && role === 'club') {
@@ -1117,10 +1094,6 @@ function Shell({
   const myPendingClearances = myIncomingClearances.length;
   const myOverdueClearances = myIncomingClearances.filter((r) => clearanceOverdue(r)).length;
   const myPlayerCount = players.length;
-  // Tenant policy may lock the Players/Clearances pages until the club is paid. When locked,
-  // the nav entries drop their count badge + use a muted dot, and the views render ComingSoon.
-  const regLocked =
-    role === 'club' && activeClub && !registrationUnlocked(activeClub, tenantConfig);
 
   const adminNav = [
     { v: 'dashboard', label: 'Cohort Dashboard', icon: Icon.Dashboard },
@@ -1185,27 +1158,21 @@ function Shell({
             v: 'players',
             label: 'Players',
             icon: Icon.Clubs,
-            num: regLocked ? undefined : myPlayerCount || undefined,
-            dot: regLocked ? 'muted' : myPlayerCount ? 'teal' : 'muted',
+            num: myPlayerCount || undefined,
+            dot: myPlayerCount ? 'teal' : 'muted',
           },
           {
             v: 'clearances',
             label: 'Clearances',
             icon: Icon.Shield,
-            num: regLocked ? undefined : myPendingClearances || undefined,
-            dot: regLocked
-              ? 'muted'
-              : myOverdueClearances
-                ? 'coral'
-                : myPendingClearances
-                  ? 'gold'
-                  : 'muted',
+            num: myPendingClearances || undefined,
+            dot: myOverdueClearances ? 'coral' : myPendingClearances ? 'gold' : 'muted',
           },
           {
             v: 'fixtures',
             label: 'Fixtures',
             icon: Icon.Field,
-            dot: hasReleased ? 'teal' : journeyUnlocked(activeClub) ? 'gold' : 'muted',
+            dot: hasReleased ? 'teal' : affiliationSubmitted(activeClub) ? 'gold' : 'muted',
             num: hasReleased ? 'NEW' : undefined,
           },
           { v: '_help', label: 'Need Help?', icon: Icon.Mail, action: () => setShowHelp(true) },
@@ -1227,6 +1194,7 @@ function Shell({
             gotoList={gotoList}
             gotoAdminView={gotoAdminView}
             onInviteAdmin={() => gotoAdminView('team')}
+            onShareLink={openShareLink}
             toast={toastShow}
             submissionDeadline={submissionDeadline}
             onUpdateDeadline={setSubmissionDeadline}
@@ -1241,11 +1209,12 @@ function Shell({
             gotoClub={setActiveClub}
             toast={toastShow}
             submissionDeadline={submissionDeadline}
-            onOnboardClub={onboardClub}
-            onBulkOnboardClubs={bulkOnboardClubs}
-            onSendInvite={sendClubInvite}
             onInvite={inviteUser}
-            knownClubs={tenantConfig?.knownClubs ?? []}
+            signupLink={signupLink}
+            onGenerateSignupLink={generateSignupLink}
+            onRevokeSignupLink={revokeSignupLink}
+            showShareLink={showShareLink}
+            setShowShareLink={setShowShareLink}
           />
         );
       if (view === 'club_detail')
@@ -1254,8 +1223,6 @@ function Shell({
             club={activeClub}
             gotoList={gotoList}
             onGenerateLink={() => generatePlayerRegLink(activeClub.id)}
-            onSetPaid={setPaid}
-            onSetProgression={setProgression}
             onInvite={inviteUser}
             toast={toastShow}
             allLeagues={allLeagues}
@@ -1287,7 +1254,7 @@ function Shell({
             clubs={clubs}
             kind="affiliation"
             gotoClub={setActiveClub}
-            onOnboard={() => gotoAdminView('clubs_list')}
+            onGetSignupLink={openShareLink}
             toast={toastShow}
           />
         );
@@ -1297,7 +1264,7 @@ function Shell({
             clubs={clubs}
             kind="docs"
             gotoClub={setActiveClub}
-            onOnboard={() => gotoAdminView('clubs_list')}
+            onGetSignupLink={openShareLink}
             toast={toastShow}
           />
         );
@@ -1307,7 +1274,7 @@ function Shell({
             clubs={clubs}
             kind="cqi"
             gotoClub={setActiveClub}
-            onOnboard={() => gotoAdminView('clubs_list')}
+            onGetSignupLink={openShareLink}
             toast={toastShow}
           />
         );
@@ -1363,12 +1330,13 @@ function Shell({
             orgName={orgName}
             submissionDeadline={submissionDeadline}
             support={branding?.copy?.support}
-            registrationAccess={tenantConfig?.registrationAccess ?? 'open'}
             onSaveOrg={saveOrgName}
             onUpdateDeadline={setSubmissionDeadline}
             onUpdateSupport={setSupportContact}
-            onUpdateRegistrationAccess={setRegistrationAccess}
             onManageTeam={() => gotoAdminView('team')}
+            signupLink={signupLink}
+            onGenerateSignupLink={generateSignupLink}
+            onRevokeSignupLink={revokeSignupLink}
             toast={toastShow}
           />
         );
@@ -1399,7 +1367,7 @@ function Shell({
           />
         );
       if (view === 'fixtures') {
-        if (!journeyUnlocked(activeClub))
+        if (!affiliationSubmitted(activeClub))
           return (
             <ComingSoon title="Fixtures & Venues" phase="02" unlocked={false} eta="Aug 2026" />
           );
@@ -1414,8 +1382,6 @@ function Shell({
         );
       }
       if (view === 'players') {
-        if (regLocked)
-          return <ComingSoon title="Player Roster" phase="03" unlocked={false} reason="paid" />;
         return (
           <ClubPlayersView
             club={activeClub}
@@ -1427,8 +1393,6 @@ function Shell({
         );
       }
       if (view === 'clearances') {
-        if (regLocked)
-          return <ComingSoon title="Player Clearances" phase="03" unlocked={false} reason="paid" />;
         return (
           <ClubClearancesView
             club={activeClub}
@@ -1682,8 +1646,7 @@ function Shell({
               })
             }
             onSubmit={(payload) => {
-              // Affiliation submit marks the club complete (locking the form) but
-              // does NOT set paid — payment is a separate admin action.
+              // Affiliation submit marks the club complete, locking the form.
               updateClub({
                 affiliation: 'complete',
                 district: payload.district,
@@ -1824,21 +1787,23 @@ function Shell({
 }
 
 /* ─── Filtered admin views (Affiliation / Docs / CQI) ─── */
-function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
+function AdminFiltered({ clubs, kind, gotoClub, onGetSignupLink, toast }) {
   const titles = {
     affiliation: {
       t: 'Affiliation tracker',
       crumb: 'Affiliations',
       desc: 'Track which clubs have completed the 2026/27 union affiliation form.',
       icon: Icon.Form,
-      empty: 'Onboard your clubs to start tracking who has completed the 2026/27 affiliation form.',
+      empty:
+        'Clubs register themselves via your signup link and appear here — then track who has completed the 2026/27 affiliation form.',
     },
     docs: {
       t: 'Compliance docs tracker',
       crumb: 'Compliance Docs',
       desc: 'Monitor compliance document uploads across all clubs.',
       icon: Icon.Upload,
-      empty: 'Onboard your clubs to start monitoring compliance document uploads.',
+      empty:
+        'Clubs register themselves via your signup link and appear here — then monitor their compliance document uploads.',
     },
     cqi: {
       t: 'CQI submission tracker',
@@ -1846,7 +1811,7 @@ function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
       desc: 'Real-time view of CQI self-assessments returned by clubs across all five categories.',
       icon: Icon.Star,
       empty:
-        'Onboard your clubs to start collecting CQI self-assessments across all five categories.',
+        'Clubs register themselves via your signup link and appear here — then collect CQI self-assessments across all five categories.',
     },
   }[kind];
 
@@ -1879,7 +1844,6 @@ function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
         return {
           ...base,
           Status: c.affiliation,
-          Payment: c.paid ? 'Paid' : 'Outstanding',
           Submitted: affiliationSubmitted(c)
             ? 'Submitted'
             : c.affiliation === 'in_progress'
@@ -1931,8 +1895,8 @@ function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
           title="No clubs in your cohort yet"
           sub={titles.empty}
           action={
-            <Btn tone="teal" icon={Icon.Plus} onClick={onOnboard}>
-              Onboard your first club
+            <Btn tone="teal" icon={Icon.Mail} onClick={onGetSignupLink}>
+              Get the club signup link
             </Btn>
           }
         />
@@ -1946,7 +1910,6 @@ function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
                 {kind === 'affiliation' && (
                   <>
                     <th>Status</th>
-                    <th>Payment</th>
                     <th>Submitted</th>
                   </>
                 )}
@@ -1992,23 +1955,6 @@ function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
                             Outstanding
                           </Pill>
                         )}
-                      </td>
-                      <td>
-                        <span
-                          style={{
-                            fontSize: 11.5,
-                            color: 'var(--muted)',
-                            fontFamily: "'Montserrat',sans-serif",
-                          }}
-                        >
-                          {c.paid
-                            ? 'Paid'
-                            : c.affiliation === 'complete'
-                              ? 'Submitted'
-                              : c.affiliation === 'in_progress'
-                                ? 'Draft saved'
-                                : '—'}
-                        </span>
                       </td>
                     </>
                   )}
@@ -2100,25 +2046,14 @@ function AdminFiltered({ clubs, kind, gotoClub, onOnboard, toast }) {
 }
 
 /* ─── Coming soon placeholder ─── */
-function ComingSoon({ title, phase, unlocked, eta, reason }) {
-  // `reason="paid"` is the tenant registration-gate variant: the page is built and ready,
-  // it just unlocks once the club's affiliation fee is paid (vs the generic phase-locked copy).
-  const paidGate = reason === 'paid';
-  const headline = unlocked
-    ? 'Coming soon'
-    : paidGate
-      ? 'Unlocks once your club is paid up'
-      : 'This phase unlocks after affiliation';
+function ComingSoon({ title, phase, unlocked, eta }) {
+  const headline = unlocked ? 'Coming soon' : 'This phase unlocks after affiliation';
   const detailDesc = unlocked
     ? `Phase ${phase} of the Smart Club Integration journey. Your affiliation is in — this module is in final development and will arrive shortly.`
-    : paidGate
-      ? `Phase ${phase} of the Smart Club Integration journey. Player registration and clearances open as soon as the Union office records your affiliation fee as paid.`
-      : `Phase ${phase} of the Smart Club Integration journey. Activates automatically once your club has completed affiliation and uploaded compliance documents.`;
+    : `Phase ${phase} of the Smart Club Integration journey. Activates automatically once your club has completed affiliation and uploaded compliance documents.`;
   const detailBody = unlocked
     ? "We're putting the finishing touches on this module. You'll be notified by email and on your home page the moment it's ready — no action needed from your side."
-    : paidGate
-      ? "Once your club's affiliation fee reflects as paid with the Union office, this page unlocks automatically — register players and manage clearances from here."
-      : 'Once your club has been confirmed by the Union office, this module activates with live data — fixtures, player registration, scoring, and clinical management — all sourced from the Medicoach platform.';
+    : 'Once your club has been confirmed by the Union office, this module activates with live data — fixtures, player registration, scoring, and clinical management — all sourced from the Medicoach platform.';
   const ring = unlocked ? 'var(--teal)' : 'var(--paper3)';
   const ringBg = unlocked ? 'var(--teal-pale)' : 'var(--paper)';
   const ringFg = unlocked ? 'var(--teal-deep)' : 'var(--muted-2)';

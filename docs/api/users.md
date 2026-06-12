@@ -4,6 +4,10 @@ User identity is in Cognito; authorization (tenant + role + clubs) is in the `US
 record and travels in the token's `memberships` claim via the PreTokenGeneration Lambda.
 See [ADR 0003](../architecture/0003-cognito-passwordless-memberships.md).
 
+> Club reps normally provision **themselves** via the public signup link
+> ([signup.md](signup.md)) — registering a club creates their account and membership in one
+> step. This route remains for inviting additional admins and extra reps to an existing club.
+
 ## `POST /admin/users` — invite a user (admin)
 
 Creates a Cognito account (suppressed invite — the user signs in via email OTP) and writes

@@ -16,7 +16,6 @@ import {
   docsAllComplete,
   overallProgress,
   affiliationSubmitted,
-  journeyUnlocked,
   fixtureCost,
   generateRoundRobin,
   resolveSpread,
@@ -61,6 +60,7 @@ import {
   affPill,
   cqiBand,
   scoreCQI,
+  useEscapeClose,
 } from './atoms.jsx';
 
 /* ─── AdminFixtures — series cards + drilldown fixture table with distance + travel-cost ─── */
@@ -947,16 +947,17 @@ export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) 
   // league. Falls back to "all unlocked clubs" until a league is picked.
   const teamsForLeague = d.leagueKey
     ? clubs.filter(
-        (c) => journeyUnlocked(c) && Array.isArray(c.leagues) && c.leagues.includes(d.leagueKey),
+        (c) =>
+          affiliationSubmitted(c) && Array.isArray(c.leagues) && c.leagues.includes(d.leagueKey),
       )
     : [];
-  const eligibleTeams = d.leagueKey ? teamsForLeague : clubs.filter((c) => journeyUnlocked(c));
+  const eligibleTeams = d.leagueKey ? teamsForLeague : clubs.filter((c) => affiliationSubmitted(c));
 
   // When the admin picks a league, auto-fill the name and bulk-select all registered teams.
   function pickLeague(key) {
     const L = findByKey(allLeagues, key);
     const filtered = clubs.filter(
-      (c) => journeyUnlocked(c) && Array.isArray(c.leagues) && c.leagues.includes(key),
+      (c) => affiliationSubmitted(c) && Array.isArray(c.leagues) && c.leagues.includes(key),
     );
     setD((prev) => ({
       ...prev,
@@ -1552,8 +1553,8 @@ export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) 
   );
 }
 
-/* ─── Empty-cohort state — shown before any clubs are onboarded ─── */
-function EmptyCohort({ onOnboard, onInviteAdmin }) {
+/* ─── Empty-cohort state — shown before any clubs have registered ─── */
+function EmptyCohort({ onShareLink, onInviteAdmin }) {
   return (
     <div style={{ padding: '8px 0' }}>
       <div className="page-head">
@@ -1561,19 +1562,19 @@ function EmptyCohort({ onOnboard, onInviteAdmin }) {
           <div className="ph-crumb">Admin Console</div>
           <h1 className="ph-title">Welcome — let&apos;s get your union set up</h1>
           <p className="ph-desc">
-            No clubs yet. Onboard your affiliated clubs to start tracking affiliation, compliance
-            and the Club Quality Index. Once clubs are in, your cohort dashboard fills in here.
+            No clubs yet. Share your union&apos;s signup link with your affiliated clubs — they
+            register themselves, and your cohort dashboard fills in here as they do.
           </p>
         </div>
       </div>
       <EmptyState
         icon={Icon.Clubs}
-        title="No clubs onboarded yet"
-        sub="Add your first club to begin. You can onboard them one at a time with the chairperson's contact details and share their portal link."
+        title="No clubs registered yet"
+        sub="Share your union's signup link — clubs register themselves and appear here as soon as they do."
         action={
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
-            <Btn tone="teal" icon={Icon.Plus} onClick={onOnboard}>
-              Onboard your first club
+            <Btn tone="teal" icon={Icon.Mail} onClick={onShareLink}>
+              Invite clubs
             </Btn>
             {onInviteAdmin && (
               <Btn tone="outline" icon={Icon.Mail} onClick={onInviteAdmin}>
@@ -1845,6 +1846,7 @@ export function AdminDashboard({
   gotoList,
   gotoAdminView,
   onInviteAdmin,
+  onShareLink,
   toast,
   submissionDeadline,
   onUpdateDeadline,
@@ -1869,8 +1871,10 @@ export function AdminDashboard({
     });
   }
 
-  // Blank tenant: show the onboarding empty state instead of a 0-of-0 dashboard.
-  if (clubs.length === 0) return <EmptyCohort onOnboard={gotoList} onInviteAdmin={onInviteAdmin} />;
+  // Blank tenant: show the invite-clubs empty state instead of a 0-of-0 dashboard.
+  // onShareLink routes to the clubs list AND opens the share modal there.
+  if (clubs.length === 0)
+    return <EmptyCohort onShareLink={onShareLink ?? gotoList} onInviteAdmin={onInviteAdmin} />;
 
   const deadlineLong = formatDeadlineLong(submissionDeadline);
   const deadlineMid = formatDeadlineMid(submissionDeadline);
@@ -1902,7 +1906,7 @@ export function AdminDashboard({
       num: '02',
       label: 'League / Fixtures',
       tone: 'teal',
-      done: clubs.filter((c) => journeyUnlocked(c)).length,
+      done: clubs.filter((c) => affiliationSubmitted(c)).length,
       view: 'fixtures',
     },
     {
@@ -2254,18 +2258,20 @@ export function AdminSettingsView({
   orgName,
   submissionDeadline,
   support,
-  registrationAccess = 'open',
   onSaveOrg,
   onUpdateDeadline,
   onUpdateSupport,
-  onUpdateRegistrationAccess,
   onManageTeam,
+  signupLink,
+  onGenerateSignupLink,
+  onRevokeSignupLink,
   toast,
 }) {
   const [name, setName] = useStateA(orgName || '');
   const [savingOrg, setSavingOrg] = useStateA(false);
   const [showEditDeadline, setShowEditDeadline] = useStateA(false);
   const [showEditSupport, setShowEditSupport] = useStateA(false);
+  const [linkBusy, setLinkBusy] = useStateA(null); // null | 'generate' | 'revoke'
   const sup = parseSupport(support);
   const deadlineMid = formatDeadlineMid(submissionDeadline);
   const dirty = (name || '').trim() !== (orgName || '').trim();
@@ -2279,6 +2285,42 @@ export function AdminSettingsView({
       /* onSaveOrg surfaces its own error toast */
     } finally {
       setSavingOrg(false);
+    }
+  }
+
+  // Same generate/revoke handlers the share modal uses (threaded from main.jsx).
+  const signupUrl = signupLink
+    ? `${(typeof window !== 'undefined' && window.location.origin) || ''}/signup?t=${signupLink.token}`
+    : '';
+  async function runLink(kind, fn, doneMsg) {
+    if (linkBusy || !fn) return;
+    setLinkBusy(kind);
+    try {
+      await fn();
+      toast?.(doneMsg);
+    } catch {
+      /* the handler's withToast already surfaced the error */
+    } finally {
+      setLinkBusy(null);
+    }
+  }
+  function copySignupUrl() {
+    if (!signupUrl) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(signupUrl).then(() => toast?.('Signup link copied'));
+    } else {
+      // Fallback for non-secure contexts (e.g. LAN-IP dev) — same as the share modal.
+      const ta = document.createElement('textarea');
+      ta.value = signupUrl;
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+        toast?.('Signup link copied');
+      } catch {
+        toast?.('Could not copy — copy it from the Invite clubs dialog', 'warn');
+      }
+      ta.remove();
     }
   }
 
@@ -2390,31 +2432,70 @@ export function AdminSettingsView({
         </Card>
 
         <Card
-          title="Player registration access"
-          sub="When locked, a club's Players & Clearances pages stay closed until the Union office marks it paid."
+          title="Club self-registration"
+          sub="One link for the whole union — clubs open it to register themselves."
         >
-          <div style={rowStyle}>
-            <div>
-              <div style={valStyle}>
-                {registrationAccess === 'paid' ? 'Locked until paid' : 'Open to all clubs'}
-              </div>
-              <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                {registrationAccess === 'paid'
-                  ? 'Only paid-up clubs can register players or run clearances.'
-                  : 'Every club can register players and run clearances immediately.'}
-              </div>
-            </div>
+          <div style={{ ...rowStyle, marginBottom: 12 }}>
+            <span style={chip(!!signupLink)}>{signupLink ? 'Link active' : 'No link'}</span>
+            {signupLink && (
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                since{' '}
+                {new Date(signupLink.createdAt).toLocaleDateString('en-ZA', {
+                  day: 'numeric',
+                  month: 'short',
+                  year: 'numeric',
+                })}
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {signupLink && (
+              <Btn tone="outline" size="sm" icon={Icon.Form} onClick={copySignupUrl}>
+                Copy link
+              </Btn>
+            )}
             <Btn
-              tone={registrationAccess === 'paid' ? 'outline' : 'teal'}
+              tone={signupLink ? 'outline' : 'teal'}
               size="sm"
-              icon={Icon.Shield}
+              icon={Icon.Plus}
+              disabled={!!linkBusy}
               onClick={() =>
-                onUpdateRegistrationAccess?.(registrationAccess === 'paid' ? 'open' : 'paid')
+                runLink(
+                  'generate',
+                  onGenerateSignupLink,
+                  signupLink
+                    ? 'New signup link issued · the previous link no longer works'
+                    : 'Signup link generated · ready to share',
+                )
               }
             >
-              {registrationAccess === 'paid' ? 'Open to all clubs' : 'Lock until paid'}
+              {linkBusy === 'generate'
+                ? 'Generating…'
+                : signupLink
+                  ? 'Regenerate'
+                  : 'Generate link'}
             </Btn>
+            {signupLink && (
+              <Btn
+                tone="ghost"
+                size="sm"
+                disabled={!!linkBusy}
+                onClick={() =>
+                  runLink(
+                    'revoke',
+                    onRevokeSignupLink,
+                    'Signup link revoked — no one can register with it',
+                  )
+                }
+              >
+                {linkBusy === 'revoke' ? 'Revoking…' : 'Revoke'}
+              </Btn>
+            )}
           </div>
+          <p style={{ fontSize: 11.5, color: 'var(--muted-2)', margin: '10px 0 0' }}>
+            Regenerating or revoking takes effect at once — the previous link stops working
+            immediately.
+          </p>
         </Card>
 
         <Card
@@ -2427,8 +2508,8 @@ export function AdminSettingsView({
             <span style={chip(false)}>SMS · not used</span>
           </div>
           <p style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.6, margin: 0 }}>
-            Fixture releases, onboarding invites and player broadcasts go out over email and
-            WhatsApp. No SMS is sent.
+            Fixture releases, staff invites and player broadcasts go out over email and WhatsApp. No
+            SMS is sent.
           </p>
         </Card>
       </div>
@@ -2481,7 +2562,7 @@ function ClubInsights({ clubs, submissionDeadline }) {
   const mostMissing = [...docStats].sort((a, b) => a.count - b.count)[0];
   const docTone = (pct) => (pct >= 70 ? '' : pct >= 40 ? 'warn' : 'danger');
 
-  // Resources required — "behind" is keyed on the form fact, not payment.
+  // Resources required — "behind" is keyed on the form fact.
   const notAffiliated = clubs.filter((c) => !affiliationSubmitted(c)).length;
   const incompleteDocs = clubs.filter((c) => !docsAllComplete(c)).length;
   const noCqi = clubs.filter((c) => c.cqi === 0).length;
@@ -2598,15 +2679,17 @@ export function AdminClubsList({
   gotoClub,
   toast,
   submissionDeadline,
-  onOnboardClub,
-  onBulkOnboardClubs,
-  onSendInvite,
   onInvite,
-  knownClubs = [],
+  signupLink,
+  onGenerateSignupLink,
+  onRevokeSignupLink,
+  // Owned by Shell so the dashboard/tracker empty states can open the modal in
+  // one click (set true + navigate here) instead of making the admin re-find it.
+  showShareLink,
+  setShowShareLink,
 }) {
   const [q, setQ] = useStateA('');
   const [filter, setFilter] = useStateA('all');
-  const [showOnboard, setShowOnboard] = useStateA(false);
   const [showInviteAdmin, setShowInviteAdmin] = useStateA(false);
 
   const filtered = useMemoA(() => {
@@ -2621,7 +2704,7 @@ export function AdminClubsList({
       cs = cs.filter((c) => c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0);
     if (filter === 'incomplete')
       cs = cs.filter((c) => !(c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0));
-    if (filter === 'not_paid') cs = cs.filter((c) => !c.paid);
+    if (filter === 'not_paid') cs = cs.filter((c) => !affiliationSubmitted(c));
     if (filter === 'no_cqi') cs = cs.filter((c) => c.cqi === 0);
     return cs;
   }, [clubs, q, filter]);
@@ -2634,7 +2717,7 @@ export function AdminClubsList({
       incomplete: clubs.filter(
         (c) => !(c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0),
       ).length,
-      not_paid: clubs.filter((c) => !c.paid).length,
+      not_paid: clubs.filter((c) => !affiliationSubmitted(c)).length,
       no_cqi: clubs.filter((c) => c.cqi === 0).length,
     }),
     [clubs],
@@ -2670,15 +2753,15 @@ export function AdminClubsList({
           >
             Export Excel
           </Btn>
-          <Btn tone="ink" icon={Icon.Plus} size="sm" onClick={() => setShowOnboard(true)}>
-            Onboard new club
+          <Btn tone="ink" icon={Icon.Mail} size="sm" onClick={() => setShowShareLink(true)}>
+            Invite clubs
           </Btn>
         </div>
       </div>
 
       {clubs.length === 0 ? (
         <EmptyCohort
-          onOnboard={() => setShowOnboard(true)}
+          onShareLink={() => setShowShareLink(true)}
           onInviteAdmin={onInvite ? () => setShowInviteAdmin(true) : undefined}
         />
       ) : (
@@ -2746,21 +2829,7 @@ export function AdminClubsList({
                           {c.sub}
                         </div>
                       </td>
-                      <td>
-                        {affPill(c.affiliation)}{' '}
-                        {c.paid && (
-                          <span
-                            style={{
-                              fontFamily: "'Montserrat',sans-serif",
-                              fontSize: 10,
-                              color: 'var(--teal-deep)',
-                              marginLeft: 6,
-                            }}
-                          >
-                            · PAID
-                          </span>
-                        )}
-                      </td>
+                      <td>{affPill(c.affiliation)}</td>
                       <td>
                         <ProgChip
                           value={dc}
@@ -2788,14 +2857,12 @@ export function AdminClubsList({
         </>
       )}
 
-      {showOnboard && (
-        <OnboardNewClubModal
-          clubs={clubs}
-          knownClubs={knownClubs}
-          onClose={() => setShowOnboard(false)}
-          onOnboard={onOnboardClub}
-          onBulkOnboard={onBulkOnboardClubs}
-          onSendInvite={onSendInvite}
+      {showShareLink && (
+        <ShareSignupLinkModal
+          signupLink={signupLink}
+          onClose={() => setShowShareLink(false)}
+          onGenerate={onGenerateSignupLink}
+          onRevoke={onRevokeSignupLink}
           toast={toast}
         />
       )}
@@ -2812,176 +2879,36 @@ export function AdminClubsList({
   );
 }
 
-/* ─── OnboardNewClubModal — admin onboards a brand-new club + shares the link ───
-   Step 1: search existing clubs by name; matches show inline so the admin can't
-   accidentally double-onboard. No match → form (chair, email, cell, district).
-   Step 2: switches to the share view with the deep link + Copy / Email / WhatsApp.
-   The chair's email and cell are pre-filled into the share affordances. */
-function OnboardNewClubModal({
-  clubs,
-  knownClubs = [],
-  onClose,
-  onOnboard,
-  onBulkOnboard,
-  onSendInvite,
-  toast,
-}) {
-  const [query, setQuery] = useStateA('');
-  const [chair, setChair] = useStateA('');
-  const [chairEmail, setChairEmail] = useStateA('');
-  const [chairCell, setChairCell] = useStateA('');
-  const [district, setDistrict] = useStateA(DISTRICTS[0]);
-  const [createdClub, setCreatedClub] = useStateA(null);
-  const [bulkCreated, setBulkCreated] = useStateA(null); // array of created clubs after bulk onboard
-  const [selectedKeys, setSelectedKeys] = useStateA(new Set()); // checkbox state, keyed by known-club name
-  const [copied, setCopied] = useStateA(false);
-  const [sending, setSending] = useStateA(null); // null | 'email' | 'whatsapp' | 'email+whatsapp'
-  const [autoFilled, setAutoFilled] = useStateA(null); // null | club name auto-filled from
-
-  function toggleSelect(name) {
-    setSelectedKeys((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-  }
-
-  const trimmedQuery = query.trim();
-  const matches =
-    trimmedQuery.length >= 2
-      ? clubs.filter((c) => c.name.toLowerCase().includes(trimmedQuery.toLowerCase()))
-      : [];
-  const exact = matches.find((c) => c.name.toLowerCase() === trimmedQuery.toLowerCase());
-  const showForm = trimmedQuery.length >= 2 && !exact;
-
-  // Known-clubs registry: filter against the cohort so already-onboarded clubs
-  // disappear from the picker, and against the typed search.
-  const onboardedNames = new Set(clubs.map((c) => c.name.toLowerCase()));
-  // Onboarding suggestions come from the tenant's config (empty by default, so the
-  // quick-pick is hidden and admins onboard manually).
-  const remainingKnown = knownClubs.filter((k) => !onboardedNames.has(k.name.toLowerCase()));
-  const filteredKnown =
-    trimmedQuery.length >= 2
-      ? remainingKnown.filter(
-          (k) =>
-            k.name.toLowerCase().includes(trimmedQuery.toLowerCase()) ||
-            k.chair.toLowerCase().includes(trimmedQuery.toLowerCase()) ||
-            k.chairEmail.toLowerCase().includes(trimmedQuery.toLowerCase()) ||
-            k.chairCell.replace(/\s+/g, '').includes(trimmedQuery.replace(/\s+/g, '')),
-        )
-      : remainingKnown;
-
-  function pickKnown(k) {
-    setQuery(k.name);
-    setChair(k.chair);
-    setChairEmail(k.chairEmail);
-    setChairCell(k.chairCell);
-    setDistrict(k.district);
-    setAutoFilled(k.name);
-  }
-
-  // Auto-fill from the tenant's known-clubs list (the `knownClubs` prop; empty by
-  // default) when the admin types an email/cell that matches a suggestion.
-  // Triggered on every email/cell change once they're long enough to be meaningful.
-  function handleEmailChange(v) {
-    setChairEmail(v);
-    const lower = v.trim().toLowerCase();
-    if (lower.length < 5) return;
-    const k = remainingKnown.find((x) => x.chairEmail.toLowerCase() === lower);
-    if (k && k.name !== autoFilled) {
-      setQuery(k.name);
-      setChair(k.chair);
-      setChairCell(k.chairCell);
-      setDistrict(k.district);
-      setAutoFilled(k.name);
-      toast && toast(`Matched ${k.name} from the records — pre-filled the rest`);
-    }
-  }
-  function handleCellChange(v) {
-    setChairCell(v);
-    const digits = v.replace(/\D+/g, '');
-    if (digits.length < 7) return;
-    const k = remainingKnown.find((x) => x.chairCell.replace(/\D+/g, '') === digits);
-    if (k && k.name !== autoFilled) {
-      setQuery(k.name);
-      setChair(k.chair);
-      setChairEmail(k.chairEmail);
-      setDistrict(k.district);
-      setAutoFilled(k.name);
-      toast && toast(`Matched ${k.name} from the records — pre-filled the rest`);
-    }
-  }
-
-  const canSubmit =
-    trimmedQuery.length >= 2 && chair.trim() && chairEmail.trim() && chairCell.trim() && !exact;
-
-  async function handleOnboard() {
-    if (!canSubmit) return;
-    const club = await onOnboard({
-      name: trimmedQuery,
-      chair: chair.trim(),
-      chairEmail: chairEmail.trim(),
-      chairCell: chairCell.trim(),
-      district,
-    });
-    if (!club) return; // onboarding failed (toast already shown)
-    setCreatedClub(club);
-    toast && toast(`${club.name} onboarded · ready to share the link`);
-  }
-
-  // Bulk onboard everything currently ticked in the known-clubs picker.
-  async function handleBulkOnboard() {
-    const specs = remainingKnown.filter((k) => selectedKeys.has(k.name));
-    if (specs.length === 0) return;
-    const created = await (onBulkOnboard
-      ? onBulkOnboard(specs)
-      : Promise.all(specs.map((s) => onOnboard(s))));
-    if (!created || !created.length) return;
-    setBulkCreated(created);
-    setSelectedKeys(new Set());
-    toast && toast(`${created.length} clubs onboarded · share the links`);
-  }
-  // Select-all toggle respects the current filtered list.
-  const allVisibleSelected =
-    filteredKnown.length > 0 && filteredKnown.every((k) => selectedKeys.has(k.name));
-  function toggleSelectAll() {
-    setSelectedKeys((prev) => {
-      const next = new Set(prev);
-      if (allVisibleSelected) filteredKnown.forEach((k) => next.delete(k.name));
-      else filteredKnown.forEach((k) => next.add(k.name));
-      return next;
-    });
-  }
-  const selectedCount = selectedKeys.size;
-
-  // E.164-ish for wa.me: keep digits only, swap leading 0 for ZA country code 27.
-  function waNumber(cell) {
-    const digits = (cell || '').replace(/\D+/g, '');
-    if (!digits) return '';
-    if (digits.startsWith('0')) return '27' + digits.slice(1);
-    if (digits.startsWith('27')) return digits;
-    return digits;
-  }
-
-  // Share-state derived values (only used after a club has been created).
+/* ─── ShareSignupLinkModal — the tenant-wide club self-registration link ───
+   One link for the whole union: clubs open /signup?t=<token>, register
+   themselves and appear in the cohort immediately. Generating a new link (or
+   revoking) kills the previous token server-side at once. */
+function ShareSignupLinkModal({ signupLink, onClose, onGenerate, onRevoke, toast }) {
+  useEscapeClose(onClose);
   const baseUrl = (typeof window !== 'undefined' && window.location.origin) || '';
-  const url = createdClub ? `${baseUrl}/club/${createdClub.id}` : '';
-  const emailBody = createdClub
-    ? `Hi ${createdClub.chair || 'team'},\n\nWelcome to the 2026/27 Dolphins Cricket Services season.\n\nOpen this link to get started — affiliation form, compliance documents and the Club Quality Index self-assessment all live here:\n\n${url}\n\nIf any of the required documents are outstanding, reach out to the union office. The deadline for submissions is in the platform.\n\nWelcome aboard,\nThe Dolphins office`
-    : '';
-  const waText = createdClub
-    ? `Welcome to Dolphins Pipeline · ${createdClub.name}. Open this link to start your 2026/27 affiliation: ${url}`
-    : '';
+  const url = signupLink ? `${baseUrl}/signup?t=${signupLink.token}` : '';
+  const [copied, setCopied] = useStateA(false);
+  const [busy, setBusy] = useStateA(null); // null | 'generate' | 'revoke'
+
+  const activeSince = signupLink
+    ? new Date(signupLink.createdAt).toLocaleString('en-ZA', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : null;
 
   function doCopy() {
     if (!url) return;
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(url).then(() => {
         setCopied(true);
-        toast && toast('Onboarding link copied');
+        toast && toast('Signup link copied');
       });
     } else {
+      // Fallback for non-secure contexts
       const ta = document.createElement('textarea');
       ta.value = url;
       document.body.appendChild(ta);
@@ -2989,466 +2916,49 @@ function OnboardNewClubModal({
       try {
         document.execCommand('copy');
         setCopied(true);
-        toast && toast('Onboarding link copied');
+        toast && toast('Signup link copied');
       } catch {}
       ta.remove();
     }
-    setTimeout(() => setCopied(false), 2000);
+    setTimeout(() => setCopied(false), 2200);
   }
 
-  // ───────────── Step 2 (bulk): bulk share view ─────────────
-  if (bulkCreated && bulkCreated.length > 0) {
-    const baseUrl = (typeof window !== 'undefined' && window.location.origin) || '';
-    const allEmails = bulkCreated
-      .map((c) => c.exco?.chair?.email)
-      .filter(Boolean)
-      .join(',');
-    const bulkBody =
-      `Welcome to the 2026/27 Dolphins Cricket Services season.\n\nEach club has its own onboarding link below — open yours to start the affiliation flow:\n\n` +
-      bulkCreated.map((c) => `• ${c.name} → ${baseUrl}/club/${c.id}`).join('\n') +
-      `\n\nIf any documents are outstanding, reach out to the union office.\n\nThe Dolphins office`;
-    const bulkMailto = `mailto:?bcc=${encodeURIComponent(allEmails)}&subject=${encodeURIComponent('Welcome to Dolphins Pipeline · 2026/27')}&body=${encodeURIComponent(bulkBody)}`;
+  // No recipient on either share — the link is union-wide, so the admin picks
+  // who to send it to in their own client.
+  const shareText = `Register your club for the season here: ${url}`;
+  const mailtoUrl = `mailto:?subject=${encodeURIComponent('Register your club · 2026/27 season')}&body=${encodeURIComponent(shareText)}`;
+  const waUrl = `https://wa.me/?text=${encodeURIComponent(shareText)}`;
 
-    const emailAllAndWaEach = () => {
-      // Open one WhatsApp tab per club; browser may rate-limit, but the first
-      // few will land — admin sees the rest via the per-row buttons below.
-      bulkCreated.forEach((c) => {
-        const wa = waNumber(c.exco?.chair?.cell);
-        if (!wa) return;
-        const text = `Welcome to Dolphins Pipeline · ${c.name}. Start your 2026/27 affiliation here: ${baseUrl}/club/${c.id}`;
-        try {
-          window.open(
-            `https://wa.me/${wa}?text=${encodeURIComponent(text)}`,
-            '_blank',
-            'noopener,noreferrer',
-          );
-        } catch {}
-      });
-      try {
-        window.location.href = bulkMailto;
-      } catch {}
-      toast && toast(`Sent ${bulkCreated.length} welcome emails + opened WhatsApp tabs`);
-    };
-
-    return createPortal(
-      <div
-        className="task-modal-backdrop"
-        onClick={(e) => e.target === e.currentTarget && onClose()}
-      >
-        <div className="task-modal narrow" style={{ maxWidth: 680 }}>
-          <div className="task-modal-head">
-            <div className="task-modal-head-text">
-              <div className="task-modal-head-eyebrow">
-                Bulk onboard · {bulkCreated.length} clubs
-              </div>
-              <div className="task-modal-head-title">
-                Share the <em>onboarding links</em>
-              </div>
-            </div>
-            <button className="task-modal-close" onClick={onClose} title="Close">
-              <Icon.X />
-            </button>
-          </div>
-          <div className="task-modal-body">
-            <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
-              {bulkCreated.length} clubs were added to the cohort. Email all chairs together below,
-              or scroll the list and use a per-row send.
-            </p>
-
-            {/* Top-level bulk send */}
-            <Btn
-              tone="teal"
-              icon={Icon.Mail}
-              onClick={emailAllAndWaEach}
-              style={{ width: '100%', justifyContent: 'center', marginBottom: 8 }}
-            >
-              Send to all · Email + WhatsApp tabs
-            </Btn>
-            <a
-              href={bulkMailto}
-              className="btn btn-outline"
-              style={{
-                textDecoration: 'none',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 6,
-                width: '100%',
-                marginBottom: 14,
-              }}
-            >
-              <Icon.Mail /> Email all chairs (one BCC'd message)
-            </a>
-
-            {/* Per-row share */}
-            <div
-              style={{
-                fontSize: 10.5,
-                letterSpacing: '0.12em',
-                textTransform: 'uppercase',
-                color: 'var(--muted-2)',
-                fontFamily: "'Montserrat',sans-serif",
-                fontWeight: 700,
-                marginBottom: 6,
-              }}
-            >
-              Onboarded clubs · {bulkCreated.length}
-            </div>
-            <div
-              style={{
-                maxHeight: 320,
-                overflowY: 'auto',
-                border: '1px solid var(--line)',
-                borderRadius: 10,
-                background: 'var(--white)',
-              }}
-            >
-              {bulkCreated.map((c) => {
-                const url = `${baseUrl}/club/${c.id}`;
-                const wa = waNumber(c.exco?.chair?.cell);
-                const mailto = `mailto:${c.exco?.chair?.email || ''}?subject=${encodeURIComponent(`Welcome to Dolphins Pipeline · ${c.name}`)}&body=${encodeURIComponent(`Hi ${c.chair || 'team'},\n\nWelcome aboard. Open this link to start your 2026/27 affiliation:\n\n${url}\n\nThe Dolphins office`)}`;
-                const waUrl = wa
-                  ? `https://wa.me/${wa}?text=${encodeURIComponent(`Welcome to Dolphins Pipeline · ${c.name}. Start your 2026/27 affiliation: ${url}`)}`
-                  : `https://wa.me/?text=${encodeURIComponent(`Welcome to Dolphins Pipeline · ${c.name}. Start your 2026/27 affiliation: ${url}`)}`;
-                return (
-                  <div
-                    key={c.id}
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: '1fr auto',
-                      gap: 10,
-                      padding: '12px 14px',
-                      borderBottom: '1px solid var(--line)',
-                      alignItems: 'center',
-                    }}
-                  >
-                    <div style={{ minWidth: 0 }}>
-                      <div
-                        style={{
-                          fontFamily: "'Montserrat',sans-serif",
-                          fontSize: 13,
-                          fontWeight: 700,
-                          color: 'var(--ink)',
-                        }}
-                      >
-                        {c.name}
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
-                        {c.chair} · {c.exco?.chair?.email} · {c.exco?.chair?.cell}
-                      </div>
-                      <div
-                        style={{
-                          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                          fontSize: 11,
-                          color: 'var(--teal-deep)',
-                          marginTop: 4,
-                          wordBreak: 'break-all',
-                        }}
-                      >
-                        {url}
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                      <a
-                        href={mailto}
-                        className="btn btn-outline"
-                        style={{
-                          textDecoration: 'none',
-                          padding: '6px 10px',
-                          fontSize: 11,
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 4,
-                        }}
-                      >
-                        <Icon.Mail /> Email
-                      </a>
-                      <a
-                        href={waUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="btn btn-outline"
-                        style={{
-                          textDecoration: 'none',
-                          padding: '6px 10px',
-                          fontSize: 11,
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 4,
-                        }}
-                      >
-                        <Icon.Arrow /> WA
-                      </a>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div
-              className="row"
-              style={{
-                justifyContent: 'flex-end',
-                gap: 8,
-                paddingTop: 14,
-                marginTop: 14,
-                borderTop: '1px solid var(--line)',
-              }}
-            >
-              <Btn tone="ink" onClick={onClose}>
-                Done
-              </Btn>
-            </div>
-          </div>
-        </div>
-      </div>,
-      document.body,
+  async function run(kind, fn, doneMsg) {
+    if (busy || !fn) return;
+    setBusy(kind);
+    try {
+      await fn();
+      toast && doneMsg && toast(doneMsg);
+    } catch {
+      /* the handler's withToast already surfaced the error */
+    } finally {
+      setBusy(null);
+    }
+  }
+  const generate = () =>
+    run(
+      'generate',
+      onGenerate,
+      signupLink
+        ? 'New signup link issued · the previous link no longer works'
+        : 'Signup link generated · ready to share',
     );
-  }
+  const revoke = () => run('revoke', onRevoke, 'Signup link revoked — no one can register with it');
 
-  // ───────────── Step 2 (single): share view ─────────────
-  if (createdClub) {
-    const wa = waNumber(createdClub.exco?.chair?.cell);
-    const chairEmailValue = createdClub.exco?.chair?.email || '';
-    const hasEmail = EMAIL_RE.test(chairEmailValue);
-    const hasCell = wa.length >= 11; // ZA E.164 is 27 + 9 digits
-    const chLabel = (ch) => (ch === 'email' ? 'email' : 'WhatsApp');
-    // Manual fallbacks — only used if the admin prefers to send from their own client.
-    const mailtoUrl = `mailto:${chairEmailValue}?subject=${encodeURIComponent(`Welcome to Dolphins Pipeline · ${createdClub.name}`)}&body=${encodeURIComponent(emailBody)}`;
-    const waUrl = wa
-      ? `https://wa.me/${wa}?text=${encodeURIComponent(waText)}`
-      : `https://wa.me/?text=${encodeURIComponent(waText)}`;
-    // Real send via the API. Each click uses a fresh idempotency key (the busy state
-    // blocks rapid double-clicks; a same-key replay only guards a lost response). The
-    // toast reflects the actual per-channel results — no more optimistic "Sent".
-    const doSend = async (channels) => {
-      if (sending || !onSendInvite) return;
-      const avail = channels.filter((ch) => (ch === 'email' ? hasEmail : hasCell));
-      if (avail.length === 0) {
-        toast && toast('No valid chair contact on file for that channel');
-        return;
-      }
-      setSending(avail.join('+'));
-      try {
-        const key =
-          (typeof crypto !== 'undefined' && crypto.randomUUID && crypto.randomUUID()) ||
-          `inv-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        const res = await onSendInvite(createdClub.id, {
-          channels: avail,
-          link: url,
-          idempotencyKey: key,
-        });
-        const results = (res && res.results) || [];
-        // A concurrent duplicate that's still sending replays with no results — say so
-        // rather than showing nothing.
-        if (res && res.deduped && res.pending && results.length === 0) {
-          toast && toast('That invite is already sending — check the communication log.');
-          return;
-        }
-        const sent = results.filter((r) => r.status === 'sent');
-        const notSent = results.filter((r) => r.status !== 'sent');
-        if (sent.length) {
-          const who = createdClub.chair ? createdClub.chair.split(' ')[0] : 'the chair';
-          toast &&
-            toast(`Invite sent to ${who} via ${sent.map((r) => chLabel(r.channel)).join(' & ')}`);
-        }
-        // Surface every channel that didn't send (not just the first) so a both-failed
-        // send can't read as a partial success.
-        if (notSent.length) {
-          const detail = notSent
-            .map((r) => `${chLabel(r.channel)} ${r.status} (${r.error || 'could not send'})`)
-            .join('; ');
-          toast && toast(`Invite not sent — ${detail}`);
-        }
-      } catch (err) {
-        toast && toast(`Could not send invite: ${(err && err.message) || 'error'}`);
-      } finally {
-        setSending(null);
-      }
-    };
-    return createPortal(
-      <div
-        className="task-modal-backdrop"
-        onClick={(e) => e.target === e.currentTarget && onClose()}
-      >
-        <div className="task-modal narrow" style={{ maxWidth: 620 }}>
-          <div className="task-modal-head">
-            <div className="task-modal-head-text">
-              <div className="task-modal-head-eyebrow">Onboarded · {createdClub.district}</div>
-              <div className="task-modal-head-title">
-                Share the link · <em>{createdClub.name}</em>
-              </div>
-            </div>
-            <button className="task-modal-close" onClick={onClose} title="Close">
-              <Icon.X />
-            </button>
-          </div>
-          <div className="task-modal-body">
-            <div
-              style={{
-                background: 'var(--paper)',
-                borderRadius: 10,
-                padding: '14px 16px',
-                marginBottom: 14,
-                border: '1px solid var(--line)',
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 10.5,
-                  letterSpacing: '0.12em',
-                  textTransform: 'uppercase',
-                  color: 'var(--muted-2)',
-                  fontFamily: "'Montserrat',sans-serif",
-                  fontWeight: 700,
-                  marginBottom: 6,
-                }}
-              >
-                Onboarding link
-              </div>
-              <div
-                style={{
-                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                  fontSize: 13,
-                  color: 'var(--ink)',
-                  wordBreak: 'break-all',
-                  lineHeight: 1.45,
-                  padding: '10px 12px',
-                  background: 'var(--white)',
-                  borderRadius: 8,
-                  border: '1px solid var(--line)',
-                }}
-              >
-                {url}
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
-                Chair: <strong style={{ color: 'var(--ink)' }}>{createdClub.chair}</strong> ·{' '}
-                {chairEmailValue} · {createdClub.exco?.chair?.cell}
-              </div>
-            </div>
-
-            {/* Primary one-click send: fires email + WhatsApp together (real API send) */}
-            <Btn
-              tone="teal"
-              icon={Icon.Mail}
-              onClick={() => doSend(['email', 'whatsapp'])}
-              disabled={!!sending || (!hasEmail && !hasCell)}
-              style={{ width: '100%', justifyContent: 'center', marginBottom: 8 }}
-            >
-              {sending === 'email+whatsapp' ? 'Sending…' : 'Send via Email + WhatsApp'}
-            </Btn>
-
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(3, 1fr)',
-                gap: 8,
-                marginBottom: 10,
-              }}
-            >
-              <Btn
-                tone={copied ? 'teal' : 'outline'}
-                icon={copied ? Icon.Check : Icon.Form}
-                onClick={doCopy}
-              >
-                {copied ? 'Copied' : 'Copy link'}
-              </Btn>
-              <Btn
-                tone="outline"
-                icon={Icon.Mail}
-                onClick={() => doSend(['email'])}
-                disabled={!!sending || !hasEmail}
-                title={hasEmail ? undefined : 'No valid chair email on file'}
-              >
-                {sending === 'email' ? 'Sending…' : 'Email only'}
-              </Btn>
-              <Btn
-                tone="outline"
-                icon={Icon.Arrow}
-                onClick={() => doSend(['whatsapp'])}
-                disabled={!!sending || !hasCell}
-                title={hasCell ? undefined : 'No valid chair cell on file'}
-              >
-                {sending === 'whatsapp' ? 'Sending…' : 'WhatsApp only'}
-              </Btn>
-            </div>
-
-            {/* Manual fallback — open a pre-filled draft in your own client instead. */}
-            <div style={{ fontSize: 11, color: 'var(--muted-2)', marginBottom: 14 }}>
-              Prefer to send it yourself?{' '}
-              <a href={mailtoUrl} style={{ color: 'var(--muted)', textDecoration: 'underline' }}>
-                open an email draft
-              </a>{' '}
-              or{' '}
-              <a
-                href={waUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ color: 'var(--muted)', textDecoration: 'underline' }}
-              >
-                open WhatsApp
-              </a>
-              .
-            </div>
-
-            <div
-              style={{
-                background: 'rgba(15,143,74,0.08)',
-                border: '1px solid rgba(15,143,74,0.3)',
-                borderRadius: 10,
-                padding: '12px 14px',
-                marginBottom: 14,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 10.5,
-                  letterSpacing: '0.12em',
-                  textTransform: 'uppercase',
-                  color: 'var(--teal-deep)',
-                  fontFamily: "'Montserrat',sans-serif",
-                  fontWeight: 800,
-                  marginBottom: 4,
-                }}
-              >
-                What happens next
-              </div>
-              <div style={{ fontSize: 12, color: 'var(--ink)', lineHeight: 1.5 }}>
-                {createdClub.chair.split(' ')[0]} clicks the link, lands on the {createdClub.name}{' '}
-                portal and is walked through onboarding → affiliation form → compliance documents →
-                CQI self-assessment.
-              </div>
-            </div>
-
-            <div
-              className="row"
-              style={{
-                justifyContent: 'flex-end',
-                gap: 8,
-                paddingTop: 6,
-                borderTop: '1px solid var(--line)',
-              }}
-            >
-              <Btn tone="ink" onClick={onClose}>
-                Done
-              </Btn>
-            </div>
-          </div>
-        </div>
-      </div>,
-      document.body,
-    );
-  }
-
-  // ───────────── Step 1: search + form ─────────────
   return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="task-modal narrow" style={{ maxWidth: 620 }}>
         <div className="task-modal-head">
           <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Cohort · admin tool</div>
+            <div className="task-modal-head-eyebrow">Cohort · club self-registration</div>
             <div className="task-modal-head-title">
-              Onboard a <em>new club</em>
+              Invite clubs · <em>share the signup link</em>
             </div>
           </div>
           <button className="task-modal-close" onClick={onClose} title="Close">
@@ -3456,41 +2966,58 @@ function OnboardNewClubModal({
           </button>
         </div>
         <div className="task-modal-body">
-          <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
-            {remainingKnown.length > 0
-              ? "Pick a known club from the list below for a one-click onboard, or type a new club name. If their email or cell is already on file we'll auto-fill the rest."
-              : "Type the new club's name, then capture the chairperson's contact details below."}
-          </p>
-
-          <div className="field">
-            <div className="field-label">
-              Club name <span className="req">*</span>
-            </div>
-            <input
-              className="field-input"
-              placeholder={
-                remainingKnown.length > 0
-                  ? 'Search known clubs or type a new name…'
-                  : 'Type the club name…'
-              }
-              value={query}
-              onChange={(e) => {
-                setQuery(e.target.value);
-                if (autoFilled && e.target.value !== autoFilled) setAutoFilled(null);
-              }}
-              autoFocus
-            />
-          </div>
-
-          {/* Known clubs from past records — tick to bulk-onboard, or click "Use details" to single-pre-fill */}
-          {remainingKnown.length > 0 && (
-            <div style={{ marginBottom: 14 }}>
+          {!signupLink ? (
+            <div style={{ textAlign: 'center', padding: '32px 20px' }}>
               <div
                 style={{
+                  width: 54,
+                  height: 54,
+                  borderRadius: '50%',
+                  margin: '0 auto 14px',
+                  background: 'rgba(15,143,74,0.12)',
+                  color: 'var(--teal-deep)',
                   display: 'flex',
                   alignItems: 'center',
-                  justifyContent: 'space-between',
+                  justifyContent: 'center',
+                }}
+              >
+                <Icon.Form />
+              </div>
+              <div
+                style={{
+                  fontFamily: "'Montserrat',sans-serif",
+                  fontSize: 14,
+                  fontWeight: 700,
                   marginBottom: 6,
+                }}
+              >
+                No signup link yet
+              </div>
+              <p
+                style={{
+                  fontSize: 12.5,
+                  color: 'var(--muted)',
+                  maxWidth: 420,
+                  margin: '0 auto 18px',
+                }}
+              >
+                Generate one link for the whole union. Clubs open it, register themselves with their
+                chairperson&apos;s details, and appear in your cohort immediately — no manual
+                onboarding.
+              </p>
+              <Btn tone="teal" icon={Icon.Plus} onClick={generate} disabled={!!busy}>
+                {busy === 'generate' ? 'Generating…' : 'Generate link'}
+              </Btn>
+            </div>
+          ) : (
+            <>
+              <div
+                style={{
+                  background: 'var(--paper)',
+                  borderRadius: 10,
+                  padding: '14px 16px',
+                  marginBottom: 14,
+                  border: '1px solid var(--line)',
                 }}
               >
                 <div
@@ -3501,381 +3028,132 @@ function OnboardNewClubModal({
                     color: 'var(--muted-2)',
                     fontFamily: "'Montserrat',sans-serif",
                     fontWeight: 700,
+                    marginBottom: 6,
                   }}
                 >
-                  Known clubs · {filteredKnown.length} of {remainingKnown.length} not yet onboarded
+                  Club signup link
                 </div>
-                <button
-                  type="button"
-                  onClick={toggleSelectAll}
-                  disabled={filteredKnown.length === 0}
+                <div
                   style={{
-                    fontSize: 11,
-                    fontFamily: "'Montserrat',sans-serif",
-                    fontWeight: 700,
-                    letterSpacing: '0.04em',
-                    color: filteredKnown.length === 0 ? 'var(--muted-3)' : 'var(--teal-deep)',
-                    background: 'transparent',
-                    border: 'none',
-                    padding: 0,
-                    cursor: filteredKnown.length === 0 ? 'not-allowed' : 'pointer',
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                    fontSize: 13,
+                    color: 'var(--ink)',
+                    wordBreak: 'break-all',
+                    lineHeight: 1.45,
+                    padding: '10px 12px',
+                    background: 'var(--white)',
+                    borderRadius: 8,
+                    border: '1px solid var(--line)',
                   }}
                 >
-                  {allVisibleSelected ? 'Clear selection' : `Select all (${filteredKnown.length})`}
-                </button>
+                  {url}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
+                  Active since {activeSince}
+                </div>
               </div>
+
               <div
                 style={{
-                  maxHeight: 240,
-                  overflowY: 'auto',
-                  border: '1px solid var(--line)',
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(3, 1fr)',
+                  gap: 8,
+                  marginBottom: 10,
+                }}
+              >
+                <Btn
+                  tone={copied ? 'teal' : 'outline'}
+                  icon={copied ? Icon.Check : Icon.Form}
+                  onClick={doCopy}
+                >
+                  {copied ? 'Copied' : 'Copy link'}
+                </Btn>
+                <a
+                  href={mailtoUrl}
+                  className="btn btn-outline"
+                  style={{
+                    textDecoration: 'none',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <Icon.Mail /> Email
+                </a>
+                <a
+                  href={waUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn btn-outline"
+                  style={{
+                    textDecoration: 'none',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <Icon.Arrow /> WhatsApp
+                </a>
+              </div>
+
+              <div
+                style={{
+                  background: 'rgba(15,143,74,0.08)',
+                  border: '1px solid rgba(15,143,74,0.3)',
                   borderRadius: 10,
-                  background: 'var(--paper)',
+                  padding: '12px 14px',
+                  marginBottom: 14,
                 }}
               >
-                {filteredKnown.length === 0 ? (
-                  <div
-                    style={{
-                      padding: '18px 14px',
-                      fontSize: 12.5,
-                      color: 'var(--muted)',
-                      textAlign: 'center',
-                    }}
-                  >
-                    No known clubs match — type the chair details below to add as a new club.
-                  </div>
-                ) : (
-                  filteredKnown.map((k) => {
-                    const isPicked = autoFilled === k.name;
-                    const isChecked = selectedKeys.has(k.name);
-                    return (
-                      <div
-                        key={k.name}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'flex-start',
-                          gap: 10,
-                          padding: '10px 14px',
-                          borderBottom: '1px solid var(--line)',
-                          background: isChecked
-                            ? 'rgba(15,143,74,0.06)'
-                            : isPicked
-                              ? 'rgba(15,143,74,0.08)'
-                              : 'var(--white)',
-                          cursor: 'pointer',
-                          font: 'inherit',
-                        }}
-                        onClick={() => toggleSelect(k.name)}
-                        onMouseEnter={(e) => {
-                          if (!isChecked && !isPicked)
-                            e.currentTarget.style.background = 'var(--paper2)';
-                        }}
-                        onMouseLeave={(e) => {
-                          if (!isChecked && !isPicked)
-                            e.currentTarget.style.background = 'var(--white)';
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={isChecked}
-                          onChange={() => toggleSelect(k.name)}
-                          onClick={(e) => e.stopPropagation()}
-                          style={{
-                            marginTop: 3,
-                            width: 16,
-                            height: 16,
-                            cursor: 'pointer',
-                            flexShrink: 0,
-                            accentColor: 'var(--teal-deep)',
-                          }}
-                        />
-                        <div style={{ minWidth: 0, flex: 1 }}>
-                          <div
-                            style={{
-                              fontFamily: "'Montserrat',sans-serif",
-                              fontSize: 13,
-                              fontWeight: 700,
-                              color: 'var(--ink)',
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: 8,
-                              flexWrap: 'wrap',
-                            }}
-                          >
-                            {k.name}
-                            {isPicked && (
-                              <span
-                                style={{
-                                  fontSize: 9.5,
-                                  letterSpacing: '0.08em',
-                                  textTransform: 'uppercase',
-                                  fontWeight: 800,
-                                  padding: '1px 7px',
-                                  borderRadius: 999,
-                                  background: 'rgba(15,143,74,0.15)',
-                                  color: 'var(--teal-deep)',
-                                  border: '1px solid rgba(15,143,74,0.35)',
-                                }}
-                              >
-                                Pre-filled
-                              </span>
-                            )}
-                          </div>
-                          <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
-                            {k.chair} · {k.chairEmail} · {k.chairCell}
-                          </div>
-                          <div
-                            style={{
-                              fontSize: 10.5,
-                              color: 'var(--muted-2)',
-                              marginTop: 2,
-                              fontFamily: "'Montserrat',sans-serif",
-                              letterSpacing: '0.04em',
-                            }}
-                          >
-                            {k.district}
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            pickKnown(k);
-                          }}
-                          style={{
-                            fontSize: 11,
-                            color: 'var(--teal-deep)',
-                            whiteSpace: 'nowrap',
-                            fontFamily: "'Montserrat',sans-serif",
-                            fontWeight: 600,
-                            background: 'transparent',
-                            border: 'none',
-                            padding: '2px 4px',
-                            cursor: 'pointer',
-                            flexShrink: 0,
-                          }}
-                        >
-                          Use details →
-                        </button>
-                      </div>
-                    );
-                  })
-                )}
+                <div
+                  style={{
+                    fontSize: 10.5,
+                    letterSpacing: '0.12em',
+                    textTransform: 'uppercase',
+                    color: 'var(--teal-deep)',
+                    fontFamily: "'Montserrat',sans-serif",
+                    fontWeight: 800,
+                    marginBottom: 4,
+                  }}
+                >
+                  What happens next
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--ink)', lineHeight: 1.5 }}>
+                  A club rep opens the link, registers the club and their own sign-in in one form,
+                  then continues through affiliation → compliance documents → CQI. The club shows up
+                  in your cohort the moment they submit.
+                </div>
               </div>
-            </div>
-          )}
 
-          {trimmedQuery.length >= 2 && matches.length > 0 && (
-            <div style={{ marginBottom: 14 }}>
               <div
+                className="row"
                 style={{
-                  fontSize: 10.5,
-                  letterSpacing: '0.12em',
-                  textTransform: 'uppercase',
-                  color: 'var(--muted-2)',
-                  fontFamily: "'Montserrat',sans-serif",
-                  fontWeight: 700,
-                  marginBottom: 6,
+                  justifyContent: 'space-between',
+                  gap: 10,
+                  paddingTop: 6,
+                  borderTop: '1px solid var(--line)',
                 }}
               >
-                {exact ? 'Already in the cohort' : `Matches in cohort (${matches.length})`}
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {matches.slice(0, 5).map((c) => (
-                  <div
-                    key={c.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '10px 12px',
-                      border: '1px solid var(--line)',
-                      borderRadius: 8,
-                      background:
-                        c.name.toLowerCase() === trimmedQuery.toLowerCase()
-                          ? 'rgba(216,90,48,0.06)'
-                          : 'var(--paper)',
-                    }}
-                  >
-                    <div style={{ minWidth: 0 }}>
-                      <div
-                        style={{
-                          fontFamily: "'Montserrat',sans-serif",
-                          fontSize: 13,
-                          fontWeight: 700,
-                          color: 'var(--ink)',
-                        }}
-                      >
-                        {c.name}
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
-                        {c.district} · {c.chair} ·{' '}
-                        {affiliationSubmitted(c)
-                          ? 'Affiliated'
-                          : c.affiliation === 'in_progress'
-                            ? 'In progress'
-                            : 'Not started'}
-                      </div>
-                    </div>
-                    {c.name.toLowerCase() === trimmedQuery.toLowerCase() && (
-                      <span
-                        style={{
-                          fontSize: 9.5,
-                          letterSpacing: '0.1em',
-                          textTransform: 'uppercase',
-                          fontWeight: 800,
-                          padding: '3px 8px',
-                          borderRadius: 999,
-                          background: 'rgba(216,90,48,0.12)',
-                          color: 'var(--coral)',
-                          border: '1px solid rgba(216,90,48,0.35)',
-                        }}
-                      >
-                        Duplicate
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {exact && (
-            <div
-              style={{
-                background: 'rgba(216,90,48,0.06)',
-                border: '1px solid rgba(216,90,48,0.3)',
-                borderRadius: 10,
-                padding: '12px 14px',
-                marginBottom: 14,
-                fontSize: 12.5,
-                color: 'var(--ink)',
-                lineHeight: 1.5,
-              }}
-            >
-              <strong>{exact.name}</strong> is already onboarded. Open their detail page to manage
-              their existing record instead.
-            </div>
-          )}
-
-          {showForm && (
-            <>
-              <div
-                style={{
-                  fontSize: 10.5,
-                  letterSpacing: '0.12em',
-                  textTransform: 'uppercase',
-                  color: 'var(--muted-2)',
-                  fontFamily: "'Montserrat',sans-serif",
-                  fontWeight: 700,
-                  marginTop: 8,
-                  marginBottom: 6,
-                }}
-              >
-                New club details
-              </div>
-              <div className="field-grid-2">
-                <div className="field">
-                  <div className="field-label">
-                    Chairperson name <span className="req">*</span>
-                  </div>
-                  <input
-                    className="field-input"
-                    placeholder="Name &amp; surname"
-                    value={chair}
-                    onChange={(e) => setChair(e.target.value)}
-                  />
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <Btn tone="ghost" onClick={generate} disabled={!!busy}>
+                    {busy === 'generate' ? 'Generating…' : '↻ Generate new link'}
+                  </Btn>
+                  <Btn tone="ghost" onClick={revoke} disabled={!!busy}>
+                    {busy === 'revoke' ? 'Revoking…' : 'Revoke link'}
+                  </Btn>
                 </div>
-                <div className="field">
-                  <div className="field-label">
-                    District <span className="req">*</span>
-                  </div>
-                  <select
-                    className="field-select"
-                    value={district}
-                    onChange={(e) => setDistrict(e.target.value)}
-                  >
-                    {DISTRICTS.map((d) => (
-                      <option key={d}>{d}</option>
-                    ))}
-                  </select>
-                </div>
+                <Btn tone="ink" onClick={onClose}>
+                  Done
+                </Btn>
               </div>
-              <div className="field-grid-2">
-                <div className="field">
-                  <div className="field-label">
-                    Chair email <span className="req">*</span>
-                  </div>
-                  <input
-                    className="field-input"
-                    type="email"
-                    placeholder="chair@club.co.za"
-                    value={chairEmail}
-                    onChange={(e) => handleEmailChange(e.target.value)}
-                  />
-                </div>
-                <div className="field">
-                  <div className="field-label">
-                    Chair cell <span className="req">*</span>
-                  </div>
-                  <input
-                    className="field-input"
-                    placeholder="0XX XXX XXXX"
-                    value={chairCell}
-                    onChange={(e) => handleCellChange(e.target.value)}
-                  />
-                </div>
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4, marginBottom: 14 }}>
-                Email + cell are used to share the onboarding link on the next screen.
+              <div style={{ fontSize: 11, color: 'var(--muted-2)', marginTop: 8 }}>
+                Generating a new link or revoking takes effect at once — the previous link stops
+                working immediately.
               </div>
             </>
           )}
-
-          <div
-            className="row"
-            style={{
-              justifyContent: 'space-between',
-              gap: 10,
-              paddingTop: 6,
-              borderTop: '1px solid var(--line)',
-            }}
-          >
-            <div
-              style={{
-                fontSize: 11.5,
-                color: 'var(--muted)',
-                fontFamily: "'Montserrat',sans-serif",
-                fontWeight: 500,
-              }}
-            >
-              {selectedCount > 0
-                ? `${selectedCount} club${selectedCount === 1 ? '' : 's'} ticked — bulk onboards them in one go`
-                : !trimmedQuery
-                  ? remainingKnown.length > 0
-                    ? 'Tick clubs above for a bulk onboard, or type a name to add a new one'
-                    : 'Type a club name to add it'
-                  : exact
-                    ? 'Already onboarded — cancel and open their record'
-                    : showForm && !canSubmit
-                      ? 'Chair contact details are required'
-                      : 'Ready — adds the club and reveals the share screen'}
-            </div>
-            <div className="row" style={{ gap: 8 }}>
-              <Btn tone="outline" onClick={onClose}>
-                Cancel
-              </Btn>
-              {selectedCount > 0 ? (
-                <Btn tone="teal" icon={Icon.Plus} onClick={handleBulkOnboard}>
-                  Bulk onboard {selectedCount} club{selectedCount === 1 ? '' : 's'}
-                </Btn>
-              ) : (
-                <Btn tone="teal" icon={Icon.Plus} disabled={!canSubmit} onClick={handleOnboard}>
-                  Onboard club
-                </Btn>
-              )}
-            </div>
-          </div>
         </div>
       </div>
     </div>,
@@ -4656,8 +3934,6 @@ export function AdminClubDetail({
   club,
   gotoList,
   onGenerateLink,
-  onSetPaid,
-  onSetProgression,
   onInvite,
   toast,
   allLeagues = [],
@@ -4701,26 +3977,6 @@ export function AdminClubDetail({
     if (!club.playerRegLink && onGenerateLink) await onGenerateLink();
     setShowLinkModal(true);
   }
-  // Payment is a manual admin action now (payments deferred). Audited server-side.
-  function togglePaid() {
-    if (!onSetPaid) return;
-    onSetPaid(club.id, !club.paid);
-    toast && toast(club.paid ? 'Marked as unpaid' : 'Marked as paid');
-  }
-  // Per-club journey gate: 'submission' advances on form submit; 'payment' keeps
-  // Fixtures locked until marked paid. Audited server-side.
-  const paymentGated = (club.progressionMode ?? 'submission') === 'payment';
-  function toggleProgression() {
-    if (!onSetProgression) return;
-    const next = paymentGated ? 'submission' : 'payment';
-    onSetProgression(club.id, next);
-    toast &&
-      toast(
-        next === 'payment'
-          ? 'Journey now payment-gated — Fixtures unlock once paid'
-          : 'Journey now submission-driven — Fixtures unlock on submission',
-      );
-  }
   function emailChair() {
     const e = club.exco?.chair?.email;
     // No email on file → open the editor so the admin can add it right away,
@@ -4759,8 +4015,8 @@ export function AdminClubDetail({
     {
       n: '02',
       t: 'League & Fixtures',
-      done: journeyUnlocked(club),
-      val: journeyUnlocked(club) ? 100 : 0,
+      done: affiliationSubmitted(club),
+      val: affiliationSubmitted(club) ? 100 : 0,
       // Allocation is a fact once affiliated; only the done/progress track the gate.
       detail: affiliationSubmitted(club)
         ? `Allocated to ${club.sub === 'EMCU' ? 'EMCU Division 1' : 'District Division'}`
@@ -4823,27 +4079,6 @@ export function AdminClubDetail({
           </Btn>
           <Btn tone="outline" icon={Icon.Mail} size="sm" onClick={emailChair}>
             Email chairperson
-          </Btn>
-          <Btn
-            tone="outline"
-            icon={Icon.Shield}
-            size="sm"
-            onClick={toggleProgression}
-            title={
-              paymentGated
-                ? 'Fixtures stay locked until this club is marked paid'
-                : 'Fixtures unlock as soon as the club submits affiliation'
-            }
-          >
-            {paymentGated ? 'Journey: Payment-gated' : 'Journey: Submission'}
-          </Btn>
-          <Btn
-            tone={club.paid ? 'outline' : 'teal'}
-            icon={Icon.Check}
-            size="sm"
-            onClick={togglePaid}
-          >
-            {club.paid ? 'Mark unpaid' : 'Mark affiliation paid'}
           </Btn>
         </div>
       </div>
@@ -5169,11 +4404,14 @@ export function AdminClubDetail({
                 // field, so a separate Sub-union row would just repeat District.
                 ['District', club.district || club.sub],
                 ['Chairperson', club.chair],
-                ['Status', club.paid ? 'Active member' : 'Pending'],
+                ['Status', affiliationSubmitted(club) ? 'Active member' : 'Pending'],
                 ['Senior teams', tc.senior],
                 ["Women's teams", club.women],
                 ['Junior teams', tc.junior],
                 ['Players', club.players],
+                // Provenance: clubs created through the tenant-wide signup link
+                // stamp onboardedVia server-side; admin-era clubs have no row.
+                ...(club.onboardedVia === 'self-signup' ? [['Registered via', 'Signup link']] : []),
               ].map(([k, v], i) => (
                 <div key={i}>
                   <div
@@ -5612,7 +4850,6 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
                 <Row label="District" value={club.district} />
                 <Row label="Sub-union" value={club.district || club.sub} />
                 <Row label="Chairperson" value={club.chair} />
-                <Row label="Paid" value={club.paid ? 'Yes' : 'No'} />
                 <Row label="Status" value={affPill(club.affiliation)} />
               </div>
             </div>

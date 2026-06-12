@@ -4,6 +4,9 @@ A club is the central entity: affiliation state, compliance docs, CQI, exco, coa
 ground, and leagues. `players` is **derived** from registration count at read time (the
 stored value is ignored). Writes use optimistic concurrency (`version`; `409` on conflict).
 
+Clubs are created by their own reps via the public signup link — see
+[signup.md](signup.md). There is no admin create route.
+
 ## `GET /clubs` — list (admin)
 
 Returns all clubs in the tenant, each with a derived `players` count.
@@ -11,26 +14,6 @@ Returns all clubs in the tenant, each with a derived `players` count.
 ```
 200 → Club[]
 403 → not an admin of this tenant
-```
-
-## `POST /clubs` — onboard (admin)
-
-Body: `{ name, district?, sub?, chair?, exco? }`. Builds a club with a slug id, neutral
-state (`affiliation: "not_started"`, `paid: false`, `cqi: 0`, empty docs), `version: 1`.
-A duplicate name (case-insensitive) within the tenant is rejected.
-
-```
-201 → Club
-409 → a club with that name already exists
-```
-
-## `POST /clubs/bulk` — bulk onboard (admin)
-
-Body: `Club[]`-shaped spec array. Per-spec and non-atomic: duplicates/invalid names are
-skipped rather than aborting the batch.
-
-```
-201 → { created: Club[], skipped: [{ name, reason }] }
 ```
 
 ## `GET /clubs/:id/players` — list registrations (rep: own only)
@@ -47,7 +30,6 @@ other club.
 Partial update of affiliation, `cqi` + `cqiAnswers`, `ground` (incl. `lat`/`lon`),
 `leagues`, `coaches`. Notes:
 
-- `paid` is stripped here — use `PATCH /clubs/:id/paid` (admin).
 - A rep **cannot** patch affiliation fields (`affiliation`, `exco`, `coaches`, `ground`,
   `leagues`) once `affiliation === "complete"` → `403 "affiliation is locked"`. Admins may.
 - Send the current `version`; mismatch → `409 "club changed; refetch"`.
@@ -81,9 +63,5 @@ Body: `{ objectKey, size }`. Sets `docs[key] = true` and records `docMeta[key]`
 Generates a server-side `crypto.randomUUID()` token, stores `TOKEN#<token> → {tenant,
 clubId}`, and sets `club.playerRegLink`. `200 → { playerRegLink: { token, createdAt } }`.
 
-## `PATCH /clubs/:id/paid` — toggle paid (admin)
-
-Body: `{ paid: boolean }`. Audited (`changedBy`/`changedAt`). `200 → Club`.
-
-> The affiliation form locks on `affiliation === "complete"`, **not** on `paid` (payments
-> are deferred; `paid` is a manual admin action). See the plan's data-gap fixes.
+> The affiliation form locks on `affiliation === "complete"` — submission is the only
+> journey gate; the platform tracks no club payments.

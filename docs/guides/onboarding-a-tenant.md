@@ -39,8 +39,13 @@ one shared stack ([ADR 0002](../architecture/0002-single-tenant-saas-vs-isolated
      npm --prefix packages/api run bootstrap-admin -- <slug> admin@union.co.za
    ```
 
-6. **Hand over.** The first admin signs in via email OTP and invites reps through the app
-   (`POST /admin/users`), assigning each rep their club(s).
+6. **Hand over.** The first admin signs in via email OTP, generates the tenant's **club
+   signup link** (All Clubs → "Invite clubs", or Settings → Club self-registration) and
+   shares it once with the club reps. Each rep registers their own club through the link —
+   that creates the club **and** the rep's account/membership, so no per-club admin work
+   remains. Clubs appear in the console as they register. Team & Access
+   (`POST /admin/users`) is only needed for additional admins or extra reps on an existing
+   club.
 
 ## Catalogue customisation
 

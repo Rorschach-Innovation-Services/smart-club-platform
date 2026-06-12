@@ -15,9 +15,10 @@ holds no personal information. Residency was the reason AWS af-south-1 was chose
 
 ### Cross-border transfer (outbound messaging)
 
-One flow is a **deliberate, documented exception** to the residency rule: the onboarding
-**invite** to a club chairperson. When an admin sends it (`POST /clubs/:id/send-invite`,
-`packages/api/src/notify/`), the chair's **name, email and cell** are transmitted to:
+One flow is a **deliberate, documented exception** to the residency rule: the **staff
+invite** to an admin or rep. When an admin sends it (`POST /admin/users` /
+`/admin/users/:sub/resend` with `channels`, `packages/api/src/notify/`), the invitee's
+**email (and cell, for WhatsApp)** is transmitted to:
 
 - **Amazon SES in `eu-west-1` (Ireland)** for the email — this account's verified sending
   identity with production access lives in eu-west-1 (af-south-1 SES exists but is
@@ -34,15 +35,17 @@ pool uses Cognito's default sender, also region-local.
 The invite flow is a cross-border transfer of personal information under **POPIA s72**.
 Basis and controls:
 
-- **Lawful basis:** operational communication necessary to deliver the service the club is
-  being onboarded into (the chair provides these details for exactly this purpose). Confirm
+- **Lawful basis:** operational communication necessary to deliver the service the person is
+  being given access to (the invitee's details are provided for exactly this purpose). Confirm
   the s72 ground (consent / necessity for the contract) with counsel before enabling real
   sends.
-- **Data minimisation:** only the three contact fields and a link leave the region — no player
-  or minor data is ever sent through this path.
-- **Auditability:** every send is recorded in the club's `commLog` (channel, recipient,
-  status, timestamp, actor) so transfers are traceable. The per-send idempotency markers
-  (`INVITE#<key>` items) also hold the recipient; both the `commLog` and the markers are
+- **Data minimisation:** only the contact fields and a sign-in link leave the region — no
+  player or minor data is ever sent through this path. (Historic chair-onboarding invites,
+  recorded in club `commLog`s before that flow was retired in favour of club
+  self-registration, fall under the same exception.)
+- **Auditability:** sends are recorded (channel, recipient, status, timestamp, actor) so
+  transfers are traceable. The per-send idempotency markers (`INVITE#<key>` items, still used
+  by the fixtures broadcast) hold the recipient; both the `commLog` and the markers are
   deleted by tenant/cohort erasure (`repo.eraseTenantData` enumerates the markers
   explicitly — they're not in the club listing index).
 - **Sub-processors:** AWS (SES, Ireland) and Meta Platforms (WhatsApp). Add both to the
@@ -59,6 +62,9 @@ debt.
 
 ## Lawful processing & consent
 
+- **Club reps** register their club via the public signup link and provide their own name,
+  email and cell. The form requires an explicit consent tick; `signupConsentAt` is stamped
+  server-side on the club record (see [signup.md](../api/signup.md)).
 - **Players** register via a public link. The registration captures consent at submission
   time (`consentAt`, stamped server-side).
 - **Minors** (computed from date of birth, under 18) require a **guardian name** before the
@@ -116,5 +122,6 @@ the union office if reports were already circulated.
 
 ## Auditability
 
-Club `paid` and affiliation changes record `changedBy`/`changedAt`. Consider extending
+Affiliation changes record `changedBy`/`changedAt`, and self-registered clubs carry
+`onboardedVia`/`signupConsentAt`. Consider extending
 audit coverage (who viewed/exported personal data) before onboarding paying unions at scale.

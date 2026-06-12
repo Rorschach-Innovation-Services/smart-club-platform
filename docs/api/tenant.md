@@ -20,6 +20,10 @@ Used at first paint for theming (resolved at the CloudFront edge in prod — see
 Body: partial `TenantConfig` (branding, `submissionDeadline`, `knownClubs`,
 `requiredDocs`). Merged over the current config. `200 → TenantConfig`.
 
+> `clubSignupLink` is stripped from patches — it is managed only via
+> `/admin/club-signup-link` ([signup.md](signup.md)) so a concurrent Settings save can't
+> resurrect a revoked link.
+
 > Catalogue overrides (districts/leagues/CQI) are **not** accepted in v1 — those are frozen
 > shared defaults. See [ADR 0005](../architecture/0005-frozen-catalogues-v1.md).
 

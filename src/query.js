@@ -31,4 +31,5 @@ export const qk = {
   clearances: (clubId) => ['clearances', t(), clubId],
   allClearances: () => ['clearances-all', t()],
   clubDirectory: () => ['club-directory', t()],
+  signupLink: () => ['signup-link', t()],
 };

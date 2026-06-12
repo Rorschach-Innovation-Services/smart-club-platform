@@ -44,10 +44,13 @@ export function setAuthLostHandler(fn) {
 const SESSION_EXPIRED = 'Your session has expired — please sign in again.';
 
 export class ApiError extends Error {
-  constructor(status, message) {
+  constructor(status, message, code) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    // Optional machine-readable discriminator from the error body (e.g. club
+    // signup's 'name_taken') so callers can branch on more than the status.
+    this.code = code;
   }
 }
 
@@ -84,9 +87,11 @@ async function request(path, { method = 'GET', body, auth = true, query } = {}) 
   });
   if (!res.ok) {
     let message = res.statusText;
+    let code;
     try {
       const data = await res.json();
       message = data.error || message;
+      code = data.code;
     } catch {
       /* non-JSON error body */
     }
@@ -99,7 +104,7 @@ async function request(path, { method = 'GET', body, auth = true, query } = {}) 
       _onAuthLost?.();
       message = SESSION_EXPIRED;
     }
-    throw new ApiError(res.status, message);
+    throw new ApiError(res.status, message, code);
   }
   if (res.status === 204) return null;
   return res.json();
@@ -121,14 +126,8 @@ export const patchMe = (patch) => request('/me', { method: 'PATCH', body: patch 
 // ── Clubs ──
 export const getClubs = () => request('/clubs');
 export const getClub = (id) => request(`/clubs/${id}`);
-export const onboardClub = (spec) => request('/clubs', { method: 'POST', body: spec });
-export const bulkOnboardClubs = (specs) => request('/clubs/bulk', { method: 'POST', body: specs });
 export const patchClub = (id, patch) => request(`/clubs/${id}`, { method: 'PATCH', body: patch });
 export const saveExco = (id, exco) => request(`/clubs/${id}/exco`, { method: 'POST', body: exco });
-export const setPaid = (id, paid) =>
-  request(`/clubs/${id}/paid`, { method: 'PATCH', body: { paid } });
-export const setProgression = (id, progressionMode) =>
-  request(`/clubs/${id}/progression`, { method: 'PATCH', body: { progressionMode } });
 export const generateRegLink = (id) => request(`/clubs/${id}/reg-link`, { method: 'POST' });
 export const getDocUploadUrl = (id, key, contentType) =>
   request(`/clubs/${id}/docs/${key}/upload-url`, {
@@ -148,17 +147,6 @@ export const deleteDocFile = (id, key, objectKey) =>
   request(`/clubs/${id}/docs/${key}/file`, { method: 'DELETE', body: { objectKey } });
 export const addClubNote = (id, text) =>
   request(`/clubs/${id}/notes`, { method: 'POST', body: { text } });
-/**
- * Send the onboarding invite to the club's chair over the given channels
- * (['email'] | ['whatsapp'] | both). The link is built from the caller's own origin
- * so it stays correct per-tenant; idempotencyKey makes a lost-response retry replay
- * instead of double-sending. Resolves to { results: [{ channel, status, error? }] }.
- */
-export const sendClubInvite = (id, { channels, link, idempotencyKey }) =>
-  request(`/clubs/${id}/send-invite`, {
-    method: 'POST',
-    body: { channels, link, idempotencyKey },
-  });
 /**
  * Share the club's released fixtures with its registered players over the given
  * channels (['email'] | ['whatsapp'] | both). The schedule is built server-side; this
@@ -223,11 +211,24 @@ export const patchUser = (sub, body) => request(`/admin/users/${sub}`, { method:
 export const removeUser = (sub) => request(`/admin/users/${sub}`, { method: 'DELETE' });
 export const resendInvite = (sub) => request(`/admin/users/${sub}/resend`, { method: 'POST' });
 
+// ── Club self-registration link (admin) ──
+// One tenant-wide link clubs use to register themselves (/signup?t=<token>).
+// Generating replaces any prior token — the old link stops working immediately.
+export const getClubSignupLink = () => request('/admin/club-signup-link');
+export const generateClubSignupLink = () => request('/admin/club-signup-link', { method: 'POST' });
+export const revokeClubSignupLink = () => request('/admin/club-signup-link', { method: 'DELETE' });
+
 // ── Public registration ──
 export const getRegistration = (clubId, token) =>
   request(`/register/${clubId}`, { auth: false, query: { t: token } });
 export const submitRegistration = (clubId, token, body) =>
   request(`/register/${clubId}`, { method: 'POST', auth: false, query: { t: token }, body });
+
+// ── Public club signup (the tenant-wide self-registration link) ──
+export const getClubSignup = (token) =>
+  request('/club-signup', { auth: false, query: { t: token } });
+export const submitClubSignup = (token, body) =>
+  request('/club-signup', { method: 'POST', auth: false, query: { t: token }, body });
 
 /**
  * Upload a file directly to a presigned S3 URL (not the API). The content-type must
