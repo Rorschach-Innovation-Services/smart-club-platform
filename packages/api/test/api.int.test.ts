@@ -2564,6 +2564,54 @@ describe('DELETE /clubs/:id (admin club deletion)', () => {
     assert.deepEqual(await repo.listClearancesForSource(T, 'survivor'), []);
     assert.deepEqual(await repo.listInboundForDest(T, 'doomed'), []);
   });
+
+  // Cross-feature seam: a club created through the REAL public signup endpoint (with
+  // its self-provisioned rep) must delete + offboard exactly like a seeded one — the
+  // two features were built in separate commits and this is the only test that chains
+  // POST /club-signup → DELETE /clubs/:id end to end.
+  test('a self-signed-up club deletes and offboards its self-provisioned rep', async () => {
+    const linkRes = await app.request('/admin/club-signup-link', {
+      method: 'POST',
+      headers: dHeaders(DADMIN),
+    });
+    const { clubSignupLink } = (await linkRes.json()) as {
+      clubSignupLink: { token: string };
+    };
+    const signup = await app.request(`/club-signup?t=${clubSignupLink.token}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        clubName: 'Self Made CC',
+        district: 'KCCD', // signup validates against VALID_DISTRICTS (seeded clubs don't)
+        repName: 'Self Rep',
+        repEmail: 'self-rep@seam.test',
+        consent: true,
+      }),
+    });
+    assert.equal(signup.status, 201);
+    const { clubId } = (await signup.json()) as { clubId: string };
+
+    // The signup created a CONFIRMED user with a deterministic offline sub.
+    const { createHash } = await import('node:crypto');
+    const repSub = `local-${createHash('sha1').update('self-rep@seam.test').digest('hex')}`;
+    assert.deepEqual(
+      (await repo.getUser(repSub))?.memberships.find((m) => m.tenantId === T)?.clubIds,
+      [clubId],
+      'self-signup scoped the rep to the new club',
+    );
+
+    const del2 = await del(clubId);
+    assert.equal(del2.status, 200);
+    assert.deepEqual(await del2.json(), {
+      ok: true,
+      removed: { players: 0, clearances: 0, users: 1 },
+    });
+
+    // Sole club gone → the self-provisioned rep is fully offboarded, marker and all.
+    assert.equal(await repo.getUser(repSub), null, 'self-signup rep fully offboarded');
+    assert.ok(!(await repo.listTenantUsers(T)).some((u) => u.sub === repSub), 'rep marker swept');
+    assert.equal(await repo.getClub(T, clubId), null);
+  });
 });
 
 describe('queryAll (LastEvaluatedKey pagination)', () => {

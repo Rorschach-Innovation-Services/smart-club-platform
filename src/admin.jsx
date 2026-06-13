@@ -2712,7 +2712,7 @@ export function AdminClubsList({
       cs = cs.filter((c) => c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0);
     if (filter === 'incomplete')
       cs = cs.filter((c) => !(c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0));
-    if (filter === 'not_paid') cs = cs.filter((c) => !affiliationSubmitted(c));
+    if (filter === 'affiliation_outstanding') cs = cs.filter((c) => !affiliationSubmitted(c));
     if (filter === 'no_cqi') cs = cs.filter((c) => c.cqi === 0);
     return cs;
   }, [clubs, q, filter]);
@@ -2725,7 +2725,7 @@ export function AdminClubsList({
       incomplete: clubs.filter(
         (c) => !(c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0),
       ).length,
-      not_paid: clubs.filter((c) => !affiliationSubmitted(c)).length,
+      affiliation_outstanding: clubs.filter((c) => !affiliationSubmitted(c)).length,
       no_cqi: clubs.filter((c) => c.cqi === 0).length,
     }),
     [clubs],
@@ -2788,7 +2788,7 @@ export function AdminClubsList({
               { k: 'all', label: 'All clubs' },
               { k: 'complete', label: 'Fully integrated' },
               { k: 'incomplete', label: 'Incomplete' },
-              { k: 'not_paid', label: 'Affiliation outstanding' },
+              { k: 'affiliation_outstanding', label: 'Affiliation outstanding' },
               { k: 'no_cqi', label: 'CQI not submitted' },
             ].map((f) => (
               <button
