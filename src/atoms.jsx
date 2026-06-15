@@ -415,6 +415,24 @@ export function Choice({ value, onChange, options }) {
   );
 }
 
+/* Rating — 1–5 Likert segmented control (used by CQI mandate/objectives questions) */
+export function Rating({ value, onChange }) {
+  const current = parseInt(value) || 0;
+  return (
+    <div className="seg">
+      {[1, 2, 3, 4, 5].map((n) => (
+        <button
+          key={n}
+          className={`seg-btn ${current === n ? 'on yes' : ''}`}
+          onClick={() => onChange(n)}
+        >
+          <span>{n}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /* Money — currency input with prefix and value formatting */
 export function MoneyInput({ value, onChange, currency = 'R', suffix = '/ member' }) {
   return (
@@ -571,6 +589,10 @@ export function scoreCQI(answers) {
         const share = countTotal > 0 ? (parseFloat(v) || 0) / countTotal : 0;
         const weight = q.key === 'pctBA' ? 1.5 : 1.0;
         earned += Math.min(q.pts, share * q.pts * weight);
+      } else if (q.kind === 'rating') {
+        // 1–5 Likert: proportional credit (rating ÷ 5).
+        const num = Math.max(0, Math.min(5, parseFloat(v) || 0));
+        earned += (num / 5) * q.pts;
       } else if (q.kind === 'choice') {
         // Any option selected = full points
         if (v) earned += q.pts;

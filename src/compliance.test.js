@@ -1,5 +1,37 @@
 import { describe, it, expect } from 'vitest';
-import { computeMarkCompliance, computeRevertCompliance } from './data.jsx';
+import {
+  computeMarkCompliance,
+  computeRevertCompliance,
+  docsAllComplete,
+  docsUploadedCount,
+  docFileMeta,
+  REQUIRED_DOCS,
+} from './data.jsx';
+
+// A club with no financial statements can mark that doc "Unavailable": docs.financials
+// flips true (so compliance reads complete) with a distinct {unavailable} sentinel,
+// which carries no objectKey and so never renders a viewable file.
+describe('financial-statements "Unavailable" sentinel', () => {
+  const allButFin = Object.fromEntries(REQUIRED_DOCS.map((d) => [d.key, d.key !== 'financials']));
+
+  it('counts an unavailable doc as complete', () => {
+    const club = {
+      docs: { ...allButFin, financials: true },
+      docMeta: { financials: { unavailable: true, at: '2026-06-15T00:00:00.000Z' } },
+    };
+    expect(docsUploadedCount(club)).toBe(REQUIRED_DOCS.length);
+    expect(docsAllComplete(club)).toBe(true);
+  });
+
+  it('exposes no real file for the sentinel (no View affordance)', () => {
+    expect(docFileMeta({ unavailable: true, at: 'x' }).real).toBe(false);
+  });
+
+  it('undo (clearing the flag) drops it back to incomplete', () => {
+    const club = { docs: { ...allButFin, financials: false }, docMeta: {} };
+    expect(docsAllComplete(club)).toBe(false);
+  });
+});
 
 // A subset of compliance-doc keys — these helpers operate on the keys passed in,
 // not on REQUIRED_DOCS, so this stays a fixed list independent of the full set.

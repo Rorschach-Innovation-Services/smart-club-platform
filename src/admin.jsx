@@ -29,6 +29,8 @@ import {
   clearanceOverdue,
   daysSinceIso,
   clearanceDaysRemaining,
+  ageFromSaId,
+  termRemaining,
 } from './data.jsx';
 import {
   leagueOptionsForDistrict,
@@ -44,6 +46,7 @@ import { openBccReminder } from './mailto.js';
 import { EMAIL_RE } from './api.js';
 import { parseSupport } from './support.js';
 import { DocPreviewModal } from './DocPreviewModal.jsx';
+import { RegLinkModal } from './RegLinkModal.jsx';
 import {
   Icon,
   Pill,
@@ -74,6 +77,7 @@ export function AdminFixtures({
   onDeleteSeries,
   onDuplicateSeries,
   onSetReleased,
+  onSetApproved,
   toast,
 }) {
   const [activeId, setActiveId] = useStateA(allSeries[0]?.id);
@@ -159,6 +163,12 @@ export function AdminFixtures({
       },
     });
   }
+  function approve(s) {
+    onSetApproved?.(s.id, true)?.then?.(() => toast?.(s.name + ' · approved — ready to release'));
+  }
+  function unapprove(s) {
+    onSetApproved?.(s.id, false)?.then?.(() => toast?.(s.name + ' · approval withdrawn'));
+  }
 
   return (
     <div>
@@ -181,15 +191,25 @@ export function AdminFixtures({
           <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={onCreateSeries}>
             Create series
           </Btn>
-          {/* Primary CTA — always visible. State reflects the active series. */}
+          {/* Primary CTA — always visible. State reflects the active series.
+              Release is gated on admin approval; approve first, then release. */}
           {active &&
             (active.released ? (
               <Btn tone="outline" size="sm" onClick={() => askRecall(active)}>
                 Recall release
               </Btn>
+            ) : active.approved ? (
+              <>
+                <Btn tone="outline" size="sm" onClick={() => unapprove(active)}>
+                  Withdraw approval
+                </Btn>
+                <Btn tone="teal" size="sm" icon={Icon.Arrow} onClick={() => askRelease(active)}>
+                  Release to clubs
+                </Btn>
+              </>
             ) : (
-              <Btn tone="teal" size="sm" icon={Icon.Arrow} onClick={() => askRelease(active)}>
-                Release to clubs
+              <Btn tone="teal" size="sm" icon={Icon.Check} onClick={() => approve(active)}>
+                Approve fixtures
               </Btn>
             ))}
         </div>
@@ -269,9 +289,13 @@ export function AdminFixtures({
                       <button className="series-card-btn recall" onClick={() => askRecall(s)}>
                         ↺ Recall draft
                       </button>
-                    ) : (
+                    ) : s.approved ? (
                       <button className="series-card-btn release" onClick={() => askRelease(s)}>
                         Release to clubs →
+                      </button>
+                    ) : (
+                      <button className="series-card-btn release" onClick={() => approve(s)}>
+                        Approve fixtures ✓
                       </button>
                     )}
                   </div>
@@ -291,6 +315,8 @@ export function AdminFixtures({
               onSetReleased={onSetReleased}
               onAskRelease={askRelease}
               onAskRecall={askRecall}
+              onApprove={approve}
+              onUnapprove={unapprove}
               toast={toast}
             />
           )}
@@ -367,6 +393,8 @@ export function FixtureTable({
   onSetReleased,
   onAskRelease,
   onAskRecall,
+  onApprove,
+  onUnapprove,
   toast,
 }) {
   const clubBy = (id) => clubs.find((c) => c.id === id);
@@ -734,13 +762,22 @@ export function FixtureTable({
                 notifications sent
               </div>
             </>
+          ) : series.approved ? (
+            <>
+              <div className="fix-release-eyebrow">✓ Approved — ready to release</div>
+              <div className="fix-release-text-title">Approved by the Dolphins office</div>
+              <div className="fix-release-text-sub">
+                Fixtures are signed off. Release to push the schedule to every club portal. Editing
+                a fixture will withdraw approval and require re-approval.
+              </div>
+            </>
           ) : (
             <>
               <div className="fix-release-eyebrow">Draft mode</div>
-              <div className="fix-release-text-title">Visible only to the Dolphins office</div>
+              <div className="fix-release-text-title">Approval required before release</div>
               <div className="fix-release-text-sub">
-                Once released, every fixture goes live in every club portal, the Athlete Management
-                System is notified, and email/WhatsApp reminders go out to chairs &amp; captains.
+                Review the fixtures, then approve. Release only unlocks once the Dolphins office has
+                approved the schedule.
               </div>
             </>
           )}
@@ -750,9 +787,18 @@ export function FixtureTable({
             <Btn tone="outline" onClick={() => onAskRecall?.(series)}>
               Recall draft
             </Btn>
+          ) : series.approved ? (
+            <>
+              <Btn tone="outline" onClick={() => onUnapprove?.(series)}>
+                Withdraw approval
+              </Btn>
+              <Btn tone="teal" icon={Icon.Arrow} onClick={() => onAskRelease?.(series)}>
+                Release to clubs →
+              </Btn>
+            </>
           ) : (
-            <Btn tone="teal" icon={Icon.Arrow} onClick={() => onAskRelease?.(series)}>
-              Release to clubs →
+            <Btn tone="teal" icon={Icon.Check} onClick={() => onApprove?.(series)}>
+              Approve fixtures
             </Btn>
           )}
         </div>
@@ -814,6 +860,25 @@ function EditFixtureRow({ fixture, teams, onSave, onCancel }) {
   function u(k, v) {
     setDraft((prev) => ({ ...prev, [k]: v }));
   }
+  // Venue picker mode is UI-only state (so "Other" can hold an empty text box without
+  // collapsing back to "primary"). The stored value is always draft.venueOverride.
+  const homeClub0 = teams.find((t) => t.id === fixture.home);
+  const secondary0 = homeClub0?.ground?.secondaryVenue || '';
+  const initialOv = fixture.venueOverride || '';
+  const [venueMode, setVenueMode] = useStateA(
+    initialOv === '' ? 'primary' : secondary0 && initialOv === secondary0 ? 'secondary' : 'custom',
+  );
+  // A "secondary" pick stored the *current* home club's secondary venue name; changing
+  // Home would otherwise persist the previous club's venue. Reset that pick to primary
+  // on a home change. A custom free-text override is club-agnostic, so it's preserved.
+  function changeHome(newHome) {
+    if (venueMode === 'secondary') {
+      setVenueMode('primary');
+      setDraft((prev) => ({ ...prev, home: newHome, venueOverride: '' }));
+    } else {
+      u('home', newHome);
+    }
+  }
   return (
     <tr className="fix-edit-tr">
       <td colSpan="9">
@@ -833,7 +898,7 @@ function EditFixtureRow({ fixture, teams, onSave, onCancel }) {
           </div>
           <div className="fix-edit-field">
             <label>Home (host)</label>
-            <select value={draft.home} onChange={(e) => u('home', e.target.value)}>
+            <select value={draft.home} onChange={(e) => changeHome(e.target.value)}>
               {teams.map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.name}
@@ -851,15 +916,45 @@ function EditFixtureRow({ fixture, teams, onSave, onCancel }) {
               ))}
             </select>
           </div>
-          <div className="fix-edit-field" style={{ gridColumn: 'span 2' }}>
-            <label>Venue override</label>
-            <input
-              type="text"
-              placeholder="(use home club's ground)"
-              value={draft.venueOverride}
-              onChange={(e) => u('venueOverride', e.target.value)}
-            />
-          </div>
+          {(() => {
+            // Venue picker driven by the home club's two grounds. The chosen venue is
+            // stored in venueOverride (empty ⇒ home club's primary ground), so display
+            // and export stay derived/live — no persisted resolved venue to go stale.
+            const homeClub = teams.find((t) => t.id === draft.home);
+            const primary = homeClub?.ground?.venue || '';
+            const secondary = homeClub?.ground?.secondaryVenue || '';
+            return (
+              <>
+                <div className="fix-edit-field">
+                  <label>Venue</label>
+                  <select
+                    value={venueMode}
+                    onChange={(e) => {
+                      const m = e.target.value;
+                      setVenueMode(m);
+                      if (m === 'primary') u('venueOverride', '');
+                      else if (m === 'secondary') u('venueOverride', secondary);
+                      else u('venueOverride', '');
+                    }}
+                  >
+                    <option value="primary">Primary{primary ? ` · ${primary}` : ' ground'}</option>
+                    {secondary && <option value="secondary">Secondary · {secondary}</option>}
+                    <option value="custom">Other (type below)</option>
+                  </select>
+                </div>
+                <div className="fix-edit-field">
+                  <label>Custom venue</label>
+                  <input
+                    type="text"
+                    placeholder="Only for an off-site venue"
+                    disabled={venueMode !== 'custom'}
+                    value={venueMode === 'custom' ? draft.venueOverride : ''}
+                    onChange={(e) => u('venueOverride', e.target.value)}
+                  />
+                </div>
+              </>
+            );
+          })()}
           <div className="fix-edit-field">
             <label>Status</label>
             <select value={draft.status} onChange={(e) => u('status', e.target.value)}>
@@ -3567,293 +3662,6 @@ function ChairContactModal({ club, onClose, onSave, toast }) {
   );
 }
 
-/* ─── PlayerRegLinkModal — V3 future feature, brought forward ───
-   Admin generates a per-club registration link, copies / shares it, or
-   regenerates it (invalidating the previous token). When a player opens the
-   link in the next phase, their data will flow into the cohort automatically. */
-function PlayerRegLinkModal({ club, onClose, onRegenerate, toast }) {
-  const baseUrl = (typeof window !== 'undefined' && window.location.origin) || '';
-  const linkRecord = club.playerRegLink;
-  const url = linkRecord ? `${baseUrl}/register/${club.id}?t=${linkRecord.token}` : '';
-  const [copied, setCopied] = useStateA(false);
-
-  function doCopy() {
-    if (!url) return;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(url).then(() => {
-        setCopied(true);
-        toast && toast('Registration link copied to clipboard');
-      });
-    } else {
-      // Fallback for non-secure contexts
-      const ta = document.createElement('textarea');
-      ta.value = url;
-      document.body.appendChild(ta);
-      ta.select();
-      try {
-        document.execCommand('copy');
-        setCopied(true);
-        toast && toast('Registration link copied');
-      } catch {}
-      ta.remove();
-    }
-    setTimeout(() => setCopied(false), 2200);
-  }
-
-  function emailBody() {
-    return `Hi ${club.chair || 'team'},\n\nPlease share this player-registration link with your members so they can register directly into ${club.name} for the 2026/27 season:\n\n${url}\n\nThe link is unique to your club — each registration flows straight into the Dolphins Pipeline cohort.\n\nThe Dolphins office`;
-  }
-  function whatsappText() {
-    return `${club.name} player registration · 2026/27 season: ${url}`;
-  }
-
-  const createdLabel = linkRecord
-    ? new Date(linkRecord.createdAt).toLocaleString('en-ZA', {
-        day: 'numeric',
-        month: 'short',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      })
-    : null;
-
-  // Normalise the chair's cell into wa.me format (digits only, 0→27)
-  function waNumber(cell) {
-    const digits = (cell || '').replace(/\D+/g, '');
-    if (!digits) return '';
-    if (digits.startsWith('0')) return '27' + digits.slice(1);
-    if (digits.startsWith('27')) return digits;
-    return digits;
-  }
-  const chairEmailValue = club.exco?.chair?.email || '';
-  const chairCellValue = club.exco?.chair?.cell || '';
-  const wa = waNumber(chairCellValue);
-  const mailtoUrl = `mailto:${chairEmailValue}?subject=${encodeURIComponent(`${club.name} · Player Registration Link`)}&body=${encodeURIComponent(emailBody())}`;
-  const waUrl = wa
-    ? `https://wa.me/${wa}?text=${encodeURIComponent(whatsappText())}`
-    : `https://wa.me/?text=${encodeURIComponent(whatsappText())}`;
-  function sendBoth() {
-    try {
-      window.open(waUrl, '_blank', 'noopener,noreferrer');
-    } catch {}
-    try {
-      window.location.href = mailtoUrl;
-    } catch {}
-    toast && toast('Player link sent via email & WhatsApp');
-  }
-
-  return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="task-modal narrow" style={{ maxWidth: 620 }}>
-        <div className="task-modal-head">
-          <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Phase 03 · Player Registration</div>
-            <div className="task-modal-head-title">
-              Generate <em>player link</em> · {club.name}
-            </div>
-          </div>
-          <button className="task-modal-close" onClick={onClose} title="Close">
-            <Icon.X />
-          </button>
-        </div>
-        <div className="task-modal-body">
-          {!linkRecord ? (
-            <div style={{ textAlign: 'center', padding: '32px 20px' }}>
-              <div
-                style={{
-                  width: 54,
-                  height: 54,
-                  borderRadius: '50%',
-                  margin: '0 auto 14px',
-                  background: 'rgba(15,143,74,0.12)',
-                  color: 'var(--teal-deep)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <Icon.Form />
-              </div>
-              <div
-                style={{
-                  fontFamily: "'Montserrat',sans-serif",
-                  fontSize: 14,
-                  fontWeight: 700,
-                  marginBottom: 6,
-                }}
-              >
-                No registration link yet
-              </div>
-              <p
-                style={{
-                  fontSize: 12.5,
-                  color: 'var(--muted)',
-                  maxWidth: 420,
-                  margin: '0 auto 18px',
-                }}
-              >
-                Generate a unique link for{' '}
-                <strong style={{ color: 'var(--ink)' }}>{club.name}</strong>. Players opening it
-                will register directly into the cohort — their data flows into club statistics and
-                roster metrics automatically.
-              </p>
-              <Btn tone="teal" icon={Icon.Plus} onClick={onRegenerate}>
-                Generate link
-              </Btn>
-            </div>
-          ) : (
-            <>
-              <div
-                style={{
-                  background: 'var(--paper)',
-                  borderRadius: 10,
-                  padding: '14px 16px',
-                  marginBottom: 14,
-                  border: '1px solid var(--line)',
-                }}
-              >
-                <div
-                  style={{
-                    fontSize: 10.5,
-                    letterSpacing: '0.12em',
-                    textTransform: 'uppercase',
-                    color: 'var(--muted-2)',
-                    fontFamily: "'Montserrat',sans-serif",
-                    fontWeight: 700,
-                    marginBottom: 6,
-                  }}
-                >
-                  Registration link
-                </div>
-                <div
-                  style={{
-                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                    fontSize: 13,
-                    color: 'var(--ink)',
-                    wordBreak: 'break-all',
-                    lineHeight: 1.45,
-                    padding: '10px 12px',
-                    background: 'var(--white)',
-                    borderRadius: 8,
-                    border: '1px solid var(--line)',
-                  }}
-                >
-                  {url}
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
-                  Created {createdLabel} · token <code>{linkRecord.token}</code>
-                </div>
-              </div>
-
-              {/* Primary one-click send: fires email + WhatsApp together */}
-              <Btn
-                tone="teal"
-                icon={Icon.Mail}
-                onClick={sendBoth}
-                style={{ width: '100%', justifyContent: 'center', marginBottom: 8 }}
-              >
-                Send via Email + WhatsApp
-              </Btn>
-
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(3, 1fr)',
-                  gap: 8,
-                  marginBottom: 14,
-                }}
-              >
-                <Btn
-                  tone={copied ? 'teal' : 'outline'}
-                  icon={copied ? Icon.Check : Icon.Form}
-                  onClick={doCopy}
-                >
-                  {copied ? 'Copied' : 'Copy link'}
-                </Btn>
-                <a
-                  href={mailtoUrl}
-                  className="btn btn-outline"
-                  style={{
-                    textDecoration: 'none',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 6,
-                  }}
-                >
-                  <Icon.Mail /> Email only
-                </a>
-                <a
-                  href={waUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="btn btn-outline"
-                  style={{
-                    textDecoration: 'none',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 6,
-                  }}
-                >
-                  <Icon.Arrow /> WhatsApp only
-                </a>
-              </div>
-
-              <div
-                style={{
-                  background: 'rgba(200,168,75,0.08)',
-                  border: '1px solid rgba(200,168,75,0.35)',
-                  borderRadius: 10,
-                  padding: '12px 14px',
-                  marginBottom: 14,
-                }}
-              >
-                <div
-                  style={{
-                    fontSize: 10.5,
-                    letterSpacing: '0.12em',
-                    textTransform: 'uppercase',
-                    color: 'var(--gold-deep, #8a6e1c)',
-                    fontFamily: "'Montserrat',sans-serif",
-                    fontWeight: 800,
-                    marginBottom: 4,
-                  }}
-                >
-                  Next phase — auto-populate
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--ink)', lineHeight: 1.5 }}>
-                  Player submissions through this link will flow directly into the Dolphins Pipeline
-                  cohort. Roster metrics, demographic splits and CQI inputs will update without
-                  manual admin entry.
-                </div>
-              </div>
-
-              <div
-                className="row"
-                style={{
-                  justifyContent: 'space-between',
-                  gap: 10,
-                  paddingTop: 6,
-                  borderTop: '1px solid var(--line)',
-                }}
-              >
-                <Btn tone="ghost" onClick={onRegenerate}>
-                  ↻ Regenerate (invalidates old link)
-                </Btn>
-                <Btn tone="ink" onClick={onClose}>
-                  Done
-                </Btn>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
 /* ─── ClubLeaguesEditor — admin assigns a club's leagues; one save, not one-per-toggle ─── */
 function ClubLeaguesEditor({ club, allLeagues, onSave }) {
   const opts = leagueOptionsForDistrict(allLeagues, club.district);
@@ -3951,6 +3759,7 @@ export function AdminClubDetail({
   onAddNote,
   onUpdateChair,
   onDeleteClub,
+  onReconfirmAffiliation,
   allSeries = [],
 }) {
   // Hooks must run unconditionally — keep state before any early return.
@@ -4085,6 +3894,19 @@ export function AdminClubDetail({
           </div>
         </div>
         <div className="ph-actions">
+          {club.amendmentPending && onReconfirmAffiliation && (
+            <Btn
+              tone="teal"
+              icon={Icon.Check}
+              size="sm"
+              onClick={async () => {
+                await onReconfirmAffiliation();
+                toast && toast('Affiliation re-confirmed');
+              }}
+            >
+              Re-confirm affiliation
+            </Btn>
+          )}
           <Btn tone="outline" icon={Icon.Form} size="sm" onClick={() => setShowChairEdit(true)}>
             Edit chairperson
           </Btn>
@@ -4097,10 +3919,18 @@ export function AdminClubDetail({
       <div className="kpi-strip">
         <KPI tone="navy" label="Overall progress" num={op + '%'} sub="all phases" />
         <KPI
-          tone="teal"
+          tone={club.amendmentPending ? 'gold' : 'teal'}
           label="Affiliation"
-          num={affiliationSubmitted(club) ? 'Submitted' : 'Pending'}
-          sub={affiliationSubmitted(club) ? 'Form complete' : 'Awaiting submission'}
+          num={
+            club.amendmentPending ? 'Amended' : affiliationSubmitted(club) ? 'Submitted' : 'Pending'
+          }
+          sub={
+            club.amendmentPending
+              ? 'Edited — re-confirm'
+              : affiliationSubmitted(club)
+                ? 'Form complete'
+                : 'Awaiting submission'
+          }
         />
         <KPI
           tone="gold"
@@ -4591,7 +4421,7 @@ export function AdminClubDetail({
       </div>
 
       {showLinkModal && (
-        <PlayerRegLinkModal
+        <RegLinkModal
           club={club}
           onClose={() => setShowLinkModal(false)}
           onRegenerate={handleGenerate}
@@ -4792,6 +4622,7 @@ function CqiViewModal({ club, onClose }) {
     const v = answers[q.key];
     if (v == null || v === '') return '—';
     if (q.kind === 'yn') return v ? 'Yes' : 'No';
+    if (q.kind === 'rating') return `${v} / 5`;
     if (q.kind === 'money') return `${q.currency || 'R'} ${Number(v).toLocaleString()}`;
     return String(v);
   };
@@ -4992,6 +4823,22 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
                       <Row label="Cell" value={m.cell} />
                       <Row label="Gender" value={m.gender} />
                       <Row label="Race" value={m.race} />
+                      {role === 'Chairperson' && (
+                        <>
+                          <Row label="ID number" value={m.idNumber} />
+                          <Row
+                            label="Age"
+                            value={
+                              ageFromSaId(m.idNumber) != null
+                                ? `${ageFromSaId(m.idNumber)} yrs`
+                                : ''
+                            }
+                          />
+                          <Row label="Term start" value={m.termStart} />
+                          <Row label="Term end" value={m.termEnd} />
+                          <Row label="Term remaining" value={termRemaining(m.termEnd).label} />
+                        </>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -5038,6 +4885,9 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
                       <Row label="Email" value={c.email} />
                       <Row label="Cell" value={c.cell} />
                       <Row label="Level" value={c.level} />
+                      <Row label="ID number" value={c.idNumber} />
+                      <Row label="Coaching since" value={c.yearStarted} />
+                      <Row label="Experience" value={c.yearsExperience} />
                       <Row label="Teams" value={Array.isArray(c.teams) ? c.teams.join(', ') : ''} />
                     </div>
                   ))}
@@ -5052,6 +4902,8 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
                 <Row label="Venue" value={club.ground?.venue} />
                 <Row label="Address" value={club.ground?.address} />
                 <Row label="Suburb" value={club.ground?.suburb} />
+                <Row label="Secondary venue" value={club.ground?.secondaryVenue} />
+                <Row label="Secondary address" value={club.ground?.secondaryAddress} />
               </div>
             </div>
           </div>

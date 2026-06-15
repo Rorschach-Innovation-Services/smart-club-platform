@@ -55,6 +55,7 @@ import {
   type Channel,
   type SendResult,
 } from './notify/index.js';
+import { sendRegLinkEmail } from './notify/email.js';
 import type {
   Club,
   ClubCommEvent,
@@ -601,15 +602,18 @@ app.patch('/clubs/:id', async (c) => {
   const id = c.req.param('id');
   assertClubAccess(ra, id);
   const patch = await c.req.json<Partial<Club>>();
-  // The affiliation form locks once complete; reps cannot reopen it.
   const current = await repo.getClub(ra.tenant, id);
   if (!current) throw new HttpError(404, 'club not found');
-  if (
-    ra.membership.role !== 'admin' &&
-    current.affiliation === 'complete' &&
-    affiliationFieldsTouched(patch)
-  ) {
-    throw new HttpError(403, 'affiliation is locked');
+  // The affiliation form is no longer hard-locked. A rep may correct an already-
+  // submitted form, but any such edit re-flags the club for admin re-confirmation.
+  // Only an admin may write `amendmentPending` (the re-confirm action sets it false);
+  // a rep's own value is dropped first so it can't self-dismiss the flag with a bare
+  // patch, then forced true when the rep actually touches affiliation fields.
+  if (ra.membership.role !== 'admin') {
+    delete patch.amendmentPending;
+    if (current.affiliation === 'complete' && affiliationFieldsTouched(patch)) {
+      patch.amendmentPending = true;
+    }
   }
   // Valid league keys = the tenant's catalogue plus keys already on the club (so an
   // admin can still remove a league that was later deleted from the catalogue).
@@ -661,9 +665,97 @@ app.patch('/clubs/:id', async (c) => {
       patch.version ??= current.version;
     }
   }
-  const updated = await applyClubPatch(ra.tenant, id, patch, ra.email);
+  let updated = await applyClubPatch(ra.tenant, id, patch, ra.email);
+  // On the not-complete → complete edge ONLY (the client re-sends affiliation:'complete'
+  // on every post-submission edit), mint a player-registration link if absent and email
+  // it to the chair. Gated on the edge so corrections never re-mint (which would revoke a
+  // shared token) or re-email.
+  const becameComplete = current.affiliation !== 'complete' && patch.affiliation === 'complete';
+  if (becameComplete) {
+    updated = await mintAndEmailRegLink(c, ra.tenant, ra.email, updated);
+  }
   return c.json(withPlayerCount(updated));
 });
+
+/**
+ * Mint the club's player-registration link (only if it has none) and email it to the
+ * chair. Best-effort: a failed send/append is logged, never failing the affiliation
+ * write. Returns the latest club (with the link, if minted).
+ */
+async function mintAndEmailRegLink(
+  c: Context<HonoEnv>,
+  tenant: string,
+  by: string,
+  club: Club,
+): Promise<Club> {
+  let current = club;
+  if (!current.playerRegLink) {
+    const token = randomUUID();
+    const createdAt = now();
+    try {
+      await repo.putToken(token, tenant, current.id, createdAt);
+      current = await applyClubPatch(
+        tenant,
+        current.id,
+        { playerRegLink: { token, createdAt } },
+        by,
+      );
+    } catch (err) {
+      console.error('reg-link mint failed on affiliation complete', err);
+      return current;
+    }
+  }
+  const chair = (current.exco as Record<string, { email?: string; name?: string }> | undefined)
+    ?.chair;
+  const chairEmail = chair?.email?.trim();
+  if (!chairEmail || !current.playerRegLink) return current;
+  const link = `${resolveLoginUrl(c)}/register/${current.id}?t=${current.playerRegLink.token}`;
+  const season = seasonLabel(new Date().getFullYear());
+  try {
+    const { messageId } = await sendRegLinkEmail({
+      to: chairEmail,
+      chairName: chair?.name || current.chair || '',
+      clubName: current.name,
+      season,
+      link,
+    });
+    await repo.appendClubCommEvents(tenant, current.id, [
+      {
+        id: randomUUID(),
+        channel: 'email',
+        to: chairEmail,
+        status: 'sent',
+        messageId,
+        at: now(),
+        by,
+        idempotencyKey: `reglink-${current.playerRegLink.token}`,
+        kind: 'reglink',
+      },
+    ]);
+  } catch (err) {
+    console.error('reg-link email failed on affiliation complete', err);
+    // Record the failure so an admin can see the auto-send didn't land (the chair can
+    // still be sent the link manually from the shared modal). Best-effort like the send.
+    try {
+      await repo.appendClubCommEvents(tenant, current.id, [
+        {
+          id: randomUUID(),
+          channel: 'email',
+          to: chairEmail,
+          status: 'failed',
+          error: err instanceof Error ? err.message : String(err),
+          at: now(),
+          by,
+          idempotencyKey: `reglink-${current.playerRegLink.token}`,
+          kind: 'reglink',
+        },
+      ]);
+    } catch (logErr) {
+      console.error('reg-link failed-event append failed', logErr);
+    }
+  }
+  return current;
+}
 
 /**
  * DELETE /clubs/:id — admin-only club deletion (junk/abandoned signups, POPIA
@@ -1387,6 +1479,22 @@ app.patch('/series/:id', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   const patch = await c.req.json<Partial<Series>>();
+  const current = await repo.getSeries(ra.tenant, id);
+  if (!current) throw new HttpError(404, 'series not found');
+  // Approval gate. Approve/unapprove stamps approvedAt server-side. Editing the
+  // fixtures of a DRAFT series recalls any prior approval (must re-approve before
+  // release); a live series keeps its state so in-season edits still reach clubs.
+  if (typeof patch.approved === 'boolean') {
+    patch.approvedAt = patch.approved ? now() : null;
+  } else if (patch.fixtures !== undefined && !current.released) {
+    patch.approved = false;
+    patch.approvedAt = null;
+  }
+  // A series can only be released once approved (in this patch or already on record).
+  if (patch.released === true) {
+    const approved = patch.approved ?? current.approved ?? false;
+    if (!approved) throw new HttpError(400, 'fixtures must be approved before release');
+  }
   // Release/recall stamps releasedAt server-side for trustworthy timestamps.
   if (typeof patch.released === 'boolean') {
     patch.releasedAt = patch.released ? now() : null;

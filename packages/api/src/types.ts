@@ -106,10 +106,27 @@ export interface Club {
     suburb?: string;
     lat?: number;
     lon?: number;
+    /** Optional second home venue (input only — no map/coords). Used for fixture venue selection. */
+    secondaryVenue?: string;
+    secondaryAddress?: string;
   };
   leagues: string[];
+  /**
+   * Office bearers. `exco.chair` carries the chair's contact plus governance
+   * fields `idNumber`, `termStart`, `termEnd` (ISO dates) captured on the
+   * affiliation form; other roles carry name/cell/email/gender/race.
+   */
   exco?: Record<string, unknown>;
+  /**
+   * Coaches by league. Each entry additionally carries `idNumber`, `yearStarted`
+   * (year as number/string) and `yearsExperience` ('0-3' | '4-10' | '10+').
+   */
   coaches?: unknown[];
+  /**
+   * Set when a rep edits an already-complete affiliation form (corrections);
+   * cleared by an admin re-confirming. The form is no longer hard-locked.
+   */
+  amendmentPending?: boolean;
   /** Admin communication-log notes, appended newest-last via list_append. */
   notes?: { id: string; text: string; author: string; at: string }[];
   /** Real onboarding-invite send events (email/WhatsApp), appended via list_append. */
@@ -165,7 +182,7 @@ export interface ClubCommEvent {
    * What was sent. Absent ⇒ 'invite' (back-compat with pre-existing rows). A 'fixtures'
    * broadcast is recorded as one PII-free summary event per channel, not one row per player.
    */
-  kind?: 'invite' | 'fixtures';
+  kind?: 'invite' | 'fixtures' | 'reglink';
   /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
   summary?: string;
 }
@@ -184,6 +201,9 @@ export interface Series {
   dateMode?: 'spread' | 'reference'; // how endDate is used: spread rounds vs display only
   teams: string[];
   fixtures: unknown[];
+  /** Admin sign-off gate: a series can only be released once approved. Editing a fixture clears it. */
+  approved?: boolean;
+  approvedAt?: string | null;
   released: boolean;
   releasedAt: string | null;
   version: number;
