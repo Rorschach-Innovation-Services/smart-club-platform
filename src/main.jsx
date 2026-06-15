@@ -17,6 +17,7 @@ import { ApiError } from './api.js';
 import { resolveTenantSlug, applyTheme } from './config.js';
 import { setActiveTenant } from './api.js';
 import { AuthProvider, useAuth, membershipFor } from './auth.jsx';
+import { routingRole, clubRouteRedirect } from './routing.js';
 import { Login } from './Login.jsx';
 import { RegisterPage } from './RegisterPage.jsx';
 import { ClubSignupPage } from './ClubSignupPage.jsx';
@@ -285,7 +286,7 @@ function AuthedApp({ tenantConfig }) {
   const [showHelp, setShowHelp] = useStateApp(false);
 
   const membership = membershipFor(memberships, TENANT_SLUG);
-  const role = membership?.role === 'admin' ? 'admin' : 'club';
+  const role = routingRole(membership);
 
   // ── Data ──
   const clubsQuery = useQuery({
@@ -585,43 +586,52 @@ function AuthedApp({ tenantConfig }) {
         <Route
           path="/club/:clubId/*"
           element={
-            <Shell
-              role="club"
-              {...{
-                clubs,
-                allSeries,
-                allLeagues,
-                toastShow,
-                onboarded,
-                setOnboarded,
-                showOnboarding,
-                setShowOnboarding,
-                showCreateSeries,
-                setShowCreateSeries,
-                showLeagueForm,
-                setShowLeagueForm,
-                showHelp,
-                setShowHelp,
-                submissionDeadline,
-                setSubmissionDeadline,
-                setSupportContact,
-                saveOrgName,
-                updateSeries,
-                deleteSeries,
-                duplicateSeries,
-                setReleased,
-                onCreateSeries,
-                onCreateLeague,
-                updateLeague,
-                deleteLeague,
-                withToast,
-                invalidate,
-                membership,
-                tenantConfig,
-                userEmail: email,
-                signOutUser,
-              }}
-            />
+            // Role guard, symmetric with /admin/* above (see clubRouteRedirect): admins
+            // manage clubs via /admin/clubs/:id, never the rep portal, so an admin left on
+            // a /club URL (e.g. an in-tab sign-out→sign-in from a rep session, which does
+            // not re-run the "/" role redirect) is bounced to the admin dashboard instead
+            // of rendering the club shell.
+            clubRouteRedirect(role) ? (
+              <Navigate to={clubRouteRedirect(role)} replace />
+            ) : (
+              <Shell
+                role="club"
+                {...{
+                  clubs,
+                  allSeries,
+                  allLeagues,
+                  toastShow,
+                  onboarded,
+                  setOnboarded,
+                  showOnboarding,
+                  setShowOnboarding,
+                  showCreateSeries,
+                  setShowCreateSeries,
+                  showLeagueForm,
+                  setShowLeagueForm,
+                  showHelp,
+                  setShowHelp,
+                  submissionDeadline,
+                  setSubmissionDeadline,
+                  setSupportContact,
+                  saveOrgName,
+                  updateSeries,
+                  deleteSeries,
+                  duplicateSeries,
+                  setReleased,
+                  onCreateSeries,
+                  onCreateLeague,
+                  updateLeague,
+                  deleteLeague,
+                  withToast,
+                  invalidate,
+                  membership,
+                  tenantConfig,
+                  userEmail: email,
+                  signOutUser,
+                }}
+              />
+            )
           }
         />
         <Route path="*" element={<Navigate to="/" replace />} />
