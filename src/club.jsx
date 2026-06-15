@@ -13,6 +13,7 @@ import {
   DISTRICTS,
   COACHING_BODIES,
   COACHING_LEVELS,
+  COACH_EXPERIENCE,
   greeting,
   REQUIRED_DOCS,
   CQI_STRUCTURE,
@@ -39,6 +40,8 @@ import {
   RACES,
   GENDERS,
   dobFromSaId,
+  ageFromSaId,
+  termRemaining,
   clearanceOverdue,
   clearanceDaysRemaining,
 } from './data.jsx';
@@ -53,6 +56,7 @@ import {
   ClubNameCell,
   YN,
   Choice,
+  Rating,
   MoneyInput,
   NumSlider,
   CountUp,
@@ -61,6 +65,7 @@ import {
 } from './atoms.jsx';
 import { getDocUploadUrl, uploadToPresigned } from './api.js';
 import { DocPreviewModal } from './DocPreviewModal.jsx';
+import { RegLinkModal } from './RegLinkModal.jsx';
 
 /* ─── Compliance doc upload — presigned S3 PUT, then mark uploaded ─── */
 function DocUploadButton({
@@ -740,8 +745,70 @@ export function ClubHome({
             ))}
           </div>
         </Card>
+
+        <GovernanceCard club={club} />
       </div>
     </div>
+  );
+}
+
+/* ─── Club Home: chairman governance + venues + coaches summary ─── */
+function GovernanceCard({ club }) {
+  const chair = club.exco?.chair || {};
+  const age = ageFromSaId(chair.idNumber);
+  const term = termRemaining(chair.termEnd);
+  const ground = club.ground || {};
+  const coaches = Array.isArray(club.coaches) ? club.coaches.filter((c) => c && c.name) : [];
+  const expCount = (bucket) => coaches.filter((c) => c.yearsExperience === bucket).length;
+  const rows = [
+    ['Chairman age', age != null ? `${age} yrs` : '—'],
+    ['Term remaining', term.label || '—'],
+    ['Primary venue', ground.venue || '—'],
+    ['Secondary venue', ground.secondaryVenue || '—'],
+    ['Coaches', coaches.length || 0],
+    [
+      'Coach experience',
+      coaches.length
+        ? [
+            expCount('10+') ? `${expCount('10+')}× 10+` : '',
+            expCount('4-10') ? `${expCount('4-10')}× 4-10` : '',
+            expCount('0-3') ? `${expCount('0-3')}× 0-3` : '',
+          ]
+            .filter(Boolean)
+            .join(' · ') || '—'
+        : '—',
+    ],
+  ];
+  return (
+    <Card title="Governance & venues" sub="From your affiliation form">
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px 18px' }}>
+        {rows.map(([k, v], i) => (
+          <div key={i}>
+            <div
+              style={{
+                fontSize: 10,
+                textTransform: 'uppercase',
+                letterSpacing: '0.1em',
+                color: 'var(--muted-2)',
+                marginBottom: 3,
+              }}
+            >
+              {k}
+            </div>
+            <div
+              style={{
+                fontFamily: "'Montserrat',sans-serif",
+                fontSize: 15,
+                fontWeight: 700,
+                color: term.expired && k === 'Term remaining' ? 'var(--coral)' : 'var(--ink)',
+              }}
+            >
+              {v}
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
   );
 }
 
@@ -754,6 +821,9 @@ const EMPTY_COACH = {
   status: 'Completed',
   cell: '',
   email: '',
+  idNumber: '',
+  yearStarted: '',
+  yearsExperience: '',
   teams: [],
 };
 
@@ -777,6 +847,7 @@ export function AffiliationForm({
       race: ex[key]?.race ?? fallback.race ?? '',
     });
     const chairSeed = seed('chair', { name: club.chair });
+    const chairGov = ex.chair || {};
     // Additional members are now an array (chair/sec/tre/vc remain fixed required slots)
     const stored = Array.isArray(ex.additionalMembers)
       ? ex.additionalMembers
@@ -793,6 +864,9 @@ export function AffiliationForm({
       chairEmail: chairSeed.email,
       chairGender: chairSeed.gender,
       chairRace: chairSeed.race,
+      chairIdNumber: chairGov.idNumber || '',
+      chairTermStart: chairGov.termStart || '',
+      chairTermEnd: chairGov.termEnd || '',
       secName: seed('sec').name,
       secCell: seed('sec').cell,
       secEmail: seed('sec').email,
@@ -823,6 +897,8 @@ export function AffiliationForm({
       // Home ground / venue
       groundVenue: ground.venue || '',
       groundAddress: ground.address || '',
+      secondaryVenue: ground.secondaryVenue || '',
+      secondaryAddress: ground.secondaryAddress || '',
       groundMapQuery: ground.mapQuery || 'Durban, KwaZulu-Natal, South Africa',
       // Restore the persisted pin so the map opens on it (and survives step round-trips)
       // instead of re-geocoding `mapQuery`. Only seed when real coords were saved.
@@ -837,6 +913,9 @@ export function AffiliationForm({
   });
   const [step, setStep] = useStateC(1);
   const [savingDraft, setSavingDraft] = useStateC(false);
+  // A submitted form is read-only until the chair opts to correct it; saving then
+  // re-flags the club for admin re-confirmation (server forces amendmentPending).
+  const [editing, setEditing] = useStateC(false);
 
   // Persist the in-progress form without locking it (no affiliation:'complete').
   // Toast only on success — updateClub can reject (e.g. version conflict) and we
@@ -941,6 +1020,8 @@ export function AffiliationForm({
     return {
       venue: data.groundVenue,
       address: data.groundAddress,
+      secondaryVenue: data.secondaryVenue.trim(),
+      secondaryAddress: data.secondaryAddress.trim(),
       mapQuery: data.groundMapQuery,
       suburb: coords.suburb,
       lat: coords.lat,
@@ -957,7 +1038,12 @@ export function AffiliationForm({
       race: data[p + 'Race'],
     });
     return {
-      chair: pick('chair'),
+      chair: {
+        ...pick('chair'),
+        idNumber: data.chairIdNumber.trim(),
+        termStart: data.chairTermStart,
+        termEnd: data.chairTermEnd,
+      },
       sec: pick('sec'),
       tre: pick('tre'),
       vc: pick('vc'),
@@ -974,8 +1060,9 @@ export function AffiliationForm({
   }
 
   const valid = data.clubName && data.chairName && data.chairCell && data.chairEmail;
-  // Form locks once affiliation is submitted (complete).
-  const viewOnly = club.affiliation === 'complete';
+  // A submitted form is read-only until the chair chooses to correct it.
+  const submitted = club.affiliation === 'complete';
+  const viewOnly = submitted && !editing;
 
   // Live summary values for the sidebar
   const filledBearers = [
@@ -1017,13 +1104,39 @@ export function AffiliationForm({
           <div className="aff-submitted-text">
             <div className="aff-submitted-title">Affiliation submitted</div>
             <div className="aff-submitted-sub">
-              Confirmed by the Dolphins office · This form is locked, contact the Union office to
-              request an amendment.
+              {club.amendmentPending
+                ? 'Edits submitted — pending re-confirmation by the Dolphins office. You can keep correcting details.'
+                : 'Spotted an error? You can correct your details and re-submit for the Dolphins office to re-confirm.'}
             </div>
           </div>
-          <Pill tone="teal" dot>
-            Completed
-          </Pill>
+          <div className="row" style={{ gap: 8 }}>
+            {club.amendmentPending ? (
+              <Pill tone="gold" dot>
+                Amendment pending
+              </Pill>
+            ) : (
+              <Pill tone="teal" dot>
+                Completed
+              </Pill>
+            )}
+            <Btn tone="outline" size="sm" icon={Icon.Form} onClick={() => setEditing(true)}>
+              Edit / correct details
+            </Btn>
+          </div>
+        </div>
+      )}
+
+      {editing && submitted && (
+        <div className="aff-submitted-banner" style={{ background: 'var(--gold-pale, #fff8e6)' }}>
+          <div className="aff-submitted-text">
+            <div className="aff-submitted-title">Correcting submitted details</div>
+            <div className="aff-submitted-sub">
+              Saving your changes will notify the Dolphins office to re-confirm your affiliation.
+            </div>
+          </div>
+          <Btn tone="ghost" size="sm" onClick={() => setEditing(false)}>
+            Cancel editing
+          </Btn>
         </div>
       )}
 
@@ -1217,6 +1330,36 @@ export function AffiliationForm({
                       }
                     />
                   </div>
+
+                  <div className="ground-section-head" style={{ marginTop: 18 }}>
+                    <div className="ground-section-title">
+                      <Icon.Field /> Secondary venue <span className="muted">(optional)</span>
+                    </div>
+                    <div className="ground-section-sub">
+                      A second home venue, if your club hosts across two grounds. Used when
+                      allocating fixture venues — no map needed.
+                    </div>
+                  </div>
+                  <div className="field-grid-2">
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <div className="field-label">Secondary Venue Name</div>
+                      <input
+                        className="field-input"
+                        placeholder="e.g. Stanger Gledhow B"
+                        value={data.secondaryVenue}
+                        onChange={(e) => update('secondaryVenue', e.target.value)}
+                      />
+                    </div>
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <div className="field-label">Secondary Venue Address</div>
+                      <input
+                        className="field-input"
+                        placeholder="Street, suburb, city"
+                        value={data.secondaryAddress}
+                        onChange={(e) => update('secondaryAddress', e.target.value)}
+                      />
+                    </div>
+                  </div>
                 </div>
               </Card>
             )}
@@ -1331,6 +1474,39 @@ export function AffiliationForm({
                         </select>
                       </div>
                     </div>
+                    {role.prefix === 'chair' && (
+                      <div className="field-grid-3" style={{ marginTop: 8 }}>
+                        <div className="field" style={{ marginBottom: 0 }}>
+                          <div className="field-label">ID Number</div>
+                          <input
+                            className="field-input"
+                            value={data.chairIdNumber || ''}
+                            onChange={(e) => update('chairIdNumber', e.target.value)}
+                            placeholder="13-digit RSA ID"
+                            inputMode="numeric"
+                            maxLength={13}
+                          />
+                        </div>
+                        <div className="field" style={{ marginBottom: 0 }}>
+                          <div className="field-label">Term Start</div>
+                          <input
+                            type="date"
+                            className="field-input"
+                            value={data.chairTermStart || ''}
+                            onChange={(e) => update('chairTermStart', e.target.value)}
+                          />
+                        </div>
+                        <div className="field" style={{ marginBottom: 0 }}>
+                          <div className="field-label">Term End</div>
+                          <input
+                            type="date"
+                            className="field-input"
+                            value={data.chairTermEnd || ''}
+                            onChange={(e) => update('chairTermEnd', e.target.value)}
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
 
@@ -1875,6 +2051,51 @@ export function AffiliationForm({
                                           />
                                         </div>
                                       </div>
+                                      <div className="field-grid-3">
+                                        <div className="field" style={{ marginBottom: 10 }}>
+                                          <div className="field-label">ID Number</div>
+                                          <input
+                                            className="field-input"
+                                            placeholder="13-digit RSA ID"
+                                            inputMode="numeric"
+                                            maxLength={13}
+                                            value={c.idNumber || ''}
+                                            onChange={(e) =>
+                                              updateCoach(idx, 'idNumber', e.target.value)
+                                            }
+                                          />
+                                        </div>
+                                        <div className="field" style={{ marginBottom: 10 }}>
+                                          <div className="field-label">Year Started Coaching</div>
+                                          <input
+                                            className="field-input"
+                                            placeholder="e.g. 2019"
+                                            inputMode="numeric"
+                                            maxLength={4}
+                                            value={c.yearStarted || ''}
+                                            onChange={(e) =>
+                                              updateCoach(idx, 'yearStarted', e.target.value)
+                                            }
+                                          />
+                                        </div>
+                                        <div className="field" style={{ marginBottom: 10 }}>
+                                          <div className="field-label">Years of Experience</div>
+                                          <select
+                                            className="field-select"
+                                            value={c.yearsExperience || ''}
+                                            onChange={(e) =>
+                                              updateCoach(idx, 'yearsExperience', e.target.value)
+                                            }
+                                          >
+                                            <option value="">Select…</option>
+                                            {COACH_EXPERIENCE.map((x) => (
+                                              <option key={x} value={x}>
+                                                {x}
+                                              </option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                      </div>
 
                                       {/* Cross-tag the same coach to other designations */}
                                       <div className="trb">
@@ -1956,6 +2177,21 @@ export function AffiliationForm({
                     tone="teal"
                     icon={Icon.Check}
                     onClick={() => {
+                      // Reject malformed SA-IDs before they reach the API (which also guards).
+                      const chairId = data.chairIdNumber.trim();
+                      if (chairId && !dobFromSaId(chairId)) {
+                        toast("Chairperson ID number isn't a valid 13-digit RSA ID", 'warn');
+                        setStep(2);
+                        return;
+                      }
+                      const badCoach = getCoachesPayload().find(
+                        (c) => c.idNumber && !dobFromSaId(String(c.idNumber).trim()),
+                      );
+                      if (badCoach) {
+                        toast(`Coach "${badCoach.name}" has an invalid ID number`, 'warn');
+                        setStep(TOTAL_STEPS);
+                        return;
+                      }
                       onSubmit({
                         district: data.district,
                         exco: getExcoPayload(),
@@ -1963,10 +2199,15 @@ export function AffiliationForm({
                         ground: getGroundPayload(),
                         leagues: getLeaguesPayload(),
                       });
-                      toast('Affiliation submitted · Exco roster & leagues captured');
+                      if (submitted) {
+                        setEditing(false);
+                        toast('Changes submitted — pending Dolphins office re-confirmation');
+                      } else {
+                        toast('Affiliation submitted · Exco roster & leagues captured');
+                      }
                     }}
                   >
-                    Submit affiliation
+                    {submitted ? 'Save changes' : 'Submit affiliation'}
                   </Btn>
                 </div>
               </div>
@@ -2495,6 +2736,7 @@ export function DocumentsView({
   toast,
   onUpload,
   onRemoveFile,
+  onMarkUnavailable,
   onSaveExco,
   submissionDeadline,
   unionEmail,
@@ -2563,6 +2805,10 @@ export function DocumentsView({
           const up = club.docs[d.key];
           const isExco = d.key === 'exco';
           const isSafeguarding = d.key === 'safeguarding';
+          // Financial statements may be marked "Unavailable" by clubs with none to
+          // upload — a distinct sentinel (vs an admin compliance override).
+          const isFinancials = d.key === 'financials';
+          const unavailable = !!club.docMeta?.[d.key]?.unavailable;
           // Real uploads carry docMeta with an objectKey; an admin "mark compliant"
           // override sets the flag with no file. Demo/local mode has no docMeta at all
           // but should still preview the bundled sample. Safeguarding is multi-file:
@@ -2657,6 +2903,16 @@ export function DocumentsView({
                           Edit
                         </a>
                       </span>
+                    ) : unavailable ? (
+                      <span>
+                        Marked unavailable — no statements to upload ·{' '}
+                        <a
+                          style={{ color: 'var(--teal-deep)', cursor: 'pointer' }}
+                          onClick={() => onMarkUnavailable && onMarkUnavailable(d.key, false)}
+                        >
+                          Undo
+                        </a>
+                      </span>
                     ) : (
                       <span>
                         {metaText || 'Document'} ·{' '}
@@ -2707,10 +2963,10 @@ export function DocumentsView({
                 </>
               ) : up ? (
                 <>
-                  <Pill tone="teal" dot>
-                    {isExco ? 'Completed' : 'Uploaded'}
+                  <Pill tone={unavailable ? 'gold' : 'teal'} dot>
+                    {unavailable ? 'Unavailable' : isExco ? 'Completed' : 'Uploaded'}
                   </Pill>
-                  {!isExco && (real || demo) && (
+                  {!isExco && !unavailable && (real || demo) && (
                     <Btn
                       tone="ghost"
                       size="sm"
@@ -2725,13 +2981,25 @@ export function DocumentsView({
                   Complete form
                 </Btn>
               ) : (
-                <DocUploadButton
-                  clubId={club.id}
-                  docKey={d.key}
-                  label={d.name}
-                  onUploaded={onUpload}
-                  toast={toast}
-                />
+                <div className="row" style={{ gap: 8 }}>
+                  {isFinancials && onMarkUnavailable && (
+                    <Btn
+                      tone="outline"
+                      size="sm"
+                      onClick={() => onMarkUnavailable(d.key, true)}
+                      title="No financial statements to upload"
+                    >
+                      Unavailable
+                    </Btn>
+                  )}
+                  <DocUploadButton
+                    clubId={club.id}
+                    docKey={d.key}
+                    label={d.name}
+                    onUploaded={onUpload}
+                    toast={toast}
+                  />
+                </div>
               )}
             </div>
           );
@@ -2985,9 +3253,9 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline, allLe
           </h1>
           <p className="ph-desc">
             Score your club across six dimensions of capability. Your responses are scored in real
-            time using the official Dolphins CQI weighting model — administration 20 pts, teams 20
-            pts, coaching 20 pts, facilities 15 pts, representation 10 pts, financial sustainability
-            15 pts.
+            time using the official Dolphins CQI weighting model — club mandate &amp; objectives 20
+            pts, teams 20 pts, coaching 20 pts, facilities 15 pts, representation 10 pts, financial
+            sustainability 15 pts.
           </p>
         </div>
       </div>
@@ -3065,10 +3333,15 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline, allLe
                         ? 'Select one'
                         : q.kind === 'money'
                           ? 'Currency · amount per player'
-                          : 'Yes / No'}
+                          : q.kind === 'rating'
+                            ? 'Rate 1 (low) – 5 (high)'
+                            : 'Yes / No'}
                 </div>
               </div>
               {q.kind === 'yn' && <YN value={answers[q.key]} onChange={(v) => setA(q.key, v)} />}
+              {q.kind === 'rating' && (
+                <Rating value={answers[q.key]} onChange={(v) => setA(q.key, v)} />
+              )}
               {q.kind === 'num' && (
                 <NumSlider value={answers[q.key]} onChange={(v) => setA(q.key, v)} max={q.max} />
               )}
@@ -3607,7 +3880,21 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
 const fmtDay = (iso) =>
   iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '';
 
-export function ClubPlayersView({ club, players, clearances, leagues, onOpenRegister }) {
+export function ClubPlayersView({
+  club,
+  players,
+  clearances,
+  leagues,
+  onOpenRegister,
+  onGenerateLink,
+  toast,
+}) {
+  const [showLink, setShowLink] = useStateC(false);
+  async function openLink() {
+    // Mint a link on first open so the modal never shows an empty value.
+    if (!club.playerRegLink && onGenerateLink) await onGenerateLink();
+    setShowLink(true);
+  }
   const teamLabel = labelByKey(leagues);
   const label = (key) => teamLabel[key] || key || '—';
   const mine = players ?? [];
@@ -3633,11 +3920,23 @@ export function ClubPlayersView({ club, players, clearances, leagues, onOpenRegi
           </p>
         </div>
         <div className="ph-actions">
+          <Btn tone="outline" size="sm" icon={Icon.Mail} onClick={openLink}>
+            Registration link
+          </Btn>
           <Btn tone="teal" size="sm" icon={Icon.Plus} onClick={onOpenRegister}>
             Register player
           </Btn>
         </div>
       </div>
+
+      {showLink && (
+        <RegLinkModal
+          club={club}
+          onClose={() => setShowLink(false)}
+          onRegenerate={onGenerateLink}
+          toast={toast}
+        />
+      )}
 
       <div className="players-stats">
         <div className="players-stat">

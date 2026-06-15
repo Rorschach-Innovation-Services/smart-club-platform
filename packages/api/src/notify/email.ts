@@ -93,6 +93,66 @@ export async function sendStaffInviteEmail(
   return { messageId: res.MessageId ?? '' };
 }
 
+export interface RegLinkEmailInput {
+  to: string;
+  chairName: string;
+  clubName: string;
+  season: string;
+  /** The public player-registration URL (validated by the caller). */
+  link: string;
+}
+
+/**
+ * Sent to the chairperson the moment affiliation completes: their unique
+ * player-registration link, ready to share with members. Mirrors the invite email
+ * shape (a link in the body) and honours the same dry-run gate.
+ */
+export async function sendRegLinkEmail(input: RegLinkEmailInput): Promise<{ messageId: string }> {
+  const { to, chairName, clubName, season, link } = input;
+  const subject = `${clubName} · player registration link (${season})`;
+  const greetName = chairName || 'there';
+
+  const text =
+    `Hi ${greetName},\n\n` +
+    `Your ${clubName} affiliation is in. Here's your unique player-registration link for the ${season} season — share it with your members so they can register straight into the club:\n\n` +
+    `${link}\n\n` +
+    `Every registration flows directly into your roster and the Dolphins cohort.\n\n` +
+    `The Dolphins office`;
+
+  const safeName = escapeHtml(greetName);
+  const safeClub = escapeHtml(clubName);
+  const safeSeason = escapeHtml(season);
+  const safeLink = escapeHtml(link);
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hi ${safeName},</p>` +
+    `<p>Your <strong>${safeClub}</strong> affiliation is in. Here's your unique player-registration link for the ${safeSeason} season — share it with your members so they can register straight into the club:</p>` +
+    `<p><a href="${safeLink}" style="color:#1D9E75;font-weight:600">${safeLink}</a></p>` +
+    `<p>Every registration flows directly into your roster and the Dolphins cohort.</p>` +
+    `<p>The Dolphins office</p>` +
+    `</div>`;
+
+  if (EMAIL_DRY_RUN) {
+    console.log(`[notify:email dry-run] would send reg-link to ${to} for ${clubName}`);
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [to] },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}
+
 export interface FixturesEmailInput {
   to: string;
   playerName: string;

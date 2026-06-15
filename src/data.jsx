@@ -66,6 +66,19 @@ export const DISTRICTS = [
 // silently presumed CSA Level 2.
 export const COACHING_BODIES = ['None', 'CSA', 'Gary Kirsten'];
 export const COACHING_LEVELS = ['None', 'Level 1', 'Level 2', 'Level 3', 'Level 4'];
+// Total years of coaching experience, captured on the affiliation form. Kept in
+// sync with COACH_EXPERIENCE in packages/api/src/catalogue.ts (server validation).
+export const COACH_EXPERIENCE = ['0-3', '4-10', '10+'];
+
+/**
+ * Current cricket season label, e.g. "2026/27". Mirrors `seasonLabel` in
+ * packages/api/src/index.ts so client copy and server emails agree. `d` is
+ * injectable so tests can pin the clock.
+ */
+export function currentSeasonLabel(d = new Date()) {
+  const y = d.getFullYear();
+  return `${y}/${String((y + 1) % 100).padStart(2, '0')}`;
+}
 
 /** Time-of-day greeting. `d` is injectable so tests can pin the clock. */
 export function greeting(d = new Date()) {
@@ -103,6 +116,41 @@ export function dobFromSaId(idNumber) {
   if (isNaN(d.getTime()) || d.getTime() > Date.now()) return '';
   if (d.getMonth() + 1 !== mm || d.getDate() !== dd) return '';
   return iso;
+}
+
+/** Whole-year age derived from a 13-digit RSA ID. Returns null if the ID isn't valid. */
+export function ageFromSaId(idNumber) {
+  const dob = dobFromSaId(String(idNumber || ''));
+  if (!dob) return null;
+  const b = new Date(dob + 'T00:00:00');
+  const now = new Date();
+  let age = now.getFullYear() - b.getFullYear();
+  const m = now.getMonth() - b.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < b.getDate())) age--;
+  return age >= 0 ? age : null;
+}
+
+/**
+ * Time remaining until an ISO term-end date, as { years, months, expired, label }.
+ * label reads like "1 yr 4 mo left", "3 mo left", "expired", or '' if no end date.
+ */
+export function termRemaining(termEnd) {
+  if (!termEnd) return { years: 0, months: 0, expired: false, label: '' };
+  const end = new Date(termEnd);
+  if (isNaN(end.getTime())) return { years: 0, months: 0, expired: false, label: '' };
+  const now = new Date();
+  if (end.getTime() <= now.getTime())
+    return { years: 0, months: 0, expired: true, label: 'expired' };
+  let months = (end.getFullYear() - now.getFullYear()) * 12 + (end.getMonth() - now.getMonth());
+  if (end.getDate() < now.getDate()) months--;
+  if (months < 0) months = 0;
+  const years = Math.floor(months / 12);
+  const rem = months % 12;
+  const parts = [];
+  if (years) parts.push(`${years} yr${years > 1 ? 's' : ''}`);
+  if (rem) parts.push(`${rem} mo`);
+  if (!parts.length) parts.push('<1 mo');
+  return { years, months, expired: false, label: `${parts.join(' ')} left` };
 }
 
 /** Whole days elapsed since an ISO timestamp — clearance overdue/remaining math. */
@@ -613,19 +661,52 @@ SAMPLE_CLUBS.forEach((c) => {
 // Weighting model: Admin 20 / Teams 20 / Coaching 20 / Facilities 15 / Representation 10 / Financial 15 = 100
 export const CQI_STRUCTURE = [
   {
+    // Key stays 'admin' so existing byCat references keep resolving; the old
+    // governance questions (constitution/conduct/agm/minutes/officers/playerdb/
+    // inventory) were dropped as redundant with the affiliation form + compliance
+    // uploads, and replaced with forward-looking mandate/ambition questions.
     key: 'admin',
-    title: 'Administration',
+    title: 'Club Mandate and Objectives',
     weight: 20,
     accent: 'var(--navy)',
-    desc: 'Governance, documentation and structural compliance.',
+    desc: "The club's vision, ambition and development pathways for the seasons ahead.",
     questions: [
-      { key: 'constitution', label: 'Club has a current Constitution', kind: 'yn', pts: 4 },
-      { key: 'conduct', label: 'Code of Conduct is in place', kind: 'yn', pts: 3 },
-      { key: 'inventory', label: 'General Admin Inventory maintained', kind: 'yn', pts: 3 },
-      { key: 'agm', label: 'AGM conducted at least once a year', kind: 'yn', pts: 4 },
-      { key: 'officers', label: 'Chairperson, Secretary & Treasurer in place', kind: 'yn', pts: 4 },
-      { key: 'minutes', label: 'Minutes of AGM available', kind: 'yn', pts: 4 },
-      { key: 'playerdb', label: 'Player database available', kind: 'yn', pts: 3 },
+      {
+        key: 'vision',
+        label: 'Club: unified vision for cricket development over the next 3–5 years',
+        kind: 'yn',
+        pts: 3,
+      },
+      {
+        key: 'ambition',
+        label: 'Club: ambition to compete at a higher level (league promotion / provincial)',
+        kind: 'rating',
+        pts: 4,
+      },
+      {
+        key: 'pathway',
+        label: 'Players: defined pathway toward representative / professional cricket',
+        kind: 'yn',
+        pts: 3,
+      },
+      {
+        key: 'retention',
+        label: 'Players: commitment to growing player numbers and improving retention',
+        kind: 'rating',
+        pts: 4,
+      },
+      {
+        key: 'accredAim',
+        label: 'Coaches: club aims for all coaches to be formally accredited / qualified',
+        kind: 'yn',
+        pts: 3,
+      },
+      {
+        key: 'coachDev',
+        label: 'Coaches: ambition to invest in ongoing coach development and upskilling',
+        kind: 'rating',
+        pts: 4,
+      },
     ],
   },
   {

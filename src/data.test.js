@@ -5,6 +5,8 @@ import {
   greeting,
   safeguardingMeta,
   safeguardingSatisfied,
+  ageFromSaId,
+  termRemaining,
 } from './data.jsx';
 
 // 6 teams → 5 single round-robin rounds (each round = one match-day).
@@ -171,5 +173,41 @@ describe('safeguardingSatisfied', () => {
 
   it('honours an admin override regardless of file count', () => {
     expect(safeguardingSatisfied({ files: [], markedCompliant: true })).toBe(true);
+  });
+});
+
+describe('ageFromSaId', () => {
+  it('derives a whole-year age from a valid RSA ID', () => {
+    // 900101… → born 1990-01-01. Age is at least 30 from any date after 2020.
+    const age = ageFromSaId('9001015800086');
+    expect(typeof age).toBe('number');
+    expect(age).toBeGreaterThanOrEqual(30);
+  });
+
+  it('returns null for a malformed ID', () => {
+    expect(ageFromSaId('123')).toBeNull();
+    expect(ageFromSaId('')).toBeNull();
+    expect(ageFromSaId(undefined)).toBeNull();
+  });
+});
+
+describe('termRemaining', () => {
+  it('reports expired for a past end date', () => {
+    expect(termRemaining('2000-01-01').expired).toBe(true);
+    expect(termRemaining('2000-01-01').label).toBe('expired');
+  });
+
+  it('returns an empty label when no end date is given', () => {
+    expect(termRemaining('').label).toBe('');
+    expect(termRemaining(undefined).label).toBe('');
+  });
+
+  it('produces a human label for a future end date', () => {
+    const far = new Date();
+    far.setFullYear(far.getFullYear() + 2);
+    const t = termRemaining(far.toISOString());
+    expect(t.expired).toBe(false);
+    expect(t.years).toBeGreaterThanOrEqual(1);
+    expect(t.label).toMatch(/left$/);
   });
 });

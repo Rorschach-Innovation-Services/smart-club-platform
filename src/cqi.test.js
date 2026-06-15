@@ -1,6 +1,65 @@
 import { describe, it, expect } from 'vitest';
 import { scoreCQI } from './atoms.jsx';
-import { REQUIRED_DOCS, docsUploadedCount, docsAllComplete, docCompletion } from './data.jsx';
+import {
+  REQUIRED_DOCS,
+  docsUploadedCount,
+  docsAllComplete,
+  docCompletion,
+  CQI_STRUCTURE,
+} from './data.jsx';
+
+// The 'admin' section was repurposed to "Club Mandate and Objectives": all 7 old
+// governance questions removed (redundant with affiliation + compliance), replaced
+// by 6 forward-looking questions, three of which use a new 1–5 'rating' kind.
+describe('CQI · Club Mandate and Objectives section', () => {
+  const admin = CQI_STRUCTURE.find((c) => c.key === 'admin');
+
+  it('is renamed and holds exactly the 6 new questions', () => {
+    expect(admin.title).toBe('Club Mandate and Objectives');
+    expect(admin.questions.map((q) => q.key)).toEqual([
+      'vision',
+      'ambition',
+      'pathway',
+      'retention',
+      'accredAim',
+      'coachDev',
+    ]);
+  });
+
+  it('dropped every redundant legacy question', () => {
+    const keys = admin.questions.map((q) => q.key);
+    for (const old of [
+      'constitution',
+      'conduct',
+      'inventory',
+      'agm',
+      'officers',
+      'minutes',
+      'playerdb',
+    ])
+      expect(keys).not.toContain(old);
+  });
+
+  it('scores rating questions proportionally (rating ÷ 5) and ignores orphan legacy keys', () => {
+    // All three ratings at 5/5 and all three yes/no true → full section (weight 20).
+    const full = scoreCQI({
+      vision: true,
+      pathway: true,
+      accredAim: true,
+      ambition: 5,
+      retention: 5,
+      coachDev: 5,
+      // a stale answer from the old structure must not crash or contribute
+      constitution: true,
+    }).byCat.admin.earned;
+    expect(full).toBeCloseTo(20, 5);
+
+    // A single rating at 3/5 (pts 4) with everything else unanswered: earned within
+    // the section = (3/5)*4 = 2.4 of possible 21 → (2.4/21)*20.
+    const partial = scoreCQI({ ambition: 3 }).byCat.admin.earned;
+    expect(partial).toBeCloseTo((2.4 / 21) * 20, 4);
+  });
+});
 
 // Representation moved from percentages to raw head-counts (slider 0–15). Scoring
 // now derives each race's SHARE of the counted total and keeps the Black African

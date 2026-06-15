@@ -409,8 +409,13 @@ function AuthedApp({ tenantConfig }) {
     const cur = allSeries.find((s) => s.id === seriesId);
     if (!cur) return;
     const next = updater(cur);
+    // Strip approval from generic edits: approval is toggled only via setApproved
+    // (a dedicated, single-field write). Omitting it lets the server's gate recall a
+    // draft series' approval whenever its fixtures are edited — so the admin must
+    // re-approve before release. (A live series keeps its state, per the server rule.)
+    const { approved: _a, approvedAt: _aa, ...rest } = next;
     withToast(
-      () => api.patchSeries(seriesId, { ...next, version: cur.version }),
+      () => api.patchSeries(seriesId, { ...rest, version: cur.version }),
       'Could not save fixtures',
     )
       .then(() => invalidate(qk.series()))
@@ -433,6 +438,18 @@ function AuthedApp({ tenantConfig }) {
     withToast(
       () => api.patchSeries(seriesId, { released: value, version: cur?.version }),
       'Could not update release',
+    )
+      .then(() => invalidate(qk.series()))
+      .catch(() => {});
+  }
+  // Approve / unapprove a series for release (single-field write so a fixture edit
+  // can independently recall approval server-side). Returns the promise so callers
+  // can chain a toast.
+  function setApproved(seriesId, value) {
+    const cur = allSeries.find((s) => s.id === seriesId);
+    return withToast(
+      () => api.patchSeries(seriesId, { approved: value, version: cur?.version }),
+      'Could not update approval',
     )
       .then(() => invalidate(qk.series()))
       .catch(() => {});
@@ -885,6 +902,31 @@ function Shell({
       invalidate(qk.clubs());
     });
   }
+  // Mark a doc "Unavailable" (or undo it) — e.g. a club with no financial
+  // statements to upload. Sets the docs flag so compliance reads complete, and
+  // stamps a distinct {unavailable} sentinel (vs the admin {markedCompliant}
+  // override) so the UI can label it correctly. Undo clears both.
+  function setDocUnavailable(key, makeUnavailable) {
+    const club = activeClub;
+    if (!club) return Promise.resolve();
+    const docs = { ...(club.docs || {}), [key]: makeUnavailable };
+    const docMeta = { ...(club.docMeta || {}) };
+    if (makeUnavailable) docMeta[key] = { unavailable: true, at: new Date().toISOString() };
+    else delete docMeta[key];
+    return patchClubAt(club.version, { docs, docMeta })
+      .then((updated) => {
+        if (makeUnavailable) {
+          toastShow('Marked unavailable', 'ok', {
+            label: 'Undo',
+            onClick: () => setDocUnavailable(key, false),
+          });
+        } else {
+          toastShow('Reset — upload when ready');
+        }
+        return updated;
+      })
+      .catch(() => undefined);
+  }
   // Remove one stored safeguarding certificate (the only multi-file doc).
   function removeDocFile(key, objectKey) {
     return withToast(
@@ -1254,6 +1296,7 @@ function Shell({
             }
             onAddNote={addNote}
             onDeleteClub={deleteClub}
+            onReconfirmAffiliation={() => updateClub({ amendmentPending: false })}
             allSeries={allSeries}
             onMarkCompliant={() =>
               markComplianceFor(
@@ -1315,6 +1358,7 @@ function Shell({
             onDeleteSeries={deleteSeries}
             onDuplicateSeries={duplicateSeries}
             onSetReleased={setReleased}
+            onSetApproved={setApproved}
             toast={toastShow}
           />
         );
@@ -1405,6 +1449,8 @@ function Shell({
             clearances={clearances}
             leagues={allLeagues}
             onOpenRegister={() => setShowRegisterPlayer(true)}
+            onGenerateLink={() => generatePlayerRegLink(activeClub.id)}
+            toast={toastShow}
           />
         );
       }
@@ -1662,7 +1708,8 @@ function Shell({
               })
             }
             onSubmit={(payload) => {
-              // Affiliation submit marks the club complete, locking the form.
+              // Affiliation submit marks the club complete. The form is no longer locked
+              // — reps may re-edit, which re-flags the club for admin re-confirmation.
               updateClub({
                 affiliation: 'complete',
                 district: payload.district,
@@ -1695,6 +1742,7 @@ function Shell({
             toast={toastShow}
             onUpload={uploadDoc}
             onRemoveFile={removeDocFile}
+            onMarkUnavailable={setDocUnavailable}
             onSaveExco={saveExco}
             submissionDeadline={submissionDeadline}
             unionEmail={unionEmail}
