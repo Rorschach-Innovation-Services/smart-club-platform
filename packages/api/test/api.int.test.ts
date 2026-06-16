@@ -976,6 +976,206 @@ describe('safeguarding multi-file certificates', () => {
     );
     assert.equal(after.docs.safeguarding, true, 'two files satisfy the minimum');
   });
+
+  test('a booked safeguarding course is preserved through the generic PATCH merge', async () => {
+    // Seed one stored file so the merge branch (stored.files.length > 0) engages.
+    await repo.updateClub(
+      'dolphins',
+      'sgclub',
+      {
+        docMeta: {
+          safeguarding: {
+            files: [
+              { objectKey: 'dolphins/sgclub/sg-keep.pdf', size: 10, uploadedAt: '2026-01-01' },
+            ],
+          },
+        },
+        docs: { safeguarding: false },
+      },
+      'test-seed',
+      new Date().toISOString(),
+    );
+    const res = await app.request('/clubs/sgclub', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        docs: { safeguarding: true },
+        docMeta: { safeguarding: { files: [], courseBooked: true, courseDate: '2026-09-01' } },
+      }),
+    });
+    assert.equal(res.status, 200);
+    const club = (await getClub()) as {
+      docs: Record<string, boolean>;
+      docMeta?: Record<string, { files?: unknown[]; courseBooked?: boolean; courseDate?: string }>;
+    };
+    assert.equal(club.docMeta?.safeguarding?.courseBooked, true, 'booking carried through merge');
+    assert.equal(club.docMeta?.safeguarding?.courseDate, '2026-09-01');
+    assert.equal(club.docMeta?.safeguarding?.files?.length, 1, 'stored file preserved by merge');
+    assert.equal(club.docs.safeguarding, true, 'course booking keeps the doc satisfied');
+  });
+
+  test('a booked course with no files survives an unrelated generic PATCH', async () => {
+    await repo.updateClub(
+      'dolphins',
+      'sgclub',
+      { docMeta: {}, docs: { safeguarding: false } },
+      'test-seed',
+      new Date().toISOString(),
+    );
+    const book = await app.request('/clubs/sgclub', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        docs: { safeguarding: true },
+        docMeta: { safeguarding: { files: [], courseBooked: true, courseDate: '2026-10-01' } },
+      }),
+    });
+    assert.equal(book.status, 200);
+    // A real client spreads existing docMeta when touching another doc — the booking must ride along.
+    const mid = (await getClub()) as { docMeta?: Record<string, unknown> };
+    const follow = await app.request('/clubs/sgclub', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        docMeta: {
+          ...mid.docMeta,
+          constitution: { markedCompliant: true, at: '2026-06-11T00:00:00.000Z' },
+        },
+      }),
+    });
+    assert.equal(follow.status, 200);
+    const after = (await getClub()) as {
+      docs: Record<string, boolean>;
+      docMeta?: Record<string, { courseBooked?: boolean }>;
+    };
+    assert.equal(after.docMeta?.safeguarding?.courseBooked, true, 'booking survived');
+    assert.equal(after.docs.safeguarding, true);
+  });
+
+  test('clearing the booking (omitting courseBooked) un-declares the course', async () => {
+    await repo.updateClub(
+      'dolphins',
+      'sgclub',
+      {
+        docMeta: { safeguarding: { files: [], courseBooked: true, courseDate: '2026-11-01' } },
+        docs: { safeguarding: true },
+      },
+      'test-seed',
+      new Date().toISOString(),
+    );
+    const res = await app.request('/clubs/sgclub', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        docs: { safeguarding: false },
+        docMeta: { safeguarding: { files: [] } },
+      }),
+    });
+    assert.equal(res.status, 200);
+    const club = (await getClub()) as {
+      docs: Record<string, boolean>;
+      docMeta?: Record<string, { courseBooked?: boolean }>;
+    };
+    assert.equal(club.docMeta?.safeguarding?.courseBooked ?? false, false, 'booking cleared');
+    assert.equal(club.docs.safeguarding, false);
+  });
+
+  test('clearing a booking while stored files coexist drops the flag, keeps the files', async () => {
+    // Exercise the merge branch (stored.files.length > 0) for the clear path.
+    const files = [
+      { objectKey: 'dolphins/sgclub/sg-x.pdf', size: 10, uploadedAt: '2026-01-01' },
+      { objectKey: 'dolphins/sgclub/sg-y.pdf', size: 10, uploadedAt: '2026-01-01' },
+    ];
+    await repo.updateClub(
+      'dolphins',
+      'sgclub',
+      {
+        docMeta: { safeguarding: { files, courseBooked: true, courseDate: '2026-12-01' } },
+        docs: { safeguarding: true },
+      },
+      'test-seed',
+      new Date().toISOString(),
+    );
+    const res = await app.request('/clubs/sgclub', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      // Client keeps the files but omits courseBooked → clears the booking.
+      body: JSON.stringify({ docs: { safeguarding: true }, docMeta: { safeguarding: { files } } }),
+    });
+    assert.equal(res.status, 200);
+    const club = (await getClub()) as {
+      docs: Record<string, boolean>;
+      docMeta?: Record<string, { files?: unknown[]; courseBooked?: boolean }>;
+    };
+    assert.equal(club.docMeta?.safeguarding?.courseBooked ?? false, false, 'booking cleared');
+    assert.equal(club.docMeta?.safeguarding?.files?.length, 2, 'files preserved by the merge');
+    assert.equal(club.docs.safeguarding, true, 'two files still satisfy the minimum');
+  });
+});
+
+describe('public registration ID-doc upload-url', () => {
+  const regClub = {
+    id: 'regclub',
+    name: 'Reg CC',
+    district: 'Test District',
+    sub: 'sub-1',
+    chair: 'Chair',
+    affiliation: 'not_started' as const,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#123456',
+    ground: {},
+    leagues: [],
+    version: 1,
+  };
+  before(async () => {
+    await repo.createClub('dolphins', regClub);
+    await repo.putToken('reg-upload-token', 'dolphins', 'regclub', '2026-06-01T00:00:00.000Z');
+  });
+
+  test('mints a presigned PUT under the club prefix for a valid token', async () => {
+    const res = await app.request('/register/regclub/id-doc/upload-url?t=reg-upload-token', {
+      method: 'POST',
+      body: JSON.stringify({ contentType: 'image/jpeg' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      uploadUrl: string;
+      objectKey: string;
+      contentType: string;
+    };
+    assert.ok(body.uploadUrl.startsWith('http'), 'returns a presigned URL');
+    assert.match(body.objectKey, /^dolphins\/regclub\/reg-.*-id\.jpg$/, 'own tenant/club prefix');
+    assert.equal(body.contentType, 'image/jpeg');
+  });
+
+  test('rejects a missing token (400) and a foreign/invalid token (404)', async () => {
+    const noTok = await app.request('/register/regclub/id-doc/upload-url', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(noTok.status, 400);
+    const bad = await app.request('/register/regclub/id-doc/upload-url?t=not-a-real-token', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    assert.equal(bad.status, 404);
+  });
+
+  test('falls back to PDF for an unknown content type', async () => {
+    const res = await app.request('/register/regclub/id-doc/upload-url?t=reg-upload-token', {
+      method: 'POST',
+      body: JSON.stringify({ contentType: 'application/zip' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { objectKey: string; contentType: string };
+    assert.equal(body.contentType, 'application/pdf');
+    assert.match(body.objectKey, /-id\.pdf$/);
+  });
 });
 
 describe('/admin/users', () => {
@@ -1741,19 +1941,36 @@ describe('Player clearances (inter-club transfer + move)', () => {
     assert.equal(res.status, 400);
   });
 
-  test('admin override refuses a request still inside the 14-day window (409)', async () => {
-    const list = (await (
-      await app.request('/clubs/clr-src/clearances', { headers: headers(REP_SRC) })
-    ).json()) as { incoming: { id: string; playerNaturalKey: string; status: string }[] };
-    const cid = list.incoming.find(
-      (x) => x.playerNaturalKey === 'mover2' && x.status === 'pending',
-    )!.id;
-    const res = await app.request(`/admin/clearances/${cid}/override`, {
+  test('admin override issues a recent pending request (no time limit)', async () => {
+    // Clearances no longer carry a 14-day window — the union may override any pending
+    // request immediately. Seed a fresh (just-now) clearance and confirm it issues.
+    await repo.createPlayer('dolphins', mkPlayer('clr-src', 'mover2b'));
+    await repo.createClearance('dolphins', {
+      id: 'clr-recent',
+      playerNaturalKey: 'mover2b',
+      playerName: 'Recent Mover',
+      fromClubId: 'clr-src',
+      toClubId: 'clr-dst',
+      fromClubName: 'Source CC',
+      toClubName: 'Destination CC',
+      requestedAt: new Date().toISOString(),
+      feesCleared: false,
+      misconductCleared: false,
+      status: 'pending',
+      clubApprovedAt: null,
+      adminOverrideAt: null,
+      version: 0,
+    });
+    const res = await app.request('/admin/clearances/clr-recent/override', {
       method: 'POST',
       headers: headers(ADMIN),
       body: JSON.stringify({ fromClubId: 'clr-src' }),
     });
-    assert.equal(res.status, 409);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { status: string };
+    assert.equal(body.status, 'admin-override');
+    const moved = await repo.getPlayer('dolphins', 'clr-dst', 'mover2b');
+    assert.equal(moved?.clubId, 'clr-dst');
   });
 
   test('admin override issues an overdue request directly', async () => {

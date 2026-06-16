@@ -277,8 +277,8 @@ export type ClearanceStatus = 'pending' | 'approved' | 'admin-override';
  * entry so admins list every request in one query) and a mirror under the
  * DESTINATION club (sk `INBOUND_CLEARANCE#<id>`, no gsi1) so each club reads only
  * its own partition — never a tenant-wide scan. The source club confirms fees +
- * misconduct within 14 days of `requestedAt`; after that the union office may
- * override and approve. "Overdue" is computed from `requestedAt`, never stored.
+ * misconduct (no time limit); the union office may override and approve any pending
+ * request on the source club's behalf.
  */
 export interface PlayerClearance {
   id: string;

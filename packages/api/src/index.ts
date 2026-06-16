@@ -127,25 +127,57 @@ interface DocFileEntry {
 function safeguardingMeta(meta: unknown): {
   files: DocFileEntry[];
   markedCompliant: boolean;
+  courseBooked: boolean;
+  courseDate: string;
   at?: string;
 } {
   const m = (meta ?? {}) as Record<string, unknown>;
+  const courseBooked = !!m.courseBooked;
+  const courseDate = (m.courseDate as string | undefined) || '';
   if (Array.isArray(m.files)) {
     return {
       files: m.files as DocFileEntry[],
       markedCompliant: !!m.markedCompliant,
+      courseBooked,
+      courseDate,
       at: m.at as string | undefined,
     };
   }
   if (m.objectKey) {
-    return { files: [m as unknown as DocFileEntry], markedCompliant: !!m.markedCompliant };
+    return {
+      files: [m as unknown as DocFileEntry],
+      markedCompliant: !!m.markedCompliant,
+      courseBooked,
+      courseDate,
+    };
   }
-  return { files: [], markedCompliant: !!m.markedCompliant, at: m.at as string | undefined };
+  return {
+    files: [],
+    markedCompliant: !!m.markedCompliant,
+    courseBooked,
+    courseDate,
+    at: m.at as string | undefined,
+  };
 }
 
-/** Re-wrap normalized safeguarding state as the stored docMeta value. */
-function safeguardingValue(files: DocFileEntry[], markedCompliant: boolean, at?: string) {
-  return markedCompliant ? { files, markedCompliant: true, at } : { files };
+/**
+ * Re-wrap normalized safeguarding state as the stored docMeta value. `extra` carries the
+ * club-set "course booked" flag + date so a generic merge or append/delete recompute can't
+ * strip it; both ride through only when truthy (the canonical course-booked shape is
+ * `{ files, courseBooked: true, courseDate, at }`).
+ */
+function safeguardingValue(
+  files: DocFileEntry[],
+  markedCompliant: boolean,
+  at?: string,
+  extra?: { courseBooked?: boolean; courseDate?: string },
+) {
+  const value: Record<string, unknown> = markedCompliant
+    ? { files, markedCompliant: true, at }
+    : { files };
+  if (extra?.courseBooked) value.courseBooked = true;
+  if (extra?.courseDate) value.courseDate = extra.courseDate;
+  return value;
 }
 
 const app = new Hono<HonoEnv>();
@@ -221,7 +253,16 @@ app.get('/register/:clubId', async (c) => {
   }
   const club = await repo.getClub(resolved.tenant, clubId);
   if (!club) throw new HttpError(404, 'club not found');
-  return c.json({ tenant: resolved.tenant, clubId: club.id, clubName: club.name });
+  // The tenant league catalogue rides along so the public Team dropdown can populate and
+  // the POST handler can validate the chosen team against real keys (names only — same
+  // non-sensitive set already exposed on /tenant).
+  const cfg = await repo.getTenantConfig(resolved.tenant);
+  return c.json({
+    tenant: resolved.tenant,
+    clubId: club.id,
+    clubName: club.name,
+    leagues: cfg?.leagues ?? [],
+  });
 });
 
 /** Submit a player registration. No auth; dedup + POPIA consent enforced. */
@@ -233,27 +274,88 @@ app.post('/register/:clubId', async (c) => {
   if (!resolved || resolved.clubId !== clubId) {
     throw new HttpError(404, 'invalid registration link');
   }
+  // cfg feeds the team/league validation below; the club read is the 404 check.
+  const cfg = await repo.getTenantConfig(resolved.tenant);
   const regClub = await repo.getClub(resolved.tenant, clubId);
   if (!regClub) throw new HttpError(404, 'club not found');
   const body = await c.req.json<Partial<PlayerRegistration>>();
-  if (!body.firstName || !body.lastName || !body.dob) {
-    throw new HttpError(400, 'firstName, lastName and dob are required');
+  // Full parity with the in-portal chair form (POST /clubs/:id/players): the public link
+  // now captures the same Union field set, including an ID-document upload. `dob` is
+  // derived server-side from the RSA ID, never trusted from the client.
+  const required: Array<keyof PlayerRegistration> = [
+    'firstName',
+    'lastName',
+    'idNumber',
+    'race',
+    'gender',
+    'cell',
+    'team',
+    'district',
+  ];
+  const missing = required.filter((k) => !body[k]);
+  if (missing.length) throw new HttpError(400, `missing required fields: ${missing.join(', ')}`);
+  const dob = dobFromSaId(body.idNumber!);
+  if (!dob) throw new HttpError(400, 'idNumber must be a valid 13-digit RSA ID');
+  // Team must be a real league key in the tenant catalogue.
+  const leagueKeys = new Set((cfg?.leagues ?? []).map((l) => l.key));
+  if (leagueKeys.size && !leagueKeys.has(body.team!)) {
+    throw new HttpError(400, 'unknown team/league');
   }
-  const isMinor = computeIsMinor(body.dob);
+  const isMinor = computeIsMinor(dob);
   if (isMinor && !body.guardianName) {
     throw new HttpError(400, 'guardianName required for minors (POPIA)');
   }
-  const naturalKey = playerNaturalKey(body);
+  // The ID document is REQUIRED on the public path (full parity with the chair form, which
+  // makes it mandatory client-side). Unlike the portal path there is no later authed step to
+  // attach it, so it must ride on the submit. Validate it the same way the authed id-doc
+  // record route does, and confirm the presigned objectKey was minted for this tenant/club.
+  const idDocMeta = body.idDocMeta;
+  if (!idDocMeta || !idDocMeta.objectKey) throw new HttpError(400, 'an ID document is required');
+  if (
+    typeof idDocMeta.size !== 'number' ||
+    idDocMeta.size <= 0 ||
+    idDocMeta.size > MAX_ID_DOC_BYTES
+  ) {
+    throw new HttpError(400, 'ID document must be a non-empty image/PDF under 5 MB');
+  }
+  if (idDocMeta.contentType && !ID_DOC_TYPES.has(idDocMeta.contentType)) {
+    throw new HttpError(400, 'ID document must be an image or PDF');
+  }
+  assertOwnObjectKey(resolved.tenant, clubId, idDocMeta.objectKey);
+  const naturalKey = playerNaturalKey({ ...body, dob });
   const player: PlayerRegistration = {
     naturalKey,
     clubId,
-    firstName: body.firstName,
-    lastName: body.lastName,
-    dob: body.dob,
+    firstName: body.firstName!,
+    lastName: body.lastName!,
+    dob,
     cell: body.cell,
     email: body.email,
     isMinor,
     guardianName: body.guardianName,
+    idNumber: body.idNumber,
+    race: body.race,
+    gender: body.gender,
+    postalAddress: body.postalAddress,
+    postalCode: body.postalCode,
+    team: body.team,
+    district: body.district,
+    lastClub: body.lastClub,
+    battingHand: body.battingHand,
+    bowlingHand: body.bowlingHand,
+    battingType: body.battingType,
+    bowlerType: body.bowlerType,
+    isAllRounder: body.isAllRounder ?? false,
+    isWk: body.isWk ?? false,
+    idDocMeta: {
+      objectKey: idDocMeta.objectKey,
+      size: idDocMeta.size,
+      contentType: idDocMeta.contentType,
+      uploadedAt: now(),
+    },
+    status: 'active',
+    registeredVia: 'link',
+    version: 0,
     consentAt: now(),
     createdAt: now(),
   };
@@ -266,6 +368,43 @@ app.post('/register/:clubId', async (c) => {
     throw err;
   }
   return c.json({ ok: true }, 201);
+});
+
+// Per-reg-token hourly cap on presigned ID-doc uploads (see the upload-url handler below).
+// High enough for a club's full roster to self-register in one onboarding window.
+const REGISTRATIONS_PER_HOUR = 120;
+
+/**
+ * Mint a presigned PUT for a self-registering player's ID document (image or PDF). Token-
+ * scoped + unauthenticated like the other /register/:clubId handlers — the `t` token must
+ * resolve to this club. The objectKey lands under the tenant/club prefix so the submit
+ * handler's own-object-key check accepts it.
+ */
+app.post('/register/:clubId/id-doc/upload-url', async (c) => {
+  const token = c.req.query('t');
+  if (!token) throw new HttpError(400, 'missing token');
+  const clubId = c.req.param('clubId');
+  const resolved = await repo.getToken(token);
+  if (!resolved || resolved.clubId !== clubId) {
+    throw new HttpError(404, 'invalid registration link');
+  }
+  // Rate-limit the presigned-PUT minting per reg token: the link is shared + long-lived, and
+  // this endpoint is unauthenticated, so cap it to bound S3 write/cost amplification from a
+  // leaked link. Generous enough for a club's whole roster to register in an onboarding window.
+  const allowed = await repo.bumpSignupTokenCounter(token, now(), REGISTRATIONS_PER_HOUR);
+  if (!allowed) throw new HttpError(429, 'too many registration uploads — please try again later');
+  const { contentType } = await c.req
+    .json<{ contentType?: string }>()
+    .catch(() => ({ contentType: undefined }));
+  const ct = contentType && ID_DOC_TYPES.has(contentType) ? contentType : 'application/pdf';
+  const ext = ct === 'image/jpeg' ? 'jpg' : ct === 'image/png' ? 'png' : 'pdf';
+  const objectKey = `${resolved.tenant}/${clubId}/reg-${randomUUID()}-id.${ext}`;
+  const url = await getSignedUrl(
+    s3,
+    new PutObjectCommand({ Bucket: UPLOADS_BUCKET, Key: objectKey, ContentType: ct }),
+    { expiresIn: 300 },
+  );
+  return c.json({ uploadUrl: url, objectKey, contentType: ct });
 });
 
 // ───────────────────── Club self-registration (public) ─────────────────────
@@ -496,8 +635,9 @@ function computeIsMinor(dob: string): boolean {
 /**
  * Idempotent dedup key for a person within a club. SHARED by the public-link path
  * and the in-portal chair form so the same person can't be registered twice (once
- * per path). Keys on email/cell/name-dob — NOT idNumber (the public path has no
- * idNumber, so an idNumber-based key would let both paths create distinct rows).
+ * per path). Keys on email/cell/name-dob (NOT idNumber) so both paths derive the
+ * SAME key — they now both capture idNumber, but keying on it would change every
+ * stored player's identity, so the cross-path-stable email/cell/name-dob key stays.
  */
 function playerNaturalKey(body: Partial<PlayerRegistration>): string {
   return (body.email || body.cell || `${body.firstName}-${body.lastName}-${body.dob}`)
@@ -649,13 +789,26 @@ app.patch('/clubs/:id', async (c) => {
     if (stored.files.length) {
       const have = new Set(incoming.files.map((f) => f.objectKey));
       const files = [...incoming.files, ...stored.files.filter((f) => !have.has(f.objectKey))];
+      // Carry the course-booked flag/date from the INCOMING patch (not `stored`): this
+      // generic PATCH is the channel a client uses to both set AND clear a booking, so it
+      // carries the full intended safeguarding state — preferring stored here would make a
+      // clear impossible. (Append/delete derive from stored because they mutate one file,
+      // not the booking.) All clients spread existing docMeta, so an unrelated patch keeps
+      // the booking; re-deriving from files only is what would silently strip it.
       (patch.docMeta as Record<string, unknown>).safeguarding = safeguardingValue(
         files,
         incoming.markedCompliant,
         incoming.at,
+        { courseBooked: incoming.courseBooked, courseDate: incoming.courseDate },
       );
       const docs = patch.docs as Record<string, boolean> | undefined;
-      if (docs && docs.safeguarding === false && files.length >= MIN_SAFEGUARDING_FILES) {
+      // The doc stays satisfied at the file minimum OR when a course is booked — don't
+      // let the merge downgrade a course-booked club below the count threshold.
+      if (
+        docs &&
+        docs.safeguarding === false &&
+        (incoming.courseBooked || files.length >= MIN_SAFEGUARDING_FILES)
+      ) {
         docs.safeguarding = true;
       }
       // The merge is read-modify-write off `current`: without pinning that version,
@@ -1217,9 +1370,19 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
       {
         docs: {
           ...current.docs,
-          [key]: norm.markedCompliant || files.length >= MIN_SAFEGUARDING_FILES,
+          // A booked course keeps the doc satisfied independently of the file count, so
+          // appending a (sub-minimum) certificate must not undo a course-booked club.
+          [key]:
+            norm.markedCompliant || norm.courseBooked || files.length >= MIN_SAFEGUARDING_FILES,
         },
-        docMeta: { ...docMeta, [key]: safeguardingValue(files, norm.markedCompliant, norm.at) },
+        // Preserve any course-booked flag/date — uploading a certificate must not strip it.
+        docMeta: {
+          ...docMeta,
+          [key]: safeguardingValue(files, norm.markedCompliant, norm.at, {
+            courseBooked: norm.courseBooked,
+            courseDate: norm.courseDate,
+          }),
+        },
         // Append is read-modify-write: pin the version read above so a parallel
         // upload 409s (client retries) instead of silently dropping a file.
         version: current.version,
@@ -1287,8 +1450,13 @@ app.delete('/clubs/:id/docs/:key/file', async (c) => {
   }
   const files = norm.files.filter((f) => f.objectKey !== objectKey);
   const nextMeta = { ...docMeta };
-  if (files.length || norm.markedCompliant) {
-    nextMeta[key] = safeguardingValue(files, norm.markedCompliant, norm.at);
+  // Keep the record (and its course-booked flag/date) whenever any of files / override /
+  // course-booked still holds — only a fully-empty state drops the key entirely.
+  if (files.length || norm.markedCompliant || norm.courseBooked) {
+    nextMeta[key] = safeguardingValue(files, norm.markedCompliant, norm.at, {
+      courseBooked: norm.courseBooked,
+      courseDate: norm.courseDate,
+    });
   } else {
     delete nextMeta[key];
   }
@@ -1298,7 +1466,7 @@ app.delete('/clubs/:id/docs/:key/file', async (c) => {
     {
       docs: {
         ...current.docs,
-        [key]: norm.markedCompliant || files.length >= MIN_SAFEGUARDING_FILES,
+        [key]: norm.markedCompliant || norm.courseBooked || files.length >= MIN_SAFEGUARDING_FILES,
       },
       docMeta: nextMeta,
       // Same read-modify-write pinning as the append path.
@@ -1848,13 +2016,6 @@ app.delete('/admin/club-signup-link', async (c) => {
 
 // ───────────────────── Admin: player clearances ─────────────────────
 
-const CLEARANCE_WINDOW_DAYS = 14;
-
-/** Whole days elapsed since an ISO timestamp (server clock). */
-function daysSince(iso: string): number {
-  return Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
-}
-
 /** Every clearance in the tenant (cohort-wide), for the admin console. */
 app.get('/admin/clearances', async (c) => {
   const ra = c.get('requestAuth')!;
@@ -1862,9 +2023,9 @@ app.get('/admin/clearances', async (c) => {
 });
 
 /**
- * Union override: approve a clearance the source club left unactioned past the 14-day
- * window, issuing it on their behalf. Admin-only (the /admin/* middleware enforces it).
- * Refuses to override a request that isn't yet overdue.
+ * Union override: approve a clearance the source club has left unactioned, issuing it
+ * on their behalf. Admin-only (the /admin/* middleware enforces it). There is no longer
+ * a time window — any still-pending clearance can be overridden.
  */
 app.post('/admin/clearances/:cid/override', async (c) => {
   const ra = c.get('requestAuth')!;
@@ -1874,12 +2035,6 @@ app.post('/admin/clearances/:cid/override', async (c) => {
   const current = await repo.getClearance(ra.tenant, body.fromClubId, cid);
   if (!current) throw new HttpError(404, 'clearance not found');
   if (current.status !== 'pending') throw new HttpError(409, 'clearance already resolved');
-  if (daysSince(current.requestedAt) < CLEARANCE_WINDOW_DAYS) {
-    throw new HttpError(
-      409,
-      `the source club still has time (under ${CLEARANCE_WINDOW_DAYS} days)`,
-    );
-  }
   try {
     const resolved = await repo.resolveClearance(ra.tenant, body.fromClubId, cid, {
       mode: 'admin',

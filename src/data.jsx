@@ -93,8 +93,10 @@ export const HANDS = ['Right', 'Left'];
 export const RACES = ['African', 'Indian', 'Coloured', 'White', 'Other'];
 export const GENDERS = ['Male', 'Female', 'Non-binary'];
 
-// How many days a source club has to action a clearance before the union may override.
-export const CLEARANCE_WINDOW_DAYS = 14;
+// Clearances no longer expire or carry a countdown — a request stays pending until the
+// source club actions it (or the union overrides). The former 14-day window, its overdue
+// math (CLEARANCE_WINDOW_DAYS / daysSinceIso / clearanceOverdue / clearanceDaysRemaining)
+// and the countdown UI were removed product-wide.
 
 /**
  * Derive an ISO date of birth from a 13-digit RSA ID (YYMMDD…), matching the server
@@ -151,18 +153,6 @@ export function termRemaining(termEnd) {
   if (rem) parts.push(`${rem} mo`);
   if (!parts.length) parts.push('<1 mo');
   return { years, months, expired: false, label: `${parts.join(' ')} left` };
-}
-
-/** Whole days elapsed since an ISO timestamp — clearance overdue/remaining math. */
-export function daysSinceIso(iso) {
-  if (!iso) return 0;
-  return Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
-}
-export function clearanceOverdue(req) {
-  return req.status === 'pending' && daysSinceIso(req.requestedAt) >= CLEARANCE_WINDOW_DAYS;
-}
-export function clearanceDaysRemaining(req) {
-  return Math.max(0, CLEARANCE_WINDOW_DAYS - daysSinceIso(req.requestedAt));
 }
 
 // Required compliance documents (from Cricket Services Club Requirements 26-27)
@@ -241,18 +231,49 @@ export const MIN_SAFEGUARDING_FILES = 2;
  *  - missing/null → empty files, no flag
  */
 export function safeguardingMeta(meta) {
-  if (!meta) return { files: [], markedCompliant: false, at: undefined };
+  const base = {
+    files: [],
+    markedCompliant: false,
+    courseBooked: false,
+    courseDate: '',
+    at: undefined,
+  };
+  if (!meta) return base;
+  const courseBooked = !!meta.courseBooked;
+  const courseDate = meta.courseDate || '';
   if (Array.isArray(meta.files)) {
-    return { files: meta.files, markedCompliant: !!meta.markedCompliant, at: meta.at };
+    return {
+      files: meta.files,
+      markedCompliant: !!meta.markedCompliant,
+      courseBooked,
+      courseDate,
+      at: meta.at,
+    };
   }
-  if (meta.objectKey) return { files: [meta], markedCompliant: !!meta.markedCompliant };
-  return { files: [], markedCompliant: !!meta.markedCompliant, at: meta.at };
+  if (meta.objectKey)
+    return {
+      ...base,
+      files: [meta],
+      markedCompliant: !!meta.markedCompliant,
+      courseBooked,
+      courseDate,
+    };
+  return {
+    files: [],
+    markedCompliant: !!meta.markedCompliant,
+    courseBooked,
+    courseDate,
+    at: meta.at,
+  };
 }
 
-/** Whether safeguarding is satisfied: admin override, or the 2-person minimum met. */
+/**
+ * Whether safeguarding is satisfied: admin override, a booked safeguarding course
+ * (the club has none yet but has scheduled training), or the 2-person minimum met.
+ */
 export function safeguardingSatisfied(meta) {
   const m = safeguardingMeta(meta);
-  return m.markedCompliant || m.files.length >= MIN_SAFEGUARDING_FILES;
+  return m.markedCompliant || m.courseBooked || m.files.length >= MIN_SAFEGUARDING_FILES;
 }
 
 /**
@@ -673,37 +694,37 @@ export const CQI_STRUCTURE = [
     questions: [
       {
         key: 'vision',
-        label: 'Club: unified vision for cricket development over the next 3–5 years',
+        label: 'Unified vision for cricket development over the next 3–5 years',
         kind: 'yn',
         pts: 3,
       },
       {
         key: 'ambition',
-        label: 'Club: ambition to compete at a higher level (league promotion / provincial)',
+        label: 'Ambition to compete at a higher level (league promotion / provincial)',
         kind: 'rating',
         pts: 4,
       },
       {
         key: 'pathway',
-        label: 'Players: defined pathway toward representative / professional cricket',
+        label: 'Defined pathway toward representative / professional cricket',
         kind: 'yn',
         pts: 3,
       },
       {
         key: 'retention',
-        label: 'Players: commitment to growing player numbers and improving retention',
+        label: 'Commitment to growing player numbers and improving retention',
         kind: 'rating',
         pts: 4,
       },
       {
         key: 'accredAim',
-        label: 'Coaches: club aims for all coaches to be formally accredited / qualified',
+        label: 'Club aims for all coaches to be formally accredited / qualified',
         kind: 'yn',
         pts: 3,
       },
       {
         key: 'coachDev',
-        label: 'Coaches: ambition to invest in ongoing coach development and upskilling',
+        label: 'Ambition to invest in ongoing coach development and upskilling',
         kind: 'rating',
         pts: 4,
       },
@@ -842,6 +863,7 @@ export function computeMarkCompliance(club, keys, at) {
       // The sentinel must PRESERVE the files array — uploads are never erased.
       const m = safeguardingMeta(club.docMeta?.safeguarding);
       if (m.files.length >= MIN_SAFEGUARDING_FILES) continue; // satisfied → leave as-is
+      if (m.courseBooked) continue; // club booked a safeguarding course → its own declaration, leave as-is
       if (!club.docs?.[k]) flipped.push(k);
       docs[k] = true;
       docMeta[k] = { files: m.files, markedCompliant: true, at };
@@ -866,6 +888,9 @@ export function computeRevertCompliance(club, keys) {
     const m = docMeta[k];
     if (k === 'safeguarding') {
       const norm = safeguardingMeta(m);
+      // A booked safeguarding course is a club self-declaration, not an admin override —
+      // "Revert" (which undoes admin mark-compliant) must never strip it.
+      if (norm.courseBooked) continue;
       const satisfied = norm.files.length >= MIN_SAFEGUARDING_FILES;
       // Revertable: an explicit sentinel, OR a compliant flag the uploads don't
       // justify — legacy flag-only records (no docMeta at all) and grandfathered

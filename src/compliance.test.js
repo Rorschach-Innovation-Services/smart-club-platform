@@ -289,6 +289,42 @@ describe('safeguarding (multi-file) mark/revert', () => {
     expect(reverted).toEqual(['safeguarding']);
   });
 
+  it('mark compliant leaves a booked safeguarding course untouched', () => {
+    const c = club({
+      docs: { safeguarding: true },
+      docMeta: {
+        safeguarding: { files: [], courseBooked: true, courseDate: '2026-09-01', at: AT },
+      },
+    });
+    const { docs, docMeta, flipped } = computeMarkCompliance(c, ['safeguarding'], AT);
+    expect(flipped).toEqual([]); // already declared → nothing flips
+    expect(docs.safeguarding).toBe(true);
+    expect(docMeta.safeguarding).toEqual({
+      files: [],
+      courseBooked: true,
+      courseDate: '2026-09-01',
+      at: AT,
+    });
+  });
+
+  it('revert never strips a booked safeguarding course (club self-declaration)', () => {
+    const c = club({
+      docs: { safeguarding: true },
+      docMeta: {
+        safeguarding: { files: [], courseBooked: true, courseDate: '2026-09-01', at: AT },
+      },
+    });
+    const { docs, docMeta, reverted } = computeRevertCompliance(c, ['safeguarding']);
+    expect(reverted).toEqual([]); // booking is not an admin override → not reverted
+    expect(docs.safeguarding).toBe(true);
+    expect(docMeta.safeguarding).toEqual({
+      files: [],
+      courseBooked: true,
+      courseDate: '2026-09-01',
+      at: AT,
+    });
+  });
+
   it('mark → undo round-trips below the minimum', () => {
     const original = club({
       docs: { safeguarding: false },

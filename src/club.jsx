@@ -34,16 +34,9 @@ import {
   formatDeadlineLong,
   formatDeadlineShort,
   daysUntil,
-  BATTING_TYPES,
-  BOWLER_TYPES,
-  HANDS,
-  RACES,
-  GENDERS,
   dobFromSaId,
   ageFromSaId,
   termRemaining,
-  clearanceOverdue,
-  clearanceDaysRemaining,
 } from './data.jsx';
 import { leagueOptionsForDistrict, findByKey, labelByKey, teamCounts } from './leagues.js';
 import { shortAddress, suburbOf, SA_BOUNDS, isInSouthAfrica } from './geocode.js';
@@ -263,7 +256,8 @@ export function GroundMap({ query, coords: savedPin, onResolved, onAddressPicked
         const addr = shortAddress(r); // '' when no readable address resolves
         onResolvedRef.current?.({ lat, lon, name: r?.display_name || null, suburb: suburbOf(r) });
         // Only fill the field with a real address — never a raw lat/lon string.
-        if (addr) onAddressRef.current?.(addr);
+        // 'pin' marks this as a deliberate map click (authoritative relocation).
+        if (addr) onAddressRef.current?.(addr, 'pin');
       })
       .catch((e) => {
         if (e.name === 'AbortError' || id !== reqRef.current) return;
@@ -365,6 +359,11 @@ export function GroundMap({ query, coords: savedPin, onResolved, onAddressPicked
         setNotFound(false);
         setCoords({ lat, lon, name: r.display_name });
         onResolvedRef.current?.({ lat, lon, name: r.display_name, suburb: suburbOf(r) });
+        // Surface the matched display address so the parent can auto-fill the
+        // (now-revealed) address field — 'match' is gated parent-side so a
+        // user-typed address is never clobbered. '' when nothing readable resolves.
+        const addr = shortAddress(r);
+        if (addr) onAddressRef.current?.(addr, 'match');
       })
       .catch((e) => {
         if (e.name === 'AbortError' || id !== reqRef.current) return;
@@ -827,15 +826,7 @@ const EMPTY_COACH = {
   teams: [],
 };
 
-export function AffiliationForm({
-  club,
-  goto,
-  toast,
-  onSubmit,
-  onSaveDraft,
-  unionEmail,
-  allLeagues = [],
-}) {
+export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allLeagues = [] }) {
   const [data, setData] = useStateC(() => {
     // Pre-fill exco from club.exco (single source of truth shared with the exco roster doc)
     const ex = club.exco || {};
@@ -1059,7 +1050,16 @@ export function AffiliationForm({
       .map(([k]) => k);
   }
 
-  const valid = data.clubName && data.chairName && data.chairCell && data.chairEmail;
+  // Step-1 Continue gate. Also requires a home-ground venue + address: an
+  // auto-filled or manually-typed address satisfies it, while a not-found empty
+  // address keeps Continue disabled until the user types one.
+  const valid =
+    data.clubName &&
+    data.chairName &&
+    data.chairCell &&
+    data.chairEmail &&
+    data.groundVenue.trim() &&
+    data.groundAddress.trim();
   // A submitted form is read-only until the chair chooses to correct it.
   const submitted = club.affiliation === 'complete';
   const viewOnly = submitted && !editing;
@@ -1273,31 +1273,37 @@ export function AffiliationForm({
                         onBlur={dropGroundPin}
                       />
                     </div>
-                    <div className="field" style={{ marginBottom: 0 }}>
-                      <div className="field-label">
-                        Address <span className="req">*</span>
-                      </div>
-                      <input
-                        className="field-input"
-                        placeholder="Street, suburb, city"
-                        value={data.groundAddress}
-                        onChange={(e) =>
-                          // Manual edit re-enables typed-address geocoding.
-                          setData((d) => ({
-                            ...d,
-                            groundAddress: e.target.value,
-                            groundAddressFromPin: false,
-                          }))
-                        }
-                        onBlur={dropGroundPin}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            dropGroundPin();
+                    {/* Address stays hidden until the venue name is typed — it then
+                        reveals (auto-filled from the geocoded match, or empty for manual
+                        entry when no match is found). A pre-filled/draft address always
+                        shows so saved data is never hidden. */}
+                    {(data.groundVenue.trim() || data.groundAddress) && (
+                      <div className="field" style={{ marginBottom: 0 }}>
+                        <div className="field-label">
+                          Address <span className="req">*</span>
+                        </div>
+                        <input
+                          className="field-input"
+                          placeholder="Street, suburb, city"
+                          value={data.groundAddress}
+                          onChange={(e) =>
+                            // Manual edit re-enables typed-address geocoding.
+                            setData((d) => ({
+                              ...d,
+                              groundAddress: e.target.value,
+                              groundAddressFromPin: false,
+                            }))
                           }
-                        }}
-                      />
-                    </div>
+                          onBlur={dropGroundPin}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              dropGroundPin();
+                            }
+                          }}
+                        />
+                      </div>
+                    )}
                   </div>
 
                   <div className="ground-map-card">
@@ -1321,12 +1327,27 @@ export function AffiliationForm({
                       query={data.groundMapQuery}
                       coords={data.groundCoords}
                       onResolved={(c) => update('groundCoords', c)}
-                      onAddressPicked={(addr) =>
-                        setData((d) => ({
-                          ...d,
-                          groundAddress: addr,
-                          groundAddressFromPin: true,
-                        }))
+                      onAddressPicked={(addr, source = 'pin') =>
+                        setData((d) => {
+                          // A 'match' is the forward-geocode resolving the typed
+                          // venue — only auto-fill when the address is blank or was
+                          // itself pin-derived, so a user-typed address is never
+                          // clobbered. A 'pin' is a deliberate map click → always fill.
+                          if (
+                            source === 'match' &&
+                            d.groundAddress.trim() &&
+                            !d.groundAddressFromPin
+                          )
+                            return d;
+                          return {
+                            ...d,
+                            groundAddress: addr,
+                            // A matched address behaves like a pin-derived one (it came
+                            // from geocoding, not typing) so a later forward-match can
+                            // still refresh it; an explicit pin stays authoritative.
+                            groundAddressFromPin: true,
+                          };
+                        })
                       }
                     />
                   </div>
@@ -1350,15 +1371,17 @@ export function AffiliationForm({
                         onChange={(e) => update('secondaryVenue', e.target.value)}
                       />
                     </div>
-                    <div className="field" style={{ marginBottom: 0 }}>
-                      <div className="field-label">Secondary Venue Address</div>
-                      <input
-                        className="field-input"
-                        placeholder="Street, suburb, city"
-                        value={data.secondaryAddress}
-                        onChange={(e) => update('secondaryAddress', e.target.value)}
-                      />
-                    </div>
+                    {(data.secondaryVenue.trim() || data.secondaryAddress) && (
+                      <div className="field" style={{ marginBottom: 0 }}>
+                        <div className="field-label">Secondary Venue Address</div>
+                        <input
+                          className="field-input"
+                          placeholder="Street, suburb, city"
+                          value={data.secondaryAddress}
+                          onChange={(e) => update('secondaryAddress', e.target.value)}
+                        />
+                      </div>
+                    )}
                   </div>
                 </div>
               </Card>
@@ -2215,36 +2238,10 @@ export function AffiliationForm({
           </fieldset>
 
           {viewOnly && (
-            <div className="row" style={{ marginTop: 14, justifyContent: 'space-between', gap: 8 }}>
-              <div
-                style={{
-                  fontSize: 11.5,
-                  color: 'var(--muted)',
-                  fontFamily: "'Montserrat',sans-serif",
-                  fontWeight: 500,
-                }}
-              >
-                Need a change? Contact the Union office to amend.
-              </div>
-              <div className="row" style={{ gap: 8 }}>
-                <Btn
-                  tone="outline"
-                  icon={Icon.Mail}
-                  size="sm"
-                  onClick={() =>
-                    unionEmail
-                      ? (window.location.href = `mailto:${unionEmail}?subject=${encodeURIComponent(
-                          'Affiliation amendment request — ' + club.name,
-                        )}`)
-                      : toast('Union office contact unavailable', 'warn')
-                  }
-                >
-                  Request amendment
-                </Btn>
-                <Btn tone="ink" onClick={() => goto('home')}>
-                  Close
-                </Btn>
-              </div>
+            <div className="row" style={{ marginTop: 14, justifyContent: 'flex-end', gap: 8 }}>
+              <Btn tone="ink" onClick={() => goto('home')}>
+                Close
+              </Btn>
             </div>
           )}
         </div>
@@ -2737,6 +2734,8 @@ export function DocumentsView({
   onUpload,
   onRemoveFile,
   onMarkUnavailable,
+  onSetSafeguardingCourse,
+  onClearSafeguardingCourse,
   onSaveExco,
   submissionDeadline,
   unionEmail,
@@ -2755,12 +2754,34 @@ export function DocumentsView({
   // Pending safeguarding-file removal ({ key, entry }) awaiting the confirm modal —
   // deletion also removes the S3 object, so a stray click must not be enough.
   const [confirmRemove, setConfirmRemove] = useStateC(null);
+  // Safeguarding "no certificates yet → book a course date" affordance. `sgCourseOpen`
+  // reveals the date control; `sgCourseDate` holds the in-progress YYYY-MM-DD value.
+  const [sgCourseOpen, setSgCourseOpen] = useStateC(false);
+  const [sgCourseDate, setSgCourseDate] = useStateC('');
+  // Today as YYYY-MM-DD — used both as the date input's `min` and to reject past/today.
+  const sgToday = new Date().toISOString().slice(0, 10);
   const excoBearerCount = (() => {
     if (!club.exco) return 0;
     const fixed = FIXED_EXCO_ROLES.filter((r) => club.exco[r.key]?.name).length;
     const extra = (club.exco.additionalMembers || []).filter((m) => m.name).length;
     return fixed + extra;
   })();
+
+  // Confirm a safeguarding course date. The date must be in the future —
+  // a past or today's date is rejected so the booking always points forward.
+  function confirmSafeguardingCourse() {
+    if (!sgCourseDate) {
+      toast('Choose the date your people will complete the safeguarding course', 'warn');
+      return;
+    }
+    if (sgCourseDate <= sgToday) {
+      toast('The safeguarding course date must be in the future', 'warn');
+      return;
+    }
+    onSetSafeguardingCourse && onSetSafeguardingCourse(sgCourseDate);
+    setSgCourseOpen(false);
+    setSgCourseDate('');
+  }
 
   return (
     <div>
@@ -2888,6 +2909,59 @@ export function DocumentsView({
                         })}
                         {sg.files.length < MIN_SAFEGUARDING_FILES && !up && <span>{d.desc}</span>}
                       </span>
+                    ) : sg.courseBooked ? (
+                      <span>
+                        No certificates yet — your people will complete the safeguarding course on{' '}
+                        <strong style={{ color: 'var(--navy)' }}>
+                          {new Date(sg.courseDate).toLocaleDateString('en-GB', {
+                            day: 'numeric',
+                            month: 'short',
+                            year: 'numeric',
+                          })}
+                        </strong>{' '}
+                        ·{' '}
+                        <a
+                          style={{ color: 'var(--teal-deep)', cursor: 'pointer' }}
+                          onClick={() => onClearSafeguardingCourse && onClearSafeguardingCourse()}
+                        >
+                          Undo
+                        </a>
+                      </span>
+                    ) : sgCourseOpen ? (
+                      <span style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <span>{d.desc}</span>
+                        <span className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
+                          <span className="field" style={{ marginBottom: 0 }}>
+                            <span
+                              className="field-label"
+                              style={{ display: 'block', marginBottom: 4 }}
+                            >
+                              Course completion date
+                            </span>
+                            <input
+                              type="date"
+                              className="field-input"
+                              min={sgToday}
+                              value={sgCourseDate}
+                              onChange={(e) => setSgCourseDate(e.target.value)}
+                              style={{ maxWidth: 200 }}
+                            />
+                          </span>
+                          <Btn tone="ink" size="sm" onClick={confirmSafeguardingCourse}>
+                            Confirm date
+                          </Btn>
+                          <Btn
+                            tone="ghost"
+                            size="sm"
+                            onClick={() => {
+                              setSgCourseOpen(false);
+                              setSgCourseDate('');
+                            }}
+                          >
+                            Cancel
+                          </Btn>
+                        </span>
+                      </span>
                     ) : (
                       d.desc
                     )
@@ -2947,19 +3021,44 @@ export function DocumentsView({
                     <Pill tone="teal" dot>
                       Uploaded
                     </Pill>
+                  ) : sg.courseBooked ? (
+                    <Pill tone="teal" dot>
+                      Course booked ·{' '}
+                      {new Date(sg.courseDate).toLocaleDateString('en-GB', {
+                        day: 'numeric',
+                        month: 'short',
+                        year: 'numeric',
+                      })}
+                    </Pill>
                   ) : sg.files.length ? (
                     <Pill tone="gold" dot>
                       {sg.files.length} of {MIN_SAFEGUARDING_FILES} minimum
                     </Pill>
                   ) : null}
-                  <DocUploadButton
-                    clubId={club.id}
-                    docKey={d.key}
-                    label={d.name}
-                    onUploaded={onUpload}
-                    toast={toast}
-                    buttonLabel="Add certificate"
-                  />
+                  {/* Uploading and booking a course date are mutually exclusive: once a
+                      course is booked, only the Undo (in the meta text) is offered;
+                      otherwise show the uploader, plus a "no certificates yet" path that
+                      books a future course date when no files exist. */}
+                  {!sg.courseBooked && (
+                    <DocUploadButton
+                      clubId={club.id}
+                      docKey={d.key}
+                      label={d.name}
+                      onUploaded={onUpload}
+                      toast={toast}
+                      buttonLabel="Add certificate"
+                    />
+                  )}
+                  {!sg.courseBooked && !sg.files.length && !sgCourseOpen && (
+                    <Btn
+                      tone="outline"
+                      size="sm"
+                      onClick={() => setSgCourseOpen(true)}
+                      title="No safeguarding certificates yet — book a course date instead"
+                    >
+                      We don&apos;t have these yet
+                    </Btn>
+                  )}
                 </>
               ) : up ? (
                 <>
@@ -3880,15 +3979,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
 const fmtDay = (iso) =>
   iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '';
 
-export function ClubPlayersView({
-  club,
-  players,
-  clearances,
-  leagues,
-  onOpenRegister,
-  onGenerateLink,
-  toast,
-}) {
+export function ClubPlayersView({ club, players, clearances, leagues, onGenerateLink, toast }) {
   const [showLink, setShowLink] = useStateC(false);
   async function openLink() {
     // Mint a link on first open so the modal never shows an empty value.
@@ -3920,11 +4011,8 @@ export function ClubPlayersView({
           </p>
         </div>
         <div className="ph-actions">
-          <Btn tone="outline" size="sm" icon={Icon.Mail} onClick={openLink}>
+          <Btn tone="teal" size="sm" icon={Icon.Mail} onClick={openLink}>
             Registration link
-          </Btn>
-          <Btn tone="teal" size="sm" icon={Icon.Plus} onClick={onOpenRegister}>
-            Register player
           </Btn>
         </div>
       </div>
@@ -4049,466 +4137,14 @@ export function ClubPlayersView({
                   colSpan="8"
                   style={{ padding: 28, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}
                 >
-                  No players registered yet — click <strong>Register player</strong> to add your
-                  first.
+                  No players registered yet — share the <strong>Registration link</strong> so
+                  players can register themselves.
                 </td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
-    </div>
-  );
-}
-
-const EMPTY_PLAYER = {
-  surname: '',
-  firstNames: '',
-  idNumber: '',
-  race: '',
-  gender: '',
-  postalAddress: '',
-  postalCode: '',
-  phone: '',
-  email: '',
-  team: '',
-  district: '',
-  lastClub: '',
-  battingHand: 'Right',
-  battingType: 'Mid Order',
-  bowlingHand: 'Right',
-  isAllRounder: false,
-  isWk: false,
-  bowlerType: '',
-  consentChecked: false,
-};
-
-/**
- * In-portal chair registration form (the official Union form). Collects the full field
- * set; `onSubmit(payload, idFile)` hands back backend-shaped fields plus the chosen ID
- * document File (main.jsx creates the player then presigns + uploads the doc). `leagues`
- * is the tenant catalogue — Team options come from it so the value is a valid league key.
- */
-export function RegisterPlayerForm({ club, leagues, onSubmit, onCancel, toast, busy }) {
-  const [d, setD] = useStateC(EMPTY_PLAYER);
-  const [idFile, setIdFile] = useStateC(null);
-  const set = (k, v) => setD((prev) => ({ ...prev, [k]: v }));
-
-  const teamOptions = leagueOptionsForDistrict(leagues, club.district);
-  const dob = dobFromSaId(d.idNumber);
-  const idValid = /^\d{13}$/.test(d.idNumber);
-  const required = [
-    'surname',
-    'firstNames',
-    'idNumber',
-    'race',
-    'gender',
-    'phone',
-    'team',
-    'district',
-  ];
-  const missing = required.filter((k) => !d[k]);
-  const canSubmit =
-    missing.length === 0 && idValid && !!dob && !!idFile && d.consentChecked && !busy;
-
-  function pickFile(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (file.size > 5 * 1024 * 1024) {
-      toast?.('ID document must be under 5 MB', 'warn');
-      return;
-    }
-    setIdFile(file);
-    toast?.(`ID document attached · ${file.name}`);
-  }
-
-  function submit() {
-    if (!canSubmit) {
-      toast?.('Fill all required fields, upload ID, accept consent', 'warn');
-      return;
-    }
-    onSubmit(
-      {
-        firstName: d.firstNames.trim(),
-        lastName: d.surname.trim(),
-        idNumber: d.idNumber,
-        race: d.race,
-        gender: d.gender,
-        cell: d.phone,
-        email: d.email || undefined,
-        postalAddress: d.postalAddress || undefined,
-        postalCode: d.postalCode || undefined,
-        team: d.team,
-        district: d.district,
-        lastClub: d.lastClub || undefined,
-        battingHand: d.battingHand,
-        bowlingHand: d.bowlingHand,
-        battingType: d.battingType,
-        bowlerType: d.bowlerType || undefined,
-        isAllRounder: d.isAllRounder,
-        isWk: d.isWk,
-      },
-      idFile,
-    );
-  }
-
-  return (
-    <div className="rp-form">
-      <div className="rp-section">
-        <div className="rp-section-head">
-          <div className="rp-section-eyebrow">Section 01</div>
-          <div className="rp-section-title">Club &amp; Team</div>
-        </div>
-        <div className="field-grid-2">
-          <div>
-            <label className="field-label">Club</label>
-            <input className="field-input" value={club.name} disabled />
-          </div>
-          <div>
-            <label className="field-label">
-              Team <span className="req">*</span>
-            </label>
-            <select
-              className="field-select"
-              value={d.team}
-              onChange={(e) => set('team', e.target.value)}
-            >
-              <option value="">Select team</option>
-              {teamOptions.map((l) => (
-                <option key={l.key} value={l.key}>
-                  {l.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <div className="rp-section">
-        <div className="rp-section-head">
-          <div className="rp-section-eyebrow">Section 02</div>
-          <div className="rp-section-title">Player identity</div>
-        </div>
-        <div className="field-grid-2">
-          <div>
-            <label className="field-label">
-              Surname <span className="req">*</span>
-            </label>
-            <input
-              className="field-input"
-              value={d.surname}
-              onChange={(e) => set('surname', e.target.value)}
-              placeholder="e.g. Mthembu"
-            />
-          </div>
-          <div>
-            <label className="field-label">
-              First name(s) <span className="req">*</span>
-            </label>
-            <input
-              className="field-input"
-              value={d.firstNames}
-              onChange={(e) => set('firstNames', e.target.value)}
-              placeholder="e.g. Sanele"
-            />
-          </div>
-        </div>
-        <div className="field-grid-2" style={{ marginTop: 12 }}>
-          <div>
-            <label className="field-label">
-              ID number <span className="req">*</span>
-            </label>
-            <input
-              className="field-input"
-              value={d.idNumber}
-              onChange={(e) => set('idNumber', e.target.value.replace(/\D/g, '').slice(0, 13))}
-              placeholder="13-digit RSA ID"
-              style={{ fontVariantNumeric: 'tabular-nums' }}
-            />
-            {d.idNumber && !idValid && (
-              <div className="rp-hint err">Must be exactly 13 digits.</div>
-            )}
-            {dob && (
-              <div className="rp-hint">
-                ✓ Date of birth: <strong style={{ color: 'var(--ink)' }}>{dob}</strong>
-              </div>
-            )}
-          </div>
-          <div>
-            <label className="field-label">
-              Race <span className="req">*</span>
-            </label>
-            <select
-              className="field-select"
-              value={d.race}
-              onChange={(e) => set('race', e.target.value)}
-            >
-              <option value="">Select</option>
-              {RACES.map((r) => (
-                <option key={r}>{r}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <div className="field-grid-2" style={{ marginTop: 12 }}>
-          <div>
-            <label className="field-label">
-              Gender <span className="req">*</span>
-            </label>
-            <select
-              className="field-select"
-              value={d.gender}
-              onChange={(e) => set('gender', e.target.value)}
-            >
-              <option value="">Select</option>
-              {GENDERS.map((g) => (
-                <option key={g}>{g}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="field-label">
-              Phone <span className="req">*</span>
-            </label>
-            <input
-              className="field-input"
-              type="tel"
-              value={d.phone}
-              onChange={(e) => set('phone', e.target.value)}
-              placeholder="065 299 1365"
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="rp-section">
-        <div className="rp-section-head">
-          <div className="rp-section-eyebrow">Section 03</div>
-          <div className="rp-section-title">Address &amp; contact</div>
-        </div>
-        <div>
-          <label className="field-label">Postal address</label>
-          <input
-            className="field-input"
-            value={d.postalAddress}
-            onChange={(e) => set('postalAddress', e.target.value)}
-            placeholder="67 Fiona Street, Mobeni Heights"
-          />
-        </div>
-        <div className="field-grid-2" style={{ marginTop: 12 }}>
-          <div>
-            <label className="field-label">Postal code</label>
-            <input
-              className="field-input"
-              value={d.postalCode}
-              onChange={(e) => set('postalCode', e.target.value.replace(/\D/g, '').slice(0, 4))}
-              placeholder="4092"
-            />
-          </div>
-          <div>
-            <label className="field-label">Email</label>
-            <input
-              className="field-input"
-              type="email"
-              value={d.email}
-              onChange={(e) => set('email', e.target.value)}
-              placeholder="player@example.com"
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="rp-section">
-        <div className="rp-section-head">
-          <div className="rp-section-eyebrow">Section 04</div>
-          <div className="rp-section-title">Playing profile</div>
-        </div>
-        <div className="field-grid-2">
-          <div>
-            <label className="field-label">Batting hand</label>
-            <div className="seg">
-              {HANDS.map((h) => (
-                <button
-                  key={h}
-                  type="button"
-                  className={`seg-btn ${d.battingHand === h ? 'on' : ''}`}
-                  onClick={() => set('battingHand', h)}
-                >
-                  {h} hander
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className="field-label">Bowling hand</label>
-            <div className="seg">
-              {HANDS.map((h) => (
-                <button
-                  key={h}
-                  type="button"
-                  className={`seg-btn ${d.bowlingHand === h ? 'on' : ''}`}
-                  onClick={() => set('bowlingHand', h)}
-                >
-                  {h} hander
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-        <div className="field-grid-2" style={{ marginTop: 12 }}>
-          <div>
-            <label className="field-label">Batting type</label>
-            <select
-              className="field-select"
-              value={d.battingType}
-              onChange={(e) => set('battingType', e.target.value)}
-            >
-              {BATTING_TYPES.map((b) => (
-                <option key={b}>{b}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="field-label">Bowler type</label>
-            <select
-              className="field-select"
-              value={d.bowlerType}
-              onChange={(e) => set('bowlerType', e.target.value)}
-            >
-              <option value="">— Not a bowler —</option>
-              {BOWLER_TYPES.map((b) => (
-                <option key={b}>{b}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <div className="row" style={{ marginTop: 12, gap: 14, flexWrap: 'wrap' }}>
-          <label className="rp-check">
-            <input
-              type="checkbox"
-              checked={d.isAllRounder}
-              onChange={(e) => set('isAllRounder', e.target.checked)}
-            />
-            <span>All-rounder</span>
-          </label>
-          <label className="rp-check">
-            <input
-              type="checkbox"
-              checked={d.isWk}
-              onChange={(e) => set('isWk', e.target.checked)}
-            />
-            <span>Wicket-keeper</span>
-          </label>
-        </div>
-      </div>
-
-      <div className="rp-section">
-        <div className="rp-section-head">
-          <div className="rp-section-eyebrow">Section 05</div>
-          <div className="rp-section-title">Registration history</div>
-        </div>
-        <div className="field-grid-2">
-          <div>
-            <label className="field-label">Club for which last registered</label>
-            <input
-              className="field-input"
-              value={d.lastClub}
-              onChange={(e) => set('lastClub', e.target.value)}
-              placeholder="Previous club, or — if first registration"
-            />
-          </div>
-          <div>
-            <label className="field-label">
-              District <span className="req">*</span>
-            </label>
-            <input
-              className="field-input"
-              value={d.district}
-              onChange={(e) => set('district', e.target.value)}
-              placeholder="e.g. Chatsworth"
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="rp-section">
-        <div className="rp-section-head">
-          <div className="rp-section-eyebrow">Section 06</div>
-          <div className="rp-section-title">
-            ID document upload{' '}
-            <span style={{ color: 'var(--coral)', fontWeight: 700, fontSize: 11, marginLeft: 6 }}>
-              REQUIRED
-            </span>
-          </div>
-        </div>
-        <div className={`rp-upload ${idFile ? 'uploaded' : ''}`}>
-          <input
-            id="rp-id-file"
-            type="file"
-            accept="image/jpeg,image/png,application/pdf"
-            onChange={pickFile}
-            style={{ display: 'none' }}
-          />
-          <label htmlFor="rp-id-file" className="rp-upload-inner">
-            {idFile ? (
-              <>
-                <div className="rp-upload-icon ok">
-                  <Icon.Check />
-                </div>
-                <div>
-                  <div className="rp-upload-title">{idFile.name}</div>
-                  <div className="rp-upload-sub">
-                    Click to replace · The Union office reviews ID documents on submission.
-                  </div>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="rp-upload-icon">
-                  <Icon.Upload />
-                </div>
-                <div>
-                  <div className="rp-upload-title">Tap to attach ID document</div>
-                  <div className="rp-upload-sub">
-                    SA ID book photo or scan · JPG, PNG or PDF · max ~5MB
-                  </div>
-                </div>
-              </>
-            )}
-          </label>
-        </div>
-      </div>
-
-      <div className="rp-section rp-consent">
-        <label className="rp-check">
-          <input
-            type="checkbox"
-            checked={d.consentChecked}
-            onChange={(e) => set('consentChecked', e.target.checked)}
-          />
-          <span>
-            I, on behalf of <strong>{club.name}</strong>, request to register the above player under
-            the <strong>Union Rules and Byelaws</strong>. I declare that the player is not being
-            paid by the club for their services as a cricketer.
-          </span>
-        </label>
-      </div>
-
-      <div className="rp-actions">
-        <Btn tone="outline" onClick={onCancel}>
-          Cancel
-        </Btn>
-        <Btn tone="teal" icon={Icon.Check} onClick={submit} disabled={!canSubmit}>
-          {busy ? 'Submitting…' : 'Submit registration'}
-        </Btn>
-      </div>
-      {!canSubmit && !busy && (missing.length || !idFile || !d.consentChecked) && (
-        <div className="rp-validation">
-          {missing.length > 0 && <>Missing: {missing.join(', ')}. </>}
-          {!idFile && <>Attach ID. </>}
-          {!d.consentChecked && <>Consent required.</>}
-        </div>
-      )}
     </div>
   );
 }
@@ -4529,8 +4165,8 @@ export function RequestPlayerForm({ club, directory, onSubmit, onCancel, busy })
           <div className="rp-section-title">Request a player for {club.name}</div>
         </div>
         <p className="ph-desc" style={{ marginBottom: 12 }}>
-          The player&apos;s current club has 14 days to confirm fees + misconduct cleared, then
-          issue the clearance. After that the Union office may override.
+          The player&apos;s current club confirms fees + misconduct cleared, then issues the
+          clearance. The Union office may override and approve on the club&apos;s behalf.
         </p>
         <div className="field-grid-2">
           <div>
@@ -4617,8 +4253,8 @@ export function ClubClearancesView({
           </h1>
           <p className="ph-desc">
             Players leaving {club.name} need a clearance certificate. Confirm{' '}
-            <strong>fees cleared</strong> and <strong>misconduct charges cleared</strong> within{' '}
-            <strong>14 days</strong>, or the Union office may override and approve on your behalf.
+            <strong>fees cleared</strong> and <strong>misconduct charges cleared</strong> to issue
+            it — the Union office may override and approve on your behalf.
           </p>
         </div>
         <div className="ph-actions">
@@ -4628,10 +4264,7 @@ export function ClubClearancesView({
         </div>
       </div>
 
-      <Card
-        title="Incoming requests"
-        sub={`Players asking to leave ${club.name}. You have 14 days to action each one.`}
-      >
+      <Card title="Incoming requests" sub={`Players asking to leave ${club.name}.`}>
         {incomingPending.length === 0 && incomingResolved.length === 0 && (
           <div
             style={{
@@ -4646,18 +4279,12 @@ export function ClubClearancesView({
         )}
         <div className="clr-list">
           {incomingPending.map((req) => {
-            const daysLeft = clearanceDaysRemaining(req);
-            const overdue = clearanceOverdue(req);
             const busy = busyId === req.id;
             return (
-              <div key={req.id} className={`clr-card ${overdue ? 'overdue' : ''}`}>
+              <div key={req.id} className="clr-card">
                 <div className="clr-card-head">
                   <div>
-                    <div className="clr-eyebrow">
-                      {overdue
-                        ? '⚠ Overdue · Union may override'
-                        : `${daysLeft} ${daysLeft === 1 ? 'day' : 'days'} remaining`}
-                    </div>
+                    <div className="clr-eyebrow">Pending · Union may override</div>
                     <div className="clr-name">{req.playerName}</div>
                     <div className="clr-meta">
                       {teamLabel[req.team] || req.team || '—'} · ID {req.idNumber || '—'} ·
@@ -4773,7 +4400,6 @@ Object.assign(window, {
   CQIView,
   ClubFixturesView,
   ClubPlayersView,
-  RegisterPlayerForm,
   RequestPlayerForm,
   ClubClearancesView,
 });

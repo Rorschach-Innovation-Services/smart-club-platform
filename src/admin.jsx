@@ -2,6 +2,9 @@
 
 import { useState as useStateA, useMemo as useMemoA, useEffect as useEffectA } from 'react';
 import { createPortal } from 'react-dom';
+import { useQueries } from '@tanstack/react-query';
+import * as api from './api.js';
+import { qk } from './query.js';
 import {
   DISTRICTS,
   REQUIRED_DOCS,
@@ -26,9 +29,6 @@ import {
   formatDeadlineMid,
   daysUntil,
   daysAgo,
-  clearanceOverdue,
-  daysSinceIso,
-  clearanceDaysRemaining,
   ageFromSaId,
   termRemaining,
 } from './data.jsx';
@@ -5641,18 +5641,12 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
     iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '';
 
   const all = clearances ?? [];
-  const overdue = all.filter((r) => clearanceOverdue(r));
-  const pending = all.filter((r) => r.status === 'pending' && !clearanceOverdue(r));
+  // `clearanceOverdue()` now always returns false, so there is no longer an
+  // "overdue" bucket — every open request is simply pending.
+  const pending = all.filter((r) => r.status === 'pending');
   const resolved = all.filter((r) => r.status !== 'pending');
 
-  const list =
-    filter === 'overdue'
-      ? overdue
-      : filter === 'pending'
-        ? pending
-        : filter === 'resolved'
-          ? resolved
-          : all;
+  const list = filter === 'pending' ? pending : filter === 'resolved' ? resolved : all;
 
   return (
     <div>
@@ -5663,9 +5657,8 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
             Player <em>Clearances</em>
           </h1>
           <p className="ph-desc">
-            Every clearance request across the cohort. Source clubs have 14 days to confirm fees +
-            misconduct. After that window, the Union office can override and approve on the source
-            club's behalf.
+            Every clearance request across the cohort. Source clubs confirm fees + misconduct, or
+            the Union office can override and issue the clearance on the source club's behalf.
           </p>
         </div>
         <div className="ph-actions">
@@ -5673,9 +5666,6 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
               doesn't advertise capabilities it doesn't have (follow-up). */}
           <Btn tone="outline" size="sm" icon={Icon.Download} disabled title="Coming soon">
             Export
-          </Btn>
-          <Btn tone="outline" size="sm" icon={Icon.Mail} disabled title="Coming soon">
-            Remind overdue clubs
           </Btn>
         </div>
       </div>
@@ -5692,12 +5682,6 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
           </div>
         </div>
         <div className="players-stat">
-          <div className="players-stat-l">Overdue (&gt; 14 days)</div>
-          <div className="players-stat-n" style={{ color: 'var(--coral)' }}>
-            {overdue.length}
-          </div>
-        </div>
-        <div className="players-stat">
           <div className="players-stat-l">Resolved</div>
           <div className="players-stat-n" style={{ color: 'var(--green)' }}>
             {resolved.length}
@@ -5708,7 +5692,6 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
       <div className="filter-row" style={{ marginTop: 14 }}>
         {[
           { k: 'all', l: 'All', n: all.length },
-          { k: 'overdue', l: 'Overdue', n: overdue.length },
           { k: 'pending', l: 'Pending', n: pending.length },
           { k: 'resolved', l: 'Resolved', n: resolved.length },
         ].map((b) => (
@@ -5739,14 +5722,11 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
           </div>
         )}
         {list.map((req) => {
-          const overdueReq = clearanceOverdue(req);
-          const elapsed = daysSinceIso(req.requestedAt);
-          const daysLeft = clearanceDaysRemaining(req);
           const busy = busyId === req.id;
           return (
             <div
               key={req.id}
-              className={`clr-card admin ${overdueReq ? 'overdue' : ''} ${req.status !== 'pending' ? 'resolved' : ''}`}
+              className={`clr-card admin ${req.status !== 'pending' ? 'resolved' : ''}`}
             >
               <div className="clr-card-head">
                 <div>
@@ -5755,9 +5735,7 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
                       ? '✓ Union override'
                       : req.status === 'approved'
                         ? `✓ Cleared by ${req.fromClubName}`
-                        : overdueReq
-                          ? `⚠ Overdue · ${elapsed} days`
-                          : `Pending · ${daysLeft} days remaining`}
+                        : 'Pending'}
                   </div>
                   <div className="clr-name">{req.playerName}</div>
                   <div className="clr-meta">
@@ -5785,11 +5763,11 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
                 </div>
               </div>
 
-              {overdueReq && req.status === 'pending' && (
+              {req.status === 'pending' && (
                 <div className="clr-override">
                   <div className="clr-override-text">
                     <div className="clr-override-title">
-                      {req.fromClubName} hasn't actioned this in {elapsed} days.
+                      Issue this clearance on {req.fromClubName}'s behalf?
                     </div>
                     <div className="clr-override-sub">
                       The Union office can override the source club's approval and issue the
@@ -5802,8 +5780,8 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
                     disabled={busy}
                     onClick={() =>
                       setConfirm({
-                        title: 'Override and approve clearance?',
-                        body: `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, bypassing ${req.fromClubName}. Both clubs will be notified.`,
+                        title: 'Issue this clearance?',
+                        body: `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf. Both clubs will be notified.`,
                         onYes: () => {
                           onOverride(req);
                           setConfirm(null);
@@ -5811,7 +5789,7 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
                       })
                     }
                   >
-                    {busy ? 'Overriding…' : 'Override & approve'}
+                    {busy ? 'Issuing…' : 'Override & approve'}
                   </Btn>
                 </div>
               )}
@@ -5871,13 +5849,282 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
                   Cancel
                 </Btn>
                 <Btn tone="teal" icon={Icon.Arrow} onClick={confirm.onYes}>
-                  Yes, override
+                  Yes, issue clearance
                 </Btn>
               </div>
             </div>
           </div>,
           document.body,
         )}
+    </div>
+  );
+}
+
+/* ─── AdminPlayersView — cross-club player register, fanned out over every club ─── */
+
+// Derive a single human-readable role label, mirroring the club-side roster.
+function playerRoleLabel(p) {
+  const bits = [];
+  if (p.isWk) bits.push('WK');
+  if (p.isAllRounder) bits.push('All-rounder');
+  // A pure batter (no bowling) reads as "Batter"; otherwise lead with bowler type.
+  if (!p.isAllRounder) {
+    if (p.bowlerType) bits.push(p.bowlerType);
+    else if (!p.isWk) bits.push('Batter');
+  } else if (p.bowlerType) {
+    bits.push(p.bowlerType);
+  }
+  return bits.join(' · ') || '—';
+}
+
+function playerStatusPill(status) {
+  if (status === 'clearance-pending')
+    return (
+      <Pill tone="gold" dot>
+        Clearance pending
+      </Pill>
+    );
+  if (status === 'inactive') return <Pill tone="muted">Inactive</Pill>;
+  return (
+    <Pill tone="teal" dot>
+      Active
+    </Pill>
+  );
+}
+
+const PLAYERS_PER_PAGE = 25;
+
+export function AdminPlayersView({ clubs, leagues, toast }) {
+  const list = clubs ?? [];
+  const teamLabel = labelByKey(leagues ?? []);
+
+  // Fan out one players query per club. Partial failures stay isolated —
+  // a single errored club contributes no rows but never blanks the table.
+  const results = useQueries({
+    queries: list.map((c) => ({
+      queryKey: qk.players(c.id),
+      queryFn: () => api.getPlayers(c.id),
+    })),
+  });
+
+  const anyLoading = results.some((r) => r.isLoading);
+  const erroredCount = results.filter((r) => r.isError).length;
+
+  // Surface partial failures once, without blocking the rest of the list.
+  useEffectA(() => {
+    if (!anyLoading && erroredCount > 0) {
+      toast?.(
+        `${erroredCount} club${erroredCount === 1 ? "'s" : "s'"} roster failed to load`,
+        'warn',
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anyLoading, erroredCount]);
+
+  const allPlayers = useMemoA(() => {
+    const out = [];
+    results.forEach((r, i) => {
+      const club = list[i];
+      if (!club || !Array.isArray(r.data)) return;
+      r.data.forEach((p) =>
+        out.push({ ...p, clubId: club.id, clubName: club.name || club.slug || '—' }),
+      );
+    });
+    // Surname, then first name — stable alphabetical ordering.
+    out.sort((a, b) => {
+      const ln = (a.lastName || '').localeCompare(b.lastName || '', undefined, {
+        sensitivity: 'base',
+      });
+      if (ln !== 0) return ln;
+      return (a.firstName || '').localeCompare(b.firstName || '', undefined, {
+        sensitivity: 'base',
+      });
+    });
+    return out;
+  }, [results, list]);
+
+  const [q, setQ] = useStateA('');
+  const [clubFilter, setClubFilter] = useStateA('all');
+  const [page, setPage] = useStateA(1);
+
+  // Any change to the query inputs resets pagination to the first page.
+  const onSearch = (v) => {
+    setQ(v);
+    setPage(1);
+  };
+  const onClubFilter = (v) => {
+    setClubFilter(v);
+    setPage(1);
+  };
+
+  const filtered = useMemoA(() => {
+    const needle = q.trim().toLowerCase();
+    return allPlayers.filter((p) => {
+      if (clubFilter !== 'all' && p.clubId !== clubFilter) return false;
+      if (!needle) return true;
+      const name = `${p.firstName || ''} ${p.lastName || ''}`.toLowerCase();
+      const id = (p.idNumber || '').toLowerCase();
+      return name.includes(needle) || id.includes(needle);
+    });
+  }, [allPlayers, q, clubFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PLAYERS_PER_PAGE));
+  const safePage = Math.min(page, totalPages);
+  const pageRows = filtered.slice((safePage - 1) * PLAYERS_PER_PAGE, safePage * PLAYERS_PER_PAGE);
+
+  return (
+    <div>
+      <div className="page-head">
+        <div className="ph-left">
+          <div className="ph-crumb">Admin Console / Players</div>
+          <h1 className="ph-title">
+            Cross-club <em>players</em>
+          </h1>
+          <p className="ph-desc">
+            Every registered player across the cohort in one register. Search by name or ID, or
+            filter to a single club.
+          </p>
+        </div>
+        <div className="ph-actions">
+          <KPI label="Players" num={allPlayers.length} />
+        </div>
+      </div>
+
+      <div className="filter-row">
+        <input
+          className="search-box"
+          placeholder="Search by player name or ID number…"
+          value={q}
+          onChange={(e) => onSearch(e.target.value)}
+        />
+        <select
+          className="field-select"
+          value={clubFilter}
+          onChange={(e) => onClubFilter(e.target.value)}
+          style={{ maxWidth: 240 }}
+        >
+          <option value="all">All clubs</option>
+          {list.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name || c.slug}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {anyLoading && allPlayers.length === 0 ? (
+        <div
+          style={{
+            padding: '48px 16px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 10,
+            color: 'var(--muted)',
+            fontSize: 13,
+          }}
+        >
+          <span className="spinner" />
+          Loading rosters…
+        </div>
+      ) : filtered.length === 0 ? (
+        <EmptyState
+          icon={Icon.Users}
+          title={allPlayers.length === 0 ? 'No players registered yet' : 'No players match'}
+          sub={
+            allPlayers.length === 0
+              ? 'Players will appear here as clubs register their squads.'
+              : 'Try a different search term or club filter.'
+          }
+        />
+      ) : (
+        <>
+          <div className="tbl-w" style={{ marginTop: 14 }}>
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Player</th>
+                  <th>ID number</th>
+                  <th>Club</th>
+                  <th>Team</th>
+                  <th>Role</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pageRows.map((p) => (
+                  <tr key={`${p.clubId}:${p.naturalKey || p.idNumber}`}>
+                    <td>
+                      <div className="rost-name">
+                        {p.firstName} {p.lastName}
+                      </div>
+                      <div className="rost-sub">
+                        {p.district || '—'} · {p.gender || '—'}
+                      </div>
+                    </td>
+                    <td>
+                      <span className="rost-id">{p.idNumber || '—'}</span>
+                    </td>
+                    <td>
+                      <div style={{ fontSize: 12.5 }}>{p.clubName}</div>
+                    </td>
+                    <td>
+                      {p.team ? (
+                        <Pill tone="navy">{teamLabel[p.team] || p.team}</Pill>
+                      ) : (
+                        <span className="rost-sub">—</span>
+                      )}
+                    </td>
+                    <td>
+                      <span className="rost-sub">{playerRoleLabel(p)}</span>
+                    </td>
+                    <td>{playerStatusPill(p.status)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {totalPages > 1 && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'flex-end',
+                gap: 12,
+                marginTop: 14,
+              }}
+            >
+              <span
+                style={{
+                  fontSize: 11.5,
+                  color: 'var(--muted)',
+                  fontFamily: "'Montserrat',sans-serif",
+                }}
+              >
+                Page {safePage} of {totalPages} · {filtered.length} players
+              </span>
+              <Btn
+                tone="outline"
+                size="sm"
+                disabled={safePage <= 1}
+                onClick={() => setPage(Math.max(1, safePage - 1))}
+              >
+                Prev
+              </Btn>
+              <Btn
+                tone="outline"
+                size="sm"
+                icon={Icon.Arrow}
+                disabled={safePage >= totalPages}
+                onClick={() => setPage(Math.min(totalPages, safePage + 1))}
+              >
+                Next
+              </Btn>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

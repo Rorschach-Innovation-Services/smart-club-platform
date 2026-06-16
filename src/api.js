@@ -176,16 +176,10 @@ export const sendClubFixtures = (id, { channels, idempotencyKey }) =>
   });
 
 // ── Players (roster) ──
+// Players now self-register via the public link (see register* below). The in-portal chair
+// "Register player" form was retired, so its client wrappers (registerPlayer / id-doc
+// upload + mark) were removed; the backend routes remain for any future re-introduction.
 export const getPlayers = (clubId) => request(`/clubs/${clubId}/players`);
-export const registerPlayer = (clubId, body) =>
-  request(`/clubs/${clubId}/players`, { method: 'POST', body });
-export const getPlayerIdDocUploadUrl = (clubId, naturalKey, contentType) =>
-  request(`/clubs/${clubId}/players/${naturalKey}/id-doc/upload-url`, {
-    method: 'POST',
-    body: { contentType },
-  });
-export const markPlayerIdDoc = (clubId, naturalKey, meta) =>
-  request(`/clubs/${clubId}/players/${naturalKey}/id-doc`, { method: 'PATCH', body: meta });
 export const getPlayerIdDocViewUrl = (clubId, naturalKey) =>
   request(`/clubs/${clubId}/players/${naturalKey}/id-doc/view-url`, { method: 'POST' });
 
@@ -238,6 +232,16 @@ export const getRegistration = (clubId, token) =>
   request(`/register/${clubId}`, { auth: false, query: { t: token } });
 export const submitRegistration = (clubId, token, body) =>
   request(`/register/${clubId}`, { method: 'POST', auth: false, query: { t: token }, body });
+// Token-scoped presign for the self-registering player's ID document (no auth). Returns
+// { uploadUrl, objectKey, contentType }; PUT the file via uploadToPresigned, then send the
+// resulting { objectKey, size, contentType } as idDocMeta on submitRegistration.
+export const getRegistrationIdDocUploadUrl = (clubId, token, contentType) =>
+  request(`/register/${clubId}/id-doc/upload-url`, {
+    method: 'POST',
+    auth: false,
+    query: { t: token },
+    body: { contentType },
+  });
 
 // ── Public club signup (the tenant-wide self-registration link) ──
 export const getClubSignup = (token) =>

@@ -1225,6 +1225,38 @@
   }
   .reg-label .req{color:var(--green-bright);font-weight:700;margin-left:3px}
 
+  /* Public registration form layout: a wider card that uses the screen better, with a
+     responsive auto-fit field grid (multi-column on desktop, single column on phones). */
+  .ps-cards.reg-cards{display:block;max-width:920px;margin:0 auto}
+  .ps-cards.reg-cards-sm{display:block;max-width:440px;margin:0 auto}
+  .ps-card.reg-card{width:100%;max-width:920px;padding:34px 36px}
+  .reg-form{display:grid;gap:26px}
+  .reg-section{display:grid;gap:13px}
+  .reg-section-title{
+    font-family:'Montserrat',sans-serif;font-size:11px;font-weight:700;
+    letter-spacing:0.16em;text-transform:uppercase;color:rgba(255,255,255,0.5);
+    padding-bottom:9px;border-bottom:1px solid rgba(255,255,255,0.08);
+  }
+  .reg-grid{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(216px,1fr));
+    gap:15px 18px;align-items:start;
+  }
+  .reg-grid .reg-span{grid-column:1 / -1}
+  .reg-checks{display:flex;gap:12px;flex-wrap:wrap}
+  /* The reg card is dark, so the shared light-background checkbox/label colours are
+     invisible here — force legible light text for the playing-profile + consent checks. */
+  .reg-card .rp-check{color:rgba(255,255,255,0.86)}
+  .reg-card .rp-check strong{color:#fff}
+  .reg-card .rp-check.rp-pill{
+    border:1px solid rgba(255,255,255,0.16);border-radius:10px;padding:9px 13px;
+    background:rgba(255,255,255,0.04);transition:border-color .15s, background .15s;
+  }
+  .reg-card .rp-check.rp-pill:hover{border-color:rgba(255,255,255,0.3);background:rgba(255,255,255,0.07)}
+  @media (max-width:600px){
+    .ps-card.reg-card{padding:24px 20px}
+    .reg-grid{grid-template-columns:1fr}
+  }
+
   .ps-card-icon{
     width:56px;height:56px;border-radius:14px;
     display:flex;align-items:center;justify-content:center;

@@ -1,4 +1,5 @@
 import { useState as useStateApp, useMemo as useMemoApp, useEffect } from 'react';
+import { ErrorBoundary } from 'react-error-boundary';
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import {
@@ -29,7 +30,8 @@ import {
   affiliationSubmitted,
   computeMarkCompliance,
   computeRevertCompliance,
-  clearanceOverdue,
+  safeguardingMeta,
+  MIN_SAFEGUARDING_FILES,
 } from './data.jsx';
 import { exportRowsToXlsx } from './exportXlsx.js';
 import { openBccReminder } from './mailto.js';
@@ -49,6 +51,7 @@ import {
   AdminDashboard,
   AdminClubsList,
   AdminClubDetail,
+  AdminPlayersView,
   AdminFixtures,
   AdminLeagues,
   AdminSettingsView,
@@ -65,7 +68,6 @@ import {
   CQIView,
   ClubFixturesView,
   ClubPlayersView,
-  RegisterPlayerForm,
   RequestPlayerForm,
   ClubClearancesView,
 } from './club.jsx';
@@ -232,6 +234,28 @@ function Splash({ message, action }) {
 }
 
 /* ─── Root ─── */
+/**
+ * Fallback shown when a single view throws during render, so one crashing screen shows a
+ * recoverable message instead of blanking the whole app (as a stray `ReferenceError` once
+ * did to the admin Fixtures tab). Used with `react-error-boundary`'s <ErrorBoundary>, which
+ * resets on navigation via `resetKeys`.
+ */
+function ViewErrorFallback({ resetErrorBoundary }) {
+  return (
+    <div style={{ padding: 40, textAlign: 'center', color: 'var(--muted)' }}>
+      <h2 style={{ fontSize: 18, color: 'var(--ink)', marginBottom: 8 }}>
+        Something went wrong loading this view
+      </h2>
+      <p style={{ fontSize: 13, marginBottom: 16 }}>
+        Try again, or pick another section from the menu. If it keeps happening, contact support.
+      </p>
+      <button className="btn btn-ink" onClick={resetErrorBoundary}>
+        Try again
+      </button>
+    </div>
+  );
+}
+
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -566,6 +590,7 @@ function AuthedApp({ tenantConfig }) {
                   deleteSeries,
                   duplicateSeries,
                   setReleased,
+                  setApproved,
                   onCreateSeries,
                   onCreateLeague,
                   updateLeague,
@@ -619,6 +644,7 @@ function AuthedApp({ tenantConfig }) {
                   deleteSeries,
                   duplicateSeries,
                   setReleased,
+                  setApproved,
                   onCreateSeries,
                   onCreateLeague,
                   updateLeague,
@@ -672,6 +698,7 @@ function Shell({
   deleteSeries,
   duplicateSeries,
   setReleased,
+  setApproved,
   onCreateSeries,
   onCreateLeague,
   updateLeague,
@@ -706,9 +733,7 @@ function Shell({
   );
 
   // ── Player roster + clearance state/data (lives here, where clubId is known) ──
-  const [showRegisterPlayer, setShowRegisterPlayer] = useStateApp(false);
   const [showRequestPlayer, setShowRequestPlayer] = useStateApp(false);
-  const [registerBusy, setRegisterBusy] = useStateApp(false);
   const [busyClearanceId, setBusyClearanceId] = useStateApp(null);
   // Signup-link share modal, lifted to Shell (which persists across admin views)
   // so empty-state buttons can open it in one click: set true + route to the
@@ -937,6 +962,50 @@ function Shell({
       })
       .catch(() => undefined);
   }
+  // Safeguarding course booking: a club with no certificates yet declares the date its
+  // people will complete the safeguarding course. Sets docs.safeguarding so compliance
+  // reads complete, and stamps a {courseBooked, courseDate} sentinel (preserving any
+  // files already uploaded). Undo clears the booking, re-deriving the flag from files.
+  function setSafeguardingCourse(courseDate) {
+    const club = activeClub;
+    if (!club) return Promise.resolve();
+    const norm = safeguardingMeta(club.docMeta?.safeguarding);
+    const docs = { ...(club.docs || {}), safeguarding: true };
+    const docMeta = {
+      ...(club.docMeta || {}),
+      safeguarding: {
+        files: norm.files,
+        courseBooked: true,
+        courseDate,
+        at: new Date().toISOString(),
+      },
+    };
+    return patchClubAt(club.version, { docs, docMeta })
+      .then((updated) => {
+        toastShow('Course date recorded', 'ok', {
+          label: 'Undo',
+          onClick: () => clearSafeguardingCourse(),
+        });
+        return updated;
+      })
+      .catch(() => undefined);
+  }
+  function clearSafeguardingCourse() {
+    const club = activeClub;
+    if (!club) return Promise.resolve();
+    const norm = safeguardingMeta(club.docMeta?.safeguarding);
+    const stillSatisfied = norm.files.length >= MIN_SAFEGUARDING_FILES;
+    const docs = { ...(club.docs || {}), safeguarding: stillSatisfied };
+    const docMeta = { ...(club.docMeta || {}) };
+    if (norm.files.length) docMeta.safeguarding = { files: norm.files };
+    else delete docMeta.safeguarding;
+    return patchClubAt(club.version, { docs, docMeta })
+      .then((updated) => {
+        toastShow('Reset — upload certificates when ready');
+        return updated;
+      })
+      .catch(() => undefined);
+  }
   // Remove one stored safeguarding certificate (the only multi-file doc).
   function removeDocFile(key, objectKey) {
     return withToast(
@@ -949,46 +1018,8 @@ function Shell({
     });
   }
   // ── Player roster + clearances (club role) ──
-  // Register a player via the chair form, then upload + record the ID document.
-  async function registerPlayer(payload, idFile) {
-    setRegisterBusy(true);
-    try {
-      const player = await withToast(
-        () => api.registerPlayer(clubId, payload),
-        'Could not register player',
-        { rawConflict: true },
-      );
-      try {
-        const ct = idFile.type || 'application/pdf';
-        const { uploadUrl, objectKey, contentType } = await api.getPlayerIdDocUploadUrl(
-          clubId,
-          player.naturalKey,
-          ct,
-        );
-        await api.uploadToPresigned(uploadUrl, idFile, contentType);
-        await api.markPlayerIdDoc(clubId, player.naturalKey, {
-          objectKey,
-          size: idFile.size,
-          contentType,
-        });
-      } catch {
-        // The player is registered even if the ID upload fails; surface it but don't block.
-        toastShow(
-          'Player registered, but the ID document upload failed — re-upload later.',
-          'warn',
-        );
-      }
-      invalidate(qk.players(clubId));
-      invalidate(qk.club(clubId));
-      invalidate(qk.clubs());
-      setShowRegisterPlayer(false);
-      toastShow(`${payload.firstName} ${payload.lastName} registered`);
-    } catch {
-      /* withToast already surfaced it */
-    } finally {
-      setRegisterBusy(false);
-    }
-  }
+  // Players self-register via the shared Registration link (RegLinkModal → public RegisterPage),
+  // which captures the full Union field set + ID document — no in-portal chair form.
   // Destination club initiates a clearance request for a player at another club.
   // busyClearanceId === 'new' disables the request form's submit so a double-click
   // can't fire two POSTs (which would race the duplicate-pending guard).
@@ -1002,7 +1033,7 @@ function Shell({
       .then(() => {
         invalidate(qk.clearances(clubId));
         setShowRequestPlayer(false);
-        toastShow('Clearance requested — the source club has 14 days to action it.');
+        toastShow('Clearance requested — the source club will be asked to action it.');
       })
       .catch(() => {})
       .finally(() => setBusyClearanceId(null));
@@ -1152,18 +1183,18 @@ function Shell({
 
   // — NAV —
   // Clearance badge counts: admin sees cohort-wide; a club counts only requests it must action.
-  const adminOverdueClearances = allClearances.filter((r) => clearanceOverdue(r)).length;
-  const adminPendingClearances = allClearances.filter(
-    (r) => r.status === 'pending' && !clearanceOverdue(r),
-  ).length;
+  // Clearances no longer carry a time limit, so there is no "overdue" tier — just pending.
+  const adminPendingClearances = allClearances.filter((r) => r.status === 'pending').length;
   const myIncomingClearances = (clearances.incoming ?? []).filter((r) => r.status === 'pending');
   const myPendingClearances = myIncomingClearances.length;
-  const myOverdueClearances = myIncomingClearances.filter((r) => clearanceOverdue(r)).length;
   const myPlayerCount = players.length;
 
+  // Nav items are listed in their natural journey order here, then sorted alphabetically
+  // by label for display (see the `.sort` below) — same for clubNav.
   const adminNav = [
     { v: 'dashboard', label: 'Cohort Dashboard', icon: Icon.Dashboard },
     { v: 'clubs_list', label: 'All Clubs', icon: Icon.Clubs, num: clubs.length },
+    { v: 'players', label: 'Players', icon: Icon.Users },
     {
       v: 'affiliations',
       label: 'Affiliations',
@@ -1191,11 +1222,11 @@ function Shell({
       v: 'clearances',
       label: 'Clearances',
       icon: Icon.Shield,
-      num: adminOverdueClearances || adminPendingClearances || undefined,
-      dot: adminOverdueClearances ? 'coral' : adminPendingClearances ? 'gold' : 'teal',
+      num: adminPendingClearances || undefined,
+      dot: adminPendingClearances ? 'gold' : 'teal',
     },
     { v: 'team', label: 'Team & Access', icon: Icon.Users, num: users.length || undefined },
-  ];
+  ].sort((a, b) => a.label.localeCompare(b.label));
 
   const releasedForMe = allSeries.filter((s) => s.released && s.teams.includes(clubId));
   const hasReleased = releasedForMe.length > 0;
@@ -1232,7 +1263,7 @@ function Shell({
             label: 'Clearances',
             icon: Icon.Shield,
             num: myPendingClearances || undefined,
-            dot: myOverdueClearances ? 'coral' : myPendingClearances ? 'gold' : 'muted',
+            dot: myPendingClearances ? 'gold' : 'muted',
           },
           {
             v: 'fixtures',
@@ -1242,7 +1273,7 @@ function Shell({
             num: hasReleased ? 'NEW' : undefined,
           },
           { v: '_help', label: 'Need Help?', icon: Icon.Mail, action: () => setShowHelp(true) },
-        ]
+        ].sort((a, b) => a.label.localeCompare(b.label))
       : [];
 
   const nav = role === 'admin' ? adminNav : clubNav;
@@ -1358,6 +1389,8 @@ function Shell({
             toast={toastShow}
           />
         );
+      if (view === 'players')
+        return <AdminPlayersView clubs={clubs} leagues={allLeagues} toast={toastShow} />;
       if (view === 'fixtures')
         return (
           <AdminFixtures
@@ -1458,7 +1491,6 @@ function Shell({
             players={players}
             clearances={clearances}
             leagues={allLeagues}
-            onOpenRegister={() => setShowRegisterPlayer(true)}
             onGenerateLink={() => generatePlayerRegLink(activeClub.id)}
             toast={toastShow}
           />
@@ -1634,18 +1666,20 @@ function Shell({
                   icon: Icon.Mail,
                   action: () => setShowHelp(true),
                 },
-              ].map((n) => (
-                <button
-                  key={n.v}
-                  className={`nav-item ${view === n.v ? 'active' : ''}`}
-                  onClick={n.action}
-                >
-                  <span className="ni-icon">
-                    <n.icon />
-                  </span>
-                  <span className="ni-label">{n.label}</span>
-                </button>
-              ))}
+              ]
+                .sort((a, b) => a.label.localeCompare(b.label))
+                .map((n) => (
+                  <button
+                    key={n.v}
+                    className={`nav-item ${view === n.v ? 'active' : ''}`}
+                    onClick={n.action}
+                  >
+                    <span className="ni-icon">
+                      <n.icon />
+                    </span>
+                    <span className="ni-label">{n.label}</span>
+                  </button>
+                ))}
             </>
           )}
 
@@ -1659,7 +1693,15 @@ function Shell({
         </aside>
 
         <main className={`main ${view === 'fixtures' && allSeries.length > 0 ? 'fullbleed' : ''}`}>
-          {renderMain()}
+          <ErrorBoundary
+            FallbackComponent={ViewErrorFallback}
+            resetKeys={[view]}
+            onError={(error, info) =>
+              console.error('View render error:', error, info?.componentStack)
+            }
+          >
+            {renderMain()}
+          </ErrorBoundary>
         </main>
       </div>
 
@@ -1707,7 +1749,6 @@ function Shell({
             goto={gotoClubView}
             toast={toastShow}
             allLeagues={allLeagues}
-            unionEmail={unionEmail}
             onSaveDraft={(payload) =>
               updateClub({
                 district: payload.district,
@@ -1753,30 +1794,11 @@ function Shell({
             onUpload={uploadDoc}
             onRemoveFile={removeDocFile}
             onMarkUnavailable={setDocUnavailable}
+            onSetSafeguardingCourse={setSafeguardingCourse}
+            onClearSafeguardingCourse={clearSafeguardingCourse}
             onSaveExco={saveExco}
             submissionDeadline={submissionDeadline}
             unionEmail={unionEmail}
-          />
-        </TaskModal>
-      )}
-
-      {role === 'club' && showRegisterPlayer && activeClub && (
-        <TaskModal
-          eyebrow={`Phase 03 · ${activeClub.name}`}
-          title={
-            <>
-              Register a new <em>player</em>
-            </>
-          }
-          onClose={() => setShowRegisterPlayer(false)}
-        >
-          <RegisterPlayerForm
-            club={activeClub}
-            leagues={allLeagues}
-            toast={toastShow}
-            busy={registerBusy}
-            onSubmit={registerPlayer}
-            onCancel={() => setShowRegisterPlayer(false)}
           />
         </TaskModal>
       )}

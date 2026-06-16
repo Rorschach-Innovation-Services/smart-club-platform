@@ -137,19 +137,28 @@ describe('safeguardingMeta', () => {
     expect(safeguardingMeta(undefined)).toEqual({
       files: [],
       markedCompliant: false,
+      courseBooked: false,
+      courseDate: '',
       at: undefined,
     });
   });
 
   it('normalizes a legacy single upload to a one-entry array', () => {
     const legacy = { objectKey: 't/c/safeguarding-x.pdf', size: 10, uploadedAt: '2026-01-01' };
-    expect(safeguardingMeta(legacy)).toEqual({ files: [legacy], markedCompliant: false });
+    expect(safeguardingMeta(legacy)).toEqual({
+      files: [legacy],
+      markedCompliant: false,
+      courseBooked: false,
+      courseDate: '',
+    });
   });
 
   it('normalizes the legacy admin sentinel to empty files with the flag', () => {
     expect(safeguardingMeta({ markedCompliant: true, at: '2026-01-01' })).toEqual({
       files: [],
       markedCompliant: true,
+      courseBooked: false,
+      courseDate: '',
       at: '2026-01-01',
     });
   });
@@ -159,8 +168,23 @@ describe('safeguardingMeta', () => {
     expect(safeguardingMeta({ files, markedCompliant: true, at: 'T' })).toEqual({
       files,
       markedCompliant: true,
+      courseBooked: false,
+      courseDate: '',
       at: 'T',
     });
+  });
+
+  it('surfaces a booked safeguarding course (no files yet)', () => {
+    expect(safeguardingMeta({ files: [], courseBooked: true, courseDate: '2026-09-01' })).toEqual({
+      files: [],
+      markedCompliant: false,
+      courseBooked: true,
+      courseDate: '2026-09-01',
+      at: undefined,
+    });
+    expect(safeguardingSatisfied({ files: [], courseBooked: true, courseDate: '2026-09-01' })).toBe(
+      true,
+    );
   });
 });
 
