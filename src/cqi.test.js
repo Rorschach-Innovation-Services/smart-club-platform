@@ -61,10 +61,10 @@ describe('CQI · Club Mandate and Objectives section', () => {
   });
 });
 
-// Representation moved from percentages to raw head-counts (slider 0–15). Scoring
-// now derives each race's SHARE of the counted total and keeps the Black African
-// 1.5× weight. These tests pin that re-baselined behaviour so future changes are
-// intentional rather than accidental.
+// Representation moved from percentages to raw head-counts (now an uncapped number
+// input — no per-race limit). Scoring derives each race's SHARE of the counted total
+// and keeps the Black African 1.5× weight. These tests pin that re-baselined
+// behaviour so future changes are intentional rather than accidental.
 describe('scoreCQI · representation by head-count', () => {
   const repOf = (answers) => scoreCQI(answers).byCat.representation.earned;
 
@@ -85,6 +85,13 @@ describe('scoreCQI · representation by head-count', () => {
   it('earns zero when no players are counted (no divide-by-zero)', () => {
     expect(repOf({})).toBe(0);
     expect(repOf({ pctBA: 0, pctIN: 0, pctCO: 0, pctWH: 0 })).toBe(0);
+  });
+
+  it('accepts counts above the old 15 cap and scores on the uncapped share', () => {
+    // 50/10/0/0 → total 60. earned =
+    //   min(4, 50/60·4·1.5=5.0)=4  +  min(2, 10/60·2)=0.3333  = 4.3333
+    // A 15-cap would have given total 25 → 4.4, so this pins the UNCAPPED value.
+    expect(repOf({ pctBA: 50, pctIN: 10, pctCO: 0, pctWH: 0 })).toBeCloseTo(4.3333, 3);
   });
 });
 

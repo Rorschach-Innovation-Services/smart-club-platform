@@ -379,6 +379,25 @@ export function YN({ value, onChange }) {
   );
 }
 
+/* Uncapped count input — CQI Representation demographics (no per-race limit).
+   Emits a clean non-negative integer, or '' when the field is empty, matching the
+   integer contract the rest of the CQI state/scoring already expects. */
+export function CountInput({ value, onChange, min = 0, label }) {
+  return (
+    <input
+      className="num-input"
+      type="number"
+      inputMode="numeric"
+      min={min}
+      aria-label={label}
+      value={value ?? ''}
+      onChange={(e) =>
+        onChange(e.target.value === '' ? '' : Math.max(min, parseInt(e.target.value, 10) || 0))
+      }
+    />
+  );
+}
+
 /* legacy stepper (kept for direct callers) */
 export function NumStep({ value, onChange, min = 0, max = 99 }) {
   return (

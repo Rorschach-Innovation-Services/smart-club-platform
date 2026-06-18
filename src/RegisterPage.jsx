@@ -266,7 +266,7 @@ export function RegisterPage() {
               placeholder="13-digit RSA ID"
             />
             {d.idNumber && !idValid && (
-              <div style={{ color: 'var(--coral)', fontSize: 12, marginTop: 4 }}>
+              <div style={{ color: 'var(--danger-on-dark)', fontSize: 12, marginTop: 4 }}>
                 Must be exactly 13 digits.
               </div>
             )}
@@ -421,7 +421,7 @@ export function RegisterPage() {
           </span>
         </label>
 
-        {error && <div style={{ color: 'var(--coral)', fontSize: 12.5 }}>{error}</div>}
+        {error && <div style={{ color: 'var(--danger-on-dark)', fontSize: 12.5 }}>{error}</div>}
         <button
           className="btn btn-teal"
           type="submit"

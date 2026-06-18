@@ -140,7 +140,7 @@ function OtpLogin({ auth, branding }) {
                 style={{ width: '100%', marginBottom: 12, fontSize: 16 }}
               />
               {error && (
-                <div style={{ color: 'var(--coral)', fontSize: 12.5, marginBottom: 10 }}>
+                <div style={{ color: 'var(--danger-on-dark)', fontSize: 12.5, marginBottom: 10 }}>
                   {error}
                 </div>
               )}
@@ -159,7 +159,7 @@ function OtpLogin({ auth, branding }) {
               <div className="ps-card-title" style={{ marginBottom: 6 }}>
                 Enter the code
               </div>
-              <p style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 14 }}>
+              <p style={{ fontSize: 12.5, color: 'var(--muted-on-dark)', marginBottom: 14 }}>
                 We emailed a one-time code to <strong>{email}</strong>.
               </p>
               <input
@@ -178,14 +178,14 @@ function OtpLogin({ auth, branding }) {
                 }}
               />
               {error && (
-                <div style={{ color: 'var(--coral)', fontSize: 12.5, marginBottom: 10 }}>
+                <div style={{ color: 'var(--danger-on-dark)', fontSize: 12.5, marginBottom: 10 }}>
                   {error}
                 </div>
               )}
               {resent && (
                 <div
                   role="status"
-                  style={{ color: 'var(--muted)', fontSize: 12.5, marginBottom: 10 }}
+                  style={{ color: 'var(--muted-on-dark)', fontSize: 12.5, marginBottom: 10 }}
                 >
                   New code sent — check your email (including spam / “Other”).
                 </div>
@@ -208,7 +208,7 @@ function OtpLogin({ auth, branding }) {
                   background: 'none',
                   border: 'none',
                   cursor: 'pointer',
-                  color: 'var(--muted)',
+                  color: 'var(--muted-on-dark)',
                   fontSize: 12.5,
                   textDecoration: 'underline',
                 }}
@@ -261,7 +261,9 @@ function DevLogin({ auth, branding }) {
       <div className="ps-cards" style={{ justifyContent: 'center' }}>
         <form className="ps-card" style={{ cursor: 'default', maxWidth: 420 }} onSubmit={go}>
           <div className="ps-card-role">Local sign-in</div>
-          <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', marginTop: 12 }}>
+          <label
+            style={{ display: 'block', fontSize: 12, color: 'var(--muted-on-dark)', marginTop: 12 }}
+          >
             Role
             <select
               className="field-select"
@@ -274,7 +276,14 @@ function DevLogin({ auth, branding }) {
             </select>
           </label>
           {role === 'rep' && (
-            <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', marginTop: 10 }}>
+            <label
+              style={{
+                display: 'block',
+                fontSize: 12,
+                color: 'var(--muted-on-dark)',
+                marginTop: 10,
+              }}
+            >
               Club IDs (comma-separated)
               <input
                 className="field-input"

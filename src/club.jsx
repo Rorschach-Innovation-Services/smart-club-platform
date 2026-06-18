@@ -52,6 +52,7 @@ import {
   Rating,
   MoneyInput,
   NumSlider,
+  CountInput,
   CountUp,
   cqiBand,
   scoreCQI,
@@ -3427,7 +3428,7 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline, allLe
                   {q.kind === 'num'
                     ? `Number · max ${q.max}`
                     : q.kind === 'count'
-                      ? `Number of players · max ${q.max}`
+                      ? 'Number of players'
                       : q.kind === 'choice'
                         ? 'Select one'
                         : q.kind === 'money'
@@ -3445,7 +3446,11 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline, allLe
                 <NumSlider value={answers[q.key]} onChange={(v) => setA(q.key, v)} max={q.max} />
               )}
               {q.kind === 'count' && (
-                <NumSlider value={answers[q.key]} onChange={(v) => setA(q.key, v)} max={q.max} />
+                <CountInput
+                  value={answers[q.key]}
+                  onChange={(v) => setA(q.key, v)}
+                  label={q.label}
+                />
               )}
               {q.kind === 'choice' && (
                 <Choice

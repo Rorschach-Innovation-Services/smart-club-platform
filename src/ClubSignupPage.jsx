@@ -226,7 +226,14 @@ export function ClubSignupPage() {
             >
               Go to {done.clubName}
             </button>
-            <p style={{ fontSize: 12, color: 'var(--muted-on-dark)', marginTop: 14, lineHeight: 1.5 }}>
+            <p
+              style={{
+                fontSize: 12,
+                color: 'var(--muted-on-dark)',
+                marginTop: 14,
+                lineHeight: 1.5,
+              }}
+            >
               You&apos;re signed in and your session was refreshed — the new club is ready.
             </p>
           </>
@@ -241,7 +248,14 @@ export function ClubSignupPage() {
             >
               Continue to sign in
             </button>
-            <p style={{ fontSize: 12, color: 'var(--muted-on-dark)', marginTop: 14, lineHeight: 1.5 }}>
+            <p
+              style={{
+                fontSize: 12,
+                color: 'var(--muted-on-dark)',
+                marginTop: 14,
+                lineHeight: 1.5,
+              }}
+            >
               Already signed in on this device? Sign out and back in to see your new club.
             </p>
           </>
@@ -273,13 +287,17 @@ export function ClubSignupPage() {
           <div>
             <Field label="Cell" value={form.repCell} onChange={set('repCell')} />
             {cellError && (
-              <div style={{ color: 'var(--coral)', fontSize: 12.5, marginTop: 4 }}>{cellError}</div>
+              <div style={{ color: 'var(--danger-on-dark)', fontSize: 12.5, marginTop: 4 }}>
+                {cellError}
+              </div>
             )}
           </div>
         </Row>
         <Field label="Club name" required value={form.clubName} onChange={set('clubName')} />
         {nameError && (
-          <div style={{ color: 'var(--coral)', fontSize: 12.5, marginTop: -8 }}>{nameError}</div>
+          <div style={{ color: 'var(--danger-on-dark)', fontSize: 12.5, marginTop: -8 }}>
+            {nameError}
+          </div>
         )}
         <label style={{ display: 'block' }}>
           <span className="reg-label">
@@ -306,7 +324,7 @@ export function ClubSignupPage() {
           By registering, you agree the union may store these details to administer your club&apos;s
           affiliation.
         </p>
-        {error && <div style={{ color: 'var(--coral)', fontSize: 12.5 }}>{error}</div>}
+        {error && <div style={{ color: 'var(--danger-on-dark)', fontSize: 12.5 }}>{error}</div>}
         <button
           className="btn btn-teal"
           type="submit"
@@ -323,7 +341,9 @@ export function ClubSignupPage() {
 
 function SignInLink({ onClick }) {
   return (
-    <div style={{ marginTop: 16, textAlign: 'center', fontSize: 12.5, color: 'var(--muted-on-dark)' }}>
+    <div
+      style={{ marginTop: 16, textAlign: 'center', fontSize: 12.5, color: 'var(--muted-on-dark)' }}
+    >
       Already registered?{' '}
       <button
         type="button"
@@ -333,7 +353,7 @@ function SignInLink({ onClick }) {
           border: 'none',
           padding: 0,
           font: 'inherit',
-          color: 'var(--teal-deep)',
+          color: 'var(--green-bright)',
           textDecoration: 'underline',
           cursor: 'pointer',
         }}

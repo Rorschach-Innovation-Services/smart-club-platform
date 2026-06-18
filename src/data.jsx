@@ -796,6 +796,8 @@ export const CQI_STRUCTURE = [
     weight: 10,
     accent: 'var(--navy-light)',
     desc: 'Player demographics across the club.',
+    // `max` is vestigial for kind:'count' — these render as uncapped number inputs
+    // (CountInput) and score on proportional share, so no per-race limit is enforced.
     questions: [
       { key: 'pctBA', label: 'Black African', kind: 'count', max: 15, pts: 4 },
       { key: 'pctIN', label: 'Indian', kind: 'count', max: 15, pts: 2 },
