@@ -1006,6 +1006,45 @@ function Shell({
       })
       .catch(() => undefined);
   }
+  // AGM "we haven't held our AGM yet": a club with no minutes to upload records the future
+  // date the AGM will be held. Sets docs.agm so compliance reads complete (per decision a
+  // booked meeting counts the doc complete), and stamps a {meetingBooked, meetingDate}
+  // sentinel — the single-file analogue of the safeguarding course booking. Undo clears it.
+  function setAgmMeeting(meetingDate) {
+    const club = activeClub;
+    if (!club) return Promise.resolve();
+    const docs = { ...(club.docs || {}), agm: true };
+    const docMeta = {
+      ...(club.docMeta || {}),
+      agm: { meetingBooked: true, meetingDate, at: new Date().toISOString() },
+    };
+    return patchClubAt(club.version, { docs, docMeta })
+      .then((updated) => {
+        toastShow('AGM date recorded', 'ok', {
+          label: 'Undo',
+          onClick: () => clearAgmMeeting(),
+        });
+        return updated;
+      })
+      .catch(() => undefined);
+  }
+  function clearAgmMeeting() {
+    const club = activeClub;
+    if (!club) return Promise.resolve();
+    // A real upload (objectKey) outranks the booking — keep the file and stay complete.
+    const existing = club.docMeta?.agm;
+    const hasUpload = !!existing?.objectKey;
+    const docs = { ...(club.docs || {}), agm: hasUpload };
+    const docMeta = { ...(club.docMeta || {}) };
+    if (hasUpload) docMeta.agm = existing;
+    else delete docMeta.agm;
+    return patchClubAt(club.version, { docs, docMeta })
+      .then((updated) => {
+        toastShow('Reset — upload minutes when ready');
+        return updated;
+      })
+      .catch(() => undefined);
+  }
   // Remove one stored safeguarding certificate (the only multi-file doc).
   function removeDocFile(key, objectKey) {
     return withToast(
@@ -1796,6 +1835,8 @@ function Shell({
             onMarkUnavailable={setDocUnavailable}
             onSetSafeguardingCourse={setSafeguardingCourse}
             onClearSafeguardingCourse={clearSafeguardingCourse}
+            onSetAgmMeeting={setAgmMeeting}
+            onClearAgmMeeting={clearAgmMeeting}
             onSaveExco={saveExco}
             submissionDeadline={submissionDeadline}
             unionEmail={unionEmail}

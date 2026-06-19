@@ -5,6 +5,7 @@ import {
   docsAllComplete,
   docsUploadedCount,
   docFileMeta,
+  agmMeta,
   REQUIRED_DOCS,
 } from './data.jsx';
 
@@ -30,6 +31,41 @@ describe('financial-statements "Unavailable" sentinel', () => {
   it('undo (clearing the flag) drops it back to incomplete', () => {
     const club = { docs: { ...allButFin, financials: false }, docMeta: {} };
     expect(docsAllComplete(club)).toBe(false);
+  });
+});
+
+// A club with no AGM minutes can instead record the future date its AGM will be held:
+// docs.agm flips true (per decision a booked meeting counts the doc complete) with a
+// {meetingBooked, meetingDate} sentinel — the single-file analogue of safeguarding's course
+// booking. It carries no objectKey (no viewable file) and is NOT an admin override.
+describe('AGM "meeting booked" sentinel', () => {
+  const allButAgm = Object.fromEntries(REQUIRED_DOCS.map((d) => [d.key, d.key !== 'agm']));
+
+  it('counts a booked-meeting AGM as complete', () => {
+    const club = {
+      docs: { ...allButAgm, agm: true },
+      docMeta: { agm: { meetingBooked: true, meetingDate: '2026-09-01', at: AT } },
+    };
+    expect(docsUploadedCount(club)).toBe(REQUIRED_DOCS.length);
+    expect(docsAllComplete(club)).toBe(true);
+  });
+
+  it('agmMeta reads the sentinel; exposes no real file (no View affordance)', () => {
+    const meta = { meetingBooked: true, meetingDate: '2026-09-01', at: AT };
+    expect(agmMeta(meta)).toEqual({ meetingBooked: true, meetingDate: '2026-09-01' });
+    expect(docFileMeta(meta).real).toBe(false);
+    expect(agmMeta(undefined)).toEqual({ meetingBooked: false, meetingDate: '' });
+  });
+
+  it('admin Revert never strips a booked meeting (club self-declaration, not an override)', () => {
+    const c = club({
+      docs: { agm: true },
+      docMeta: { agm: { meetingBooked: true, meetingDate: '2026-09-01', at: AT } },
+    });
+    const { docs, docMeta, reverted } = computeRevertCompliance(c, ['agm']);
+    expect(reverted).toEqual([]);
+    expect(docs.agm).toBe(true);
+    expect(docMeta.agm).toEqual({ meetingBooked: true, meetingDate: '2026-09-01', at: AT });
   });
 });
 

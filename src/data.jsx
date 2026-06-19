@@ -276,6 +276,19 @@ export function safeguardingSatisfied(meta) {
   return m.markedCompliant || m.courseBooked || m.files.length >= MIN_SAFEGUARDING_FILES;
 }
 
+// ── AGM Minutes: "we haven't held our AGM yet" → record a future meeting date ──
+// A club with no minutes to upload declares the date the AGM will be held. Mirrors the
+// safeguarding course-booking sentinel but for a single-file doc:
+// docMeta.agm = { meetingBooked: true, meetingDate: 'YYYY-MM-DD', at: ISO } (no objectKey).
+// docs.agm is satisfied by either a real upload OR a booked meeting. Single source of truth
+// for the club row, the admin row, and the revert guard so the definition can't drift.
+export function agmMeta(meta) {
+  return {
+    meetingBooked: !!meta?.meetingBooked,
+    meetingDate: meta?.meetingDate || '',
+  };
+}
+
 /**
  * Derive display fields for an uploaded compliance document from its `docMeta` entry.
  * A real upload carries an `objectKey`; an admin "mark compliant" override (or a sample
@@ -679,16 +692,20 @@ SAMPLE_CLUBS.forEach((c) => {
 });
 
 // CQI structure — categories, weights, and questions
-// Weighting model: Admin 20 / Teams 20 / Coaching 20 / Facilities 15 / Representation 10 / Financial 15 = 100
+// Weighting model: Admin 18 / Teams 18 / Coaching 18 / Facilities 14 / Representation 9 /
+// Financial 13 / Governance 10 = 100. The six capability categories were scaled from their
+// original 20/20/20/15/10/15 (=100) down to 90 to make room for the 10-pt Governance &
+// Compliance dimension. Stored club.cqi is a per-submission snapshot — historical scores
+// predate this 7th dimension and re-baseline only when a club next submits.
 export const CQI_STRUCTURE = [
   {
-    // Key stays 'admin' so existing byCat references keep resolving; the old
-    // governance questions (constitution/conduct/agm/minutes/officers/playerdb/
-    // inventory) were dropped as redundant with the affiliation form + compliance
-    // uploads, and replaced with forward-looking mandate/ambition questions.
+    // Key stays 'admin' so existing byCat references keep resolving. The forward-looking
+    // mandate/ambition questions live here; the governance checks they once shared the
+    // category with (constitution/conduct/agm/minutes/officers/playerdb/inventory) now live
+    // in the dedicated 'governance' category below, auto-filled from compliance documents.
     key: 'admin',
     title: 'Club Mandate and Objectives',
-    weight: 20,
+    weight: 18,
     accent: 'var(--navy)',
     desc: "The club's vision, ambition and development pathways for the seasons ahead.",
     questions: [
@@ -733,7 +750,7 @@ export const CQI_STRUCTURE = [
   {
     key: 'teams',
     title: 'Teams',
-    weight: 20,
+    weight: 18,
     accent: 'var(--teal)',
     desc: 'Squad depth across senior, women and junior structures.',
     questions: [
@@ -752,7 +769,7 @@ export const CQI_STRUCTURE = [
   {
     key: 'coaching',
     title: 'Coaching',
-    weight: 20,
+    weight: 18,
     accent: 'var(--gold)',
     desc: 'Coach-to-team ratio and accreditation levels.',
     questions: [
@@ -764,7 +781,7 @@ export const CQI_STRUCTURE = [
   {
     key: 'facilities',
     title: 'Facilities',
-    weight: 15,
+    weight: 14,
     accent: 'var(--coral)',
     desc: 'Playing fields, nets and venue ownership.',
     questions: [
@@ -793,7 +810,7 @@ export const CQI_STRUCTURE = [
   {
     key: 'representation',
     title: 'Representation',
-    weight: 10,
+    weight: 9,
     accent: 'var(--navy-light)',
     desc: 'Player demographics across the club.',
     // `max` is vestigial for kind:'count' — these render as uncapped number inputs
@@ -808,7 +825,7 @@ export const CQI_STRUCTURE = [
   {
     key: 'financial',
     title: 'Financial Sustainability',
-    weight: 15,
+    weight: 13,
     accent: 'var(--green)',
     desc: 'Member subscriptions and monetary sponsorships keeping the club running.',
     questions: [
@@ -829,7 +846,109 @@ export const CQI_STRUCTURE = [
       { key: 'sponsors', label: 'Number of monetary sponsors', kind: 'num', max: 10, pts: 9 },
     ],
   },
+  {
+    // Governance & Compliance — the foundational checks the Cricket Services requirements
+    // expect. These are NOT entered by the club: they auto-fill from the compliance documents
+    // and club data (see deriveGovernance below), but stay editable so a club can correct a
+    // nuance. Reuses the legacy governance question keys.
+    key: 'governance',
+    title: 'Governance & Compliance',
+    weight: 10,
+    accent: 'var(--navy)',
+    desc: 'Auto-filled from your compliance documents and club records — adjust if needed.',
+    questions: [
+      { key: 'constitution', label: 'Club has a current Constitution', kind: 'yn', pts: 2 },
+      { key: 'codeOfConduct', label: 'Code of Conduct is in place', kind: 'yn', pts: 1 },
+      { key: 'inventory', label: 'General Admin Inventory maintained', kind: 'yn', pts: 1 },
+      { key: 'agmConducted', label: 'AGM conducted at least once a year', kind: 'yn', pts: 2 },
+      {
+        key: 'officers',
+        label: 'Chairperson, Secretary & Treasurer in place',
+        kind: 'yn',
+        pts: 2,
+      },
+      { key: 'agmMinutes', label: 'Minutes of AGM available', kind: 'yn', pts: 1 },
+      { key: 'playerdb', label: 'Player database available', kind: 'yn', pts: 1 },
+    ],
+  },
 ];
+
+// ── CQI Governance auto-fill ──
+// The Governance & Compliance category is derived from compliance documents and club records
+// rather than entered by the club. Single source of truth for both the club CQI form and the
+// admin breakdown so the mapping can't drift.
+export const GOVERNANCE_KEYS = [
+  'constitution',
+  'codeOfConduct',
+  'inventory',
+  'agmConducted',
+  'officers',
+  'agmMinutes',
+  'playerdb',
+];
+
+/** The seven governance answers derived from a club's documents and records. */
+export function deriveGovernance(club) {
+  const docs = club?.docs || {};
+  const playerCount = club?.players ?? club?.playerCount ?? 0;
+  return {
+    constitution: !!docs.constitution,
+    codeOfConduct: !!docs.codeOfConduct,
+    // No standalone source — admin inventory is maintained on-platform via the affiliation
+    // form and roster, so it's treated as in place (editable if a club disagrees).
+    inventory: true,
+    // docs.agm is satisfied by uploaded minutes OR a booked AGM meeting date.
+    agmConducted: !!docs.agm,
+    officers: !!docs.exco,
+    agmMinutes: !!docs.agm,
+    playerdb: playerCount > 0,
+  };
+}
+
+// Old-schema CQI answer keys with no equivalent in the current structure. Their presence in a
+// stored cqiAnswers marks a submission made BEFORE the Governance & Compliance category
+// existed — back then an approximation block wrote governance-ish keys (constitution / officers
+// / inventory / playerdb) into cqiAnswers. Those are NOT genuine club overrides, so they must
+// not win over the live document derivation. A current submission never writes these keys.
+const LEGACY_CQI_KEYS = ['agm', 'minutes', 'conduct'];
+
+/**
+ * A club's genuine stored CQI answers. For legacy submissions (detected by an orphan old-schema
+ * key) the colliding governance keys are dropped so they re-derive from the documents rather
+ * than freezing on a stale approximation. Single source of truth for "did the club genuinely
+ * answer this" — used both to build effectiveAnswers and to tag answer provenance.
+ */
+export function genuineCqiAnswers(club) {
+  const stored = { ...(club?.cqiAnswers || {}) };
+  if (LEGACY_CQI_KEYS.some((k) => k in stored)) {
+    for (const k of GOVERNANCE_KEYS) delete stored[k];
+  }
+  return stored;
+}
+
+/**
+ * Effective CQI answers for scoring/display: the auto-filled governance values overlaid by
+ * whatever the club has genuinely stored. Because we persist only governance OVERRIDES (see
+ * governanceOverrides), untouched governance answers keep tracking the documents live — so
+ * every consumer that scores or renders answers must read through this, not raw cqiAnswers.
+ */
+export function effectiveAnswers(club) {
+  return { ...deriveGovernance(club), ...genuineCqiAnswers(club) };
+}
+
+/**
+ * Strip governance answers that equal their derived value, leaving only genuine club
+ * overrides. Called at submit so a club that later uploads a document isn't frozen on the
+ * stale auto-filled value it happened to submit with.
+ */
+export function governanceOverrides(answers, club) {
+  const derived = deriveGovernance(club);
+  const out = { ...answers };
+  for (const k of GOVERNANCE_KEYS) {
+    if (out[k] === derived[k]) delete out[k];
+  }
+  return out;
+}
 
 // Aggregate stats helpers
 export function cohortStats(clubs) {
@@ -907,6 +1026,9 @@ export function computeRevertCompliance(club, keys) {
       reverted.push(k);
       continue;
     }
+    // A booked AGM meeting is a club self-declaration (a future meeting date), not an admin
+    // override — "Revert" must never strip it. Mirrors the safeguarding courseBooked guard.
+    if (k === 'agm' && agmMeta(m).meetingBooked) continue;
     if (m && m.markedCompliant && !m.objectKey) {
       docs[k] = false;
       delete docMeta[k];

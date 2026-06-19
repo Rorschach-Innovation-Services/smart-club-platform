@@ -9,10 +9,13 @@ import {
   DISTRICTS,
   REQUIRED_DOCS,
   CQI_STRUCTURE,
+  effectiveAnswers,
+  genuineCqiAnswers,
   SUBMISSION_DEADLINE_DEFAULT,
   cohortStats,
   docFileMeta,
   safeguardingMeta,
+  agmMeta,
   MIN_SAFEGUARDING_FILES,
   docCompletion,
   docsUploadedCount,
@@ -4094,10 +4097,22 @@ export function AdminClubDetail({
               const sg = d.key === 'safeguarding' ? safeguardingMeta(meta) : null;
               const { real, metaText } = docFileMeta(meta);
               const sgSatisfied = sg ? sg.files.length >= MIN_SAFEGUARDING_FILES : false;
+              // A booked AGM meeting is a club self-declaration (future meeting date), not an
+              // admin override — it must render as its own state, never "Override", and is
+              // not revertable by the admin (the club self-clears via Undo on its portal).
+              const agm = d.key === 'agm' ? agmMeta(meta) : null;
+              const agmBooked = !!agm?.meetingBooked;
+              const agmDateLabel =
+                agm?.meetingDate &&
+                new Date(agm.meetingDate).toLocaleDateString('en-GB', {
+                  day: 'numeric',
+                  month: 'short',
+                  year: 'numeric',
+                });
               // Safeguarding "override" = any compliant flag the uploads don't
               // justify: explicit sentinel, legacy flag-only (no docMeta — the
               // seeded demo clubs), or a grandfathered single file. All revert.
-              const override = sg ? up && !sgSatisfied : up && !real;
+              const override = sg ? up && !sgSatisfied : up && !real && !agmBooked;
               // A lingering sentinel on a club that later met the minimum on its
               // own shows Approved but must stay revertable.
               const canRevert = override || (sg ? up && sg.markedCompliant : false);
@@ -4142,6 +4157,8 @@ export function AdminClubDetail({
                         ) : (
                           'Not yet uploaded · awaiting club'
                         )
+                      ) : agmBooked ? (
+                        `No minutes yet — AGM to be held on ${agmDateLabel}`
                       ) : real ? (
                         metaText
                       ) : override ? (
@@ -4153,12 +4170,14 @@ export function AdminClubDetail({
                   </div>
                   {up || (sg && sg.files.length > 0) ? (
                     <div className="doc-row-actions">
-                      <Pill tone={override || (sg && !up) ? 'gold' : 'teal'} dot>
+                      <Pill tone={override || agmBooked || (sg && !up) ? 'gold' : 'teal'} dot>
                         {sg && !up
                           ? `${sg.files.length} of ${MIN_SAFEGUARDING_FILES} minimum`
-                          : override
-                            ? 'Override'
-                            : 'Approved'}
+                          : agmBooked
+                            ? `Meeting booked · ${agmDateLabel}`
+                            : override
+                              ? 'Override'
+                              : 'Approved'}
                       </Pill>
                       {/* Only real uploads (with a stored file) can be previewed;
                           overrides have no file on record. Safeguarding previews
@@ -4211,10 +4230,11 @@ export function AdminClubDetail({
             ) : (
               <div className="score-grid" style={{ marginBottom: 0 }}>
                 {CQI_STRUCTURE.map((cat) => {
-                  // Real per-category score from the club's stored answers (falls
-                  // back to a proportional estimate only for legacy clubs that have
-                  // a score but no persisted answers).
-                  const byCat = club.cqiAnswers ? scoreCQI(club.cqiAnswers).byCat : null;
+                  // Real per-category score from the club's effective answers (governance is
+                  // auto-filled from docs + stored overlays, so score the merged view, not raw
+                  // cqiAnswers). Falls back to a proportional estimate only for legacy clubs
+                  // that have a score but no persisted answers.
+                  const byCat = club.cqiAnswers ? scoreCQI(effectiveAnswers(club)).byCat : null;
                   const score = byCat
                     ? byCat[cat.key].earned
                     : Math.min(cat.weight, cat.weight * Math.min(1, club.cqi / 100));
@@ -4234,6 +4254,62 @@ export function AdminClubDetail({
                 })}
               </div>
             )}
+            {/* Governance & Compliance answers — auto-filled from this club's compliance
+                documents and records, with any club override flagged. Lets admins see exactly
+                what was declared without opening the club portal. */}
+            {club.cqi > 0 &&
+              (() => {
+                const gov = CQI_STRUCTURE.find((c) => c.key === 'governance');
+                if (!gov) return null;
+                const eff = effectiveAnswers(club);
+                // A genuine club override (not a legacy approximation) — drives the provenance tag.
+                const genuine = genuineCqiAnswers(club);
+                return (
+                  <div style={{ marginTop: 16 }}>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.1em',
+                        color: 'var(--muted-2)',
+                        marginBottom: 8,
+                      }}
+                    >
+                      Governance &amp; Compliance · auto-filled
+                    </div>
+                    <div className="stack" style={{ gap: 6 }}>
+                      {gov.questions.map((q) => {
+                        const yes = eff[q.key] === true;
+                        const edited = q.key in genuine;
+                        return (
+                          <div
+                            key={q.key}
+                            className="row"
+                            style={{ justifyContent: 'space-between', gap: 12 }}
+                          >
+                            <span style={{ fontSize: 13, color: 'var(--ink)' }}>{q.label}</span>
+                            <span className="row" style={{ gap: 8 }}>
+                              <span
+                                style={{
+                                  fontSize: 10,
+                                  textTransform: 'uppercase',
+                                  letterSpacing: '0.08em',
+                                  color: 'var(--muted-2)',
+                                }}
+                              >
+                                {edited ? 'Club-edited' : 'Auto'}
+                              </span>
+                              <Pill tone={yes ? 'teal' : 'gold'} dot>
+                                {yes ? 'Yes' : 'No'}
+                              </Pill>
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
           </Card>
         </div>
 
@@ -4610,11 +4686,15 @@ function RemoveClubModal({ club, allSeries = [], onClose, onConfirm }) {
 
 /* ─── CqiViewModal — read-only view of a club's submitted CQI self-assessment ─── */
 function CqiViewModal({ club, onClose }) {
-  const answers = club.cqiAnswers || {};
+  // Read through effectiveAnswers so the auto-filled Governance & Compliance answers render
+  // (they're not persisted in cqiAnswers — only genuine overrides are). The empty-state gate
+  // still keys off the raw stored answers, so a legacy club with a bare score isn't shown a
+  // grid built purely from derived governance values.
+  const answers = effectiveAnswers(club);
   const band = cqiBand(club.cqi);
   // Legacy/seeded clubs can carry a score with no itemised answers (answer capture
   // post-dates them). Show an honest empty state instead of a grid of dashes.
-  const hasAnswers = Object.keys(answers).length > 0;
+  const hasAnswers = Object.keys(club.cqiAnswers || {}).length > 0;
   // Render each answer by its question kind so booleans, counts, percentages,
   // choices and money all read correctly (iterate the structure, not the answers,
   // so nothing is orphaned).

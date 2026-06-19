@@ -17,6 +17,9 @@ import {
   greeting,
   REQUIRED_DOCS,
   CQI_STRUCTURE,
+  deriveGovernance,
+  effectiveAnswers,
+  governanceOverrides,
   docFileMeta,
   DOC_ACCEPT,
   resolveDocMime,
@@ -24,6 +27,7 @@ import {
   extFromMime,
   safeguardingMeta,
   MIN_SAFEGUARDING_FILES,
+  agmMeta,
   docCompletion,
   docsUploadedCount,
   overallProgress,
@@ -2737,6 +2741,8 @@ export function DocumentsView({
   onMarkUnavailable,
   onSetSafeguardingCourse,
   onClearSafeguardingCourse,
+  onSetAgmMeeting,
+  onClearAgmMeeting,
   onSaveExco,
   submissionDeadline,
   unionEmail,
@@ -2759,6 +2765,10 @@ export function DocumentsView({
   // reveals the date control; `sgCourseDate` holds the in-progress YYYY-MM-DD value.
   const [sgCourseOpen, setSgCourseOpen] = useStateC(false);
   const [sgCourseDate, setSgCourseDate] = useStateC('');
+  // AGM "we haven't held our AGM yet → record the meeting date" affordance — the single-file
+  // analogue of the safeguarding course booking. `agmMeetingOpen` reveals the date control.
+  const [agmMeetingOpen, setAgmMeetingOpen] = useStateC(false);
+  const [agmMeetingDate, setAgmMeetingDate] = useStateC('');
   // Today as YYYY-MM-DD — used both as the date input's `min` and to reject past/today.
   const sgToday = new Date().toISOString().slice(0, 10);
   const excoBearerCount = (() => {
@@ -2782,6 +2792,22 @@ export function DocumentsView({
     onSetSafeguardingCourse && onSetSafeguardingCourse(sgCourseDate);
     setSgCourseOpen(false);
     setSgCourseDate('');
+  }
+
+  // Confirm the AGM meeting date. Like the safeguarding course, the date must be in the
+  // future — the booking always points forward to a meeting yet to be held.
+  function confirmAgmMeeting() {
+    if (!agmMeetingDate) {
+      toast('Choose the date your AGM will be held', 'warn');
+      return;
+    }
+    if (agmMeetingDate <= sgToday) {
+      toast('The AGM meeting date must be in the future', 'warn');
+      return;
+    }
+    onSetAgmMeeting && onSetAgmMeeting(agmMeetingDate);
+    setAgmMeetingOpen(false);
+    setAgmMeetingDate('');
   }
 
   return (
@@ -2831,14 +2857,26 @@ export function DocumentsView({
           // upload — a distinct sentinel (vs an admin compliance override).
           const isFinancials = d.key === 'financials';
           const unavailable = !!club.docMeta?.[d.key]?.unavailable;
+          // AGM Minutes: a club with no minutes yet may instead record the future date its
+          // AGM will be held — a single-file analogue of the safeguarding course booking.
+          const isAgm = d.key === 'agm';
+          const meta = club.docMeta?.[d.key];
+          const agm = isAgm ? agmMeta(meta) : null;
+          const agmBooked = !!agm?.meetingBooked;
           // Real uploads carry docMeta with an objectKey; an admin "mark compliant"
           // override sets the flag with no file. Demo/local mode has no docMeta at all
           // but should still preview the bundled sample. Safeguarding is multi-file:
           // one certificate per person, at least two people.
-          const meta = club.docMeta?.[d.key];
           const demo = import.meta.env.VITE_LOCAL_AUTH === '1';
           const { real, metaText } = docFileMeta(meta);
           const sg = isSafeguarding ? safeguardingMeta(meta) : null;
+          const agmDateLabel = agm?.meetingDate
+            ? new Date(agm.meetingDate).toLocaleDateString('en-GB', {
+                day: 'numeric',
+                month: 'short',
+                year: 'numeric',
+              })
+            : '';
           return (
             <div key={d.key} className={`doc-row ${up ? 'uploaded' : ''}`}>
               <div className="doc-icon">{isExco ? <Icon.Form /> : <Icon.Doc />}</div>
@@ -2966,6 +3004,52 @@ export function DocumentsView({
                     ) : (
                       d.desc
                     )
+                  ) : isAgm && agmBooked ? (
+                    <span>
+                      No minutes yet — your AGM will be held on{' '}
+                      <strong style={{ color: 'var(--navy)' }}>{agmDateLabel}</strong> ·{' '}
+                      <a
+                        style={{ color: 'var(--teal-deep)', cursor: 'pointer' }}
+                        onClick={() => onClearAgmMeeting && onClearAgmMeeting()}
+                      >
+                        Undo
+                      </a>
+                    </span>
+                  ) : isAgm && agmMeetingOpen ? (
+                    <span style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      <span>{d.desc}</span>
+                      <span className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
+                        <span className="field" style={{ marginBottom: 0 }}>
+                          <span
+                            className="field-label"
+                            style={{ display: 'block', marginBottom: 4 }}
+                          >
+                            AGM meeting date
+                          </span>
+                          <input
+                            type="date"
+                            className="field-input"
+                            min={sgToday}
+                            value={agmMeetingDate}
+                            onChange={(e) => setAgmMeetingDate(e.target.value)}
+                            style={{ maxWidth: 200 }}
+                          />
+                        </span>
+                        <Btn tone="ink" size="sm" onClick={confirmAgmMeeting}>
+                          Confirm date
+                        </Btn>
+                        <Btn
+                          tone="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setAgmMeetingOpen(false);
+                            setAgmMeetingDate('');
+                          }}
+                        >
+                          Cancel
+                        </Btn>
+                      </span>
+                    </span>
                   ) : up ? (
                     isExco ? (
                       <span>
@@ -3061,6 +3145,22 @@ export function DocumentsView({
                     </Btn>
                   )}
                 </>
+              ) : isAgm && agmBooked ? (
+                <>
+                  <Pill tone="gold" dot>
+                    Meeting booked · {agmDateLabel}
+                  </Pill>
+                  {/* The club can still upload real minutes without first undoing the booking —
+                      a successful upload replaces the sentinel with the stored file. */}
+                  <DocUploadButton
+                    clubId={club.id}
+                    docKey={d.key}
+                    label={d.name}
+                    onUploaded={onUpload}
+                    toast={toast}
+                    buttonLabel="Upload minutes"
+                  />
+                </>
               ) : up ? (
                 <>
                   <Pill tone={unavailable ? 'gold' : 'teal'} dot>
@@ -3090,6 +3190,16 @@ export function DocumentsView({
                       title="No financial statements to upload"
                     >
                       Unavailable
+                    </Btn>
+                  )}
+                  {isAgm && onSetAgmMeeting && !agmMeetingOpen && (
+                    <Btn
+                      tone="outline"
+                      size="sm"
+                      onClick={() => setAgmMeetingOpen(true)}
+                      title="No AGM minutes yet — record the date your AGM will be held"
+                    >
+                      We haven&apos;t held our AGM yet
                     </Btn>
                   )}
                   <DocUploadButton
@@ -3288,18 +3398,14 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline, allLe
     // Prefer the real stored answers (persisted on submit). Only fall back to the
     // score-band approximation for legacy clubs that have a score but no answers.
     if (club.cqiAnswers && Object.keys(club.cqiAnswers).length) {
-      return { ...club.cqiAnswers };
+      // Governance answers are auto-filled from compliance docs (only genuine overrides are
+      // persisted), so derive them fresh and let stored overrides win.
+      return effectiveAnswers(club);
     }
-    const a = {};
+    // Governance auto-fills for every club (not just legacy scored ones).
+    const a = { ...deriveGovernance(club) };
     if (club.cqi > 0) {
-      // approximate defaults based on the club's score band
-      a.constitution = !!club.docs.constitution;
-      a.agm = !!club.docs.agm;
-      a.minutes = !!club.docs.agm;
-      a.officers = true;
-      a.conduct = true;
-      a.inventory = true;
-      a.playerdb = true;
+      // approximate capability defaults based on the club's score band.
       // Mirror the home-page glance card: team counts derive from leagues entered.
       const tc = teamCounts(club.leagues, allLeagues);
       a.senior = tc.senior;
@@ -3352,10 +3458,11 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline, allLe
             Club Quality <em>Index</em> · 2026/27
           </h1>
           <p className="ph-desc">
-            Score your club across six dimensions of capability. Your responses are scored in real
-            time using the official Dolphins CQI weighting model — club mandate &amp; objectives 20
-            pts, teams 20 pts, coaching 20 pts, facilities 15 pts, representation 10 pts, financial
-            sustainability 15 pts.
+            Score your club across seven dimensions. Your responses are scored in real time using
+            the official Dolphins CQI weighting model — club mandate &amp; objectives 18 pts, teams
+            18 pts, coaching 18 pts, facilities 14 pts, representation 9 pts, financial
+            sustainability 13 pts, governance &amp; compliance 10 pts. Governance answers auto-fill
+            from your compliance documents — adjust any that need correcting.
           </p>
         </div>
       </div>
@@ -3504,7 +3611,9 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline, allLe
               tone="teal"
               icon={Icon.Check}
               onClick={() => {
-                onSubmit(total, answers);
+                // Persist only genuine governance overrides — auto-filled answers stay live
+                // against the documents so they don't freeze on the value submitted with.
+                onSubmit(total, governanceOverrides(answers, club));
                 toast('CQI submitted · score ' + total.toFixed(1));
               }}
             >
