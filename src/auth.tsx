@@ -14,22 +14,38 @@
  * land without a sign-out (PreTokenGen re-reads memberships on the forced mint).
  */
 import { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
+import type { ReactNode } from 'react';
 import { Amplify } from 'aws-amplify';
 import { Hub } from 'aws-amplify/utils';
 import { signIn, confirmSignIn, signOut, fetchAuthSession, getCurrentUser } from 'aws-amplify/auth';
 import { setTokenProvider, setAuthLostHandler } from './api';
 import { getDevIdentity, setDevIdentity, clearDevIdentity } from './devAuth';
+import type { DevIdentity } from './devAuth';
+import type { Membership } from './types';
 
 const LOCAL_AUTH = import.meta.env.VITE_LOCAL_AUTH === '1';
 
-const AuthContext = createContext(null);
+/** The value exposed by useAuth(). devSignIn/signedOutReason are mode-specific. */
+export interface AuthValue {
+  status: string; // 'loading' | 'otp' | 'signedIn' | 'signedOut'
+  email: string;
+  memberships: Membership[];
+  signedOutReason?: string;
+  startSignIn: (addr: string) => Promise<void>;
+  submitOtp: (code: string) => Promise<void>;
+  signOutUser: () => Promise<void>;
+  refreshSession: () => Promise<boolean>;
+  devSignIn?: (id: DevIdentity) => void;
+}
+
+const AuthContext = createContext<AuthValue | null>(null);
 
 // ───────────────────────── Local (offline) provider ─────────────────────────
-function LocalAuthProvider({ children }) {
+function LocalAuthProvider({ children }: { children?: ReactNode }) {
   const initial = getDevIdentity();
   const [identity, setIdentity] = useState(initial);
 
-  const devSignIn = useCallback((id) => {
+  const devSignIn = useCallback((id: DevIdentity) => {
     setDevIdentity(id);
     setIdentity(id);
   }, []);
@@ -38,7 +54,7 @@ function LocalAuthProvider({ children }) {
     setIdentity(null);
   }, []);
 
-  const value = {
+  const value: AuthValue = {
     status: identity ? 'signedIn' : 'signedOut',
     email: identity?.email ?? '',
     memberships: identity?.memberships ?? [],
@@ -55,10 +71,10 @@ function LocalAuthProvider({ children }) {
 }
 
 // ───────────────────────── Cloud (Cognito) provider ─────────────────────────
-function CloudAuthProvider({ children }) {
+function CloudAuthProvider({ children }: { children?: ReactNode }) {
   const [status, setStatus] = useState('loading');
   const [email, setEmail] = useState('');
-  const [memberships, setMemberships] = useState([]);
+  const [memberships, setMemberships] = useState<Membership[]>([]);
   // Why the last sign-out happened ('expired' | ''), so Login can explain it.
   const [signedOutReason, setSignedOutReason] = useState('');
   // Current status for the mount-once listeners below (avoids re-registering).
@@ -91,9 +107,9 @@ function CloudAuthProvider({ children }) {
         signedOut();
         return false;
       }
-      setEmail(payload.email ?? '');
+      setEmail(String(payload.email ?? ''));
       try {
-        setMemberships(JSON.parse(payload.memberships ?? '[]'));
+        setMemberships(JSON.parse((payload.memberships as string) ?? '[]'));
       } catch {
         setMemberships([]);
       }
@@ -148,7 +164,7 @@ function CloudAuthProvider({ children }) {
     };
   }, [loadSession]);
 
-  const startSignIn = useCallback(async (addr) => {
+  const startSignIn = useCallback(async (addr: string) => {
     setSignedOutReason('');
     setEmail(addr);
     await signIn({
@@ -159,7 +175,7 @@ function CloudAuthProvider({ children }) {
   }, []);
 
   const submitOtp = useCallback(
-    async (code) => {
+    async (code: string) => {
       await confirmSignIn({ challengeResponse: code });
       // The code is consumed at this point — if the session read hiccups
       // (transient network), retry once rather than stranding the user on the
@@ -196,7 +212,7 @@ function CloudAuthProvider({ children }) {
     setStatus('signedOut');
   }, []);
 
-  const value = {
+  const value: AuthValue = {
     status,
     email,
     memberships,
@@ -228,7 +244,7 @@ if (!LOCAL_AUTH) {
   });
 }
 
-export function AuthProvider({ children }) {
+export function AuthProvider({ children }: { children?: ReactNode }) {
   return LOCAL_AUTH ? (
     <LocalAuthProvider>{children}</LocalAuthProvider>
   ) : (
@@ -236,14 +252,14 @@ export function AuthProvider({ children }) {
   );
 }
 
-export function useAuth() {
+export function useAuth(): AuthValue {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error('useAuth must be used within AuthProvider');
   return ctx;
 }
 
 /** The caller's membership for the active tenant, or null. */
-export function membershipFor(memberships, tenant) {
+export function membershipFor(memberships: Membership[], tenant: string): Membership | null {
   return memberships.find((m) => m.tenantId === tenant) ?? null;
 }
 

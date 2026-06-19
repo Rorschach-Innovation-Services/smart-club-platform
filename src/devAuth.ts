@@ -6,11 +6,21 @@
  * local API as the `x-dev-auth` header (base64 JSON), which the API trusts only
  * when LOCAL_AUTH=1. Persisted to localStorage so a refresh stays signed in.
  */
+import type { Membership } from './types';
+
 const KEY = 'smartclub.devAuth';
 
-let _identity = load();
+/** The dev "login as" identity, shaped like the cloud token's relevant claims. */
+export interface DevIdentity {
+  tenant?: string;
+  role?: string;
+  email?: string;
+  memberships?: Membership[];
+}
 
-function load() {
+let _identity: DevIdentity | null = load();
+
+function load(): DevIdentity | null {
   try {
     return JSON.parse(localStorage.getItem(KEY) || 'null');
   } catch {
@@ -18,11 +28,11 @@ function load() {
   }
 }
 
-export function getDevIdentity() {
+export function getDevIdentity(): DevIdentity | null {
   return _identity;
 }
 
-export function setDevIdentity(identity) {
+export function setDevIdentity(identity: DevIdentity) {
   _identity = identity;
   localStorage.setItem(KEY, JSON.stringify(identity));
 }

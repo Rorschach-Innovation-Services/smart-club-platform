@@ -47,7 +47,7 @@ export function setTokenProvider(fn: () => Promise<string | null>) {
  * screen. Must be idempotent — query retries can fire it several times per expiry.
  */
 let _onAuthLost: (() => void) | null = null;
-export function setAuthLostHandler(fn: () => void) {
+export function setAuthLostHandler(fn: (() => void) | null) {
   _onAuthLost = fn;
 }
 
