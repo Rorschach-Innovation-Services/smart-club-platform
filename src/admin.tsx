@@ -1,6 +1,7 @@
 /* ─── Admin views ─── */
 
 import { useState as useStateA, useMemo as useMemoA, useEffect as useEffectA } from 'react';
+import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { useQueries } from '@tanstack/react-query';
 import * as api from './api';
@@ -714,7 +715,7 @@ export function FixtureTable({
             {rows.length === 0 && (
               <tr>
                 <td
-                  colSpan="9"
+                  colSpan={9}
                   style={{
                     padding: '28px',
                     textAlign: 'center',
@@ -884,7 +885,7 @@ function EditFixtureRow({ fixture, teams, onSave, onCancel }) {
   }
   return (
     <tr className="fix-edit-tr">
-      <td colSpan="9">
+      <td colSpan={9}>
         <div className="fix-edit-grid">
           <div className="fix-edit-field">
             <label>Round</label>
@@ -1080,7 +1081,7 @@ export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) 
   const spread = resolveSpread(d);
   const roundsNeeded = d.teams.length % 2 === 0 ? d.teams.length - 1 : d.teams.length;
   const windowDays = d.endDate
-    ? Math.round((new Date(d.endDate) - new Date(d.startDate)) / 86400000)
+    ? Math.round((new Date(d.endDate).getTime() - new Date(d.startDate).getTime()) / 86400000)
     : null;
   const endBeforeStart = !!d.endDate && d.endDate < d.startDate;
   // Spreading needs at least one day per round after the first.
@@ -4242,7 +4243,9 @@ export function AdminClubDetail({
                     <div
                       key={cat.key}
                       className="score-card"
-                      style={{ '--fill': (score / cat.weight) * 100 + '%', '--accent': cat.accent }}
+                      style={
+                        { '--fill': (score / cat.weight) * 100 + '%', '--accent': cat.accent } as CSSProperties
+                      }
                     >
                       <div>
                         <span className="sc-cat">{cat.title}</span>
@@ -5106,7 +5109,22 @@ const chLabel = (ch) => (ch === 'email' ? 'email' : 'WhatsApp');
    Decoupled from a single club: `clubs` feeds the rep club multi-select; `presetClubId`
    pre-selects one club and `presetRole` seeds the role. On success it shows the real
    outcome — a copyable login link plus per-channel send results. */
-function InviteUserModal({ clubs = [], presetClubId, presetRole, onClose, onInvite, toast }) {
+interface InviteUserModalProps {
+  clubs?: any[];
+  presetClubId?: string;
+  presetRole?: string;
+  onClose: () => void;
+  onInvite: (body: any) => Promise<any>;
+  toast: (msg: string, tone?: string) => void;
+}
+function InviteUserModal({
+  clubs = [],
+  presetClubId,
+  presetRole,
+  onClose,
+  onInvite,
+  toast,
+}: InviteUserModalProps) {
   const canRep = clubs.length > 0;
   const [email, setEmail] = useStateA('');
   const [role, setRole] = useStateA(canRep ? presetRole || 'rep' : 'admin');
