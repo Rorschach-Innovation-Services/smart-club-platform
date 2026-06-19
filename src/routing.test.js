@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { routingRole, clubRouteRedirect } from './routing.js';
+import { routingRole, clubRouteRedirect } from './routing';
 
 // Regression guard for the bug where an admin, after an in-tab sign-out→sign-in
 // from a rep session, was left rendering the club portal at a stale /club/:id URL.

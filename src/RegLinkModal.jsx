@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Icon, Btn } from './atoms.jsx';
-import { currentSeasonLabel } from './data.jsx';
+import { Icon, Btn } from './atoms';
+import { currentSeasonLabel } from './data';
 
 /* ─── RegLinkModal — shared player-registration link modal ───
    Used on BOTH the admin club-detail page and the club portal. A per-club link

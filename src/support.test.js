@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { parseSupport } from './support.js';
-import { EMAIL_RE } from './api.js';
+import { parseSupport } from './support';
+import { EMAIL_RE } from './api';
 
 describe('parseSupport', () => {
   it('splits the seeded "Name · email" string', () => {

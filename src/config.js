@@ -10,7 +10,7 @@
  * is no edge function, so first paint shows the neutral default until JS themes it —
  * never the *wrong* brand, but a brief neutral flash is expected. See docs/architecture/0002.
  */
-import { setActiveTenant, getTenant } from './api.js';
+import { setActiveTenant, getTenant } from './api';
 
 // Host → tenant slug (JSON env, mirrors TENANT_HOST_MAP in sst.config.ts). Empty off-prod.
 const HOST_TENANT_MAP = (() => {

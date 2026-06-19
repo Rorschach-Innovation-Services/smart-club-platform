@@ -5,8 +5,8 @@
  * so it needs no token and works the same in dev (tenant via header) and prod (by host).
  */
 import { useQuery } from '@tanstack/react-query';
-import { qk } from './query.js';
-import { getTenant } from './api.js';
+import { qk } from './query';
+import { getTenant } from './api';
 
 export function TutorialsPage() {
   const tenantQuery = useQuery({ queryKey: qk.tenant(), queryFn: getTenant, retry: 0 });

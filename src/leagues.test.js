@@ -7,7 +7,7 @@ import {
   optionsGroupedByGroup,
   findByKey,
   teamCounts,
-} from './leagues.js';
+} from './leagues';
 
 const LEAGUES = [
   { key: 'premier', label: 'Premier League', group: 'Overarching', district: OVERARCHING_DISTRICT },

@@ -41,9 +41,9 @@ import {
   dobFromSaId,
   ageFromSaId,
   termRemaining,
-} from './data.jsx';
-import { leagueOptionsForDistrict, findByKey, labelByKey, teamCounts } from './leagues.js';
-import { shortAddress, suburbOf, SA_BOUNDS, isInSouthAfrica } from './geocode.js';
+} from './data';
+import { leagueOptionsForDistrict, findByKey, labelByKey, teamCounts } from './leagues';
+import { shortAddress, suburbOf, SA_BOUNDS, isInSouthAfrica } from './geocode';
 import {
   Icon,
   Pill,
@@ -60,10 +60,10 @@ import {
   CountUp,
   cqiBand,
   scoreCQI,
-} from './atoms.jsx';
-import { getDocUploadUrl, uploadToPresigned } from './api.js';
-import { DocPreviewModal } from './DocPreviewModal.jsx';
-import { RegLinkModal } from './RegLinkModal.jsx';
+} from './atoms';
+import { getDocUploadUrl, uploadToPresigned } from './api';
+import { DocPreviewModal } from './DocPreviewModal';
+import { RegLinkModal } from './RegLinkModal';
 
 /* ─── Compliance doc upload — presigned S3 PUT, then mark uploaded ─── */
 function DocUploadButton({

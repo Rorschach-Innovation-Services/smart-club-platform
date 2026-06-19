@@ -17,8 +17,8 @@ import { createContext, useContext, useEffect, useState, useCallback, useRef } f
 import { Amplify } from 'aws-amplify';
 import { Hub } from 'aws-amplify/utils';
 import { signIn, confirmSignIn, signOut, fetchAuthSession, getCurrentUser } from 'aws-amplify/auth';
-import { setTokenProvider, setAuthLostHandler } from './api.js';
-import { getDevIdentity, setDevIdentity, clearDevIdentity } from './devAuth.js';
+import { setTokenProvider, setAuthLostHandler } from './api';
+import { getDevIdentity, setDevIdentity, clearDevIdentity } from './devAuth';
 
 const LOCAL_AUTH = import.meta.env.VITE_LOCAL_AUTH === '1';
 

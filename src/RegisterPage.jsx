@@ -14,7 +14,7 @@ import {
   getRegistrationIdDocUploadUrl,
   uploadToPresigned,
   ApiError,
-} from './api.js';
+} from './api';
 import {
   RACES,
   GENDERS,
@@ -23,8 +23,8 @@ import {
   HANDS,
   DISTRICTS,
   dobFromSaId,
-} from './data.jsx';
-import { leagueOptionsForDistrict } from './leagues.js';
+} from './data';
+import { leagueOptionsForDistrict } from './leagues';
 
 const EMPTY = {
   surname: '',

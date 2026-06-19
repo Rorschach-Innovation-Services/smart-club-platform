@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolvePreviewSource, docFileMeta } from './data.jsx';
+import { resolvePreviewSource, docFileMeta } from './data';
 
 // The preview source decision is the riskiest part of the doc-preview feature: it must
 // never substitute the demo sample for a real (or real-but-fileless) production document.

@@ -7,7 +7,7 @@ import {
   docFileMeta,
   agmMeta,
   REQUIRED_DOCS,
-} from './data.jsx';
+} from './data';
 
 // A club with no financial statements can mark that doc "Unavailable": docs.financials
 // flips true (so compliance reads complete) with a distinct {unavailable} sentinel,

@@ -6,8 +6,8 @@
  * resolved tenant config.
  */
 import { useState } from 'react';
-import { useAuth, IS_LOCAL_AUTH } from './auth.jsx';
-import { getActiveTenant } from './api.js';
+import { useAuth, IS_LOCAL_AUTH } from './auth';
+import { getActiveTenant } from './api';
 
 export function Login({ tenantConfig }) {
   const auth = useAuth();

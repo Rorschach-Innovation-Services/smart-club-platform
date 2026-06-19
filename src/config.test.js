@@ -14,7 +14,7 @@ vi.stubEnv('VITE_DEFAULT_TENANT', 'dolphins');
 
 let resolveTenantSlug;
 beforeAll(async () => {
-  ({ resolveTenantSlug } = await import('./config.js'));
+  ({ resolveTenantSlug } = await import('./config'));
 });
 
 const atHost = (hostname, search = '') =>

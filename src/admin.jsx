@@ -3,8 +3,8 @@
 import { useState as useStateA, useMemo as useMemoA, useEffect as useEffectA } from 'react';
 import { createPortal } from 'react-dom';
 import { useQueries } from '@tanstack/react-query';
-import * as api from './api.js';
-import { qk } from './query.js';
+import * as api from './api';
+import { qk } from './query';
 import {
   DISTRICTS,
   REQUIRED_DOCS,
@@ -34,7 +34,7 @@ import {
   daysAgo,
   ageFromSaId,
   termRemaining,
-} from './data.jsx';
+} from './data';
 import {
   leagueOptionsForDistrict,
   optionsGroupedByGroup,
@@ -43,13 +43,13 @@ import {
   labelByKey,
   teamCounts,
   OVERARCHING_DISTRICT,
-} from './leagues.js';
-import { exportRowsToXlsx, clubExportRow } from './exportXlsx.js';
-import { openBccReminder } from './mailto.js';
-import { EMAIL_RE } from './api.js';
-import { parseSupport } from './support.js';
-import { DocPreviewModal } from './DocPreviewModal.jsx';
-import { RegLinkModal } from './RegLinkModal.jsx';
+} from './leagues';
+import { exportRowsToXlsx, clubExportRow } from './exportXlsx';
+import { openBccReminder } from './mailto';
+import { EMAIL_RE } from './api';
+import { parseSupport } from './support';
+import { DocPreviewModal } from './DocPreviewModal';
+import { RegLinkModal } from './RegLinkModal';
 import {
   Icon,
   Pill,
@@ -69,7 +69,7 @@ import {
   cqiBand,
   scoreCQI,
   useEscapeClose,
-} from './atoms.jsx';
+} from './atoms';
 
 /* ─── AdminFixtures — series cards + drilldown fixture table with distance + travel-cost ─── */
 export function AdminFixtures({

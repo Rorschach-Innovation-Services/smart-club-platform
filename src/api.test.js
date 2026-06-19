@@ -16,7 +16,7 @@
  * Only the fetch boundary is stubbed; the real request() pipeline runs.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ApiError, getMe, getTenant, setAuthLostHandler, setTokenProvider } from './api.js';
+import { ApiError, getMe, getTenant, setAuthLostHandler, setTokenProvider } from './api';
 
 const SESSION_EXPIRED = 'Your session has expired — please sign in again.';
 

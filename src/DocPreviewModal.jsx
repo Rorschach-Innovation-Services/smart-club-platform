@@ -2,9 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Icon, Btn, useEscapeClose } from './atoms.jsx';
-import { docFileMeta, resolvePreviewSource } from './data.jsx';
-import { getDocViewUrl } from './api.js';
+import { Icon, Btn, useEscapeClose } from './atoms';
+import { docFileMeta, resolvePreviewSource } from './data';
+import { getDocViewUrl } from './api';
 
 // Local/demo fallback. Vite serves public/ at BASE_URL, so this resolves to
 // `/sample-document.pdf` in the default deploy.

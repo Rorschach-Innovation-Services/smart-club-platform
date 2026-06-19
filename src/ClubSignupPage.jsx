@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { qk } from './query.js';
+import { qk } from './query';
 import {
   getClubSignup,
   submitClubSignup,
@@ -16,8 +16,8 @@ import {
   getActiveTenant,
   normalizeZaCell,
   ApiError,
-} from './api.js';
-import { useAuth, membershipFor } from './auth.jsx';
+} from './api';
+import { useAuth, membershipFor } from './auth';
 
 /**
  * Which CTA the done view shows for an already-signed-in visitor:

@@ -7,7 +7,7 @@ import {
   safeguardingSatisfied,
   ageFromSaId,
   termRemaining,
-} from './data.jsx';
+} from './data';
 
 // 6 teams → 5 single round-robin rounds (each round = one match-day).
 const SIX = ['a', 'b', 'c', 'd', 'e', 'f'];

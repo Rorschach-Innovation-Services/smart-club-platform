@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { affiliationSubmitted } from './data.jsx';
+import { affiliationSubmitted } from './data';
 
 // Minimal club factory — only the fields this gate helper reads.
 function club({ affiliation = 'not_started' } = {}) {

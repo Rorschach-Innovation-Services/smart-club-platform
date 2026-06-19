@@ -10,8 +10,8 @@
  *   plain sign-in fallback.
  */
 import { describe, it, expect } from 'vitest';
-import { normalizeZaCell } from './api.js';
-import { signupDoneCta } from './ClubSignupPage.jsx';
+import { normalizeZaCell } from './api';
+import { signupDoneCta } from './ClubSignupPage';
 
 describe('normalizeZaCell', () => {
   it.each([

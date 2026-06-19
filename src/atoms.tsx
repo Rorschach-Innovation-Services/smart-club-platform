@@ -1,7 +1,14 @@
 /* ─── Shared atom components ─── */
 
 import { useState, useEffect, useRef } from 'react';
-import { CQI_STRUCTURE } from './data.jsx';
+import type {
+  ReactNode,
+  CSSProperties,
+  ComponentType,
+  ButtonHTMLAttributes,
+} from 'react';
+import { CQI_STRUCTURE } from './data';
+import type { Club } from './types';
 
 /* ─── Icons (inline, no external deps) ─── */
 export const Icon = {
@@ -239,7 +246,12 @@ export const Icon = {
 
 /* ─── Atoms ─── */
 
-export function Pill({ tone = 'muted', children, dot }) {
+interface PillProps {
+  tone?: string;
+  children?: ReactNode;
+  dot?: boolean;
+}
+export function Pill({ tone = 'muted', children, dot }: PillProps) {
   return (
     <span className={`pill pill-${tone}`}>
       {dot && <span className={`sdot ${tone}`} />}
@@ -248,7 +260,12 @@ export function Pill({ tone = 'muted', children, dot }) {
   );
 }
 
-export function Btn({ tone = 'outline', size, icon: I, children, onClick, ...rest }) {
+interface BtnProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  tone?: string;
+  size?: string;
+  icon?: ComponentType;
+}
+export function Btn({ tone = 'outline', size, icon: I, children, onClick, ...rest }: BtnProps) {
   const cls = `btn btn-${tone}${size === 'sm' ? ' btn-sm' : ''}`;
   return (
     <button className={cls} onClick={onClick} {...rest}>
@@ -258,7 +275,14 @@ export function Btn({ tone = 'outline', size, icon: I, children, onClick, ...res
   );
 }
 
-export function Card({ title, sub, action, children, style }) {
+interface CardProps {
+  title?: ReactNode;
+  sub?: ReactNode;
+  action?: ReactNode;
+  children?: ReactNode;
+  style?: CSSProperties;
+}
+export function Card({ title, sub, action, children, style }: CardProps) {
   return (
     <div className="card" style={style}>
       {(title || action) && (
@@ -278,7 +302,13 @@ export function Card({ title, sub, action, children, style }) {
 // Centered empty-state card — shared by admin pages that can render with no data
 // (blank cohort: clubs, fixtures, affiliations, docs, CQI). Uses the .club-fix-empty
 // design-system classes so every empty surface looks identical.
-export function EmptyState({ icon: I, title, sub, action }) {
+interface EmptyStateProps {
+  icon?: ComponentType;
+  title?: ReactNode;
+  sub?: ReactNode;
+  action?: ReactNode;
+}
+export function EmptyState({ icon: I, title, sub, action }: EmptyStateProps) {
   return (
     <div className="club-fix-empty">
       {I && (
@@ -293,7 +323,13 @@ export function EmptyState({ icon: I, title, sub, action }) {
   );
 }
 
-export function KPI({ label, num, sub, tone = '' }) {
+interface KPIProps {
+  label?: ReactNode;
+  num?: ReactNode;
+  sub?: ReactNode;
+  tone?: string;
+}
+export function KPI({ label, num, sub, tone = '' }: KPIProps) {
   return (
     <div className={`kpi ${tone}`}>
       <div className="kpi-l">{label}</div>
@@ -303,7 +339,11 @@ export function KPI({ label, num, sub, tone = '' }) {
   );
 }
 
-export function ProgressBar({ value, tone }) {
+interface ProgressBarProps {
+  value: number;
+  tone?: string;
+}
+export function ProgressBar({ value, tone }: ProgressBarProps) {
   return (
     <div className="pbar">
       <div
@@ -314,7 +354,11 @@ export function ProgressBar({ value, tone }) {
   );
 }
 
-export function ProgChip({ value, tone = 'teal' }) {
+interface ProgChipProps {
+  value: number;
+  tone?: string;
+}
+export function ProgChip({ value, tone = 'teal' }: ProgChipProps) {
   return (
     <div className="prog-chip">
       <div className="prog-chip-bar">
@@ -328,7 +372,11 @@ export function ProgChip({ value, tone = 'teal' }) {
   );
 }
 
-export function ClubAvatar({ club, size = 30 }) {
+interface ClubAvatarProps {
+  club: Pick<Club, 'name' | 'color'>;
+  size?: number;
+}
+export function ClubAvatar({ club, size = 30 }: ClubAvatarProps) {
   const initials = club.name
     .split(/\s+/)
     .filter((w) => /^[A-Z]/.test(w))
@@ -345,7 +393,10 @@ export function ClubAvatar({ club, size = 30 }) {
   );
 }
 
-export function ClubNameCell({ club }) {
+interface ClubNameCellProps {
+  club: Pick<Club, 'name' | 'color' | 'sub'>;
+}
+export function ClubNameCell({ club }: ClubNameCellProps) {
   return (
     <div className="club-name-cell">
       <ClubAvatar club={club} />
@@ -358,7 +409,11 @@ export function ClubNameCell({ club }) {
 }
 
 /* yes/no segmented — conditional colours + icons in active state */
-export function YN({ value, onChange }) {
+interface YNProps {
+  value?: boolean | null;
+  onChange: (v: boolean) => void;
+}
+export function YN({ value, onChange }: YNProps) {
   return (
     <div className="seg">
       <button
@@ -382,7 +437,13 @@ export function YN({ value, onChange }) {
 /* Uncapped count input — CQI Representation demographics (no per-race limit).
    Emits a clean non-negative integer, or '' when the field is empty, matching the
    integer contract the rest of the CQI state/scoring already expects. */
-export function CountInput({ value, onChange, min = 0, label }) {
+interface CountInputProps {
+  value?: number | string;
+  onChange: (v: number | '') => void;
+  min?: number;
+  label?: string;
+}
+export function CountInput({ value, onChange, min = 0, label }: CountInputProps) {
   return (
     <input
       className="num-input"
@@ -399,7 +460,13 @@ export function CountInput({ value, onChange, min = 0, label }) {
 }
 
 /* legacy stepper (kept for direct callers) */
-export function NumStep({ value, onChange, min = 0, max = 99 }) {
+interface NumStepProps {
+  value?: number | string;
+  onChange: (v: number | '') => void;
+  min?: number;
+  max?: number;
+}
+export function NumStep({ value, onChange, min = 0, max = 99 }: NumStepProps) {
   return (
     <input
       className="num-input"
@@ -417,7 +484,12 @@ export function NumStep({ value, onChange, min = 0, max = 99 }) {
 }
 
 /* Choice — segmented control for arbitrary string options (used by CQI subscription cycle) */
-export function Choice({ value, onChange, options }) {
+interface ChoiceProps {
+  value?: string;
+  onChange: (v: string) => void;
+  options: string[];
+}
+export function Choice({ value, onChange, options }: ChoiceProps) {
   return (
     <div className="seg">
       {options.map((opt) => (
@@ -435,8 +507,12 @@ export function Choice({ value, onChange, options }) {
 }
 
 /* Rating — 1–5 Likert segmented control (used by CQI mandate/objectives questions) */
-export function Rating({ value, onChange }) {
-  const current = parseInt(value) || 0;
+interface RatingProps {
+  value?: number | string;
+  onChange: (n: number) => void;
+}
+export function Rating({ value, onChange }: RatingProps) {
+  const current = parseInt(String(value)) || 0;
   return (
     <div className="seg">
       {[1, 2, 3, 4, 5].map((n) => (
@@ -453,7 +529,13 @@ export function Rating({ value, onChange }) {
 }
 
 /* Money — currency input with prefix and value formatting */
-export function MoneyInput({ value, onChange, currency = 'R', suffix = '/ member' }) {
+interface MoneyInputProps {
+  value?: number | string;
+  onChange: (v: number | '') => void;
+  currency?: string;
+  suffix?: string;
+}
+export function MoneyInput({ value, onChange, currency = 'R', suffix = '/ member' }: MoneyInputProps) {
   return (
     <div className="money-input">
       <span className="money-currency">{currency}</span>
@@ -472,11 +554,19 @@ export function MoneyInput({ value, onChange, currency = 'R', suffix = '/ member
 }
 
 /* slider input — used in CQI for capped quantities (teams, coaches, fields, %) */
-export function NumSlider({ value, onChange, min = 0, max = 10, suffix }) {
-  const v = value === '' || value == null ? 0 : Math.max(min, Math.min(max, parseInt(value) || 0));
+interface NumSliderProps {
+  value?: number | string;
+  onChange: (n: number) => void;
+  min?: number;
+  max?: number;
+  suffix?: string;
+}
+export function NumSlider({ value, onChange, min = 0, max = 10, suffix }: NumSliderProps) {
+  const v =
+    value === '' || value == null ? 0 : Math.max(min, Math.min(max, parseInt(String(value)) || 0));
   const pct = max > min ? ((v - min) / (max - min)) * 100 : 0;
   return (
-    <div className="num-slider" style={{ '--pct': pct + '%' }}>
+    <div className="num-slider" style={{ '--pct': pct + '%' } as CSSProperties}>
       <input
         type="range"
         min={min}
@@ -501,22 +591,28 @@ export function NumSlider({ value, onChange, min = 0, max = 10, suffix }) {
 }
 
 /* CountUp — animates smoothly between previous + new target, with a setTimeout fallback so the value lands even if rAF is throttled (background tabs, headless contexts). */
-export function CountUp({ to, duration = 900, decimals = 0, suffix = '' }) {
+interface CountUpProps {
+  to: number | string;
+  duration?: number;
+  decimals?: number;
+  suffix?: string;
+}
+export function CountUp({ to, duration = 900, decimals = 0, suffix = '' }: CountUpProps) {
   const target = Number(to) || 0;
   const [val, setVal] = useState(target);
   const fromRef = useRef(target);
-  const rafRef = useRef(null);
-  const fallbackRef = useRef(null);
+  const rafRef = useRef<number | null>(null);
+  const fallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    cancelAnimationFrame(rafRef.current);
-    clearTimeout(fallbackRef.current);
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    if (fallbackRef.current !== null) clearTimeout(fallbackRef.current);
     const from = fromRef.current;
     if (from === target) {
       setVal(target);
       return;
     }
     const start = performance.now();
-    const animate = (now) => {
+    const animate = (now: number) => {
       const t = Math.min((now - start) / duration, 1);
       const eased = 1 - Math.pow(1 - t, 3);
       const v = from + (target - from) * eased;
@@ -531,13 +627,13 @@ export function CountUp({ to, duration = 900, decimals = 0, suffix = '' }) {
     rafRef.current = requestAnimationFrame(animate);
     // Safety net — guarantees the value lands at target even when rAF is throttled
     fallbackRef.current = setTimeout(() => {
-      cancelAnimationFrame(rafRef.current);
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
       fromRef.current = target;
       setVal(target);
     }, duration + 80);
     return () => {
-      cancelAnimationFrame(rafRef.current);
-      clearTimeout(fallbackRef.current);
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      if (fallbackRef.current !== null) clearTimeout(fallbackRef.current);
     };
   }, [target, duration]);
   if (decimals === 0)
@@ -556,20 +652,20 @@ export function CountUp({ to, duration = 900, decimals = 0, suffix = '' }) {
 }
 
 /* statusFor — picks "good"/"warn"/"danger" tone based on a percentage value */
-export function statusFor(value, goodAt = 70, warnAt = 40) {
+export function statusFor(value: number, goodAt = 70, warnAt = 40) {
   if (value >= goodAt) return 'good';
   if (value >= warnAt) return 'warn';
   return 'danger';
 }
 
 /* Affiliation status helpers */
-export function affPill(status) {
+export function affPill(status: string) {
   if (status === 'complete') return <Pill tone="teal">Affiliated</Pill>;
   if (status === 'in_progress') return <Pill tone="gold">In progress</Pill>;
   return <Pill tone="muted">Not started</Pill>;
 }
 
-export function cqiBand(score) {
+export function cqiBand(score: number) {
   if (score === 0) return { tone: 'muted', label: 'Pending' };
   if (score >= 80) return { tone: 'teal', label: 'A · ' + score.toFixed(1) };
   if (score >= 65) return { tone: 'navy', label: 'B · ' + score.toFixed(1) };
@@ -581,9 +677,9 @@ export function cqiBand(score) {
    Each question contributes its `pts` value, scaled by yes/no or by num/max.
    Section total = sum of pts (which roughly equals the section weight),
    we then proportion to the section weight and total to 100. */
-export function scoreCQI(answers) {
+export function scoreCQI(answers: Record<string, any>) {
   let totalScore = 0;
-  const byCat = {};
+  const byCat: Record<string, { earned: number; possible: number }> = {};
   for (const cat of CQI_STRUCTURE) {
     let earned = 0,
       possible = 0;
@@ -630,9 +726,9 @@ export function scoreCQI(answers) {
 
 /* Simulated toast */
 /* Close-on-Escape hook for modals/overlays. */
-export function useEscapeClose(onClose) {
+export function useEscapeClose(onClose: () => void) {
   useEffect(() => {
-    const handler = (e) => {
+    const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', handler);
@@ -640,22 +736,29 @@ export function useEscapeClose(onClose) {
   }, [onClose]);
 }
 
-export function useToast() {
-  const [msg, setMsg] = useState(null);
-  const [tone, setTone] = useState('ok');
+interface ToastAction {
+  label: ReactNode;
+  onClick?: () => void;
+}
+export function useToast(): [
+  (m: string, t?: string, act?: ToastAction | null) => void,
+  ReactNode,
+] {
+  const [msg, setMsg] = useState<string | null>(null);
+  const [tone, setTone] = useState<string>('ok');
   // Optional inline action (e.g. an Undo button) carried by a toast.
-  const [action, setAction] = useState(null);
+  const [action, setAction] = useState<ToastAction | null>(null);
   // Single timer ref so a new toast clears any pending dismissal — otherwise the
   // previous toast's timeout could clear a fresh message early, or leave a stale
   // action button rendered on an unrelated message.
-  const timer = useRef(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   function clear() {
     if (timer.current) clearTimeout(timer.current);
     timer.current = null;
     setMsg(null);
     setAction(null);
   }
-  function show(m, t = 'ok', act = null) {
+  function show(m: string, t: string = 'ok', act: ToastAction | null = null) {
     if (timer.current) clearTimeout(timer.current);
     setMsg(m);
     setTone(t);

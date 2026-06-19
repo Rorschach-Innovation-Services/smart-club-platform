@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { scoreCQI } from './atoms.jsx';
+import { scoreCQI } from './atoms';
 import {
   REQUIRED_DOCS,
   docsUploadedCount,
@@ -11,7 +11,7 @@ import {
   governanceOverrides,
   genuineCqiAnswers,
   GOVERNANCE_KEYS,
-} from './data.jsx';
+} from './data';
 
 // The 'admin' section was repurposed to "Club Mandate and Objectives": all 7 old
 // governance questions removed (redundant with affiliation + compliance), replaced

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shortAddress, suburbOf, SA_BOUNDS, isInSouthAfrica } from './geocode.js';
+import { shortAddress, suburbOf, SA_BOUNDS, isInSouthAfrica } from './geocode';
 
 describe('shortAddress', () => {
   it('composes street, suburb and city from structured addressdetails', () => {

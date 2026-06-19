@@ -10,7 +10,7 @@
  * the app can fall back to the login screen.
  */
 
-import { devAuthHeader } from './devAuth.js';
+import { devAuthHeader } from './devAuth';
 
 const BASE = import.meta.env.VITE_API_URL ?? '';
 const LOCAL_AUTH = import.meta.env.VITE_LOCAL_AUTH === '1';

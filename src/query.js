@@ -6,7 +6,7 @@
  * they call api.js then invalidate these keys.
  */
 import { QueryClient } from '@tanstack/react-query';
-import { getActiveTenant } from './api.js';
+import { getActiveTenant } from './api';
 
 export const queryClient = new QueryClient({
   defaultOptions: {

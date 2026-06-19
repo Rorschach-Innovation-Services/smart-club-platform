@@ -12,17 +12,17 @@ import {
   useParams,
 } from 'react-router-dom';
 import { QueryClientProvider, useQuery, useQueries } from '@tanstack/react-query';
-import { queryClient, qk } from './query.js';
-import * as api from './api.js';
-import { ApiError } from './api.js';
-import { resolveTenantSlug, applyTheme } from './config.js';
-import { setActiveTenant } from './api.js';
-import { AuthProvider, useAuth, membershipFor } from './auth.jsx';
-import { routingRole, clubRouteRedirect } from './routing.js';
-import { Login } from './Login.jsx';
-import { RegisterPage } from './RegisterPage.jsx';
-import { ClubSignupPage } from './ClubSignupPage.jsx';
-import { TutorialsPage } from './TutorialsPage.jsx';
+import { queryClient, qk } from './query';
+import * as api from './api';
+import { ApiError } from './api';
+import { resolveTenantSlug, applyTheme } from './config';
+import { setActiveTenant } from './api';
+import { AuthProvider, useAuth, membershipFor } from './auth';
+import { routingRole, clubRouteRedirect } from './routing';
+import { Login } from './Login';
+import { RegisterPage } from './RegisterPage';
+import { ClubSignupPage } from './ClubSignupPage';
+import { TutorialsPage } from './TutorialsPage';
 import {
   REQUIRED_DOCS,
   SUBMISSION_DEADLINE_DEFAULT,
@@ -33,9 +33,9 @@ import {
   computeRevertCompliance,
   safeguardingMeta,
   MIN_SAFEGUARDING_FILES,
-} from './data.jsx';
-import { exportRowsToXlsx } from './exportXlsx.js';
-import { openBccReminder } from './mailto.js';
+} from './data';
+import { exportRowsToXlsx } from './exportXlsx';
+import { openBccReminder } from './mailto';
 import {
   Icon,
   Pill,
@@ -47,7 +47,7 @@ import {
   cqiBand,
   useToast,
   useEscapeClose,
-} from './atoms.jsx';
+} from './atoms';
 import {
   AdminDashboard,
   AdminClubsList,
@@ -60,8 +60,8 @@ import {
   AdminClearances,
   LeagueForm,
   CreateSeriesForm,
-} from './admin.jsx';
-import { parseSupport } from './support.js';
+} from './admin';
+import { parseSupport } from './support';
 import {
   ClubHome,
   AffiliationForm,
@@ -71,8 +71,8 @@ import {
   ClubPlayersView,
   RequestPlayerForm,
   ClubClearancesView,
-} from './club.jsx';
-import { Onboarding } from './onboarding.jsx';
+} from './club';
+import { Onboarding } from './onboarding';
 
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
 const TENANT_SLUG = resolveTenantSlug();

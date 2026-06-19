@@ -1,8 +1,8 @@
 /* ─── Club Onboarding · 3-step cinematic flow ─── */
 
 import { useState as useStateOb } from 'react';
-import { Icon, Btn, useEscapeClose } from './atoms.jsx';
-import { formatDeadlineLong, formatDeadlineMid } from './data.jsx';
+import { Icon, Btn, useEscapeClose } from './atoms';
+import { formatDeadlineLong, formatDeadlineMid } from './data';
 
 export function Onboarding({ club, onClose, onComplete, onStart, submissionDeadline }) {
   useEscapeClose(onClose);
