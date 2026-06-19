@@ -52,10 +52,10 @@ import {
 import {
   sendClubFixtures,
   sendStaffInvite,
+  sendChairOnboarding,
   type Channel,
   type SendResult,
 } from './notify/index.js';
-import { sendRegLinkEmail } from './notify/email.js';
 import type {
   Club,
   ClubCommEvent,
@@ -63,11 +63,38 @@ import type {
   Membership,
   Series,
   TenantConfig,
+  TutorialVideo,
   UserProfile,
   PlayerRegistration,
 } from './types.js';
 
 const s3 = new S3Client({});
+
+/**
+ * Shared fallback set of how-to-use-the-app tutorial videos, used when a tenant has
+ * no `tutorials` override on its config (so existing tenant rows need no migration).
+ * `url`s are absolute CloudFront links built from TUTORIALS_BASE_URL (the dedicated
+ * `Cdn` Router in sst.config) — the matching MP4s live under the `tutorials/` key
+ * prefix of the TutorialAssets bucket, uploaded out-of-band (see docs/guides/
+ * tutorial-videos.md), NOT shipped in the web build. Surfaced on the public
+ * /tutorials page and linked in the chair onboarding email; `absUrl` passes these
+ * absolute URLs through unchanged. Order = the on-screen numbering ({i+1}.).
+ */
+const TUTORIALS_BASE_URL = process.env.TUTORIALS_BASE_URL ?? '';
+const tutorialUrl = (file: string) => `${TUTORIALS_BASE_URL}/tutorials/${file}`;
+const DEFAULT_TUTORIALS: TutorialVideo[] = [
+  { title: 'Creating your account', url: tutorialUrl('01-creating-account.mp4') },
+  { title: 'Completing the affiliation form', url: tutorialUrl('02-affiliation.mp4') },
+  { title: 'Uploading compliance forms', url: tutorialUrl('03-compliance-forms.mp4') },
+  { title: 'Completing the CQI', url: tutorialUrl('04-cqi.mp4') },
+  { title: 'Onboarding players', url: tutorialUrl('05-onboarding-players.mp4') },
+  { title: 'Player clearances', url: tutorialUrl('06-clearances.mp4') },
+  { title: 'Full walkthrough (all six steps)', url: tutorialUrl('00-full-walkthrough.mp4') },
+];
+
+/** A tenant's tutorial videos, falling back to the shared default set. */
+const tutorialsFor = (config: TenantConfig | null): TutorialVideo[] =>
+  config?.tutorials?.length ? config.tutorials : DEFAULT_TUTORIALS;
 const cognito = new CognitoIdentityProviderClient({});
 const UPLOADS_BUCKET = process.env.UPLOADS_BUCKET!;
 const USER_POOL_ID = process.env.USER_POOL_ID!;
@@ -238,6 +265,9 @@ app.get('/tenant', async (c) => {
     branding: config.branding,
     submissionDeadline: config.submissionDeadline,
     leagues: config.leagues ?? [],
+    // How-to-use-the-app videos for the public /tutorials page (non-sensitive; falls
+    // back to the shared default set when the tenant has no override).
+    tutorials: tutorialsFor(config),
   });
 });
 
@@ -820,28 +850,53 @@ app.patch('/clubs/:id', async (c) => {
   }
   let updated = await applyClubPatch(ra.tenant, id, patch, ra.email);
   // On the not-complete → complete edge ONLY (the client re-sends affiliation:'complete'
-  // on every post-submission edit), mint a player-registration link if absent and email
-  // it to the chair. Gated on the edge so corrections never re-mint (which would revoke a
-  // shared token) or re-email.
+  // on every post-submission edit), mint a player-registration link if absent and deliver
+  // the chair onboarding bundle (reg link + tutorials). Gated on the edge so corrections
+  // never re-mint (which would revoke a shared token); the send itself is gated on a
+  // fresh mint so re-confirmations don't re-blast (and re-bill) WhatsApp/email.
   const becameComplete = current.affiliation !== 'complete' && patch.affiliation === 'complete';
   if (becameComplete) {
-    updated = await mintAndEmailRegLink(c, ra.tenant, ra.email, updated);
+    updated = await mintAndDeliverOnboarding(c, ra.tenant, ra.email, updated);
   }
   return c.json(withPlayerCount(updated));
 });
 
 /**
- * Mint the club's player-registration link (only if it has none) and email it to the
- * chair. Best-effort: a failed send/append is logged, never failing the affiliation
- * write. Returns the latest club (with the link, if minted).
+ * The app base URL safe to put in an outbound (emailed/WhatsApped) link. Reuses
+ * `resolveLoginUrl`'s trusted-origin logic, but refuses its `localhost` dev fallback in a
+ * deployed stage — a dead `localhost` link in an approved WhatsApp template would hurt the
+ * WABA's quality rating (and is useless to the chair). Returns null when no real host is
+ * resolvable so the caller skips the auto-send (the chair can still be sent the link
+ * manually from the shared modal). In local dev (STAGE 'local') a localhost base is fine.
  */
-async function mintAndEmailRegLink(
+function deliverableBaseUrl(c: Context<HonoEnv>): string | null {
+  const base = resolveLoginUrl(c);
+  try {
+    if (new URL(base).hostname === 'localhost' && process.env.STAGE !== 'local') return null;
+  } catch {
+    return null;
+  }
+  return base;
+}
+
+/**
+ * Mint the club's player-registration link (only if it has none) and deliver the chair
+ * onboarding bundle — reg link + how-to-use-the-app tutorials — over email + WhatsApp.
+ *
+ * The send is gated on a FRESH mint (the link didn't exist before this call): on later
+ * re-confirmations the chair already holds the link, so we don't re-blast (or re-bill) the
+ * channels — manual resend lives on the shared RegLinkModal. Best-effort: a failed
+ * send/append is logged + recorded, never failing the affiliation write. Returns the
+ * latest club (with the link, if minted).
+ */
+async function mintAndDeliverOnboarding(
   c: Context<HonoEnv>,
   tenant: string,
   by: string,
   club: Club,
 ): Promise<Club> {
   let current = club;
+  let justMinted = false;
   if (!current.playerRegLink) {
     const token = randomUUID();
     const createdAt = now();
@@ -853,59 +908,71 @@ async function mintAndEmailRegLink(
         { playerRegLink: { token, createdAt } },
         by,
       );
+      justMinted = true;
     } catch (err) {
       console.error('reg-link mint failed on affiliation complete', err);
       return current;
     }
   }
-  const chair = (current.exco as Record<string, { email?: string; name?: string }> | undefined)
-    ?.chair;
-  const chairEmail = chair?.email?.trim();
-  if (!chairEmail || !current.playerRegLink) return current;
-  const link = `${resolveLoginUrl(c)}/register/${current.id}?t=${current.playerRegLink.token}`;
+  // Only auto-send on the first completion (fresh mint) — re-confirmations skip the blast.
+  if (!justMinted || !current.playerRegLink) return current;
+
+  const base = deliverableBaseUrl(c);
+  if (!base) {
+    console.warn('onboarding send skipped: no deliverable host (localhost in a deployed stage)');
+    return current;
+  }
+
+  const chair = (
+    current.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
+  )?.chair;
+  const token = current.playerRegLink.token;
+  const regLink = `${base}/register/${current.id}?t=${token}`;
+  // Best-effort like the rest of this path: a tenant-config read fault must not fail the
+  // affiliation write (the mint already succeeded). Degrade to the default tutorial set.
+  const tenantConfig = await repo.getTenantConfig(tenant).catch((err) => {
+    console.error('onboarding: tenant-config read failed, using default tutorials', err);
+    return null;
+  });
+  const tutorialsConfig = tutorialsFor(tenantConfig);
+  const absUrl = (u: string) =>
+    /^https?:\/\//i.test(u) ? u : `${base}${u.startsWith('/') ? '' : '/'}${u}`;
+  const tutorials = {
+    pageUrl: `${base}/tutorials`,
+    videos: tutorialsConfig.map((v) => ({ title: v.title, url: absUrl(v.url) })),
+  };
   const season = seasonLabel(new Date().getFullYear());
+
+  const { results } = await sendChairOnboarding({
+    chair: { name: chair?.name || current.chair || '', email: chair?.email, cell: chair?.cell },
+    clubName: current.name,
+    channels: ['email', 'whatsapp'],
+    regLink,
+    tutorials,
+    season,
+  });
+
+  // Record each channel outcome truthfully. One auditable row per channel, keyed so a
+  // future retry of the same token's send replaces rather than duplicates.
   try {
-    const { messageId } = await sendRegLinkEmail({
-      to: chairEmail,
-      chairName: chair?.name || current.chair || '',
-      clubName: current.name,
-      season,
-      link,
-    });
-    await repo.appendClubCommEvents(tenant, current.id, [
-      {
+    await repo.appendClubCommEvents(
+      tenant,
+      current.id,
+      results.map((r) => ({
         id: randomUUID(),
-        channel: 'email',
-        to: chairEmail,
-        status: 'sent',
-        messageId,
+        channel: r.channel,
+        ...(r.to ? { to: r.to } : {}),
+        status: r.status,
+        ...(r.messageId ? { messageId: r.messageId } : {}),
+        ...(r.error ? { error: r.error } : {}),
         at: now(),
         by,
-        idempotencyKey: `reglink-${current.playerRegLink.token}`,
-        kind: 'reglink',
-      },
-    ]);
-  } catch (err) {
-    console.error('reg-link email failed on affiliation complete', err);
-    // Record the failure so an admin can see the auto-send didn't land (the chair can
-    // still be sent the link manually from the shared modal). Best-effort like the send.
-    try {
-      await repo.appendClubCommEvents(tenant, current.id, [
-        {
-          id: randomUUID(),
-          channel: 'email',
-          to: chairEmail,
-          status: 'failed',
-          error: err instanceof Error ? err.message : String(err),
-          at: now(),
-          by,
-          idempotencyKey: `reglink-${current.playerRegLink.token}`,
-          kind: 'reglink',
-        },
-      ]);
-    } catch (logErr) {
-      console.error('reg-link failed-event append failed', logErr);
-    }
+        idempotencyKey: `reglink-${token}-${r.channel}`,
+        kind: 'reglink' as const,
+      })),
+    );
+  } catch (logErr) {
+    console.error('onboarding comm-event append failed', logErr);
   }
   return current;
 }

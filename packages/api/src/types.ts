@@ -40,6 +40,19 @@ export interface League {
   note?: string;
 }
 
+/**
+ * A short how-to-use-the-app tutorial video, surfaced on the public /tutorials page
+ * and linked from the chair's onboarding email. `url` may be a site-relative path
+ * (e.g. '/tutorials/01-getting-started.mp4', served by the StaticSite CDN) or an
+ * absolute URL; link builders resolve relative paths against the tenant host.
+ */
+export interface TutorialVideo {
+  title: string;
+  url: string;
+  /** Optional poster image shown before play. */
+  poster?: string;
+}
+
 export interface TenantConfig {
   tenant: string;
   branding: {
@@ -72,6 +85,12 @@ export interface TenantConfig {
    * repo.recountAdmins from authoritative memberships before the guard runs.
    */
   adminCount?: number;
+  /**
+   * Per-tenant how-to-use-the-app tutorial videos, shown on the public /tutorials
+   * page and linked in the chair onboarding email. Absent ⇒ the shared
+   * DEFAULT_TUTORIALS fallback is used (so existing rows need no migration).
+   */
+  tutorials?: TutorialVideo[];
 }
 
 /** Stored club record. Catalogue-derived fields stay client-side. */

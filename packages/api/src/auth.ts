@@ -58,10 +58,26 @@ export class HttpError extends Error {
   }
 }
 
+// Custom-domain host → tenant slug (JSON env, set in sst.config.ts). Custom domains
+// don't follow the leftmost-label convention — the API lives at `api.<…>` and a union's
+// vanity host can differ from its slug (e.g. `dolphinspipeline` → `dolphins`) — so map
+// them explicitly. Parsed once at module load (matches repo.ts reading TABLE_NAME).
+const HOST_TENANT_MAP: Record<string, string> = (() => {
+  try {
+    return JSON.parse(process.env.TENANT_HOST_MAP ?? '{}');
+  } catch (e) {
+    // Malformed map → empty (safe: falls back to leftmost-label). Warn so a prod
+    // misconfiguration is debuggable instead of silently breaking the vanity host.
+    console.warn('TENANT_HOST_MAP is not valid JSON; ignoring it', e);
+    return {};
+  }
+})();
+
 /**
- * Resolve the tenant slug for a request. Prod: the leftmost label of the Host
- * (e.g. `dolphins.example.com` → `dolphins`). Dev: an explicit `x-tenant` header.
- * Returns null if it can't be determined (callers decide whether that's fatal).
+ * Resolve the tenant slug for a request. Prod: an explicit host→tenant map entry, else
+ * the leftmost label of the Host (e.g. `dolphins.example.com` → `dolphins`). Dev: an
+ * explicit `x-tenant` header. Returns null if it can't be determined (callers decide
+ * whether that's fatal).
  */
 export function resolveTenant(c: Context): string | null {
   // The x-tenant header is a DEV convenience only (no custom domains locally).
@@ -71,12 +87,14 @@ export function resolveTenant(c: Context): string | null {
     const explicit = c.req.header('x-tenant');
     if (explicit) return explicit.toLowerCase();
   }
-  const host = c.req.header('host') ?? '';
-  const label = host.split(':')[0].split('.')[0];
+  const host = (c.req.header('host') ?? '').split(':')[0].toLowerCase();
+  // Explicit custom-domain mapping wins (covers the API host + vanity web hosts).
+  if (HOST_TENANT_MAP[host]) return HOST_TENANT_MAP[host];
+  const label = host.split('.')[0];
   // Ignore non-tenant hosts (raw execute-api/localhost) so the API-Gateway
   // default domain can't be used to bypass host-based tenant inference.
   if (!label || label === 'localhost' || host.includes('execute-api')) return null;
-  return label.toLowerCase();
+  return label;
 }
 
 /** Parse + verify the bearer token and attach the decoded auth context. */

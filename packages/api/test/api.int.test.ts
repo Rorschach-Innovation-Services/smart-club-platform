@@ -308,6 +308,112 @@ describe('PATCH /clubs/:id — chair contact (repair existing clubs)', () => {
   });
 });
 
+describe('PATCH /clubs/:id — chair onboarding on affiliation complete', () => {
+  // FROM_EMAIL / WHATSAPP_* unset ⇒ notify/ runs dry-run (synthetic ids, no real sends).
+  // STAGE='local' ⇒ the localhost link fallback is allowed (deliverableBaseUrl).
+  type WithLink = {
+    playerRegLink?: { token: string; createdAt: string };
+  };
+
+  const mkClub = (id: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    name: id,
+    district: 'Test District',
+    sub: '',
+    chair: 'Carlton',
+    affiliation: 'in_progress' as const,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#123456',
+    ground: {},
+    leagues: [],
+    version: 1,
+    ...extra,
+  });
+
+  test('first completion mints a reg-link and sends both channels (dry-run)', async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('onboardme', {
+        exco: { chair: { name: 'Carlton', email: 'chair@onboard.co.za', cell: '083 111 2222' } },
+      }),
+    );
+    const res = await app.request('/clubs/onboardme', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ affiliation: 'complete', version: 1 }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as WithLink;
+    const token = body.playerRegLink?.token;
+    assert.ok(token, 'a player-registration link was minted');
+
+    // Comm events are appended after the affiliation write returns, so read them back.
+    const stored = await repo.getClub('dolphins', 'onboardme');
+    assert.equal(stored?.commLog?.length, 2, 'one event per channel');
+    assert.ok(stored?.commLog?.every((e) => e.kind === 'reglink'));
+    const email = stored?.commLog?.find((e) => e.channel === 'email');
+    const wa = stored?.commLog?.find((e) => e.channel === 'whatsapp');
+    assert.equal(email?.status, 'sent');
+    assert.equal(email?.idempotencyKey, `reglink-${token}-email`);
+    assert.equal(wa?.status, 'sent');
+    assert.equal(wa?.to, '27831112222', 'cell normalized to E.164 for WhatsApp');
+    assert.equal(wa?.idempotencyKey, `reglink-${token}-whatsapp`);
+  });
+
+  test('whatsapp is skipped (not failed) when the chair has no cell on file', async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('nocell', { exco: { chair: { name: 'No Cell', email: 'nocell@onboard.co.za' } } }),
+    );
+    const res = await app.request('/clubs/nocell', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ affiliation: 'complete', version: 1 }),
+    });
+    assert.equal(res.status, 200);
+    const stored = await repo.getClub('dolphins', 'nocell');
+    const wa = stored?.commLog?.find((e) => e.channel === 'whatsapp');
+    assert.equal(wa?.status, 'skipped');
+    assert.equal(stored?.commLog?.find((e) => e.channel === 'email')?.status, 'sent');
+  });
+
+  test('re-completion with a pre-existing link does not re-send (fresh-mint gate)', async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('alreadylinked', {
+        exco: { chair: { name: 'Carlton', email: 'chair@linked.co.za', cell: '083 111 2222' } },
+        playerRegLink: { token: 'pre-existing', createdAt: '2026-06-01T00:00:00.000Z' },
+      }),
+    );
+    const res = await app.request('/clubs/alreadylinked', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ affiliation: 'complete', version: 1 }),
+    });
+    assert.equal(res.status, 200);
+    const stored = await repo.getClub('dolphins', 'alreadylinked');
+    assert.equal((stored as WithLink).playerRegLink?.token, 'pre-existing', 'link not re-minted');
+    assert.ok(!stored?.commLog?.length, 'no onboarding send on re-confirmation');
+  });
+});
+
+describe('GET /tenant — public tutorials', () => {
+  test('returns the default tutorial set when the tenant has no override', async () => {
+    const res = await app.request('/tenant', { headers: { 'x-tenant': 'dolphins' } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { tutorials?: { title: string; url: string }[] };
+    // Non-empty, well-formed default set. Each url carries the '/tutorials/' path segment
+    // (relative here since TUTORIALS_BASE_URL is unset off-prod; absolute CDN URL in prod).
+    assert.ok(Array.isArray(body.tutorials) && body.tutorials.length > 0);
+    assert.ok(body.tutorials.every((t) => t.title && t.url.includes('/tutorials/')));
+  });
+});
+
 describe('POST /clubs/:id/send-fixtures', () => {
   // FROM_EMAIL / WHATSAPP_* unset ⇒ notify/ runs dry-run (synthetic ids, no real sends).
   // REP is scoped to clubIds ['testers'] (module-level), so it may share for 'testers'.

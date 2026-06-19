@@ -93,6 +93,12 @@ export async function sendStaffInviteEmail(
   return { messageId: res.MessageId ?? '' };
 }
 
+/** A single how-to-use-the-app tutorial video link (absolute URL, built by the caller). */
+export interface TutorialLink {
+  title: string;
+  url: string;
+}
+
 export interface RegLinkEmailInput {
   to: string;
   chairName: string;
@@ -100,35 +106,63 @@ export interface RegLinkEmailInput {
   season: string;
   /** The public player-registration URL (validated by the caller). */
   link: string;
+  /**
+   * Optional getting-started section: a link to the in-app tutorials page plus the
+   * direct video links. When present, appended below the registration link. Absent ⇒
+   * the email is exactly the link-only shape it had before.
+   */
+  tutorials?: { pageUrl: string; videos: TutorialLink[] };
 }
 
 /**
  * Sent to the chairperson the moment affiliation completes: their unique
- * player-registration link, ready to share with members. Mirrors the invite email
- * shape (a link in the body) and honours the same dry-run gate.
+ * player-registration link, ready to share with members, plus (optionally) the
+ * how-to-use-the-app tutorial videos. Mirrors the invite email shape (a link in the
+ * body) and honours the same dry-run gate.
  */
 export async function sendRegLinkEmail(input: RegLinkEmailInput): Promise<{ messageId: string }> {
-  const { to, chairName, clubName, season, link } = input;
+  const { to, chairName, clubName, season, link, tutorials } = input;
   const subject = `${clubName} · player registration link (${season})`;
   const greetName = chairName || 'there';
+
+  const hasTutorials = !!tutorials && tutorials.videos.length > 0;
+  const tutorialsText = hasTutorials
+    ? `\n\nNew to the app? These short videos walk you through it — watch them all here:\n${tutorials!.pageUrl}\n\n` +
+      tutorials!.videos.map((v) => `• ${v.title}: ${v.url}`).join('\n') +
+      `\n`
+    : '';
 
   const text =
     `Hi ${greetName},\n\n` +
     `Your ${clubName} affiliation is in. Here's your unique player-registration link for the ${season} season — share it with your members so they can register straight into the club:\n\n` +
     `${link}\n\n` +
-    `Every registration flows directly into your roster and the Dolphins cohort.\n\n` +
+    `Every registration flows directly into your roster and the Dolphins cohort.` +
+    `${tutorialsText}\n\n` +
     `The Dolphins office`;
 
   const safeName = escapeHtml(greetName);
   const safeClub = escapeHtml(clubName);
   const safeSeason = escapeHtml(season);
   const safeLink = escapeHtml(link);
+  const tutorialsHtml = hasTutorials
+    ? `<p style="margin-top:22px">New to the app? These short videos walk you through it — ` +
+      `<a href="${escapeHtml(tutorials!.pageUrl)}" style="color:#1D9E75;font-weight:600">watch them all here</a>:</p>` +
+      `<ul style="padding-left:18px;margin:8px 0">` +
+      tutorials!.videos
+        .map(
+          (v) =>
+            `<li style="margin:4px 0"><a href="${escapeHtml(v.url)}" style="color:#1D9E75">${escapeHtml(v.title)}</a></li>`,
+        )
+        .join('') +
+      `</ul>`
+    : '';
   const html =
     `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
     `<p>Hi ${safeName},</p>` +
     `<p>Your <strong>${safeClub}</strong> affiliation is in. Here's your unique player-registration link for the ${safeSeason} season — share it with your members so they can register straight into the club:</p>` +
     `<p><a href="${safeLink}" style="color:#1D9E75;font-weight:600">${safeLink}</a></p>` +
     `<p>Every registration flows directly into your roster and the Dolphins cohort.</p>` +
+    `${tutorialsHtml}` +
     `<p>The Dolphins office</p>` +
     `</div>`;
 

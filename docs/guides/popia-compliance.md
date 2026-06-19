@@ -43,6 +43,15 @@ Basis and controls:
   player or minor data is ever sent through this path. (Historic chair-onboarding invites,
   recorded in club `commLog`s before that flow was retired in favour of club
   self-registration, fall under the same exception.)
+- **Chair onboarding send (reg link + tutorials):** when a chair completes affiliation, the
+  same path delivers their club's player-registration link plus a link to the how-to-use-the-app
+  tutorial videos, over email + WhatsApp (recorded in `commLog` as `kind: 'reglink'`). Only the
+  chair's own contact fields and two non-sensitive links (the reg link; the public `/tutorials`
+  page) leave the region — no player/minor data. The reg link is operational communication
+  necessary to deliver the service; the **tutorials link is product guidance** and is the weaker
+  fit for the s72 "necessity for the contract" ground — confirm its basis with counsel alongside
+  the invite flow. If in doubt, the tutorials link can be dropped from the outbound messages
+  (it also lives on the in-app Help panel) without affecting the reg-link delivery.
 - **Auditability:** sends are recorded (channel, recipient, status, timestamp, actor) so
   transfers are traceable. The per-send idempotency markers (`INVITE#<key>` items, still used
   by the fixtures broadcast) hold the recipient; both the `commLog` and the markers are

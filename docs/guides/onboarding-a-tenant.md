@@ -27,9 +27,24 @@ one shared stack ([ADR 0002](../architecture/0002-single-tenant-saas-vs-isolated
    to also load the sample clubs + series. To blank a tenant that already has data:
    `… run clear-cohort -- <slug> --confirm`.)
 
-4. **Point DNS + TLS** (prod): add the subdomain to the StaticSite `domain` config with an
-   ACM cert in af-south-1, and the CloudFront Function host→branding mapping. (Dev uses the
-   `x-tenant` header instead.)
+4. **Point DNS + TLS** (prod): add the host(s) to the StaticSite/API `domain` config and to
+   `TENANT_HOST_MAP` in `sst.config.ts` (a host→tenant slug map — needed when the host label
+   isn't the slug, e.g. `api.<…>` or a vanity host like `dolphinspipeline` → `dolphins`).
+   Mind the cert region: the **web/CloudFront cert MUST be in us-east-1**; the **API Gateway
+   custom-domain cert MUST be in af-south-1** (HTTP API custom domains are regional — a
+   us-east-1 cert can't attach). Each cert's SANs must cover **every** host it fronts —
+   verify before deploy, or CloudFront/API GW serve cert errors for the missing host:
+
+   ```bash
+   aws acm describe-certificate --region us-east-1 --profile medicoach \
+     --certificate-arn <web-arn> --query 'Certificate.SubjectAlternativeNames'   # apex + www
+   aws acm describe-certificate --region af-south-1 --profile medicoach \
+     --certificate-arn <api-arn> --query 'Certificate.SubjectAlternativeNames'   # api.<…>
+   ```
+
+   `medicoach.co.za` is on external DNS, so use `dns: false` + `cert: <arn>` and create the
+   CNAMEs manually. Branding is resolved client-side (no edge function today). (Dev uses the
+   `x-tenant` header instead.) See the dolphinspipeline setup for a worked example.
 
 5. **Bootstrap the first admin** (chicken-and-egg: admin-create-only means no one can invite
    the first admin):

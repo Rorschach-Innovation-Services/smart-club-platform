@@ -22,6 +22,7 @@ import { routingRole, clubRouteRedirect } from './routing.js';
 import { Login } from './Login.jsx';
 import { RegisterPage } from './RegisterPage.jsx';
 import { ClubSignupPage } from './ClubSignupPage.jsx';
+import { TutorialsPage } from './TutorialsPage.jsx';
 import {
   REQUIRED_DOCS,
   SUBMISSION_DEADLINE_DEFAULT,
@@ -100,6 +101,46 @@ function HelpModal({ onClose, support }) {
           </button>
         </div>
         <div className="task-modal-body">
+          <a
+            href="/tutorials"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              padding: '14px 16px',
+              marginBottom: 16,
+              borderRadius: 10,
+              border: '1px solid var(--line)',
+              background: 'rgba(15,143,74,0.06)',
+              textDecoration: 'none',
+              color: 'inherit',
+            }}
+          >
+            <span style={{ color: 'var(--teal-deep)' }}>
+              <Icon.Form />
+            </span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span
+                style={{
+                  display: 'block',
+                  fontFamily: "'Montserrat',sans-serif",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  color: 'var(--ink)',
+                }}
+              >
+                How to use the app
+              </span>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                Watch short video tutorials
+              </span>
+            </span>
+            <span style={{ color: 'var(--muted-2)' }}>
+              <Icon.Arrow />
+            </span>
+          </a>
           <div
             style={{
               background: 'var(--paper)',
@@ -283,6 +324,8 @@ function AppRoutes() {
       <Route path="/register/:clubId" element={<RegisterPage />} />
       {/* Public club self-registration — the tenant-wide signup link. */}
       <Route path="/signup" element={<ClubSignupPage />} />
+      {/* Public how-to-use-the-app tutorial videos (linked from chair onboarding + portal nav). */}
+      <Route path="/tutorials" element={<TutorialsPage />} />
       <Route
         path="/*"
         element={

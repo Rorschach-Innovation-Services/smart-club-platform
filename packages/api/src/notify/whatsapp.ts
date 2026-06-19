@@ -34,6 +34,14 @@ const FIXTURES_TEMPLATE_LANG = process.env.WHATSAPP_FIXTURES_TEMPLATE_LANG ?? 'e
 // staff name, {{2}} org name, {{3}} the sign-in link (same body slots as the invite).
 const STAFF_TEMPLATE = process.env.WHATSAPP_STAFF_TEMPLATE ?? TEMPLATE;
 const STAFF_TEMPLATE_LANG = process.env.WHATSAPP_STAFF_TEMPLATE_LANG ?? TEMPLATE_LANG;
+// Chair onboarding template, sent the moment affiliation completes — {{1}} chair name,
+// {{2}} club name, {{3}} the player-registration link, {{4}} the tutorials-page URL.
+// A single business-initiated message carries both links (one conversation, not two).
+// Create + approve this Utility template before real sends; see the runbook. Two URL
+// body variables are more scrutinised by Meta — if {{4}} blocks approval, drop it and
+// rely on the email + portal for tutorials (the email already carries every link).
+const REGLINK_TEMPLATE = process.env.WHATSAPP_REGLINK_TEMPLATE ?? 'club_reglink_ready';
+const REGLINK_TEMPLATE_LANG = process.env.WHATSAPP_REGLINK_TEMPLATE_LANG ?? 'en';
 const GRAPH_VERSION = 'v22.0';
 export const WHATSAPP_DRY_RUN = process.env.NOTIFY_DRY_RUN === '1' || !TOKEN || !PHONE_NUMBER_ID;
 
@@ -153,6 +161,38 @@ export async function sendStaffInviteWhatsApp(
       { type: 'text', text: link },
     ],
     `staff invite for ${orgName}`,
+  );
+}
+
+export interface RegLinkWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  chairName: string;
+  clubName: string;
+  regLink: string;
+  tutorialsUrl: string;
+}
+
+/**
+ * Chair onboarding heads-up sent on affiliation-complete: the club's player-registration
+ * link to forward to members, plus a link to the how-to-use-the-app tutorial videos. Uses
+ * REGLINK_TEMPLATE — {{1}} chair name, {{2}} club name, {{3}} reg link, {{4}} tutorials URL.
+ * WhatsApp is best-effort alongside the (primary) email.
+ */
+export async function sendRegLinkWhatsApp(
+  input: RegLinkWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const { to, chairName, clubName, regLink, tutorialsUrl } = input;
+  return sendTemplate(
+    to,
+    REGLINK_TEMPLATE,
+    REGLINK_TEMPLATE_LANG,
+    [
+      { type: 'text', text: chairName || 'there' },
+      { type: 'text', text: clubName },
+      { type: 'text', text: regLink },
+      { type: 'text', text: tutorialsUrl },
+    ],
+    `reg link for ${clubName}`,
   );
 }
 

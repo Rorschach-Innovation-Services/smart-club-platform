@@ -6,8 +6,14 @@
  * toast reflects reality instead of optimism.
  */
 import type { Club, Channel, SendResult, PlayerRegistration } from '../types.js';
-import { sendStaffInviteEmail, sendFixturesEmail } from './email.js';
-import { sendStaffInviteWhatsApp, sendFixturesWhatsApp, toE164 } from './whatsapp.js';
+import { sendStaffInviteEmail, sendFixturesEmail, sendRegLinkEmail } from './email.js';
+import type { TutorialLink } from './email.js';
+import {
+  sendStaffInviteWhatsApp,
+  sendFixturesWhatsApp,
+  sendRegLinkWhatsApp,
+  toE164,
+} from './whatsapp.js';
 
 // Re-export so existing import sites (index.ts) keep resolving these from here.
 export type { Channel, SendResult } from '../types.js';
@@ -107,6 +113,112 @@ export async function sendStaffInvite(args: {
       channel === 'email'
         ? sendEmailChannel(contact, orgName, link)
         : sendWhatsAppChannel(contact, orgName, link),
+    ),
+  );
+  return { results };
+}
+
+// ───────────────────────── Chair onboarding (reg link + tutorials) ─────────────────────────
+
+interface ChairContact {
+  name: string;
+  email: string;
+  cell: string;
+}
+
+interface OnboardingTutorials {
+  /** Absolute URL of the in-app /tutorials page. */
+  pageUrl: string;
+  /** Direct video links (absolute URLs) listed in the email body. */
+  videos: TutorialLink[];
+}
+
+async function sendOnboardingEmail(
+  chair: ChairContact,
+  clubName: string,
+  season: string,
+  regLink: string,
+  tutorials: OnboardingTutorials,
+): Promise<SendResult> {
+  if (!EMAIL_RE.test(chair.email)) {
+    return {
+      channel: 'email',
+      status: 'skipped',
+      ...(chair.email ? { to: chair.email } : {}),
+      error: 'no valid chair email on file',
+    };
+  }
+  try {
+    const { messageId } = await sendRegLinkEmail({
+      to: chair.email,
+      chairName: chair.name,
+      clubName,
+      season,
+      link: regLink,
+      tutorials,
+    });
+    return { channel: 'email', status: 'sent', to: chair.email, messageId };
+  } catch (err) {
+    return { channel: 'email', status: 'failed', to: chair.email, error: errMessage(err) };
+  }
+}
+
+async function sendOnboardingWhatsApp(
+  chair: ChairContact,
+  clubName: string,
+  regLink: string,
+  tutorialsUrl: string,
+): Promise<SendResult> {
+  const e164 = toE164(chair.cell);
+  if (!e164) {
+    return {
+      channel: 'whatsapp',
+      status: 'skipped',
+      ...(chair.cell ? { to: chair.cell } : {}),
+      error: 'no valid chair cell on file',
+    };
+  }
+  try {
+    const { messageId } = await sendRegLinkWhatsApp({
+      to: e164,
+      chairName: chair.name,
+      clubName,
+      regLink,
+      tutorialsUrl,
+    });
+    return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
+  } catch (err) {
+    return { channel: 'whatsapp', status: 'failed', to: e164, error: errMessage(err) };
+  }
+}
+
+/**
+ * Deliver the chair's onboarding bundle — their club's player-registration link plus the
+ * how-to-use-the-app tutorials — over email and/or WhatsApp, the moment affiliation
+ * completes. The reg-link email carries the tutorials section inline; the reg-link
+ * WhatsApp carries the tutorials-page URL. Non-throwing per channel (a bad/blank chair
+ * contact becomes a `skipped`/`failed` result, never sinking the other channel). Email is
+ * primary; WhatsApp is best-effort.
+ */
+export async function sendChairOnboarding(args: {
+  chair: { name?: string; email?: string; cell?: string };
+  clubName: string;
+  channels: Channel[];
+  regLink: string;
+  tutorials: OnboardingTutorials;
+  season: string;
+}): Promise<{ results: SendResult[] }> {
+  const { chair, clubName, channels, regLink, tutorials, season } = args;
+  const contact: ChairContact = {
+    name: (chair.name ?? '').trim(),
+    email: (chair.email ?? '').trim(),
+    cell: (chair.cell ?? '').trim(),
+  };
+  const results = await Promise.all(
+    channels.map((channel) =>
+      channel === 'email'
+        ? sendOnboardingEmail(contact, clubName, season, regLink, tutorials)
+        : sendOnboardingWhatsApp(contact, clubName, regLink, tutorials.pageUrl),
     ),
   );
   return { results };

@@ -127,6 +127,9 @@ export function normalizeZaCell(raw) {
   return m ? `0${m[1]}` : null;
 }
 export const getTenant = () => request('/tenant', { auth: false });
+// How-to-use-the-app tutorial videos ride the public /tenant payload (falls back to the
+// backend default set). Thin accessor for the public Tutorials page.
+export const getTutorials = async () => (await getTenant()).tutorials ?? [];
 export const putTenantConfig = (patch) => request('/tenant/config', { method: 'PUT', body: patch });
 export const putSupportContact = ({ name, email }) =>
   request('/tenant/support', { method: 'PUT', body: { name, email } });

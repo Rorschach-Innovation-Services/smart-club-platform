@@ -24,6 +24,32 @@ export default $config({
   },
 
   async run() {
+    // ── Prod custom domains ──
+    // medicoach.co.za is on external DNS (no Route53 zone), so SST uses dns:false +
+    // pre-issued ACM certs; the apex/api/www CNAMEs are created manually after deploy.
+    // Web cert MUST be us-east-1 (CloudFront); API cert MUST be af-south-1 (HTTP API
+    // custom domains are regional — a us-east-1 cert can't attach). Both cover www.
+    // NOTE: the cert ARNs below are specific to AWS account 433453514361 — re-issue per
+    // account if this stack is ever deployed elsewhere. Each cert's SANs must cover every
+    // host it fronts (web cert: apex + www; API cert: api.<…>) or CloudFront/API GW serve
+    // cert errors. See docs/guides/onboarding-a-tenant.md.
+    const isProd = $app.stage === 'prod';
+    const WEB_CERT =
+      'arn:aws:acm:us-east-1:433453514361:certificate/5c749bdd-1687-4ecc-a3b7-f4e35aaab487';
+    const API_CERT =
+      'arn:aws:acm:af-south-1:433453514361:certificate/f485b435-3bef-42f0-a27f-3b798e98c8eb';
+    const PROD_WEB_HOST = 'dolphinspipeline.medicoach.co.za';
+    const PROD_API_HOST = 'api.dolphinspipeline.medicoach.co.za';
+    // Custom-domain hosts don't follow the leftmost-label tenant convention (the API
+    // lives at api.<…> and the union's vanity host is "dolphinspipeline", not "dolphins"),
+    // so map them explicitly. resolveTenant()/resolveTenantSlug() consult this first and
+    // fall back to the leftmost label for clean per-union subdomains. See auth.ts.
+    const TENANT_HOST_MAP: Record<string, string> = {
+      [PROD_WEB_HOST]: 'dolphins',
+      [`www.${PROD_WEB_HOST}`]: 'dolphins',
+      [PROD_API_HOST]: 'dolphins',
+    };
+
     // ── Data: single DynamoDB table, tenant-scoped keys ──
     // pk/sk primary, gsi1 for per-tenant listing & by-tenant user lookups.
     // See docs/architecture/data-model.md.
@@ -46,6 +72,19 @@ export default $config({
 
     // ── Uploads: private compliance PDFs + tenant logos (presigned access) ──
     const uploads = new sst.aws.Bucket('Uploads');
+
+    // ── Tutorial videos: public how-to-use-the-app MP4s, served over CloudFront ──
+    // Private bucket (CloudFront-only via OAC) fronted by a dedicated Router/CDN. The
+    // clips are large (≈1.2 GB across the 6 steps + a 1.17 GB full cut) and non-sensitive,
+    // so they live here rather than in the web build's `public/` — no git bloat, no
+    // re-upload on every web deploy, and CloudFront serves byte-range requests so the
+    // <video> player can seek. Files are uploaded out-of-band (see docs/guides/
+    // tutorial-videos.md), NOT synced from the repo, so a deploy never purges them.
+    // Object keys live under the `tutorials/` prefix; Router passes the path straight
+    // through to S3 (no rewrite), so URL `/tutorials/<file>` maps to key `tutorials/<file>`.
+    const tutorialAssets = new sst.aws.Bucket('TutorialAssets', { access: 'cloudfront' });
+    const cdn = new sst.aws.Router('Cdn');
+    cdn.routeBucket('/tutorials', tutorialAssets);
 
     // ── Auth: Cognito user pool with passwordless email OTP ──
     // Passwordless USER_AUTH/EMAIL_OTP requires the Essentials feature plan.
@@ -118,11 +157,21 @@ export default $config({
     // Staff (admin/rep) invites reuse the invite template by default until a dedicated
     // Meta-approved staff template exists. Read by notify/whatsapp.ts (WHATSAPP_STAFF_TEMPLATE).
     const whatsappStaffTemplate = new sst.Secret('WhatsappStaffTemplate', 'club_onboarding_invite');
+    // Chair onboarding (player-reg link + tutorials), sent on affiliation-complete. Read by
+    // notify/whatsapp.ts (WHATSAPP_REGLINK_TEMPLATE) — create + approve this Utility template
+    // (body vars {{1}} chair, {{2}} club, {{3}} reg link, {{4}} tutorials URL) before real sends.
+    const whatsappReglinkTemplate = new sst.Secret('WhatsappReglinkTemplate', 'club_reglink_ready');
 
     // ── API: one Hono Lambda behind a $default route ──
     // JWT is verified inside the app (aws-jwt-verify) so public routes (/tenant,
     // /register) and protected routes can coexist on one catch-all route.
-    const api = new sst.aws.ApiGatewayV2('Api');
+    const api = new sst.aws.ApiGatewayV2('Api', {
+      // Prod: dedicated regional custom domain so the Host header carries the tenant
+      // (raw execute-api hosts resolve to null). dns:false — CNAME added manually at
+      // the external DNS provider. With a domain set, `api.url` becomes the custom URL,
+      // so VITE_API_URL + ALLOWED_ORIGINS below pick it up automatically.
+      domain: isProd ? { name: PROD_API_HOST, dns: false, cert: API_CERT } : undefined,
+    });
     api.route('$default', {
       handler: 'packages/api/src/index.handler',
       // Linking grants IAM + Resource access. userPool link lets the API call
@@ -137,6 +186,7 @@ export default $config({
         whatsappPhoneNumberId,
         whatsappInviteTemplate,
         whatsappStaffTemplate,
+        whatsappReglinkTemplate,
       ],
       // SES isn't covered by `link` (it's not an SST resource), so grant it directly.
       // SES authorizes by verified identity, not resource ARN, hence resources: ['*'].
@@ -153,8 +203,17 @@ export default $config({
         TABLE_NAME: table.name,
         // STAGE gates the dev-only x-tenant header (prod resolves tenant by host).
         STAGE: $app.stage,
-        // Comma-separated extra CORS origins (custom tenant domains in prod).
-        ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS ?? '',
+        // Base URL (CloudFront) for the public tutorial videos. DEFAULT_TUTORIALS
+        // builds absolute `${TUTORIALS_BASE_URL}/tutorials/<file>` links from this.
+        TUTORIALS_BASE_URL: cdn.url,
+        // Host→tenant map for custom domains (JSON). Consulted by resolveTenant() before
+        // the leftmost-label fallback. Empty off-prod (dev uses the x-tenant header).
+        TENANT_HOST_MAP: JSON.stringify(isProd ? TENANT_HOST_MAP : {}),
+        // Trusted CORS origins (custom tenant domains in prod). The web app is cross-origin
+        // to the API (different subdomains), so its origin must be listed here.
+        ALLOWED_ORIGINS: isProd
+          ? `https://${PROD_WEB_HOST},https://www.${PROD_WEB_HOST}`
+          : (process.env.ALLOWED_ORIGINS ?? ''),
         // Outbound messaging. SES_REGION must stay eu-west-1 — that's where the
         // verified identity with production access lives (this account's af-south-1
         // SES exists but is sandboxed: unverified recipients are rejected).
@@ -164,6 +223,7 @@ export default $config({
         WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
         WHATSAPP_INVITE_TEMPLATE: whatsappInviteTemplate.value,
         WHATSAPP_STAFF_TEMPLATE: whatsappStaffTemplate.value,
+        WHATSAPP_REGLINK_TEMPLATE: whatsappReglinkTemplate.value,
         // Force dry-run regardless of secrets (set NOTIFY_DRY_RUN=1 in the deploy env)
         // — the verified-only/dry-run gate while awaiting SES production access.
         NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
@@ -175,6 +235,13 @@ export default $config({
     const web = new sst.aws.StaticSite('Web', {
       build: { command: 'npm run build', output: 'dist' },
 
+      // Prod: serve at the union's custom domain (+ www alias on the same distribution;
+      // the us-east-1 cert covers both). dns:false — CNAMEs added manually at the external
+      // DNS provider. Aliases (not redirects) keep DNS to simple same-target CNAMEs.
+      domain: isProd
+        ? { name: PROD_WEB_HOST, dns: false, cert: WEB_CERT, aliases: [`www.${PROD_WEB_HOST}`] }
+        : undefined,
+
       // Vite bakes these at build time (one platform build; tenant is resolved at
       // runtime by hostname). See docs/architecture/0002.
       environment: {
@@ -182,6 +249,10 @@ export default $config({
         VITE_USER_POOL_ID: userPool.id,
         VITE_USER_POOL_CLIENT_ID: userPoolClient.id,
         VITE_AWS_REGION: 'af-south-1',
+        // Tenant fallback for bare/www hosts, and the host→tenant map mirroring the API
+        // (so dolphinspipeline.* → dolphins client-side too). Empty map off-prod.
+        VITE_DEFAULT_TENANT: 'dolphins',
+        VITE_TENANT_HOST_MAP: JSON.stringify(isProd ? TENANT_HOST_MAP : {}),
       },
 
       // ── SPA fallback ──
@@ -222,6 +293,9 @@ export default $config({
       api: api.url,
       userPoolId: userPool.id,
       userPoolClientId: userPoolClient.id,
+      // For the tutorial-video upload runbook (docs/guides/tutorial-videos.md).
+      tutorialBucket: tutorialAssets.name,
+      cdnUrl: cdn.url,
     };
   },
 });
