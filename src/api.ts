@@ -128,6 +128,8 @@ async function request<T = any>(
     }
     throw new ApiError(res.status, message, code);
   }
+  // No current backend route emits 204; kept for forward-compat (callers of a
+  // future 204 route should type T to include null).
   if (res.status === 204) return null as T;
   return res.json();
 }
@@ -223,7 +225,7 @@ export const sendClubFixtures = (
 export const getPlayers = (clubId: string) =>
   request<PlayerRegistration[]>(`/clubs/${clubId}/players`);
 export const getPlayerIdDocViewUrl = (clubId: string, naturalKey: string) =>
-  request<{ url: string }>(`/clubs/${clubId}/players/${naturalKey}/id-doc/view-url`, {
+  request<{ viewUrl: string }>(`/clubs/${clubId}/players/${naturalKey}/id-doc/view-url`, {
     method: 'POST',
   });
 
