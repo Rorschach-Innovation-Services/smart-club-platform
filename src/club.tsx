@@ -6,6 +6,7 @@ import {
   useEffect as useEffectC,
   useRef as useRefC,
 } from 'react';
+import type { ReactNode, ChangeEvent, CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -66,6 +67,15 @@ import { DocPreviewModal } from './DocPreviewModal';
 import { RegLinkModal } from './RegLinkModal';
 
 /* ─── Compliance doc upload — presigned S3 PUT, then mark uploaded ─── */
+interface DocUploadButtonProps {
+  clubId: string;
+  docKey: string;
+  label?: ReactNode;
+  onUploaded: (key: string, meta: any) => void | Promise<void>;
+  toast: (msg: string, tone?: string) => void;
+  variant?: string;
+  buttonLabel?: ReactNode;
+}
 function DocUploadButton({
   clubId,
   docKey,
@@ -74,11 +84,11 @@ function DocUploadButton({
   toast,
   variant = 'button',
   buttonLabel,
-}) {
-  const inputRef = useRefC(null);
+}: DocUploadButtonProps) {
+  const inputRef = useRefC<HTMLInputElement | null>(null);
   const [busy, setBusy] = useStateC(false);
   const isReplace = variant === 'link';
-  async function handleFile(e) {
+  async function handleFile(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     // file.type is often empty for .doc/.docx — resolve from the extension before
@@ -196,7 +206,7 @@ export function GroundMap({ query, coords: savedPin, onResolved, onAddressPicked
 
   // Drop / move the single ground marker. Popup is opt-in (forward-geocode
   // shows the resolved place name; clicks stay quiet — coords + field report it).
-  function placeMarker(lat, lon, label) {
+  function placeMarker(lat: number, lon: number, label?: string) {
     if (!mapRef.current || !L) return;
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
     if (markerRef.current) markerRef.current.remove();
@@ -834,8 +844,8 @@ const EMPTY_COACH = {
 export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allLeagues = [] }) {
   const [data, setData] = useStateC(() => {
     // Pre-fill exco from club.exco (single source of truth shared with the exco roster doc)
-    const ex = club.exco || {};
-    const seed = (key, fallback = {}) => ({
+    const ex: Record<string, any> = club.exco || {};
+    const seed = (key: string, fallback: Record<string, any> = {}) => ({
       name: ex[key]?.name ?? fallback.name ?? '',
       cell: ex[key]?.cell ?? fallback.cell ?? '',
       email: ex[key]?.email ?? fallback.email ?? '',
@@ -1686,7 +1696,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
                 const selectedLeagueKeys = Object.entries(data.leagues)
                   .filter(([_, v]) => v)
                   .map(([k]) => k);
-                const leagueGroups = districtOptions.reduce((acc, L) => {
+                const leagueGroups = districtOptions.reduce<Record<string, any[]>>((acc, L) => {
                   (acc[L.group] = acc[L.group] || []).push(L);
                   return acc;
                 }, {});
@@ -3220,10 +3230,10 @@ export function DocumentsView({
         <ExcoFormModal
           club={club}
           onClose={() => setShowExcoForm(false)}
-          onSave={(members) => {
+          onSave={(members: Record<string, any>) => {
             onSaveExco(members);
             setShowExcoForm(false);
-            const count = Object.values(members).filter((m) => m.name).length;
+            const count = Object.values(members).filter((m: any) => m.name).length;
             toast(
               `Exco roster ${club.docs.exco ? 'updated' : 'submitted'} · ${count} bearer${count === 1 ? '' : 's'}`,
             );
@@ -3403,7 +3413,7 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline, allLe
       return effectiveAnswers(club);
     }
     // Governance auto-fills for every club (not just legacy scored ones).
-    const a = { ...deriveGovernance(club) };
+    const a: Record<string, any> = { ...deriveGovernance(club) };
     if (club.cqi > 0) {
       // approximate capability defaults based on the club's score band.
       // Mirror the home-page glance card: team counts derive from leagues entered.
@@ -3503,7 +3513,9 @@ export function CQIView({ club, goto, toast, onSubmit, submissionDeadline, allLe
             <div
               key={cat.key}
               className="score-card"
-              style={{ '--fill': (s.earned / cat.possible) * 100 + '%', '--accent': cat.accent }}
+              style={
+                { '--fill': (s.earned / s.possible) * 100 + '%', '--accent': cat.accent } as CSSProperties
+              }
             >
               <div>
                 <span className="sc-cat">{cat.title}</span>
@@ -3749,7 +3761,10 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
   });
 
   const daysToNext = nextFixture
-    ? Math.max(0, Math.ceil((new Date(nextFixture.date) - new Date(todayISO)) / 86400000))
+    ? Math.max(
+        0,
+        Math.ceil((new Date(nextFixture.date).getTime() - new Date(todayISO).getTime()) / 86400000),
+      )
     : null;
   // An opponent id with no club behind it means the club was deleted — say so
   // instead of the pre-schedule 'TBA'.
@@ -4248,7 +4263,7 @@ export function ClubPlayersView({ club, players, clearances, leagues, onGenerate
             {mine.length === 0 && (
               <tr>
                 <td
-                  colSpan="8"
+                  colSpan={8}
                   style={{ padding: 28, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}
                 >
                   No players registered yet — share the <strong>Registration link</strong> so

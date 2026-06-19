@@ -890,7 +890,7 @@ export const GOVERNANCE_KEYS = [
 ];
 
 /** The seven governance answers derived from a club's documents and records. */
-export function deriveGovernance(club) {
+export function deriveGovernance(club: Club): Record<string, boolean> {
   const docs = club?.docs || {};
   const playerCount = club?.players ?? club?.playerCount ?? 0;
   return {
@@ -920,8 +920,8 @@ const LEGACY_CQI_KEYS = ['agm', 'minutes', 'conduct'];
  * than freezing on a stale approximation. Single source of truth for "did the club genuinely
  * answer this" — used both to build effectiveAnswers and to tag answer provenance.
  */
-export function genuineCqiAnswers(club) {
-  const stored = { ...(club?.cqiAnswers || {}) };
+export function genuineCqiAnswers(club: Club): Record<string, any> {
+  const stored: Record<string, any> = { ...(club?.cqiAnswers || {}) };
   if (LEGACY_CQI_KEYS.some((k) => k in stored)) {
     for (const k of GOVERNANCE_KEYS) delete stored[k];
   }
@@ -934,7 +934,7 @@ export function genuineCqiAnswers(club) {
  * governanceOverrides), untouched governance answers keep tracking the documents live — so
  * every consumer that scores or renders answers must read through this, not raw cqiAnswers.
  */
-export function effectiveAnswers(club) {
+export function effectiveAnswers(club: Club): Record<string, any> {
   return { ...deriveGovernance(club), ...genuineCqiAnswers(club) };
 }
 
@@ -943,9 +943,12 @@ export function effectiveAnswers(club) {
  * overrides. Called at submit so a club that later uploads a document isn't frozen on the
  * stale auto-filled value it happened to submit with.
  */
-export function governanceOverrides(answers, club) {
-  const derived = deriveGovernance(club);
-  const out = { ...answers };
+export function governanceOverrides(
+  answers: Record<string, any>,
+  club: Club,
+): Record<string, any> {
+  const derived: Record<string, any> = deriveGovernance(club);
+  const out: Record<string, any> = { ...answers };
   for (const k of GOVERNANCE_KEYS) {
     if (out[k] === derived[k]) delete out[k];
   }

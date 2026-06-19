@@ -11,7 +11,7 @@
 export const OVERARCHING_DISTRICT = 'All districts';
 
 /** Derive a stable, URL-safe key from a league name (new admin-created leagues only). */
-export function slugifyLeagueKey(label) {
+export function slugifyLeagueKey(label: string) {
   return String(label || '')
     .toLowerCase()
     .trim()
@@ -25,14 +25,14 @@ export function slugifyLeagueKey(label) {
  * fallback to a default district — an unknown/blank district yields just the overarching
  * set, which is the correct behaviour for a fresh tenant.
  */
-export function leagueOptionsForDistrict(allLeagues, district) {
+export function leagueOptionsForDistrict(allLeagues: any[], district: string): any[] {
   const list = Array.isArray(allLeagues) ? allLeagues : [];
   const overarching = list.filter((l) => l.district === OVERARCHING_DISTRICT);
   const districtSpecific = list.filter(
     (l) => l.district === district && l.district !== OVERARCHING_DISTRICT,
   );
-  const seen = new Set();
-  const out = [];
+  const seen = new Set<string>();
+  const out: any[] = [];
   for (const l of [...overarching, ...districtSpecific]) {
     if (seen.has(l.key)) continue;
     seen.add(l.key);
@@ -42,21 +42,21 @@ export function leagueOptionsForDistrict(allLeagues, district) {
 }
 
 /** key -> label map (replaces the static LEAGUE_LABEL_BY_KEY). */
-export function labelByKey(allLeagues) {
-  const map = {};
+export function labelByKey(allLeagues: any[]): Record<string, string> {
+  const map: Record<string, string> = {};
   for (const l of allLeagues || []) map[l.key] = l.label;
   return map;
 }
 
 /** Group leagues by their `group` label, for optgroup-style rendering. */
-export function optionsGroupedByGroup(allLeagues) {
-  const groups = {};
+export function optionsGroupedByGroup(allLeagues: any[]): Record<string, any[]> {
+  const groups: Record<string, any[]> = {};
   for (const l of allLeagues || []) (groups[l.group] = groups[l.group] || []).push(l);
   return groups;
 }
 
 /** Find a single league by key (returns undefined if it was deleted). */
-export function findByKey(allLeagues, key) {
+export function findByKey(allLeagues: any[], key: string) {
   return (allLeagues || []).find((l) => l.key === key);
 }
 
@@ -68,7 +68,7 @@ export const JUNIOR_GROUP = 'Juniors';
  * league entered fields one side. Keys whose league was deleted from the
  * catalogue count as senior so the total always equals leagues entered.
  */
-export function teamCounts(leagueKeys, allLeagues) {
+export function teamCounts(leagueKeys: any[], allLeagues: any[]) {
   const keys = Array.isArray(leagueKeys) ? leagueKeys : [];
   let junior = 0;
   for (const k of keys) {
