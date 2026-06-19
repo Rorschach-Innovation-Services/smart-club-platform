@@ -73,18 +73,20 @@ export default $config({
     // ── Uploads: private compliance PDFs + tenant logos (presigned access) ──
     const uploads = new sst.aws.Bucket('Uploads');
 
-    // ── Tutorial videos: public how-to-use-the-app MP4s, served over CloudFront ──
-    // Private bucket (CloudFront-only via OAC) fronted by a dedicated Router/CDN. The
+    // ── Tutorial videos: public how-to-use-the-app MP4s, served straight from S3 ──
+    // Public-read bucket served over its regional HTTPS REST endpoint. No CloudFront: this
+    // (shared medicoach) account is at its CloudFront cache-policy quota (20/20), and a
+    // dedicated Router would need a free slot — see docs/guides/tutorial-videos.md. The
     // clips are large (≈1.2 GB across the 6 steps + a 1.17 GB full cut) and non-sensitive,
     // so they live here rather than in the web build's `public/` — no git bloat, no
-    // re-upload on every web deploy, and CloudFront serves byte-range requests so the
-    // <video> player can seek. Files are uploaded out-of-band (see docs/guides/
-    // tutorial-videos.md), NOT synced from the repo, so a deploy never purges them.
-    // Object keys live under the `tutorials/` prefix; Router passes the path straight
-    // through to S3 (no rewrite), so URL `/tutorials/<file>` maps to key `tutorials/<file>`.
-    const tutorialAssets = new sst.aws.Bucket('TutorialAssets', { access: 'cloudfront' });
-    const cdn = new sst.aws.Router('Cdn');
-    cdn.routeBucket('/tutorials', tutorialAssets);
+    // re-upload on every web deploy. S3 serves byte-range requests so the <video> player
+    // can seek, and a cross-origin <video> needs no CORS. Files are uploaded out-of-band
+    // (see the runbook), NOT synced from the repo, so a deploy never purges them. Object
+    // keys live under the `tutorials/` prefix, e.g. tutorials/01-creating-account.mp4.
+    const tutorialAssets = new sst.aws.Bucket('TutorialAssets', { access: 'public' });
+    // Virtual-hosted-style HTTPS endpoint (af-south-1). DEFAULT_TUTORIALS builds
+    // `${TUTORIALS_BASE_URL}/tutorials/<file>` from this.
+    const tutorialsBaseUrl = $interpolate`https://${tutorialAssets.name}.s3.af-south-1.amazonaws.com`;
 
     // ── Auth: Cognito user pool with passwordless email OTP ──
     // Passwordless USER_AUTH/EMAIL_OTP requires the Essentials feature plan.
@@ -203,9 +205,9 @@ export default $config({
         TABLE_NAME: table.name,
         // STAGE gates the dev-only x-tenant header (prod resolves tenant by host).
         STAGE: $app.stage,
-        // Base URL (CloudFront) for the public tutorial videos. DEFAULT_TUTORIALS
-        // builds absolute `${TUTORIALS_BASE_URL}/tutorials/<file>` links from this.
-        TUTORIALS_BASE_URL: cdn.url,
+        // Base URL (public S3) for the tutorial videos. DEFAULT_TUTORIALS builds
+        // absolute `${TUTORIALS_BASE_URL}/tutorials/<file>` links from this.
+        TUTORIALS_BASE_URL: tutorialsBaseUrl,
         // Host→tenant map for custom domains (JSON). Consulted by resolveTenant() before
         // the leftmost-label fallback. Empty off-prod (dev uses the x-tenant header).
         TENANT_HOST_MAP: JSON.stringify(isProd ? TENANT_HOST_MAP : {}),
@@ -295,7 +297,7 @@ export default $config({
       userPoolClientId: userPoolClient.id,
       // For the tutorial-video upload runbook (docs/guides/tutorial-videos.md).
       tutorialBucket: tutorialAssets.name,
-      cdnUrl: cdn.url,
+      tutorialBaseUrl: tutorialsBaseUrl,
     };
   },
 });

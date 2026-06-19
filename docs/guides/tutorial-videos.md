@@ -7,16 +7,22 @@ payload returns in `tutorials[]`; that list comes from `DEFAULT_TUTORIALS` in
 
 ## Where the files live
 
-A dedicated, private S3 bucket (`TutorialAssets`) fronted by its own CloudFront
-distribution (the `Cdn` Router in `sst.config.ts`). The MP4s are **not** part of the
-web build — they're uploaded out-of-band, so a `sst deploy` never re-uploads or
-purges them, and they never bloat the git repo.
+A public-read S3 bucket (`TutorialAssets`, `access: 'public'` in `sst.config.ts`),
+served directly over its regional HTTPS REST endpoint. **No CloudFront** — the shared
+`medicoach` account is at its CloudFront cache-policy quota (20/20), so a dedicated
+Router/distribution can't be created without freeing a slot or a quota increase. S3
+still serves byte-range requests, so the `<video>` player can seek; a cross-origin
+`<video>` needs no CORS. The MP4s are **not** part of the web build — they're uploaded
+out-of-band, so a `sst deploy` never re-uploads or purges them, and they never bloat git.
 
-- Object keys live under the `tutorials/` prefix.
-- The Router serves them at `https://<cdn>/tutorials/<file>` (no path rewrite: URL
-  `/tutorials/01-creating-account.mp4` → S3 key `tutorials/01-creating-account.mp4`).
-- `DEFAULT_TUTORIALS` builds those absolute URLs from the `TUTORIALS_BASE_URL` env
-  var (= `cdn.url`), wired in `sst.config.ts`.
+- Object keys live under the `tutorials/` prefix, e.g. `tutorials/01-creating-account.mp4`.
+- Served at `https://<bucket>.s3.af-south-1.amazonaws.com/tutorials/<file>`.
+- `DEFAULT_TUTORIALS` builds those absolute URLs from the `TUTORIALS_BASE_URL` env var
+  (= the bucket's HTTPS endpoint, `tutorialBaseUrl` output), wired in `sst.config.ts`.
+- **Future**: if a CloudFront cache-policy slot frees up (or the quota is raised), this
+  can move back behind a Router for edge caching — flip the bucket to `access: 'cloudfront'`,
+  add `const cdn = new sst.aws.Router('Cdn'); cdn.routeBucket('/tutorials', tutorialAssets)`,
+  and set `TUTORIALS_BASE_URL`/`tutorialBaseUrl` to `cdn.url`. Object keys stay the same.
 
 ## Canonical filenames
 
@@ -40,7 +46,7 @@ purges them, and they never bloat the git repo.
    npx sst deploy --stage prod
    ```
 
-   Note the two new outputs: `tutorialBucket` (bucket name) and `cdnUrl`.
+   Note the two new outputs: `tutorialBucket` (bucket name) and `tutorialBaseUrl`.
 
 2. **Upload the videos.** The recordings are in `~/Downloads/Tutorial videos`. The
    helper script renames them to the canonical keys and uploads with the right
@@ -63,15 +69,10 @@ after the upload (the API reads `TUTORIALS_BASE_URL` at runtime).
 
 Re-record, drop the new file in the source folder under the **same raw name**, and
 re-run the upload script (or `aws s3 cp` that one file to its `tutorials/<key>`).
-Objects are served with `Cache-Control: public,max-age=86400`, so a swap propagates
-within a day. To make it live immediately, invalidate the CDN:
-
-```sh
-aws cloudfront create-invalidation \
-  --distribution-id <Cdn distribution id> \
-  --paths "/tutorials/<key>" \
-  --profile medicoach
-```
+Objects carry `Cache-Control: public,max-age=86400`, so a browser that already cached
+the old clip may keep it for up to a day. Served straight from S3 (no CDN), there's no
+distribution to invalidate; to force-refresh immediately, change the key (e.g.
+`…-v2.mp4`) and update the matching entry in `DEFAULT_TUTORIALS`.
 
 ## Per-tenant overrides
 

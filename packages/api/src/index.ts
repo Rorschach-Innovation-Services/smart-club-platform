@@ -73,12 +73,12 @@ const s3 = new S3Client({});
 /**
  * Shared fallback set of how-to-use-the-app tutorial videos, used when a tenant has
  * no `tutorials` override on its config (so existing tenant rows need no migration).
- * `url`s are absolute CloudFront links built from TUTORIALS_BASE_URL (the dedicated
- * `Cdn` Router in sst.config) — the matching MP4s live under the `tutorials/` key
- * prefix of the TutorialAssets bucket, uploaded out-of-band (see docs/guides/
- * tutorial-videos.md), NOT shipped in the web build. Surfaced on the public
- * /tutorials page and linked in the chair onboarding email; `absUrl` passes these
- * absolute URLs through unchanged. Order = the on-screen numbering ({i+1}.).
+ * `url`s are absolute public-S3 links built from TUTORIALS_BASE_URL (the TutorialAssets
+ * bucket's HTTPS REST endpoint, set in sst.config) — the matching MP4s live under the
+ * `tutorials/` key prefix, uploaded out-of-band (see docs/guides/tutorial-videos.md),
+ * NOT shipped in the web build. Surfaced on the public /tutorials page and linked in the
+ * chair onboarding email; `absUrl` passes these absolute URLs through unchanged. Order =
+ * the on-screen numbering ({i+1}.).
  */
 const TUTORIALS_BASE_URL = process.env.TUTORIALS_BASE_URL ?? '';
 const tutorialUrl = (file: string) => `${TUTORIALS_BASE_URL}/tutorials/${file}`;

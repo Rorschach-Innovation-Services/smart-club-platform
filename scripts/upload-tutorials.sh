@@ -42,12 +42,15 @@ for pair in "${MAP[@]}"; do
     continue
   fi
   echo "↑ $raw  ->  tutorials/$key"
+  # No --only-show-errors: progress matters on the multi-GB full cut, and a stalled
+  # transfer should be visible. `aws s3 cp` auto-multiparts >8 MB and is safe to re-run
+  # per-file if the loop aborts mid-set.
   aws s3 cp "$SRC/$raw" "s3://$BUCKET/tutorials/$key" \
     --profile "$PROFILE" --region "$REGION" \
     --content-type video/mp4 \
-    --cache-control "public,max-age=86400" \
-    --only-show-errors
+    --cache-control "public,max-age=86400"
 done
 
 echo
-echo "Done. Verify:  aws s3 ls s3://$BUCKET/tutorials/ --profile $PROFILE --region $REGION"
+echo "Done. Verify the object serves over HTTPS (expect 200 + accept-ranges: bytes):"
+echo "  curl -I https://$BUCKET.s3.$REGION.amazonaws.com/tutorials/01-creating-account.mp4"
