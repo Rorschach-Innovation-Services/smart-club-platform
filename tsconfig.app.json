@@ -29,7 +29,12 @@
     "checkJs": false,
 
     "strict": false,
-    "noImplicitAny": false
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "noImplicitThis": true,
+    "alwaysStrict": true
   },
   "include": ["src"]
 }
