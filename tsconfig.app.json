@@ -28,6 +28,14 @@
     "allowJs": true,
     "checkJs": false,
 
+    // Strict ratchet status (Phase 4): the zero-cost sub-flags below are ON.
+    // Two flags remain OFF as a reviewed follow-up — enable one at a time and fix
+    // the fallout (counts measured 2026-06, pre-fix):
+    //   "strictNullChecks": true  → ~185 fixes (mostly typing useState/useRef nulls
+    //                               in admin/club/main; catches real null derefs)
+    //   "noImplicitAny": true     → ~836 fixes (param/prop annotations, ~85% in the
+    //                               three large feature modules)
+    // Flip "strict": true once both pass (it implies them + useUnknownInCatchVariables).
     "strict": false,
     "noImplicitAny": false,
     "strictNullChecks": false,
