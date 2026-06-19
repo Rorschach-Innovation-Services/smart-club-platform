@@ -1,0 +1,35 @@
+{
+  /*
+   * Frontend (browser) app config. The type-check gate runs:
+   *   tsc --noEmit -p tsconfig.app.json
+   * NOT solution-style build mode (`tsc -b`) — that would require `composite: true`
+   * + .tsbuildinfo emit and would pull the SST config into the gate. The existing
+   * root tsconfig.json is left untouched (it owns sst.config.ts).
+   *
+   * Strictness starts LOW (strict:false) and is ratcheted up flag-by-flag in Phase 4
+   * once every src file is .ts/.tsx. `allowJs` lets .js/.jsx and .ts/.tsx coexist so
+   * the app stays runnable after each single-file rename.
+   */
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "types": ["vite/client", "node"],
+
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+    "noEmit": true,
+
+    "allowJs": true,
+    "checkJs": false,
+
+    "strict": false,
+    "noImplicitAny": false
+  },
+  "include": ["src"]
+}
