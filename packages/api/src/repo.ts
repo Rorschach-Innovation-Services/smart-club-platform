@@ -249,6 +249,37 @@ export async function backfillLeagues(
   }
 }
 
+/**
+ * Targeted SET of the league catalogue to a caller-computed MERGED list, guarded so a
+ * concurrent admin save can't be clobbered: the write only lands while the stored catalogue
+ * still has exactly the size the caller read (or is absent). Returns false if the guard fired
+ * (raced) — the caller re-reads and reports. The additive-merge policy lives in the caller
+ * (seed-core's mergeSnapshotLeagues); this is just the race net, mirroring backfillLeagues.
+ */
+export async function mergeLeagues(
+  tenant: string,
+  leagues: League[],
+  expectedCount: number,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: tenantConfigKey(tenant),
+        UpdateExpression: 'SET #l = :v',
+        ConditionExpression:
+          'attribute_exists(pk) AND (attribute_not_exists(#l) OR size(#l) = :expected)',
+        ExpressionAttributeNames: { '#l': 'leagues' },
+        ExpressionAttributeValues: { ':v': leagues, ':expected': expectedCount },
+      }),
+    );
+    return true;
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
 // ── Clubs ──
 
 export async function listClubs(tenant: string): Promise<Club[]> {

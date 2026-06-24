@@ -2085,6 +2085,72 @@ describe('seedLeaguesOnly (manual leagues backfill repair)', () => {
   });
 });
 
+/**
+ * `mergeSnapshotLeagues` — the ADDITIVE leagues backfill (--merge-leagues): append only the
+ * snapshot leagues whose key is missing from an already-populated tenant, preserving existing
+ * and custom leagues (the propagation path for a stage whose CONFIG predates a new seed league).
+ */
+describe('mergeSnapshotLeagues (additive league backfill)', () => {
+  let seed: typeof import('../src/seed-core.js');
+  const NEW_KEY = 'promotion-women-s-league';
+  let fullLeagues: { key: string; label: string; group: string; district: string }[] = [];
+
+  before(async () => {
+    seed = await import('../src/seed-core.js');
+    fullLeagues = (await repo.getTenantConfig('dolphins'))?.leagues ?? [];
+    assert.ok(
+      fullLeagues.some((l) => l.key === NEW_KEY),
+      'precondition: snapshot catalogue includes the new league',
+    );
+  });
+
+  // Restore dolphins to its full catalogue so neighbouring suites see a healthy tenant.
+  after(async () => {
+    await seed.seedLeaguesOnly('dolphins', true);
+  });
+
+  // Force-write a chosen catalogue (touches only the leagues attribute), bypassing the merge.
+  const setLeagues = (leagues: typeof fullLeagues) =>
+    repo.backfillLeagues('dolphins', leagues, true);
+
+  test('tenant with no CONFIG row → config-missing', async () => {
+    const r = await seed.mergeSnapshotLeagues('unseeded-merge-co');
+    assert.deepEqual(r, { status: 'config-missing' });
+  });
+
+  test('appends only the missing key, preserving existing leagues, no duplicates', async () => {
+    const minus = fullLeagues.filter((l) => l.key !== NEW_KEY); // pre-women's-league state
+    await setLeagues(minus);
+    const r = await seed.mergeSnapshotLeagues('dolphins');
+    assert.equal(r.status, 'merged');
+    assert.ok(r.status === 'merged' && r.added.includes(NEW_KEY), 'added the new league key');
+    const keys = (await repo.getTenantConfig('dolphins'))?.leagues?.map((l) => l.key) ?? [];
+    for (const l of minus) assert.ok(keys.includes(l.key), `preserved existing league ${l.key}`);
+    assert.ok(keys.includes(NEW_KEY), 'catalogue now contains the new league');
+    assert.equal(new Set(keys).size, keys.length, 'no duplicate keys');
+  });
+
+  test('idempotent: a second merge on a full catalogue is a no-op (up-to-date)', async () => {
+    await seed.seedLeaguesOnly('dolphins', true); // ensure full catalogue
+    const count = (await repo.getTenantConfig('dolphins'))?.leagues?.length ?? 0;
+    const r = await seed.mergeSnapshotLeagues('dolphins');
+    assert.equal(r.status, 'up-to-date');
+    assert.equal(r.status === 'up-to-date' && r.count, count);
+    assert.equal((await repo.getTenantConfig('dolphins'))?.leagues?.length, count, 'unchanged');
+  });
+
+  test('preserves a custom (non-snapshot) league while adding missing snapshot leagues', async () => {
+    await setLeagues([
+      { key: 'custom-x', label: 'Custom X', group: 'Custom', district: 'All districts' },
+    ]);
+    const r = await seed.mergeSnapshotLeagues('dolphins');
+    assert.equal(r.status, 'merged');
+    const keys = (await repo.getTenantConfig('dolphins'))?.leagues?.map((l) => l.key) ?? [];
+    assert.ok(keys.includes('custom-x'), 'custom league preserved');
+    assert.ok(keys.includes(NEW_KEY) && keys.includes('premier'), 'snapshot leagues appended');
+  });
+});
+
 describe('POST /clubs/:id/players (chair registration)', () => {
   const REP_PLY = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['plyclub'] }]);
   let teamKey: string;

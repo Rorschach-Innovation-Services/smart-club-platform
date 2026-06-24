@@ -136,6 +136,35 @@ export async function seedLeaguesOnly(
   return { status: 'already-populated', count: after.leagues?.length ?? 0 };
 }
 
+export type LeaguesMergeResult =
+  | { status: 'config-missing' }
+  | { status: 'up-to-date'; count: number }
+  | { status: 'merged'; added: string[]; count: number }
+  | { status: 'raced' };
+
+/**
+ * Additively merge a tenant's snapshot leagues into its existing catalogue: append only the
+ * snapshot leagues whose `key` isn't already present (in snapshot order), preserving every
+ * existing/custom league and order. Idempotent — re-running once the keys are present is a
+ * no-op ('up-to-date'). Safe for prod: it never replaces, reorders, or drops a league. The
+ * write is race-guarded (see repo.mergeLeagues) on the catalogue size the caller read, so a
+ * concurrent admin save returns 'raced' (operator re-runs — still idempotent) rather than
+ * clobbering. Unlike seedLeaguesOnly's --force this is the additive propagation path for a
+ * stage whose CONFIG predates a newly-seeded league.
+ */
+export async function mergeSnapshotLeagues(tenant: string): Promise<LeaguesMergeResult> {
+  const current = await repo.getTenantConfig(tenant);
+  if (!current) return { status: 'config-missing' };
+  const existing = current.leagues ?? [];
+  const have = new Set(existing.map((l) => l.key));
+  const toAdd = (loadSnapshot(tenant).leagues ?? []).filter((l) => !have.has(l.key));
+  if (toAdd.length === 0) return { status: 'up-to-date', count: existing.length };
+  const merged = [...existing, ...toAdd];
+  const written = await repo.mergeLeagues(tenant, merged, existing.length);
+  if (written) return { status: 'merged', added: toAdd.map((l) => l.key), count: merged.length };
+  return { status: 'raced' };
+}
+
 /**
  * Opt-in demo COHORT data: load the snapshot's sample clubs + series into a tenant
  * (for local dev / set demo accounts). Provisioning (config, incl. leagues) must run
