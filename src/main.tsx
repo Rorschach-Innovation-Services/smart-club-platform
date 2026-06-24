@@ -34,6 +34,8 @@ import {
   computeRevertCompliance,
   safeguardingMeta,
   MIN_SAFEGUARDING_FILES,
+  teamIdsForClub,
+  distinctClubCount,
 } from './data';
 import { exportRowsToXlsx } from './exportXlsx';
 import { openBccReminder } from './mailto';
@@ -1337,7 +1339,13 @@ function Shell({
     { v: 'team', label: 'Team & Access', icon: Icon.Users, num: users.length || undefined },
   ].sort((a, b) => a.label.localeCompare(b.label));
 
-  const releasedForMe = allSeries.filter((s) => s.released && s.teams.includes(clubId));
+  // A multi-team club appears under its `tm_…` ids — match its resolved team set.
+  const releasedForMe = allSeries.filter(
+    (s) =>
+      s.released &&
+      Array.isArray(s.teams) &&
+      teamIdsForClub(s, clubId).some((tid) => s.teams.includes(tid)),
+  );
   const hasReleased = releasedForMe.length > 0;
 
   // Built only for the club role (admins never use it). activeClub is guaranteed
@@ -1992,8 +2000,9 @@ function Shell({
             onCreate={(s) => {
               onCreateSeries(s)
                 .then(() => {
+                  const clubN = distinctClubCount(s);
                   const tail = s.bulkSend
-                    ? ` · bulk-sent to ${s.teams.length} club${s.teams.length === 1 ? '' : 's'}`
+                    ? ` · bulk-sent to ${clubN} club${clubN === 1 ? '' : 's'}`
                     : '';
                   toastShow(`${s.name} created · ${s.fixtures.length} fixtures generated${tail}`);
                 })

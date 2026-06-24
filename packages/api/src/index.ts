@@ -67,6 +67,7 @@ import type {
   UserProfile,
   PlayerRegistration,
 } from './types.js';
+import { teamIdsForClub, resolveTeam } from './teams.js';
 
 const s3 = new S3Client({});
 
@@ -1776,9 +1777,13 @@ app.post('/clubs/:id/send-fixtures', async (c) => {
   // client for what gets broadcast. If there's nothing to share, release the just-claimed
   // marker so this 409 doesn't poison a legitimate retry once fixtures are released.
   const allSeries = await repo.listSeries(ra.tenant);
-  const releasedSeries = allSeries.filter(
-    (s) => s.released && Array.isArray(s.teams) && s.teams.includes(id),
-  );
+  const releasedSeries = allSeries.filter((s) => {
+    if (!s.released || !Array.isArray(s.teams)) return false;
+    // A multi-team club participates under its `tm_…` ids, not its clubId — match
+    // against the club's resolved team set so its fixtures aren't missed.
+    const mine = new Set(teamIdsForClub(s, id));
+    return s.teams.some((t) => mine.has(t));
+  });
   if (releasedSeries.length === 0) {
     await repo.releaseInviteClaim(ra.tenant, id, idempotencyKey);
     throw new HttpError(409, 'no released fixtures to share');
@@ -2411,21 +2416,25 @@ function buildClubSchedule(
   const season = seasonFromSeries(releasedSeries);
   const blocks: string[] = [];
   for (const s of releasedSeries) {
+    // Match fixtures against the club's resolved team set (its `tm_…` ids for a
+    // multi-team club, else its clubId). A same-club derby (both sides ours) lists
+    // once from the home side's view, naming the other side as the opponent.
+    const mine = new Set(teamIdsForClub(s, club.id));
     const fixtures = ((s.fixtures as FixtureLite[]) ?? [])
-      .filter((f) => f.home === club.id || f.away === club.id)
+      .filter((f) => (f.home != null && mine.has(f.home)) || (f.away != null && mine.has(f.away)))
       .sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
     if (fixtures.length === 0) continue;
     const lines = [String(s.name ?? 'Series')];
     for (const f of fixtures) {
-      const isHome = f.home === club.id;
-      const opp = clubsById.get((isHome ? f.away : f.home) ?? '');
-      const oppName = opp?.name ?? 'TBA';
+      const isHome = f.home != null && mine.has(f.home);
+      const me = resolveTeam(s, (isHome ? f.home : f.away) ?? '', clubsById);
+      const opp = resolveTeam(s, (isHome ? f.away : f.home) ?? '', clubsById);
       const venue = isHome
-        ? club.ground?.venue || 'Home ground TBA'
-        : opp?.ground?.venue || 'Opponent ground TBA';
-      let line = `  R${f.round ?? '?'} · ${fmtFixtureDate(f.date)} · ${isHome ? 'Home' : 'Away'} vs ${oppName} · ${venue}`;
-      if (!isHome && opp) {
-        const km = Math.round(haversineKm(opp.ground, club.ground) * 2);
+        ? me.venue || club.ground?.venue || 'Home ground TBA'
+        : opp.venue || 'Opponent ground TBA';
+      let line = `  R${f.round ?? '?'} · ${fmtFixtureDate(f.date)} · ${isHome ? 'Home' : 'Away'} vs ${opp.name} · ${venue}`;
+      if (!isHome) {
+        const km = Math.round(haversineKm({ lat: opp.lat, lon: opp.lon }, club.ground) * 2);
         if (km > 0) line += ` · ${km.toLocaleString()} km round-trip`;
       }
       lines.push(line);

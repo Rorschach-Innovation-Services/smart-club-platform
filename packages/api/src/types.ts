@@ -41,6 +41,31 @@ export interface League {
 }
 
 /**
+ * A named side a club fields in a league when it enters more than one team there
+ * (`Club.leagueTeams[key] >= 2`). Each carries a stable, generated `id` so coach
+ * links and fixture references survive renames/reorders within the form.
+ *
+ * `id` MUST use the reserved `tm_` prefix so the teamId namespace can never collide
+ * with a bare `clubId` slug (e.g. 'ukzn'). A single-team league has NO roster: the
+ * club itself is the team and `teamId === clubId`.
+ */
+export interface ClubTeam {
+  /** `tm_${shortId}` — reserved prefix, never equal to a clubId. */
+  id: string;
+  /** Display name, e.g. "Glenwood A". 1–80 chars. */
+  name: string;
+  /** Optional home-ground override; absent ⇒ the club ground. */
+  venue?: string;
+  address?: string;
+  /** Optional pin; absent ⇒ club ground coords are used for travel cost. */
+  lat?: number;
+  lon?: number;
+}
+
+/** The reserved prefix every generated team id carries (clubIds never have it). */
+export const TEAM_ID_PREFIX = 'tm_';
+
+/**
  * A short how-to-use-the-app tutorial video, surfaced on the public /tutorials page
  * and linked from the chair's onboarding email. `url` may be a site-relative path
  * (e.g. '/tutorials/01-getting-started.mp4', served by the StaticSite CDN) or an
@@ -132,6 +157,13 @@ export interface Club {
   leagues: string[];
   /** Teams entered per league key (a club may field >1 side in a league); absent ⇒ 1. */
   leagueTeams?: Record<string, number>;
+  /**
+   * Named sides per league key, present ONLY for leagues with `leagueTeams[key] >= 2`.
+   * Roster length tracks the count; ids are stable (`tm_…`). A count-1 league has no
+   * entry here — the club is its own single team. Drives fixture participants and
+   * per-team coach assignment.
+   */
+  teamRosters?: Record<string, ClubTeam[]>;
   /**
    * Office bearers. `exco.chair` carries the chair's contact plus governance
    * fields `idNumber`, `termStart`, `termEnd` (ISO dates) captured on the affiliation
@@ -229,7 +261,28 @@ export interface Series {
   startDate: string;
   endDate?: string; // optional; when set, may drive scheduling (see dateMode)
   dateMode?: 'spread' | 'reference'; // how endDate is used: spread rounds vs display only
+  /**
+   * Participant ids. A participant is a *team*, not a club: for a single-team club
+   * `teamId === clubId` (legacy-compatible); for a multi-team club these are `tm_…`
+   * ids. Fixtures' `home`/`away` reference these. Resolve back to a club via
+   * `participants`.
+   */
   teams: string[];
+  /**
+   * Self-contained snapshot mapping each `teams[]` id → its club, display name and
+   * travel coords, captured at series-creation time. Authoritative for rendering and
+   * cost so a later roster edit (rename/shrink/league removal) never orphans a live
+   * series. Absent ⇒ legacy series where every `teams[]` id is a clubId.
+   */
+  participants?: Array<{
+    teamId: string;
+    clubId: string;
+    name: string;
+    /** Resolved home-venue label at creation (team override or club ground). */
+    venue?: string;
+    lat?: number;
+    lon?: number;
+  }>;
   fixtures: unknown[];
   /** Admin sign-off gate: a series can only be released once approved. Editing a fixture clears it. */
   approved?: boolean;

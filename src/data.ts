@@ -1306,6 +1306,76 @@ export function fixtureCost(
   return { distanceKm: km, roundTripKm, cars, costPerKm, fuelR };
 }
 
+/* ─── TEAM ↔ CLUB RESOLUTION ───
+   A series participant is a *team*, not a club. For a single-team club the teamId
+   equals the clubId (legacy-compatible); a multi-team club uses `tm_…` ids and a
+   `series.participants` snapshot. These helpers read that snapshot so fixtures keep
+   resolving names/coords even after the club later edits its roster — and fall back
+   to club-id semantics for legacy series that predate participants.
+
+   PARITY: a behavioural twin lives in packages/api/src/teams.ts (used by the player
+   broadcast). Keep the matching/fallback rules in sync. The shapes differ on purpose
+   — this one returns `{ ground: {...} }` to feed fixtureCost; the backend returns
+   flat coords to feed its schedule text — and the orphan/missing display strings
+   differ by surface (staff-facing "Removed club"/"Unknown team" here vs player-facing
+   "TBA" there). */
+
+// Distinct clubs participating in a series — one portal + one notification per club,
+// so this (not series.teams.length, which counts sides) is what release/broadcast copy
+// should show. Legacy series have no participants: every teamId is a clubId, so the
+// team count already equals the club count.
+export function distinctClubCount(series) {
+  const parts = series?.participants;
+  if (Array.isArray(parts) && parts.length) {
+    return new Set(parts.map((p) => p && p.clubId).filter(Boolean)).size;
+  }
+  return Array.isArray(series?.teams) ? series.teams.length : 0;
+}
+
+// The teamIds this club fields in a series. Legacy series (no participants) ⇒ [clubId].
+export function teamIdsForClub(series, clubId) {
+  const parts = series?.participants;
+  if (Array.isArray(parts) && parts.length) {
+    return parts.filter((p) => p && p.clubId === clubId).map((p) => p.teamId);
+  }
+  return [clubId];
+}
+
+// Resolve a fixture's home/away id → { teamId, clubId, club, name, ground }. `ground`
+// carries the venue label + coords used for display and travel cost (team override
+// when set, else the club ground). `clubBy(clubId)` looks up the live club.
+export function resolveTeam(series, teamId, clubBy) {
+  const lookup = typeof clubBy === 'function' ? clubBy : () => undefined;
+  const parts = series?.participants;
+  if (Array.isArray(parts) && parts.length) {
+    const p = parts.find((x) => x && x.teamId === teamId);
+    if (p) {
+      const club = lookup(p.clubId);
+      const g = (club && club.ground) || {};
+      const lat = Number.isFinite(p.lat) ? p.lat : g.lat;
+      const lon = Number.isFinite(p.lon) ? p.lon : g.lon;
+      return {
+        teamId,
+        clubId: p.clubId,
+        club,
+        name: p.name || club?.name || 'Team',
+        ground: { ...g, venue: p.venue || g.venue, lat, lon },
+      };
+    }
+    // participants present but this id isn't in it — an orphaned reference.
+    return { teamId, clubId: undefined, club: undefined, name: 'Unknown team', ground: {} };
+  }
+  // Legacy series: the teamId IS a clubId.
+  const club = lookup(teamId);
+  return {
+    teamId,
+    clubId: teamId,
+    club,
+    name: club?.name ?? 'Removed club',
+    ground: (club && club.ground) || {},
+  };
+}
+
 // Resolve whether an end date should drive scheduling. Empty/absent `dateMode`
 // falls back to a format-based default: tournaments are bounded events (spread),
 // series run weekly (reference). Shared by the create form and `regenerate` so

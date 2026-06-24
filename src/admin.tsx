@@ -28,6 +28,9 @@ import {
   DEFAULT_CARS,
   generateRoundRobin,
   resolveSpread,
+  resolveTeam,
+  teamIdsForClub,
+  distinctClubCount,
   formatDeadlineLong,
   formatDeadlineShort,
   formatDeadlineMid,
@@ -43,6 +46,7 @@ import {
   slugifyLeagueKey,
   labelByKey,
   teamCounts,
+  clubTeamsForLeague,
   OVERARCHING_DISTRICT,
 } from './leagues';
 import { exportRowsToXlsx, clubExportRow } from './exportXlsx';
@@ -89,15 +93,18 @@ export function AdminFixtures({
   const active = allSeries.find((s) => s.id === activeId) || allSeries[0];
   const [confirm, setConfirm] = useStateA(null); // shared confirmation modal state
   const clubBy = (id) => clubs.find((c) => c.id === id);
+  // Resolve a fixture id → team (series participant). A single-team club resolves to
+  // itself; a multi-team club's `tm_…` id resolves via the series snapshot.
+  const teamBy = (s, id) => resolveTeam(s, id, clubBy);
 
   // Aggregate distance + fuel per series
   const seriesAgg = (s) => {
     let totalKm = 0,
       totalCost = 0;
     s.fixtures.forEach((f) => {
-      const home = clubBy(f.home),
-        away = clubBy(f.away);
-      if (!home || !away) return;
+      const home = teamBy(s, f.home),
+        away = teamBy(s, f.away);
+      if (!home.clubId || !away.clubId) return;
       const c = fixtureCost(home, away, s.costPerKm, s.carsPerAwayTrip);
       totalKm += c.roundTripKm;
       totalCost += c.fuelR;
@@ -111,8 +118,8 @@ export function AdminFixtures({
   function exportSchedule() {
     if (!active) return toast?.('No series to export');
     const rows = active.fixtures.map((f) => {
-      const home = clubBy(f.home),
-        away = clubBy(f.away);
+      const home = teamBy(active, f.home),
+        away = teamBy(active, f.away);
       const hasGeo =
         home?.ground?.lat != null &&
         home?.ground?.lon != null &&
@@ -148,11 +155,11 @@ export function AdminFixtures({
   function askRelease(s) {
     setConfirm({
       title: `Release ${s.fixtures.length} fixtures to the league?`,
-      body: `This publishes the full ${s.name} schedule to all ${s.teams.length} affiliated clubs. They'll see it in their portals immediately and receive email + WhatsApp notifications.`,
+      body: `This publishes the full ${s.name} schedule to all ${distinctClubCount(s)} affiliated clubs. They'll see it in their portals immediately and receive email + WhatsApp notifications.`,
       onYes: () => {
         onSetReleased(s.id, true);
         setConfirm(null);
-        toast?.(s.name + ' · released to ' + s.teams.length + ' clubs');
+        toast?.(s.name + ' · released to ' + distinctClubCount(s) + ' clubs');
       },
     });
   }
@@ -403,6 +410,8 @@ export function FixtureTable({
   toast,
 }) {
   const clubBy = (id) => clubs.find((c) => c.id === id);
+  // Resolve a fixture id → team for this series (participant snapshot, else clubId).
+  const teamBy = (id) => resolveTeam(series, id, clubBy);
   const [editingId, setEditingId] = useStateA(null);
   const [filter, setFilter] = useStateA('all');
   const [confirm, setConfirm] = useStateA(null); // {title, body, onYes} — for delete/regen only; release uses parent's modal
@@ -426,12 +435,15 @@ export function FixtureTable({
     const nextRound = last ? last.round + 1 : 1;
     const baseDate = last ? new Date(last.date) : new Date(series.startDate);
     baseDate.setDate(baseDate.getDate() + 7);
+    // Default to two distinct teams so a fresh row isn't a team-vs-itself fixture
+    // (matters for a 2-side derby series where teams[1] is the only alternative).
+    const t = series.teams || [];
     const newFix = {
       id: newId,
       round: nextRound,
       date: baseDate.toISOString().slice(0, 10),
-      home: series.teams[0],
-      away: series.teams[1] || series.teams[0],
+      home: t[0],
+      away: t.find((x) => x !== t[0]) || t[1] || t[0],
       status: 'scheduled',
     };
     onUpdateSeries(series.id, (s) => ({ ...s, fixtures: [...s.fixtures, newFix] }));
@@ -452,8 +464,8 @@ export function FixtureTable({
 
   // Build rows with computed cost
   const allRows = series.fixtures.map((f) => {
-    const home = clubBy(f.home),
-      away = clubBy(f.away);
+    const home = teamBy(f.home),
+      away = teamBy(f.away);
     const c = fixtureCost(home, away, series.costPerKm, series.carsPerAwayTrip);
     return { f, home, away, c };
   });
@@ -601,7 +613,10 @@ export function FixtureTable({
                   <EditFixtureRow
                     key={f.id}
                     fixture={f}
-                    teams={series.teams.map(clubBy).filter(Boolean)}
+                    teams={series.teams.map((id) => {
+                      const r = teamBy(id);
+                      return { id, name: r.name, ground: r.ground, club: r.club };
+                    })}
                     onSave={(updates) => {
                       updateFixture(f.id, updates);
                       setEditingId(null);
@@ -632,33 +647,29 @@ export function FixtureTable({
                   </td>
                   <td>
                     <div className="fix-row-team">
-                      {home && <ClubAvatar club={home} size={26} />}
+                      {home.club && <ClubAvatar club={home.club} size={26} />}
                       <div>
                         {/* An id with no club behind it means the club was deleted —
                             say so instead of the pre-schedule 'TBD'. */}
-                        <div className="fix-row-team-name">
-                          {home?.name || (f.home ? 'Removed club' : 'TBD')}
-                        </div>
-                        <div className="fix-row-team-sub">{home?.sub}</div>
+                        <div className="fix-row-team-name">{f.home ? home.name : 'TBD'}</div>
+                        <div className="fix-row-team-sub">{home.club?.sub}</div>
                       </div>
                     </div>
                   </td>
                   <td>
                     <div className="fix-row-venue">
                       <div className="fix-row-venue-name">
-                        {f.venueOverride || home?.ground?.venue || '—'}
+                        {f.venueOverride || home.ground?.venue || '—'}
                       </div>
-                      <div className="fix-row-venue-suburb">{home?.ground?.suburb || ''}</div>
+                      <div className="fix-row-venue-suburb">{home.ground?.suburb || ''}</div>
                     </div>
                   </td>
                   <td>
                     <div className="fix-row-team">
-                      {away && <ClubAvatar club={away} size={26} />}
+                      {away.club && <ClubAvatar club={away.club} size={26} />}
                       <div>
-                        <div className="fix-row-team-name">
-                          {away?.name || (f.away ? 'Removed club' : 'TBD')}
-                        </div>
-                        <div className="fix-row-team-sub">{away?.sub}</div>
+                        <div className="fix-row-team-name">{f.away ? away.name : 'TBD'}</div>
+                        <div className="fix-row-team-sub">{away.club?.sub}</div>
                       </div>
                     </div>
                   </td>
@@ -753,7 +764,7 @@ export function FixtureTable({
             <>
               <div className="fix-release-eyebrow">✓ Live to clubs</div>
               <div className="fix-release-text-title">
-                Fixtures released to all {series.teams.length} clubs
+                Fixtures released to all {distinctClubCount(series)} clubs
               </div>
               <div className="fix-release-text-sub">
                 Published{' '}
@@ -1051,27 +1062,31 @@ export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) 
     });
   }
 
-  // Teams eligible = clubs past the phase-1 gate that registered for the selected
-  // league. Falls back to "all unlocked clubs" until a league is picked.
-  const teamsForLeague = d.leagueKey
+  // Teams eligible = each club past the phase-1 gate that registered for the selected
+  // league, expanded into its sides: a club fielding ≥2 teams contributes one
+  // participant per named side (so two sides of one club can be drawn against each
+  // other); otherwise the club is a single team (teamId === clubId).
+  const registeredClubs = d.leagueKey
     ? clubs.filter(
         (c) =>
           affiliationSubmitted(c) && Array.isArray(c.leagues) && c.leagues.includes(d.leagueKey),
       )
     : [];
-  const eligibleTeams = d.leagueKey ? teamsForLeague : clubs.filter((c) => affiliationSubmitted(c));
+  const teamCandidates = registeredClubs.flatMap((c) =>
+    clubTeamsForLeague(c, d.leagueKey).map((p) => ({ ...p, club: c })),
+  );
 
-  // When the admin picks a league, auto-fill the name and bulk-select all registered teams.
+  // When the admin picks a league, auto-fill the name and bulk-select all registered sides.
   function pickLeague(key) {
     const L = findByKey(allLeagues, key);
-    const filtered = clubs.filter(
-      (c) => affiliationSubmitted(c) && Array.isArray(c.leagues) && c.leagues.includes(key),
-    );
+    const candidates = clubs
+      .filter((c) => affiliationSubmitted(c) && Array.isArray(c.leagues) && c.leagues.includes(key))
+      .flatMap((c) => clubTeamsForLeague(c, key));
     setD((prev) => ({
       ...prev,
       leagueKey: key,
       name: L ? `${L.label} · 2026/27` : prev.name,
-      teams: filtered.map((c) => c.id),
+      teams: candidates.map((p) => p.teamId),
       tags: L ? `${L.group}, ${L.label}` : prev.tags,
     }));
   }
@@ -1092,9 +1107,22 @@ export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) 
 
   function submit() {
     if (!canCreate) return;
+    // Self-contained snapshot of the selected sides — authoritative for resolving
+    // fixture names/coords, so a later roster edit never orphans this series.
+    const participants = teamCandidates
+      .filter((p) => d.teams.includes(p.teamId))
+      .map((p) => ({
+        teamId: p.teamId,
+        clubId: p.clubId,
+        name: p.name,
+        ...(p.venue ? { venue: p.venue } : {}),
+        ...(Number.isFinite(p.lat) ? { lat: p.lat } : {}),
+        ...(Number.isFinite(p.lon) ? { lon: p.lon } : {}),
+      }));
     const series = {
       id: 's-' + Date.now(),
       ...d,
+      participants,
       // Persist the *resolved* mode (not the raw '' default) only when an end
       // date exists, so regenerate reproduces the schedule the admin confirmed.
       dateMode: d.endDate ? (spread ? 'spread' : 'reference') : undefined,
@@ -1202,31 +1230,32 @@ export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) 
       {d.leagueKey ? (
         <div className="cs-row">
           <div className="cs-row-label">
-            {teamsForLeague.length} club{teamsForLeague.length === 1 ? '' : 's'} registered for{' '}
+            {registeredClubs.length} club{registeredClubs.length === 1 ? '' : 's'} ·{' '}
+            {teamCandidates.length} team{teamCandidates.length === 1 ? '' : 's'} registered for{' '}
             <strong>{findByKey(allLeagues, d.leagueKey)?.label ?? d.leagueKey}</strong>
           </div>
           <div className="cs-row-input">
             <div style={{ fontSize: 11.5, color: 'var(--muted)', marginBottom: 8 }}>
-              All clubs that selected this league during affiliation are pre-included. Tap a chip to
-              opt one out.
+              Every side registered for this league is pre-included — clubs fielding more than one
+              team show each side separately. Tap a chip to opt one out.
             </div>
             <div className="cs-teams-grid">
-              {teamsForLeague.length === 0 ? (
+              {teamCandidates.length === 0 ? (
                 <span style={{ fontSize: 12, color: 'var(--muted)' }}>
                   No registered clubs yet — once clubs affiliate for this league they'll appear here
                   automatically.
                 </span>
               ) : (
-                teamsForLeague.map((c) => {
-                  const on = d.teams.includes(c.id);
+                teamCandidates.map((p) => {
+                  const on = d.teams.includes(p.teamId);
                   return (
                     <button
-                      key={c.id}
+                      key={p.teamId}
                       className={`cs-team-chip ${on ? 'on' : ''}`}
-                      onClick={() => toggleTeam(c.id)}
+                      onClick={() => toggleTeam(p.teamId)}
                     >
                       {on && <Icon.Check />}
-                      {c.name}
+                      {p.name}
                     </button>
                   );
                 })
@@ -4718,7 +4747,14 @@ function RemoveClubModal({ club, allSeries = [], onClose, onConfirm }) {
   const [busy, setBusy] = useStateA(false);
   // Exact match (trimmed, case-sensitive) — the friction is the point.
   const match = typed.trim() === club.name;
-  const inReleased = allSeries.some((s) => s.released && (s.teams || []).includes(club.id));
+  // A multi-team club participates under its `tm_…` ids, so test the club's resolved
+  // team set — not just its clubId — or the delete-safety friction would be skipped.
+  const inReleased = allSeries.some(
+    (s) =>
+      s.released &&
+      Array.isArray(s.teams) &&
+      teamIdsForClub(s, club.id).some((tid) => s.teams.includes(tid)),
+  );
   const playerCount = club.players || 0;
   const docCount = docsUploadedCount(club);
   function confirm() {
@@ -4903,6 +4939,11 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
   ].filter(([, m]) => m);
   const leagues = club.leagues || [];
   const coaches = club.coaches || [];
+  // teamId → name across all rosters, for showing a coach's specific side assignments.
+  const teamNameById = {};
+  for (const roster of Object.values(club.teamRosters || {})) {
+    if (Array.isArray(roster)) for (const t of roster) teamNameById[t.id] = t.name;
+  }
   // Distinguish "form not yet submitted" from "submitted, but this club genuinely
   // registered none." Empty Leagues/Coaches under an "Affiliated" status is a real
   // answer, not a pending one — saying "Not yet submitted" there would contradict
@@ -5047,13 +5088,23 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
                 <Empty />
               ) : (
                 <div className="stack" style={{ gap: 4 }}>
-                  {leagues.map((k) => (
-                    <Row
-                      key={k}
-                      label={allLeagues.find((l) => l.key === k)?.label || k}
-                      value="Registered"
-                    />
-                  ))}
+                  {leagues.map((k) => {
+                    const count = Math.max(1, Number(club.leagueTeams?.[k]) || 1);
+                    const roster = Array.isArray(club.teamRosters?.[k]) ? club.teamRosters[k] : [];
+                    const value =
+                      count >= 2
+                        ? roster.length
+                          ? roster.map((t) => t.name).join(', ')
+                          : `${count} teams`
+                        : 'Registered';
+                    return (
+                      <Row
+                        key={k}
+                        label={allLeagues.find((l) => l.key === k)?.label || k}
+                        value={value}
+                      />
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -5084,6 +5135,12 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
                       <Row label="Coaching since" value={c.yearStarted} />
                       <Row label="Experience" value={c.yearsExperience} />
                       <Row label="Teams" value={Array.isArray(c.teams) ? c.teams.join(', ') : ''} />
+                      {Array.isArray(c.teamIds) && c.teamIds.length > 0 && (
+                        <Row
+                          label="Sides"
+                          value={c.teamIds.map((id) => teamNameById[id] || id).join(', ')}
+                        />
+                      )}
                     </div>
                   ))}
                 </div>
