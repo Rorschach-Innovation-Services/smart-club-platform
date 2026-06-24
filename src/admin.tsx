@@ -3856,7 +3856,11 @@ export function AdminClubDetail({
       t: 'Affiliation',
       done: affiliationSubmitted(club),
       val: affiliationSubmitted(club) ? 100 : club.affiliation === 'in_progress' ? 40 : 0,
-      detail: affiliationSubmitted(club) ? 'Submitted' : 'Awaiting submission',
+      detail: affiliationSubmitted(club)
+        ? 'Submitted'
+        : club.affiliation === 'in_progress'
+          ? 'Draft saved · awaiting submission'
+          : 'Awaiting submission',
     },
     {
       n: '02',
@@ -3968,17 +3972,25 @@ export function AdminClubDetail({
       <div className="kpi-strip">
         <KPI tone="navy" label="Overall progress" num={op + '%'} sub="all phases" />
         <KPI
-          tone={club.amendmentPending ? 'gold' : 'teal'}
+          tone={club.amendmentPending || club.affiliation === 'in_progress' ? 'gold' : 'teal'}
           label="Affiliation"
           num={
-            club.amendmentPending ? 'Amended' : affiliationSubmitted(club) ? 'Submitted' : 'Pending'
+            club.amendmentPending
+              ? 'Amended'
+              : affiliationSubmitted(club)
+                ? 'Submitted'
+                : club.affiliation === 'in_progress'
+                  ? 'In progress'
+                  : 'Pending'
           }
           sub={
             club.amendmentPending
               ? 'Edited — re-confirm'
               : affiliationSubmitted(club)
                 ? 'Form complete'
-                : 'Awaiting submission'
+                : club.affiliation === 'in_progress'
+                  ? 'Draft saved · not submitted'
+                  : 'Awaiting submission'
           }
         />
         <KPI
@@ -4372,7 +4384,14 @@ export function AdminClubDetail({
                 // field, so a separate Sub-union row would just repeat District.
                 ['District', club.district || club.sub],
                 ['Chairperson', club.chair],
-                ['Status', affiliationSubmitted(club) ? 'Active member' : 'Pending'],
+                [
+                  'Status',
+                  affiliationSubmitted(club)
+                    ? 'Active member'
+                    : club.affiliation === 'in_progress'
+                      ? 'In progress'
+                      : 'Pending',
+                ],
                 ['Senior teams', tc.senior],
                 ["Women's teams", club.women],
                 ['Junior teams', tc.junior],
@@ -4938,6 +4957,12 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
                 <Row label="Chairperson" value={club.chair} />
                 <Row label="Status" value={affPill(club.affiliation)} />
               </div>
+              {club.affiliation === 'in_progress' && (
+                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--muted)' }}>
+                  Draft — saved by the club but <strong>not yet submitted</strong>. The details
+                  below are work in progress and may still change.
+                </div>
+              )}
             </div>
 
             {/* Exco */}

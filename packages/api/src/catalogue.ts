@@ -187,3 +187,48 @@ export function validateClubPatch(
   }
   return null;
 }
+
+/**
+ * True when a club shows real evidence of having worked on its affiliation form —
+ * more than the chair-only seed every signup club starts with (buildInitialExco sets
+ * only `exco.chair {name,email,cell}`). Drives the one-off backfill that promotes stuck
+ * `not_started` clubs to `in_progress`. Deliberately ignores the `docs.exco` flag: an
+ * admin "Mark as compliant" override sets it with no form data, which would otherwise
+ * misread an untouched club as a draft.
+ */
+export function hasAffiliationDraft(club: {
+  exco?: Record<string, unknown>;
+  leagues?: string[];
+  coaches?: unknown[];
+  ground?: Record<string, unknown>;
+}): boolean {
+  const exco = club.exco ?? {};
+  const named = (role: string): boolean => {
+    const m = exco[role] as { name?: unknown } | undefined;
+    return typeof m?.name === 'string' && m.name.trim() !== '';
+  };
+  // A non-chair officer (sec/tre/vc) only ever comes from the affiliation form.
+  if (named('sec') || named('tre') || named('vc')) return true;
+  // Additional committee members are form-only too.
+  const additional = exco.additionalMembers;
+  if (Array.isArray(additional) && additional.some((m) => (m as { name?: unknown })?.name)) {
+    return true;
+  }
+  // The chair seed carries only name/email/cell; these governance fields are form-only.
+  const chair = (exco.chair ?? {}) as Record<string, unknown>;
+  const FORM_ONLY_CHAIR = [
+    'idNumber',
+    'gender',
+    'race',
+    'termStart',
+    'termEnd',
+    'reasonForInvolvement',
+  ];
+  if (FORM_ONLY_CHAIR.some((k) => chair[k] != null && String(chair[k]).trim() !== '')) return true;
+  // League selection, coaches, or a populated ground are all affiliation-form output.
+  if (Array.isArray(club.leagues) && club.leagues.length > 0) return true;
+  if (Array.isArray(club.coaches) && club.coaches.length > 0) return true;
+  const ground = club.ground ?? {};
+  if (Object.values(ground).some((v) => v != null && String(v).trim() !== '')) return true;
+  return false;
+}

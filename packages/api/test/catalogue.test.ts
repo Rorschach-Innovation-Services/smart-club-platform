@@ -7,7 +7,12 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateClubPatch, isValidSaId, COACH_EXPERIENCE } from '../src/catalogue.js';
+import {
+  validateClubPatch,
+  isValidSaId,
+  COACH_EXPERIENCE,
+  hasAffiliationDraft,
+} from '../src/catalogue.js';
 
 const leagueKeys = new Set<string>(['premier']);
 const docKeys = new Set<string>(['constitution', 'financials']);
@@ -63,5 +68,57 @@ describe('validateClubPatch · coach governance', () => {
   test('rejects a malformed coach ID and a bad year', () => {
     assert.match(String(ok({ coaches: [{ idNumber: 'abc' }] })), /coach idNumber/);
     assert.match(String(ok({ coaches: [{ yearStarted: '19' }] })), /yearStarted/);
+  });
+});
+
+describe('hasAffiliationDraft', () => {
+  test('false for a bare signup club (chair-only seed: name/email/cell)', () => {
+    // buildInitialExco seeds exactly this; it must NOT count as a draft.
+    assert.equal(
+      hasAffiliationDraft({
+        exco: { chair: { name: 'Lauryn Thole', email: 'a@b.com', cell: '0837301194' } },
+        leagues: [],
+        ground: {},
+      }),
+      false,
+    );
+  });
+
+  test('false for an admin "Mark as compliant" exco override (no form data)', () => {
+    // The override sets docs.exco:true with no exco content — the predicate ignores
+    // docs entirely, so a never-started club stays not_started.
+    assert.equal(hasAffiliationDraft({ exco: undefined, leagues: [], ground: {} }), false);
+  });
+
+  test('true when a non-chair officer is named (sec/tre/vc are form-only)', () => {
+    assert.equal(
+      hasAffiliationDraft({ exco: { chair: { name: 'A' }, sec: { name: 'Debbie Dennill' } } }),
+      true,
+    );
+  });
+
+  test('true with additional committee members', () => {
+    assert.equal(
+      hasAffiliationDraft({ exco: { additionalMembers: [{ name: 'Member One' }] } }),
+      true,
+    );
+  });
+
+  test('true when the chair carries a form-only governance field', () => {
+    assert.equal(
+      hasAffiliationDraft({ exco: { chair: { name: 'A', idNumber: '9001015800086' } } }),
+      true,
+    );
+    assert.equal(hasAffiliationDraft({ exco: { chair: { name: 'A', gender: 'Female' } } }), true);
+  });
+
+  test('true with leagues, coaches, or a populated ground', () => {
+    assert.equal(hasAffiliationDraft({ leagues: ['premier'] }), true);
+    assert.equal(hasAffiliationDraft({ coaches: [{ name: 'Coach' }] }), true);
+    assert.equal(hasAffiliationDraft({ ground: { venue: 'Kingsmead' } }), true);
+  });
+
+  test('false for a completely empty club', () => {
+    assert.equal(hasAffiliationDraft({}), false);
   });
 });

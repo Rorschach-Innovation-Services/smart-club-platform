@@ -914,6 +914,19 @@ app.patch('/clubs/:id', async (c) => {
       patch.version ??= current.version;
     }
   }
+  // A club that saves affiliation-form data (exco/leagues/coaches/ground) without
+  // explicitly submitting never reaches 'complete' — but it's no longer truly
+  // 'not_started' either. Promote the first such save to 'in_progress' so the admin can
+  // tell a draft-in-progress club apart from one that never started. Never overrides an
+  // explicit affiliation in the patch (submit sends 'complete'), and only fires from
+  // 'not_started', so 'complete' is never downgraded on a post-submission edit.
+  if (
+    current.affiliation === 'not_started' &&
+    !('affiliation' in patch) &&
+    affiliationFieldsTouched(patch)
+  ) {
+    patch.affiliation = 'in_progress';
+  }
   let updated = await applyClubPatch(ra.tenant, id, patch, ra.email);
   // On the not-complete → complete edge ONLY (the client re-sends affiliation:'complete'
   // on every post-submission edit), mint a player-registration link if absent and deliver
@@ -1445,10 +1458,17 @@ app.post('/clubs/:id/exco', async (c) => {
   const exco = await c.req.json<Record<string, unknown>>();
   const current = await repo.getClub(ra.tenant, id);
   if (!current) throw new HttpError(404, 'club not found');
+  // Saving the exco is real affiliation-form progress: promote a not-yet-started club to
+  // 'in_progress' (this path bypasses PATCH /clubs/:id, so it carries its own bump). Only
+  // include the key when it changes — a 'complete' or already-'in_progress' club is left as-is.
   const updated = await applyClubPatch(
     ra.tenant,
     id,
-    { exco, docs: { ...current.docs, exco: true } },
+    {
+      exco,
+      docs: { ...current.docs, exco: true },
+      ...(current.affiliation === 'not_started' ? { affiliation: 'in_progress' as const } : {}),
+    },
     ra.email,
   );
   return c.json(updated);
