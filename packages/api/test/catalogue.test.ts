@@ -71,6 +71,167 @@ describe('validateClubPatch · coach governance', () => {
   });
 });
 
+describe('validateClubPatch · team rosters', () => {
+  const roster2 = {
+    leagues: ['premier'],
+    leagueTeams: { premier: 2 },
+    teamRosters: {
+      premier: [
+        { id: 'tm_a', name: 'Glenwood A' },
+        { id: 'tm_b', name: 'Glenwood B' },
+      ],
+    },
+  };
+
+  test('accepts a well-formed 2-side roster', () => {
+    assert.equal(ok(roster2), null);
+  });
+
+  test('rejects a roster key not among the leagues entered', () => {
+    assert.match(
+      String(ok({ leagues: ['premier'], teamRosters: { other: [{ id: 'tm_x', name: 'X' }] } })),
+      /teamRosters has keys not in leagues/,
+    );
+  });
+
+  test('rejects a team id missing the tm_ prefix', () => {
+    assert.match(
+      String(
+        ok({
+          leagues: ['premier'],
+          leagueTeams: { premier: 2 },
+          teamRosters: {
+            premier: [
+              { id: 'a', name: 'A' },
+              { id: 'tm_b', name: 'B' },
+            ],
+          },
+        }),
+      ),
+      /tm_ id/,
+    );
+  });
+
+  test('rejects duplicate team ids across rosters', () => {
+    assert.match(
+      String(
+        ok({
+          leagues: ['premier'],
+          leagueTeams: { premier: 2 },
+          teamRosters: {
+            premier: [
+              { id: 'tm_a', name: 'A' },
+              { id: 'tm_a', name: 'B' },
+            ],
+          },
+        }),
+      ),
+      /duplicate team id/,
+    );
+  });
+
+  test('rejects an empty or over-long team name', () => {
+    assert.match(
+      String(
+        ok({
+          leagues: ['premier'],
+          leagueTeams: { premier: 2 },
+          teamRosters: {
+            premier: [
+              { id: 'tm_a', name: '  ' },
+              { id: 'tm_b', name: 'B' },
+            ],
+          },
+        }),
+      ),
+      /team name cannot be empty/,
+    );
+    assert.match(
+      String(
+        ok({
+          leagues: ['premier'],
+          leagueTeams: { premier: 2 },
+          teamRosters: {
+            premier: [
+              { id: 'tm_a', name: 'x'.repeat(81) },
+              { id: 'tm_b', name: 'B' },
+            ],
+          },
+        }),
+      ),
+      /80 characters or fewer/,
+    );
+  });
+
+  test('rejects a roster whose length does not match the team count', () => {
+    assert.match(
+      String(
+        ok({
+          leagues: ['premier'],
+          leagueTeams: { premier: 3 },
+          teamRosters: {
+            premier: [
+              { id: 'tm_a', name: 'A' },
+              { id: 'tm_b', name: 'B' },
+            ],
+          },
+        }),
+      ),
+      /length must match the team count/,
+    );
+  });
+
+  test('rejects a roster for a league fielding fewer than 2 sides', () => {
+    assert.match(
+      String(
+        ok({
+          leagues: ['premier'],
+          leagueTeams: { premier: 1 },
+          teamRosters: {
+            premier: [
+              { id: 'tm_a', name: 'A' },
+              { id: 'tm_b', name: 'B' },
+            ],
+          },
+        }),
+      ),
+      /fewer than 2 teams/,
+    );
+  });
+});
+
+describe('validateClubPatch · coach team assignment', () => {
+  const base = {
+    leagues: ['premier'],
+    leagueTeams: { premier: 2 },
+    teamRosters: {
+      premier: [
+        { id: 'tm_a', name: 'A' },
+        { id: 'tm_b', name: 'B' },
+      ],
+    },
+  };
+
+  test('accepts a coach assigned to a real roster side', () => {
+    assert.equal(
+      ok({ ...base, coaches: [{ name: 'C', teams: ['premier'], teamIds: ['tm_a'] }] }),
+      null,
+    );
+  });
+
+  test('rejects a coach assigned to an unknown side', () => {
+    assert.match(
+      String(ok({ ...base, coaches: [{ name: 'C', teamIds: ['tm_ghost'] }] })),
+      /unknown team/,
+    );
+  });
+
+  test('ignores coach.teamIds when the patch carries no rosters (draft)', () => {
+    // A draft that omits rosters but keeps coaches must still pass.
+    assert.equal(ok({ coaches: [{ name: 'C', teamIds: ['tm_a'] }] }), null);
+  });
+});
+
 describe('hasAffiliationDraft', () => {
   test('false for a bare signup club (chair-only seed: name/email/cell)', () => {
     // buildInitialExco seeds exactly this; it must NOT count as a draft.

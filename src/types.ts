@@ -70,6 +70,24 @@ export interface TenantConfig {
   tutorials?: TutorialVideo[];
 }
 
+/**
+ * A named side a club fields in a league when it enters >1 team there
+ * (`leagueTeams[key] >= 2`). `id` uses the reserved `tm_` prefix so the teamId
+ * namespace never collides with a bare clubId. Single-team leagues have no roster
+ * (the club is the team; `teamId === clubId`).
+ */
+export interface ClubTeam {
+  id: string; // `tm_${shortId}`
+  name: string; // "Glenwood A", 1–80 chars
+  venue?: string; // optional home-ground override; absent ⇒ club ground
+  address?: string;
+  lat?: number;
+  lon?: number;
+}
+
+/** Reserved prefix every generated team id carries (clubIds never have it). */
+export const TEAM_ID_PREFIX = 'tm_';
+
 /** A club's home/secondary ground. */
 export interface ClubGround {
   venue?: string;
@@ -112,6 +130,12 @@ export interface Club {
   leagues?: string[]; // server-authoritative (omitted by demo SAMPLE_CLUBS)
   /** Teams entered per league key (a club may field >1 side in a league); absent ⇒ 1. */
   leagueTeams?: Record<string, number>;
+  /**
+   * Named sides per league key, present ONLY for leagues with `leagueTeams[key] >= 2`.
+   * Roster length tracks the count; ids are stable (`tm_…`). A count-1 league has no
+   * entry — the club is its own single team.
+   */
+  teamRosters?: Record<string, ClubTeam[]>;
   /** Office bearers; `exco.chair` carries chair contact + governance fields. */
   exco?: Record<string, unknown>;
   /** Coaches by league; entries carry idNumber/yearStarted/yearsExperience. */

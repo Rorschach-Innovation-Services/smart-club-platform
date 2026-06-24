@@ -7,6 +7,9 @@ import {
   optionsGroupedByGroup,
   findByKey,
   teamCounts,
+  teamLetter,
+  defaultTeamName,
+  clubTeamsForLeague,
 } from './leagues';
 
 const LEAGUES = [
@@ -134,5 +137,79 @@ describe('teamCounts', () => {
     });
     expect(teamCounts(['premier'], CATALOGUE, { premier: 0 })).toEqual({ senior: 1, junior: 0 });
     expect(teamCounts(['premier'], CATALOGUE, {})).toEqual({ senior: 1, junior: 0 });
+  });
+});
+
+describe('teamLetter / defaultTeamName', () => {
+  it('maps indices to spreadsheet-style letters', () => {
+    expect([0, 1, 25, 26, 27].map(teamLetter)).toEqual(['A', 'B', 'Z', 'AA', 'AB']);
+  });
+  it('builds a default side name from the club name', () => {
+    expect(defaultTeamName('Glenwood', 0)).toBe('Glenwood A');
+    expect(defaultTeamName('Glenwood', 1)).toBe('Glenwood B');
+    expect(defaultTeamName('', 0)).toBe('Team A');
+  });
+});
+
+describe('clubTeamsForLeague', () => {
+  const club = {
+    id: 'glenwood',
+    name: 'Glenwood',
+    leagues: ['premier'],
+    ground: { venue: 'Glenwood Oval', lat: -29.85, lon: 31.02 },
+  };
+
+  it('treats a single-team club as one team whose teamId is the clubId', () => {
+    const teams = clubTeamsForLeague(club as any, 'premier');
+    expect(teams).toEqual([
+      {
+        teamId: 'glenwood',
+        clubId: 'glenwood',
+        name: 'Glenwood',
+        venue: 'Glenwood Oval',
+        lat: -29.85,
+        lon: 31.02,
+      },
+    ]);
+  });
+
+  it('expands a ≥2-team league into its named roster sides', () => {
+    const c = {
+      ...club,
+      leagueTeams: { premier: 2 },
+      teamRosters: {
+        premier: [
+          { id: 'tm_a', name: 'Glenwood A', venue: 'Oval' },
+          { id: 'tm_b', name: 'Glenwood B' },
+        ],
+      },
+    };
+    const teams = clubTeamsForLeague(c as any, 'premier');
+    expect(teams.map((t) => [t.teamId, t.name, t.venue])).toEqual([
+      ['tm_a', 'Glenwood A', 'Oval'],
+      ['tm_b', 'Glenwood B', 'Glenwood Oval'], // falls back to the club venue
+    ]);
+    expect(teams.every((t) => t.clubId === 'glenwood')).toBe(true);
+  });
+
+  it('pads with auto-named sides when the count exceeds the stored roster', () => {
+    const c = {
+      ...club,
+      leagueTeams: { premier: 3 },
+      teamRosters: { premier: [{ id: 'tm_a', name: 'First XI' }] },
+    };
+    const teams = clubTeamsForLeague(c as any, 'premier');
+    expect(teams).toHaveLength(3);
+    expect(teams[0].name).toBe('First XI');
+    expect(teams[1].name).toBe('Glenwood B');
+    expect(teams[2].name).toBe('Glenwood C');
+    // Padded ids MUST be deterministic (tm_<club>_<league>_<index>) — a fresh
+    // makeTeamId() here would desync series creation. Assert the exact value, and
+    // that a second call yields the same ids, so a regression can't slip through.
+    expect(teams[1].teamId).toBe('tm_glenwood_premier_1');
+    expect(teams[2].teamId).toBe('tm_glenwood_premier_2');
+    expect(clubTeamsForLeague(c as any, 'premier').map((t) => t.teamId)).toEqual(
+      teams.map((t) => t.teamId),
+    );
   });
 });

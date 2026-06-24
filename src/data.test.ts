@@ -7,6 +7,8 @@ import {
   safeguardingSatisfied,
   ageFromSaId,
   termRemaining,
+  teamIdsForClub,
+  resolveTeam,
 } from './data';
 
 // 6 teams → 5 single round-robin rounds (each round = one match-day).
@@ -233,5 +235,67 @@ describe('termRemaining', () => {
     expect(t.expired).toBe(false);
     expect(t.years).toBeGreaterThanOrEqual(1);
     expect(t.label).toMatch(/left$/);
+  });
+});
+
+describe('teamIdsForClub / resolveTeam', () => {
+  const clubs = [
+    { id: 'glenwood', name: 'Glenwood', ground: { venue: 'Oval', lat: -29.85, lon: 31.02 } },
+    { id: 'pirates', name: 'Pirates', ground: { venue: 'Bay', lat: -29.9, lon: 31.0 } },
+  ];
+  const clubBy = (id) => clubs.find((c) => c.id === id);
+
+  it('legacy series (no participants): teamId is the clubId', () => {
+    const s = { teams: ['glenwood', 'pirates'] };
+    expect(teamIdsForClub(s, 'glenwood')).toEqual(['glenwood']);
+    const r = resolveTeam(s, 'pirates', clubBy);
+    expect(r.clubId).toBe('pirates');
+    expect(r.name).toBe('Pirates');
+    expect(r.ground.lat).toBe(-29.9);
+  });
+
+  it('participant series: resolves names/coords from the snapshot, not the live club', () => {
+    const s = {
+      teams: ['tm_a', 'tm_b', 'pirates'],
+      participants: [
+        {
+          teamId: 'tm_a',
+          clubId: 'glenwood',
+          name: 'Glenwood A',
+          venue: 'Oval',
+          lat: -29.85,
+          lon: 31.02,
+        },
+        { teamId: 'tm_b', clubId: 'glenwood', name: 'Glenwood B', lat: -29.85, lon: 31.02 },
+        { teamId: 'pirates', clubId: 'pirates', name: 'Pirates' },
+      ],
+    };
+    // Both of Glenwood's sides resolve to the club.
+    expect(teamIdsForClub(s, 'glenwood').sort()).toEqual(['tm_a', 'tm_b']);
+    const a = resolveTeam(s, 'tm_a', clubBy);
+    expect(a.clubId).toBe('glenwood');
+    expect(a.name).toBe('Glenwood A');
+    expect(a.club.name).toBe('Glenwood'); // underlying club for avatar/colour
+    expect(a.ground.venue).toBe('Oval');
+  });
+
+  it('falls back to the club ground when a participant has no own pin', () => {
+    const s = {
+      teams: ['tm_b'],
+      participants: [{ teamId: 'tm_b', clubId: 'glenwood', name: 'Glenwood B' }],
+    };
+    const r = resolveTeam(s, 'tm_b', clubBy);
+    expect(r.ground.lat).toBe(-29.85); // from the club ground
+    expect(r.ground.venue).toBe('Oval');
+  });
+
+  it('an orphaned participant id resolves without throwing', () => {
+    const s = {
+      teams: ['tm_x'],
+      participants: [{ teamId: 'tm_y', clubId: 'glenwood', name: 'X' }],
+    };
+    const r = resolveTeam(s, 'tm_x', clubBy);
+    expect(r.name).toBe('Unknown team');
+    expect(r.clubId).toBeUndefined();
   });
 });

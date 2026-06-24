@@ -112,6 +112,7 @@ export function validateClubPatch(
     district?: string;
     leagues?: string[];
     leagueTeams?: Record<string, number>;
+    teamRosters?: Record<string, { id?: unknown; name?: unknown }[]>;
     docs?: Record<string, unknown>;
     docMeta?: Record<string, unknown>;
     // Accepted as part of a club patch but no longer validated here — the
@@ -145,6 +146,36 @@ export function validateClubPatch(
       // since updateClub PUTs the whole object, an orphaned count would persist forever.
       if (patch.leagues && !patch.leagues.includes(k)) {
         return 'leagueTeams has keys not in leagues';
+      }
+    }
+  }
+  // Named team rosters — present only for leagues a club fields >1 side in. Each id
+  // must carry the reserved `tm_` prefix (so the teamId namespace stays disjoint from
+  // clubId slugs) and be unique across all rosters; names are 1–80 chars. Keys, like
+  // leagueTeams, must be among the leagues entered (no orphans persisting via the PUT).
+  const allTeamIds = new Set<string>();
+  if (patch.teamRosters) {
+    for (const [k, roster] of Object.entries(patch.teamRosters)) {
+      if (patch.leagues && !patch.leagues.includes(k)) {
+        return 'teamRosters has keys not in leagues';
+      }
+      if (!Array.isArray(roster)) return 'teamRosters values must be arrays';
+      // When the count is in the same patch, the roster must describe exactly that
+      // many sides — a roster is only meaningful for a ≥2-side league, and a count/
+      // roster-length mismatch would desync the named teams from the fixture pool.
+      const count = patch.leagueTeams?.[k];
+      if (typeof count === 'number') {
+        if (count < 2) return 'teamRosters present for a league with fewer than 2 teams';
+        if (roster.length !== count) return 'teamRosters length must match the team count';
+      }
+      for (const t of roster) {
+        const id = typeof t?.id === 'string' ? t.id : '';
+        if (!id || !id.startsWith('tm_')) return 'team id must be a non-empty tm_ id';
+        if (allTeamIds.has(id)) return 'duplicate team id';
+        allTeamIds.add(id);
+        const name = typeof t?.name === 'string' ? t.name.trim() : '';
+        if (!name) return 'team name cannot be empty';
+        if (name.length > 80) return 'team name must be 80 characters or fewer';
       }
     }
   }
@@ -199,6 +230,13 @@ export function validateClubPatch(
       }
       if (c.yearStarted && !/^\d{4}$/.test(String(c.yearStarted))) {
         return 'coach yearStarted must be a 4-digit year';
+      }
+      // Per-team assignment: every referenced id must be a real roster team. Checked
+      // only when the patch carries teamRosters (so a draft that omits rosters but
+      // keeps coaches still passes); absent teamIds ⇒ covers all the club's sides.
+      if (patch.teamRosters && Array.isArray(c.teamIds)) {
+        const bad = (c.teamIds as unknown[]).find((id) => !allTeamIds.has(String(id)));
+        if (bad !== undefined) return `coach assigned to unknown team: ${String(bad)}`;
       }
     }
   }

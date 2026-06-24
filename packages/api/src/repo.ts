@@ -52,6 +52,7 @@ import type {
 } from './types.js';
 
 import { tableName } from './env.js';
+import { teamIdsForClub } from './teams.js';
 
 const TABLE = tableName();
 // DYNAMO_ENDPOINT points at a local DynamoDB (dynalite) for offline dev; any
@@ -686,12 +687,20 @@ async function stripClubFromDraftSeries(
   clubId: string,
 ): Promise<boolean> {
   const cur = await getSeries(tenant, seriesId);
-  if (!cur || cur.released === true || !cur.teams.includes(clubId)) return false;
-  const teams = cur.teams.filter((t) => t !== clubId);
+  if (!cur || cur.released === true) return false;
+  // A multi-team club participates under its `tm_…` ids — strip the club's whole team
+  // set (and its participant snapshot entries), not just a bare clubId.
+  const mine = new Set(teamIdsForClub(cur, clubId));
+  if (!cur.teams.some((t) => mine.has(t))) return false;
+  const teams = cur.teams.filter((t) => !mine.has(t));
   const fixtures = (cur.fixtures as Array<{ home?: string; away?: string } | null>).filter(
-    (f) => !f || (f.home !== clubId && f.away !== clubId),
+    (f) => !f || (!mine.has(f.home ?? '') && !mine.has(f.away ?? '')),
   );
-  await updateSeries(tenant, seriesId, { teams, fixtures, approved: false, approvedAt: null });
+  const patch: Record<string, unknown> = { teams, fixtures, approved: false, approvedAt: null };
+  if (Array.isArray(cur.participants)) {
+    patch.participants = cur.participants.filter((p) => p.clubId !== clubId);
+  }
+  await updateSeries(tenant, seriesId, patch);
   return true;
 }
 
@@ -1851,7 +1860,11 @@ export async function eraseClubData(
   let series = 0;
   let seriesFailed = 0;
   for (const s of await listSeries(tenant)) {
-    if (s.released === true || !s.teams.includes(club.id)) continue;
+    if (s.released === true) continue;
+    // Skip series the club isn't in — matched via its resolved team set (a multi-team
+    // club is present under `tm_…` ids, not its clubId).
+    const mine = teamIdsForClub(s, club.id);
+    if (!mine.some((tid) => s.teams.includes(tid))) continue;
     try {
       if (await stripClubFromDraftSeries(tenant, s.id, club.id)) series++;
     } catch (err: unknown) {

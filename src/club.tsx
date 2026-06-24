@@ -34,6 +34,8 @@ import {
   overallProgress,
   affiliationSubmitted,
   fixtureCost,
+  resolveTeam,
+  teamIdsForClub,
   DEFAULT_COST_PER_KM,
   DEFAULT_CARS,
   formatDeadlineLong,
@@ -44,7 +46,15 @@ import {
   termRemaining,
   INVOLVEMENT_REASONS,
 } from './data';
-import { leagueOptionsForDistrict, findByKey, labelByKey, teamCounts } from './leagues';
+import {
+  leagueOptionsForDistrict,
+  findByKey,
+  labelByKey,
+  teamCounts,
+  makeTeamId,
+  defaultTeamName,
+  teamLetter,
+} from './leagues';
 import { shortAddress, suburbOf, SA_BOUNDS, isInSouthAfrica } from './geocode';
 import {
   Icon,
@@ -887,7 +897,31 @@ const EMPTY_COACH = {
   yearStarted: '',
   yearsExperience: '',
   teams: [],
+  // Specific sides this coach takes when a tagged league fields >1 team. Empty ⇒
+  // covers all the club's sides in its tagged leagues (the common case).
+  teamIds: [],
 };
+
+// Reconcile a stored/edited roster to exactly `count` named sides: keep existing
+// entries (stable ids) up to the count, pad with auto-named defaults, trim the rest.
+// Used both to seed form state and to re-sync when the team count changes.
+function syncRoster(existing, count, clubName) {
+  const arr = Array.isArray(existing) ? existing : [];
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const e = arr[i] || {};
+    out.push({
+      id: e.id || makeTeamId(),
+      name:
+        typeof e.name === 'string' && e.name.trim() ? e.name.trim() : defaultTeamName(clubName, i),
+      venue: e.venue || '',
+      address: e.address || '',
+      lat: Number.isFinite(e.lat) ? e.lat : undefined,
+      lon: Number.isFinite(e.lon) ? e.lon : undefined,
+    });
+  }
+  return out;
+}
 
 export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allLeagues = [] }) {
   const [data, setData] = useStateC(() => {
@@ -957,6 +991,20 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
           return acc;
         }, {});
       })(),
+      // Named sides per league, seeded only for leagues fielding ≥2 teams. Reconciled
+      // to the stored count so a saved roster restores and a count-only legacy club
+      // gets auto-named defaults.
+      teamRosters: (() => {
+        const prior = Array.isArray(club.leagues) ? club.leagues : [];
+        const counts = club.leagueTeams || {};
+        const rosters = club.teamRosters || {};
+        const out = {};
+        for (const k of prior) {
+          const count = Math.max(1, Number(counts[k]) || 1);
+          if (count >= 2) out[k] = syncRoster(rosters[k], count, club.name);
+        }
+        return out;
+      })(),
       coaches: club.coaches && club.coaches.length ? club.coaches : [{ ...EMPTY_COACH, teams: [] }],
       // Home ground / venue
       groundVenue: ground.venue || '',
@@ -997,6 +1045,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
       ground: getGroundPayload(),
       leagues: getLeaguesPayload(),
       leagueTeams: getLeagueTeamsPayload(),
+      teamRosters: getTeamRostersPayload(),
     })
       .then(() => toast('Draft saved'))
       .catch(() => {})
@@ -1034,6 +1083,18 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
       }),
     }));
   }
+  // Assign/unassign a coach to a specific named side (only shown for ≥2-team leagues).
+  function toggleCoachTeamId(idx, teamId) {
+    setData((d) => ({
+      ...d,
+      coaches: d.coaches.map((c, i) => {
+        if (i !== idx) return c;
+        const ids = Array.isArray(c.teamIds) ? c.teamIds : [];
+        const has = ids.includes(teamId);
+        return { ...c, teamIds: has ? ids.filter((t) => t !== teamId) : [...ids, teamId] };
+      }),
+    }));
+  }
   function addCoach() {
     setData((d) => ({ ...d, coaches: [...d.coaches, { ...EMPTY_COACH }] }));
   }
@@ -1051,15 +1112,47 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
     setData((d) => {
       const on = !d.leagues[k];
       const leagueTeams = { ...d.leagueTeams };
-      if (on)
+      const teamRosters = { ...d.teamRosters };
+      if (on) {
         leagueTeams[k] = leagueTeams[k] || 1; // default a freshly-entered league to 1 side
-      else delete leagueTeams[k]; // drop the count when the league is de-selected
-      return { ...d, leagues: { ...d.leagues, [k]: on }, leagueTeams };
+      } else {
+        delete leagueTeams[k]; // drop the count + roster when the league is de-selected
+        delete teamRosters[k];
+      }
+      return { ...d, leagues: { ...d.leagues, [k]: on }, leagueTeams, teamRosters };
     });
   }
   function updateLeagueTeams(k, n) {
     const clamped = Math.min(30, Math.max(1, Number(n) | 0));
-    setData((d) => ({ ...d, leagueTeams: { ...d.leagueTeams, [k]: clamped } }));
+    setData((d) => {
+      const teamRosters = { ...d.teamRosters };
+      if (clamped >= 2) {
+        // Keep names/ids; pad or trim to the new count.
+        teamRosters[k] = syncRoster(teamRosters[k], clamped, d.clubName);
+      } else {
+        delete teamRosters[k]; // a single side is just the club — no named roster
+      }
+      // Trim any coach assignments that referenced a side we just removed.
+      const liveIds = new Set(
+        Object.values(teamRosters)
+          .flat()
+          .map((t: any) => t.id),
+      );
+      const coaches = d.coaches.map((c) =>
+        Array.isArray(c.teamIds) && c.teamIds.length
+          ? { ...c, teamIds: c.teamIds.filter((id) => liveIds.has(id)) }
+          : c,
+      );
+      return { ...d, leagueTeams: { ...d.leagueTeams, [k]: clamped }, teamRosters, coaches };
+    });
+  }
+  // Edit one field (name/venue/address) of a named side within a league's roster.
+  function updateTeamField(leagueKey, idx, field, val) {
+    setData((d) => {
+      const roster = Array.isArray(d.teamRosters[leagueKey]) ? d.teamRosters[leagueKey] : [];
+      const next = roster.map((t, i) => (i === idx ? { ...t, [field]: val } : t));
+      return { ...d, teamRosters: { ...d.teamRosters, [leagueKey]: next } };
+    });
   }
   // Changing district wipes prior league selections — the catalogue is district-specific
   // (Smart Club Integration V2) so cross-district keys would be invalid.
@@ -1075,9 +1168,20 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
         ...c,
         teams: c.teams.filter((t) => validKeys.has(t)),
       }));
-      // Wipe per-league team counts too — cross-district keys are invalid, so stale
-      // counts would otherwise persist as orphaned keys the server now rejects.
-      return { ...d, district: newDistrict, leagues: freshLeagues, leagueTeams: {}, coaches };
+      // Wipe per-league team counts AND rosters too — cross-district keys are invalid,
+      // so stale counts/rosters would persist as orphaned keys the server now rejects.
+      // Coach team assignments go with them (their sides no longer exist).
+      const wiped = coaches.map((c) =>
+        Array.isArray(c.teamIds) && c.teamIds.length ? { ...c, teamIds: [] } : c,
+      );
+      return {
+        ...d,
+        district: newDistrict,
+        leagues: freshLeagues,
+        leagueTeams: {},
+        teamRosters: {},
+        coaches: wiped,
+      };
     });
   }
 
@@ -1128,9 +1232,6 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
       additionalMembers: data.additionalMembers.filter((m) => m.name),
     };
   }
-  function getCoachesPayload() {
-    return data.coaches.filter((c) => c.name);
-  }
   function getLeaguesPayload() {
     return Object.entries(data.leagues)
       .filter(([_, v]) => v)
@@ -1143,6 +1244,41 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
       acc[k] = Math.min(30, Math.max(1, Number(data.leagueTeams[k]) || 1));
       return acc;
     }, {});
+  }
+  // Named rosters for SELECTED leagues fielding ≥2 sides only (same subset discipline as
+  // leagueTeams — orphaned keys are rejected). Single-team leagues have no roster.
+  function getTeamRostersPayload() {
+    const selected = new Set(getLeaguesPayload());
+    const out = {};
+    for (const [k, roster] of Object.entries(data.teamRosters || {})) {
+      const count = Math.min(30, Math.max(1, Number(data.leagueTeams[k]) || 1));
+      if (!selected.has(k) || count < 2 || !Array.isArray(roster) || !roster.length) continue;
+      out[k] = roster.slice(0, count).map((t, i) => ({
+        id: t.id || makeTeamId(),
+        name: (t.name || '').trim() || defaultTeamName(data.clubName, i),
+        ...(t.venue && t.venue.trim() ? { venue: t.venue.trim() } : {}),
+        ...(t.address && t.address.trim() ? { address: t.address.trim() } : {}),
+        ...(Number.isFinite(t.lat) ? { lat: t.lat } : {}),
+        ...(Number.isFinite(t.lon) ? { lon: t.lon } : {}),
+      }));
+    }
+    return out;
+  }
+  // Coaches with name set. `teamIds` is pruned to sides that actually exist in the
+  // payload's rosters; an empty result omits the field entirely (⇒ covers all sides).
+  function getCoachesPayload() {
+    const validIds = new Set(
+      Object.values(getTeamRostersPayload())
+        .flat()
+        .map((t: any) => t.id),
+    );
+    return data.coaches
+      .filter((c) => c.name)
+      .map((c) => {
+        const ids = (Array.isArray(c.teamIds) ? c.teamIds : []).filter((id) => validIds.has(id));
+        const { teamIds, ...rest } = c;
+        return ids.length ? { ...rest, teamIds: ids } : rest;
+      });
   }
 
   // Step-1 Continue gate — validates only Step-1 fields. Chair name/cell/email
@@ -1898,6 +2034,107 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
                       ))}
                     </div>
 
+                    {/* Name your sides — shown only for leagues fielding more than one team.
+                        Each named team becomes its own fixtures participant (intra-club
+                        derbies included); an optional venue overrides the club ground. */}
+                    {(() => {
+                      const multi = selectedLeagueKeys.filter(
+                        (k) => (data.leagueTeams[k] || 1) >= 2,
+                      );
+                      if (!multi.length) return null;
+                      const labels = labelByKey(allLeagues);
+                      return (
+                        <>
+                          <div className="hr" />
+                          <div className="field">
+                            <div className="field-label">Name your teams</div>
+                            <div
+                              style={{
+                                fontSize: 11.5,
+                                color: 'var(--muted)',
+                                marginBottom: 10,
+                              }}
+                            >
+                              You're entering more than one side in these leagues. Name each team so
+                              it shows up separately in the fixtures — sides from the same club can
+                              be drawn against each other.
+                            </div>
+                            {multi.map((key) => {
+                              const roster = data.teamRosters[key] || [];
+                              return (
+                                <div
+                                  key={key}
+                                  style={{
+                                    border: '1px solid var(--line)',
+                                    borderRadius: 12,
+                                    padding: '12px 14px',
+                                    marginBottom: 12,
+                                    background: 'var(--white)',
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      fontFamily: "'Montserrat',sans-serif",
+                                      fontWeight: 700,
+                                      fontSize: 13,
+                                      marginBottom: 10,
+                                    }}
+                                  >
+                                    {labels[key] ?? key}
+                                    <span
+                                      style={{
+                                        marginLeft: 8,
+                                        fontSize: 11,
+                                        color: 'var(--muted)',
+                                        fontWeight: 500,
+                                      }}
+                                    >
+                                      {roster.length} {roster.length === 1 ? 'side' : 'sides'}
+                                    </span>
+                                  </div>
+                                  {roster.map((t, i) => (
+                                    <div
+                                      key={t.id}
+                                      style={{
+                                        display: 'grid',
+                                        gridTemplateColumns: '1fr 1fr',
+                                        gap: 8,
+                                        marginBottom: 8,
+                                      }}
+                                    >
+                                      <div className="field" style={{ margin: 0 }}>
+                                        <div className="field-label">Team {teamLetter(i)} name</div>
+                                        <input
+                                          className="field-input"
+                                          value={t.name || ''}
+                                          placeholder={defaultTeamName(data.clubName, i)}
+                                          maxLength={80}
+                                          onChange={(e) =>
+                                            updateTeamField(key, i, 'name', e.target.value)
+                                          }
+                                        />
+                                      </div>
+                                      <div className="field" style={{ margin: 0 }}>
+                                        <div className="field-label">Home venue (optional)</div>
+                                        <input
+                                          className="field-input"
+                                          value={t.venue || ''}
+                                          placeholder={data.groundVenue || 'Club ground'}
+                                          onChange={(e) =>
+                                            updateTeamField(key, i, 'venue', e.target.value)
+                                          }
+                                        />
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </>
+                      );
+                    })()}
+
                     <div className="hr" />
 
                     {/* Coaches grouped by designation — one banner per selected league */}
@@ -2296,6 +2533,55 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
                                           )}
                                         </div>
                                       </div>
+
+                                      {/* Per-team assignment — only when this league fields >1 side.
+                                          No selection ⇒ the coach covers every side. */}
+                                      {(data.leagueTeams[key] || 1) >= 2 &&
+                                        (data.teamRosters[key] || []).length > 0 && (
+                                          <div className="trb" style={{ marginTop: 10 }}>
+                                            <div className="trb-head">
+                                              <span className="trb-label">
+                                                Which {L.label} sides
+                                              </span>
+                                              <span className="trb-count filled">
+                                                {(() => {
+                                                  const ids = Array.isArray(c.teamIds)
+                                                    ? c.teamIds
+                                                    : [];
+                                                  const roster = data.teamRosters[key] || [];
+                                                  const n = roster.filter((t) =>
+                                                    ids.includes(t.id),
+                                                  ).length;
+                                                  return n === 0
+                                                    ? 'all sides'
+                                                    : `${n} of ${roster.length}`;
+                                                })()}
+                                              </span>
+                                            </div>
+                                            <div className="trb-chips">
+                                              {(data.teamRosters[key] || []).map((t) => {
+                                                const on =
+                                                  Array.isArray(c.teamIds) &&
+                                                  c.teamIds.includes(t.id);
+                                                return (
+                                                  <button
+                                                    key={t.id}
+                                                    className={`trb-chip ${on ? 'on' : ''}`}
+                                                    onClick={() => toggleCoachTeamId(idx, t.id)}
+                                                  >
+                                                    <span className="trb-chip-tick">
+                                                      {on ? <Icon.Check /> : null}
+                                                    </span>
+                                                    {t.name}
+                                                  </button>
+                                                );
+                                              })}
+                                              <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                                                No selection = coaches all sides.
+                                              </span>
+                                            </div>
+                                          </div>
+                                        )}
                                     </div>
                                   );
                                 })
@@ -2373,6 +2659,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
                         ground: getGroundPayload(),
                         leagues: getLeaguesPayload(),
                         leagueTeams: getLeagueTeamsPayload(),
+                        teamRosters: getTeamRostersPayload(),
                       });
                       if (submitted) {
                         setEditing(false);
@@ -3855,8 +4142,15 @@ export function CQIView({
 export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures }) {
   const clubBy = (id) => clubs.find((c) => c.id === id);
 
-  // Only series this club is in AND that have been released by the Dolphins office
-  const myReleased = (allSeries || []).filter((s) => s.released && s.teams.includes(club.id));
+  // Only series this club is in AND that have been released by the Dolphins office.
+  // A multi-team club participates under its `tm_…` ids, so match the club's resolved
+  // team set rather than its clubId.
+  const myReleased = (allSeries || []).filter(
+    (s) =>
+      s.released &&
+      Array.isArray(s.teams) &&
+      teamIdsForClub(s, club.id).some((tid) => s.teams.includes(tid)),
+  );
 
   // Share-with-players modal state. Hooks must run before the early return below.
   const [shareOpen, setShareOpen] = useStateC(false);
@@ -3949,14 +4243,16 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
   const todayISO = new Date().toISOString().slice(0, 10);
 
   myReleased.forEach((s) => {
+    const mine = new Set(teamIdsForClub(s, club.id));
     s.fixtures.forEach((f) => {
-      if (f.home !== club.id && f.away !== club.id) return;
+      const isHome = mine.has(f.home);
+      if (!isHome && !mine.has(f.away)) return;
       totalMatches++;
-      if (f.home === club.id) homeMatches++;
+      if (isHome) homeMatches++;
       else {
         awayMatches++;
-        const home = clubBy(f.home);
-        if (home && home.ground && club.ground) {
+        const home = resolveTeam(s, f.home, clubBy);
+        if (home.ground && club.ground) {
           const c = fixtureCost(
             home,
             club,
@@ -3968,7 +4264,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
         }
       }
       if (f.date >= todayISO && (!nextFixture || f.date < nextFixture.date)) {
-        nextFixture = { ...f, seriesName: s.name };
+        nextFixture = { ...f, seriesName: s.name, _series: s };
       }
     });
   });
@@ -3979,14 +4275,14 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
         Math.ceil((new Date(nextFixture.date).getTime() - new Date(todayISO).getTime()) / 86400000),
       )
     : null;
-  // An opponent id with no club behind it means the club was deleted — say so
-  // instead of the pre-schedule 'TBA'.
-  const nextOppId = nextFixture
-    ? nextFixture.home === club.id
-      ? nextFixture.away
-      : nextFixture.home
-    : null;
-  const nextOppName = clubBy(nextOppId)?.name || (nextOppId ? 'Removed club' : 'TBA');
+  // Resolve the next fixture's opponent through that series' participants (handles a
+  // multi-team club and intra-club derbies; falls back to club-id for legacy series).
+  const nextMine = nextFixture ? new Set(teamIdsForClub(nextFixture._series, club.id)) : null;
+  const nextIsHome = nextFixture ? nextMine.has(nextFixture.home) : false;
+  const nextOppId = nextFixture ? (nextIsHome ? nextFixture.away : nextFixture.home) : null;
+  const nextOppName = nextFixture
+    ? resolveTeam(nextFixture._series, nextOppId, clubBy).name
+    : 'TBA';
 
   return (
     <div>
@@ -4066,7 +4362,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
             </div>
             <div className="club-fix-next-detail">
               <div className="club-fix-next-title">
-                {nextFixture.home === club.id ? 'vs' : 'away to'} <strong>{nextOppName}</strong>
+                {nextIsHome ? 'vs' : 'away to'} <strong>{nextOppName}</strong>
               </div>
               <div className="club-fix-next-sub">
                 {new Date(nextFixture.date).toLocaleDateString('en-GB', {
@@ -4079,7 +4375,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
               </div>
             </div>
             <div className="club-fix-next-tag">
-              {nextFixture.home === club.id ? (
+              {nextIsHome ? (
                 <Pill tone="teal" dot>
                   Home fixture
                 </Pill>
@@ -4095,8 +4391,9 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
 
       {/* One block per released series */}
       {myReleased.map((s) => {
+        const myTeamIds = new Set(teamIdsForClub(s, club.id));
         const mine = s.fixtures
-          .filter((f) => f.home === club.id || f.away === club.id)
+          .filter((f) => myTeamIds.has(f.home) || myTeamIds.has(f.away))
           .sort((a, b) => a.date.localeCompare(b.date));
 
         return (
@@ -4113,7 +4410,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                 </div>
                 <div className="club-fix-series-name">{s.name}</div>
                 <div className="club-fix-series-meta">
-                  {s.teams.length} clubs · {s.maxOvers} overs · {s.seriesType} · {mine.length} of
+                  {s.teams.length} teams · {s.maxOvers} overs · {s.seriesType} · {mine.length} of
                   your matches
                 </div>
               </div>
@@ -4141,18 +4438,18 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                 </thead>
                 <tbody>
                   {mine.map((f) => {
-                    const isHome = f.home === club.id;
+                    const isHome = myTeamIds.has(f.home);
                     const oppId = isHome ? f.away : f.home;
-                    const opp = clubBy(oppId);
-                    // Distinguish "deleted club" (id present, lookup empty) from
-                    // a genuinely unscheduled opponent.
-                    const oppFallback = oppId ? 'Removed club' : 'TBA';
+                    // Resolve through the series snapshot — names/coords survive a later
+                    // roster edit, and an intra-club derby names the other side correctly.
+                    const opp = resolveTeam(s, oppId, clubBy);
+                    const mySide = resolveTeam(s, f.home, clubBy);
                     const venueName = isHome
-                      ? club.ground?.venue || 'Home ground TBA'
-                      : opp?.ground?.venue || 'Opponent ground TBA';
+                      ? mySide.ground?.venue || club.ground?.venue || 'Home ground TBA'
+                      : opp.ground?.venue || 'Opponent ground TBA';
                     let dist = null,
                       cost = null;
-                    if (!isHome && opp && opp.ground && club.ground) {
+                    if (!isHome && opp.ground && club.ground) {
                       const c = fixtureCost(
                         opp,
                         club,
@@ -4201,7 +4498,14 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                           </div>
                         </td>
                         <td>
-                          <ClubNameCell club={opp || { name: oppFallback, short: 'TBA' }} />
+                          {/* Show the opponent's team name with its club's avatar/short. */}
+                          <ClubNameCell
+                            club={
+                              opp.club
+                                ? { ...opp.club, name: opp.name }
+                                : { name: opp.name, short: 'TBA' }
+                            }
+                          />
                         </td>
                         <td>
                           {isHome ? (
