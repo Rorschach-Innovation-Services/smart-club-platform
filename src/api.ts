@@ -298,6 +298,13 @@ export const patchUser = (sub: string, body: unknown) =>
 export const removeUser = (sub: string) => request(`/admin/users/${sub}`, { method: 'DELETE' });
 export const resendInvite = (sub: string) =>
   request(`/admin/users/${sub}/resend`, { method: 'POST' });
+// Correct a mistyped email for a not-yet-signed-in member, then re-send the invite.
+// Resolves to { sub, email, status, results? } — results carries the auto-resend outcome.
+export const changeUserEmail = (sub: string, email: string) =>
+  request<{ sub: string; email: string; status: string; results?: SendResult[] }>(
+    `/admin/users/${sub}/email`,
+    { method: 'PATCH', body: { email } },
+  );
 
 // ── Club self-registration link (admin) ──
 // One tenant-wide link clubs use to register themselves (/signup?t=<token>).

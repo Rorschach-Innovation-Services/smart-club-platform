@@ -2015,6 +2015,92 @@ describe('/admin/users', () => {
     assert.equal(body.results[0].status, 'sent');
   });
 
+  // ── PATCH /admin/users/:sub/email — correct a mistyped email (pending users) ──
+  const patchEmail = (sub: string, body: unknown, auth = TADMIN) =>
+    app.request(`/admin/users/${sub}/email`, {
+      method: 'PATCH',
+      headers: adminHeaders(auth),
+      body: JSON.stringify(body),
+    });
+
+  test('PATCH email corrects a pending member, re-syncs the marker, and auto-resends', async () => {
+    const wrong = 'tpyo@team.test';
+    const right = 'typo@team.test';
+    await invite({ email: wrong, role: 'rep', clubIds: ['c1'] });
+    const sub = await subFor(wrong);
+
+    const res = await patchEmail(sub, { email: right });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      sub: string;
+      email: string;
+      status: string;
+      results: { channel: string; status: string }[];
+    };
+    assert.equal(body.email, right);
+    assert.equal(body.status, 'pending');
+    // Auto-resend goes out (dry-run "sent") to the corrected address.
+    assert.equal(body.results.find((r) => r.channel === 'email')?.status, 'sent');
+
+    // The sub is unchanged; the profile + the gsi1 marker now carry the new email,
+    // so the roster lists the corrected address (and no longer the typo).
+    assert.equal((await repo.getUser(sub))?.email, right);
+    const rows = (await (await list()).json()) as Array<{ sub: string; email: string }>;
+    assert.equal(rows.find((r) => r.sub === sub)?.email, right);
+    assert.ok(!rows.some((r) => r.email === wrong), 'the typo address is gone from the roster');
+  });
+
+  test('PATCH email: a re-issued identical correction is a no-op (400 unchanged), DB stays converged', async () => {
+    // Offline (LOCAL_AUTH=1) the Cognito relocation is stubbed, so this verifies only the
+    // unchanged-guard half of the retry story — NOT the by-sub alias re-set that makes the
+    // Cognito-succeeded-then-DB-failed path converge (that resolve-by-sub idempotency can
+    // only be proven against a real pool; see the prod smoke step).
+    const wrong = 'retry-wrong@team.test';
+    const right = 'retry-right@team.test';
+    await invite({ email: wrong, role: 'rep', clubIds: ['c1'] });
+    const sub = await subFor(wrong);
+
+    assert.equal((await patchEmail(sub, { email: right })).status, 200);
+    // Re-issue the identical correction — the unchanged-guard returns 400, DB untouched.
+    assert.equal((await patchEmail(sub, { email: right })).status, 400);
+    assert.equal((await repo.getUser(sub))?.email, right);
+  });
+
+  test('PATCH email on an ALREADY-ACTIVE member is rejected (400)', async () => {
+    const email = 'already-active@team.test';
+    await invite({ email, role: 'rep', clubIds: ['c1'] });
+    const sub = await subFor(email);
+    await repo.stampFirstLogin(sub); // they signed in ⇒ address already works
+    const res = await patchEmail(sub, { email: 'new-active@team.test' });
+    assert.equal(res.status, 400);
+  });
+
+  test('PATCH email to an address already used in the tenant is a 409', async () => {
+    const taken = 'taken@team.test';
+    const moving = 'moving@team.test';
+    await invite({ email: taken, role: 'rep', clubIds: ['c1'] });
+    await invite({ email: moving, role: 'rep', clubIds: ['c1'] });
+    const sub = await subFor(moving);
+    const res = await patchEmail(sub, { email: taken });
+    assert.equal(res.status, 409);
+    // The collision left the moving user's address untouched.
+    assert.equal((await repo.getUser(sub))?.email, moving);
+  });
+
+  test('PATCH email rejects an invalid address (400) and an unknown sub (404)', async () => {
+    const email = 'valid-check@team.test';
+    await invite({ email, role: 'rep', clubIds: ['c1'] });
+    const sub = await subFor(email);
+    assert.equal((await patchEmail(sub, { email: 'not-an-email' })).status, 400);
+    assert.equal((await patchEmail('local-nope', { email: 'who@team.test' })).status, 404);
+  });
+
+  test('PATCH email: a non-admin (rep) is forbidden (403)', async () => {
+    const sub = await subFor('list-rep@team.test');
+    const res = await patchEmail(sub, { email: 'x@team.test' }, TREP);
+    assert.equal(res.status, 403);
+  });
+
   test('a non-admin (rep) is forbidden (403)', async () => {
     const res = await list(TREP);
     assert.equal(res.status, 403);

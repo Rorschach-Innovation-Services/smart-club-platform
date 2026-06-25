@@ -473,7 +473,7 @@ function AuthedApp({ tenantConfig }) {
   async function withToast(
     fn: () => Promise<any>,
     errMsg?: string,
-    opts: { rawConflict?: boolean; invalidate?: any[] } = {},
+    opts: { rawConflict?: boolean; rawClientError?: boolean; invalidate?: any[] } = {},
   ) {
     try {
       return await fn();
@@ -483,11 +483,16 @@ function AuthedApp({ tenantConfig }) {
       // 409s ("user already active…", "cannot remove the last admin") carry actionable copy
       // the admin must see, so those callers pass `rawConflict` to surface err.message.
       const rawConflict = conflict && opts.rawConflict;
+      // `rawClientError` surfaces the server's message for ANY 4xx (not just 409) — used where
+      // every client-error carries actionable recovery copy (e.g. email correction's 404
+      // "sign-in account is missing — remove and re-invite"), which a generic errMsg would mask.
+      const rawClientError =
+        opts.rawClientError && err instanceof ApiError && err.status >= 400 && err.status < 500;
       // 401s carry the session-expired copy from api.js — more useful than errMsg.
       // (When auth is truly lost the app flips to Login anyway; this covers the rest.)
       const authError = err instanceof ApiError && err.status === 401;
       toastShow(
-        rawConflict || authError
+        rawConflict || rawClientError || authError
           ? err.message
           : conflict
             ? 'Someone else just changed this — refreshing.'
@@ -1260,6 +1265,19 @@ function Shell({
   function resendInvite(sub) {
     return withToast(() => api.resendInvite(sub), 'Could not resend invite');
   }
+  // Correct a not-yet-signed-in member's email (server relocates the Cognito alias +
+  // re-syncs markers, then auto-resends). Resolves to { results } so the modal can surface
+  // the resend outcome. rawClientError surfaces the server's actionable 4xx copy — the 409
+  // collision AND the 404 orphan "remove and re-invite" — instead of a generic message.
+  function changeUserEmail(sub, email) {
+    return withToast(() => api.changeUserEmail(sub, email), 'Could not update email', {
+      rawClientError: true,
+      invalidate: [qk.users()],
+    }).then((res) => {
+      invalidate(qk.users());
+      return res;
+    });
+  }
   async function generatePlayerRegLink(targetClubId) {
     const res = await withToast(() => api.generateRegLink(targetClubId), 'Could not create link');
     invalidate(qk.club(targetClubId));
@@ -1562,6 +1580,7 @@ function Shell({
             onPatchUser={patchUser}
             onRemoveUser={removeUser}
             onResend={resendInvite}
+            onChangeEmail={changeUserEmail}
             currentUserEmail={userEmail}
             toast={toastShow}
           />

@@ -12,6 +12,7 @@ import {
   AdminCreateUserCommand,
   AdminGetUserCommand,
   AdminSetUserPasswordCommand,
+  AdminUpdateUserAttributesCommand,
   AdminUserGlobalSignOutCommand,
   AdminDeleteUserCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
@@ -86,6 +87,42 @@ export async function ensurePasswordlessUser(
     }),
   );
   return sub;
+}
+
+/**
+ * Relocate a user's sign-in email (the typo-correction flow). The pool uses
+ * `usernames: ['email']` (UsernameAttributes), so the immutable `Username` is the
+ * sub (a UUID) and the email is a RELOCATABLE alias — updating the `email` attribute
+ * moves the alias without changing the sub, so every USER#{sub} record stays valid and
+ * the user signs in (EMAIL_OTP) under the new address. `email_verified=true` keeps the
+ * new value usable as a sign-in alias immediately.
+ *
+ * Resolve by `sub` (NOT the old email): re-setting the email to the same value is then a
+ * harmless no-op, so a retry after a later DB-write failure re-converges. Resolving by the
+ * old email would break on retry — once the first attempt moves the alias, the old email no
+ * longer resolves (UserNotFoundException) and the correction is stuck.
+ *
+ * Throws `AliasExistsException` if the new email is already an alias for another pool user
+ * (caller → 409) and `UserNotFoundException` for an orphaned account (caller → 404). No-op
+ * offline (LOCAL_AUTH=1) — note that offline never exercises the real alias relocation.
+ */
+export async function adminUpdateCognitoUserEmail(
+  cognito: CognitoIdentityProviderClient,
+  userPoolId: string,
+  sub: string,
+  newEmail: string,
+): Promise<void> {
+  if (LOCAL) return;
+  await cognito.send(
+    new AdminUpdateUserAttributesCommand({
+      UserPoolId: userPoolId,
+      Username: sub, // immutable username == sub on a usernames:['email'] pool
+      UserAttributes: [
+        { Name: 'email', Value: newEmail.trim().toLowerCase() },
+        { Name: 'email_verified', Value: 'true' },
+      ],
+    }),
+  );
 }
 
 /**

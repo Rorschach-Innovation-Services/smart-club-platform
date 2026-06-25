@@ -5611,6 +5611,87 @@ function setEq(a, b) {
   return true;
 }
 
+/* ─── EditEmailModal — correct a mistyped email for a not-yet-signed-in member ───
+   Server relocates the Cognito sign-in alias, re-syncs markers, and auto-resends the
+   invite to the new address, so the right person can sign in. Surfaces the resend
+   outcome like the row-level resend helper. */
+function EditEmailModal({ user, onClose, onSave, toast }) {
+  const [email, setEmail] = useStateA(user.email || '');
+  const [busy, setBusy] = useStateA(false);
+  const clean = email.trim().toLowerCase();
+  const valid = EMAIL_RE.test(clean);
+  const changed = clean !== (user.email || '').trim().toLowerCase();
+  const canSave = !busy && valid && changed;
+
+  async function save() {
+    if (!canSave || !onSave) return;
+    setBusy(true);
+    try {
+      const res = await onSave(user.sub, clean);
+      const results = (res && res.results) || [];
+      const sent = results.filter((r) => r.status === 'sent');
+      if (sent.length) toast && toast(`Email updated · invite re-sent to ${clean}`);
+      else if (results.length)
+        toast &&
+          toast(
+            `Email updated, but the invite didn't send (${results
+              .map((r) => `${chLabel(r.channel)} ${r.status}`)
+              .join('; ')}) — use Resend to try again`,
+            'warn',
+          );
+      else toast && toast('Email updated');
+      onClose();
+    } catch {
+      /* withToast already surfaced the error */
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return createPortal(
+    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="task-modal narrow" style={{ maxWidth: 460 }}>
+        <div className="task-modal-head">
+          <div className="task-modal-head-text">
+            <div className="task-modal-head-eyebrow">{user.email}</div>
+            <div className="task-modal-head-title">
+              Correct <em>email</em>
+            </div>
+          </div>
+          <button className="task-modal-close" onClick={onClose} title="Close">
+            <Icon.X />
+          </button>
+        </div>
+        <div className="task-modal-body">
+          <div className="stack" style={{ gap: 12 }}>
+            <label style={{ fontSize: 12, color: 'var(--muted)' }}>
+              Email address
+              <input
+                className="field-input"
+                type="email"
+                autoFocus
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && save()}
+                placeholder="name@club.co.za"
+                style={{ width: '100%', marginTop: 4 }}
+              />
+            </label>
+            <div style={{ fontSize: 11.5, color: 'var(--muted)' }}>
+              A fresh invite is sent to the corrected address — they sign in with a one-time code,
+              no password needed.
+            </div>
+            <Btn tone="teal" icon={Icon.Check} disabled={!canSave} onClick={save}>
+              {busy ? 'Saving…' : 'Save & re-send invite'}
+            </Btn>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 /* ─── AdminTeamAccessView — tenant-level roster: invite, change role, edit scope, resend, remove ─── */
 export function AdminTeamAccessView({
   users = [],
@@ -5619,11 +5700,13 @@ export function AdminTeamAccessView({
   onPatchUser,
   onRemoveUser,
   onResend,
+  onChangeEmail,
   currentUserEmail,
   toast,
 }) {
   const [showInvite, setShowInvite] = useStateA(false);
   const [editing, setEditing] = useStateA(null); // { user, mode }
+  const [editingEmail, setEditingEmail] = useStateA(null); // user being email-corrected
   const [confirm, setConfirm] = useStateA(null); // { title, body, danger, onYes }
   const [busySub, setBusySub] = useStateA(null);
 
@@ -5732,7 +5815,29 @@ export function AdminTeamAccessView({
                 return (
                   <tr key={u.sub}>
                     <td>
-                      <span style={{ fontSize: 12.5 }}>{u.email}</span>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <span style={{ fontSize: 12.5 }}>{u.email}</span>
+                        {u.status === 'pending' && onChangeEmail && (
+                          <button
+                            className="icon-btn"
+                            title="Correct email address"
+                            aria-label={`Correct email for ${u.email}`}
+                            onClick={() => setEditingEmail(u)}
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              border: 0,
+                              background: 'none',
+                              padding: 2,
+                              cursor: 'pointer',
+                              color: 'var(--muted-2)',
+                              lineHeight: 0,
+                            }}
+                          >
+                            <Icon.Form />
+                          </button>
+                        )}
+                      </span>
                       {self && (
                         <Pill tone="navy">
                           <span style={{ marginLeft: 0 }}>You</span>
@@ -5855,6 +5960,14 @@ export function AdminTeamAccessView({
           lockRep={isLastAdmin(editing.user)}
           onClose={() => setEditing(null)}
           onSave={onPatchUser}
+          toast={toast}
+        />
+      )}
+      {editingEmail && (
+        <EditEmailModal
+          user={editingEmail}
+          onClose={() => setEditingEmail(null)}
+          onSave={onChangeEmail}
           toast={toast}
         />
       )}

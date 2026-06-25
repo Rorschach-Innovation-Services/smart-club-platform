@@ -27,6 +27,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import {
   ensurePasswordlessUser,
+  adminUpdateCognitoUserEmail,
   adminGlobalSignOut,
   adminDeleteCognitoUser,
   cognitoUserExists,
@@ -2162,6 +2163,69 @@ app.post('/admin/users/:sub/resend', async (c) => {
     link: loginUrl,
   });
   return c.json({ results });
+});
+
+/**
+ * PATCH /admin/users/:sub/email — correct a mistyped email for a member who hasn't signed
+ * in yet, so the right person can log in. The pool uses email as a relocatable alias over
+ * the immutable sub (see adminUpdateCognitoUserEmail), so this moves the sign-in identity
+ * without touching any USER#{sub} key.
+ *
+ * Validate everything BEFORE mutating (mirrors POST /admin/users). Update Cognito BEFORE
+ * DynamoDB so a DB-write failure still leaves the user able to log in under the new email;
+ * the sub-keyed Cognito call is idempotent, so a retry re-converges the DB. Auto-resends the
+ * staff invite to the corrected address. Pending-only: an active user already proved their
+ * address works (note: lastLoginAt is global to the sub, not per-tenant).
+ */
+app.patch('/admin/users/:sub/email', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const sub = c.req.param('sub');
+  const body = await c.req.json<{ email?: string; link?: string }>();
+
+  const profile = await repo.getUser(sub);
+  const membership = profile?.memberships.find((m) => m.tenantId === ra.tenant);
+  if (!profile || !membership) throw new HttpError(404, 'user not found in this tenant');
+
+  // Pending-only: an active user has already signed in, so their address works.
+  if (profile.lastLoginAt)
+    throw new HttpError(400, 'can only correct the address of a member who has not signed in yet');
+
+  const email = (body.email ?? '').trim().toLowerCase();
+  if (!EMAIL_RE.test(email)) throw new HttpError(400, 'valid email required');
+  if (email === profile.email) throw new HttpError(400, 'email unchanged');
+
+  // Collision: the marker listing already carries email — no per-row getUser fan-out needed.
+  const roster = await repo.listTenantUsers(ra.tenant);
+  if (roster.some((u) => u.sub !== sub && u.email === email))
+    throw new HttpError(409, 'that email is already in use by another member');
+
+  // Resolve link + org name up front so a bad link 400s before any mutation.
+  const loginUrl = resolveLoginUrl(c, body.link);
+  const orgName = await tenantOrgName(ra.tenant);
+
+  // Relocate the Cognito sign-in alias (by sub). Map alias collision → 409, orphan → 404.
+  try {
+    await adminUpdateCognitoUserEmail(cognito, USER_POOL_ID, sub, email);
+  } catch (err: unknown) {
+    const name = (err as { name?: string }).name;
+    if (name === 'AliasExistsException')
+      throw new HttpError(409, 'that email is already in use by another account');
+    if (name === 'UserNotFoundException')
+      throw new HttpError(404, 'this member’s sign-in account is missing — remove and re-invite');
+    throw err;
+  }
+
+  // Persist the new email; reconcileUserMarkers refreshes every tenant marker (gsi1sk + email).
+  await repo.putUser({ ...profile, email });
+
+  // Re-send the invite to the corrected address so they receive a working link.
+  const { results } = await sendStaffInvite({
+    email,
+    orgName,
+    channels: ['email'],
+    link: loginUrl,
+  });
+  return c.json({ sub, email, status: 'pending', results });
 });
 
 // ───────────────── Admin: club self-registration link ─────────────────
