@@ -5823,16 +5823,6 @@ export function AdminTeamAccessView({
                             title="Correct email address"
                             aria-label={`Correct email for ${u.email}`}
                             onClick={() => setEditingEmail(u)}
-                            style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              border: 0,
-                              background: 'none',
-                              padding: 2,
-                              cursor: 'pointer',
-                              color: 'var(--muted-2)',
-                              lineHeight: 0,
-                            }}
                           >
                             <Icon.Form />
                           </button>

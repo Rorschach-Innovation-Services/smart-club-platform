@@ -1,12 +1,7 @@
 /* ─── Shared atom components ─── */
 
 import { useState, useEffect, useRef } from 'react';
-import type {
-  ReactNode,
-  CSSProperties,
-  ComponentType,
-  ButtonHTMLAttributes,
-} from 'react';
+import type { ReactNode, CSSProperties, ComponentType, ButtonHTMLAttributes } from 'react';
 import { CQI_STRUCTURE } from './data';
 import type { Club } from './types';
 
@@ -39,7 +34,7 @@ export const Icon = {
     </svg>
   ),
   Form: () => (
-    <svg viewBox="0 0 16 16" fill="none">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
       <rect x="3" y="2" width="10" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
       <path
         d="M6 6h4M6 9h4M6 12h2.5"
@@ -535,7 +530,12 @@ interface MoneyInputProps {
   currency?: string;
   suffix?: string;
 }
-export function MoneyInput({ value, onChange, currency = 'R', suffix = '/ member' }: MoneyInputProps) {
+export function MoneyInput({
+  value,
+  onChange,
+  currency = 'R',
+  suffix = '/ member',
+}: MoneyInputProps) {
   return (
     <div className="money-input">
       <span className="money-currency">{currency}</span>
@@ -740,10 +740,7 @@ interface ToastAction {
   label: ReactNode;
   onClick?: () => void;
 }
-export function useToast(): [
-  (m: string, t?: string, act?: ToastAction | null) => void,
-  ReactNode,
-] {
+export function useToast(): [(m: string, t?: string, act?: ToastAction | null) => void, ReactNode] {
   const [msg, setMsg] = useState<string | null>(null);
   const [tone, setTone] = useState<string>('ok');
   // Optional inline action (e.g. an Undo button) carried by a toast.
