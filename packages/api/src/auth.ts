@@ -14,6 +14,7 @@
 import type { Context, MiddlewareHandler } from 'hono';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { Sentry } from './instrument.js';
+import { PLATFORM_TENANT } from './types.js';
 import type { Membership, Role } from './types.js';
 
 export interface AuthContext {
@@ -174,6 +175,25 @@ export const requireTenantMembership: MiddlewareHandler<HonoEnv> = async (c, nex
 export const requireAdmin: MiddlewareHandler<HonoEnv> = async (c, next) => {
   const ra = c.get('requestAuth');
   if (!ra || ra.membership.role !== 'admin') throw new HttpError(403, 'admin only');
+  await next();
+};
+
+/**
+ * Require the caller to hold the PLATFORM membership `{tenantId: '*', role: 'operator'}`.
+ * Tenant-independent (no host resolution): the /platform/* portal manages every tenant,
+ * so it never runs through requireTenantMembership. Use after `authenticate`.
+ */
+export const requirePlatformOperator: MiddlewareHandler<HonoEnv> = async (c, next) => {
+  const auth = c.get('auth');
+  if (!auth) throw new HttpError(401, 'unauthenticated');
+  const membership = auth.memberships.find(
+    (m) => m.tenantId === PLATFORM_TENANT && m.role === 'operator',
+  );
+  if (!membership) throw new HttpError(403, 'platform operator only');
+  // Same triage fingerprinting requireTenantMembership applies (no tenant tag —
+  // platform routes are tenant-independent).
+  Sentry.setUser({ id: auth.sub });
+  Sentry.setTag('role', membership.role);
   await next();
 };
 

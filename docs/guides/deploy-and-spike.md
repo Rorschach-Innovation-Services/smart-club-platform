@@ -115,6 +115,15 @@ confirms the account so EMAIL_OTP is offered) and an admin `USER#` membership. T
 signs in via email OTP. Thereafter admins invite reps via `POST /admin/users`, which uses
 the same confirmed-user flow.
 
+For the cross-tenant operator portal (`/platform` — tenant creation, branding, flags),
+bootstrap a **platform operator** the same way (see
+[onboarding-a-tenant.md](onboarding-a-tenant.md)):
+
+```bash
+npx sst shell --stage dev -- \
+  npm --prefix packages/api run bootstrap-operator -- you@example.com
+```
+
 ## 6. Prove the end-to-end auth + isolation path
 
 Get an ID token by signing in with email OTP. Easiest is the AWS CLI initiate/respond
@@ -187,6 +196,7 @@ stack deploys fine before this is done.
    npx sst secret set SentryDsnApi '<dolphins-api DSN>' --stage dev
    npx sst secret set SentryDsnWeb '<dolphins-web DSN>' --stage dev
    ```
+
 3. Create a Sentry **org auth token** (scopes: `project:releases`, `project:read`,
    `project:write`) for source-map upload. Put it in a git-ignored file at repo root:
 
@@ -213,8 +223,10 @@ npm run deploy:remove
 
 ## Notes
 
-- **Custom domains + edge branding** (prod): add `domain` to the StaticSite and a
-  CloudFront Function mapping host → branding. In dev we use `x-tenant`. See
+- **Custom domains** (prod): vanity hosts, certs, and the host→tenant map are all driven
+  by `infra/tenants.ts` — see the go-live checklist in
+  [onboarding-a-tenant.md](onboarding-a-tenant.md). Branding is applied at runtime from
+  `GET /tenant` (no edge function). In dev we use `x-tenant`. See
   [auth-and-roles.md](auth-and-roles.md).
 - **Email delivery:** Cognito's default email has a low daily cap — fine for the spike.
   For real use, wire SES (available in af-south-1).

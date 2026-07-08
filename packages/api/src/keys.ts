@@ -17,6 +17,21 @@ export const tenantConfigKey = (tenant: string) => ({
   sk: 'CONFIG',
 });
 
+/**
+ * gsi1 attributes that make a tenant CONFIG row enumerable platform-wide (the
+ * operator portal's registry listing). Derived INSIDE createTenantConfig /
+ * putTenantConfig from `config.tenant` — never supplied by callers — because
+ * stripKeys removes gsi attrs on read and putTenantConfig whole-item-Puts, so a
+ * read-modify-write would otherwise silently delist the tenant.
+ */
+export const tenantConfigGsi1 = (slug: string) => ({
+  gsi1pk: 'PLATFORM#TENANTS',
+  gsi1sk: slug,
+});
+
+/** gsi1pk used to enumerate every tenant CONFIG row (platform registry). */
+export const tenantsListGsi1pk = () => 'PLATFORM#TENANTS';
+
 /** A single club. */
 export const clubKey = (tenant: string, clubId: string) => ({
   pk: `${tenantPrefix(tenant)}#CLUB#${clubId}`,

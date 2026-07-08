@@ -24,6 +24,7 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import {
   ensurePasswordlessUser,
@@ -37,6 +38,7 @@ import {
   authenticate,
   requireTenantMembership,
   requireAdmin,
+  requirePlatformOperator,
   assertClubAccess,
   resolveTenant,
   HttpError,
@@ -71,6 +73,11 @@ import type {
   PlayerRegistration,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
+import { orgCopy } from './branding.js';
+import { hasFeature } from './features.js';
+import { buildTenantConfig, type TenantBrandingInput } from './seed-core.js';
+import { validateTenantSlug } from './tenant-validation.js';
+import { grantTenantAdmin } from './tenant-admin.js';
 
 const s3 = new S3Client({});
 
@@ -101,6 +108,10 @@ const tutorialsFor = (config: TenantConfig | null): TutorialVideo[] =>
   config?.tutorials?.length ? config.tutorials : DEFAULT_TUTORIALS;
 const cognito = new CognitoIdentityProviderClient({});
 const UPLOADS_BUCKET = process.env.UPLOADS_BUCKET!;
+// Public TutorialAssets bucket (also hosts tenant logos under branding/<slug>/ —
+// the login page shows logos unauthenticated, so the private Uploads bucket is
+// wrong for them). Set in sst.config.ts; '' offline (logo upload is cloud-only).
+const TUTORIALS_BUCKET = process.env.TUTORIALS_BUCKET ?? '';
 const USER_POOL_ID = process.env.USER_POOL_ID!;
 const MAX_DOC_BYTES = 10 * 1024 * 1024; // 10 MB
 
@@ -289,6 +300,9 @@ app.get('/tenant', async (c) => {
     // How-to-use-the-app videos for the public /tutorials page (non-sensitive; falls
     // back to the shared default set when the tenant has no override).
     tutorials: tutorialsFor(config),
+    // Per-tenant feature flags (boolean map; defaults resolve client/server-side
+    // via hasFeature/useFeature, so an empty map is a valid "all defaults" state).
+    features: config.features ?? {},
   });
 });
 
@@ -521,9 +535,8 @@ app.get('/club-signup', async (c) => {
   const cfg = await resolveSignupTenant(c.req.query('t'));
   return c.json({
     tenant: cfg.tenant,
-    // Same fallback chain as tenantOrgName, inlined — resolveSignupTenant already
-    // fetched this config; no second read per link validation.
-    orgName: cfg.branding?.name || cfg.branding?.title || cfg.tenant,
+    // resolveSignupTenant already fetched this config — resolve locally, no second read.
+    orgName: orgCopy(cfg).name,
     districts: [...VALID_DISTRICTS],
   });
 });
@@ -809,6 +822,9 @@ app.use('/series', authenticate, requireTenantMembership);
 app.use('/tenant/config', authenticate, requireTenantMembership);
 app.use('/tenant/support', authenticate, requireTenantMembership);
 app.use('/admin/*', authenticate, requireTenantMembership, requireAdmin);
+// Platform operator portal — tenant-INDEPENDENT (no requireTenantMembership /
+// host resolution): the '*'/operator membership itself is the authorization.
+app.use('/platform/*', authenticate, requirePlatformOperator);
 
 // ───────────────────────── Clubs ─────────────────────────
 
@@ -1086,7 +1102,12 @@ async function mintAndDeliverOnboarding(
   const { results } = await sendChairOnboarding({
     chair: { name: chair?.name || current.chair || '', email: chair?.email, cell: chair?.cell },
     clubName: current.name,
-    channels: ['email', 'whatsapp'],
+    // WhatsApp rides a shared, dolphins-flavored WABA template — flag-gated (default
+    // ON for existing tenants) so a new client can launch email-only.
+    channels: hasFeature(tenantConfig, 'whatsappInvites', true)
+      ? (['email', 'whatsapp'] as Channel[])
+      : (['email'] as Channel[]),
+    org: orgCopy(tenantConfig ?? { tenant }),
     regLink,
     tutorials,
     season,
@@ -1970,9 +1991,17 @@ app.post('/series/:id/duplicate', requireAdmin, async (c) => {
 // safe to splice into a mailto: link downstream. Kept identical to api.js EMAIL_RE.
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 
-app.put('/tenant/config', requireAdmin, async (c) => {
-  const { tenant } = c.get('requestAuth')!;
-  const patch = await c.req.json<Partial<TenantConfig>>();
+/**
+ * Strip-and-merge core of a tenant-config patch, shared by PUT /tenant/config
+ * (tenant admin) and PUT /platform/tenants/:slug (operator). Reads the current
+ * row, strips server-owned/retired fields, validates the league catalogue, and
+ * whole-item-Puts the merged result. Throws HttpError (404/400/409); returns the
+ * updated config.
+ */
+async function applyTenantConfigPatch(
+  tenant: string,
+  patch: Partial<TenantConfig>,
+): Promise<TenantConfig> {
   const current = await repo.getTenantConfig(tenant);
   if (!current) throw new HttpError(404, 'tenant not found');
   // clubSignupLink is server-owned and written only via its targeted routes — a stale
@@ -1980,6 +2009,13 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   // is retired; strip it too so an old client can't write it back onto the row.
   delete (patch as { clubSignupLink?: unknown }).clubSignupLink;
   delete (patch as { registrationAccess?: unknown }).registrationAccess;
+  // Table/index keys are derived at the repo write choke point — strip them here
+  // too so a malicious patch can't even attempt to retarget another tenant's row
+  // or corrupt the platform registry index.
+  delete (patch as { pk?: unknown }).pk;
+  delete (patch as { sk?: unknown }).sk;
+  delete (patch as { gsi1pk?: unknown }).gsi1pk;
+  delete (patch as { gsi1sk?: unknown }).gsi1sk;
   // Guard the league catalogue: keys are the matching token stored on clubs, so they
   // must be unique and present. Reject a patch that would introduce a duplicate/blank key.
   if (patch.leagues !== undefined) {
@@ -1991,6 +2027,19 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   }
   const next = { ...current, ...patch, tenant };
   await repo.putTenantConfig(next);
+  return next;
+}
+
+app.put('/tenant/config', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const patch = await c.req.json<Partial<TenantConfig>>();
+  // Operator-only fields (ADR 0006): feature flags, tutorials and the admin count
+  // are never writable by a tenant admin. Stripped here (not in the shared
+  // applyTenantConfigPatch) because the operator route whitelists separately.
+  delete (patch as { features?: unknown }).features;
+  delete (patch as { tutorials?: unknown }).tutorials;
+  delete (patch as { adminCount?: unknown }).adminCount;
+  const next = await applyTenantConfigPatch(tenant, patch);
   return c.json(next);
 });
 
@@ -2017,6 +2066,231 @@ app.put('/tenant/support', requireAdmin, async (c) => {
     throw err;
   }
   return c.json({ support });
+});
+
+// ───────────────────── Platform operator portal (/platform/*) ─────────────────────
+// All routes below are gated by `authenticate + requirePlatformOperator` (see the
+// middleware block) — tenant-independent, so :slug in the path names the target
+// tenant explicitly instead of the request host.
+
+/** Allowed logo upload types → stored extension (allowlist doubles as the gate). */
+const LOGO_CONTENT_TYPES: Record<string, string> = {
+  'image/png': 'png',
+  'image/svg+xml': 'svg',
+  'image/webp': 'webp',
+};
+const MAX_LOGO_BYTES = 1024 * 1024; // 1 MB
+
+/** GET /platform/tenants — registry listing (projection, not full configs). */
+app.get('/platform/tenants', async (c) => {
+  const tenants = await repo.listTenants();
+  return c.json(
+    tenants.map((t) => ({
+      tenant: t.tenant,
+      name: t.branding?.name ?? t.tenant,
+      title: t.branding?.title ?? '',
+      logoUrl: t.branding?.logoUrl ?? '',
+      submissionDeadline: t.submissionDeadline,
+      adminCount: t.adminCount ?? 0,
+      features: t.features ?? {},
+    })),
+  );
+});
+
+/**
+ * POST /platform/tenants — create a tenant. Body {slug, branding, submissionDeadline,
+ * features?}; branding needs at least a name (buildTenantConfig fills the defaults the
+ * seed path uses, so portal-created and seeded tenants share one shape). The
+ * `attribute_not_exists` create guard maps to 409 on a duplicate slug.
+ */
+app.post('/platform/tenants', async (c) => {
+  const body = await c.req.json<{
+    slug?: string;
+    branding?: TenantBrandingInput;
+    submissionDeadline?: string;
+    features?: Record<string, boolean>;
+  }>();
+  const slug = (body.slug ?? '').trim().toLowerCase();
+  const slugError = validateTenantSlug(slug);
+  if (slugError) throw new HttpError(400, slugError);
+  const name = body.branding?.name?.trim();
+  if (!name) throw new HttpError(400, 'branding.name required');
+  const deadline = (body.submissionDeadline ?? '').trim();
+  if (!deadline || Number.isNaN(Date.parse(deadline)))
+    throw new HttpError(400, 'valid submissionDeadline required (ISO date)');
+  const config = buildTenantConfig(slug, { ...body.branding, name }, deadline, body.features);
+  try {
+    await repo.createTenantConfig(config);
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException')
+      throw new HttpError(409, `tenant "${slug}" already exists`);
+    throw err;
+  }
+  return c.json(config, 201);
+});
+
+/** GET /platform/tenants/:slug — the full config row (operator edit form). */
+app.get('/platform/tenants/:slug', async (c) => {
+  const config = await repo.getTenantConfig(c.req.param('slug'));
+  if (!config) throw new HttpError(404, 'tenant not found');
+  return c.json(config);
+});
+
+/**
+ * PUT /platform/tenants/:slug — merge-patch branding / features / submissionDeadline
+ * (whitelisted: the operator portal edits nothing else). Shares applyTenantConfigPatch
+ * with PUT /tenant/config, so the same strip-and-merge + league guards apply.
+ */
+app.put('/platform/tenants/:slug', async (c) => {
+  const slug = c.req.param('slug');
+  const body = await c.req.json<Partial<TenantConfig>>();
+  const patch: Partial<TenantConfig> = {};
+  if (body.branding !== undefined) patch.branding = body.branding;
+  if (body.features !== undefined) patch.features = body.features;
+  if (body.submissionDeadline !== undefined) {
+    const deadline = String(body.submissionDeadline).trim();
+    if (!deadline || Number.isNaN(Date.parse(deadline)))
+      throw new HttpError(400, 'valid submissionDeadline required (ISO date)');
+    patch.submissionDeadline = body.submissionDeadline;
+  }
+  const next = await applyTenantConfigPatch(slug, patch);
+  return c.json(next);
+});
+
+/**
+ * POST /platform/tenants/:slug/admins — grant (or re-grant) a tenant admin. Shares
+ * grantTenantAdmin with the bootstrap-admin CLI: passwordless Cognito user + USER#
+ * admin membership + adminCount recount. Idempotent per email.
+ */
+app.post('/platform/tenants/:slug/admins', async (c) => {
+  const slug = c.req.param('slug');
+  const config = await repo.getTenantConfig(slug);
+  if (!config) throw new HttpError(404, 'tenant not found');
+  const body = await c.req.json<{ email?: string }>();
+  const email = (body.email ?? '').trim().toLowerCase();
+  if (!email) throw new HttpError(400, 'email required');
+  if (!EMAIL_RE.test(email)) throw new HttpError(400, 'valid email required');
+  try {
+    const { sub, adminCount } = await grantTenantAdmin(cognito, USER_POOL_ID, slug, email);
+    return c.json({ tenant: slug, email, sub, adminCount }, 201);
+  } catch (err: unknown) {
+    // Same mapping as provisionInviteUser: an address Cognito rejects is a 400, not a 500.
+    if ((err as { name?: string }).name === 'InvalidParameterException')
+      throw new HttpError(400, 'enter a valid email address');
+    throw err;
+  }
+});
+
+/**
+ * POST /platform/tenants/:slug/logo-upload — presigned POST (not PUT: only a POST
+ * policy can enforce content-length-range) to the PUBLIC TutorialAssets bucket, so
+ * the login page can show the logo unauthenticated. Body {contentType}; response
+ * {url, fields, objectKey, publicUrl} — the client submits multipart form-data with
+ * `fields` + the file to `url`, then saves `publicUrl` as branding.logoUrl.
+ */
+app.post('/platform/tenants/:slug/logo-upload', async (c) => {
+  const slug = c.req.param('slug');
+  const config = await repo.getTenantConfig(slug);
+  if (!config) throw new HttpError(404, 'tenant not found');
+  const { contentType } = await c.req
+    .json<{ contentType?: string }>()
+    .catch(() => ({ contentType: undefined }));
+  const ext = contentType ? LOGO_CONTENT_TYPES[contentType] : undefined;
+  if (!contentType || !ext)
+    throw new HttpError(400, 'contentType must be image/png, image/svg+xml or image/webp');
+  if (!TUTORIALS_BUCKET)
+    throw new HttpError(
+      501,
+      'logo upload requires the cloud assets bucket (unavailable in offline dev)',
+    );
+  const objectKey = `branding/${slug}/logo-${randomUUID().slice(0, 8)}.${ext}`;
+  const post = await createPresignedPost(s3, {
+    Bucket: TUTORIALS_BUCKET,
+    Key: objectKey,
+    Conditions: [
+      ['content-length-range', 0, MAX_LOGO_BYTES],
+      ['eq', '$Content-Type', contentType],
+    ],
+    Fields: { 'Content-Type': contentType },
+    Expires: 300,
+  });
+  return c.json({
+    url: post.url,
+    fields: post.fields,
+    objectKey,
+    publicUrl: `${TUTORIALS_BASE_URL}/${objectKey}`,
+  });
+});
+
+/**
+ * GET /platform/tenants/:slug/dns — the vanity-domain go-live instruction sheet as
+ * DATA (the portal renders it): cert-SAN reissue, client CNAMEs (operator fills the
+ * targets from `sst deploy` outputs), the infra/tenants.ts VANITY entry, deploy.
+ */
+app.get('/platform/tenants/:slug/dns', async (c) => {
+  const slug = c.req.param('slug');
+  const config = await repo.getTenantConfig(slug);
+  if (!config) throw new HttpError(404, 'tenant not found');
+  return c.json({
+    tenant: slug,
+    note:
+      'Vanity go-live checklist. Placeholders in angle brackets are operator-filled: ' +
+      'pick the client hosts (e.g. clubs.<client-domain> / api.clubs.<client-domain>) ' +
+      'and read the CNAME targets from the `sst deploy --stage prod` outputs.',
+    steps: [
+      {
+        key: 'certificates',
+        title: 'Reissue ACM certificates with the new SANs',
+        detail:
+          'ACM cannot add SANs to an existing certificate. Request NEW certificates — ' +
+          'us-east-1 for CloudFront (web) and af-south-1 for API Gateway — covering ALL ' +
+          'existing tenant hosts PLUS <webHost>, www.<webHost> and <apiHost>. Validate via ' +
+          'DNS, then update WEB_CERT_ARN / API_CERT_ARN in infra/tenants.ts. This must ' +
+          'COMPLETE before the deploy that adds the new aliases.',
+      },
+      {
+        key: 'client-dns',
+        title: "Client DNS CNAME records (at the client's DNS provider / cPanel)",
+        detail:
+          'Add the ACM validation CNAMEs from the certificate step, plus the records below. ' +
+          'Targets come from the current deploy outputs (CloudFront distribution domain for ' +
+          'web; API Gateway regional custom-domain target for api).',
+        records: [
+          {
+            type: 'CNAME',
+            host: '<webHost>',
+            target: '<CloudFront distribution domain — sst deploy output>',
+          },
+          {
+            type: 'CNAME',
+            host: 'www.<webHost>',
+            target: '<same CloudFront distribution domain>',
+          },
+          {
+            type: 'CNAME',
+            host: '<apiHost>',
+            target: '<API Gateway regional domain — sst deploy output>',
+          },
+        ],
+      },
+      {
+        key: 'registry',
+        title: 'Add the VANITY entry to infra/tenants.ts',
+        detail:
+          `Append { slug: '${slug}', webHost: '<webHost>', www: true, apiHost: '<apiHost>', ` +
+          `enabled: true } to VANITY so TENANT_HOST_MAP, ALLOWED_ORIGINS, the web aliases ` +
+          `and the API domain mapping are all derived for this tenant.`,
+      },
+      {
+        key: 'deploy',
+        title: 'Deploy',
+        detail:
+          'First check `aws cloudfront list-distributions` for alias conflicts in the shared ' +
+          'account (`sst diff` does not catch CNAMEAlreadyExists), then run ' +
+          '`npx sst deploy --stage prod`. The user runs deploys — see the runbook.',
+      },
+    ],
+  });
 });
 
 /**
@@ -2421,10 +2695,13 @@ function resolveLoginUrl(c: Context<HonoEnv>, link?: string): string {
   return 'http://localhost:5173';
 }
 
-/** The tenant's display name for invite copy, falling back to the slug. */
+/**
+ * The tenant's display name for invite copy, falling back to the slug. Thin
+ * fetch-then-resolve wrapper over orgCopy (branding.ts) — the single fallback chain.
+ */
 async function tenantOrgName(tenant: string): Promise<string> {
   const cfg = await repo.getTenantConfig(tenant);
-  return cfg?.branding?.name || cfg?.branding?.title || tenant;
+  return orgCopy(cfg ?? { tenant }).name;
 }
 
 /**

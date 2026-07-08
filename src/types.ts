@@ -13,7 +13,14 @@
  * the backend requires them. Such fields are annotated `// server-authoritative`.
  */
 
-export type Role = 'admin' | 'rep';
+export type Role = 'admin' | 'rep' | 'operator';
+
+/**
+ * Sentinel tenantId for the platform-operator membership `{tenantId: '*',
+ * role: 'operator'}` — grants the cross-tenant /platform/* portal, never a
+ * tenant console. Mirrors PLATFORM_TENANT in packages/api/src/types.ts.
+ */
+export const PLATFORM_TENANT = '*';
 
 export interface Membership {
   tenantId: string;
@@ -50,17 +57,42 @@ export interface TutorialVideo {
   poster?: string;
 }
 
+/**
+ * Org copy strings keyed by slot. All optional — resolveCopy (src/branding.ts)
+ * supplies the fallback chain. Stays a string map on disk (index signature) so
+ * legacy `branding.copy.support`-style access keeps working.
+ */
+export interface BrandingCopy {
+  welcome?: string;
+  eyebrow?: string;
+  office?: string;
+  admin?: string;
+  support?: string;
+  footer?: string;
+  orgShort?: string;
+  cohortName?: string;
+  heroTitle?: string;
+  heroBlurb?: string;
+  crumbRoot?: string;
+  [slot: string]: string | undefined;
+}
+
+export interface TenantBranding {
+  name: string;
+  title: string;
+  logoUrl: string;
+  /** Favicon override; applyTheme falls back to logoUrl when absent. */
+  faviconUrl?: string;
+  /** CSS color tokens injected at runtime, e.g. { '--navy': '#1B2A4A' }. */
+  colors: Record<string, string>;
+  copy: BrandingCopy;
+}
+
 export interface TenantConfig {
   tenant: string;
-  branding: {
-    name: string;
-    title: string;
-    logoUrl: string;
-    /** CSS color tokens injected at the edge, e.g. { '--navy': '#1B2A4A' }. */
-    colors: Record<string, string>;
-    /** Org copy strings keyed by slot (welcome, eyebrow, office, footer, support). */
-    copy: Record<string, string>;
-  };
+  branding: TenantBranding;
+  /** Per-tenant feature flags (e.g. whatsappInvites). Absent key ⇒ caller default. */
+  features?: Record<string, boolean>;
   submissionDeadline: string;
   knownClubs: unknown[];
   clubSignupLink?: { token: string; createdAt: string };
@@ -68,6 +100,43 @@ export interface TenantConfig {
   requiredDocs?: unknown[];
   adminCount?: number;
   tutorials?: TutorialVideo[];
+}
+
+/** One row of GET /platform/tenants — a registry projection, not the full config. */
+export interface TenantSummary {
+  tenant: string;
+  name: string;
+  title: string;
+  logoUrl: string;
+  submissionDeadline: string;
+  adminCount: number;
+  features: Record<string, boolean>;
+}
+
+/** Presigned-POST grant from POST /platform/tenants/:slug/logo-upload. */
+export interface LogoUploadPost {
+  url: string;
+  fields: Record<string, string>;
+  objectKey: string;
+  publicUrl: string;
+}
+
+/** GET /platform/tenants/:slug/dns — the vanity-domain go-live instruction sheet. */
+export interface DnsRecord {
+  type: 'CNAME';
+  host: string;
+  target: string;
+}
+export interface DnsStep {
+  key: string;
+  title: string;
+  detail: string;
+  records?: DnsRecord[];
+}
+export interface DnsSheet {
+  tenant: string;
+  note: string;
+  steps: DnsStep[];
 }
 
 /**

@@ -6,6 +6,7 @@ import { createPortal } from 'react-dom';
 import { useQueries } from '@tanstack/react-query';
 import * as api from './api';
 import { qk } from './query';
+import { useCopy } from './branding';
 import {
   DISTRICTS,
   REQUIRED_DOCS,
@@ -89,6 +90,7 @@ export function AdminFixtures({
   onSetApproved,
   toast,
 }) {
+  const copy = useCopy();
   const [activeId, setActiveId] = useStateA(allSeries[0]?.id);
   const active = allSeries.find((s) => s.id === activeId) || allSeries[0];
   const [confirm, setConfirm] = useStateA(null); // shared confirmation modal state
@@ -186,7 +188,7 @@ export function AdminFixtures({
     <div>
       <div className="page-head">
         <div className="ph-left">
-          <div className="ph-crumb">Dolphins · Admin Console / Fixtures &amp; Venues</div>
+          <div className="ph-crumb">{copy.crumbRoot} · Admin Console / Fixtures &amp; Venues</div>
           <h1 className="ph-title">
             Fixtures &amp; <em>Venues</em>
           </h1>
@@ -409,6 +411,7 @@ export function FixtureTable({
   onUnapprove,
   toast,
 }) {
+  const copy = useCopy();
   const clubBy = (id) => clubs.find((c) => c.id === id);
   // Resolve a fixture id → team for this series (participant snapshot, else clubId).
   const teamBy = (id) => resolveTeam(series, id, clubBy);
@@ -575,7 +578,7 @@ export function FixtureTable({
             onClick={() =>
               setConfirm({
                 title: 'Delete this series?',
-                body: `Permanently remove "${series.name}" along with all ${series.fixtures.length} fixtures. The Dolphins office cannot undo this.`,
+                body: `Permanently remove "${series.name}" along with all ${series.fixtures.length} fixtures. The ${copy.office} cannot undo this.`,
                 onYes: () => {
                   onDeleteSeries(series.id);
                   setConfirm(null);
@@ -781,7 +784,7 @@ export function FixtureTable({
           ) : series.approved ? (
             <>
               <div className="fix-release-eyebrow">✓ Approved — ready to release</div>
-              <div className="fix-release-text-title">Approved by the Dolphins office</div>
+              <div className="fix-release-text-title">Approved by the {copy.office}</div>
               <div className="fix-release-text-sub">
                 Fixtures are signed off. Release to push the schedule to every club portal. Editing
                 a fixture will withdraw approval and require re-approval.
@@ -792,7 +795,7 @@ export function FixtureTable({
               <div className="fix-release-eyebrow">Draft mode</div>
               <div className="fix-release-text-title">Approval required before release</div>
               <div className="fix-release-text-sub">
-                Review the fixtures, then approve. Release only unlocks once the Dolphins office has
+                Review the fixtures, then approve. Release only unlocks once the {copy.office} has
                 approved the schedule.
               </div>
             </>
@@ -1727,6 +1730,7 @@ function EmptyCohort({ onShareLink, onInviteAdmin }) {
 
 /* ─── AdminLeagues — manage the tenant league catalogue clubs opt into ─── */
 export function AdminLeagues({ allLeagues, clubs, onCreate, onEdit, onDeleteLeague, toast }) {
+  const copy = useCopy();
   const [confirm, setConfirm] = useStateA(null);
   const countFor = (key) =>
     clubs.filter((c) => Array.isArray(c.leagues) && c.leagues.includes(key)).length;
@@ -1751,7 +1755,7 @@ export function AdminLeagues({ allLeagues, clubs, onCreate, onEdit, onDeleteLeag
     <div>
       <div className="page-head">
         <div className="ph-left">
-          <div className="ph-crumb">Dolphins · Admin Console / Leagues</div>
+          <div className="ph-crumb">{copy.crumbRoot} · Admin Console / Leagues</div>
           <h1 className="ph-title">
             League <em>catalogue</em>
           </h1>
@@ -1990,6 +1994,7 @@ export function AdminDashboard({
   support,
   onUpdateSupport,
 }) {
+  const copy = useCopy();
   const stats = cohortStats(clubs);
   // Clubs a rep has renamed but no admin has acknowledged yet — surfaced as a worklist
   // tile so the flag is visible without opening each club.
@@ -2077,12 +2082,9 @@ export function AdminDashboard({
   return (
     <div>
       {/* Aspirational hero banner */}
-      <div
-        className="hero-banner"
-        style={{ backgroundImage: "url('/venues/kingsmead-stadium.jpg')", height: 170 }}
-      >
+      <div className="hero-banner" style={{ backgroundImage: 'var(--hero-image)', height: 170 }}>
         <div className="hero-content">
-          <div className="hero-eyebrow">Hollywoodbets Dolphins · Cricket Services</div>
+          <div className="hero-eyebrow">{copy.eyebrow}</div>
           <h2 className="hero-title">
             Building the next <em>generation</em>.
           </h2>
@@ -2095,14 +2097,13 @@ export function AdminDashboard({
 
       <div className="page-head">
         <div className="ph-left">
-          <div className="ph-crumb">Dolphins · Admin Console</div>
+          <div className="ph-crumb">{copy.crumbRoot} · Admin Console</div>
           <h1 className="ph-title">
             Club Integration <em>Cohort</em>
           </h1>
           <p className="ph-desc">
-            {stats.total} affiliated clubs across the Dolphins Cricket Services districts. Track
-            affiliation, document compliance, CQI scoring and franchise readiness for the 2026/27
-            season.
+            {stats.total} affiliated clubs across the {copy.orgShort} districts. Track affiliation,
+            document compliance, CQI scoring and franchise readiness for the 2026/27 season.
           </p>
         </div>
         <div className="ph-actions">
@@ -2517,7 +2518,7 @@ export function AdminSettingsView({
               className="field-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Hollywoodbets Dolphins"
+              placeholder="e.g. Coastal Cricket Union"
             />
           </div>
           <Btn tone="teal" size="sm" onClick={saveOrg} disabled={!dirty || savingOrg}>
@@ -2831,6 +2832,7 @@ export function AdminClubsList({
   showShareLink,
   setShowShareLink,
 }) {
+  const copy = useCopy();
   const [q, setQ] = useStateA('');
   const [filter, setFilter] = useStateA('all');
   const [showInviteAdmin, setShowInviteAdmin] = useStateA(false);
@@ -2870,7 +2872,7 @@ export function AdminClubsList({
     <div>
       <div className="page-head">
         <div className="ph-left">
-          <div className="ph-crumb">Dolphins · Admin Console / Clubs</div>
+          <div className="ph-crumb">{copy.crumbRoot} · Admin Console / Clubs</div>
           <h1 className="ph-title">
             Club <em>directory</em>
           </h1>

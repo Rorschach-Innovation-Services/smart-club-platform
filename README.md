@@ -6,7 +6,12 @@ site on its own subdomain; all unions share one backend. Hosted entirely in AWS
 **af-south-1** for South African data residency (POPIA).
 
 Two unions ship today as tenants — **Hollywoodbets Dolphins** and **DP World Lions** — from
-one codebase. Adding another is a config row + seed, not a fork.
+one codebase. New clients are created in the **operator portal** (`/platform`), not forked:
+see [`docs/guides/onboarding-a-tenant.md`](docs/guides/onboarding-a-tenant.md) and
+[ADR 0006](docs/architecture/0006-platform-operator-and-tenant-registry.md).
+
+> The sibling `../lions-smart-club` repo (github `niallnaidoo/lions-smart-club`) is a stale
+> pre-backend prototype fork, superseded by the `lions` tenant here — it should be archived.
 
 > Stack: Vite 5 + React 18 (SPA, JSX) · TanStack Query · AWS Amplify (auth) on the front;
 > SST → DynamoDB + Lambda (Hono) + API Gateway + Cognito (passwordless email OTP) + S3 on
@@ -73,11 +78,13 @@ npm run deploy:dev     # stage=dev, af-south-1, profile medicoach
 npm run deploy         # stage=prod
 ```
 
-After deploying, seed tenants and bootstrap the first admin:
+After deploying, seed the dev tenants and bootstrap the first admin (dev stages; in prod,
+tenants and admins are created via the operator portal):
 
 ```bash
 npx sst shell --stage dev -- npm --prefix packages/api run seed
 npx sst shell --stage dev -- npm --prefix packages/api run bootstrap-admin -- dolphins you@example.com
+npx sst shell --stage dev -- npm --prefix packages/api run bootstrap-operator -- you@example.com  # /platform portal
 ```
 
 ## How it works

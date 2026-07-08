@@ -34,11 +34,14 @@ import {
   clearancesListGsi1pk,
   tokenKey,
   tenantConfigKey,
+  tenantConfigGsi1,
+  tenantsListGsi1pk,
   userKey,
   userTenantMarkerKey,
   userGsi1,
   usersListGsi1pk,
 } from './keys.js';
+import { PLATFORM_TENANT } from './types.js';
 import type {
   Club,
   ClubCommEvent,
@@ -174,7 +177,11 @@ export async function createTenantConfig(config: TenantConfig): Promise<void> {
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
-      Item: { ...tenantConfigKey(config.tenant), ...config },
+      // gsi1 (the platform tenant registry) is derived HERE, at the write choke
+      // point: stripKeys removes gsi attrs on read, so a caller round-tripping a
+      // read config could never carry them back. Derived keys spread LAST so a
+      // config that smuggles pk/sk/gsi1* can never override them.
+      Item: { ...config, ...tenantConfigKey(config.tenant), ...tenantConfigGsi1(config.tenant) },
       ConditionExpression: 'attribute_not_exists(pk)',
     }),
   );
@@ -184,7 +191,47 @@ export async function putTenantConfig(config: TenantConfig): Promise<void> {
   await ddb.send(
     new PutCommand({
       TableName: TABLE,
-      Item: { ...tenantConfigKey(config.tenant), ...config },
+      // Whole-item Put: re-derive gsi1 so a config save can't delist the tenant
+      // from the platform registry (see createTenantConfig). Derived keys spread
+      // LAST so a config that smuggles pk/sk/gsi1* can never override them.
+      Item: { ...config, ...tenantConfigKey(config.tenant), ...tenantConfigGsi1(config.tenant) },
+    }),
+  );
+}
+
+/**
+ * Enumerate every tenant's CONFIG row (the platform registry), sorted by slug.
+ * Queries the PLATFORM#TENANTS gsi1 partition — rows written before the registry
+ * index existed need ensureTenantConfigGsi (backfill-branding runs it).
+ */
+export async function listTenants(): Promise<TenantConfig[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    IndexName: 'gsi1',
+    KeyConditionExpression: 'gsi1pk = :p',
+    ExpressionAttributeValues: { ':p': tenantsListGsi1pk() },
+  });
+  // gsi1sk = slug, so the query returns slug order already; sort defensively anyway.
+  return items
+    .map((i) => stripKeys<TenantConfig>(i)!)
+    .sort((a, b) => a.tenant.localeCompare(b.tenant));
+}
+
+/**
+ * Idempotent registry-index backfill: SET the PLATFORM#TENANTS gsi1 attrs on an
+ * EXISTING CONFIG row (no-op when already present — same values every time).
+ * Throws ConditionalCheckFailedException when the row doesn't exist (callers
+ * read first, so that only fires on a delete race).
+ */
+export async function ensureTenantConfigGsi(tenant: string): Promise<void> {
+  const gsi = tenantConfigGsi1(tenant);
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: tenantConfigKey(tenant),
+      UpdateExpression: 'SET gsi1pk = :p, gsi1sk = :s',
+      ConditionExpression: 'attribute_exists(pk)',
+      ExpressionAttributeValues: { ':p': gsi.gsi1pk, ':s': gsi.gsi1sk },
     }),
   );
 }
@@ -279,6 +326,66 @@ export async function mergeLeagues(
     if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return false;
     throw err;
   }
+}
+
+/** The branding-only merge patch backfill-branding.ts writes. All parts optional. */
+export interface BrandingMergePatch {
+  /** Full caller-merged color map (existing tokens + seed tokens, seed winning). */
+  colors?: Record<string, string>;
+  /** Individual copy slots to SET — only these slots are touched, never the map. */
+  copySlots?: Record<string, string>;
+  faviconUrl?: string;
+  logoUrl?: string;
+}
+
+/**
+ * Targeted merge-patch of a tenant's branding (backfill-branding CLI). Uses a
+ * single UpdateExpression that SETs only `branding.colors`, the named
+ * `branding.copy.<slot>` paths, and (optionally) faviconUrl/logoUrl — so it
+ * physically cannot clobber adminCount, clubSignupLink, leagues, deadline, or
+ * admin-edited copy slots like `copy.support` (same isolation rationale as
+ * updateSupportCopy above, which also documents the `branding.copy`-must-exist
+ * precondition). Guarded on row existence: throws
+ * ConditionalCheckFailedException for a missing tenant (caller reads first, so
+ * this only fires on a delete race).
+ */
+export async function mergeBrandingPatch(tenant: string, patch: BrandingMergePatch): Promise<void> {
+  const sets: string[] = [];
+  const names: Record<string, string> = { '#b': 'branding' };
+  const values: Record<string, unknown> = {};
+  if (patch.colors) {
+    names['#colors'] = 'colors';
+    values[':colors'] = patch.colors;
+    sets.push('#b.#colors = :colors');
+  }
+  const slots = Object.entries(patch.copySlots ?? {});
+  if (slots.length > 0) names['#copy'] = 'copy';
+  slots.forEach(([slot, value], i) => {
+    names[`#s${i}`] = slot;
+    values[`:s${i}`] = value;
+    sets.push(`#b.#copy.#s${i} = :s${i}`);
+  });
+  if (patch.faviconUrl) {
+    names['#fav'] = 'faviconUrl';
+    values[':fav'] = patch.faviconUrl;
+    sets.push('#b.#fav = :fav');
+  }
+  if (patch.logoUrl) {
+    names['#logo'] = 'logoUrl';
+    values[':logo'] = patch.logoUrl;
+    sets.push('#b.#logo = :logo');
+  }
+  if (sets.length === 0) return;
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: tenantConfigKey(tenant),
+      UpdateExpression: `SET ${sets.join(', ')}`,
+      ConditionExpression: 'attribute_exists(pk)',
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+    }),
+  );
 }
 
 // ── Clubs ──
@@ -1408,7 +1515,12 @@ async function reconcileUserMarkers(user: UserProfile): Promise<void> {
   const writes: Promise<unknown>[] = [];
   // Upsert a marker for every current membership — unconditionally, so a changed
   // role/email on an existing membership refreshes the marker (not just new ones).
+  // The PLATFORM membership (tenantId '*') is skipped SYMMETRICALLY (no upsert
+  // here, no revoked-delete below): '*' is not a tenant, so an operator must
+  // never surface in any tenant roster listing — and a legacy '*' marker is
+  // likewise left alone rather than "reconciled".
   for (const m of user.memberships) {
+    if (m.tenantId === PLATFORM_TENANT) continue;
     writes.push(
       ddb.send(
         new PutCommand({
@@ -1424,8 +1536,9 @@ async function reconcileUserMarkers(user: UserProfile): Promise<void> {
       ),
     );
   }
-  // Remove markers for revoked memberships.
+  // Remove markers for revoked memberships ('*' markers are ignored — see above).
   for (const tenantId of have) {
+    if (tenantId === PLATFORM_TENANT) continue;
     if (!wanted.has(tenantId)) {
       writes.push(
         ddb.send(

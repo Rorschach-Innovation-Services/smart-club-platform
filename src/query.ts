@@ -32,4 +32,9 @@ export const qk = {
   allClearances: () => ['clearances-all', t()],
   clubDirectory: () => ['club-directory', t()],
   signupLink: () => ['signup-link', t()],
+  // Operator portal keys are deliberately NOT tenant-scoped: /platform/* is
+  // tenant-independent (the slug in the key names the MANAGED tenant, not the host's).
+  platformTenants: () => ['platform-tenants'],
+  platformTenant: (slug: string) => ['platform-tenant', slug],
+  platformDns: (slug: string) => ['platform-dns', slug],
 };

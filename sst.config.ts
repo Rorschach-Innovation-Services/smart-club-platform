@@ -27,28 +27,24 @@ export default $config({
     // ── Prod custom domains ──
     // medicoach.co.za is on external DNS (no Route53 zone), so SST uses dns:false +
     // pre-issued ACM certs; the apex/api/www CNAMEs are created manually after deploy.
-    // Web cert MUST be us-east-1 (CloudFront); API cert MUST be af-south-1 (HTTP API
-    // custom domains are regional — a us-east-1 cert can't attach). Both cover www.
-    // NOTE: the cert ARNs below are specific to AWS account 433453514361 — re-issue per
-    // account if this stack is ever deployed elsewhere. Each cert's SANs must cover every
-    // host it fronts (web cert: apex + www; API cert: api.<…>) or CloudFront/API GW serve
-    // cert errors. See docs/guides/onboarding-a-tenant.md.
+    // The vanity-domain registry (hosts, cert ARNs, onboarding sequence) lives in
+    // infra/tenants.ts — dynamic import because SST forbids top-level imports here.
     const isProd = $app.stage === 'prod';
-    const WEB_CERT =
-      'arn:aws:acm:us-east-1:433453514361:certificate/5c749bdd-1687-4ecc-a3b7-f4e35aaab487';
-    const API_CERT =
-      'arn:aws:acm:af-south-1:433453514361:certificate/f485b435-3bef-42f0-a27f-3b798e98c8eb';
-    const PROD_WEB_HOST = 'dolphinspipeline.medicoach.co.za';
-    const PROD_API_HOST = 'api.dolphinspipeline.medicoach.co.za';
+    const { WEB_CERT_ARN, API_CERT_ARN, VANITY, hostTenantMap, allowedOrigins, apiHostMap } =
+      await import('./infra/tenants');
+    // First enabled entry is the PRIMARY tenant: it takes SST's built-in `domain:`
+    // slot on the StaticSite and the ApiGatewayV2; the rest ride as CloudFront
+    // aliases and raw API GW domain mappings (below).
+    const enabledVanity = VANITY.filter((v) => v.enabled);
+    const [primaryVanity, ...extraVanity] = enabledVanity;
+    if (isProd && !primaryVanity) {
+      throw new Error('infra/tenants.ts: prod requires at least one enabled VANITY entry');
+    }
     // Custom-domain hosts don't follow the leftmost-label tenant convention (the API
     // lives at api.<…> and the union's vanity host is "dolphinspipeline", not "dolphins"),
     // so map them explicitly. resolveTenant()/resolveTenantSlug() consult this first and
     // fall back to the leftmost label for clean per-union subdomains. See auth.ts.
-    const TENANT_HOST_MAP: Record<string, string> = {
-      [PROD_WEB_HOST]: 'dolphins',
-      [`www.${PROD_WEB_HOST}`]: 'dolphins',
-      [PROD_API_HOST]: 'dolphins',
-    };
+    const TENANT_HOST_MAP: Record<string, string> = hostTenantMap(VANITY);
 
     // ── Data: single DynamoDB table, tenant-scoped keys ──
     // pk/sk primary, gsi1 for per-tenant listing & by-tenant user lookups.
@@ -174,11 +170,12 @@ export default $config({
     const sentryDsnWeb = new sst.Secret('SentryDsnWeb', '');
     // One release id shared by the API + web builds so a frontend error and the API
     // call behind it correlate to the same release (and to the uploaded source maps).
+    // Platform-wide prefix (one deploy serves every tenant; tenant is an event tag).
     // git is available (manual local deploy from the repo); execFile = no shell.
     // Dynamic import — SST forbids top-level imports in sst.config.ts.
     const { execFileSync } = await import('node:child_process');
     const gitSha = execFileSync('git', ['rev-parse', '--short', 'HEAD']).toString().trim();
-    const sentryRelease = `dolphins@${process.env.npm_package_version ?? '0'}+${gitSha}`;
+    const sentryRelease = `smart-club@${process.env.npm_package_version ?? '0'}+${gitSha}`;
 
     // ── API: one Hono Lambda behind a $default route ──
     // JWT is verified inside the app (aws-jwt-verify) so public routes (/tenant,
@@ -188,8 +185,30 @@ export default $config({
       // (raw execute-api hosts resolve to null). dns:false — CNAME added manually at
       // the external DNS provider. With a domain set, `api.url` becomes the custom URL,
       // so VITE_API_URL + ALLOWED_ORIGINS below pick it up automatically.
-      domain: isProd ? { name: PROD_API_HOST, dns: false, cert: API_CERT } : undefined,
+      domain: isProd ? { name: primaryVanity.apiHost, dns: false, cert: API_CERT_ARN } : undefined,
     });
+    // Additional enabled vanity API hosts (beyond the primary): SST's `domain:`
+    // takes one host, so the rest are raw API GW custom domains mapped onto the
+    // same HTTP API. Each tenant needs its OWN api host because the API resolves
+    // tenant from the Host header. Stage is SST's fixed '$default' (see
+    // .sst/platform/src/components/aws/apigatewayv2.ts createStage()).
+    if (isProd) {
+      for (const v of extraVanity) {
+        const dn = new aws.apigatewayv2.DomainName(`ApiDomain${v.slug}`, {
+          domainName: v.apiHost,
+          domainNameConfiguration: {
+            certificateArn: API_CERT_ARN,
+            endpointType: 'REGIONAL',
+            securityPolicy: 'TLS_1_2',
+          },
+        });
+        new aws.apigatewayv2.ApiMapping(`ApiMapping${v.slug}`, {
+          apiId: api.nodes.api.id,
+          domainName: dn.id,
+          stage: '$default',
+        });
+      }
+    }
     api.route('$default', {
       handler: 'packages/api/src/index.handler',
       // Linking grants IAM + Resource access. userPool link lets the API call
@@ -197,6 +216,10 @@ export default $config({
       link: [
         table,
         uploads,
+        // Logo uploads: the platform portal presigns POSTs into the public
+        // tutorial-assets bucket under branding/<slug>/ (login pages need the
+        // logo unauthenticated, so the private Uploads bucket is wrong for it).
+        tutorialAssets,
         userPool,
         userPoolClient,
         fromEmail,
@@ -228,13 +251,17 @@ export default $config({
         // Base URL (public S3) for the tutorial videos. DEFAULT_TUTORIALS builds
         // absolute `${TUTORIALS_BASE_URL}/tutorials/<file>` links from this.
         TUTORIALS_BASE_URL: tutorialsBaseUrl,
+        // Bucket name for the platform logo-upload presigned POSTs (branding/<slug>/…).
+        TUTORIALS_BUCKET: tutorialAssets.name,
         // Host→tenant map for custom domains (JSON). Consulted by resolveTenant() before
         // the leftmost-label fallback. Empty off-prod (dev uses the x-tenant header).
         TENANT_HOST_MAP: JSON.stringify(isProd ? TENANT_HOST_MAP : {}),
         // Trusted CORS origins (custom tenant domains in prod). The web app is cross-origin
         // to the API (different subdomains), so its origin must be listed here.
+        // Enumerated per enabled vanity entry — no suffix matching (originAllowed()
+        // also anti-phishing-validates invite/reg-link URLs).
         ALLOWED_ORIGINS: isProd
-          ? `https://${PROD_WEB_HOST},https://www.${PROD_WEB_HOST}`
+          ? allowedOrigins(VANITY).join(',')
           : (process.env.ALLOWED_ORIGINS ?? ''),
         // Outbound messaging. SES_REGION must stay eu-west-1 — that's where the
         // verified identity with production access lives (this account's af-south-1
@@ -257,11 +284,21 @@ export default $config({
     const web = new sst.aws.StaticSite('Web', {
       build: { command: 'npm run build', output: 'dist' },
 
-      // Prod: serve at the union's custom domain (+ www alias on the same distribution;
-      // the us-east-1 cert covers both). dns:false — CNAMEs added manually at the external
-      // DNS provider. Aliases (not redirects) keep DNS to simple same-target CNAMEs.
+      // Prod: serve at the primary union's custom domain, with every other enabled
+      // vanity webHost (+ www variants) as aliases on the SAME distribution — one
+      // multi-SAN us-east-1 cert covers all of them. dns:false — CNAMEs added manually
+      // at each client's external DNS provider. Aliases (not redirects) keep DNS to
+      // simple same-target CNAMEs.
       domain: isProd
-        ? { name: PROD_WEB_HOST, dns: false, cert: WEB_CERT, aliases: [`www.${PROD_WEB_HOST}`] }
+        ? {
+            name: primaryVanity.webHost,
+            dns: false,
+            cert: WEB_CERT_ARN,
+            aliases: [
+              ...(primaryVanity.www ? [`www.${primaryVanity.webHost}`] : []),
+              ...extraVanity.flatMap((v) => [v.webHost, ...(v.www ? [`www.${v.webHost}`] : [])]),
+            ],
+          }
         : undefined,
 
       // Vite bakes these at build time (one platform build; tenant is resolved at
@@ -275,6 +312,11 @@ export default $config({
         // (so dolphinspipeline.* → dolphins client-side too). Empty map off-prod.
         VITE_DEFAULT_TENANT: 'dolphins',
         VITE_TENANT_HOST_MAP: JSON.stringify(isProd ? TENANT_HOST_MAP : {}),
+        // Web host → API origin (JSON). apiBase() in src/api.ts consults this at
+        // runtime so each vanity web host talks to its own API host (the API
+        // resolves tenant from ITS OWN Host header). Empty off-prod → apiBase()
+        // falls back to VITE_API_URL.
+        VITE_API_HOST_MAP: JSON.stringify(isProd ? apiHostMap(VANITY) : {}),
         // Sentry (errors only). Empty DSN → the SPA init is a no-op. These are set as
         // real env vars in the `npm run build` child SST spawns, so the SDK (reads
         // import.meta.env) and @sentry/vite-plugin (reads process.env.VITE_SENTRY_RELEASE)

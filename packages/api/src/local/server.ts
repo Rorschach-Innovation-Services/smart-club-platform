@@ -71,7 +71,8 @@ async function main(): Promise<void> {
   const demo = process.env.SEED_DEMO === '1';
   const { seedTenantConfig, seedDemoData, SEED_TENANTS } = await import('../seed-core.js');
   for (const t of SEED_TENANTS) {
-    const leagues = await seedTenantConfig(t);
+    // Fresh dynalite each boot ⇒ create-if-absent always creates here.
+    const { leagues } = await seedTenantConfig(t);
     if (demo) {
       const { clubs, series } = await seedDemoData(t);
       console.log(

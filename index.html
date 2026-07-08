@@ -3,18 +3,20 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dolphins Pipeline — Smart Club Integration</title>
-<link rel="icon" type="image/png" href="/dolphins-logo.png">
+<title>Smart Club Platform</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
   :root{
-    /* Hollywoodbets Dolphins palette
-       Primary = Dolphins green (ODI/T20 kit), Secondary = KZN purple (alt T20 kit)
-       Ink = jet black (cap & kit base), Paper = warm white */
-    /* Only three colour families: black/ink, white/paper, dark green */
+    /* Neutral platform default palette.
+       This is the brandless first paint: a slate/graphite accent family that any
+       tenant's real colors overwrite at runtime (applyTheme in src/config.ts sets
+       every branding.colors token onto :root once GET /tenant lands).
+       Token NAMES are the contract — 2,800+ CSS lines reference them — so tenants
+       re-color the same tokens; only the VALUES here are neutral. */
     /* Black / inks */
     --ink:#0A0F14;
     --ink2:#1A1F26;
@@ -26,15 +28,20 @@
     --paper2:#EEEFF1;
     --paper3:#DCDEE2;
 
-    /* Dark green — the brand palette */
-    --green:#0E3529;             /* deepest forest */
-    --green-mid:#215F47;          /* mid */
-    --green-bright:#4B8A6C;       /* highlight (cooler, sage-leaning) */
-    --green-pale:#E8F0EB;         /* tint */
+    /* Slate — the neutral accent family (token names kept from the original
+       green scale; tenants supply their own values via branding.colors) */
+    --green:#26303B;             /* deepest slate */
+    --green-mid:#45586B;          /* mid */
+    --green-bright:#7189A0;       /* highlight */
+    --green-pale:#EBEEF2;         /* tint */
 
     /* Warm accents — used very sparingly (eyebrow / badge moments) */
-    --cream:#E7DDC6;              /* soft sand */
-    --gold-warm:#B89B4A;          /* premium tan */
+    --cream:#E3E0D8;              /* soft stone */
+    --gold-warm:#9A8F7A;          /* muted brass */
+
+    /* Hero/backdrop imagery — neutral gradient until the tenant's branding.colors
+       supplies a real image (e.g. url('/venues/….jpg')) at runtime. */
+    --hero-image:linear-gradient(160deg,#2E363F 0%,#1A1F26 55%,#0A0F14 100%);
 
     /* Legacy aliases so existing var(--gold/teal/navy/coral) keeps working,
        all routed through the monochrome+green system. */
@@ -139,7 +146,7 @@
     color:rgba(255,255,255,0.5);transition:all .15s;
   }
   .role-btn:hover{color:rgba(255,255,255,0.8)}
-  .role-btn.active{background:var(--green-bright);color:var(--ink)}     /* Dolphins green */
+  .role-btn.active{background:var(--green-bright);color:var(--ink)}     /* accent highlight */
   .role-btn.active.club{background:#fff;color:var(--ink)}               /* white pill — clean contrast */
 
   .h-user{
@@ -1115,7 +1122,7 @@
       linear-gradient(180deg, rgba(10,15,20,0.78) 0%, rgba(10,15,20,0.94) 60%, rgba(10,15,20,0.98) 100%),
       radial-gradient(900px 600px at 15% 0%,  rgba(31,170,92,0.18), transparent 60%),
       radial-gradient(800px 500px at 90% 100%, rgba(10,15,20,0.20), transparent 60%),
-      url('/venues/kingsmead-stadium.jpg') center/cover no-repeat,
+      var(--hero-image) center/cover no-repeat,
       linear-gradient(180deg, var(--ink) 0%, var(--ink2) 100%);
     color:#fff;padding:48px 32px;
     display:flex;flex-direction:column;align-items:center;justify-content:center;gap:42px;

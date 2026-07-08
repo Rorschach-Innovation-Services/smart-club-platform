@@ -14,6 +14,8 @@ import { Sentry } from './sentry';
 import { devAuthHeader } from './devAuth';
 import type {
   TenantConfig,
+  TenantBranding,
+  TenantSummary,
   TutorialVideo,
   UserProfile,
   Club,
@@ -21,9 +23,32 @@ import type {
   PlayerClearance,
   Series,
   SendResult,
+  LogoUploadPost,
+  DnsSheet,
 } from './types';
 
-const BASE = import.meta.env.VITE_API_URL ?? '';
+/**
+ * Resolve the API base URL for the current host. Each vanity web host has its
+ * own API host (the API resolves tenant from ITS OWN Host header), mapped via
+ * VITE_API_HOST_MAP (JSON, baked by sst.config.ts from infra/tenants.ts). An
+ * unmapped host (dev, bare CloudFront) falls back to VITE_API_URL — dolphins
+ * prod maps to the same URL VITE_API_URL carries, so behavior is unchanged.
+ */
+export function apiBase(): string {
+  // Malformed map → {} (safe: falls back to VITE_API_URL). console.error so a
+  // prod misconfiguration is debuggable — mirrors HOST_TENANT_MAP in config.ts.
+  let map: Record<string, string> = {};
+  try {
+    map = JSON.parse(import.meta.env.VITE_API_HOST_MAP ?? '{}');
+  } catch (e) {
+    console.error('VITE_API_HOST_MAP is not valid JSON; ignoring it', e);
+  }
+  const host = typeof window !== 'undefined' ? window.location?.hostname?.toLowerCase() : undefined;
+  if (host && map[host]) return map[host];
+  return import.meta.env.VITE_API_URL ?? '';
+}
+
+const BASE = apiBase();
 const LOCAL_AUTH = import.meta.env.VITE_LOCAL_AUTH === '1';
 
 let _tenant: string | null = null;
@@ -341,6 +366,65 @@ export const getClubSignup = (token: string) =>
   request('/club-signup', { auth: false, query: { t: token } });
 export const submitClubSignup = (token: string, body: unknown) =>
   request('/club-signup', { method: 'POST', auth: false, query: { t: token }, body });
+
+// ── Platform operator portal (/platform/*) ──
+// Operator-only routes (membership {tenantId:'*', role:'operator'}); tenant-independent,
+// so :slug names the target tenant explicitly. All errors are { error: string }.
+export const platformListTenants = () => request<TenantSummary[]>('/platform/tenants');
+export const platformCreateTenant = (body: {
+  slug: string;
+  branding: Partial<TenantBranding> & { name: string };
+  submissionDeadline: string;
+  features?: Record<string, boolean>;
+}) => request<TenantConfig>('/platform/tenants', { method: 'POST', body });
+export const platformGetTenant = (slug: string) =>
+  request<TenantConfig>(`/platform/tenants/${encodeURIComponent(slug)}`);
+// PUT merge-patches only branding / features / submissionDeadline; each key present
+// REPLACES that key wholesale (same shallow merge as PUT /tenant/config), so callers
+// must send the full branding object, not a fragment.
+export const platformUpdateTenant = (slug: string, patch: Partial<TenantConfig>) =>
+  request<TenantConfig>(`/platform/tenants/${encodeURIComponent(slug)}`, {
+    method: 'PUT',
+    body: patch,
+  });
+// Idempotent per email: re-granting an existing admin succeeds with the same sub.
+export const platformAddAdmin = (slug: string, email: string) =>
+  request<{ tenant: string; email: string; sub: string; adminCount: number }>(
+    `/platform/tenants/${encodeURIComponent(slug)}/admins`,
+    { method: 'POST', body: { email } },
+  );
+// contentType must be image/png | image/svg+xml | image/webp (≤ 1 MB, 300s expiry).
+// The grant is a presigned POST — submit via uploadLogoToS3, then persist publicUrl
+// as branding.logoUrl through platformUpdateTenant.
+export const platformLogoUploadUrl = (slug: string, contentType: string) =>
+  request<LogoUploadPost>(`/platform/tenants/${encodeURIComponent(slug)}/logo-upload`, {
+    method: 'POST',
+    body: { contentType },
+  });
+export const platformDnsSheet = (slug: string) =>
+  request<DnsSheet>(`/platform/tenants/${encodeURIComponent(slug)}/dns`);
+
+/**
+ * Submit a logo to S3 via the presigned POST grant (not the API — plain fetch, no
+ * auth headers). Policy fields must all ride along and the file part must be LAST:
+ * S3 ignores form fields after the file, so a trailing file is the only valid order.
+ */
+export async function uploadLogoToS3(post: LogoUploadPost, file: Blob) {
+  const form = new FormData();
+  for (const [k, v] of Object.entries(post.fields)) form.append(k, v);
+  form.append('file', file);
+  const res = await fetch(post.url, { method: 'POST', body: form });
+  // S3 POST errors are XML, not JSON — log the raw body for debugging (best-effort)
+  // and surface a stable message with the status.
+  if (!res.ok) {
+    try {
+      console.error('logo upload failed', res.status, await res.text());
+    } catch {
+      // body unreadable — the status alone will have to do
+    }
+    throw new ApiError(res.status, `logo upload failed (${res.statusText || res.status})`);
+  }
+}
 
 /**
  * Upload a file directly to a presigned S3 URL (not the API). The content-type must

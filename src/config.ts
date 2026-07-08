@@ -40,12 +40,32 @@ export function resolveTenantSlug() {
   return (qp || import.meta.env.VITE_DEFAULT_TENANT || 'dolphins').toLowerCase();
 }
 
-/** Inject a tenant's color tokens + title onto :root. Missing tokens fall back to the default theme. */
-export function applyTheme(branding?: { colors?: Record<string, string>; title?: string } | null) {
+/** Inject a tenant's color tokens + title + favicon onto the document. Missing tokens fall back to the default theme. */
+export function applyTheme(
+  branding?: {
+    colors?: Record<string, string>;
+    title?: string;
+    faviconUrl?: string;
+    logoUrl?: string;
+  } | null,
+) {
   if (!branding) return;
   const root = document.documentElement;
+  // Values are set verbatim, so tokens can carry any CSS value — including
+  // url(…) images (e.g. --hero-image), not just colors.
   for (const [token, value] of Object.entries(branding.colors ?? {})) {
     root.style.setProperty(token, value);
   }
   if (branding.title) document.title = branding.title;
+  // Swap the neutral favicon shipped in index.html for the tenant's own.
+  const favicon = branding.faviconUrl ?? branding.logoUrl;
+  if (favicon) {
+    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (link) {
+      // The static link declares type="image/svg+xml" for the bundled neutral icon;
+      // the tenant asset may be any image type, so drop the now-wrong hint.
+      link.removeAttribute('type');
+      link.href = favicon;
+    }
+  }
 }

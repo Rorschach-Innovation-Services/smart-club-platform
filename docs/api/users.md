@@ -29,9 +29,9 @@ Behaviour:
   tenant is **added** to their existing `memberships[]` — one person can belong to several
   unions and clubs. Handover/role change is just another call (replaces this tenant's
   membership).
-- The first admin of a brand-new tenant is created out-of-band by the platform bootstrap
-  script, not this route (chicken-and-egg). See
-  [onboarding-a-tenant.md](../guides/onboarding-a-tenant.md).
+- The first admin of a brand-new tenant is created out-of-band — by a platform operator in
+  the `/platform` portal (or the `bootstrap-admin` CLI on dev stages) — not this route
+  (chicken-and-egg). See [onboarding-a-tenant.md](../guides/onboarding-a-tenant.md).
 
 ```
 201 → { sub, email }

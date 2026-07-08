@@ -3980,3 +3980,77 @@ describe('clubDocObjectKeys (S3 purge key collection)', () => {
     );
   });
 });
+
+// ─────────────── branding merge-patch (backfill-branding) + feature flags ───────────────
+
+describe('branding merge-patch + tenant feature flags', () => {
+  const T = 'brandfill';
+
+  before(async () => {
+    // A row shaped like a live pre-backfill tenant: legacy palette, admin-edited
+    // support copy, a real adminCount and an active club-signup link — everything
+    // the merge-patch must NOT clobber.
+    await repo.putTenantConfig({
+      tenant: T,
+      branding: {
+        name: 'Backfill Union',
+        title: 'Backfill Smart Club',
+        logoUrl: '/old-logo.png',
+        colors: { '--green': '#1D9E75', '--navy': '#1B2A4A' },
+        copy: { office: 'Backfill office', support: 'admin-edited support line' },
+      },
+      submissionDeadline: '2026-12-31',
+      knownClubs: [],
+      leagues: [],
+      adminCount: 3,
+      clubSignupLink: { token: 'tok-123', createdAt: '2026-01-01T00:00:00Z' },
+      features: { whatsappInvites: false },
+    });
+  });
+
+  test('mergeBrandingPatch sets colors + new copy slots and preserves everything else', async () => {
+    await repo.mergeBrandingPatch(T, {
+      colors: { '--green': '#0E3529', '--navy': '#1B2A4A', '--green-mid': '#215F47' },
+      copySlots: { orgShort: 'Backfill', cohortName: 'Backfill cohort' },
+    });
+    const cfg = await repo.getTenantConfig(T);
+    assert.equal(cfg?.branding.colors['--green'], '#0E3529'); // corrected token
+    assert.equal(cfg?.branding.colors['--navy'], '#1B2A4A'); // legacy token untouched
+    assert.equal(cfg?.branding.colors['--green-mid'], '#215F47'); // new token added
+    assert.equal(cfg?.branding.copy.orgShort, 'Backfill');
+    assert.equal(cfg?.branding.copy.cohortName, 'Backfill cohort');
+    // The paths outside the UpdateExpression survive verbatim.
+    assert.equal(cfg?.branding.copy.support, 'admin-edited support line');
+    assert.equal(cfg?.branding.copy.office, 'Backfill office');
+    assert.equal(cfg?.branding.logoUrl, '/old-logo.png');
+    assert.equal(cfg?.adminCount, 3);
+    assert.deepEqual(cfg?.clubSignupLink, { token: 'tok-123', createdAt: '2026-01-01T00:00:00Z' });
+    assert.deepEqual(cfg?.features, { whatsappInvites: false });
+  });
+
+  test('mergeBrandingPatch can set logoUrl/faviconUrl when explicitly asked', async () => {
+    await repo.mergeBrandingPatch(T, { logoUrl: '/new-logo.svg', faviconUrl: '/favicon.png' });
+    const cfg = await repo.getTenantConfig(T);
+    assert.equal(cfg?.branding.logoUrl, '/new-logo.svg');
+    assert.equal(cfg?.branding.faviconUrl, '/favicon.png');
+  });
+
+  test('an empty patch is a no-op (no write, no throw)', async () => {
+    const beforeCfg = await repo.getTenantConfig(T);
+    await repo.mergeBrandingPatch(T, {});
+    assert.deepEqual(await repo.getTenantConfig(T), beforeCfg);
+  });
+
+  test('GET /tenant exposes the stored features map, defaulting to {}', async () => {
+    const res = await app.request('/tenant', { headers: { 'x-tenant': T } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { features: Record<string, boolean> };
+    assert.deepEqual(body.features, { whatsappInvites: false });
+
+    // A tenant with no features attribute (the seeded dolphins row) → empty map.
+    const dolphins = await app.request('/tenant', { headers: { 'x-tenant': 'dolphins' } });
+    assert.equal(dolphins.status, 200);
+    const dolphinsBody = (await dolphins.json()) as { features: Record<string, boolean> };
+    assert.deepEqual(dolphinsBody.features, {});
+  });
+});

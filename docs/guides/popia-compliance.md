@@ -9,7 +9,7 @@ compliance. It is engineering guidance, not legal advice; confirm specifics with
 
 All persistent data lives in a single DynamoDB table in **af-south-1 (Cape Town)**, and all
 compute (Lambda) and storage (S3) run in the same region. Data does not leave South Africa.
-CloudFront (static assets + the branding edge function) is the only global component and
+CloudFront (static assets) is the only global component and
 holds no personal information. Residency was the reason AWS af-south-1 was chosen — see
 [ADR 0001](../architecture/0001-aws-native-dynamodb.md).
 

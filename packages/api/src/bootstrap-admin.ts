@@ -11,7 +11,7 @@
  */
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import * as repo from './repo.js';
-import { ensurePasswordlessUser } from './cognito-users.js';
+import { grantTenantAdmin } from './tenant-admin.js';
 import { userPoolId } from './env.js';
 
 async function main(): Promise<void> {
@@ -27,21 +27,8 @@ async function main(): Promise<void> {
   }
 
   const cognito = new CognitoIdentityProviderClient({});
-  const sub = await ensurePasswordlessUser(cognito, userPoolId(), email);
-
-  const existing = await repo.getUser(sub);
-  const memberships = (existing?.memberships ?? []).filter((m) => m.tenantId !== tenant);
-  memberships.push({ tenantId: tenant, role: 'admin', clubIds: [] });
-  await repo.putUser({
-    sub,
-    email,
-    memberships,
-    onboardingSeen: existing?.onboardingSeen ?? {},
-    ...(existing?.lastLoginAt ? { lastLoginAt: existing.lastLoginAt } : {}),
-  });
-  // Keep the transactional last-admin counter on CONFIG consistent. Recount (rather
-  // than +1) so re-running bootstrap is idempotent and repairs a drifted/absent count.
-  await repo.recountAdmins(tenant);
+  // Shared core with POST /platform/tenants/:slug/admins (tenant-admin.ts).
+  const { sub } = await grantTenantAdmin(cognito, userPoolId(), tenant, email);
 
   console.log(`bootstrapped admin ${email} (sub ${sub}) for tenant ${tenant}`);
   console.log('they can now sign in via email OTP.');

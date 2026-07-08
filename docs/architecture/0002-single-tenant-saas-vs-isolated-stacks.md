@@ -2,6 +2,12 @@
 
 **Status:** Accepted
 
+> **Note (2026-07):** two details evolved. Edge-resolved branding was never built — the SPA
+> ships a neutral default theme and applies tenant branding at runtime from `GET /tenant`.
+> And "config row + seed" became the operator portal: tenants are created and configured at
+> `/platform`, backed by a DynamoDB tenant registry. See
+> [ADR 0006](0006-platform-operator-and-tenant-registry.md).
+
 ## Context
 
 There are already two near-identical deployments: `dolphins-smart-club` and a

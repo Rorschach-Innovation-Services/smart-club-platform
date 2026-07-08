@@ -3,6 +3,7 @@
 import { useState as useStateOb } from 'react';
 import { Icon, Btn, useEscapeClose } from './atoms';
 import { formatDeadlineLong, formatDeadlineMid } from './data';
+import { useCopy } from './branding';
 
 export function Onboarding({ club, onClose, onComplete, onStart, submissionDeadline }) {
   useEscapeClose(onClose);
@@ -103,16 +104,14 @@ export function Onboarding({ club, onClose, onComplete, onStart, submissionDeadl
 
 /* ─── Step 1 — Cinematic welcome (photo left · content right) ─── */
 function StepWelcome({ club, deadlineLong }) {
+  const copy = useCopy();
   return (
     <div className="ob-hero">
-      <div
-        className="ob-hero-photo"
-        style={{ backgroundImage: "url('/venues/kingsmead-stadium.jpg')" }}
-      >
+      <div className="ob-hero-photo" style={{ backgroundImage: 'var(--hero-image)' }}>
         <div className="ob-hero-overlay">
           <div className="ob-hero-badge">
             <span className="dot" />
-            Hollywoodbets Dolphins · 2026/27
+            {copy.eyebrow} · 2026/27
           </div>
         </div>
       </div>
@@ -120,11 +119,11 @@ function StepWelcome({ club, deadlineLong }) {
         <div className="ob-eyebrow">Welcome aboard</div>
         <h2 className="ob-title">
           Hello {club.chair.split(' ')[0]},<br />
-          <em>welcome to the Dolphins family.</em>
+          <em>welcome to the {copy.orgShort} family.</em>
         </h2>
         <p className="ob-desc">
           You're now the chair of <strong>{club.name}</strong> on the Smart Club platform — the
-          digital home for every cricket club in the Dolphins Cricket Services district leagues.
+          digital home for every cricket club in the {copy.orgName} district leagues.
         </p>
         <p className="ob-desc">
           We'll walk you through what's required before <strong>{deadlineLong}</strong>, then hand

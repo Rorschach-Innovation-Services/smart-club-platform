@@ -56,6 +56,7 @@ import {
   teamLetter,
 } from './leagues';
 import { shortAddress, suburbOf, SA_BOUNDS, isInSouthAfrica } from './geocode';
+import { useCopy } from './branding';
 import {
   Icon,
   Pill,
@@ -446,6 +447,7 @@ export function ClubHome({
   onRenameClub,
 }) {
   const [showNameEdit, setShowNameEdit] = useStateC(false);
+  const copy = useCopy();
   const deadlineLong = formatDeadlineLong(submissionDeadline);
   const deadlineShort = formatDeadlineShort(submissionDeadline);
   const daysLeft = daysUntil(submissionDeadline);
@@ -499,15 +501,10 @@ export function ClubHome({
   return (
     <div>
       {/* Aspirational hero banner */}
-      <div
-        className="hero-banner"
-        style={{ backgroundImage: "url('/venues/kingsmead-stadium.jpg')" }}
-      >
+      <div className="hero-banner" style={{ backgroundImage: 'var(--hero-image)' }}>
         <div className="hero-content">
-          <div className="hero-eyebrow">Hollywoodbets Dolphins · 2026/27 Season</div>
-          <h2 className="hero-title">
-            From your club to the <em>Dolphins</em>.
-          </h2>
+          <div className="hero-eyebrow">{copy.eyebrow} · 2026/27 Season</div>
+          <h2 className="hero-title">{copy.heroTitle}</h2>
           <p className="hero-sub">
             Affiliate, register and integrate — be part of the same ecosystem that powers our
             provincial heroes.
@@ -774,8 +771,7 @@ export function ClubHome({
             )}
             {affDone && dc === 100 && club.cqi > 0 && (
               <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--muted)' }}>
-                Everything submitted. Your club has been forwarded to the Dolphins administrators
-                for review.
+                Everything submitted. Your club has been forwarded to the {copy.admin} for review.
               </div>
             )}
           </div>
@@ -924,6 +920,7 @@ function syncRoster(existing, count, clubName) {
 }
 
 export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allLeagues = [] }) {
+  const copy = useCopy();
   const [data, setData] = useStateC(() => {
     // Pre-fill exco from club.exco (single source of truth shared with the exco roster doc)
     const ex: Record<string, any> = club.exco || {};
@@ -1333,8 +1330,8 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
             <div className="aff-submitted-title">Affiliation submitted</div>
             <div className="aff-submitted-sub">
               {club.amendmentPending
-                ? 'Edits submitted — pending re-confirmation by the Dolphins office. You can keep correcting details.'
-                : 'Spotted an error? You can correct your details and re-submit for the Dolphins office to re-confirm.'}
+                ? `Edits submitted — pending re-confirmation by the ${copy.office}. You can keep correcting details.`
+                : `Spotted an error? You can correct your details and re-submit for the ${copy.office} to re-confirm.`}
             </div>
           </div>
           <div className="row" style={{ gap: 8 }}>
@@ -1359,7 +1356,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
           <div className="aff-submitted-text">
             <div className="aff-submitted-title">Correcting submitted details</div>
             <div className="aff-submitted-sub">
-              Saving your changes will notify the Dolphins office to re-confirm your affiliation.
+              Saving your changes will notify the {copy.office} to re-confirm your affiliation.
             </div>
           </div>
           <Btn tone="ghost" size="sm" onClick={() => setEditing(false)}>
@@ -2663,7 +2660,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
                       });
                       if (submitted) {
                         setEditing(false);
-                        toast('Changes submitted — pending Dolphins office re-confirmation');
+                        toast(`Changes submitted — pending ${copy.office} re-confirmation`);
                       } else {
                         toast('Affiliation submitted · Exco roster & leagues captured');
                       }
@@ -2687,10 +2684,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
 
         {/* ─── Right-side sticky hero + live summary ─── */}
         <aside className="aff-side">
-          <div
-            className="aff-hero-card"
-            style={{ backgroundImage: "url('/venues/kingsmead-stadium.jpg')" }}
-          >
+          <div className="aff-hero-card" style={{ backgroundImage: 'var(--hero-image)' }}>
             <div className="aff-hero-content">
               <div className="aff-hero-badge">
                 <span className="dot" />
@@ -2700,11 +2694,8 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
                 <div className="aff-hero-title">
                   Your club, <em>on the same platform</em> as our heroes.
                 </div>
-                <div className="aff-hero-sub">
-                  Affiliated clubs join the Hollywoodbets Dolphins ecosystem — fixtures, talent ID,
-                  clinical data and franchise readiness, all in one place.
-                </div>
-                <div className="aff-hero-credit">Hollywoodbets Dolphins</div>
+                <div className="aff-hero-sub">{copy.heroBlurb}</div>
+                <div className="aff-hero-credit">{copy.orgName}</div>
               </div>
             </div>
           </div>
@@ -2764,7 +2755,7 @@ export function AffiliationForm({ club, goto, toast, onSubmit, onSaveDraft, allL
               </div>
             </div>
             <div className="aff-summary-foot">
-              Submitting to the <strong>Dolphins office</strong> · Cricket Services
+              Submitting to the <strong>{copy.office}</strong>
             </div>
           </div>
         </aside>
@@ -3835,6 +3826,7 @@ export function CQIView({
   submissionDeadline,
   allLeagues = [],
 }) {
+  const copy = useCopy();
   const deadlineLong = formatDeadlineLong(submissionDeadline);
   const [answers, setAnswers] = useStateC(() => {
     // Prefer the real stored answers (persisted on submit). Only fall back to the
@@ -3910,8 +3902,8 @@ export function CQIView({
           </h1>
           <p className="ph-desc">
             Score your club across seven dimensions. Your responses are scored in real time using
-            the official Dolphins CQI weighting model — club mandate &amp; objectives 18 pts, teams
-            18 pts, coaching 18 pts, facilities 14 pts, representation 9 pts, financial
+            the official {copy.orgShort} CQI weighting model — club mandate &amp; objectives 18 pts,
+            teams 18 pts, coaching 18 pts, facilities 14 pts, representation 9 pts, financial
             sustainability 13 pts, governance &amp; compliance 10 pts. Governance answers auto-fill
             from your compliance documents — adjust any that need correcting.
           </p>
@@ -4098,8 +4090,8 @@ export function CQIView({
             </div>
             <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
               {submitted
-                ? `Your score has been forwarded to the Dolphins Admin office. You can re-submit any time before ${deadlineLong}.`
-                : 'Your CQI will be visible to the Dolphins administrators alongside your affiliation and compliance documents.'}
+                ? `Your score has been forwarded to the ${copy.office}. You can re-submit any time before ${deadlineLong}.`
+                : `Your CQI will be visible to the ${copy.admin} alongside your affiliation and compliance documents.`}
             </div>
           </div>
           <div className="row" style={{ gap: 8 }}>
@@ -4140,9 +4132,10 @@ export function CQIView({
 
 /* ─── Phase 2 · Club Fixtures (only shown once admin has released) ─── */
 export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures }) {
+  const copy = useCopy();
   const clubBy = (id) => clubs.find((c) => c.id === id);
 
-  // Only series this club is in AND that have been released by the Dolphins office.
+  // Only series this club is in AND that have been released by the union office.
   // A multi-team club participates under its `tm_…` ids, so match the club's resolved
   // team set rather than its clubId.
   const myReleased = (allSeries || []).filter(
@@ -4195,7 +4188,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
               Your <em>Fixtures</em>
             </h1>
             <p className="ph-desc">
-              Your league schedule lands here the moment the Dolphins office releases it.
+              Your league schedule lands here the moment the {copy.office} releases it.
             </p>
           </div>
         </div>
@@ -4219,7 +4212,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
               />
             </svg>
           </div>
-          <div className="club-fix-empty-title">Awaiting release from the Dolphins office</div>
+          <div className="club-fix-empty-title">Awaiting release from the {copy.office}</div>
           <div className="club-fix-empty-sub">
             Once the union office signs off on the 2026/27 fixture list, every match you're playing
             — round, date, opponent, venue and travel costs — will populate here automatically.
@@ -4293,9 +4286,9 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
             Your <em>Fixtures</em>
           </h1>
           <p className="ph-desc">
-            {myReleased.length} {myReleased.length === 1 ? 'series' : 'series'} released by the
-            Dolphins office. {totalMatches} matches across the 2026/27 season — {homeMatches} at
-            home, {awayMatches} on the road.
+            {myReleased.length} {myReleased.length === 1 ? 'series' : 'series'} released by the{' '}
+            {copy.office}. {totalMatches} matches across the 2026/27 season — {homeMatches} at home,{' '}
+            {awayMatches} on the road.
           </p>
         </div>
         <div className="ph-actions">
@@ -4567,7 +4560,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
       <div className="club-fix-foot">
         Travel cost is estimated at R {myReleased[0]?.costPerKm || DEFAULT_COST_PER_KM}/km ×{' '}
         {myReleased[0]?.carsPerAwayTrip || 3} cars per away trip — published with the fixture
-        release. Adjustments to schedule require a Dolphins office sign-off.
+        release. Adjustments to schedule require a {copy.office} sign-off.
       </div>
 
       {/* Share-with-players modal — portaled for the same transformed-ancestor

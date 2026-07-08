@@ -7,9 +7,22 @@
  * the routing role ('admin' | 'club').
  */
 
+import { PLATFORM_TENANT } from './types';
+import type { Membership } from './types';
+
 /** Routing role for a tenant membership: 'admin' for an admin, else 'club'. */
 export function routingRole(membership) {
   return membership?.role === 'admin' ? 'admin' : 'club';
+}
+
+/**
+ * Whether the caller holds the platform-operator membership `{tenantId:'*',
+ * role:'operator'}` — the gate for the /platform/* portal. Mirrors
+ * requirePlatformOperator in packages/api/src/auth.ts. Independent of any
+ * tenant membership: an operator may also be a tenant admin, or hold nothing else.
+ */
+export function isOperator(memberships: Membership[] | null | undefined): boolean {
+  return (memberships ?? []).some((m) => m.tenantId === PLATFORM_TENANT && m.role === 'operator');
 }
 
 /**

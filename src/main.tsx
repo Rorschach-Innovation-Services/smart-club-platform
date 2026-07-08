@@ -20,7 +20,8 @@ import { ApiError } from './api';
 import { resolveTenantSlug, applyTheme } from './config';
 import { setActiveTenant } from './api';
 import { AuthProvider, useAuth, membershipFor } from './auth';
-import { routingRole, clubRouteRedirect } from './routing';
+import { routingRole, clubRouteRedirect, isOperator } from './routing';
+import { PlatformPortal } from './platform';
 import { Login } from './Login';
 import { RegisterPage } from './RegisterPage';
 import { ClubSignupPage } from './ClubSignupPage';
@@ -81,6 +82,10 @@ import { Onboarding } from './onboarding';
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
 const TENANT_SLUG = resolveTenantSlug();
 setActiveTenant(TENANT_SLUG);
+// Tag every frontend event with the tenant, mirroring the API's tagging — Sentry is
+// one platform-wide project, so tenant is an event tag, not a project. Safe without a
+// DSN: sentry.ts guards init, and setTag on an uninitialised SDK is a no-op.
+Sentry.setTag('tenant', TENANT_SLUG);
 
 /* ─── HelpModal — support guidance + union office contacts ─── */
 function HelpModal({ onClose, support }) {
@@ -361,6 +366,7 @@ function AppRoutes() {
 /* ─── Authenticated app: loads tenant-scoped data + builds API-backed handlers ─── */
 function AuthedApp({ tenantConfig }) {
   const { memberships, email, signOutUser } = useAuth();
+  const location = useLocation();
   const [toastShow, toastNode] = useToast();
   const [showOnboarding, setShowOnboarding] = useStateApp(false);
   const [showCreateSeries, setShowCreateSeries] = useStateApp(false);
@@ -370,6 +376,7 @@ function AuthedApp({ tenantConfig }) {
 
   const membership = membershipFor(memberships, TENANT_SLUG);
   const role = routingRole(membership);
+  const operator = isOperator(memberships);
 
   // Identify the caller on Sentry so frontend errors carry the same tenant/role
   // context the API tags backend errors with. No-op without a DSN; email is
@@ -408,7 +415,22 @@ function AuthedApp({ tenantConfig }) {
     enabled: !!membership && role === 'admin',
   });
 
+  // Platform operator portal — authenticated but tenant-INDEPENDENT, so it renders
+  // before the tenant-membership gate and the tenant-data loading gates below (an
+  // operator may hold no membership for this host's tenant at all).
+  if (
+    operator &&
+    (location.pathname === '/platform' || location.pathname.startsWith('/platform/'))
+  ) {
+    return (
+      <PlatformPortal userEmail={email} signOutUser={signOutUser} hasTenantConsole={!!membership} />
+    );
+  }
+
   if (!membership) {
+    // An operator with no membership for this tenant isn't dead-ended on the
+    // "not linked" splash — their home is the platform portal.
+    if (operator) return <Navigate to="/platform" replace />;
     return (
       <div className="ps-screen">
         <div className="ps-intro" style={{ textAlign: 'center' }}>
@@ -792,6 +814,10 @@ function Shell({
   const navigate = useNavigate();
   const location = useLocation();
   const routeParams = useParams();
+  // Operator shortcut into the cross-tenant /platform portal — rendered only for
+  // holders of the platform membership (unobtrusive: one item, own nav section).
+  const { memberships: authMemberships } = useAuth();
+  const showOperatorNav = isOperator(authMemberships);
   const branding = tenantConfig?.branding;
   // Union office email for mailto actions — parsed from the tenant support copy
   // slot via the shared parseSupport helper, so it stays correct per tenant.
@@ -1862,6 +1888,20 @@ function Shell({
                     <span className="ni-label">{n.label}</span>
                   </button>
                 ))}
+            </>
+          )}
+
+          {showOperatorNav && (
+            <>
+              <div className="nav-section" style={{ marginTop: 18 }}>
+                Platform
+              </div>
+              <button className="nav-item" onClick={() => navigate('/platform')}>
+                <span className="ni-icon">
+                  <Icon.Shield />
+                </span>
+                <span className="ni-label">Operator portal</span>
+              </button>
             </>
           )}
 

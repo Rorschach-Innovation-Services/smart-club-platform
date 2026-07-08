@@ -6,12 +6,14 @@ How identity, tenancy, and permissions fit together. Decisions:
 ## Sign-in (passwordless email OTP)
 
 Users sign in with their email and a one-time code — no passwords. Cognito's `USER_AUTH`
-flow with `EMAIL_OTP` (Essentials feature plan). Accounts are created three ways: a club
+flow with `EMAIL_OTP` (Essentials feature plan). Accounts are created four ways: a club
 rep **self-registers** through the tenant's signup link (registering a club provisions the
 account + membership in one step — see [signup.md](../api/signup.md)), an admin invite
-(`POST /admin/users`) for additional admins/reps, or the platform bootstrap script for a
-new tenant's first admin. Cognito's own open self-signup stays disabled — every account is
-created server-side through one of those three gates.
+(`POST /admin/users`) for additional admins/reps, a platform operator granting a new
+tenant's first admin from the `/platform` portal (the `bootstrap-admin` CLI still works on
+dev stages), or the `bootstrap-operator` CLI for platform operators themselves. Cognito's
+own open self-signup stays disabled — every account is created server-side through one of
+those gates.
 
 If passwordless isn't available in af-south-1, the fallback is a `CUSTOM_AUTH` OTP via
 Lambda triggers (same token shape, app unaffected) — see
@@ -31,10 +33,11 @@ Because authorization is a DB record (not a fixed Cognito attribute):
 
 ## Roles
 
-| Role    | Scope                                                                                 |
-| ------- | ------------------------------------------------------------------------------------- |
-| `admin` | Everything in their tenant: all clubs, series, the club signup link, invites, config. |
-| `rep`   | Only the clubs in their `clubIds`: read/patch that club, exco, docs, reg-link.        |
+| Role       | Scope                                                                                                                                                                                                                                                                                               |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `admin`    | Everything in their tenant: all clubs, series, the club signup link, invites, config.                                                                                                                                                                                                               |
+| `rep`      | Only the clubs in their `clubIds`: read/patch that club, exco, docs, reg-link.                                                                                                                                                                                                                      |
+| `operator` | The cross-tenant `/platform/*` portal only, via the platform membership `{tenantId: '*', role: 'operator'}`. No tenant data access — `'*'` never resolves from a host, and operators never appear in tenant rosters. See [ADR 0006](../architecture/0006-platform-operator-and-tenant-registry.md). |
 
 ## Tenant resolution & isolation
 

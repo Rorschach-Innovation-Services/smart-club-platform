@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon, Btn } from './atoms';
 import { currentSeasonLabel } from './data';
+import { useCopy, useFeature } from './branding';
 
 /* ─── RegLinkModal — shared player-registration link modal ───
    Used on BOTH the admin club-detail page and the club portal. A per-club link
@@ -13,6 +14,10 @@ export function RegLinkModal({ club, onClose, onRegenerate, toast }) {
   const linkRecord = club.playerRegLink;
   const url = linkRecord ? `${baseUrl}/register/${club.id}?t=${linkRecord.token}` : '';
   const season = currentSeasonLabel();
+  const copy = useCopy();
+  // Tenants without their own WhatsApp templates launch email-only: hide every
+  // WhatsApp share affordance so the chair is never nudged down a dead channel.
+  const whatsappEnabled = useFeature('whatsappInvites', true);
   const [copied, setCopied] = useState(false);
 
   function doCopy() {
@@ -39,7 +44,7 @@ export function RegLinkModal({ club, onClose, onRegenerate, toast }) {
   }
 
   function emailBody() {
-    return `Hi ${club.chair || 'team'},\n\nPlease share this player-registration link with your members so they can register directly into ${club.name} for the ${season} season:\n\n${url}\n\nThe link is unique to your club — each registration flows straight into the Dolphins Pipeline cohort.\n\nThe Dolphins office`;
+    return `Hi ${club.chair || 'team'},\n\nPlease share this player-registration link with your members so they can register directly into ${club.name} for the ${season} season:\n\n${url}\n\nThe link is unique to your club — each registration flows straight into the ${copy.cohortName}.\n\nThe ${copy.office}`;
   }
   function whatsappText() {
     return `${club.name} player registration · ${season} season: ${url}`;
@@ -71,13 +76,18 @@ export function RegLinkModal({ club, onClose, onRegenerate, toast }) {
     ? `https://wa.me/${wa}?text=${encodeURIComponent(whatsappText())}`
     : `https://wa.me/?text=${encodeURIComponent(whatsappText())}`;
   function sendBoth() {
-    try {
-      window.open(waUrl, '_blank', 'noopener,noreferrer');
-    } catch {}
+    if (whatsappEnabled) {
+      try {
+        window.open(waUrl, '_blank', 'noopener,noreferrer');
+      } catch {}
+    }
     try {
       window.location.href = mailtoUrl;
     } catch {}
-    toast && toast('Player link sent via email & WhatsApp');
+    toast &&
+      toast(
+        whatsappEnabled ? 'Player link sent via email & WhatsApp' : 'Player link sent via email',
+      );
   }
 
   return createPortal(
@@ -183,20 +193,20 @@ export function RegLinkModal({ club, onClose, onRegenerate, toast }) {
                 </div>
               </div>
 
-              {/* Primary one-click send: fires email + WhatsApp together */}
+              {/* Primary one-click send: fires email (+ WhatsApp when the tenant has it) */}
               <Btn
                 tone="teal"
                 icon={Icon.Mail}
                 onClick={sendBoth}
                 style={{ width: '100%', justifyContent: 'center', marginBottom: 8 }}
               >
-                Send via Email + WhatsApp
+                {whatsappEnabled ? 'Send via Email + WhatsApp' : 'Send via Email'}
               </Btn>
 
               <div
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(3, 1fr)',
+                  gridTemplateColumns: `repeat(${whatsappEnabled ? 3 : 2}, 1fr)`,
                   gap: 8,
                   marginBottom: 14,
                 }}
@@ -221,21 +231,23 @@ export function RegLinkModal({ club, onClose, onRegenerate, toast }) {
                 >
                   <Icon.Mail /> Email only
                 </a>
-                <a
-                  href={waUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="btn btn-outline"
-                  style={{
-                    textDecoration: 'none',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 6,
-                  }}
-                >
-                  <Icon.Arrow /> WhatsApp only
-                </a>
+                {whatsappEnabled && (
+                  <a
+                    href={waUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn btn-outline"
+                    style={{
+                      textDecoration: 'none',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 6,
+                    }}
+                  >
+                    <Icon.Arrow /> WhatsApp only
+                  </a>
+                )}
               </div>
 
               <div

@@ -99,6 +99,16 @@ export interface TutorialLink {
   url: string;
 }
 
+/** The tenant identity interpolated into the reg-link email (see orgCopy in branding.ts). */
+export interface RegLinkOrgCopy {
+  /** Full org display name, e.g. "Hollywoodbets Dolphins". */
+  name: string;
+  /** Sign-off label, e.g. "Dolphins office". */
+  office: string;
+  /** Cohort label, e.g. "Dolphins Pipeline cohort". */
+  cohort: string;
+}
+
 export interface RegLinkEmailInput {
   to: string;
   chairName: string;
@@ -106,6 +116,8 @@ export interface RegLinkEmailInput {
   season: string;
   /** The public player-registration URL (validated by the caller). */
   link: string;
+  /** Tenant org copy — the email body carries no hardcoded union name. */
+  org: RegLinkOrgCopy;
   /**
    * Optional getting-started section: a link to the in-app tutorials page plus the
    * direct video links. When present, appended below the registration link. Absent ⇒
@@ -115,13 +127,16 @@ export interface RegLinkEmailInput {
 }
 
 /**
- * Sent to the chairperson the moment affiliation completes: their unique
- * player-registration link, ready to share with members, plus (optionally) the
- * how-to-use-the-app tutorial videos. Mirrors the invite email shape (a link in the
- * body) and honours the same dry-run gate.
+ * Build the reg-link email bodies. Pure (no SES, no env) — exported so tests can
+ * assert the rendered copy (e.g. that no hardcoded union name leaks in) without
+ * sending anything.
  */
-export async function sendRegLinkEmail(input: RegLinkEmailInput): Promise<{ messageId: string }> {
-  const { to, chairName, clubName, season, link, tutorials } = input;
+export function regLinkEmailContent(input: RegLinkEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { chairName, clubName, season, link, org, tutorials } = input;
   const subject = `${clubName} · player registration link (${season})`;
   const greetName = chairName || 'there';
 
@@ -136,14 +151,16 @@ export async function sendRegLinkEmail(input: RegLinkEmailInput): Promise<{ mess
     `Hi ${greetName},\n\n` +
     `Your ${clubName} affiliation is in. Here's your unique player-registration link for the ${season} season — share it with your members so they can register straight into the club:\n\n` +
     `${link}\n\n` +
-    `Every registration flows directly into your roster and the Dolphins cohort.` +
+    `Every registration flows directly into your roster and the ${org.cohort}.` +
     `${tutorialsText}\n\n` +
-    `The Dolphins office`;
+    `The ${org.office}`;
 
   const safeName = escapeHtml(greetName);
   const safeClub = escapeHtml(clubName);
   const safeSeason = escapeHtml(season);
   const safeLink = escapeHtml(link);
+  const safeCohort = escapeHtml(org.cohort);
+  const safeOffice = escapeHtml(org.office);
   const tutorialsHtml = hasTutorials
     ? `<p style="margin-top:22px">New to the app? These short videos walk you through it — ` +
       `<a href="${escapeHtml(tutorials!.pageUrl)}" style="color:#1D9E75;font-weight:600">watch them all here</a>:</p>` +
@@ -161,10 +178,23 @@ export async function sendRegLinkEmail(input: RegLinkEmailInput): Promise<{ mess
     `<p>Hi ${safeName},</p>` +
     `<p>Your <strong>${safeClub}</strong> affiliation is in. Here's your unique player-registration link for the ${safeSeason} season — share it with your members so they can register straight into the club:</p>` +
     `<p><a href="${safeLink}" style="color:#1D9E75;font-weight:600">${safeLink}</a></p>` +
-    `<p>Every registration flows directly into your roster and the Dolphins cohort.</p>` +
+    `<p>Every registration flows directly into your roster and the ${safeCohort}.</p>` +
     `${tutorialsHtml}` +
-    `<p>The Dolphins office</p>` +
+    `<p>The ${safeOffice}</p>` +
     `</div>`;
+
+  return { subject, text, html };
+}
+
+/**
+ * Sent to the chairperson the moment affiliation completes: their unique
+ * player-registration link, ready to share with members, plus (optionally) the
+ * how-to-use-the-app tutorial videos. Mirrors the invite email shape (a link in the
+ * body) and honours the same dry-run gate.
+ */
+export async function sendRegLinkEmail(input: RegLinkEmailInput): Promise<{ messageId: string }> {
+  const { to, clubName } = input;
+  const { subject, text, html } = regLinkEmailContent(input);
 
   if (EMAIL_DRY_RUN) {
     console.log(`[notify:email dry-run] would send reg-link to ${to} for ${clubName}`);

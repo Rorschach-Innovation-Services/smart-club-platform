@@ -1,14 +1,16 @@
 /**
  * Seed CLI — provision tenants.
  *
- *   sst shell --stage <stage> -- npx tsx packages/api/src/seed.ts [tenant ...]
+ *   sst shell --stage <stage> -- npx tsx packages/api/src/seed.ts [tenant ...] [--force]
  *   …                                                              [tenant ...] --demo
  *   …                                                              [tenant ...] --leagues-only [--force]
  *   …                                                              [tenant ...] --merge-leagues
  *
  * Default: writes only each tenant's config (branding + deadline) — the cohort is
- * BLANK so real unions input their own clubs/series. `--demo` additionally loads
- * the sample clubs + series (for set/demo accounts). Idempotent (upserts).
+ * BLANK so real unions input their own clubs/series. CREATE-IF-ABSENT: an existing
+ * CONFIG row (the registry source of truth, possibly portal-edited) is never
+ * overwritten without `--force`. `--demo` additionally loads the sample clubs +
+ * series (for set/demo accounts).
  *
  * `--leagues-only` is a MANUAL one-shot repair (not a post-deploy step): it backfills only
  * the league catalogue from the snapshot, leaving branding/deadline/adminCount untouched,
@@ -37,7 +39,8 @@ async function main(): Promise<void> {
   const leaguesOnly = args.includes('--leagues-only');
   const mergeLeaguesFlag = args.includes('--merge-leagues');
   const force = args.includes('--force');
-  if (force && !leaguesOnly) console.warn('--force has no effect without --leagues-only; ignoring');
+  if (force && mergeLeaguesFlag)
+    console.warn('--force has no effect with --merge-leagues; ignoring');
   const requested = args.filter((a) => !a.startsWith('--'));
   const toSeed = requested.length ? requested : SEED_TENANTS;
 
@@ -88,14 +91,16 @@ async function main(): Promise<void> {
       }
       continue;
     }
-    const leagues = await seedTenantConfig(t);
+    const result = await seedTenantConfig(t, { force });
+    if (result.status === 'exists') {
+      console.log(`${t}: CONFIG exists — not overwriting; use --force to reset it`);
+    } else {
+      const verb = result.status === 'overwritten' ? 'overwrote' : 'provisioned';
+      console.log(`${verb} ${t} (blank cohort, ${result.leagues} leagues)`);
+    }
     if (demo) {
       const { clubs, series } = await seedDemoData(t);
-      console.log(
-        `provisioned ${t} + demo data: ${clubs} clubs, ${series} series (${leagues} leagues)`,
-      );
-    } else {
-      console.log(`provisioned ${t} (blank cohort, ${leagues} leagues)`);
+      console.log(`loaded ${t} demo data: ${clubs} clubs, ${series} series`);
     }
   }
   console.log('seed complete');

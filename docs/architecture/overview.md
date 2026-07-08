@@ -17,8 +17,7 @@ flowchart TB
     end
 
     subgraph Edge["CloudFront (global edge)"]
-        CF["Static assets (S3 origin)"]
-        CFF["CloudFront Function<br/>host → tenant branding"]
+        CF["Static assets (S3 origin)<br/>neutral default theme"]
     end
 
     subgraph AWS["AWS · af-south-1"]
@@ -30,7 +29,6 @@ flowchart TB
     end
 
     SPA -->|"static load"| CF
-    CF --- CFF
     SPA -->|"authed API calls (JWT)"| APIGW
     APIGW --> L
     L --> DDB
@@ -45,14 +43,17 @@ flowchart TB
   Middleware derives the tenant from the authenticated request host (locked to custom domains)
   and the user's `memberships` claim, and rejects any cross-tenant access. See
   [data-model.md](data-model.md).
-- **Branding resolves at the edge**, not via a blocking API call, so first paint keeps the
-  static-site latency profile and shows no branding flash. See
-  [ADR 0002](0002-single-tenant-saas-vs-isolated-stacks.md).
+- **Branding is runtime configuration.** The SPA ships a neutral default theme
+  (`index.html`) and applies the tenant's colors, copy, logo, favicon and hero image from
+  the public `GET /tenant` payload at load. Tenants live in a DynamoDB registry managed
+  from the operator portal (`/platform`) — see
+  [ADR 0006](0006-platform-operator-and-tenant-registry.md). (ADR 0002's edge-resolved
+  branding was never built.)
 - **The API is a thin, tenant-scoped CRUD layer.** All dashboards, leaderboards, travel-cost,
   round-robin scheduling, and CQI scoring are computed in the browser from the full per-tenant
   `clubs[]`/`series[]` payloads. See [ADR 0004](0004-thin-crud-client-side-compute.md).
 - **Region:** everything runs in `af-south-1` (Cape Town) for South African data residency
-  (POPIA). CloudFront is the only global component (static assets + the branding function).
+  (POPIA). CloudFront is the only global component (static assets).
 
 ## Decision records
 
@@ -63,5 +64,6 @@ flowchart TB
 | [0003](0003-cognito-passwordless-memberships.md)      | Cognito passwordless OTP + `memberships[]` claim       |
 | [0004](0004-thin-crud-client-side-compute.md)         | Thin CRUD API, computation stays client-side           |
 | [0005](0005-frozen-catalogues-v1.md)                  | Districts/leagues/CQI frozen shared defaults in v1     |
+| [0006](0006-platform-operator-and-tenant-registry.md) | Platform operator role, tenant registry, `/platform`   |
 
 For the data layout and access patterns, see [data-model.md](data-model.md).

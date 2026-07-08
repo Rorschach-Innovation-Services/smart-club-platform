@@ -15,6 +15,9 @@ export default defineConfig({
     // skips upload — the build still succeeds (e.g. plain local `npm run build`).
     sentryVitePlugin({
       org: 'medicoach-ap',
+      // 'dolphins-web' is the platform-wide Sentry project for ALL tenants (legacy
+      // name; member tokens can't create projects). Tenant is an event tag, not a
+      // per-tenant project.
       project: 'dolphins-web',
       url: 'https://de.sentry.io/', // EU region — keep ingest in the EU
       release: { name: process.env.VITE_SENTRY_RELEASE },

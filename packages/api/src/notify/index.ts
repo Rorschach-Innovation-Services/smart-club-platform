@@ -7,7 +7,7 @@
  */
 import type { Club, Channel, SendResult, PlayerRegistration } from '../types.js';
 import { sendStaffInviteEmail, sendFixturesEmail, sendRegLinkEmail } from './email.js';
-import type { TutorialLink } from './email.js';
+import type { TutorialLink, RegLinkOrgCopy } from './email.js';
 import {
   sendStaffInviteWhatsApp,
   sendFixturesWhatsApp,
@@ -139,6 +139,7 @@ async function sendOnboardingEmail(
   season: string,
   regLink: string,
   tutorials: OnboardingTutorials,
+  org: RegLinkOrgCopy,
 ): Promise<SendResult> {
   if (!EMAIL_RE.test(chair.email)) {
     return {
@@ -155,6 +156,7 @@ async function sendOnboardingEmail(
       clubName,
       season,
       link: regLink,
+      org,
       tutorials,
     });
     return { channel: 'email', status: 'sent', to: chair.email, messageId };
@@ -207,8 +209,10 @@ export async function sendChairOnboarding(args: {
   regLink: string;
   tutorials: OnboardingTutorials;
   season: string;
+  /** Tenant org copy for the email body (see orgCopy in branding.ts). */
+  org: RegLinkOrgCopy;
 }): Promise<{ results: SendResult[] }> {
-  const { chair, clubName, channels, regLink, tutorials, season } = args;
+  const { chair, clubName, channels, regLink, tutorials, season, org } = args;
   const contact: ChairContact = {
     name: (chair.name ?? '').trim(),
     email: (chair.email ?? '').trim(),
@@ -217,7 +221,7 @@ export async function sendChairOnboarding(args: {
   const results = await Promise.all(
     channels.map((channel) =>
       channel === 'email'
-        ? sendOnboardingEmail(contact, clubName, season, regLink, tutorials)
+        ? sendOnboardingEmail(contact, clubName, season, regLink, tutorials, org)
         : sendOnboardingWhatsApp(contact, clubName, regLink, tutorials.pageUrl),
     ),
   );

@@ -3,22 +3,28 @@
 ## `GET /tenant` — branding (public)
 
 Resolves the tenant from the host (prod) or `x-tenant` / `?tenant=` (dev) and returns the
-**public** subset of config: branding (name, title, logo, color tokens, copy) and the
-submission deadline. `knownClubs` and `requiredDocs` are not exposed here.
+**public** subset of config: branding (name, title, logo, favicon, color tokens, copy
+slots), the submission deadline, the league catalogue, the tutorial videos, and the
+per-tenant feature flags. `knownClubs` and `requiredDocs` are not exposed here.
 
 ```
-200 → { tenant, branding, submissionDeadline }
+200 → { tenant, branding, submissionDeadline, leagues, tutorials, features }
 400 → unknown tenant
 404 → tenant not found
 ```
 
-Used at first paint for theming (resolved at the CloudFront edge in prod — see
-[ADR 0002](../architecture/0002-single-tenant-saas-vs-isolated-stacks.md)).
+Used at first paint for theming: the SPA ships a neutral default theme and applies
+`branding` (colors, copy, favicon, `--hero-image`) at runtime — see
+[ADR 0006](../architecture/0006-platform-operator-and-tenant-registry.md). `features` is a
+boolean map read via `useFeature`/`hasFeature`, so each flag carries its own default and an
+empty map means "all defaults".
 
 ## `PUT /tenant/config` — update config (admin)
 
 Body: partial `TenantConfig` (branding, `submissionDeadline`, `knownClubs`,
-`requiredDocs`). Merged over the current config. `200 → TenantConfig`.
+`requiredDocs`). Merged over the current config. `200 → TenantConfig`. The same
+strip-and-merge core backs the operator's `PUT /platform/tenants/:slug`
+([ADR 0006](../architecture/0006-platform-operator-and-tenant-registry.md)).
 
 > `clubSignupLink` is stripped from patches — it is managed only via
 > `/admin/club-signup-link` ([signup.md](signup.md)) so a concurrent Settings save can't

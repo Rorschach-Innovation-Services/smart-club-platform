@@ -1,6 +1,15 @@
 /** Domain types shared across the API. Mirrors the frontend's data shapes. */
 
-export type Role = 'admin' | 'rep';
+export type Role = 'admin' | 'rep' | 'operator';
+
+/**
+ * Sentinel tenantId for the PLATFORM membership `{tenantId: '*', role: 'operator'}`.
+ * It can never collide with tenant access: resolveTenant never yields '*',
+ * requireTenantMembership matches an exact tenantId, and the repo layer skips
+ * TENANT# markers for it (see reconcileUserMarkers) so an operator is never
+ * listable inside any tenant's roster.
+ */
+export const PLATFORM_TENANT = '*';
 
 export interface Membership {
   tenantId: string;
@@ -78,6 +87,29 @@ export interface TutorialVideo {
   poster?: string;
 }
 
+/**
+ * Named org-copy slots on `branding.copy`. All optional — resolution falls back
+ * through `orgCopy()` (branding.ts), so a tenant row never needs every slot. Kept
+ * as a string map on disk (`BrandingCopy & Record<string, string>`) so ad-hoc
+ * slots survive round-trips without a shape migration.
+ */
+export interface BrandingCopy {
+  welcome?: string;
+  eyebrow?: string;
+  office?: string;
+  admin?: string;
+  support?: string;
+  footer?: string;
+  /** Short org handle for compound copy, e.g. "Dolphins" → "Dolphins office". */
+  orgShort?: string;
+  /** Full cohort label, e.g. "Dolphins Pipeline cohort". */
+  cohortName?: string;
+  heroTitle?: string;
+  heroBlurb?: string;
+  /** Breadcrumb root, e.g. "Dolphins" in "Dolphins · Admin Console / …". */
+  crumbRoot?: string;
+}
+
 export interface TenantConfig {
   tenant: string;
   branding: {
@@ -85,10 +117,12 @@ export interface TenantConfig {
     /** Human title for <title> and headers, e.g. "Dolphins Pipeline". */
     title: string;
     logoUrl: string;
+    /** Browser-tab icon; absent ⇒ the frontend falls back to logoUrl. */
+    faviconUrl?: string;
     /** CSS color tokens injected at the edge, e.g. { '--navy': '#1B2A4A' }. */
     colors: Record<string, string>;
-    /** Org copy strings keyed by slot (welcome, eyebrow, office, footer, support). */
-    copy: Record<string, string>;
+    /** Org copy strings keyed by slot — named slots typed, extras allowed. */
+    copy: BrandingCopy & Record<string, string>;
   };
   submissionDeadline: string;
   knownClubs: unknown[];
@@ -116,6 +150,13 @@ export interface TenantConfig {
    * DEFAULT_TUTORIALS fallback is used (so existing rows need no migration).
    */
   tutorials?: TutorialVideo[];
+  /**
+   * Per-tenant feature flags, read via hasFeature() (features.ts) so each flag
+   * carries its own default. Known flags: 'whatsappInvites' (default TRUE —
+   * shared WABA templates are dolphins-flavored, so new clients launch
+   * email-only), 'selfServeBranding' (reserved, default false).
+   */
+  features?: Record<string, boolean>;
 }
 
 /** Stored club record. Catalogue-derived fields stay client-side. */

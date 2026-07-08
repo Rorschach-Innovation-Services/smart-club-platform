@@ -13,7 +13,11 @@ tenant-scoped CRUD (see [ADR 0004](../architecture/0004-thin-crud-client-side-co
 - **Tenant resolution:** the request tenant comes from the host (prod custom domains) or an
   `x-tenant` header (dev). The caller must have a membership for that tenant or the request
   is `403`. This is the tenant-isolation boundary.
-- **Roles:** `admin` (whole tenant) or `rep` (only their `clubIds`).
+- **Roles:** `admin` (whole tenant) or `rep` (only their `clubIds`). A third role,
+  `operator`, gates the cross-tenant `/platform/*` routes (tenant registry, branding,
+  flags, first admins) via the platform membership `{tenantId: '*'}` — see
+  [ADR 0006](../architecture/0006-platform-operator-and-tenant-registry.md). Those routes
+  are tenant-independent (`:slug` in the path, not the host) and outside the matrix below.
 - **Concurrency:** club and series writes use optimistic concurrency on a `version` field.
   A stale write returns **`409`** with `{ "error": "… changed; refetch" }`; the client should
   refetch and retry.

@@ -237,6 +237,17 @@ function DevLogin({ auth, branding }) {
 
   function go(e) {
     e.preventDefault();
+    if (role === 'operator') {
+      // Platform operator is tenant-INDEPENDENT: the identity carries only the
+      // '*' platform membership (and no tenant field), mirroring the cloud token
+      // minted by bootstrap-operator. /platform/* never reads x-tenant.
+      auth.devSignIn({
+        sub: 'dev-operator',
+        email: 'operator@platform.local',
+        memberships: [{ tenantId: '*', role: 'operator', clubIds: [] }],
+      });
+      return;
+    }
     const ids = clubIds
       .split(',')
       .map((s) => s.trim())
@@ -273,6 +284,7 @@ function DevLogin({ auth, branding }) {
             >
               <option value="admin">Administrator — whole {tenant} union</option>
               <option value="rep">Club rep — specific club(s)</option>
+              <option value="operator">Platform operator — all tenants</option>
             </select>
           </label>
           {role === 'rep' && (
