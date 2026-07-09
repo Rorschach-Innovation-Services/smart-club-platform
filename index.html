@@ -28,16 +28,27 @@
     --paper2:#EEEFF1;
     --paper3:#DCDEE2;
 
-    /* Slate — the neutral accent family (token names kept from the original
-       green scale; tenants supply their own values via branding.colors) */
-    --green:#26303B;             /* deepest slate */
-    --green-mid:#45586B;          /* mid */
-    --green-bright:#7189A0;       /* highlight */
-    --green-pale:#EBEEF2;         /* tint */
+    /* ── Semantic brand roles (the two-layer token model) ──
+       Tenants set THESE via branding.colors (applyTheme, src/config.ts). The
+       value-named primitives below ALIAS them, so the 2,800+ CSS lines that
+       reference --green etc. re-colour automatically when a role changes. Values
+       here are the brandless neutral first-paint defaults. See src/platform-theme.ts. */
+    --brand-primary:#26303B;         /* primary · deep */
+    --brand-primary-mid:#45586B;     /* primary · mid */
+    --brand-primary-bright:#7189A0;  /* primary · bright */
+    --brand-primary-tint:#EBEEF2;    /* primary · tint */
+    --brand-neutral:#E3E0D8;         /* warm neutral (soft stone) */
+    --brand-accent:#9A8F7A;          /* warm accent (muted brass) */
+    --brand-font:'Montserrat',sans-serif; /* tenant typeface */
 
-    /* Warm accents — used very sparingly (eyebrow / badge moments) */
-    --cream:#E3E0D8;              /* soft stone */
-    --gold-warm:#9A8F7A;          /* muted brass */
+    /* Primitive layer — aliases of the roles above. Names kept (the CSS contract);
+       only the indirection is new, so tenant role edits flow through here. */
+    --green:var(--brand-primary);
+    --green-mid:var(--brand-primary-mid);
+    --green-bright:var(--brand-primary-bright);
+    --green-pale:var(--brand-primary-tint);
+    --cream:var(--brand-neutral);
+    --gold-warm:var(--brand-accent);
 
     /* Hero/backdrop imagery — neutral gradient until the tenant's branding.colors
        supplies a real image (e.g. url('/venues/….jpg')) at runtime. */
@@ -73,7 +84,7 @@
     --radius-lg:14px;
   }
   html{font-size:14px;color:var(--ink);background:var(--paper)}
-  body{font-family:'Montserrat',sans-serif;line-height:1.5;min-height:100vh}
+  body{font-family:var(--brand-font);line-height:1.5;min-height:100vh}
   button,input,select,textarea{font-family:inherit;outline:none}
   button{cursor:pointer;border:none;background:none}
   input,select,textarea{color:inherit}

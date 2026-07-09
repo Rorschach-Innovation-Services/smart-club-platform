@@ -21,17 +21,17 @@ interface Snapshot {
 }
 
 // Shared color palette (Dolphins and Lions use the same green theme today).
-// The full token family the app CSS keys off (mirrors the dolphins values that
-// lived in index.html:13-67 before the neutral-default sweep). Legacy alias
-// tokens (--navy/--teal/--gold/--coral) are NOT seeded — index.html routes them
-// through this family, so overriding only the family keeps the aliases coherent.
+// Keyed by the semantic ROLE tokens (see src/platform-theme.ts); the value-named
+// primitives (--green/--cream…) and legacy aliases (--navy/--teal/--gold/--coral)
+// route through these roles in index.html, so setting only the roles re-colours the
+// whole app coherently. applyTheme also maps any stored legacy key onto its role.
 const COLORS = {
-  '--green': '#0E3529',
-  '--green-mid': '#215F47',
-  '--green-bright': '#4B8A6C',
-  '--green-pale': '#E8F0EB',
-  '--cream': '#E7DDC6',
-  '--gold-warm': '#B89B4A',
+  '--brand-primary': '#0E3529',
+  '--brand-primary-mid': '#215F47',
+  '--brand-primary-bright': '#4B8A6C',
+  '--brand-primary-tint': '#E8F0EB',
+  '--brand-neutral': '#E7DDC6',
+  '--brand-accent': '#B89B4A',
 };
 
 export const BRANDING: Record<string, TenantConfig['branding']> = {
@@ -94,6 +94,7 @@ export interface TenantBrandingInput {
   logoUrl?: string;
   faviconUrl?: string;
   colors?: Record<string, string>;
+  font?: { family: string; url?: string };
   copy?: Record<string, string>;
 }
 
@@ -119,6 +120,7 @@ export function buildTenantConfig(
       logoUrl: branding.logoUrl ?? '',
       ...(branding.faviconUrl ? { faviconUrl: branding.faviconUrl } : {}),
       colors: { ...COLORS, ...(branding.colors ?? {}) },
+      ...(branding.font ? { font: branding.font } : {}),
       copy: { footer: 'Powered by Medicoach', ...(branding.copy ?? {}) },
     },
     submissionDeadline,

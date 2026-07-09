@@ -18,6 +18,21 @@ import { ApiError, EMAIL_RE } from './api';
 import { resolveCopy } from './branding';
 import { Icon, Pill, Btn, EmptyState, useToast } from './atoms';
 import type { TenantConfig, TenantSummary, BrandingCopy } from './types';
+import {
+  BRAND_ROLES,
+  HERO_TOKEN,
+  CANONICAL_ROLE_TOKENS,
+  THEME_PRESETS,
+  DEFAULT_BRAND_COLORS,
+  LEGACY_TO_ROLE,
+  isValidHex,
+  hex6,
+  onColor,
+  contrastRatio,
+  deriveScale,
+  defaultHeroGradient,
+  fontStack,
+} from './platform-theme';
 
 /* ─── Contract mirrors (keep in sync with the API) ─── */
 
@@ -35,17 +50,6 @@ function slugProblem(slug: string): string | null {
 // Mirrors LOGO_CONTENT_TYPES / MAX_LOGO_BYTES on POST …/logo-upload.
 const LOGO_TYPES = ['image/png', 'image/svg+xml', 'image/webp'];
 const MAX_LOGO_BYTES = 1024 * 1024;
-
-/** Canonical theme tokens (the index.html default theme's custom properties). */
-const CANONICAL_COLOR_TOKENS = [
-  '--green',
-  '--green-mid',
-  '--green-bright',
-  '--green-pale',
-  '--cream',
-  '--gold-warm',
-  '--hero-image',
-];
 
 /** The org-copy slots resolveCopy (src/branding.ts) falls back over. */
 const COPY_SLOTS: { key: keyof BrandingCopy & string; label: string; hint?: string }[] = [
@@ -558,7 +562,7 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           saveBranding={saveBranding}
           toast={toast}
         />
-        <ColorsCard
+        <BrandCard
           key={`cl-${config.tenant}`}
           config={config}
           saveBranding={saveBranding}
@@ -1024,7 +1028,508 @@ function CopyCard({
   );
 }
 
-function ColorsCard({
+/* ─── Brand & theme editor ─── */
+
+/** Editing state for the brand: role/extra colour tokens + the optional typeface. */
+interface BrandDraft {
+  colors: Record<string, string>;
+  font: { family: string; url: string };
+}
+
+/** Rewrite any legacy value-named key (--green…) to its semantic role, so the draft is role-keyed. */
+function normalizeColors(colors: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(colors)) out[LEGACY_TO_ROLE[k] ?? k] = v;
+  return out;
+}
+
+/** Drop blank values — a blank token falls back to the app default at runtime. */
+function pruneColors(colors: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(colors)) if (String(v).trim()) out[k] = String(v).trim();
+  return out;
+}
+
+/** Order-independent map compare — the dirty check must not flip on key order alone. */
+function sameMap(a: Record<string, string>, b: Record<string, string>): boolean {
+  const ak = Object.keys(a);
+  if (ak.length !== Object.keys(b).length) return false;
+  return ak.every((k) => a[k] === b[k]);
+}
+
+function brandingToDraft(b?: TenantConfig['branding']): BrandDraft {
+  return {
+    colors: normalizeColors(b?.colors ?? {}),
+    font: { family: b?.font?.family ?? '', url: b?.font?.url ?? '' },
+  };
+}
+
+/** The persisted font shape (undefined when no family set — clears any stored font). */
+function draftFontOut(font: BrandDraft['font']): { family: string; url?: string } | undefined {
+  const family = font.family.trim();
+  if (!family) return undefined;
+  const url = font.url.trim();
+  return url ? { family, url } : { family };
+}
+
+function sameFont(
+  a?: { family?: string; url?: string },
+  b?: { family?: string; url?: string },
+): boolean {
+  return (a?.family ?? '') === (b?.family ?? '') && (a?.url ?? '') === (b?.url ?? '');
+}
+
+/** A native colour picker styled as a swatch (the pragmatic, universally-understood control). */
+function SwatchInput({
+  value,
+  onChange,
+  title,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  title?: string;
+}) {
+  return (
+    <label
+      title={title}
+      style={{
+        position: 'relative',
+        width: 34,
+        height: 34,
+        flexShrink: 0,
+        borderRadius: 8,
+        border: '1px solid var(--line)',
+        background: isValidHex(value) ? value : 'var(--paper2)',
+        cursor: 'pointer',
+        display: 'inline-block',
+      }}
+    >
+      <input
+        type="color"
+        value={hex6(value)}
+        onChange={(e) => onChange(e.target.value.toUpperCase())}
+        style={{
+          position: 'absolute',
+          inset: 0,
+          width: '100%',
+          height: '100%',
+          opacity: 0,
+          cursor: 'pointer',
+          border: 'none',
+          padding: 0,
+          background: 'none',
+        }}
+      />
+    </label>
+  );
+}
+
+/** One brand-colour role: swatch picker + label + synced hex field + inline validation. */
+function ColorRow({
+  role,
+  value,
+  onChange,
+}: {
+  role: (typeof BRAND_ROLES)[number];
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const invalid = !!value.trim() && !isValidHex(value);
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+      <SwatchInput value={value} onChange={onChange} title={role.label} />
+      <div style={{ width: 118, flexShrink: 0 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600 }}>{role.label}</div>
+        <div style={{ ...MONO, fontSize: 10.5, color: 'var(--muted-2)' }}>{role.token}</div>
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <input
+          className="field-input"
+          style={{ ...MONO, width: '100%', ...(invalid ? { borderColor: 'var(--coral)' } : {}) }}
+          value={value}
+          spellCheck={false}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="#0B3D2E"
+        />
+        <div
+          style={{
+            fontSize: 10.5,
+            color: invalid ? 'var(--coral)' : 'var(--muted-2)',
+            marginTop: 3,
+          }}
+        >
+          {invalid ? 'Enter a hex colour, e.g. #0B3D2E' : role.hint}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The reusable brand-editing surface — presets, generate-from-one-colour, per-role
+ * pickers, typeface, hero backdrop and a live scoped preview. Controlled: the parent
+ * (BrandCard on the detail page, the create wizard) owns the draft. showAdvanced adds
+ * the raw-token escape hatch for arbitrary/legacy tokens (detail page only).
+ */
+function BrandFields({
+  value,
+  onChange,
+  showAdvanced = false,
+}: {
+  value: BrandDraft;
+  onChange: (d: BrandDraft) => void;
+  showAdvanced?: boolean;
+}) {
+  const { colors, font } = value;
+  const [base, setBase] = useState(() =>
+    isValidHex(colors['--brand-primary']) ? colors['--brand-primary'] : '#0E3529',
+  );
+  const [newToken, setNewToken] = useState('');
+  const [newValue, setNewValue] = useState('');
+  const [advErr, setAdvErr] = useState('');
+
+  const setColors = (patch: Record<string, string>) =>
+    onChange({ ...value, colors: { ...colors, ...patch } });
+  const setColor = (token: string, v: string) => setColors({ [token]: v });
+  const setFont = (patch: Partial<BrandDraft['font']>) =>
+    onChange({ ...value, font: { ...font, ...patch } });
+  const removeToken = (t: string) => {
+    const next = { ...colors };
+    delete next[t];
+    onChange({ ...value, colors: next });
+  };
+
+  const extraTokens = Object.keys(colors).filter((t) => !CANONICAL_ROLE_TOKENS.includes(t));
+  const hero = colors[HERO_TOKEN] ?? '';
+  const primary = colors['--brand-primary'] ?? '';
+  const lightPrimary = isValidHex(primary) && contrastRatio(primary, '#FFFFFF') < 4.5;
+
+  // Scoped preview: the draft roles are set as CSS vars on this wrapper only — never
+  // on :root — so the mock reflects edits without fighting applyTheme.
+  const previewVars: Record<string, string> = { fontFamily: fontStack(font.family) };
+  for (const r of BRAND_ROLES)
+    if (isValidHex(colors[r.token])) previewVars[r.token] = colors[r.token];
+  previewVars['--brand-on-primary'] = isValidHex(primary) ? onColor(primary) : '#FFFFFF';
+  previewVars[HERO_TOKEN] = hero || defaultHeroGradient(colors);
+
+  function addToken() {
+    const t = newToken.trim();
+    setAdvErr('');
+    if (!/^--[a-z][a-z0-9-]*$/i.test(t)) {
+      setAdvErr('Tokens are CSS custom properties, e.g. --brand-primary');
+      return;
+    }
+    if (t in colors) {
+      setAdvErr(`${t} is already listed`);
+      return;
+    }
+    setColors({ [t]: newValue.trim() });
+    setNewToken('');
+    setNewValue('');
+  }
+
+  return (
+    <div>
+      <div className="field-label">Starter palettes</div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '6px 0 16px' }}>
+        {THEME_PRESETS.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            onClick={() => onChange({ ...value, colors: { ...colors, ...p.colors } })}
+            title={`Use the ${p.label} palette`}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '5px 12px 5px 6px',
+              borderRadius: 999,
+              border: '1px solid var(--line)',
+              background: 'var(--white)',
+              fontSize: 11.5,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            <span
+              style={{
+                display: 'flex',
+                borderRadius: 999,
+                overflow: 'hidden',
+                border: '1px solid var(--line)',
+              }}
+            >
+              {['--brand-primary', '--brand-primary-bright', '--brand-accent'].map((t) => (
+                <span key={t} style={{ width: 13, height: 13, background: p.colors[t] }} />
+              ))}
+            </span>
+            {p.label}
+          </button>
+        ))}
+      </div>
+
+      <Field
+        label="Base brand colour"
+        hint="Pick one colour, then Generate to derive the primary scale (deep → tint). Fine-tune any role below."
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <SwatchInput value={base} onChange={setBase} title="Base brand colour" />
+          <input
+            className="field-input"
+            style={{ ...MONO, flex: 1, minWidth: 0 }}
+            value={base}
+            spellCheck={false}
+            onChange={(e) => setBase(e.target.value)}
+            placeholder="#0E3529"
+          />
+          <Btn
+            tone="teal"
+            size="sm"
+            onClick={() => onChange({ ...value, colors: { ...colors, ...deriveScale(base) } })}
+            disabled={!isValidHex(base)}
+          >
+            Generate
+          </Btn>
+        </div>
+      </Field>
+
+      <div className="field-label" style={{ marginTop: 4 }}>
+        Colour roles
+      </div>
+      <div style={{ margin: '8px 0 2px' }}>
+        {BRAND_ROLES.map((r) => (
+          <ColorRow
+            key={r.token}
+            role={r}
+            value={colors[r.token] ?? ''}
+            onChange={(v) => setColor(r.token, v)}
+          />
+        ))}
+      </div>
+      {lightPrimary && (
+        <div style={{ fontSize: 11.5, color: 'var(--muted)', margin: '0 0 12px', lineHeight: 1.5 }}>
+          Light primary — white text on primary buttons may read as low-contrast.
+        </div>
+      )}
+
+      <Field
+        label="Typeface"
+        hint="Optional. A font-family name; add a web-font stylesheet URL if it isn't a system font."
+      >
+        <input
+          className="field-input"
+          placeholder="Montserrat"
+          value={font.family}
+          onChange={(e) => setFont({ family: e.target.value })}
+        />
+        <input
+          className="field-input"
+          style={{ ...MONO, fontSize: 11.5, marginTop: 8 }}
+          placeholder="https://fonts.googleapis.com/css2?family=…&display=swap"
+          value={font.url}
+          spellCheck={false}
+          onChange={(e) => setFont({ url: e.target.value })}
+        />
+      </Field>
+
+      <Field
+        label="Hero backdrop"
+        hint="A url('…') image or any CSS background. Blank uses a gradient built from your primary."
+      >
+        <input
+          className="field-input"
+          style={{ ...MONO, fontSize: 11.5 }}
+          placeholder="url('/venues/ground.jpg')"
+          value={hero}
+          spellCheck={false}
+          onChange={(e) => setColor(HERO_TOKEN, e.target.value)}
+        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+          <span
+            style={{
+              width: 66,
+              height: 38,
+              borderRadius: 8,
+              flexShrink: 0,
+              border: '1px solid var(--line)',
+              backgroundImage: hero || defaultHeroGradient(colors),
+              backgroundSize: 'cover',
+              backgroundPosition: 'center',
+            }}
+          />
+          <Btn
+            tone="outline"
+            size="sm"
+            onClick={() => setColor(HERO_TOKEN, defaultHeroGradient(colors))}
+          >
+            Use generated gradient
+          </Btn>
+          {hero && (
+            <Btn tone="ghost" size="sm" onClick={() => removeToken(HERO_TOKEN)}>
+              Clear
+            </Btn>
+          )}
+        </div>
+      </Field>
+
+      <div className="field-label" style={{ marginTop: 4 }}>
+        Preview
+      </div>
+      <div
+        style={{
+          ...(previewVars as CSSProperties),
+          marginTop: 8,
+          borderRadius: 12,
+          overflow: 'hidden',
+          border: '1px solid var(--line)',
+        }}
+      >
+        <div
+          style={{
+            backgroundImage: 'var(--hero-image)',
+            backgroundSize: 'cover',
+            backgroundPosition: 'center',
+            padding: '20px 16px',
+            color: '#fff',
+          }}
+        >
+          <div
+            style={{
+              fontSize: 10.5,
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              opacity: 0.85,
+            }}
+          >
+            Your union · 2026 / 27
+          </div>
+          <div style={{ fontSize: 17, fontWeight: 800, marginTop: 4 }}>
+            From your club to the top.
+          </div>
+        </div>
+        <div style={{ background: 'var(--white)', padding: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span
+              style={{
+                padding: '7px 14px',
+                borderRadius: 8,
+                background: 'var(--brand-primary)',
+                color: 'var(--brand-on-primary)',
+                fontSize: 12,
+                fontWeight: 700,
+              }}
+            >
+              Primary action
+            </span>
+            <span style={{ color: 'var(--brand-primary-bright)', fontSize: 12.5, fontWeight: 700 }}>
+              A link
+            </span>
+            <span
+              style={{
+                padding: '5px 10px',
+                borderRadius: 999,
+                background: 'var(--brand-primary-tint)',
+                color: 'var(--brand-primary)',
+                fontSize: 11,
+                fontWeight: 700,
+              }}
+            >
+              Badge
+            </span>
+            <span
+              style={{
+                padding: '5px 10px',
+                borderRadius: 999,
+                background: 'var(--brand-accent)',
+                color: '#fff',
+                fontSize: 11,
+                fontWeight: 700,
+              }}
+            >
+              Accent
+            </span>
+          </div>
+          <p style={{ margin: '10px 0 0', fontSize: 12, color: 'var(--muted)' }}>
+            Sample body text rendered in the tenant typeface.
+          </p>
+        </div>
+      </div>
+
+      {showAdvanced && (
+        <details style={{ marginTop: 14 }}>
+          <summary
+            style={{ fontSize: 12, fontWeight: 600, color: 'var(--muted)', cursor: 'pointer' }}
+          >
+            Advanced — raw tokens{extraTokens.length ? ` (${extraTokens.length})` : ''}
+          </summary>
+          <div style={{ marginTop: 10 }}>
+            {extraTokens.map((t) => (
+              <div
+                key={t}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}
+              >
+                <span
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: 5,
+                    flexShrink: 0,
+                    border: '1px solid var(--line)',
+                    background: colors[t] || 'transparent',
+                  }}
+                />
+                <span style={{ ...MONO, width: 116, flexShrink: 0, color: 'var(--muted)' }}>
+                  {t}
+                </span>
+                <input
+                  className="field-input"
+                  style={{ ...MONO, flex: 1, minWidth: 0 }}
+                  value={colors[t] ?? ''}
+                  spellCheck={false}
+                  onChange={(e) => setColor(t, e.target.value)}
+                />
+                <Btn tone="ghost" size="sm" onClick={() => removeToken(t)}>
+                  Remove
+                </Btn>
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <input
+                className="field-input"
+                style={{ ...MONO, width: 116, flexShrink: 0 }}
+                placeholder="--token"
+                value={newToken}
+                onChange={(e) => setNewToken(e.target.value)}
+              />
+              <input
+                className="field-input"
+                style={{ ...MONO, flex: 1, minWidth: 0 }}
+                placeholder="#0B3D2E"
+                value={newValue}
+                spellCheck={false}
+                onChange={(e) => setNewValue(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addToken())}
+              />
+              <Btn
+                tone="outline"
+                size="sm"
+                icon={Icon.Plus}
+                onClick={addToken}
+                disabled={!newToken.trim()}
+              >
+                Add
+              </Btn>
+            </div>
+            {advErr && <div style={ERR}>{advErr}</div>}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/** The client detail-page brand editor — wraps BrandFields with draft state + save. */
+function BrandCard({
   config,
   saveBranding,
   toast,
@@ -1033,45 +1538,25 @@ function ColorsCard({
   saveBranding: BrandingSaver;
   toast: Toast;
 }) {
-  const [draft, setDraft] = useState<Record<string, string>>({
-    ...(config.branding?.colors ?? {}),
-  });
-  const [newToken, setNewToken] = useState('');
-  const [newValue, setNewValue] = useState('');
-  const [err, setErr] = useState('');
+  const [draft, setDraft] = useState<BrandDraft>(() => brandingToDraft(config.branding));
   const [busy, setBusy] = useState(false);
-  const extraTokens = Object.keys(draft).filter((t) => !CANONICAL_COLOR_TOKENS.includes(t));
-  const savedColors = config.branding?.colors ?? {};
-  const pruned = () => {
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(draft)) if (v.trim()) out[k] = v.trim();
-    return out;
-  };
-  const dirty = JSON.stringify(pruned()) !== JSON.stringify(savedColors);
+  const [err, setErr] = useState('');
 
-  function addToken() {
-    const t = newToken.trim();
-    setErr('');
-    if (!/^--[a-z][a-z0-9-]*$/i.test(t)) {
-      setErr('Tokens are CSS custom properties, e.g. --navy');
-      return;
-    }
-    if (t in draft) {
-      setErr(`${t} is already listed`);
-      return;
-    }
-    setDraft({ ...draft, [t]: newValue.trim() });
-    setNewToken('');
-    setNewValue('');
-  }
+  const savedColors = pruneColors(normalizeColors(config.branding?.colors ?? {}));
+  const prunedColors = pruneColors(draft.colors);
+  const fontOut = draftFontOut(draft.font);
+  const invalid = BRAND_ROLES.some(
+    (r) => !!draft.colors[r.token]?.trim() && !isValidHex(draft.colors[r.token]),
+  );
+  const dirty = !sameMap(prunedColors, savedColors) || !sameFont(fontOut, config.branding?.font);
 
   async function saveIt() {
     setErr('');
     setBusy(true);
     try {
-      // Blank values are dropped — the app's default theme token applies.
-      await saveBranding({ colors: pruned() });
-      toast('Theme tokens saved');
+      // Blank tokens are dropped (app default applies); font undefined clears any stored font.
+      await saveBranding({ colors: prunedColors, font: fontOut });
+      toast('Branding saved');
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Could not save — try again');
     } finally {
@@ -1079,81 +1564,16 @@ function ColorsCard({
     }
   }
 
-  const swatch = (v: string): CSSProperties => ({
-    width: 20,
-    height: 20,
-    borderRadius: 5,
-    flexShrink: 0,
-    border: '1px solid var(--line)',
-    // Shorthand only (no backgroundSize — React warns on mixing): tokens may be
-    // any CSS background value, including the --hero-image url(…).
-    background: v || 'transparent',
-  });
-
-  const tokenRow = (token: string, removable: boolean) => (
-    <div key={token} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-      <span style={swatch(draft[token] ?? '')} />
-      <span style={{ ...MONO, width: 128, flexShrink: 0, color: 'var(--muted)' }}>{token}</span>
-      <input
-        className="field-input"
-        style={{ ...MONO, flex: 1 }}
-        value={draft[token] ?? ''}
-        onChange={(e) => setDraft({ ...draft, [token]: e.target.value })}
-        placeholder="app default"
-      />
-      {removable && (
-        <Btn
-          tone="ghost"
-          size="sm"
-          onClick={() => {
-            const next = { ...draft };
-            delete next[token];
-            setDraft(next);
-          }}
-        >
-          Remove
-        </Btn>
-      )}
-    </div>
-  );
-
   return (
     <Panel
-      title="Theme tokens"
-      sub="CSS custom properties injected at runtime — blank means the app default. --hero-image takes a url(…)."
+      title="Brand & theme"
+      sub="Colours, typeface and hero backdrop, injected at runtime. Blank colours fall back to the app default; edits preview live below."
     >
-      {CANONICAL_COLOR_TOKENS.map((t) => tokenRow(t, false))}
-      {extraTokens.map((t) => tokenRow(t, true))}
-      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-        <input
-          className="field-input"
-          style={{ ...MONO, width: 128, flexShrink: 0 }}
-          placeholder="--token"
-          value={newToken}
-          onChange={(e) => setNewToken(e.target.value)}
-        />
-        <input
-          className="field-input"
-          style={{ ...MONO, flex: 1 }}
-          placeholder="#0B3D2E"
-          value={newValue}
-          onChange={(e) => setNewValue(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addToken())}
-        />
-        <Btn
-          tone="outline"
-          size="sm"
-          icon={Icon.Plus}
-          onClick={addToken}
-          disabled={!newToken.trim()}
-        >
-          Add
-        </Btn>
-      </div>
+      <BrandFields value={draft} onChange={setDraft} showAdvanced />
       {err && <div style={ERR}>{err}</div>}
       <div style={{ marginTop: 14 }}>
-        <Btn tone="teal" size="sm" onClick={saveIt} disabled={!dirty || busy}>
-          {busy ? 'Saving…' : 'Save tokens'}
+        <Btn tone="teal" size="sm" onClick={saveIt} disabled={!dirty || busy || invalid}>
+          {busy ? 'Saving…' : 'Save branding'}
         </Btn>
       </div>
     </Panel>
@@ -1338,11 +1758,25 @@ function DnsPanel({ slug }: { slug: string }) {
 
 /* ─── Create-client wizard ─── */
 
-const WIZARD_STEPS = ['Slug', 'Identity', 'Logo', 'Deadline', 'First admin'];
+// Named step indices — the wizard hops these by name, not by fragile integer literals.
+const STEP = {
+  Slug: 0,
+  Identity: 1,
+  Logo: 2,
+  Brand: 3,
+  Deadline: 4,
+  Admin: 5,
+  Done: 6,
+} as const;
+const WIZARD_STEPS = ['Slug', 'Identity', 'Logo', 'Brand', 'Deadline', 'First admin'];
 
 function CreateTenantWizard({ toast }: { toast: Toast }) {
   const navigate = useNavigate();
-  const [step, setStep] = useState(0); // 0..4 form steps, 5 = done
+  const [step, setStep] = useState<number>(STEP.Slug);
+  const [brand, setBrand] = useState<BrandDraft>(() => ({
+    colors: { ...DEFAULT_BRAND_COLORS },
+    font: { family: '', url: '' },
+  }));
   const [slug, setSlug] = useState('');
   const [slugErr, setSlugErr] = useState('');
   const [name, setName] = useState('');
@@ -1379,7 +1813,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
     setSlugErr(problem ?? '');
     if (problem) return;
     setSlug(s);
-    setStep(1);
+    setStep(STEP.Identity);
   }
   function nextFromName() {
     if (!name.trim()) {
@@ -1387,7 +1821,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
       return;
     }
     setNameErr('');
-    setStep(2);
+    setStep(STEP.Logo);
   }
   function pickLogo(file: File | undefined) {
     setLogoErr('');
@@ -1424,9 +1858,15 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
     }
     setCreating(true);
     try {
+      const brandFont = draftFontOut(brand.font);
       const cfg = await api.platformCreateTenant({
         slug,
-        branding: { name: name.trim(), ...(title.trim() ? { title: title.trim() } : {}) },
+        branding: {
+          name: name.trim(),
+          ...(title.trim() ? { title: title.trim() } : {}),
+          colors: pruneColors(brand.colors),
+          ...(brandFont ? { font: brandFont } : {}),
+        },
         submissionDeadline: deadline,
       });
       queryClient.invalidateQueries({ queryKey: qk.platformTenants() });
@@ -1450,19 +1890,19 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
       }
       queryClient.setQueryData(qk.platformTenant(cfg.tenant), finalCfg);
       setCreated(finalCfg);
-      setStep(4);
+      setStep(STEP.Admin);
     } catch (err) {
       const msg =
         err instanceof ApiError ? err.message : 'Could not create the client — try again.';
       if (err instanceof ApiError && err.status === 409) {
         setSlugErr(msg);
-        setStep(0);
+        setStep(STEP.Slug);
       } else if (err instanceof ApiError && err.status === 400 && /slug/i.test(msg)) {
         setSlugErr(msg);
-        setStep(0);
+        setStep(STEP.Slug);
       } else if (err instanceof ApiError && err.status === 400 && /name/i.test(msg)) {
         setNameErr(msg);
-        setStep(1);
+        setStep(STEP.Identity);
       } else {
         setDeadlineErr(msg);
       }
@@ -1485,7 +1925,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
       setAdminDone(res.email);
       queryClient.invalidateQueries({ queryKey: qk.platformTenants() });
       queryClient.invalidateQueries({ queryKey: qk.platformTenant(created.tenant) });
-      setStep(5);
+      setStep(STEP.Done);
     } catch (e) {
       setAdminErr(e instanceof ApiError ? e.message : 'Could not add the admin — try again');
     } finally {
@@ -1517,7 +1957,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
 
       <div className="card" style={{ maxWidth: 620 }}>
         <div className="card-body">
-          {step < 5 && (
+          {step < STEP.Done && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 18 }}>
               {WIZARD_STEPS.map((label, i) => (
                 <span
@@ -1543,7 +1983,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
             </div>
           )}
 
-          {step === 0 && (
+          {step === STEP.Slug && (
             <>
               <Field
                 label="Tenant slug"
@@ -1568,7 +2008,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
             </>
           )}
 
-          {step === 1 && (
+          {step === STEP.Identity && (
             <>
               <Field label="Organisation name" error={nameErr}>
                 <input
@@ -1589,7 +2029,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
                 />
               </Field>
               <div style={footRow}>
-                <Btn tone="ghost" size="sm" onClick={() => setStep(0)}>
+                <Btn tone="ghost" size="sm" onClick={() => setStep(STEP.Slug)}>
                   Back
                 </Btn>
                 <Btn tone="teal" size="sm" onClick={nextFromName} disabled={!name.trim()}>
@@ -1599,7 +2039,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
             </>
           )}
 
-          {step === 2 && (
+          {step === STEP.Logo && (
             <>
               <Field
                 label="Logo (optional)"
@@ -1635,17 +2075,42 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
                 </div>
               </Field>
               <div style={footRow}>
-                <Btn tone="ghost" size="sm" onClick={() => setStep(1)}>
+                <Btn tone="ghost" size="sm" onClick={() => setStep(STEP.Identity)}>
                   Back
                 </Btn>
-                <Btn tone="teal" size="sm" onClick={() => setStep(3)}>
+                <Btn tone="teal" size="sm" onClick={() => setStep(STEP.Brand)}>
                   {logoFile ? 'Continue' : 'Skip for now'}
                 </Btn>
               </div>
             </>
           )}
 
-          {step === 3 && (
+          {step === STEP.Brand && (
+            <>
+              <p
+                style={{
+                  fontSize: 12.5,
+                  color: 'var(--muted)',
+                  margin: '0 0 14px',
+                  lineHeight: 1.6,
+                }}
+              >
+                Set this client's colours, typeface and hero backdrop — or keep the default and
+                refine it later from the settings page.
+              </p>
+              <BrandFields value={brand} onChange={setBrand} />
+              <div style={footRow}>
+                <Btn tone="ghost" size="sm" onClick={() => setStep(STEP.Logo)}>
+                  Back
+                </Btn>
+                <Btn tone="teal" size="sm" onClick={() => setStep(STEP.Deadline)}>
+                  Continue
+                </Btn>
+              </div>
+            </>
+          )}
+
+          {step === STEP.Deadline && (
             <>
               <Field
                 label="Affiliation deadline"
@@ -1661,7 +2126,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
                 />
               </Field>
               <div style={footRow}>
-                <Btn tone="ghost" size="sm" onClick={() => setStep(2)} disabled={creating}>
+                <Btn tone="ghost" size="sm" onClick={() => setStep(STEP.Brand)} disabled={creating}>
                   Back
                 </Btn>
                 <Btn tone="teal" size="sm" onClick={createClient} disabled={creating || !deadline}>
@@ -1671,7 +2136,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
             </>
           )}
 
-          {step === 4 && created && (
+          {step === STEP.Admin && created && (
             <>
               <p
                 style={{
@@ -1696,7 +2161,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
                 />
               </Field>
               <div style={footRow}>
-                <Btn tone="ghost" size="sm" onClick={() => setStep(5)} disabled={adminBusy}>
+                <Btn tone="ghost" size="sm" onClick={() => setStep(STEP.Done)} disabled={adminBusy}>
                   Skip for now
                 </Btn>
                 <Btn
@@ -1712,7 +2177,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
             </>
           )}
 
-          {step === 5 && created && (
+          {step === STEP.Done && created && (
             <>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
                 <LogoThumb

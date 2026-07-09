@@ -83,8 +83,14 @@ export interface TenantBranding {
   logoUrl: string;
   /** Favicon override; applyTheme falls back to logoUrl when absent. */
   faviconUrl?: string;
-  /** CSS color tokens injected at runtime, e.g. { '--navy': '#1B2A4A' }. */
+  /**
+   * CSS theme tokens injected at runtime. Canonical keys are the semantic ROLE tokens
+   * (--brand-primary, --brand-accent, --hero-image …, see src/platform-theme.ts); legacy
+   * value-named keys (--green …) still render via the alias layer in index.html.
+   */
   colors: Record<string, string>;
+  /** Optional per-tenant typeface; applyTheme sets --brand-font and injects the web font. */
+  font?: { family: string; url?: string };
   copy: BrandingCopy;
 }
 

@@ -54,6 +54,7 @@ describe('resolveTenantSlug', () => {
 // surface applyTheme touches. Mirrors index.html's static <link rel="icon">.
 const atDocument = () => {
   const rootTokens = {};
+  const created: { rel: string; href: string; dataset: Record<string, string> }[] = [];
   const favicon = {
     href: '/favicon.svg',
     type: 'image/svg+xml',
@@ -70,10 +71,12 @@ const atDocument = () => {
         },
       },
     },
+    head: { appendChild: (el) => created.push(el) },
+    createElement: () => ({ rel: '', href: '', dataset: {} }),
     querySelector: (sel) => (sel === 'link[rel="icon"]' ? favicon : null),
   };
   vi.stubGlobal('document', doc);
-  return { doc, favicon, rootTokens };
+  return { doc, favicon, rootTokens, created };
 };
 
 describe('applyTheme', () => {
@@ -97,15 +100,34 @@ describe('applyTheme', () => {
     expect(favicon.type).toBe('image/svg+xml');
   });
 
-  it('sets color tokens verbatim — including url() values like --hero-image', () => {
+  it('rewrites a legacy value-named key onto its semantic role token', () => {
     const { rootTokens, doc } = atDocument();
     applyTheme({
       colors: { '--green': '#0E3529', '--hero-image': "url('/venues/kingsmead-stadium.jpg')" },
       title: 'Dolphins Pipeline — Smart Club Integration',
     });
-    expect(rootTokens['--green']).toBe('#0E3529');
+    // --green maps to --brand-primary (the primitives alias the role in index.html).
+    expect(rootTokens['--brand-primary']).toBe('#0E3529');
+    expect(rootTokens['--green']).toBeUndefined();
+    // Non-legacy tokens (hero, role keys, custom extras) are set verbatim.
     expect(rootTokens['--hero-image']).toBe("url('/venues/kingsmead-stadium.jpg')");
     expect(doc.title).toBe('Dolphins Pipeline — Smart Club Integration');
+  });
+
+  it('sets role-keyed tokens verbatim', () => {
+    const { rootTokens } = atDocument();
+    applyTheme({ colors: { '--brand-primary': '#123456', '--brand-accent': '#ABCDEF' } });
+    expect(rootTokens['--brand-primary']).toBe('#123456');
+    expect(rootTokens['--brand-accent']).toBe('#ABCDEF');
+  });
+
+  it('sets --brand-font and injects a web-font stylesheet when a font is given', () => {
+    const { rootTokens, created } = atDocument();
+    applyTheme({ font: { family: 'Poppins', url: 'https://fonts.example/poppins.css' } });
+    expect(rootTokens['--brand-font']).toBe("Poppins, 'Montserrat', sans-serif");
+    expect(created).toHaveLength(1);
+    expect(created[0].href).toBe('https://fonts.example/poppins.css');
+    expect(created[0].rel).toBe('stylesheet');
   });
 
   it('is a no-op for a null/undefined branding payload', () => {

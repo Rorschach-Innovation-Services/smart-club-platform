@@ -11,6 +11,8 @@
  * never the *wrong* brand, but a brief neutral flash is expected. See docs/architecture/0002.
  */
 
+import { LEGACY_TO_ROLE, fontStack } from './platform-theme';
+
 // Host → tenant slug (JSON env, mirrors TENANT_HOST_MAP in sst.config.ts). Empty off-prod.
 const HOST_TENANT_MAP = (() => {
   try {
@@ -40,10 +42,11 @@ export function resolveTenantSlug() {
   return (qp || import.meta.env.VITE_DEFAULT_TENANT || 'dolphins').toLowerCase();
 }
 
-/** Inject a tenant's color tokens + title + favicon onto the document. Missing tokens fall back to the default theme. */
+/** Inject a tenant's color tokens + font + title + favicon onto the document. Missing tokens fall back to the default theme. */
 export function applyTheme(
   branding?: {
     colors?: Record<string, string>;
+    font?: { family?: string; url?: string };
     title?: string;
     faviconUrl?: string;
     logoUrl?: string;
@@ -52,12 +55,40 @@ export function applyTheme(
   if (!branding) return;
   const root = document.documentElement;
   // Values are set verbatim, so tokens can carry any CSS value — including
-  // url(…) images (e.g. --hero-image), not just colors.
+  // url(…) images (e.g. --hero-image), not just colors. Legacy value-named keys
+  // (--green…) are rewritten to their semantic role token so --brand-primary stays
+  // authoritative; the primitives alias the roles in index.html, so either shape renders.
   for (const [token, value] of Object.entries(branding.colors ?? {})) {
-    root.style.setProperty(token, value);
+    root.style.setProperty(LEGACY_TO_ROLE[token] ?? token, value);
   }
+  // Typeface: set the --brand-font role and, if the family needs a web font, inject its
+  // stylesheet (same swap pattern as the favicon below). A web font fetches over the
+  // network, so a brief FOUT before it loads is expected.
+  if (branding.font?.family)
+    root.style.setProperty('--brand-font', fontStack(branding.font.family));
+  if (branding.font?.url) injectFontLink(branding.font.url);
   if (branding.title) document.title = branding.title;
   // Swap the neutral favicon shipped in index.html for the tenant's own.
+  applyFavicon(branding);
+}
+
+/** Add (once) a tenant web-font stylesheet, keyed by href so re-themes don't duplicate it. */
+function injectFontLink(href: string) {
+  const existing = document.querySelector<HTMLLinkElement>('link[data-brand-font]');
+  if (existing) {
+    if (existing.href === href) return;
+    existing.href = href;
+    return;
+  }
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.dataset.brandFont = '';
+  link.href = href;
+  document.head.appendChild(link);
+}
+
+/** The favicon swap, factored out of applyTheme for readability. */
+function applyFavicon(branding: { faviconUrl?: string; logoUrl?: string }) {
   const favicon = branding.faviconUrl ?? branding.logoUrl;
   if (favicon) {
     const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
