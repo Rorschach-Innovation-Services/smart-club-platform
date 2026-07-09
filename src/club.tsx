@@ -8,6 +8,13 @@ import {
 } from 'react';
 import type { ReactNode, ChangeEvent, CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
+import {
+  PlayerFilterBar,
+  FilterResultCount,
+  filterPlayers,
+  hasActiveFilters,
+  emptyPlayerFilters,
+} from './playerFilters';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
@@ -4630,6 +4637,7 @@ export function ClubPlayersView({
   const [showLink, setShowLink] = useStateC(false);
   const [confirmDelete, setConfirmDelete] = useStateC(null); // the player pending confirmation
   const [busyNk, setBusyNk] = useStateC(null); // naturalKey of the row being deleted
+  const [filters, setFilters] = useStateC(emptyPlayerFilters);
   async function openLink() {
     // Mint a link on first open so the modal never shows an empty value.
     if (!club.playerRegLink && onGenerateLink) await onGenerateLink();
@@ -4638,6 +4646,7 @@ export function ClubPlayersView({
   const teamLabel = labelByKey(leagues);
   const label = (key) => teamLabel[key] || key || '—';
   const mine = players ?? [];
+  const visible = useMemoC(() => filterPlayers(mine, filters), [mine, filters]);
   // Players leaving this club appear as `incoming` clearances (this club is the source).
   const leaving = (clearances?.incoming ?? []).filter((r) => r.status === 'pending');
   const leavingFor = (nk) => leaving.find((r) => r.playerNaturalKey === nk);
@@ -4740,6 +4749,18 @@ export function ClubPlayersView({
         </div>
       </div>
 
+      <div style={{ marginTop: 14 }}>
+        <PlayerFilterBar
+          filters={filters}
+          onChange={setFilters}
+          players={mine}
+          teamLabel={teamLabel}
+        />
+      </div>
+      {hasActiveFilters(filters) && (
+        <FilterResultCount shown={visible.length} total={mine.length} />
+      )}
+
       <div className="tbl-w" style={{ marginTop: 14 }}>
         <table className="tbl">
           <thead>
@@ -4755,7 +4776,7 @@ export function ClubPlayersView({
             </tr>
           </thead>
           <tbody>
-            {mine.map((p) => {
+            {visible.map((p) => {
               const outbound = leavingFor(p.naturalKey);
               const roleBits = [
                 p.battingHand ? p.battingHand + ' hand' : null,
@@ -4847,6 +4868,16 @@ export function ClubPlayersView({
                 >
                   No players registered yet — share the <strong>Registration link</strong> so
                   players can register themselves.
+                </td>
+              </tr>
+            )}
+            {mine.length > 0 && visible.length === 0 && (
+              <tr>
+                <td
+                  colSpan={8}
+                  style={{ padding: 28, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}
+                >
+                  No players match — try adjusting your search or filters.
                 </td>
               </tr>
             )}

@@ -8,6 +8,13 @@ import * as api from './api';
 import { qk } from './query';
 import { useCopy } from './branding';
 import {
+  PlayerFilterBar,
+  FilterResultCount,
+  filterPlayers,
+  hasActiveFilters,
+  emptyPlayerFilters,
+} from './playerFilters';
+import {
   DISTRICTS,
   REQUIRED_DOCS,
   CQI_STRUCTURE,
@@ -6315,30 +6322,24 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
     return out;
   }, [results, list]);
 
-  const [q, setQ] = useStateA('');
-  const [clubFilter, setClubFilter] = useStateA('all');
+  const [filters, setFilters] = useStateA(emptyPlayerFilters);
   const [page, setPage] = useStateA(1);
 
   // Any change to the query inputs resets pagination to the first page.
-  const onSearch = (v) => {
-    setQ(v);
-    setPage(1);
-  };
-  const onClubFilter = (v) => {
-    setClubFilter(v);
+  const onFilters = (f) => {
+    setFilters(f);
     setPage(1);
   };
 
-  const filtered = useMemoA(() => {
-    const needle = q.trim().toLowerCase();
-    return allPlayers.filter((p) => {
-      if (clubFilter !== 'all' && p.clubId !== clubFilter) return false;
-      if (!needle) return true;
-      const name = `${p.firstName || ''} ${p.lastName || ''}`.toLowerCase();
-      const id = (p.idNumber || '').toLowerCase();
-      return name.includes(needle) || id.includes(needle);
-    });
-  }, [allPlayers, q, clubFilter]);
+  // Club-scoped but otherwise-unfiltered — feeds the team/district facet
+  // options so they narrow with the club select but not with other facets.
+  const clubScoped = useMemoA(
+    () =>
+      filters.club === 'all' ? allPlayers : allPlayers.filter((p) => p.clubId === filters.club),
+    [allPlayers, filters.club],
+  );
+
+  const filtered = useMemoA(() => filterPlayers(allPlayers, filters), [allPlayers, filters]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PLAYERS_PER_PAGE));
   const safePage = Math.min(page, totalPages);
@@ -6354,7 +6355,7 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
           </h1>
           <p className="ph-desc">
             Every registered player across the cohort in one register. Search by name or ID, or
-            filter to a single club.
+            filter by club, status, team, role and more.
           </p>
         </div>
         <div className="ph-actions">
@@ -6362,27 +6363,13 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
         </div>
       </div>
 
-      <div className="filter-row">
-        <input
-          className="search-box"
-          placeholder="Search by player name or ID number…"
-          value={q}
-          onChange={(e) => onSearch(e.target.value)}
-        />
-        <select
-          className="field-select"
-          value={clubFilter}
-          onChange={(e) => onClubFilter(e.target.value)}
-          style={{ maxWidth: 240 }}
-        >
-          <option value="all">All clubs</option>
-          {list.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name || c.slug}
-            </option>
-          ))}
-        </select>
-      </div>
+      <PlayerFilterBar
+        filters={filters}
+        onChange={onFilters}
+        players={clubScoped}
+        teamLabel={teamLabel}
+        clubs={list}
+      />
 
       {anyLoading && allPlayers.length === 0 ? (
         <div
@@ -6406,11 +6393,14 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
           sub={
             allPlayers.length === 0
               ? 'Players will appear here as clubs register their squads.'
-              : 'Try a different search term or club filter.'
+              : 'Try adjusting your search or filters.'
           }
         />
       ) : (
         <>
+          {hasActiveFilters(filters) && (
+            <FilterResultCount shown={filtered.length} total={allPlayers.length} />
+          )}
           <div className="tbl-w" style={{ marginTop: 14 }}>
             <table className="tbl">
               <thead>
