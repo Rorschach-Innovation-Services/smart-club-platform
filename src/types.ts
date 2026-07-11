@@ -328,13 +328,15 @@ export interface PlayerRegistration {
   isAllRounder?: boolean;
   isWk?: boolean;
   idDocMeta?: PlayerIdDocMeta;
+  /** Previous club's vetted ID doc, carried over when a registration-origin clearance is approved. */
+  previousIdDocMeta?: PlayerIdDocMeta;
   status?: PlayerStatus;
   registeredBy?: string;
   registeredVia?: 'link' | 'portal';
   version?: number;
 }
 
-export type ClearanceStatus = 'pending' | 'approved' | 'admin-override';
+export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejected';
 
 /** An inter-club transfer/clearance request. */
 export interface PlayerClearance {
@@ -350,10 +352,15 @@ export interface PlayerClearance {
   requestedAt: string;
   requestedBy?: string;
   note?: string;
+  /** 'registration' ⇒ opened by the public registration page; absent ⇒ rep-initiated request. */
+  origin?: 'registration' | 'request';
   feesCleared: boolean;
   misconductCleared: boolean;
   status: ClearanceStatus;
   clubApprovedAt?: string | null;
   adminOverrideAt?: string | null;
+  rejectedAt?: string | null;
+  rejectedBy?: string;
+  rejectReason?: string;
   version: number;
 }

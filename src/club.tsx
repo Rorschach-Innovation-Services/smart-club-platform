@@ -4651,6 +4651,10 @@ export function ClubPlayersView({
   // Players leaving this club appear as `incoming` clearances (this club is the source).
   const leaving = (clearances?.incoming ?? []).filter((r) => r.status === 'pending');
   const leavingFor = (nk) => leaving.find((r) => r.playerNaturalKey === nk);
+  // Players joining via a registration-origin clearance appear as `outbound` mirrors
+  // (this club is the destination) AND as pending rows already on this roster.
+  const joining = (clearances?.outbound ?? []).filter((r) => r.status === 'pending');
+  const joiningFrom = (nk) => joining.find((r) => r.playerNaturalKey === nk);
 
   const allRounders = mine.filter((p) => p.isAllRounder).length;
   const wks = mine.filter((p) => p.isWk).length;
@@ -4779,6 +4783,8 @@ export function ClubPlayersView({
           <tbody>
             {visible.map((p) => {
               const outbound = leavingFor(p.naturalKey);
+              const inbound =
+                p.status === 'clearance-pending' ? joiningFrom(p.naturalKey) : undefined;
               const roleBits = [
                 p.battingHand ? p.battingHand + ' hand' : null,
                 p.battingType,
@@ -4840,6 +4846,10 @@ export function ClubPlayersView({
                   <td style={{ textAlign: 'right', paddingRight: 14 }}>
                     {outbound ? (
                       <span className="rost-sub">→ {outbound.toClubName}</span>
+                    ) : inbound ? (
+                      // Registration-origin transfer INTO this club: pending until the
+                      // source club (or the union office) clears it.
+                      <span className="rost-sub">from {inbound.fromClubName}</span>
                     ) : (
                       // Gate on BOTH mid-transfer signals: the status flag (qk.players cache)
                       // and the outbound-clearance arrow above (clearances cache). They come
@@ -5027,11 +5037,24 @@ export function ClubClearancesView({
                 <div className="clr-card-head">
                   <div>
                     <div className="clr-eyebrow">Pending · Union may override</div>
-                    <div className="clr-name">{req.playerName}</div>
+                    <div className="clr-name">
+                      {req.playerName}
+                      {req.origin === 'registration' && (
+                        <span style={{ marginLeft: 8 }}>
+                          <Pill tone="muted">Via registration</Pill>
+                        </span>
+                      )}
+                    </div>
                     <div className="clr-meta">
                       {teamLabel[req.team] || req.team || '—'} · ID {req.idNumber || '—'} ·
                       Requested {fmtDay(req.requestedAt)}
                     </div>
+                    {req.origin === 'registration' && (
+                      <div className="clr-meta">
+                        The player registered themselves at {req.toClubName} — their new details are
+                        self-asserted, not entered by a club rep.
+                      </div>
+                    )}
                   </div>
                   <div className="clr-route">
                     <div className="clr-route-from">{req.fromClubName}</div>
@@ -5081,23 +5104,44 @@ export function ClubClearancesView({
               </div>
             );
           })}
-          {incomingResolved.map((req) => (
-            <div key={req.id} className="clr-card resolved">
-              <div className="clr-card-head">
-                <div>
-                  <div className="clr-eyebrow" style={{ color: 'var(--green)' }}>
-                    {req.status === 'admin-override' ? 'Union override' : 'Issued'} ·{' '}
-                    {fmtDay(req.clubApprovedAt || req.adminOverrideAt)}
+          {incomingResolved.map((req) =>
+            req.status === 'rejected' ? (
+              <div key={req.id} className="clr-card resolved">
+                <div className="clr-card-head">
+                  <div>
+                    <div className="clr-eyebrow" style={{ color: 'var(--coral)' }}>
+                      Rejected by Union office · {fmtDay(req.rejectedAt)}
+                    </div>
+                    <div className="clr-name">{req.playerName}</div>
+                    <div className="clr-meta">
+                      {req.rejectReason
+                        ? `"${req.rejectReason}"`
+                        : `Stays registered at ${req.fromClubName}`}
+                    </div>
                   </div>
-                  <div className="clr-name">{req.playerName}</div>
-                  <div className="clr-meta">Now at {req.toClubName}</div>
+                  <Pill tone="coral" dot>
+                    Rejected
+                  </Pill>
                 </div>
-                <Pill tone="teal" dot>
-                  {req.status === 'admin-override' ? 'Union approved' : 'Cleared'}
-                </Pill>
               </div>
-            </div>
-          ))}
+            ) : (
+              <div key={req.id} className="clr-card resolved">
+                <div className="clr-card-head">
+                  <div>
+                    <div className="clr-eyebrow" style={{ color: 'var(--green)' }}>
+                      {req.status === 'admin-override' ? 'Union override' : 'Issued'} ·{' '}
+                      {fmtDay(req.clubApprovedAt || req.adminOverrideAt)}
+                    </div>
+                    <div className="clr-name">{req.playerName}</div>
+                    <div className="clr-meta">Now at {req.toClubName}</div>
+                  </div>
+                  <Pill tone="teal" dot>
+                    {req.status === 'admin-override' ? 'Union approved' : 'Cleared'}
+                  </Pill>
+                </div>
+              </div>
+            ),
+          )}
         </div>
       </Card>
 
@@ -5109,9 +5153,21 @@ export function ClubClearancesView({
                 <div className="clr-card-head">
                   <div>
                     <div className="clr-eyebrow">
-                      Incoming · {req.status === 'pending' ? 'Pending source club' : 'Cleared'}
+                      Incoming ·{' '}
+                      {req.status === 'pending'
+                        ? 'Pending source club'
+                        : req.status === 'rejected'
+                          ? 'Rejected'
+                          : 'Cleared'}
                     </div>
-                    <div className="clr-name">{req.playerName}</div>
+                    <div className="clr-name">
+                      {req.playerName}
+                      {req.origin === 'registration' && (
+                        <span style={{ marginLeft: 8 }}>
+                          <Pill tone="muted">Via registration</Pill>
+                        </span>
+                      )}
+                    </div>
                     <div className="clr-meta">
                       From <strong>{req.fromClubName}</strong> · Requested {fmtDay(req.requestedAt)}
                     </div>
@@ -5119,6 +5175,10 @@ export function ClubClearancesView({
                   {req.status === 'pending' ? (
                     <Pill tone="gold" dot>
                       Waiting on {req.fromClubName}
+                    </Pill>
+                  ) : req.status === 'rejected' ? (
+                    <Pill tone="coral" dot>
+                      Rejected
                     </Pill>
                   ) : (
                     <Pill tone="teal" dot>

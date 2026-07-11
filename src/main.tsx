@@ -1236,8 +1236,39 @@ function Shell({
       { rawConflict: true },
     )
       .then(() => {
+        // Both clubs' clearance views AND rosters change (the player moved), so the
+        // club-scoped caches must drop too — not just the admin list.
         invalidate(qk.allClearances());
+        invalidate(qk.clearances(req.fromClubId));
+        invalidate(qk.clearances(req.toClubId));
+        invalidate(qk.players(req.fromClubId));
+        invalidate(qk.players(req.toClubId));
         toastShow(`${req.playerName} cleared to ${req.toClubName} · Union override`);
+      })
+      .catch(() => {})
+      .finally(() => setBusyClearanceId(null));
+  }
+  // Admin rejects a pending request on the clubs' behalf: the source player returns to
+  // active; a registration-origin clearance's pending destination row is removed.
+  function rejectClearanceReq(req, reason) {
+    setBusyClearanceId(req.id);
+    return withToast(
+      () =>
+        api.rejectClearance(req.id, {
+          fromClubId: req.fromClubId,
+          version: req.version,
+          reason: reason || undefined,
+        }),
+      'Could not reject clearance',
+      { rawConflict: true },
+    )
+      .then(() => {
+        invalidate(qk.allClearances());
+        invalidate(qk.clearances(req.fromClubId));
+        invalidate(qk.clearances(req.toClubId));
+        invalidate(qk.players(req.fromClubId));
+        invalidate(qk.players(req.toClubId));
+        toastShow(`${req.playerName}'s clearance rejected — they stay at ${req.fromClubName}`);
       })
       .catch(() => {})
       .finally(() => setBusyClearanceId(null));
@@ -1615,6 +1646,7 @@ function Shell({
             clearances={allClearances}
             leagues={allLeagues}
             onOverride={overrideClearance}
+            onReject={rejectClearanceReq}
             busyId={busyClearanceId}
           />
         );

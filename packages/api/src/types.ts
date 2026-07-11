@@ -387,6 +387,13 @@ export interface PlayerRegistration {
   isAllRounder?: boolean;
   isWk?: boolean;
   idDocMeta?: PlayerIdDocMeta;
+  /**
+   * The vetted ID document from the player's PREVIOUS club, carried onto the
+   * destination record when a registration-origin clearance is approved. The
+   * fresh registration's own `idDocMeta` is self-asserted; this preserves the
+   * source club's evidence of the original identity.
+   */
+  previousIdDocMeta?: PlayerIdDocMeta;
   /** Roster lifecycle. Absent ⇒ treated as 'active'. */
   status?: PlayerStatus;
   /** Email of the chair/admin who registered the player via the portal. */
@@ -400,7 +407,7 @@ export interface PlayerRegistration {
   version?: number;
 }
 
-export type ClearanceStatus = 'pending' | 'approved' | 'admin-override';
+export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejected';
 
 /**
  * An inter-club transfer/clearance request. Stored as TWO items written together:
@@ -426,10 +433,21 @@ export interface PlayerClearance {
   /** Email of the destination-club rep who initiated the request. */
   requestedBy?: string;
   note?: string;
+  /**
+   * How the clearance came to exist. 'registration' ⇒ opened automatically by the
+   * public registration page (the destination player row already exists, status
+   * 'clearance-pending', with self-asserted data). Absent ⇒ 'request'
+   * (destination-rep initiated; the destination row is created on approval).
+   */
+  origin?: 'registration' | 'request';
   feesCleared: boolean;
   misconductCleared: boolean;
   status: ClearanceStatus;
   clubApprovedAt?: string | null;
   adminOverrideAt?: string | null;
+  rejectedAt?: string | null;
+  /** Email of the union admin who rejected on the clubs' behalf. */
+  rejectedBy?: string;
+  rejectReason?: string;
   version: number;
 }

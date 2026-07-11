@@ -21,6 +21,7 @@ import type {
   Club,
   PlayerRegistration,
   PlayerClearance,
+  League,
   Series,
   SendResult,
   LogoUploadPost,
@@ -298,6 +299,10 @@ export const patchClearance = (fromClubId: string, clearanceId: string, body: un
 export const getAllClearances = () => request<PlayerClearance[]>('/admin/clearances');
 export const overrideClearance = (clearanceId: string, body: unknown) =>
   request<PlayerClearance>(`/admin/clearances/${clearanceId}/override`, { method: 'POST', body });
+// Union reject on the clubs' behalf: body { fromClubId, version?, reason? }. Restores the
+// source player; removes a registration-origin clearance's pending destination row.
+export const rejectClearance = (clearanceId: string, body: unknown) =>
+  request<PlayerClearance>(`/admin/clearances/${clearanceId}/reject`, { method: 'POST', body });
 
 // ── Series ──
 export const getSeriesList = () => request<Series[]>('/series');
@@ -343,10 +348,25 @@ export const generateClubSignupLink = () => request('/admin/club-signup-link', {
 export const revokeClubSignupLink = () => request('/admin/club-signup-link', { method: 'DELETE' });
 
 // ── Public registration ──
+// `clubs` = sibling clubs for the previous-club dropdown (absent on older backends —
+// the page falls back to a free-text field).
 export const getRegistration = (clubId: string, token: string) =>
-  request(`/register/${clubId}`, { auth: false, query: { t: token } });
+  request<{
+    tenant: string;
+    clubId: string;
+    clubName: string;
+    leagues: League[];
+    clubs?: { id: string; name: string }[];
+  }>(`/register/${clubId}`, { auth: false, query: { t: token } });
+// `clearance` present ⇔ the registration opened a transfer from the named previous club
+// (the player is pending until that club or the union office approves).
 export const submitRegistration = (clubId: string, token: string, body: unknown) =>
-  request(`/register/${clubId}`, { method: 'POST', auth: false, query: { t: token }, body });
+  request<{ ok: boolean; clearance?: { fromClubName: string } }>(`/register/${clubId}`, {
+    method: 'POST',
+    auth: false,
+    query: { t: token },
+    body,
+  });
 // Token-scoped presign for the self-registering player's ID document (no auth). Returns
 // { uploadUrl, objectKey, contentType }; PUT the file via uploadToPresigned, then send the
 // resulting { objectKey, size, contentType } as idDocMeta on submitRegistration.

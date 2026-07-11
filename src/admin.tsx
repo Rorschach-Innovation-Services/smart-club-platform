@@ -6006,8 +6006,10 @@ export function AdminTeamAccessView({
 }
 
 /* ─── AdminClearances — oversight of every clearance across the cohort ─── */
-export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
+export function AdminClearances({ clearances, leagues, onOverride, onReject, busyId }) {
   const [confirm, setConfirm] = useStateA(null);
+  // Optional note the admin attaches to a rejection (shown to both clubs).
+  const [reason, setReason] = useStateA('');
   const [filter, setFilter] = useStateA('all');
   const teamLabel = labelByKey(leagues ?? []);
   const fmtDay = (iso) =>
@@ -6017,9 +6019,17 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
   // `clearanceOverdue()` now always returns false, so there is no longer an
   // "overdue" bucket — every open request is simply pending.
   const pending = all.filter((r) => r.status === 'pending');
-  const resolved = all.filter((r) => r.status !== 'pending');
+  const rejected = all.filter((r) => r.status === 'rejected');
+  const resolved = all.filter((r) => r.status === 'approved' || r.status === 'admin-override');
 
-  const list = filter === 'pending' ? pending : filter === 'resolved' ? resolved : all;
+  const list =
+    filter === 'pending'
+      ? pending
+      : filter === 'resolved'
+        ? resolved
+        : filter === 'rejected'
+          ? rejected
+          : all;
 
   return (
     <div>
@@ -6060,6 +6070,12 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
             {resolved.length}
           </div>
         </div>
+        <div className="players-stat">
+          <div className="players-stat-l">Rejected</div>
+          <div className="players-stat-n" style={{ color: 'var(--coral)' }}>
+            {rejected.length}
+          </div>
+        </div>
       </div>
 
       <div className="filter-row" style={{ marginTop: 14 }}>
@@ -6067,6 +6083,7 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
           { k: 'all', l: 'All', n: all.length },
           { k: 'pending', l: 'Pending', n: pending.length },
           { k: 'resolved', l: 'Resolved', n: resolved.length },
+          { k: 'rejected', l: 'Rejected', n: rejected.length },
         ].map((b) => (
           <button
             key={b.k}
@@ -6108,9 +6125,18 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
                       ? '✓ Union override'
                       : req.status === 'approved'
                         ? `✓ Cleared by ${req.fromClubName}`
-                        : 'Pending'}
+                        : req.status === 'rejected'
+                          ? '✕ Rejected'
+                          : 'Pending'}
                   </div>
-                  <div className="clr-name">{req.playerName}</div>
+                  <div className="clr-name">
+                    {req.playerName}
+                    {req.origin === 'registration' && (
+                      <span style={{ marginLeft: 8 }}>
+                        <Pill tone="muted">Via registration</Pill>
+                      </span>
+                    )}
+                  </div>
                   <div className="clr-meta">
                     ID {req.idNumber || '—'} · {teamLabel[req.team] || req.team || '—'} · Requested{' '}
                     {fmtDay(req.requestedAt)}
@@ -6140,19 +6166,42 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
                 <div className="clr-override">
                   <div className="clr-override-text">
                     <div className="clr-override-title">
-                      Issue this clearance on {req.fromClubName}'s behalf?
+                      Act on this clearance on the clubs' behalf?
                     </div>
                     <div className="clr-override-sub">
-                      The Union office can override the source club's approval and issue the
-                      clearance directly to {req.toClubName}.
+                      The Union office can override {req.fromClubName}'s approval and issue the
+                      clearance to {req.toClubName} — or reject the request
+                      {req.origin === 'registration'
+                        ? ` (the player stays registered at ${req.fromClubName} and the pending record at ${req.toClubName} is removed)`
+                        : ` (the player stays registered at ${req.fromClubName})`}
+                      .
                     </div>
                   </div>
+                  <Btn
+                    tone="outline"
+                    disabled={busy}
+                    onClick={() => {
+                      setReason('');
+                      setConfirm({
+                        kind: 'reject',
+                        title: 'Reject this clearance?',
+                        body: `This will reject ${req.playerName}'s transfer to ${req.toClubName} on the Union's authority. They stay registered at ${req.fromClubName}. Both clubs will be notified.`,
+                        onYes: (note) => {
+                          onReject(req, note);
+                          setConfirm(null);
+                        },
+                      });
+                    }}
+                  >
+                    Reject
+                  </Btn>
                   <Btn
                     tone="teal"
                     icon={Icon.Arrow}
                     disabled={busy}
                     onClick={() =>
                       setConfirm({
+                        kind: 'override',
                         title: 'Issue this clearance?',
                         body: `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf. Both clubs will be notified.`,
                         onYes: () => {
@@ -6169,9 +6218,22 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
 
               {req.status !== 'pending' && (
                 <div className="clr-resolved-bar">
-                  <Pill tone="teal" dot>
-                    {req.status === 'admin-override' ? 'Union override' : 'Cleared by source club'}
-                  </Pill>
+                  {req.status === 'rejected' ? (
+                    <Pill tone="coral" dot>
+                      Rejected{req.rejectedBy ? ` · ${req.rejectedBy}` : ''}
+                    </Pill>
+                  ) : (
+                    <Pill tone="teal" dot>
+                      {req.status === 'admin-override'
+                        ? 'Union override'
+                        : 'Cleared by source club'}
+                    </Pill>
+                  )}
+                  {req.status === 'rejected' && req.rejectReason && (
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                      "{req.rejectReason}"
+                    </span>
+                  )}
                   <span
                     style={{
                       fontSize: 11,
@@ -6179,16 +6241,16 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
                       fontFamily: "'Montserrat',sans-serif",
                     }}
                   >
-                    {req.clubApprovedAt || req.adminOverrideAt
-                      ? new Date(req.clubApprovedAt || req.adminOverrideAt).toLocaleDateString(
-                          'en-GB',
-                          {
+                    {(() => {
+                      const at = req.rejectedAt || req.clubApprovedAt || req.adminOverrideAt;
+                      return at
+                        ? new Date(at).toLocaleDateString('en-GB', {
                             day: 'numeric',
                             month: 'short',
                             year: 'numeric',
-                          },
-                        )
-                      : ''}
+                          })
+                        : '';
+                    })()}
                   </span>
                 </div>
               )}
@@ -6204,26 +6266,54 @@ export function AdminClearances({ clearances, leagues, onOverride, busyId }) {
             onClick={(e) => e.target === e.currentTarget && setConfirm(null)}
           >
             <div className="fix-confirm-box">
-              <div className="fix-confirm-icon go">
-                <svg viewBox="0 0 24 24" fill="none">
-                  <path
-                    d="M4 12l5 5L20 6"
-                    stroke="currentColor"
-                    strokeWidth="2.2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
+              <div className={`fix-confirm-icon ${confirm.kind === 'reject' ? 'danger' : 'go'}`}>
+                {confirm.kind === 'reject' ? (
+                  <svg viewBox="0 0 24 24" fill="none">
+                    <path
+                      d="M6 6l12 12M18 6L6 18"
+                      stroke="currentColor"
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                ) : (
+                  <svg viewBox="0 0 24 24" fill="none">
+                    <path
+                      d="M4 12l5 5L20 6"
+                      stroke="currentColor"
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                )}
               </div>
               <div className="fix-confirm-title">{confirm.title}</div>
               <div className="fix-confirm-body">{confirm.body}</div>
+              {confirm.kind === 'reject' && (
+                <textarea
+                  className="field-input"
+                  rows={2}
+                  maxLength={500}
+                  placeholder="Reason (optional — shown to both clubs)"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  style={{ width: '100%', marginTop: 10, resize: 'vertical', fontSize: 13 }}
+                />
+              )}
               <div className="fix-confirm-actions">
                 <Btn tone="outline" onClick={() => setConfirm(null)}>
                   Cancel
                 </Btn>
-                <Btn tone="teal" icon={Icon.Arrow} onClick={confirm.onYes}>
-                  Yes, issue clearance
-                </Btn>
+                {confirm.kind === 'reject' ? (
+                  <Btn tone="ink" onClick={() => confirm.onYes(reason.trim())}>
+                    Yes, reject clearance
+                  </Btn>
+                ) : (
+                  <Btn tone="teal" icon={Icon.Arrow} onClick={() => confirm.onYes()}>
+                    Yes, issue clearance
+                  </Btn>
+                )}
               </div>
             </div>
           </div>,

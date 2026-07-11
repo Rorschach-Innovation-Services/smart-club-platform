@@ -43,6 +43,10 @@ const EMPTY = {
   email: '',
   team: '',
   district: '',
+  // Previous-club picker: '' (unanswered) | '__first__' | '__other__' | a real club id.
+  // The free-text `lastClub` is only used with '__other__' (or when the backend sent no
+  // club list and the page falls back to the legacy free-text field).
+  lastClubChoice: '',
   lastClub: '',
   battingHand: 'Right',
   battingType: 'Mid Order',
@@ -73,6 +77,10 @@ export function RegisterPage() {
   const [state, setState] = useState('loading'); // loading | ready | invalid | done
   const [clubName, setClubName] = useState('');
   const [leagues, setLeagues] = useState([]);
+  // Sibling clubs for the previous-club dropdown; empty ⇒ free-text fallback.
+  const [clubs, setClubs] = useState<{ id: string; name: string }[]>([]);
+  // Set when the submit opened a transfer — drives the clearance success variant.
+  const [clearanceFrom, setClearanceFrom] = useState('');
   const [d, setD] = useState(EMPTY);
   const [idFile, setIdFile] = useState<File | null>(null);
   const [error, setError] = useState('');
@@ -90,6 +98,7 @@ export function RegisterPage() {
         if (!live) return;
         setClubName(r.clubName);
         setLeagues(r.leagues ?? []);
+        setClubs(r.clubs ?? []);
         setState('ready');
       } catch {
         if (live) setState('invalid');
@@ -182,7 +191,7 @@ export function RegisterPage() {
         ct,
       );
       await uploadToPresigned(uploadUrl, idFile, contentType);
-      await submitRegistration(clubId, token, {
+      const res = await submitRegistration(clubId, token, {
         firstName: d.firstNames.trim(),
         lastName: d.surname.trim(),
         idType: d.idType,
@@ -197,7 +206,18 @@ export function RegisterPage() {
         postalCode: d.postalCode || undefined,
         team: d.team,
         district: d.district,
-        lastClub: d.lastClub || undefined,
+        // Dropdown pick sends the club id (backend opens a clearance when the player
+        // is found there); 'Other' sends the typed name; first registration sends the
+        // documented '—' convention. No club list ⇒ legacy free-text behavior.
+        ...(clubs.length === 0
+          ? { lastClub: d.lastClub.trim() || undefined }
+          : d.lastClubChoice === '__other__'
+            ? { lastClub: d.lastClub.trim() || undefined }
+            : d.lastClubChoice === '__first__'
+              ? { lastClub: '—' }
+              : d.lastClubChoice
+                ? { lastClubId: d.lastClubChoice }
+                : {}),
         battingHand: d.battingHand,
         bowlingHand: d.bowlingHand,
         battingType: d.battingType,
@@ -207,10 +227,13 @@ export function RegisterPage() {
         guardianName: minor ? d.guardianName : undefined,
         idDocMeta: { objectKey, size: idFile.size, contentType },
       });
+      if (res?.clearance?.fromClubName) setClearanceFrom(res.clearance.fromClubName);
       setState('done');
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        setError('This person is already registered for the club.');
+        // Matches the server's deliberately-collapsed conflict wording (dedup vs
+        // mid-transfer are indistinguishable by design).
+        setError('This person is already registered, or a transfer is already in progress.');
       } else {
         setError(err?.message || 'Could not submit. Please try again.');
       }
@@ -235,6 +258,21 @@ export function RegisterPage() {
     );
   }
   if (state === 'done') {
+    if (clearanceFrom) {
+      return (
+        <CenterCard>
+          <h1 className="ps-title" style={{ fontSize: 22 }}>
+            Registration received — clearance pending
+          </h1>
+          <p className="ps-desc">
+            Because you were last registered at <strong>{clearanceFrom}</strong>, a clearance
+            request has been sent to them. You&apos;ll appear on {clubName}&apos;s roster as{' '}
+            <em>clearance pending</em> until {clearanceFrom} (or the Union office) approves the
+            transfer.
+          </p>
+        </CenterCard>
+      );
+    }
     return (
       <CenterCard>
         <h1 className="ps-title" style={{ fontSize: 22 }}>
@@ -437,13 +475,59 @@ export function RegisterPage() {
         </Section>
 
         <Section title="Registration history">
-          <Field
-            span
-            label="Club for which last registered"
-            value={d.lastClub}
-            onChange={set('lastClub')}
-            placeholder="Previous club, or — if first registration"
-          />
+          {clubs.length === 0 ? (
+            // Older backend (no club list in the link context) — legacy free text.
+            <Field
+              span
+              label="Club for which last registered"
+              value={d.lastClub}
+              onChange={set('lastClub')}
+              placeholder="Previous club, or — if first registration"
+            />
+          ) : (
+            <>
+              <Select
+                span
+                label="Club for which last registered"
+                value={d.lastClubChoice}
+                onChange={(e) =>
+                  // Leaving 'Other' clears the typed name so it can't ride along with
+                  // a club pick (same pattern as the admin venue picker).
+                  setD((f) => ({ ...f, lastClubChoice: e.target.value, lastClub: '' }))
+                }
+                placeholder="Select…"
+              >
+                <option value="__first__">— First registration —</option>
+                {clubs.map((cl) => (
+                  <option key={cl.id} value={cl.id}>
+                    {cl.name}
+                  </option>
+                ))}
+                <option value="__other__">Other club (type below)</option>
+              </Select>
+              {d.lastClubChoice === '__other__' && (
+                <Field
+                  span
+                  label="Previous club name"
+                  value={d.lastClub}
+                  onChange={set('lastClub')}
+                  placeholder="Name of the club you last registered for"
+                />
+              )}
+              {!!d.lastClubChoice &&
+                d.lastClubChoice !== '__first__' &&
+                d.lastClubChoice !== '__other__' && (
+                  <div
+                    className="reg-span"
+                    style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
+                  >
+                    If you&apos;re still registered there under this ID number, a clearance request
+                    will be sent to that club — they (or the Union office) must approve it before
+                    you join {clubName}.
+                  </div>
+                )}
+            </>
+          )}
         </Section>
 
         <Section title="ID document (required)">

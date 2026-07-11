@@ -2962,6 +2962,347 @@ describe('Player clearances (inter-club transfer + move)', () => {
   });
 });
 
+describe('registration-origin clearances (previous-club dropdown on the public form)', () => {
+  // A player registers at a NEW club naming their previous club: the destination row is
+  // created 'clearance-pending' together with an origin:'registration' clearance the
+  // source club (or the union) resolves. Reject (union-only) restores the source player
+  // and removes the pending destination row.
+  const mkClub = (id: string, name: string) => ({
+    id,
+    name,
+    district: 'Test District',
+    sub: 's',
+    chair: 'Chair',
+    affiliation: 'not_started' as const,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#abcdef',
+    ground: {},
+    leagues: [],
+    version: 1,
+  });
+  const REP_RCA = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['rc-a'] }]);
+  let teamKey: string;
+  let keyA: string; // presigned objectKey under rc-a
+  let keyB: string; // presigned objectKey under rc-b
+
+  const mintKey = async (clubId: string, token: string) => {
+    const up = await app.request(`/register/${clubId}/id-doc/upload-url?t=${token}`, {
+      method: 'POST',
+      body: JSON.stringify({ contentType: 'image/png' }),
+    });
+    return ((await up.json()) as { objectKey: string }).objectKey;
+  };
+
+  const regBody = (extra: Record<string, unknown> = {}) => ({
+    firstName: 'Thabo',
+    lastName: 'Nkosi',
+    idType: 'passport',
+    idNumber: 'RC9001',
+    dob: '1999-02-02',
+    nationality: 'Zimbabwean',
+    race: 'African',
+    gender: 'Male',
+    cell: '0831112222',
+    team: teamKey,
+    district: 'Ethekwini',
+    idDocMeta: { objectKey: keyB, size: 100, contentType: 'image/png' },
+    ...extra,
+  });
+
+  const registerAt = (clubId: string, token: string, body: Record<string, unknown>) =>
+    app.request(`/register/${clubId}?t=${token}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  before(async () => {
+    await repo.createClub('dolphins', mkClub('rc-a', 'RC Alpha CC'));
+    await repo.createClub('dolphins', mkClub('rc-b', 'RC Beta CC'));
+    await repo.putToken('rc-a-token', 'dolphins', 'rc-a', '2026-06-01T00:00:00.000Z');
+    await repo.putToken('rc-b-token', 'dolphins', 'rc-b', '2026-06-01T00:00:00.000Z');
+    teamKey = ((await repo.getTenantConfig('dolphins'))?.leagues ?? [])[0]?.key ?? '';
+    assert.ok(teamKey, 'precondition: tenant has a league catalogue');
+    keyA = await mintKey('rc-a', 'rc-a-token');
+    keyB = await mintKey('rc-b', 'rc-b-token');
+  });
+
+  test('GET /register/:clubId lists the sibling clubs (excluding the registering club)', async () => {
+    const res = await app.request('/register/rc-b?t=rc-b-token');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { clubs: { id: string; name: string }[] };
+    assert.ok(Array.isArray(body.clubs), 'clubs list rides on the link context');
+    assert.ok(
+      body.clubs.some((cl) => cl.id === 'rc-a'),
+      'sibling club present',
+    );
+    assert.ok(!body.clubs.some((cl) => cl.id === 'rc-b'), 'registering club excluded');
+  });
+
+  test('registering with a matching previous club creates a pending row + clearance', async () => {
+    // Seed the player at the SOURCE via the same public route so both rows derive the
+    // same naturalKey from the same identity fields.
+    const seeded = await registerAt('rc-a', 'rc-a-token', {
+      ...regBody({ cell: '0830000001' }),
+      idDocMeta: { objectKey: keyA, size: 100, contentType: 'image/png' },
+    });
+    assert.equal(seeded.status, 201);
+
+    const res = await registerAt('rc-b', 'rc-b-token', {
+      ...regBody({ cell: '0830000002' }),
+      lastClubId: 'rc-a',
+    });
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { ok: boolean; clearance?: { fromClubName: string } };
+    assert.equal(body.clearance?.fromClubName, 'RC Alpha CC');
+
+    const source = await repo.listPlayers('dolphins', 'rc-a');
+    const srcRow = source.find((p) => p.idNumber === 'RC9001');
+    assert.equal(srcRow?.status, 'clearance-pending', 'source player flipped pending');
+    const dest = await repo.listPlayers('dolphins', 'rc-b');
+    const dstRow = dest.find((p) => p.idNumber === 'RC9001');
+    assert.equal(dstRow?.status, 'clearance-pending', 'destination row pre-created pending');
+    assert.equal(dstRow?.lastClub, 'RC Alpha CC');
+    assert.equal(dstRow?.cell, '0830000002', 'destination row carries the fresh data');
+
+    const clr = (await repo.listClearancesForSource('dolphins', 'rc-a')).find(
+      (x) => x.idNumber === 'RC9001',
+    );
+    assert.equal(clr?.origin, 'registration');
+    assert.equal(clr?.status, 'pending');
+    assert.ok(clr?.requestedAt, 'requestedAt set (feeds the admin-list gsi1 sort)');
+    assert.equal(clr?.requestedBy, undefined, 'no rep initiated it');
+
+    // Union sight: the clearance appears in the tenant-wide admin list.
+    const adminList = (await (
+      await app.request('/admin/clearances', { headers: headers(ADMIN) })
+    ).json()) as { id: string }[];
+    assert.ok(adminList.some((x) => x.id === clr!.id));
+
+    const destClub = await repo.getClub('dolphins', 'rc-b');
+    assert.equal(destClub?.playerCount, 1, 'destination count bumped once, at registration');
+  });
+
+  test('issuing the clearance activates the destination row in place (fresh data wins)', async () => {
+    const clr = (await repo.listClearancesForSource('dolphins', 'rc-a')).find(
+      (x) => x.idNumber === 'RC9001',
+    )!;
+    const res = await app.request(`/clubs/rc-a/clearances/${clr.id}`, {
+      method: 'PATCH',
+      headers: headers(REP_RCA),
+      body: JSON.stringify({
+        feesCleared: true,
+        misconductCleared: true,
+        action: 'issue',
+        version: clr.version,
+      }),
+    });
+    assert.equal(res.status, 200);
+    const dest = (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9001');
+    assert.equal(dest?.status, 'active');
+    assert.equal(dest?.cell, '0830000002', 'activated row is the registration, not a copy');
+    assert.equal(
+      dest?.previousIdDocMeta?.objectKey,
+      keyA,
+      'source club’s vetted ID doc carried over as evidence',
+    );
+    const source = (await repo.listPlayers('dolphins', 'rc-a')).find(
+      (p) => p.idNumber === 'RC9001',
+    );
+    assert.equal(source, undefined, 'source row removed on approval');
+    const destClub = await repo.getClub('dolphins', 'rc-b');
+    assert.equal(destClub?.playerCount, 1, 'no double-increment on approval');
+  });
+
+  test('no ID match at the claimed club falls back to a plain registration', async () => {
+    const res = await registerAt('rc-b', 'rc-b-token', {
+      ...regBody({ idNumber: 'RC9002', cell: '0830000003' }),
+      lastClubId: 'rc-a',
+    });
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { clearance?: unknown };
+    assert.equal(body.clearance, undefined, 'no clearance opened');
+    const row = (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9002');
+    assert.equal(row?.status, 'active');
+    assert.equal(row?.lastClub, 'RC Alpha CC', 'claimed club stored as text');
+  });
+
+  test('self-referential or unknown lastClubId is rejected (400)', async () => {
+    const self = await registerAt('rc-b', 'rc-b-token', {
+      ...regBody({ idNumber: 'RC9003' }),
+      lastClubId: 'rc-b',
+    });
+    assert.equal(self.status, 400);
+    const unknown = await registerAt('rc-b', 'rc-b-token', {
+      ...regBody({ idNumber: 'RC9003' }),
+      lastClubId: 'no-such-club',
+    });
+    assert.equal(unknown.status, 400);
+  });
+
+  test('union admin rejects: source restored, pending destination row removed', async () => {
+    // Seed at source, then transfer-register at destination.
+    await registerAt('rc-a', 'rc-a-token', {
+      ...regBody({ idNumber: 'RC9004', cell: '0830000004' }),
+      idDocMeta: { objectKey: keyA, size: 100, contentType: 'image/png' },
+    });
+    const reg = await registerAt('rc-b', 'rc-b-token', {
+      ...regBody({ idNumber: 'RC9004', cell: '0830000005' }),
+      lastClubId: 'rc-a',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await repo.listClearancesForSource('dolphins', 'rc-a')).find(
+      (x) => x.idNumber === 'RC9004' && x.status === 'pending',
+    )!;
+    const countBefore = (await repo.getClub('dolphins', 'rc-b'))?.playerCount ?? 0;
+
+    const res = await app.request(`/admin/clearances/${clr.id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'rc-a', version: clr.version, reason: 'Fees owing' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      status: string;
+      rejectedBy?: string;
+      rejectReason?: string;
+    };
+    assert.equal(body.status, 'rejected');
+    assert.equal(body.rejectReason, 'Fees owing');
+    assert.ok(body.rejectedBy, 'rejecting admin recorded');
+
+    const source = (await repo.listPlayers('dolphins', 'rc-a')).find(
+      (p) => p.idNumber === 'RC9004',
+    );
+    assert.equal(source?.status, 'active', 'source player restored');
+    const dest = (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9004');
+    assert.equal(dest, undefined, 'pending destination row removed');
+    const countAfter = (await repo.getClub('dolphins', 'rc-b'))?.playerCount ?? 0;
+    assert.equal(countAfter, countBefore - 1, 'destination count restored');
+    // The mirror flipped too (destination club sees the outcome).
+    const mirror = (await repo.listInboundForDest('dolphins', 'rc-b')).find((x) => x.id === clr.id);
+    assert.equal(mirror?.status, 'rejected');
+  });
+
+  test('reject is admin-only (403 for reps) and pending-only (409 after resolution)', async () => {
+    const clr = (await repo.listClearancesForSource('dolphins', 'rc-a')).find(
+      (x) => x.idNumber === 'RC9004',
+    )!;
+    const rep = await app.request(`/admin/clearances/${clr.id}/reject`, {
+      method: 'POST',
+      headers: headers(REP_RCA),
+      body: JSON.stringify({ fromClubId: 'rc-a' }),
+    });
+    assert.equal(rep.status, 403);
+    const again = await app.request(`/admin/clearances/${clr.id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'rc-a' }),
+    });
+    assert.equal(again.status, 409, 'already rejected');
+  });
+
+  test('a rep-initiated (request-origin) clearance can also be rejected', async () => {
+    // Same lifecycle as the union office declining a normal transfer request: no
+    // destination row exists, so reject only restores the source player.
+    await repo.createPlayer('dolphins', {
+      naturalKey: 'req-reject',
+      clubId: 'rc-a',
+      firstName: 'Stay',
+      lastName: 'Put',
+      dob: '1995-01-01',
+      isMinor: false,
+      status: 'active',
+      consentAt: '2026-05-01T00:00:00.000Z',
+      createdAt: '2026-05-01T00:00:00.000Z',
+    });
+    await repo.createClearance('dolphins', {
+      id: 'clr-req-reject',
+      playerNaturalKey: 'req-reject',
+      playerName: 'Stay Put',
+      fromClubId: 'rc-a',
+      toClubId: 'rc-b',
+      fromClubName: 'RC Alpha CC',
+      toClubName: 'RC Beta CC',
+      requestedAt: new Date().toISOString(),
+      feesCleared: false,
+      misconductCleared: false,
+      status: 'pending',
+      clubApprovedAt: null,
+      adminOverrideAt: null,
+      version: 0,
+    });
+    const res = await app.request('/admin/clearances/clr-req-reject/reject', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'rc-a' }),
+    });
+    assert.equal(res.status, 200);
+    const player = await repo.getPlayer('dolphins', 'rc-a', 'req-reject');
+    assert.equal(player?.status, 'active', 'source player unstuck');
+    assert.ok(
+      await repo.getPlayer('dolphins', 'rc-b', 'req-reject').then((p) => p === null),
+      'no destination row ever existed',
+    );
+  });
+
+  test('registering while the player is already mid-clearance is a conflict with nothing written', async () => {
+    // RC9005 gets a pending clearance rc-a → rc-b, then tries to transfer-register at a
+    // third club naming rc-a: the atomic source guard rejects it, and the third club
+    // must carry NO residue (no player row, no clearance items).
+    await repo.createClub('dolphins', mkClub('rc-c', 'RC Gamma CC'));
+    await repo.putToken('rc-c-token', 'dolphins', 'rc-c', '2026-06-01T00:00:00.000Z');
+    const keyC = await mintKey('rc-c', 'rc-c-token');
+    await registerAt('rc-a', 'rc-a-token', {
+      ...regBody({ idNumber: 'RC9005', cell: '0830000006' }),
+      idDocMeta: { objectKey: keyA, size: 100, contentType: 'image/png' },
+    });
+    const first = await registerAt('rc-b', 'rc-b-token', {
+      ...regBody({ idNumber: 'RC9005', cell: '0830000007' }),
+      lastClubId: 'rc-a',
+    });
+    assert.equal(first.status, 201);
+
+    const second = await registerAt('rc-c', 'rc-c-token', {
+      ...regBody({ idNumber: 'RC9005', cell: '0830000008' }),
+      idDocMeta: { objectKey: keyC, size: 100, contentType: 'image/png' },
+      lastClubId: 'rc-a',
+    });
+    assert.equal(second.status, 409);
+    const cRoster = await repo.listPlayers('dolphins', 'rc-c');
+    assert.equal(cRoster.length, 0, 'no player row at the third club');
+    const cInbound = await repo.listInboundForDest('dolphins', 'rc-c');
+    assert.equal(cInbound.length, 0, 'no clearance mirror at the third club');
+
+    // Indistinguishability: the mid-clearance conflict must read exactly like a
+    // duplicate registration, so the public endpoint can't probe transfer state.
+    const dup = await registerAt('rc-b', 'rc-b-token', {
+      ...regBody({ idNumber: 'RC9005', cell: '0830000009' }),
+      lastClubId: 'rc-a',
+    });
+    assert.equal(dup.status, 409);
+    assert.deepEqual(await dup.json(), await second.json(), 'identical conflict responses');
+  });
+
+  test('the public submit endpoint is rate-limited per token (429)', async () => {
+    await repo.createClub('dolphins', mkClub('rc-rl', 'RC RateLimit CC'));
+    await repo.putToken('rc-rl-token', 'dolphins', 'rc-rl', '2026-06-01T00:00:00.000Z');
+    // Invalid bodies still consume quota (the cap runs before validation, like the
+    // presign route) — so the loop is cheap 400s until the cap trips.
+    let status = 0;
+    for (let i = 0; i < 241 && status !== 429; i++) {
+      const res = await registerAt('rc-rl', 'rc-rl-token', {});
+      status = res.status;
+    }
+    assert.equal(status, 429, 'cap trips within the hourly budget');
+  });
+});
+
 describe('/admin/club-signup-link (lifecycle)', () => {
   // Dedicated tenant so minting/revoking links can't leak into the public-signup suite.
   const T = 'linktenant';

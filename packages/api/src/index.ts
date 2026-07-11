@@ -71,6 +71,7 @@ import type {
   TutorialVideo,
   UserProfile,
   PlayerRegistration,
+  PlayerClearance,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
 import { orgCopy } from './branding.js';
@@ -327,6 +328,12 @@ app.get('/register/:clubId', async (c) => {
     clubId: club.id,
     clubName: club.name,
     leagues: cfg?.leagues ?? [],
+    // Sibling clubs for the "club for which last registered" dropdown. Public
+    // (token-gated) exposure of id+name ONLY — the same projection reps get from
+    // /clubs/directory; club names are non-sensitive here.
+    clubs: (await repo.listClubs(resolved.tenant))
+      .filter((cl) => cl.id !== club.id)
+      .map((cl) => ({ id: cl.id, name: cl.name })),
   });
 });
 
@@ -339,11 +346,17 @@ app.post('/register/:clubId', async (c) => {
   if (!resolved || resolved.clubId !== clubId) {
     throw new HttpError(404, 'invalid registration link');
   }
+  // Same per-token cap as the presign route (shared counter). The submit is
+  // unauthenticated, and the previous-club path below both reveals whether an ID
+  // number is registered at a named club and flips that player to
+  // 'clearance-pending' — neither may be an unthrottled anonymous primitive.
+  const allowed = await repo.bumpSignupTokenCounter(token, now(), REGISTRATIONS_PER_HOUR);
+  if (!allowed) throw new HttpError(429, 'too many registrations — please try again later');
   // cfg feeds the team/league validation below; the club read is the 404 check.
   const cfg = await repo.getTenantConfig(resolved.tenant);
   const regClub = await repo.getClub(resolved.tenant, clubId);
   if (!regClub) throw new HttpError(404, 'club not found');
-  const body = await c.req.json<Partial<PlayerRegistration>>();
+  const body = await c.req.json<Partial<PlayerRegistration> & { lastClubId?: string }>();
   // Full parity with the in-portal chair form (POST /clubs/:id/players): the public link
   // now captures the same Union field set, including an ID-document upload. `dob` is
   // derived server-side from the RSA ID, never trusted from the client.
@@ -438,20 +451,86 @@ app.post('/register/:clubId', async (c) => {
     consentAt: now(),
     createdAt: now(),
   };
+
+  // Previous-club path: the form sent a real club id (dropdown pick) instead of free
+  // text. If the player has a matching registration there, this becomes a transfer —
+  // the row is created here as 'clearance-pending' together with a clearance the
+  // source club (or the union office) must resolve before the player goes active.
+  const lastClubId = typeof body.lastClubId === 'string' ? body.lastClubId.trim() : '';
+  if (lastClubId) {
+    if (lastClubId === clubId) {
+      throw new HttpError(400, 'previous club cannot be the club you are registering for');
+    }
+    const sourceClub = await repo.getClub(resolved.tenant, lastClubId);
+    if (!sourceClub) throw new HttpError(400, 'unknown previous club');
+    // The selected club's name is the stored lastClub text whether or not a
+    // matching registration is found there.
+    player.lastClub = sourceClub.name;
+    const sourcePlayer = await findPlayerByIdNumber(resolved.tenant, lastClubId, body.idNumber);
+    // The clearance machinery addresses BOTH rows by one playerNaturalKey, so the
+    // source row's key must equal this registration's (a passport nationality
+    // respelling can diverge them). On mismatch — or no match at all — fall back to
+    // a plain registration rather than opening an unresolvable clearance.
+    if (sourcePlayer && sourcePlayer.naturalKey === naturalKey) {
+      player.status = 'clearance-pending';
+      const clearance: PlayerClearance = {
+        id: randomUUID(),
+        playerNaturalKey: naturalKey,
+        playerName: `${player.firstName} ${player.lastName}`,
+        idNumber: player.idNumber,
+        team: player.team,
+        fromClubId: lastClubId,
+        toClubId: clubId,
+        fromClubName: sourceClub.name,
+        toClubName: regClub.name,
+        // requestedAt feeds the admin-list gsi1 sort key — required even though no
+        // rep initiated this (requestedBy stays absent; origin says who did).
+        requestedAt: now(),
+        origin: 'registration',
+        feesCleared: false,
+        misconductCleared: false,
+        status: 'pending',
+        clubApprovedAt: null,
+        adminOverrideAt: null,
+        version: 0,
+      };
+      try {
+        await repo.createPlayerWithClearance(resolved.tenant, player, clearance);
+      } catch (err: unknown) {
+        // Deliberately ONE message for both conflict shapes: an anonymous caller
+        // must not be able to distinguish "registered at the destination" from
+        // "mid-clearance at the source" and use this endpoint as a status oracle.
+        if (
+          err instanceof repo.PlayerExistsAtDestinationError ||
+          err instanceof repo.DuplicatePendingClearanceError
+        ) {
+          throw new HttpError(409, 'already registered or a transfer is already in progress');
+        }
+        if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
+        throw err;
+      }
+      return c.json({ ok: true, clearance: { fromClubName: sourceClub.name } }, 201);
+    }
+  }
+
   try {
     await repo.createPlayer(resolved.tenant, player);
   } catch (err: unknown) {
     if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
-      throw new HttpError(409, 'already registered');
+      // Same wording as the clearance-path conflicts (see above) — the pair must be
+      // indistinguishable to an anonymous caller.
+      throw new HttpError(409, 'already registered or a transfer is already in progress');
     }
     throw err;
   }
   return c.json({ ok: true }, 201);
 });
 
-// Per-reg-token hourly cap on presigned ID-doc uploads (see the upload-url handler below).
-// High enough for a club's full roster to self-register in one onboarding window.
-const REGISTRATIONS_PER_HOUR = 120;
+// Per-reg-token hourly cap shared by the presign AND submit handlers (one counter per
+// token — a normal registration spends two: presign + submit). High enough for a club's
+// full roster to self-register in one onboarding window, low enough to bound anonymous
+// probing/state-flipping via the previous-club path on the submit route.
+const REGISTRATIONS_PER_HOUR = 240;
 
 /**
  * Mint a presigned PUT for a self-registering player's ID document (image or PDF). Token-
@@ -787,6 +866,21 @@ function resolvePlayerDob(body: Partial<PlayerRegistration>): string | null {
 /** Normalise an ID for storage/matching — trims and upper-cases (passports are alphanumeric). */
 function normalizeId(idNumber: string | undefined): string {
   return (idNumber || '').trim().toUpperCase();
+}
+
+/**
+ * Find a club's player by normalized ID number (no GSI on idNumber — a linear scan of
+ * that one club's roster, same matching the clearance-request route uses). Passports
+ * are alphanumeric and prone to case/space variance, so both sides normalise.
+ */
+async function findPlayerByIdNumber(
+  tenant: string,
+  clubId: string,
+  idNumber: string | undefined,
+): Promise<PlayerRegistration | null> {
+  const roster = await repo.listPlayers(tenant, clubId);
+  const wanted = normalizeId(idNumber);
+  return roster.find((p) => normalizeId(p.idNumber) === wanted) ?? null;
 }
 
 // ───────────────────── Authenticated routes ─────────────────────
@@ -1442,16 +1536,9 @@ app.post('/clubs/:id/clearances', async (c) => {
   if (!fromClub || !toClub) throw new HttpError(404, 'club not found');
   // Resolve the player at the source club — by naturalKey if given, else by ID number.
   // Only the matched player is read; the rest of the source roster is never exposed.
-  let player = null;
-  if (body.playerNaturalKey) {
-    player = await repo.getPlayer(ra.tenant, body.fromClubId, body.playerNaturalKey);
-  } else {
-    const roster = await repo.listPlayers(ra.tenant, body.fromClubId);
-    // Normalise both sides: passports are alphanumeric and prone to case/space variance
-    // (SA IDs were incidentally normalised by the digit-strip the request form applied).
-    const wanted = normalizeId(body.idNumber);
-    player = roster.find((p) => normalizeId(p.idNumber) === wanted) ?? null;
-  }
+  const player = body.playerNaturalKey
+    ? await repo.getPlayer(ra.tenant, body.fromClubId, body.playerNaturalKey)
+    : await findPlayerByIdNumber(ra.tenant, body.fromClubId, body.idNumber);
   if (!player) throw new HttpError(404, 'player not found at source club');
   // Reject a duplicate active request for the same player (already pending elsewhere).
   const existing = await repo.listClearancesForSource(ra.tenant, body.fromClubId);
@@ -2655,6 +2742,37 @@ app.post('/admin/clearances/:cid/override', async (c) => {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
     if (err instanceof repo.PlayerExistsAtDestinationError) throw new HttpError(409, err.message);
     if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
+    throw err;
+  }
+});
+
+/**
+ * Union reject: decline a pending clearance on the clubs' behalf. Admin-only (the
+ * /admin/* middleware enforces it). The source player returns to 'active'; a
+ * registration-origin clearance's pre-created destination row is removed. Same
+ * 404/409 semantics as the override route.
+ */
+app.post('/admin/clearances/:cid/reject', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cid = c.req.param('cid');
+  const body = await c.req.json<{ fromClubId?: string; version?: number; reason?: string }>();
+  if (!body.fromClubId) throw new HttpError(400, 'fromClubId required');
+  if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 500)) {
+    throw new HttpError(400, 'reason must be a string of at most 500 characters');
+  }
+  const current = await repo.getClearance(ra.tenant, body.fromClubId, cid);
+  if (!current) throw new HttpError(404, 'clearance not found');
+  if (current.status !== 'pending') throw new HttpError(409, 'clearance already resolved');
+  try {
+    const rejected = await repo.rejectClearance(ra.tenant, body.fromClubId, cid, {
+      at: now(),
+      by: ra.email,
+      reason: body.reason?.trim() || undefined,
+      expectedVersion: body.version,
+    });
+    return c.json(rejected);
+  } catch (err) {
+    if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
     throw err;
   }
 });
