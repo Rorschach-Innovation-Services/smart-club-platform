@@ -5,10 +5,12 @@
  * membership: the gate is the platform membership {tenantId:'*', role:'operator'}
  * (isOperator in routing.ts, mirroring requirePlatformOperator on the API).
  * Three screens: client list → per-client settings (identity, branding, copy,
- * color tokens, feature flags, deadline, admins, DNS go-live sheet) → a
- * create-client wizard. All writes go through the /platform/* client in api.ts.
+ * color tokens, feature flags, league catalogue, deadline, admins, DNS go-live
+ * sheet) → a create-client wizard. All writes go through the /platform/* client
+ * in api.ts.
  */
 import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import type { ReactNode, CSSProperties } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -16,8 +18,9 @@ import { queryClient, qk } from './query';
 import * as api from './api';
 import { ApiError, EMAIL_RE } from './api';
 import { resolveCopy } from './branding';
-import { Icon, Pill, Btn, EmptyState, useToast } from './atoms';
-import type { TenantConfig, TenantSummary, BrandingCopy } from './types';
+import { Icon, Pill, Btn, EmptyState, useToast, useEscapeClose } from './atoms';
+import { LeagueForm } from './admin';
+import type { TenantConfig, TenantSummary, BrandingCopy, League } from './types';
 import {
   BRAND_ROLES,
   HERO_TOKEN,
@@ -531,8 +534,8 @@ function TenantEditPage({ toast }: { toast: Toast }) {
             {config.branding?.name ?? slug} <em>settings</em>
           </h1>
           <p className="ph-desc">
-            Branding, copy, theme tokens, feature flags, admin access and the vanity-domain go-live
-            checklist for this client.
+            Branding, copy, theme tokens, feature flags, leagues, admin access and the vanity-domain
+            go-live checklist for this client.
           </p>
         </div>
         <div className="ph-actions">
@@ -574,6 +577,13 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           key={`cl-${config.tenant}`}
           config={config}
           saveBranding={saveBranding}
+          toast={toast}
+        />
+        <LeaguesCard
+          key={`lg-${config.tenant}`}
+          slug={slug}
+          config={config}
+          save={save}
           toast={toast}
         />
         <DnsPanel slug={slug} />
@@ -939,6 +949,229 @@ function FeaturesCard({
           {busy ? 'Saving…' : 'Save features'}
         </Btn>
       </div>
+    </Panel>
+  );
+}
+
+/** Modal host for LeagueForm — main.tsx's TaskModal is private (and importing it
+ *  would create a cycle), so this reuses the same global task-modal classes. */
+function LeagueModal({
+  title,
+  onClose,
+  children,
+}: {
+  title: ReactNode;
+  onClose: () => void;
+  children?: ReactNode;
+}) {
+  useEscapeClose(onClose);
+  return createPortal(
+    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="task-modal narrow">
+        <div className="task-modal-head">
+          <div className="task-modal-head-text">
+            <div className="task-modal-head-eyebrow">Platform · League catalogue</div>
+            <div className="task-modal-head-title">{title}</div>
+          </div>
+          <button className="task-modal-close" onClick={onClose} title="Close">
+            <Icon.X />
+          </button>
+        </div>
+        <div className="task-modal-body">{children}</div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function LeaguesCard({
+  slug,
+  config,
+  save,
+  toast,
+}: {
+  slug: string;
+  config: TenantConfig;
+  save: (p: Partial<TenantConfig>) => Promise<TenantConfig>;
+  toast: Toast;
+}) {
+  const [form, setForm] = useState<League | 'new' | null>(null);
+  const [confirm, setConfirm] = useState<League | null>(null);
+  const leagues = config.leagues ?? [];
+
+  /**
+   * Rebuild-and-PUT against the server's latest catalogue, not this tab's cache:
+   * the tenant admin console writes the same whole array, so a stale operator tab
+   * must not silently erase a league created there. LeagueForm swallows rejections,
+   * so errors are toasted here before re-throwing (which keeps the modal open).
+   */
+  async function saveLeagues(
+    build: (fresh: League[]) => League[],
+    fallback: string,
+  ): Promise<void> {
+    try {
+      const current = await api.platformGetTenant(slug);
+      await save({ leagues: build(current.leagues ?? []) });
+    } catch (e) {
+      toast(e instanceof ApiError ? e.message : fallback, 'warn');
+      throw e;
+    }
+  }
+
+  const onCreate = (league: League) =>
+    saveLeagues((fresh) => [...fresh, league], 'Could not create league');
+  const onUpdate = (key: string, patch: Partial<League>) =>
+    saveLeagues((fresh) => {
+      // The refetch can reveal a concurrent delete from the tenant admin console —
+      // surface that instead of silently PUTting the catalogue back without it.
+      if (!fresh.some((l) => l.key === key))
+        throw new ApiError(
+          409,
+          'This league was deleted in the admin console — it can no longer be edited.',
+        );
+      // key is the immutable matching token stored on clubs — never overwritten
+      return fresh.map((l) => (l.key === key ? { ...l, ...patch, key: l.key } : l));
+    }, 'Could not save league');
+  function onDelete(league: League) {
+    setConfirm(null);
+    saveLeagues((fresh) => fresh.filter((l) => l.key !== league.key), 'Could not delete league')
+      .then(() => toast(`${league.label} · deleted`))
+      .catch(() => {}); // 409 delete-guard (clubs registered) already toasted above
+  }
+
+  return (
+    <Panel
+      title="League catalogue"
+      sub="The leagues clubs opt into during affiliation — fixtures are generated per league. Deleting a league clubs are registered for is blocked; that stays a tenant-admin decision."
+    >
+      {leagues.length === 0 ? (
+        <EmptyState
+          icon={Icon.Shield}
+          title="No leagues yet"
+          sub="Create the leagues clubs opt into during affiliation, before this client invites its clubs."
+          action={
+            <Btn tone="teal" icon={Icon.Plus} onClick={() => setForm('new')}>
+              Create your first league
+            </Btn>
+          }
+        />
+      ) : (
+        <>
+          <div className="tbl-w">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>League</th>
+                  <th>District</th>
+                  <th>Group</th>
+                  <th>Note</th>
+                  <th style={{ width: 130 }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {leagues.map((L) => (
+                  <tr key={L.key}>
+                    <td>
+                      <span style={{ fontWeight: 700 }}>{L.label}</span>
+                    </td>
+                    <td>
+                      <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{L.district}</span>
+                    </td>
+                    <td>
+                      <Pill tone="muted">{L.group}</Pill>
+                    </td>
+                    <td>
+                      <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{L.note ?? ''}</span>
+                    </td>
+                    <td>
+                      <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                        <Btn tone="outline" size="sm" onClick={() => setForm(L)}>
+                          Edit
+                        </Btn>
+                        <Btn tone="ghost" size="sm" onClick={() => setConfirm(L)}>
+                          Delete
+                        </Btn>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ marginTop: 14 }}>
+            <Btn tone="teal" size="sm" icon={Icon.Plus} onClick={() => setForm('new')}>
+              Create league
+            </Btn>
+          </div>
+        </>
+      )}
+
+      {form && (
+        <LeagueModal
+          title={
+            form !== 'new' ? (
+              <>
+                Edit <em>league</em>
+              </>
+            ) : (
+              <>
+                Create a <em>league</em>
+              </>
+            )
+          }
+          onClose={() => setForm(null)}
+        >
+          <LeagueForm
+            league={form !== 'new' ? form : null}
+            allLeagues={leagues}
+            onCreate={onCreate}
+            onUpdate={onUpdate}
+            onClose={() => setForm(null)}
+            toast={toast}
+          />
+        </LeagueModal>
+      )}
+
+      {confirm &&
+        createPortal(
+          <div
+            className="fix-confirm"
+            onClick={(e) => e.target === e.currentTarget && setConfirm(null)}
+          >
+            <div className="fix-confirm-box">
+              <div className="fix-confirm-icon danger">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M12 2L22 21H2L12 2z"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M12 9v5M12 17v.5"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </div>
+              <div className="fix-confirm-title">Delete “{confirm.label}”?</div>
+              <div className="fix-confirm-body">
+                It disappears from this client's affiliation picker and fixture filters. If clubs
+                are already registered for it, the delete is blocked.
+              </div>
+              <div className="fix-confirm-actions">
+                <Btn tone="outline" onClick={() => setConfirm(null)}>
+                  Cancel
+                </Btn>
+                <Btn tone="ink" onClick={() => onDelete(confirm)}>
+                  Yes, delete
+                </Btn>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
     </Panel>
   );
 }

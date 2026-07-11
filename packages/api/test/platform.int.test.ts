@@ -245,7 +245,7 @@ describe('tenant create → list → get → patch', () => {
     assert.equal(missing.status, 404);
   });
 
-  test('PUT /platform/tenants/:slug merge-patches branding/features/deadline only', async () => {
+  test('PUT /platform/tenants/:slug merge-patches whitelisted fields only', async () => {
     const res = await app.request('/platform/tenants/sharks', {
       method: 'PUT',
       headers: platformHeaders(OPERATOR),
@@ -284,6 +284,107 @@ describe('tenant create → list → get → patch', () => {
     assert.equal(res.status, 400);
     const stored = await repo.getTenantConfig('sharks');
     assert.equal(stored?.submissionDeadline, '2026-10-31'); // untouched
+  });
+
+  // ── Operator-managed league catalogue (order-dependent: builds on 'sharks' above,
+  //    resets leagues to [] at the end so later describes see clean shared state). ──
+
+  const LEAGUES = [
+    { key: 'premier', label: 'Premier League', group: 'Senior Leagues', district: 'All districts' },
+    { key: 'reserve', label: 'Reserve League', group: 'Senior Leagues', district: 'All districts' },
+  ];
+
+  test('PUT /platform/tenants/:slug leagues round-trips and persists', async () => {
+    const res = await app.request('/platform/tenants/sharks', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ leagues: LEAGUES }),
+    });
+    assert.equal(res.status, 200);
+    const cfg = (await res.json()) as import('../src/types.js').TenantConfig;
+    assert.deepEqual(cfg.leagues, LEAGUES);
+    const stored = await repo.getTenantConfig('sharks');
+    assert.deepEqual(stored?.leagues, LEAGUES);
+  });
+
+  // Error bodies are asserted so the shape 400s can't regress into the delete
+  // guard's "clubs are registered" 409 (validation must run before the guard).
+  for (const [name, leagues, status, message] of [
+    ['a duplicate league key', [...LEAGUES, { ...LEAGUES[0] }], 409, /duplicate league key/],
+    ['a blank label', [{ ...LEAGUES[0], label: '  ' }], 400, /needs a label/],
+    ['a non-string key', [{ ...LEAGUES[0], key: 7 }], 400, /needs a key/],
+    ['a non-array payload', { premier: true }, 400, /must be an array/],
+  ] as const) {
+    test(`PUT /platform/tenants/:slug leagues with ${name} → ${status}`, async () => {
+      const res = await app.request('/platform/tenants/sharks', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ leagues }),
+      });
+      assert.equal(res.status, status);
+      assert.match(((await res.json()) as { error: string }).error, message);
+      const stored = await repo.getTenantConfig('sharks');
+      assert.deepEqual(stored?.leagues, LEAGUES); // untouched
+    });
+  }
+
+  test('operator delete guard: dropping a league clubs reference → 409; unreferenced → 200', async () => {
+    await repo.createClub('sharks', {
+      id: 'guardcc',
+      name: 'Guard CC',
+      district: 'Test District',
+      sub: '',
+      chair: 'Carlton',
+      affiliation: 'not_started',
+      cqi: 0,
+      docs: {},
+      players: 0,
+      teams: 0,
+      women: 0,
+      juniors: 0,
+      color: '#123456',
+      ground: {},
+      leagues: ['premier'],
+      version: 1,
+    } as unknown as import('../src/types.js').Club);
+
+    // 'premier' is referenced by guardcc — removing it must be rejected with the count.
+    const blocked = await app.request('/platform/tenants/sharks', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ leagues: LEAGUES.filter((l) => l.key !== 'premier') }),
+    });
+    assert.equal(blocked.status, 409);
+    const err = (await blocked.json()) as { error: string };
+    assert.match(err.error, /1 club is registered for "Premier League"/);
+    assert.deepEqual((await repo.getTenantConfig('sharks'))?.leagues, LEAGUES); // untouched
+
+    // 'reserve' is unreferenced — removing it goes through.
+    const ok = await app.request('/platform/tenants/sharks', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ leagues: LEAGUES.filter((l) => l.key !== 'reserve') }),
+    });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(
+      (await repo.getTenantConfig('sharks'))?.leagues,
+      LEAGUES.filter((l) => l.key !== 'reserve'),
+    );
+  });
+
+  // The guardcc club row intentionally persists (leagues: []) — nothing later in
+  // this file lists sharks clubs, and the dynalite instance is per-file.
+  test('leagues cleanup: unreference then clear the catalogue', async () => {
+    const guard = await repo.getClub('sharks', 'guardcc');
+    assert.ok(guard);
+    await repo.putClub('sharks', { ...guard, leagues: [] });
+    const res = await app.request('/platform/tenants/sharks', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ leagues: [] }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual((await repo.getTenantConfig('sharks'))?.leagues, []);
   });
 });
 

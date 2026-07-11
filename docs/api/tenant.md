@@ -30,8 +30,11 @@ strip-and-merge core backs the operator's `PUT /platform/tenants/:slug`
 > `/admin/club-signup-link` ([signup.md](signup.md)) so a concurrent Settings save can't
 > resurrect a revoked link.
 
-> Catalogue overrides (districts/leagues/CQI) are **not** accepted in v1 — those are frozen
-> shared defaults. See [ADR 0005](../architecture/0005-frozen-catalogues-v1.md).
+> The `leagues` catalogue IS tenant-editable here (whole-array replace, validated:
+> unique string keys, non-blank labels) and operator-editable via
+> `PUT /platform/tenants/:slug` — the operator route additionally rejects (409)
+> removing a league clubs are still registered for. Districts and CQI remain frozen
+> shared defaults per [ADR 0005](../architecture/0005-frozen-catalogues-v1.md).
 
 ## `GET /me` — current user (authenticated)
 

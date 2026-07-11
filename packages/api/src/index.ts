@@ -65,6 +65,7 @@ import type {
   Club,
   ClubCommEvent,
   ClubSpec,
+  League,
   Membership,
   Series,
   TenantConfig,
@@ -2103,18 +2104,27 @@ async function applyTenantConfigPatch(
   delete (patch as { sk?: unknown }).sk;
   delete (patch as { gsi1pk?: unknown }).gsi1pk;
   delete (patch as { gsi1sk?: unknown }).gsi1sk;
-  // Guard the league catalogue: keys are the matching token stored on clubs, so they
-  // must be unique and present. Reject a patch that would introduce a duplicate/blank key.
-  if (patch.leagues !== undefined) {
-    const keys = patch.leagues.map((l) => l.key);
-    if (keys.some((k) => !k)) throw new HttpError(400, 'every league needs a key');
-    if (patch.leagues.some((l) => !l.label?.trim()))
-      throw new HttpError(400, 'every league needs a label');
-    if (new Set(keys).size !== keys.length) throw new HttpError(409, 'duplicate league key');
-  }
+  if (patch.leagues !== undefined) validateLeagues(patch.leagues);
   const next = { ...current, ...patch, tenant };
   await repo.putTenantConfig(next);
   return next;
+}
+
+/**
+ * League-catalogue shape guard: keys are the matching token stored on clubs, so they
+ * must be unique, present and strings. Rejects a malformed payload with a 400 rather
+ * than letting a non-array/non-string key TypeError into a 500 or persist junk.
+ * The operator route also calls this BEFORE its club-reference delete guard so a
+ * malformed body gets its 400 instead of a misleading "clubs are registered" 409.
+ */
+function validateLeagues(leagues: unknown): asserts leagues is League[] {
+  if (!Array.isArray(leagues)) throw new HttpError(400, 'leagues must be an array');
+  const keys = leagues.map((l) => (l as League | undefined)?.key);
+  if (keys.some((k) => typeof k !== 'string' || !k.trim()))
+    throw new HttpError(400, 'every league needs a key');
+  if (leagues.some((l) => !(l as League).label?.trim()))
+    throw new HttpError(400, 'every league needs a label');
+  if (new Set(keys).size !== keys.length) throw new HttpError(409, 'duplicate league key');
 }
 
 app.put('/tenant/config', requireAdmin, async (c) => {
@@ -2224,9 +2234,10 @@ app.get('/platform/tenants/:slug', async (c) => {
 });
 
 /**
- * PUT /platform/tenants/:slug — merge-patch branding / features / submissionDeadline
- * (whitelisted: the operator portal edits nothing else). Shares applyTenantConfigPatch
- * with PUT /tenant/config, so the same strip-and-merge + league guards apply.
+ * PUT /platform/tenants/:slug — merge-patch branding / features / leagues /
+ * submissionDeadline (whitelisted: the operator portal edits nothing else). Shares
+ * applyTenantConfigPatch with PUT /tenant/config, so the same strip-and-merge +
+ * league guards apply.
  */
 app.put('/platform/tenants/:slug', async (c) => {
   const slug = c.req.param('slug');
@@ -2234,6 +2245,30 @@ app.put('/platform/tenants/:slug', async (c) => {
   const patch: Partial<TenantConfig> = {};
   if (body.branding !== undefined) patch.branding = body.branding;
   if (body.features !== undefined) patch.features = body.features;
+  if (body.leagues !== undefined) {
+    validateLeagues(body.leagues); // shape 400s must win over the guard's 409
+    patch.leagues = body.leagues;
+    // Operator-side delete guard: unlike the tenant admin console, the operator has
+    // no view of club registrations, so a write that drops a league key clubs still
+    // reference is rejected outright — an orphaned key breaks player registration.
+    const current = await repo.getTenantConfig(slug);
+    if (!current) throw new HttpError(404, 'tenant not found');
+    const nextKeys = new Set(body.leagues.map((l) => l.key));
+    const removed = (current.leagues ?? []).filter((l) => !nextKeys.has(l.key));
+    if (removed.length > 0) {
+      const clubs = await repo.listClubs(slug);
+      for (const league of removed) {
+        const n = clubs.filter(
+          (club) => Array.isArray(club.leagues) && club.leagues.includes(league.key),
+        ).length;
+        if (n > 0)
+          throw new HttpError(
+            409,
+            `${n} club${n === 1 ? ' is' : 's are'} registered for "${league.label}" — it can only be deleted from the tenant admin console`,
+          );
+      }
+    }
+  }
   if (body.submissionDeadline !== undefined) {
     const deadline = String(body.submissionDeadline).trim();
     if (!deadline || Number.isNaN(Date.parse(deadline)))
