@@ -125,12 +125,16 @@ export function RegisterPage() {
   // picks their own district here, so the options follow that selection.
   const teamOptions = leagueOptionsForDistrict(leagues, d.district);
   // Current-club dropdown: shown only when the previous club differs from the link club —
-  // i.e. the player picked a real on-system previous club, or "Other". Hidden for a first
-  // registration ('__first__') or when unanswered, where the link club IS the current club.
+  // i.e. the player picked a real SIBLING club, or "Other". Hidden for a first registration
+  // ('__first__'), when unanswered, or when the previous club IS the link club (a
+  // re-registration at the same club) — in all of which the link club is the current club.
   const showCurrentClub =
     clubs.length > 0 &&
     (d.lastClubChoice === '__other__' ||
-      (!!d.lastClubChoice && d.lastClubChoice !== '__first__' && d.lastClubChoice !== '__other__'));
+      (!!d.lastClubChoice &&
+        d.lastClubChoice !== '__first__' &&
+        d.lastClubChoice !== '__other__' &&
+        d.lastClubChoice !== clubId));
   // Options = the link club (default) + every sibling, minus the club chosen as previous
   // (you can't transfer to the club you came from). `clubs` already excludes the link club.
   const currentClubOptions = [{ id: clubId, name: clubName }, ...clubs].filter(
@@ -556,6 +560,9 @@ export function RegisterPage() {
                 placeholder="Select…"
               >
                 <option value="__first__">None (first registration)</option>
+                {/* The link club itself — for a player re-registering at the same club.
+                    Picking it keeps the current club as the link club (no transfer). */}
+                <option value={clubId}>{clubName} (this club)</option>
                 {clubs.map((cl) => (
                   <option key={cl.id} value={cl.id}>
                     {cl.name}
@@ -574,7 +581,8 @@ export function RegisterPage() {
               )}
               {!!d.lastClubChoice &&
                 d.lastClubChoice !== '__first__' &&
-                d.lastClubChoice !== '__other__' && (
+                d.lastClubChoice !== '__other__' &&
+                d.lastClubChoice !== clubId && (
                   <div
                     className="reg-span"
                     style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
@@ -584,6 +592,11 @@ export function RegisterPage() {
                     you join your current club.
                   </div>
                 )}
+              {d.lastClubChoice === clubId && (
+                <div className="reg-span" style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>
+                  You&apos;re re-registering with {clubName} — no clearance is needed.
+                </div>
+              )}
               {showCurrentClub && (
                 <>
                   <Select

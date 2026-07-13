@@ -1706,7 +1706,12 @@ describe('POST /register — cross-club holds, off-system alerts, review actions
     (await repo.listAllReviews('dolphins')).find((r) => r.playerName === name);
 
   test('first registration ("—") creates an active player and NO review', async () => {
-    const res = await postLink({ firstName: 'First', lastName: 'Reg', idNumber: 'RVA', lastClub: '—' });
+    const res = await postLink({
+      firstName: 'First',
+      lastName: 'Reg',
+      idNumber: 'RVA',
+      lastClub: '—',
+    });
     assert.equal(res.status, 201);
     assert.ok((await rosterIds('rlink')).includes('RVA'), 'player active in the link club');
     assert.equal(await reviewByName('First Reg'), undefined, 'first registration raises no alert');
@@ -1783,11 +1788,36 @@ describe('POST /register — cross-club holds, off-system alerts, review actions
     assert.equal((await reviewByName('Decl Ined'))?.resolution, 'declined');
   });
 
-  test('previous club cannot be the link club or the current club (400)', async () => {
-    const linkGuard = await postLink({ idNumber: 'RVE', currentClubId: 'rdest', lastClubId: 'rlink' });
-    assert.equal(linkGuard.status, 400);
-    const selfGuard = await postLink({ idNumber: 'RVF', currentClubId: 'rdest', lastClubId: 'rdest' });
+  test('previous club cannot equal a non-link current club (400)', async () => {
+    // previous == current == a sibling (not the link club) is a transfer to yourself → 400.
+    const selfGuard = await postLink({
+      idNumber: 'RVF',
+      currentClubId: 'rdest',
+      lastClubId: 'rdest',
+    });
     assert.equal(selfGuard.status, 400);
+  });
+
+  test('re-registration at the link club (previous == link) → active, no clearance, no review', async () => {
+    const res = await postLink({
+      firstName: 'Return',
+      lastName: 'Ing',
+      idNumber: 'RVH',
+      lastClubId: 'rlink',
+    });
+    assert.equal(res.status, 201);
+    // Landed active on the link club's own roster, with the link club recorded as history.
+    const players = (await (
+      await app.request('/clubs/rlink/players', { headers: headers(ADMIN) })
+    ).json()) as { idNumber?: string; lastClub?: string; status?: string }[];
+    const stored = players.find((p) => p.idNumber === 'RVH');
+    assert.equal(stored?.status ?? 'active', 'active');
+    assert.equal(stored?.lastClub, 'Reg Link CC');
+    // No transfer machinery: no clearance and no registration review for this player.
+    assert.ok(
+      !(await repo.listAllClearances('dolphins')).some((c) => c.playerName === 'Return Ing'),
+    );
+    assert.equal(await reviewByName('Return Ing'), undefined);
   });
 
   test('accepting a cross-club hold whose previous club has a match opens a clearance', async () => {
@@ -3332,14 +3362,23 @@ describe('registration-origin clearances (previous-club dropdown on the public f
     assert.equal(row?.lastClub, 'RC Alpha CC', 'claimed club stored as text');
   });
 
-  test('self-referential or unknown lastClubId is rejected (400)', async () => {
+  test('self-referential lastClubId (== the club being joined) is a re-registration', async () => {
+    // Previous club == the club whose link is used == current club → a re-registration at the
+    // same club: active row, the club recorded as history, no clearance (nothing to transfer).
     const self = await registerAt('rc-b', 'rc-b-token', {
       ...regBody({ idNumber: 'RC9003' }),
       lastClubId: 'rc-b',
     });
-    assert.equal(self.status, 400);
+    assert.equal(self.status, 201);
+    assert.equal(((await self.json()) as { clearance?: unknown }).clearance, undefined);
+    const row = (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9003');
+    assert.equal(row?.status, 'active');
+    assert.equal(row?.lastClub, 'RC Beta CC', 'own club recorded as last-registered history');
+  });
+
+  test('unknown lastClubId is rejected (400)', async () => {
     const unknown = await registerAt('rc-b', 'rc-b-token', {
-      ...regBody({ idNumber: 'RC9003' }),
+      ...regBody({ idNumber: 'RC9019', cell: '0830000019' }),
       lastClubId: 'no-such-club',
     });
     assert.equal(unknown.status, 400);

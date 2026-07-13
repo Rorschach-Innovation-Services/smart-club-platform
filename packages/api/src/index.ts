@@ -483,15 +483,12 @@ app.post('/register/:clubId', async (c) => {
   };
 
   const lastClubId = typeof body.lastClubId === 'string' ? body.lastClubId.trim() : '';
-  // Guard both ways: the previous club can't be the club whose link was used, nor the
-  // current club the player is joining. The link-club guard specifically blocks a crafted
-  // request (lastClubId = linkClub, currentClubId = elsewhere) from flipping a real
-  // link-club player to 'clearance-pending'.
-  if (lastClubId && (lastClubId === clubId || lastClubId === destClubId)) {
-    throw new HttpError(
-      400,
-      'previous club cannot be your current club or the club whose link you used',
-    );
+  // The previous club can't be the current club — a transfer to the club you're leaving is
+  // meaningless — UNLESS both are the LINK club, which is a legitimate re-registration at the
+  // same club (handled without a clearance in createSelfRegistration). So only reject
+  // previous == current when the current club isn't the link club.
+  if (lastClubId && lastClubId === destClubId && destClubId !== clubId) {
+    throw new HttpError(400, 'previous club cannot be your current club');
   }
 
   // ── Cross-club HOLD ──
@@ -989,7 +986,12 @@ async function createSelfRegistration(
   destClub: Club,
   lastClubId: string,
 ): Promise<{ clearanceFromName?: string }> {
-  if (lastClubId) {
+  // Re-registration at the SAME club (previous == the club being joined): record the history
+  // name but open no clearance — there is nothing to transfer, and a club-to-itself clearance
+  // would be unresolvable. Falls through to a plain active registration below.
+  if (lastClubId && lastClubId === player.clubId) {
+    player.lastClub = destClub.name;
+  } else if (lastClubId) {
     const sourceClub = await repo.getClub(tenant, lastClubId);
     if (!sourceClub) throw new HttpError(400, 'unknown previous club');
     // The selected club's name is the stored lastClub text whether or not a matching
