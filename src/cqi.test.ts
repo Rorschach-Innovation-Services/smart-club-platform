@@ -258,4 +258,33 @@ describe('CQI · Governance & Compliance auto-fill', () => {
     expect(genuineCqiAnswers(club).constitution).toBe(false);
     expect(effectiveAnswers(club).constitution).toBe(false);
   });
+
+  it('governanceOverrides never re-persists legacy marker keys', () => {
+    // Editors seed from effectiveAnswers, which carries a legacy club's orphan marker keys
+    // through. If a save wrote them back, genuineCqiAnswers would keep flagging the club as
+    // legacy and discard governance overrides on every read.
+    const club = {
+      docs: { constitution: true },
+      cqiAnswers: { minutes: true, agm: true, conduct: true, vision: true },
+    };
+    const stored = governanceOverrides(effectiveAnswers(club), club);
+    for (const k of ['agm', 'minutes', 'conduct']) expect(k in stored).toBe(false);
+    expect(stored.vision).toBe(true);
+  });
+
+  it('a governance override on a legacy-keyed club survives a save→read round-trip', () => {
+    const club = {
+      docs: { constitution: true },
+      players: 4,
+      cqiAnswers: { minutes: true, vision: true }, // legacy marker present
+    };
+    // Editor overrides constitution against the derived value and saves.
+    const answers = { ...effectiveAnswers(club), constitution: false };
+    const stored = governanceOverrides(answers, club);
+    expect(stored.constitution).toBe(false);
+    // Next read: with the legacy markers stripped, the override is genuine and wins.
+    const after = { ...club, cqiAnswers: stored };
+    expect(effectiveAnswers(after).constitution).toBe(false);
+    expect(genuineCqiAnswers(after).vision).toBe(true);
+  });
 });

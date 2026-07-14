@@ -245,6 +245,70 @@ describe('validateClubPatch · coach team assignment', () => {
   });
 });
 
+describe('validateClubPatch · cqi score and answers', () => {
+  test('accepts a realistic submission (mixed value types + involvementReasons)', () => {
+    assert.equal(
+      ok({
+        cqi: 62.4,
+        cqiAnswers: {
+          vision: true, // yn
+          ambition: 4, // rating
+          pctBA: 12, // count
+          subsFee: '250', // money atoms emit strings
+          constitution: false, // governance override
+          involvementReasons: ['Giving back to the cricket community'],
+        },
+      }),
+      null,
+    );
+  });
+
+  test('accepts cqi 0 and the [0,100] bounds', () => {
+    assert.equal(ok({ cqi: 0 }), null);
+    assert.equal(ok({ cqi: 100 }), null);
+  });
+
+  test('rejects an out-of-range or non-numeric cqi', () => {
+    assert.match(String(ok({ cqi: 150 })), /between 0 and 100/);
+    assert.match(String(ok({ cqi: -1 })), /between 0 and 100/);
+    assert.match(String(ok({ cqi: 'high' as unknown })), /must be a number/);
+    assert.match(String(ok({ cqi: NaN })), /must be a number/);
+  });
+
+  test('treats an explicit null cqiAnswers as absent (legacy patch contract)', () => {
+    assert.equal(ok({ cqiAnswers: null }), null);
+  });
+
+  test('allows null answer values (legacy blanks must stay correctable)', () => {
+    assert.equal(ok({ cqiAnswers: { vision: null, ambition: 3 } }), null);
+  });
+
+  test('rejects a non-object cqiAnswers and non-scalar answer values', () => {
+    assert.match(
+      String(ok({ cqiAnswers: [] as unknown as Record<string, unknown> })),
+      /must be an object/,
+    );
+    assert.match(String(ok({ cqiAnswers: { vision: { nested: true } } })), /values must be/);
+  });
+
+  test('rejects an oversized answers object', () => {
+    const big = Object.fromEntries(Array.from({ length: 61 }, (_, i) => [`k${i}`, 1]));
+    assert.match(String(ok({ cqiAnswers: big })), /too many keys/);
+  });
+
+  test('rejects an oversized string value (would otherwise 500 at the DynamoDB item limit)', () => {
+    assert.match(String(ok({ cqiAnswers: { subsFee: 'x'.repeat(201) } })), /characters or fewer/);
+    assert.equal(ok({ cqiAnswers: { subsFee: 'x'.repeat(200) } }), null);
+  });
+
+  test('still rejects unknown involvementReasons inside an otherwise-valid patch', () => {
+    assert.match(
+      String(ok({ cqi: 50, cqiAnswers: { involvementReasons: ['Money'] } })),
+      /invalid involvementReasons/,
+    );
+  });
+});
+
 describe('hasAffiliationDraft', () => {
   test('false for a bare signup club (chair-only seed: name/email/cell)', () => {
     // buildInitialExco seeds exactly this; it must NOT count as a draft.

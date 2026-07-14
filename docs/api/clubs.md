@@ -32,6 +32,8 @@ Partial update of affiliation, `cqi` + `cqiAnswers`, `ground` (incl. `lat`/`lon`
 
 - A rep **cannot** patch affiliation fields (`affiliation`, `exco`, `coaches`, `ground`,
   `leagues`) once `affiliation === "complete"` → `403 "affiliation is locked"`. Admins may.
+- `cqi` must be a number in [0, 100]; `cqiAnswers` a flat object of scalar values
+  (≤60 keys, strings ≤200 chars) → `400` otherwise.
 - Send the current `version`; mismatch → `409 "club changed; refetch"`.
 
 ```

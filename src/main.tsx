@@ -1080,11 +1080,18 @@ function Shell({
     );
   }
   // Admin appends a note to the active club's communication log (server-side
-  // list_append, so concurrent notes don't clobber each other).
+  // list_append, so concurrent notes don't clobber each other). Seed the cache from
+  // the route's authoritative response rather than invalidating — the clubs list is
+  // an eventually-consistent GSI query, so a refetch fired right after a write (e.g.
+  // the auto-note that follows a CQI save) can read the pre-write item and make the
+  // just-saved change appear to revert. Same reasoning as updateClub above.
   function addNote(text) {
-    return withToast(() => api.addClubNote(clubId, text), 'Could not save note').then(() => {
-      invalidate(qk.club(clubId));
-      invalidate(qk.clubs());
+    return withToast(() => api.addClubNote(clubId, text), 'Could not save note').then((updated) => {
+      if (!updated) return;
+      queryClient.setQueryData(qk.clubs(), (old) =>
+        Array.isArray(old) ? old.map((c) => (c.id === clubId ? updated : c)) : old,
+      );
+      queryClient.setQueryData(qk.club(clubId), updated);
     });
   }
   // Safeguarding writes are version-pinned server-side (append/remove are
@@ -1704,6 +1711,20 @@ function Shell({
               })
             }
             onAddNote={addNote}
+            onSaveCqi={({ cqi, cqiAnswers }) => {
+              // Auto-note gives the admin correction a visible trace in the comm log —
+              // the platform's only history mechanism. Fire-and-forget: an audit hiccup
+              // must not fail (or appear to fail) the save itself.
+              const prev = activeClub?.cqi || 0;
+              return updateClub({ cqi, cqiAnswers }).then(() => {
+                const detail = !prev
+                  ? `form recorded — score ${cqi.toFixed(1)}`
+                  : prev.toFixed(1) === cqi.toFixed(1)
+                    ? `answers corrected — score unchanged at ${cqi.toFixed(1)}`
+                    : `answers corrected — score ${prev.toFixed(1)} → ${cqi.toFixed(1)}`;
+                addNote(`CQI ${detail}`).catch(() => {});
+              });
+            }}
             onRenameClub={(name) => updateClub({ name })}
             onAcknowledgeRename={() => updateClub({ nameChangePending: false, previousName: '' })}
             onDeleteClub={deleteClub}

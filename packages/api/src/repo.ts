@@ -513,8 +513,9 @@ export async function updateClub(
  *
  * Caveat: because the bump is unconditional (no `version = :v` guard), an append
  * can invalidate the OCC token of a concurrent version-guarded updateClub, handing
- * it a spurious 409. The UI mitigates this by invalidating the club query right
- * after a note add, so the next edit re-reads the bumped version.
+ * it a spurious 409. The UI mitigates this by seeding its club caches from this
+ * function's ALL_NEW response right after a note add, so the next edit carries the
+ * bumped version.
  */
 export async function appendClubNote(
   tenant: string,

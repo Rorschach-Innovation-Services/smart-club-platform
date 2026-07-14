@@ -20,6 +20,8 @@ import {
   CQI_STRUCTURE,
   effectiveAnswers,
   genuineCqiAnswers,
+  deriveGovernance,
+  governanceOverrides,
   SUBMISSION_DEADLINE_DEFAULT,
   cohortStats,
   docFileMeta,
@@ -82,6 +84,10 @@ import {
   ClubNameCell,
   YN,
   Choice,
+  Rating,
+  NumSlider,
+  CountInput,
+  MoneyInput,
   CountUp,
   statusFor,
   affPill,
@@ -3817,6 +3823,7 @@ export function AdminClubDetail({
   onRevertDoc,
   onAddNote,
   onUpdateChair,
+  onSaveCqi,
   onRenameClub,
   onAcknowledgeRename,
   onDeleteClub,
@@ -4396,7 +4403,7 @@ export function AdminClubDetail({
                                   color: 'var(--muted-2)',
                                 }}
                               >
-                                {edited ? 'Club-edited' : 'Auto'}
+                                {edited ? 'Edited' : 'Auto'}
                               </span>
                               <Pill tone={yes ? 'teal' : 'gold'} dot>
                                 {yes ? 'Yes' : 'No'}
@@ -4605,12 +4612,10 @@ export function AdminClubDetail({
               </Btn>
               <Btn
                 tone="outline"
-                icon={Icon.Eye}
-                onClick={() =>
-                  club.cqi === 0 ? toast?.('No CQI form submitted yet') : setShowCqi(true)
-                }
+                icon={club.cqi === 0 ? Icon.Form : Icon.Eye}
+                onClick={() => setShowCqi(true)}
               >
-                View submitted CQI form
+                {club.cqi === 0 ? 'Record CQI form' : 'View submitted CQI form'}
               </Btn>
               <Btn tone="outline" icon={Icon.Eye} onClick={() => setShowAffiliation(true)}>
                 View affiliation form
@@ -4649,7 +4654,15 @@ export function AdminClubDetail({
           toast={toast}
         />
       )}
-      {showCqi && <CqiViewModal club={club} onClose={() => setShowCqi(false)} />}
+      {showCqi && (
+        <CqiViewModal
+          club={club}
+          toast={toast}
+          onSave={onSaveCqi}
+          initialEditing={club.cqi === 0}
+          onClose={() => setShowCqi(false)}
+        />
+      )}
       {showDocPreview && (
         <DocPreviewModal
           clubId={club.id}
@@ -4836,17 +4849,52 @@ function RemoveClubModal({ club, allSeries = [], onClose, onConfirm }) {
   );
 }
 
-/* ─── CqiViewModal — read-only view of a club's submitted CQI self-assessment ─── */
-function CqiViewModal({ club, onClose }) {
-  // Read through effectiveAnswers so the auto-filled Governance & Compliance answers render
-  // (they're not persisted in cqiAnswers — only genuine overrides are). The empty-state gate
+/* ─── CqiViewModal — view (and, for admins, correct) a club's CQI self-assessment ─── */
+function CqiViewModal({ club, onClose, onSave, toast, initialEditing = false }) {
+  // Seed once from effectiveAnswers so the auto-filled Governance & Compliance answers
+  // render/edit (they're not persisted in cqiAnswers — only genuine overrides are), and so
+  // the cache reseed a save triggers can't clobber in-progress edits. The empty-state gate
   // still keys off the raw stored answers, so a legacy club with a bare score isn't shown a
   // grid built purely from derived governance values.
-  const answers = effectiveAnswers(club);
-  const band = cqiBand(club.cqi);
-  // Legacy/seeded clubs can carry a score with no itemised answers (answer capture
-  // post-dates them). Show an honest empty state instead of a grid of dashes.
+  const [seed] = useStateA(() => effectiveAnswers(club));
+  const [answers, setAnswers] = useStateA(seed);
+  const [editing, setEditing] = useStateA(!!onSave && initialEditing);
+  const [busy, setBusy] = useStateA(false);
   const hasAnswers = Object.keys(club.cqiAnswers || {}).length > 0;
+  // Loose compare — money/count atoms emit numbers where stored values may be strings.
+  const same = (a, b) => String(a ?? '') === String(b ?? '');
+  const dirty = [...new Set([...Object.keys(seed), ...Object.keys(answers)])].some(
+    (k) => !same(seed[k], answers[k]),
+  );
+  const recordMode = club.cqi === 0;
+  // In record mode a club's complete draft is submittable untouched — the save still
+  // materially changes state (cqi 0 → score, flipping the club to "submitted"). A blank
+  // form still needs at least one answer entered before it can be recorded.
+  const canSave = dirty || (recordMode && hasAnswers);
+  // A stray Escape, backdrop click or header X must not discard a long-form edit —
+  // dismissal while dirty requires the explicit Cancel/Save buttons.
+  const guardedClose = () => {
+    if (!(editing && dirty)) onClose();
+  };
+  useEscapeClose(guardedClose);
+  const liveScore = scoreCQI(answers).total;
+  const band = cqiBand(editing ? liveScore : club.cqi);
+  const derived = deriveGovernance(club);
+  const setA = (key, v) => setAnswers((a) => ({ ...a, [key]: v }));
+
+  function save() {
+    if (!canSave || busy) return;
+    setBusy(true);
+    // Resolve(onSave) so a rejected save (e.g. a 409 version conflict surfaced by the
+    // parent's withToast) keeps the modal open for retry rather than closing.
+    Promise.resolve(onSave({ cqi: liveScore, cqiAnswers: governanceOverrides(answers, club) }))
+      .then(() => {
+        toast && toast(`CQI ${recordMode ? 'recorded' : 'updated'} · ${cqiBand(liveScore).label}`);
+        onClose();
+      })
+      .catch(() => setBusy(false));
+  }
+
   // Render each answer by its question kind so booleans, counts, percentages,
   // choices and money all read correctly (iterate the structure, not the answers,
   // so nothing is orphaned).
@@ -4858,22 +4906,65 @@ function CqiViewModal({ club, onClose }) {
     if (q.kind === 'money') return `${q.currency || 'R'} ${Number(v).toLocaleString()}`;
     return String(v);
   };
+  const input = (q) => {
+    const v = answers[q.key];
+    if (q.kind === 'yn') return <YN value={v} onChange={(x) => setA(q.key, x)} />;
+    if (q.kind === 'rating') return <Rating value={v} onChange={(x) => setA(q.key, x)} />;
+    if (q.kind === 'num')
+      return <NumSlider value={v} onChange={(x) => setA(q.key, x)} max={q.max} />;
+    if (q.kind === 'count')
+      return <CountInput value={v} onChange={(x) => setA(q.key, x)} label={q.label} />;
+    if (q.kind === 'choice')
+      return <Choice value={v} onChange={(x) => setA(q.key, x)} options={q.options} />;
+    if (q.kind === 'money')
+      return (
+        <MoneyInput
+          value={v}
+          onChange={(x) => setA(q.key, x)}
+          currency={q.currency || 'R'}
+          suffix="/ player"
+        />
+      );
+    return null;
+  };
+
   return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <div
+      className="task-modal-backdrop"
+      onClick={(e) => e.target === e.currentTarget && guardedClose()}
+    >
       <div className="task-modal" style={{ maxWidth: 620 }}>
         <div className="task-modal-head">
           <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Submitted CQI · {club.name}</div>
+            <div className="task-modal-head-eyebrow">
+              {editing && recordMode ? 'Record CQI' : 'Submitted CQI'} · {club.name}
+            </div>
             <div className="task-modal-head-title">
               CQI <em>self-assessment</em> · {band.label}
             </div>
           </div>
-          <button className="task-modal-close" onClick={onClose} title="Close">
+          <button className="task-modal-close" onClick={guardedClose} title="Close">
             <Icon.X />
           </button>
         </div>
         <div className="task-modal-body">
-          {!hasAnswers ? (
+          {editing && !hasAnswers && club.cqi > 0 && (
+            <p
+              style={{ margin: '0 0 14px', fontSize: 12.5, color: 'var(--coral)', lineHeight: 1.5 }}
+            >
+              This club&apos;s score of {club.cqi.toFixed(1)} predates itemised answers. Saving will
+              replace it with the score computed from the answers entered below.
+            </p>
+          )}
+          {editing && recordMode && hasAnswers && (
+            <p
+              style={{ margin: '0 0 14px', fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5 }}
+            >
+              Draft answers on file — the pre-filled values below are the club&apos;s in-progress
+              draft. Saving submits the form on the club&apos;s behalf.
+            </p>
+          )}
+          {!hasAnswers && !editing ? (
             <div style={{ textAlign: 'center', padding: '28px 8px', color: 'var(--muted)' }}>
               <p style={{ fontSize: 14, color: 'var(--ink)', margin: 0 }}>
                 Score on record: <strong>{band.label}</strong>
@@ -4906,23 +4997,81 @@ function CqiViewModal({ club, onClose }) {
                         style={{
                           display: 'flex',
                           justifyContent: 'space-between',
+                          alignItems: 'center',
+                          flexWrap: 'wrap',
                           gap: 12,
                           fontSize: 12.5,
                           padding: '4px 0',
                           borderBottom: '1px solid var(--line2)',
                         }}
                       >
-                        <span style={{ color: 'var(--muted)' }}>{q.label}</span>
-                        <span
-                          style={{ color: 'var(--ink)', fontWeight: 600, whiteSpace: 'nowrap' }}
-                        >
-                          {fmt(q)}
+                        <span style={{ color: 'var(--muted)', flex: '1 1 220px' }}>
+                          {q.label}
+                          {/* Governance provenance — untouched answers keep tracking the
+                              documents live; only a real disagreement persists. */}
+                          {editing && q.key in derived && (
+                            <span
+                              style={{
+                                marginLeft: 8,
+                                fontSize: 10,
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.08em',
+                                color: 'var(--muted-2)',
+                              }}
+                            >
+                              {answers[q.key] === derived[q.key] ? 'Auto' : 'Edited'}
+                            </span>
+                          )}
                         </span>
+                        {editing ? (
+                          input(q)
+                        ) : (
+                          <span
+                            style={{ color: 'var(--ink)', fontWeight: 600, whiteSpace: 'nowrap' }}
+                          >
+                            {fmt(q)}
+                          </span>
+                        )}
                       </div>
                     ))}
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+          {onSave && (
+            <div
+              className="row"
+              style={{
+                justifyContent: 'flex-end',
+                gap: 8,
+                paddingTop: 16,
+                marginTop: 18,
+                borderTop: '1px solid var(--line)',
+              }}
+            >
+              {editing ? (
+                <>
+                  <Btn
+                    tone="outline"
+                    onClick={() => {
+                      // In record mode there's no meaningful read-only view to fall back to.
+                      if (initialEditing) return onClose();
+                      setAnswers(seed);
+                      setEditing(false);
+                    }}
+                  >
+                    Cancel
+                  </Btn>
+                  <Btn tone="teal" icon={Icon.Check} disabled={!canSave || busy} onClick={save}>
+                    {busy ? 'Saving…' : recordMode ? 'Record CQI' : 'Save CQI'}
+                  </Btn>
+                </>
+              ) : (
+                <Btn tone="outline" icon={Icon.Form} onClick={() => setEditing(true)}>
+                  Edit answers
+                </Btn>
+              )}
             </div>
           )}
         </div>

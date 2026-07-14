@@ -878,6 +878,11 @@ export function effectiveAnswers(club: Partial<Club>): Record<string, any> {
  * Strip governance answers that equal their derived value, leaving only genuine club
  * overrides. Called at submit so a club that later uploads a document isn't frozen on the
  * stale auto-filled value it happened to submit with.
+ *
+ * Legacy marker keys are stripped too: effectiveAnswers carries them through from a legacy
+ * club's stored answers, so without this a re-save would re-persist them — and their presence
+ * makes genuineCqiAnswers discard governance overrides on every subsequent read, silently
+ * reverting the edit. A current submission never writes these keys.
  */
 export function governanceOverrides(
   answers: Record<string, any>,
@@ -888,6 +893,7 @@ export function governanceOverrides(
   for (const k of GOVERNANCE_KEYS) {
     if (out[k] === derived[k]) delete out[k];
   }
+  for (const k of LEGACY_CQI_KEYS) delete out[k];
   return out;
 }
 

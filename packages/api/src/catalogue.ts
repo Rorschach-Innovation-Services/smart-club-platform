@@ -130,6 +130,13 @@ function isParseableDate(v: unknown): boolean {
  * governance fields (chair ID/term, coach ID/experience) are validated here —
  * this is the only server gate that sees them.
  */
+// CQI answers hold ~44 keys today (36 questions + 7 governance + involvementReasons);
+// the cap leaves headroom for legacy orphan keys without letting the object grow unbounded.
+const CQI_ANSWERS_MAX_KEYS = 60;
+// Answer values are short (counts, ratings, money amounts, choice labels). Without a
+// bound, an oversized string would only fail at DynamoDB's item limit as a raw 500.
+const CQI_ANSWER_MAX_LEN = 200;
+
 export function validateClubPatch(
   patch: {
     name?: string;
@@ -139,9 +146,8 @@ export function validateClubPatch(
     teamRosters?: Record<string, { id?: unknown; name?: unknown }[]>;
     docs?: Record<string, unknown>;
     docMeta?: Record<string, unknown>;
-    // Accepted as part of a club patch but no longer validated here — the
-    // representation sum-to-100 rule was removed when those fields became head-counts.
-    cqiAnswers?: Record<string, unknown>;
+    cqi?: unknown;
+    cqiAnswers?: Record<string, unknown> | null;
     exco?: Record<string, unknown>;
     coaches?: unknown[];
   },
@@ -207,6 +213,36 @@ export function validateClubPatch(
   const docKeys = [...Object.keys(patch.docs ?? {}), ...Object.keys(patch.docMeta ?? {})];
   const badDocs = [...new Set(docKeys.filter((k) => !validDocKeys.has(k)))];
   if (badDocs.length) return `unknown document keys: ${badDocs.join(', ')}`;
+
+  // CQI score + answers — shape checks only. The score is computed client-side (scoreCQI)
+  // and provably capped at 100, so the server just bounds it. Answers stay loose on
+  // purpose: values legitimately arrive as mixed boolean/number/string (the scorer
+  // parseFloats), legacy clubs carry orphan keys, and both the rep and the admin submit
+  // through this same route — a per-question kind mirror would buy little and break
+  // corrective saves of exactly the malformed forms admins need to fix. An explicit null
+  // (for either the object or a value) is treated as absent, matching stored legacy data.
+  if (patch.cqi !== undefined) {
+    if (typeof patch.cqi !== 'number' || !Number.isFinite(patch.cqi)) {
+      return 'cqi must be a number';
+    }
+    if (patch.cqi < 0 || patch.cqi > 100) return 'cqi must be between 0 and 100';
+  }
+  if (patch.cqiAnswers != null) {
+    if (typeof patch.cqiAnswers !== 'object' || Array.isArray(patch.cqiAnswers)) {
+      return 'cqiAnswers must be an object';
+    }
+    const entries = Object.entries(patch.cqiAnswers);
+    if (entries.length > CQI_ANSWERS_MAX_KEYS) return 'cqiAnswers has too many keys';
+    for (const [k, v] of entries) {
+      if (k === 'involvementReasons') continue; // validated below
+      if (v != null && !['boolean', 'number', 'string'].includes(typeof v)) {
+        return 'cqiAnswers values must be booleans, numbers or strings';
+      }
+      if (typeof v === 'string' && v.length > CQI_ANSWER_MAX_LEN) {
+        return `cqiAnswers values must be ${CQI_ANSWER_MAX_LEN} characters or fewer`;
+      }
+    }
+  }
 
   // Chairperson "why involved in club cricket" — informational, non-scoring, captured on the
   // CQI form as cqiAnswers.involvementReasons (multi-select). Validated ONLY when the key is
