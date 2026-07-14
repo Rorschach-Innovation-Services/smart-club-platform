@@ -175,6 +175,30 @@ function FlagToggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => v
   );
 }
 
+/** Read-only setup-status chip (D6): "Live" once an operator marks setup complete, else "In setup". */
+function SetupChip({ complete }: { complete: boolean }) {
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '4px 12px',
+        borderRadius: 999,
+        fontSize: 11.5,
+        fontWeight: 700,
+        fontFamily: "'Montserrat',sans-serif",
+        border: '1px solid var(--line)',
+        background: complete ? 'var(--green-pale)' : 'var(--line2)',
+        color: complete ? 'var(--green)' : 'var(--muted-2)',
+      }}
+    >
+      <span className={`sdot ${complete ? 'teal' : 'muted'}`} />
+      {complete ? 'Live' : 'In setup'}
+    </span>
+  );
+}
+
 /** Card — same surface as atoms.Card but with its own save footer wiring. */
 function Panel({
   title,
@@ -433,6 +457,7 @@ function TenantListPage() {
                 <th className="hide-narrow">Deadline</th>
                 <th>Cohort</th>
                 <th>Admins</th>
+                <th>Status</th>
                 <th style={{ width: 110 }}></th>
               </tr>
             </thead>
@@ -481,6 +506,9 @@ function TenantListPage() {
                     </td>
                     <td>
                       <span style={COUNT}>{t.adminCount}</span>
+                    </td>
+                    <td>
+                      <SetupChip complete={!!t.setupCompletedAt} />
                     </td>
                     <td style={{ textAlign: 'right', paddingRight: 18, whiteSpace: 'nowrap' }}>
                       {/* Row click opens settings; this drills into the breakdown. */}
@@ -626,6 +654,7 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           save={save}
           toast={toast}
         />
+        <SetupCard key={`setup-${config.tenant}`} slug={slug} config={config} toast={toast} />
         <DnsPanel slug={slug} />
       </div>
     </div>
@@ -2135,6 +2164,159 @@ function AdminsCard({ config, toast }: { config: TenantConfig; toast: Toast }) {
   );
 }
 
+/**
+ * Setup milestone card (D6). Informational only — the client is publicly live from
+ * creation and every setting stays editable regardless of this state. While in setup it
+ * shows an auto-derived readiness checklist + a "Mark setup complete" action (never
+ * blocked by unchecked items). Once complete it becomes a hand-off summary (the live
+ * URLs to share) with a low-key "Reopen setup".
+ */
+function SetupCard({ slug, config, toast }: { slug: string; config: TenantConfig; toast: Toast }) {
+  const [busy, setBusy] = useState(false);
+  // Shared with DnsPanel (same query key) — gives us the canonical live URL.
+  const dns = useQuery({
+    queryKey: qk.platformDns(slug),
+    queryFn: () => api.platformDnsSheet(slug),
+  });
+  const liveUrl = dns.data?.liveUrl ?? null;
+  const complete = !!config.setupCompletedAt;
+
+  async function apply(fn: () => Promise<TenantConfig>, msg: string) {
+    setBusy(true);
+    try {
+      const next = await fn();
+      queryClient.setQueryData(qk.platformTenant(slug), next);
+      queryClient.invalidateQueries({ queryKey: qk.platformTenants() });
+      toast(msg);
+    } catch {
+      toast('Could not update setup status — try again', 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const checklist: Array<{ label: string; done: boolean }> = [
+    { label: 'Logo uploaded', done: !!config.branding?.logoUrl },
+    { label: 'Brand colours set', done: Object.keys(config.branding?.colors ?? {}).length > 0 },
+    { label: 'Submission deadline set', done: !!config.submissionDeadline },
+    { label: 'Districts configured', done: (config.districts?.length ?? 0) > 0 },
+    { label: 'Leagues configured', done: (config.leagues?.length ?? 0) > 0 },
+    { label: 'First admin added', done: (config.adminCount ?? 0) > 0 },
+  ];
+
+  return (
+    <Panel
+      title="Setup"
+      sub={
+        complete
+          ? 'Setup marked complete — share the links below. Everything stays editable.'
+          : 'A readiness check before hand-off. None of it blocks the client, which is already live.'
+      }
+    >
+      {complete ? (
+        <>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              marginBottom: 14,
+              fontSize: 12.5,
+              color: 'var(--muted)',
+            }}
+          >
+            <SetupChip complete />
+            <span>
+              Marked complete{config.setupCompletedBy ? ` by ${config.setupCompletedBy}` : ''}
+              {config.setupCompletedAt ? ` · ${fmtDate(config.setupCompletedAt)}` : ''}
+            </span>
+          </div>
+          <div style={{ display: 'grid', gap: 8, marginBottom: 16 }}>
+            {liveUrl ? (
+              <>
+                <LinkRow label="Club site (sign-in)" url={liveUrl} />
+                <LinkRow label="Club signup" url={`${liveUrl}/signup`} />
+                <LinkRow label="How-to tutorials" url={`${liveUrl}/tutorials`} />
+              </>
+            ) : (
+              <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: 0 }}>
+                Live URL unavailable — see the DNS / go-live panel below.
+              </p>
+            )}
+          </div>
+          <Btn
+            tone="outline"
+            size="sm"
+            disabled={busy}
+            onClick={() => apply(() => api.platformReopenSetup(slug), 'Setup reopened')}
+          >
+            Reopen setup
+          </Btn>
+        </>
+      ) : (
+        <>
+          {liveUrl && (
+            <div style={{ marginBottom: 14 }}>
+              <LinkRow label="Already live at" url={liveUrl} />
+            </div>
+          )}
+          <ul
+            style={{ listStyle: 'none', margin: '0 0 16px', padding: 0, display: 'grid', gap: 8 }}
+          >
+            {checklist.map((item) => (
+              <li
+                key={item.label}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12.5 }}
+              >
+                <span className={`sdot ${item.done ? 'teal' : 'muted'}`} />
+                <span style={{ color: item.done ? 'var(--ink)' : 'var(--muted)' }}>
+                  {item.label}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <Btn
+            tone="teal"
+            size="sm"
+            disabled={busy}
+            onClick={() => apply(() => api.platformCompleteSetup(slug), 'Setup marked complete')}
+          >
+            Mark setup complete
+          </Btn>
+        </>
+      )}
+    </Panel>
+  );
+}
+
+/** A labelled, copyable URL row for the setup hand-off summary. */
+function LinkRow({ label, url }: { label: string; url: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 11.5, color: 'var(--muted-2)', minWidth: 120 }}>{label}</span>
+      <a href={url} target="_blank" rel="noreferrer" style={{ ...MONO, fontSize: 12.5 }}>
+        {url}
+      </a>
+      <button
+        type="button"
+        className="btn btn-outline btn-sm"
+        onClick={() => {
+          navigator.clipboard?.writeText(url).then(
+            () => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            },
+            () => {},
+          );
+        }}
+      >
+        {copied ? 'Copied' : 'Copy'}
+      </button>
+    </div>
+  );
+}
+
 function DnsPanel({ slug }: { slug: string }) {
   const q = useQuery({ queryKey: qk.platformDns(slug), queryFn: () => api.platformDnsSheet(slug) });
   const sheet = q.data;
@@ -2433,8 +2615,8 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
             New <em>client</em>
           </h1>
           <p className="ph-desc">
-            Slug, branding basics, deadline and the first admin — the client is usable on the
-            platform host at once; its vanity domain goes live per the DNS sheet.
+            Slug, branding basics, deadline and the first admin — the client is live at its own club
+            subdomain the moment it’s created; a vanity domain is an optional extra.
           </p>
         </div>
         <div className="ph-actions">
@@ -2715,9 +2897,11 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
                   lineHeight: 1.6,
                 }}
               >
-                The client serves from the platform host immediately. Its own vanity domain goes
-                live once the DNS / go-live checklist (certificates, client CNAMEs, VANITY entry,
-                deploy) on the settings page is completed.
+                The client is live immediately at{' '}
+                <span style={MONO}>https://{created.tenant}.club.medicoach.co.za</span>. Finish
+                branding, districts, leagues and the first admin on the settings page, then mark
+                setup complete for the hand-off summary. A dedicated vanity domain is an optional
+                extra (DNS / go-live panel).
               </p>
               <div style={footRow}>
                 <Btn
@@ -2725,7 +2909,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
                   size="sm"
                   onClick={() => navigate(`/platform/tenants/${created.tenant}`)}
                 >
-                  Open client settings & DNS sheet
+                  Complete setup on the client page
                 </Btn>
                 <Btn tone="outline" size="sm" onClick={() => navigate('/platform')}>
                   All clients

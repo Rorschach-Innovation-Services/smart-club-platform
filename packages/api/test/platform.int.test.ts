@@ -1017,15 +1017,18 @@ describe('GET /platform/tenants/:slug/dns', () => {
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
       tenant: string;
+      liveUrl: string | null;
       steps: Array<{ key: string; title: string; detail: string; records?: unknown[] }>;
     };
     assert.equal(body.tenant, 'sharks');
+    // Vanity upsell is now a single web-cert reissue (no per-tenant API cert).
     assert.deepEqual(
       body.steps.map((s) => s.key),
-      ['certificates', 'client-dns', 'registry', 'deploy'],
+      ['web-certificate', 'client-dns', 'registry', 'deploy'],
     );
+    // web + www CNAMEs (the client shares the platform API host — no api record here).
     const dns = body.steps.find((s) => s.key === 'client-dns')!;
-    assert.equal(dns.records?.length, 3);
+    assert.equal(dns.records?.length, 2);
     const registry = body.steps.find((s) => s.key === 'registry')!;
     assert.match(registry.detail, /slug: 'sharks'/);
   });
@@ -1035,6 +1038,81 @@ describe('GET /platform/tenants/:slug/dns', () => {
       headers: platformHeaders(OPERATOR),
     });
     assert.equal(res.status, 404);
+  });
+});
+
+describe('setup-complete milestone (D6)', () => {
+  test('POST stamps setupCompletedAt/By, DELETE clears them, list reflects it', async () => {
+    // Start from a fresh tenant so the assertions don't fight other suites.
+    await app.request('/platform/tenants', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        slug: 'setupco',
+        branding: { name: 'Setup Co' },
+        submissionDeadline: '2026-09-30',
+      }),
+    });
+
+    // Initially absent → list chip reads "In setup".
+    const before = await (
+      await app.request('/platform/tenants', { headers: platformHeaders(OPERATOR) })
+    ).json();
+    const row0 = (before as Array<{ tenant: string; setupCompletedAt?: string }>).find(
+      (t) => t.tenant === 'setupco',
+    );
+    assert.equal(row0?.setupCompletedAt, undefined);
+
+    // POST → stamped with the operator's email.
+    const done = await app.request('/platform/tenants/setupco/setup-complete', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+    });
+    assert.equal(done.status, 200);
+    const doneBody = (await done.json()) as {
+      setupCompletedAt?: string;
+      setupCompletedBy?: string;
+    };
+    assert.ok(doneBody.setupCompletedAt, 'setupCompletedAt stamped');
+    assert.equal(doneBody.setupCompletedBy, 'operator@platform');
+
+    // List projection now carries it.
+    const mid = await (
+      await app.request('/platform/tenants', { headers: platformHeaders(OPERATOR) })
+    ).json();
+    const row1 = (mid as Array<{ tenant: string; setupCompletedAt?: string }>).find(
+      (t) => t.tenant === 'setupco',
+    );
+    assert.ok(row1?.setupCompletedAt, 'list row shows Live');
+
+    // DELETE → cleared (fields dropped, not stored as null).
+    const reopened = await app.request('/platform/tenants/setupco/setup-complete', {
+      method: 'DELETE',
+      headers: platformHeaders(OPERATOR),
+    });
+    assert.equal(reopened.status, 200);
+    const reopenedBody = (await reopened.json()) as {
+      setupCompletedAt?: string;
+      setupCompletedBy?: string;
+    };
+    assert.equal(reopenedBody.setupCompletedAt, undefined);
+    assert.equal(reopenedBody.setupCompletedBy, undefined);
+  });
+
+  test('unknown tenant → 404', async () => {
+    const res = await app.request('/platform/tenants/ghost/setup-complete', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+    });
+    assert.equal(res.status, 404);
+  });
+
+  test('non-operator is rejected by the platform gate', async () => {
+    const res = await app.request('/platform/tenants/dolphins/setup-complete', {
+      method: 'POST',
+      headers: platformHeaders(DOLPHINS_ADMIN),
+    });
+    assert.equal(res.status, 403);
   });
 });
 

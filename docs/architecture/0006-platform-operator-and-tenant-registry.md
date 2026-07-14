@@ -115,6 +115,14 @@ bucket.
 
 ## Deferred: wildcard-subdomain scheme
 
+> **Superseded by [ADR 0007](0007-wildcard-subdomains-shared-api-host.md) (July 2026).**
+> The wildcard scheme was built, with two changes from the sketch below: the base is
+> `<slug>.club.medicoach.co.za` (not `smartclub`), and the API uses ONE shared host
+> `api.club.medicoach.co.za` (tenant resolved from Origin) rather than a wildcard API
+> host — so only ONE wildcard cert reissue, not two. The four blockers listed here are
+> each resolved in 0007 (shared-API Origin resolution, split CORS-vs-link origin checks,
+> the unknown-club SPA state, and a cPanel-wildcard verification/Route53 contingency).
+
 The zero-deploy alternative — `<slug>.smartclub.medicoach.co.za` +
 `<slug>.api.smartclub.medicoach.co.za` wildcard baselines, so a portal-created tenant is
 **instantly** reachable — is designed but deliberately not built:

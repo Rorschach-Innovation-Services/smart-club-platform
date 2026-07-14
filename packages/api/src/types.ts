@@ -165,6 +165,14 @@ export interface TenantConfig {
    * email-only), 'selfServeBranding' (reserved, default false).
    */
   features?: Record<string, boolean>;
+  /**
+   * Operator "setup complete" milestone (D6) — informational only (the client is
+   * publicly live from creation and every setting stays editable). Present ⇒ an
+   * operator marked setup done; absent ⇒ still in setup. Stamped/cleared ONLY via
+   * POST/DELETE /platform/tenants/:slug/setup-complete, never the config merge-patch.
+   */
+  setupCompletedAt?: string;
+  setupCompletedBy?: string;
 }
 
 /** Stored club record. Catalogue-derived fields stay client-side. */

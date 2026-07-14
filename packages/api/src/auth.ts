@@ -75,11 +75,48 @@ const HOST_TENANT_MAP: Record<string, string> = (() => {
   }
 })();
 
+// Wildcard platform (scheme 1): the ONE shared API host every wildcard tenant calls,
+// and the web suffix its Origin carries. WILDCARD_ENABLED gates the Origin branch so
+// the resolver behaves exactly as before until the wildcard is armed. See origins.ts.
+const SHARED_API_HOST = (process.env.SHARED_API_HOST ?? '').toLowerCase();
+const WILDCARD_WEB_SUFFIX = (process.env.WILDCARD_WEB_SUFFIX ?? '').toLowerCase();
+const WILDCARD_ENABLED = process.env.WILDCARD_ENABLED === '1';
+/** A safe single DNS label. */
+const LABEL_RE = /^[a-z0-9-]+$/;
+
 /**
- * Resolve the tenant slug for a request. Prod: an explicit host→tenant map entry, else
- * the leftmost label of the Host (e.g. `dolphins.example.com` → `dolphins`). Dev: an
- * explicit `x-tenant` header. Returns null if it can't be determined (callers decide
- * whether that's fatal).
+ * Derive the tenant from a browser Origin when the request hits the SHARED_API_HOST
+ * (where the Host is `api.club.…` for everyone, so it can't identify the tenant). A
+ * vanity web origin sharing the shared API resolves via the host map; a wildcard web
+ * origin resolves to its single leftmost label. Anything else (missing/foreign Origin,
+ * a multi-label `a.b.club.…`) returns null — the shared host NEVER falls through to
+ * leftmost-label (that would yield the reserved slug 'api'). Origin is spoofable by
+ * non-browser clients, but that only lets a caller SELECT a tenant they already hold a
+ * membership in (the JWT `memberships` claim is the isolation boundary) — see auth
+ * docs / docs/architecture/0007.
+ */
+function tenantFromOrigin(origin: string | undefined): string | null {
+  if (!origin) return null;
+  let host: string;
+  try {
+    host = new URL(origin).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (HOST_TENANT_MAP[host]) return HOST_TENANT_MAP[host];
+  if (WILDCARD_WEB_SUFFIX && host.endsWith(WILDCARD_WEB_SUFFIX)) {
+    const label = host.slice(0, -WILDCARD_WEB_SUFFIX.length);
+    if (LABEL_RE.test(label)) return label;
+  }
+  return null;
+}
+
+/**
+ * Resolve the tenant slug for a request. Prod order: an explicit host→tenant map entry
+ * (vanity web + api hosts) → the shared API host's Origin-derived tenant → the leftmost
+ * label of the Host (e.g. `dolphins.example.com` → `dolphins`). Dev: an explicit
+ * `x-tenant` header. Returns null if it can't be determined (callers decide whether
+ * that's fatal).
  */
 export function resolveTenant(c: Context): string | null {
   // The x-tenant header is a DEV convenience only (no custom domains locally).
@@ -90,8 +127,12 @@ export function resolveTenant(c: Context): string | null {
     if (explicit) return explicit.toLowerCase();
   }
   const host = (c.req.header('host') ?? '').split(':')[0].toLowerCase();
-  // Explicit custom-domain mapping wins (covers the API host + vanity web hosts).
+  // Explicit custom-domain mapping wins (covers per-tenant API hosts + vanity web hosts).
   if (HOST_TENANT_MAP[host]) return HOST_TENANT_MAP[host];
+  // Shared API host: resolve from Origin, and never fall through to leftmost-label.
+  if (WILDCARD_ENABLED && SHARED_API_HOST && host === SHARED_API_HOST) {
+    return tenantFromOrigin(c.req.header('origin'));
+  }
   const label = host.split('.')[0];
   // Ignore non-tenant hosts (raw execute-api/localhost) so the API-Gateway
   // default domain can't be used to bypass host-based tenant inference.

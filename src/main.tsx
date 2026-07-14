@@ -17,7 +17,7 @@ import { QueryClientProvider, useQuery, useQueries } from '@tanstack/react-query
 import { queryClient, qk } from './query';
 import * as api from './api';
 import { ApiError } from './api';
-import { resolveTenantSlug, applyTheme } from './config';
+import { resolveTenantSlug, applyTheme, redirectToCanonicalOrigin } from './config';
 import { setActiveTenant } from './api';
 import { AuthProvider, useAuth, membershipFor } from './auth';
 import { routingRole, clubRouteRedirect, isOperator } from './routing';
@@ -299,6 +299,27 @@ function Splash({ message, action }: { message?: ReactNode; action?: ReactNode }
   );
 }
 
+/**
+ * Full-page state when the host names no tenant (GET /tenant → 404). On the shared
+ * wildcard host every `<slug>.club.medicoach.co.za` resolves DNS-wise, so an unclaimed
+ * or mistyped slug lands here instead of a half-broken app. Neutral-branded (no tenant
+ * theme loaded) — never leaks another club's identity.
+ */
+function UnknownClub() {
+  return (
+    <Splash
+      message={
+        <>
+          <strong style={{ display: 'block', color: 'var(--ink)', marginBottom: 8 }}>
+            This club isn’t available
+          </strong>
+          Check the web address, or contact your union if you think it should be here.
+        </>
+      }
+    />
+  );
+}
+
 /* ─── Root ─── */
 /**
  * Fallback shown when a single view throws during render, so one crashing screen shows a
@@ -341,10 +362,20 @@ function AppRoutes() {
   // retry the tenant config: it carries the league/district catalogue the authed app
   // derives everything from, so a transient failure here (previously retry:0) would
   // otherwise leave `tenantConfig` undefined and silently zero the leagues/teams breakdown.
-  const tenantQuery = useQuery({ queryKey: qk.tenant(), queryFn: api.getTenant, retry: 2 });
+  // A 404 is NOT transient (the slug names no tenant — common on the wildcard host for an
+  // unclaimed subdomain): don't retry it (also stops subdomain-scanning bots tripling the
+  // DynamoDB reads), and show the dedicated "unknown club" screen below.
+  const tenantQuery = useQuery({
+    queryKey: qk.tenant(),
+    queryFn: api.getTenant,
+    retry: (count, err) => !(err instanceof ApiError && err.status === 404) && count < 2,
+  });
   useEffect(() => {
     if (tenantQuery.data?.branding) applyTheme(tenantQuery.data.branding);
   }, [tenantQuery.data]);
+
+  const tenantMissing = tenantQuery.error instanceof ApiError && tenantQuery.error.status === 404;
+  if (tenantMissing) return <UnknownClub />;
 
   return (
     <Routes>
@@ -2711,4 +2742,9 @@ function ComingSoon({ title, phase, unlocked, eta }) {
   );
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+// D5: a vanity tenant reached on the shared wildcard host is bounced to its own origin
+// before we render, so sessions/links stay single-host. When it redirects, skip the
+// render entirely to avoid a flash of the app on the wrong origin.
+if (!redirectToCanonicalOrigin()) {
+  createRoot(document.getElementById('root')).render(<App />);
+}

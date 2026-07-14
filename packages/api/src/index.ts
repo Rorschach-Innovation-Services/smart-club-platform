@@ -82,6 +82,7 @@ import { hasFeature } from './features.js';
 import { buildTenantConfig, type TenantBrandingInput } from './seed-core.js';
 import { validateTenantSlug } from './tenant-validation.js';
 import { grantTenantAdmin } from './tenant-admin.js';
+import { originAllowed, originAllowedForTenant, canonicalWebOrigin } from './origins.js';
 
 const s3 = new S3Client({});
 
@@ -118,6 +119,13 @@ const UPLOADS_BUCKET = process.env.UPLOADS_BUCKET!;
 const TUTORIALS_BUCKET = process.env.TUTORIALS_BUCKET ?? '';
 const USER_POOL_ID = process.env.USER_POOL_ID!;
 const MAX_DOC_BYTES = 10 * 1024 * 1024; // 10 MB
+
+// Wildcard platform (scheme 1) — real CNAME targets for the operator DNS sheet, and
+// the shared API host. Empty until the wildcard is armed (see infra/tenants.ts).
+const WILDCARD_ENABLED = process.env.WILDCARD_ENABLED === '1';
+const SHARED_API_HOST = process.env.SHARED_API_HOST ?? '';
+const WEB_CNAME_TARGET = process.env.WEB_CNAME_TARGET ?? '';
+const SHARED_API_CNAME_TARGET = process.env.SHARED_API_CNAME_TARGET ?? '';
 
 /**
  * Provision a passwordless invite/signup user, translating Cognito's email-format
@@ -245,29 +253,9 @@ function safeguardingValue(
 
 const app = new Hono<HonoEnv>();
 
-// CORS: allow localhost (dev), *.cloudfront.net, and any host in ALLOWED_ORIGINS.
-// A wildcard origin alongside bearer tokens + the x-tenant header is too open.
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-/**
- * True if `origin` (scheme://host[:port]) is a trusted app origin: localhost (dev),
- * any *.cloudfront.net, or an explicit ALLOWED_ORIGINS entry (custom tenant domains).
- * Shared by CORS and the invite-link host check so an admin can't send an invite
- * pointing at an arbitrary/phishing domain.
- */
-function originAllowed(origin: string): boolean {
-  if (ALLOWED_ORIGINS.includes(origin)) return true;
-  try {
-    const { hostname } = new URL(origin);
-    return hostname === 'localhost' || hostname.endsWith('.cloudfront.net');
-  } catch {
-    return false;
-  }
-}
-
+// CORS trust (localhost, *.cloudfront.net, enumerated vanity hosts, and the wildcard
+// suffix once armed) lives in ./origins. Link/anti-phishing validation uses the
+// stricter originAllowedForTenant there — see docs/architecture/0007.
 app.use(
   '*',
   cors({
@@ -1289,8 +1277,8 @@ app.patch('/clubs/:id', async (c) => {
  * resolvable so the caller skips the auto-send (the chair can still be sent the link
  * manually from the shared modal). In local dev (STAGE 'local') a localhost base is fine.
  */
-function deliverableBaseUrl(c: Context<HonoEnv>): string | null {
-  const base = resolveLoginUrl(c);
+function deliverableBaseUrl(c: Context<HonoEnv>, tenant: string): string | null {
+  const base = resolveLoginUrl(c, tenant);
   try {
     if (new URL(base).hostname === 'localhost' && process.env.STAGE !== 'local') return null;
   } catch {
@@ -1337,7 +1325,7 @@ async function mintAndDeliverOnboarding(
   // Only auto-send on the first completion (fresh mint) — re-confirmations skip the blast.
   if (!justMinted || !current.playerRegLink) return current;
 
-  const base = deliverableBaseUrl(c);
+  const base = deliverableBaseUrl(c, tenant);
   if (!base) {
     console.warn('onboarding send skipped: no deliverable host (localhost in a deployed stage)');
     return current;
@@ -2576,6 +2564,9 @@ app.get('/platform/tenants', async (c) => {
         submissionDeadline: t.submissionDeadline,
         adminCount: t.adminCount ?? 0,
         features: t.features ?? {},
+        // Setup milestone (D6): present = operator marked setup done. Drives the
+        // "In setup" / "Live" chip on the client list.
+        setupCompletedAt: t.setupCompletedAt,
         ...(clubs && {
           clubCount: clubs.length,
           teamCount: clubs.reduce((sum, cl) => sum + clubTeamCount(cl), 0),
@@ -2820,63 +2811,65 @@ app.post('/platform/tenants/:slug/logo-upload', async (c) => {
 });
 
 /**
- * GET /platform/tenants/:slug/dns — the vanity-domain go-live instruction sheet as
- * DATA (the portal renders it): cert-SAN reissue, client CNAMEs (operator fills the
- * targets from `sst deploy` outputs), the infra/tenants.ts VANITY entry, deploy.
+ * GET /platform/tenants/:slug/dns — the domain sheet as DATA (the portal renders it).
+ * `liveUrl` is where the client is ALREADY reachable (wildcard host, or vanity origin
+ * once configured). `steps` are the OPTIONAL vanity-domain upsell: with the shared API
+ * host, that's now a single web-cert reissue + one VANITY entry + client CNAMEs — no
+ * per-tenant API cert. Real CNAME targets come from the deploy envs; the web target is
+ * only populated once WEB_CNAME_TARGET is filled in infra/tenants.ts.
  */
 app.get('/platform/tenants/:slug/dns', async (c) => {
   const slug = c.req.param('slug');
   const config = await repo.getTenantConfig(slug);
   if (!config) throw new HttpError(404, 'tenant not found');
+  const liveUrl = canonicalWebOrigin(slug);
+  const webTarget =
+    WEB_CNAME_TARGET || '<CloudFront distribution domain — aws cloudfront list-distributions>';
+  const apiTarget =
+    SHARED_API_CNAME_TARGET || '<shared API Gateway regional domain — sst deploy output>';
   return c.json({
     tenant: slug,
-    note:
-      'Vanity go-live checklist. Placeholders in angle brackets are operator-filled: ' +
-      'pick the client hosts (e.g. clubs.<client-domain> / api.clubs.<client-domain>) ' +
-      'and read the CNAME targets from the `sst deploy --stage prod` outputs.',
+    liveUrl,
+    note: WILDCARD_ENABLED
+      ? `This client is already live at ${liveUrl} — nothing to do. The steps below are ` +
+        'only needed if the client wants their OWN vanity domain instead of the shared ' +
+        'club subdomain.'
+      : 'Vanity go-live checklist. Placeholders in angle brackets are operator-filled: ' +
+        'pick the client web host (e.g. clubs.<client-domain>) and read the CNAME targets ' +
+        'from the `sst deploy --stage prod` outputs.',
     steps: [
       {
-        key: 'certificates',
-        title: 'Reissue ACM certificates with the new SANs',
+        key: 'web-certificate',
+        title: 'Reissue the WEB ACM certificate with the new SANs',
         detail:
-          'ACM cannot add SANs to an existing certificate. Request NEW certificates — ' +
-          'us-east-1 for CloudFront (web) and af-south-1 for API Gateway — covering ALL ' +
-          'existing tenant hosts PLUS <webHost>, www.<webHost> and <apiHost>. Validate via ' +
-          'DNS, then update WEB_CERT_ARN / API_CERT_ARN in infra/tenants.ts. This must ' +
-          'COMPLETE before the deploy that adds the new aliases.',
+          'ACM cannot add SANs to an existing certificate. Request a NEW us-east-1 ' +
+          '(CloudFront) certificate covering ALL existing web hosts PLUS <webHost> and ' +
+          'www.<webHost> — `npm --prefix packages/api run request-cert -- --region ' +
+          'us-east-1 --replace <WEB_CERT_ARN> --add <webHost> --add www.<webHost>` builds ' +
+          'the superset so a live SAN is never dropped. Validate via DNS, then update ' +
+          'WEB_CERT_ARN in infra/tenants.ts. (The client shares the platform API host, so ' +
+          'NO af-south-1 API cert is needed unless they insist on their own apiHost.)',
       },
       {
         key: 'client-dns',
         title: "Client DNS CNAME records (at the client's DNS provider / cPanel)",
         detail:
           'Add the ACM validation CNAMEs from the certificate step, plus the records below. ' +
-          'Targets come from the current deploy outputs (CloudFront distribution domain for ' +
-          'web; API Gateway regional custom-domain target for api).',
+          `Never advertise www.<slug>${process.env.WILDCARD_WEB_SUFFIX ?? '.club.medicoach.co.za'} ` +
+          'forms — the wildcard certificate covers a single label only.',
         records: [
-          {
-            type: 'CNAME',
-            host: '<webHost>',
-            target: '<CloudFront distribution domain — sst deploy output>',
-          },
-          {
-            type: 'CNAME',
-            host: 'www.<webHost>',
-            target: '<same CloudFront distribution domain>',
-          },
-          {
-            type: 'CNAME',
-            host: '<apiHost>',
-            target: '<API Gateway regional domain — sst deploy output>',
-          },
+          { type: 'CNAME', host: '<webHost>', target: webTarget },
+          { type: 'CNAME', host: 'www.<webHost>', target: webTarget },
         ],
       },
       {
         key: 'registry',
         title: 'Add the VANITY entry to infra/tenants.ts',
         detail:
-          `Append { slug: '${slug}', webHost: '<webHost>', www: true, apiHost: '<apiHost>', ` +
-          `enabled: true } to VANITY so TENANT_HOST_MAP, ALLOWED_ORIGINS, the web aliases ` +
-          `and the API domain mapping are all derived for this tenant.`,
+          `Append { slug: '${slug}', webHost: '<webHost>', www: true, enabled: true } to ` +
+          'VANITY (leave apiHost unset so the client shares the platform API host). ' +
+          'TENANT_HOST_MAP, ALLOWED_ORIGINS, WEB_ORIGIN_MAP, the web alias and the SPA ' +
+          'web→API map are all derived from it.',
       },
       {
         key: 'deploy',
@@ -2887,7 +2880,37 @@ app.get('/platform/tenants/:slug/dns', async (c) => {
           '`npx sst deploy --stage prod`. The user runs deploys — see the runbook.',
       },
     ],
+    // The one shared API host every tenant already uses (informational).
+    sharedApiHost: SHARED_API_HOST,
+    sharedApiTarget: apiTarget,
   });
+});
+
+/**
+ * POST /platform/tenants/:slug/setup-complete — stamp the operator's "setup done"
+ * milestone (informational only; the client is already publicly live and every setting
+ * stays editable). Records who + when. DELETE reopens. Kept OUT of the PUT merge-patch
+ * so it's an explicit, audited action.
+ */
+app.post('/platform/tenants/:slug/setup-complete', async (c) => {
+  const auth = c.get('auth')!;
+  const slug = c.req.param('slug');
+  // applyTenantConfigPatch 404s on a missing tenant.
+  const next = await applyTenantConfigPatch(slug, {
+    setupCompletedAt: now(),
+    setupCompletedBy: auth.email,
+  });
+  return c.json(next);
+});
+
+app.delete('/platform/tenants/:slug/setup-complete', async (c) => {
+  const slug = c.req.param('slug');
+  // undefined drops the fields (repo marshals with removeUndefinedValues), reopening setup.
+  const next = await applyTenantConfigPatch(slug, {
+    setupCompletedAt: undefined,
+    setupCompletedBy: undefined,
+  });
+  return c.json(next);
 });
 
 /**
@@ -2953,7 +2976,7 @@ app.post('/admin/users', async (c) => {
 
   // Validate the optional invite link up front (so a bad link fails before provisioning).
   // Falls back to the request-derived app origin when no link is supplied.
-  const loginUrl = resolveLoginUrl(c, body.link);
+  const loginUrl = resolveLoginUrl(c, ra.tenant, body.link);
   if (body.channels !== undefined) validateChannels(body.channels);
 
   // Create (or reuse, for a multi-union invite) a CONFIRMED passwordless user.
@@ -3106,7 +3129,7 @@ app.post('/admin/users/:sub/resend', async (c) => {
   const channels =
     body.channels && body.channels.length > 0 ? body.channels : (['email'] as Channel[]);
   validateChannels(channels);
-  const loginUrl = resolveLoginUrl(c, body.link);
+  const loginUrl = resolveLoginUrl(c, ra.tenant, body.link);
   const orgName = await tenantOrgName(ra.tenant);
   const { results } = await sendStaffInvite({
     email: profile.email,
@@ -3151,7 +3174,7 @@ app.patch('/admin/users/:sub/email', async (c) => {
     throw new HttpError(409, 'that email is already in use by another member');
 
   // Resolve link + org name up front so a bad link 400s before any mutation.
-  const loginUrl = resolveLoginUrl(c, body.link);
+  const loginUrl = resolveLoginUrl(c, ra.tenant, body.link);
   const orgName = await tenantOrgName(ra.tenant);
 
   // Relocate the Cognito sign-in alias (tries sub, falls back to the current email alias).
@@ -3366,12 +3389,15 @@ function validateChannels(channels: Channel[]): void {
 }
 
 /**
- * Resolve the sign-in URL an invite should carry. Prefers a client-supplied `link`
- * (so it rides the tenant's own custom domain), validated to be http(s) on a TRUSTED
- * app origin — so an admin can't aim an invite at a phishing domain. Falls back to the
- * request's own Origin (or a localhost dev default) when no link is supplied.
+ * Resolve the sign-in URL an invite should carry, for a given tenant. A client-supplied
+ * `link` is validated STRICTLY against THIS tenant's own origins (originAllowedForTenant)
+ * — never another tenant's host or a bare *.cloudfront.net — so an admin can't aim an
+ * invite at a phishing clone. With no link, prefers the tenant's canonical origin (its
+ * vanity host, else its wildcard host) so links are deterministic and single-host;
+ * falls back to the request Origin or a localhost dev default only in the dormant
+ * pre-wildcard state for a tenant with no vanity host.
  */
-function resolveLoginUrl(c: Context<HonoEnv>, link?: string): string {
+function resolveLoginUrl(c: Context<HonoEnv>, tenant: string, link?: string): string {
   if (link) {
     let url: URL;
     try {
@@ -3381,9 +3407,18 @@ function resolveLoginUrl(c: Context<HonoEnv>, link?: string): string {
     }
     if (url.protocol !== 'http:' && url.protocol !== 'https:')
       throw new HttpError(400, 'valid link required');
-    if (!originAllowed(url.origin)) throw new HttpError(400, 'link host not allowed');
+    // Strict per-tenant validation the moment the tenant HAS a canonical origin (vanity
+    // or wildcard) — that closes the phishing hole. A dormant tenant (no vanity, wildcard
+    // off) has no origin to enforce against, so fall back to the broad app-origin check to
+    // preserve today's behavior (localhost/CloudFront/enumerated).
+    const ok = canonicalWebOrigin(tenant)
+      ? originAllowedForTenant(url.origin, tenant)
+      : originAllowed(url.origin);
+    if (!ok) throw new HttpError(400, 'link host not allowed');
     return url.href;
   }
+  const canonical = canonicalWebOrigin(tenant);
+  if (canonical) return canonical;
   const origin = c.req.header('origin') ?? '';
   if (origin && originAllowed(origin)) return origin;
   // No usable origin (e.g. a server-to-server call) — return a harmless localhost

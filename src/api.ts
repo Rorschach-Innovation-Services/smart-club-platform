@@ -48,6 +48,12 @@ export function apiBase(): string {
   }
   const host = typeof window !== 'undefined' ? window.location?.hostname?.toLowerCase() : undefined;
   if (host && map[host]) return map[host];
+  // Wildcard host `<slug>.club.medicoach.co.za` → the ONE shared API host (the API
+  // resolves the tenant from this SPA's Origin header). Checked after the explicit map
+  // so a vanity host with its own API host still wins.
+  const suffix = import.meta.env.VITE_WILDCARD_WEB_SUFFIX ?? '';
+  const sharedApiUrl = import.meta.env.VITE_SHARED_API_URL ?? '';
+  if (host && suffix && sharedApiUrl && host.endsWith(suffix)) return sharedApiUrl;
   return import.meta.env.VITE_API_URL ?? '';
 }
 
@@ -473,6 +479,16 @@ export const platformLogoUploadUrl = (slug: string, contentType: string) =>
   });
 export const platformDnsSheet = (slug: string) =>
   request<DnsSheet>(`/platform/tenants/${encodeURIComponent(slug)}/dns`);
+// Operator "setup complete" milestone (D6) — informational, reversible. Returns the
+// updated config (setupCompletedAt present ⇒ done; DELETE clears it, reopening setup).
+export const platformCompleteSetup = (slug: string) =>
+  request<TenantConfig>(`/platform/tenants/${encodeURIComponent(slug)}/setup-complete`, {
+    method: 'POST',
+  });
+export const platformReopenSetup = (slug: string) =>
+  request<TenantConfig>(`/platform/tenants/${encodeURIComponent(slug)}/setup-complete`, {
+    method: 'DELETE',
+  });
 // Read-only breakdown payload for the per-client overview page. Clubs are the
 // sanitized InsightsClub projection — never the full Club records.
 export const platformTenantOverview = (slug: string) =>

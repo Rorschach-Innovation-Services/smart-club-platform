@@ -11,15 +11,43 @@ vi.stubEnv(
   }),
 );
 vi.stubEnv('VITE_DEFAULT_TENANT', 'dolphins');
+// Wildcard platform: parsed at config.js module load, so stub before the import below.
+vi.stubEnv('VITE_WILDCARD_WEB_SUFFIX', '.club.medicoach.co.za');
+vi.stubEnv(
+  'VITE_WEB_ORIGIN_MAP',
+  JSON.stringify({ dolphins: 'https://dolphinspipeline.medicoach.co.za' }),
+);
 
 let resolveTenantSlug;
 let applyTheme;
+let redirectToCanonicalOrigin;
 beforeAll(async () => {
-  ({ resolveTenantSlug, applyTheme } = await import('./config'));
+  ({ resolveTenantSlug, applyTheme, redirectToCanonicalOrigin } = await import('./config'));
 });
 
 const atHost = (hostname, search = '') =>
   vi.stubGlobal('window', { location: { hostname, search } });
+// Full location stub with a replace() spy, for the canonical-origin redirect.
+const atLocation = (loc: {
+  hostname: string;
+  origin: string;
+  pathname?: string;
+  search?: string;
+  hash?: string;
+}) => {
+  const replace = vi.fn();
+  vi.stubGlobal('window', {
+    location: {
+      hostname: loc.hostname,
+      origin: loc.origin,
+      pathname: loc.pathname ?? '/',
+      search: loc.search ?? '',
+      hash: loc.hash ?? '',
+      replace,
+    },
+  });
+  return replace;
+};
 afterEach(() => vi.unstubAllGlobals());
 
 describe('resolveTenantSlug', () => {
@@ -47,6 +75,42 @@ describe('resolveTenantSlug', () => {
   it('honors ?tenant= on a bare host (dev)', () => {
     atHost('localhost', '?tenant=lions');
     expect(resolveTenantSlug()).toBe('lions');
+  });
+
+  it('resolves a wildcard club host by leftmost label', () => {
+    atHost('demo.club.medicoach.co.za');
+    expect(resolveTenantSlug()).toBe('demo');
+  });
+});
+
+describe('redirectToCanonicalOrigin (D5)', () => {
+  it('bounces a vanity tenant off the wildcard host to its own origin', () => {
+    const replace = atLocation({
+      hostname: 'dolphins.club.medicoach.co.za',
+      origin: 'https://dolphins.club.medicoach.co.za',
+      pathname: '/clubs',
+      search: '?x=1',
+    });
+    expect(redirectToCanonicalOrigin()).toBe(true);
+    expect(replace).toHaveBeenCalledWith('https://dolphinspipeline.medicoach.co.za/clubs?x=1');
+  });
+
+  it('does NOT redirect a wildcard-only tenant (no vanity origin)', () => {
+    const replace = atLocation({
+      hostname: 'demo.club.medicoach.co.za',
+      origin: 'https://demo.club.medicoach.co.za',
+    });
+    expect(redirectToCanonicalOrigin()).toBe(false);
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it('does NOT redirect when already on the vanity host', () => {
+    const replace = atLocation({
+      hostname: 'dolphinspipeline.medicoach.co.za',
+      origin: 'https://dolphinspipeline.medicoach.co.za',
+    });
+    expect(redirectToCanonicalOrigin()).toBe(false);
+    expect(replace).not.toHaveBeenCalled();
   });
 });
 

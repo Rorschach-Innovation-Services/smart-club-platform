@@ -30,8 +30,20 @@ export default $config({
     // The vanity-domain registry (hosts, cert ARNs, onboarding sequence) lives in
     // infra/tenants.ts — dynamic import because SST forbids top-level imports here.
     const isProd = $app.stage === 'prod';
-    const { WEB_CERT_ARN, API_CERT_ARN, VANITY, hostTenantMap, allowedOrigins, apiHostMap } =
-      await import('./infra/tenants');
+    const {
+      WEB_CERT_ARN,
+      API_CERT_ARN,
+      SHARED_API_CERT_ARN,
+      SHARED_API_HOST,
+      WILDCARD_WEB_ALIAS,
+      WILDCARD_WEB_SUFFIX,
+      WEB_CNAME_TARGET,
+      VANITY,
+      hostTenantMap,
+      allowedOrigins,
+      apiHostMap,
+      webOriginMap,
+    } = await import('./infra/tenants');
     // First enabled entry is the PRIMARY tenant: it takes SST's built-in `domain:`
     // slot on the StaticSite and the ApiGatewayV2; the rest ride as CloudFront
     // aliases and raw API GW domain mappings (below).
@@ -39,6 +51,29 @@ export default $config({
     const [primaryVanity, ...extraVanity] = enabledVanity;
     if (isProd && !primaryVanity) {
       throw new Error('infra/tenants.ts: prod requires at least one enabled VANITY entry');
+    }
+    // The PRIMARY entry feeds SST's ApiGatewayV2 `domain:` slot (and api.url →
+    // VITE_API_URL, the SPA's last-resort API base). It MUST have its own apiHost —
+    // without one, api.url would fall to the raw execute-api host, which resolveTenant()
+    // deliberately nulls. Fail loudly rather than ship a broken fallback.
+    if (isProd && !primaryVanity.apiHost) {
+      throw new Error('infra/tenants.ts: the primary VANITY entry must set apiHost');
+    }
+    // Wildcard platform (scheme 1) is ARMED once the shared API cert exists. Until then
+    // the wildcard alias + shared API host aren't created, so this code can land / deploy
+    // dormant ahead of the rollout. See docs/runbooks/wildcard-domain-rollout.md.
+    const wildcardEnabled = isProd && SHARED_API_CERT_ARN !== '';
+    // Before the wildcard is armed, a vanity tenant MUST have its own apiHost: the shared
+    // API host apiHostMap() would otherwise point it at doesn't exist yet (no domain, no
+    // DNS), so the tenant's SPA would ship a dead API base. Once armed, sharing is fine.
+    if (isProd && !wildcardEnabled) {
+      const orphan = enabledVanity.find((v) => !v.apiHost);
+      if (orphan)
+        throw new Error(
+          `infra/tenants.ts: vanity tenant "${orphan.slug}" has no apiHost, but the wildcard ` +
+            `platform is not armed (SHARED_API_CERT_ARN is empty) — set an apiHost, or arm the ` +
+            `wildcard first (docs/runbooks/wildcard-domain-rollout.md)`,
+        );
     }
     // Custom-domain hosts don't follow the leftmost-label tenant convention (the API
     // lives at api.<…> and the union's vanity host is "dolphinspipeline", not "dolphins"),
@@ -187,13 +222,14 @@ export default $config({
       // so VITE_API_URL + ALLOWED_ORIGINS below pick it up automatically.
       domain: isProd ? { name: primaryVanity.apiHost, dns: false, cert: API_CERT_ARN } : undefined,
     });
-    // Additional enabled vanity API hosts (beyond the primary): SST's `domain:`
-    // takes one host, so the rest are raw API GW custom domains mapped onto the
-    // same HTTP API. Each tenant needs its OWN api host because the API resolves
-    // tenant from the Host header. Stage is SST's fixed '$default' (see
+    // Additional enabled vanity API hosts (beyond the primary that have their OWN
+    // apiHost): SST's `domain:` takes one host, so the rest are raw API GW custom
+    // domains mapped onto the same HTTP API. A vanity tenant WITHOUT an apiHost shares
+    // SHARED_API_HOST instead, so skip those here. Stage is SST's fixed '$default' (see
     // .sst/platform/src/components/aws/apigatewayv2.ts createStage()).
     if (isProd) {
       for (const v of extraVanity) {
+        if (!v.apiHost) continue;
         const dn = new aws.apigatewayv2.DomainName(`ApiDomain${v.slug}`, {
           domainName: v.apiHost,
           domainNameConfiguration: {
@@ -208,6 +244,27 @@ export default $config({
           stage: '$default',
         });
       }
+    }
+    // The ONE shared API host for wildcard tenants (scheme 1). The API resolves the
+    // tenant from the request's Origin header when hit here (Host is api.club.* for
+    // everyone). Its own single-name af-south-1 cert, so the existing per-vanity
+    // API_CERT_ARN stays untouched. targetDomainName feeds the DNS sheet.
+    let sharedApiCnameTarget: string | ReturnType<typeof $interpolate> = '';
+    if (wildcardEnabled) {
+      const sharedDn = new aws.apigatewayv2.DomainName('ApiDomainShared', {
+        domainName: SHARED_API_HOST,
+        domainNameConfiguration: {
+          certificateArn: SHARED_API_CERT_ARN,
+          endpointType: 'REGIONAL',
+          securityPolicy: 'TLS_1_2',
+        },
+      });
+      new aws.apigatewayv2.ApiMapping('ApiMappingShared', {
+        apiId: api.nodes.api.id,
+        domainName: sharedDn.id,
+        stage: '$default',
+      });
+      sharedApiCnameTarget = sharedDn.domainNameConfiguration.targetDomainName;
     }
     api.route('$default', {
       handler: 'packages/api/src/index.handler',
@@ -263,6 +320,20 @@ export default $config({
         ALLOWED_ORIGINS: isProd
           ? allowedOrigins(VANITY).join(',')
           : (process.env.ALLOWED_ORIGINS ?? ''),
+        // ── Wildcard platform (scheme 1) ── Inert until WILDCARD_ENABLED='1'. See
+        // infra/tenants.ts + packages/api/src/{auth,origins}.ts.
+        // '1' arms the Origin-based tenant resolution on SHARED_API_HOST, the wildcard
+        // CORS/canonical-origin logic, and the DNS sheet's "already live" copy.
+        WILDCARD_ENABLED: wildcardEnabled ? '1' : '',
+        // The shared API host + web wildcard suffix the resolver/origins logic keys on.
+        SHARED_API_HOST: isProd ? SHARED_API_HOST : '',
+        WILDCARD_WEB_SUFFIX: isProd ? WILDCARD_WEB_SUFFIX : '',
+        // slug → canonical vanity web origin (JSON). canonicalWebOrigin() falls back to
+        // `https://<slug>${WILDCARD_WEB_SUFFIX}` for tenants not in this map.
+        WEB_ORIGIN_MAP: JSON.stringify(isProd ? webOriginMap(VANITY) : {}),
+        // Real CNAME targets for the operator DNS sheet (empty → the sheet shows a hint).
+        WEB_CNAME_TARGET: isProd ? WEB_CNAME_TARGET : '',
+        SHARED_API_CNAME_TARGET: sharedApiCnameTarget,
         // Outbound messaging. SES_REGION must stay eu-west-1 — that's where the
         // verified identity with production access lives (this account's af-south-1
         // SES exists but is sandboxed: unverified recipients are rejected).
@@ -289,6 +360,9 @@ export default $config({
       // multi-SAN us-east-1 cert covers all of them. dns:false — CNAMEs added manually
       // at each client's external DNS provider. Aliases (not redirects) keep DNS to
       // simple same-target CNAMEs.
+      // The wildcard alias (WILDCARD_WEB_ALIAS) rides here once wildcardEnabled — the
+      // reissued WEB_CERT_ARN must cover it (a single-label `*.club.…`; www.<slug>.club
+      // is NOT covered and is never advertised). One alias serves every wildcard tenant.
       domain: isProd
         ? {
             name: primaryVanity.webHost,
@@ -297,6 +371,7 @@ export default $config({
             aliases: [
               ...(primaryVanity.www ? [`www.${primaryVanity.webHost}`] : []),
               ...extraVanity.flatMap((v) => [v.webHost, ...(v.www ? [`www.${v.webHost}`] : [])]),
+              ...(wildcardEnabled ? [WILDCARD_WEB_ALIAS] : []),
             ],
           }
         : undefined,
@@ -317,6 +392,13 @@ export default $config({
         // resolves tenant from ITS OWN Host header). Empty off-prod → apiBase()
         // falls back to VITE_API_URL.
         VITE_API_HOST_MAP: JSON.stringify(isProd ? apiHostMap(VANITY) : {}),
+        // ── Wildcard platform (scheme 1), SPA side ── mirror of the API envs above.
+        // '1' arms resolveTenantSlug()'s wildcard-suffix fallback, apiBase()'s shared
+        // API host, and the D5 canonical-origin redirect. Inert off-prod / pre-rollout.
+        VITE_WILDCARD_ENABLED: wildcardEnabled ? '1' : '',
+        VITE_WILDCARD_WEB_SUFFIX: isProd ? WILDCARD_WEB_SUFFIX : '',
+        VITE_SHARED_API_URL: isProd ? `https://${SHARED_API_HOST}` : '',
+        VITE_WEB_ORIGIN_MAP: JSON.stringify(isProd ? webOriginMap(VANITY) : {}),
         // Sentry (errors only). Empty DSN → the SPA init is a no-op. These are set as
         // real env vars in the `npm run build` child SST spawns, so the SDK (reads
         // import.meta.env) and @sentry/vite-plugin (reads process.env.VITE_SENTRY_RELEASE)
@@ -367,6 +449,9 @@ export default $config({
       // For the tutorial-video upload runbook (docs/guides/tutorial-videos.md).
       tutorialBucket: tutorialAssets.name,
       tutorialBaseUrl: tutorialsBaseUrl,
+      // Wildcard rollout (docs/runbooks/wildcard-domain-rollout.md): the shared API
+      // host's CNAME target for the `api.club` record ('' until the wildcard is armed).
+      sharedApiTarget: sharedApiCnameTarget,
     };
   },
 });

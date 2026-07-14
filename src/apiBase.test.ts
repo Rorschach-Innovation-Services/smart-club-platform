@@ -14,12 +14,15 @@ import {
   hostTenantMap,
   allowedOrigins,
   apiHostMap,
+  webOriginMap,
+  SHARED_API_HOST,
   type VanityDomain,
 } from '../infra/tenants';
 
 const WEB = 'dolphinspipeline.medicoach.co.za';
 const API_ORIGIN = 'https://api.dolphinspipeline.medicoach.co.za';
 const FALLBACK = 'https://dxxxxxxxx.cloudfront.net';
+const SHARED_API_URL = `https://${SHARED_API_HOST}`;
 
 // apiBase() reads import.meta.env at call time, so stubs apply per test.
 const atHost = (hostname: string) => vi.stubGlobal('window', { location: { hostname } });
@@ -58,6 +61,25 @@ describe('apiBase', () => {
     expect(apiBase()).toBe(FALLBACK);
   });
 
+  it('routes a wildcard club host to the shared API URL', () => {
+    vi.stubEnv('VITE_API_URL', FALLBACK);
+    vi.stubEnv('VITE_WILDCARD_WEB_SUFFIX', '.club.medicoach.co.za');
+    vi.stubEnv('VITE_SHARED_API_URL', SHARED_API_URL);
+    withMap('{}');
+    atHost('demo.club.medicoach.co.za');
+    expect(apiBase()).toBe(SHARED_API_URL);
+  });
+
+  it('prefers an explicit API-host map entry over the wildcard suffix', () => {
+    vi.stubEnv('VITE_API_URL', FALLBACK);
+    vi.stubEnv('VITE_WILDCARD_WEB_SUFFIX', '.club.medicoach.co.za');
+    vi.stubEnv('VITE_SHARED_API_URL', SHARED_API_URL);
+    // A vanity tenant that also happens to live under the suffix keeps its own API host.
+    withMap(JSON.stringify({ 'dolphins.club.medicoach.co.za': API_ORIGIN }));
+    atHost('dolphins.club.medicoach.co.za');
+    expect(apiBase()).toBe(API_ORIGIN);
+  });
+
   it('falls back to VITE_API_URL when the map is malformed JSON (and logs it)', () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.stubEnv('VITE_API_URL', FALLBACK);
@@ -86,6 +108,10 @@ describe('infra/tenants helpers (dolphins prod rendering)', () => {
 
   it('apiHostMap points webHost and www variant at the API origin', () => {
     expect(apiHostMap(VANITY)).toEqual({ [WEB]: API_ORIGIN, [`www.${WEB}`]: API_ORIGIN });
+  });
+
+  it('webOriginMap gives slug → canonical vanity origin', () => {
+    expect(webOriginMap(VANITY)).toEqual({ dolphins: `https://${WEB}` });
   });
 
   it('skips disabled entries and omits www when www:false', () => {
@@ -118,5 +144,25 @@ describe('infra/tenants helpers (dolphins prod rendering)', () => {
     ]);
     expect(apiHostMap(vanity)['lions.example.co.za']).toBe('https://api.lions.example.co.za');
     expect(apiHostMap(vanity)['ghost.example.co.za']).toBeUndefined();
+  });
+
+  it('points a vanity tenant with NO apiHost at the shared API host', () => {
+    const vanity: VanityDomain[] = [
+      {
+        slug: 'sharks',
+        webHost: 'clubs.sharks.co.za',
+        www: true,
+        enabled: true,
+      },
+    ];
+    // No per-tenant API host, and no host→tenant entry for one either.
+    expect(hostTenantMap(vanity)).toEqual({
+      'clubs.sharks.co.za': 'sharks',
+      'www.clubs.sharks.co.za': 'sharks',
+    });
+    expect(apiHostMap(vanity)).toEqual({
+      'clubs.sharks.co.za': SHARED_API_URL,
+      'www.clubs.sharks.co.za': SHARED_API_URL,
+    });
   });
 });

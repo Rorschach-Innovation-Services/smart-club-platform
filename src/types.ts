@@ -111,6 +111,9 @@ export interface TenantConfig {
   requiredDocs?: unknown[];
   adminCount?: number;
   tutorials?: TutorialVideo[];
+  /** Operator "setup complete" milestone (D6). Present ⇒ setup marked done. */
+  setupCompletedAt?: string;
+  setupCompletedBy?: string;
 }
 
 /** One row of GET /platform/tenants — a registry projection, not the full config. */
@@ -122,6 +125,8 @@ export interface TenantSummary {
   submissionDeadline: string;
   adminCount: number;
   features: Record<string, boolean>;
+  /** Present ⇒ operator marked setup done; absent ⇒ still in setup. Drives the list chip. */
+  setupCompletedAt?: string;
   /** Fleet rollup counts. Optional: react-query rows cached before the rollup shipped lack them. */
   clubCount?: number;
   teamCount?: number;
@@ -180,8 +185,13 @@ export interface DnsStep {
 }
 export interface DnsSheet {
   tenant: string;
+  /** Where the client is already reachable (wildcard host, or vanity origin). */
+  liveUrl: string | null;
   note: string;
   steps: DnsStep[];
+  /** The one shared API host every tenant uses (informational). */
+  sharedApiHost?: string;
+  sharedApiTarget?: string;
 }
 
 /**
