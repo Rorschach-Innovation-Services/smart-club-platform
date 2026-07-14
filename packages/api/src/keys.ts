@@ -32,6 +32,24 @@ export const tenantConfigGsi1 = (slug: string) => ({
 /** gsi1pk used to enumerate every tenant CONFIG row (platform registry). */
 export const tenantsListGsi1pk = () => 'PLATFORM#TENANTS';
 
+/**
+ * Player-register export audit item. Co-located with the tenant CONFIG row
+ * (pk `TENANT#<t>`, distinct EXPORT# sk) so it is tenant-isolated and queryable by
+ * `begins_with(sk,'EXPORT#')` without a gsi1 entry. It carries no player PII (just
+ * actor + counts), but sits ABOVE the `tenantErasurePrefix` sweep (which only matches
+ * `TENANT#<t>#…`), so tenant erasure must enumerate it explicitly (see listExportLogKeys).
+ */
+export const exportLogKey = (tenant: string, iso: string, id: string) => ({
+  pk: tenantPrefix(tenant),
+  sk: `EXPORT#${iso}#${id}`,
+});
+
+/** pk + sk-prefix to query a tenant's export history (and to enumerate for erasure). */
+export const exportLogsListKey = (tenant: string) => ({
+  pk: tenantPrefix(tenant),
+  skPrefix: 'EXPORT#',
+});
+
 /** A single club. */
 export const clubKey = (tenant: string, clubId: string) => ({
   pk: `${tenantPrefix(tenant)}#CLUB#${clubId}`,

@@ -250,6 +250,17 @@ export const deleteDocFile = (id: string, key: string, objectKey: string) =>
 export const addClubNote = (id: string, text: string) =>
   request<Club>(`/clubs/${id}/notes`, { method: 'POST', body: { text } });
 /**
+ * Audit a player-register export (who/when/rowCount/scope) — the .xlsx is built
+ * client-side, so this only records the event. `erroredClubs` flags an "export all" run
+ * where some rosters failed to load, so the trail never reads a partial file as complete.
+ * Best-effort: callers fire-and-forget so a log failure never blocks the download.
+ */
+export const logPlayerExport = (body: {
+  rowCount: number;
+  scope: 'all' | 'filtered';
+  erroredClubs?: number;
+}) => request<{ ok: boolean }>('/admin/export-log', { method: 'POST', body });
+/**
  * Share the club's released fixtures with its registered players over the given
  * channels (['email'] | ['whatsapp'] | both). The schedule is built server-side; this
  * just selects channels. idempotencyKey makes a lost-response retry replay instead of

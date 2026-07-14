@@ -2,7 +2,7 @@
 // before click() — required by older Firefox for programmatic downloads — and
 // defer revocation so the download has started (revoking on the next synchronous
 // line can cancel it in Firefox/Safari).
-import type { Club } from './types';
+import type { Club, PlayerRegistration, PlayerStatus } from './types';
 
 function downloadXlsx(buf: BlobPart, filename: string) {
   const blob = new Blob([buf], {
@@ -75,5 +75,50 @@ export function clubExportRow(
     'CQI Score': c.cqi,
     'CQI Band': cqiBand(c.cqi).label,
     'Overall %': overallProgress(c),
+  };
+}
+
+// The admin players view injects clubName onto each row before export.
+type ExportablePlayer = PlayerRegistration & { clubName?: string };
+
+const ID_TYPE_LABEL: Record<string, string> = { 'sa-id': 'SA ID', passport: 'Passport' };
+// Missing status ⇒ 'Active', mirroring playerStatusPill's default (atoms.tsx).
+const STATUS_LABEL: Record<PlayerStatus, string> = {
+  active: 'Active',
+  'clearance-pending': 'Clearance pending',
+  inactive: 'Inactive',
+  'clearance-rejected': 'Clearance rejected',
+};
+
+/**
+ * Map a player registration to the export row shape. Every key is ALWAYS present
+ * (optionals coerced to '') because fillSheet derives its columns from the first row's
+ * keys alone — a conditionally-omitted key would silently drop that column for the whole
+ * sheet. resolveTeam/resolveRole are injected (their label maps live in admin.tsx).
+ */
+export function playerExportRow(
+  p: ExportablePlayer,
+  resolveTeam: (team: string | undefined) => string,
+  resolveRole: (p: ExportablePlayer) => string,
+) {
+  return {
+    'First name': p.firstName || '',
+    'Last name': p.lastName || '',
+    'Date of birth': p.dob || '',
+    'ID type': p.idType ? ID_TYPE_LABEL[p.idType] || p.idType : '',
+    'ID number': p.idNumber || '',
+    Gender: p.gender || '',
+    Nationality: p.nationality || '',
+    Race: p.race || '',
+    Cell: p.cell || '',
+    Email: p.email || '',
+    Guardian: p.isMinor ? p.guardianName || '' : '',
+    Club: p.clubName || '',
+    Team: resolveTeam(p.team) || '',
+    District: p.district || '',
+    Role: resolveRole(p) || '',
+    Batting: p.battingHand || '',
+    Bowling: p.bowlingHand || '',
+    Status: p.status ? STATUS_LABEL[p.status] || p.status : 'Active',
   };
 }

@@ -3223,6 +3223,34 @@ app.delete('/admin/club-signup-link', async (c) => {
 // ───────────────────── Admin: player clearances ─────────────────────
 
 /** Every clearance in the tenant (cohort-wide), for the admin console. */
+/**
+ * Audit a player-register export. The .xlsx is generated client-side from rosters already
+ * fetched, so this records only the client-reported event (actor / time / row count / scope)
+ * — a best-effort compliance signal, NOT an authoritative or tamper-proof access trail (see
+ * ExportLogEntry). Admin-only via the /admin/* middleware. The body is coerced, never
+ * rejected: a malformed payload must still produce a record rather than 400 and lose the
+ * audit event entirely.
+ */
+app.post('/admin/export-log', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const { rowCount, scope, erroredClubs } = await c.req.json<{
+    rowCount?: number;
+    scope?: string;
+    erroredClubs?: number;
+  }>();
+  await repo.putExportLog(ra.tenant, {
+    id: randomUUID(),
+    kind: 'player-export',
+    by: ra.email,
+    sub: ra.sub,
+    at: now(),
+    rowCount: Number(rowCount) || 0,
+    scope: scope === 'filtered' ? 'filtered' : 'all',
+    erroredClubs: Number(erroredClubs) || 0,
+  });
+  return c.json({ ok: true });
+});
+
 app.get('/admin/clearances', async (c) => {
   const ra = c.get('requestAuth')!;
   return c.json(await repo.listAllClearances(ra.tenant));

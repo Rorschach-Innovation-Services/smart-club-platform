@@ -298,6 +298,34 @@ export interface ClubCommEvent {
   summary?: string;
 }
 
+/**
+ * One admin export of the cross-club player register. A best-effort, tenant-scoped
+ * record of the event (who / when / how many rows / which scope) — NOT an authoritative
+ * PII-access trail: the .xlsx is built in the browser from rosters already fetched, and the
+ * client reports this after the fact, so the counts are client-asserted and the write is
+ * bypassable. It is a compliance intent-signal, not proof of access. The register fetch
+ * itself is the server-observed access boundary if a definitive trail is ever required.
+ */
+export interface ExportLogEntry {
+  id: string;
+  kind: 'player-export';
+  /** Human-readable actor (caller email), mirroring notes[].author / commLog[].by. */
+  by: string;
+  /** Stable Cognito sub of the actor. */
+  sub?: string;
+  at: string;
+  rowCount: number;
+  /** Whether the admin exported the whole register or the current filtered selection. */
+  scope: 'all' | 'filtered';
+  /**
+   * Number of club rosters that failed to load at export time (>0 ⇒ the file may be partial —
+   * some rosters were missing when the rows were gathered; applies to filtered exports too, as
+   * both draw from the same cross-club set). Recorded so the trail never reads a truncated
+   * register as a clean export.
+   */
+  erroredClubs?: number;
+}
+
 /** Onboard payload: a Club plus the flat chair contact fields the admin form sends. */
 export type ClubSpec = Partial<Club> & {
   chairEmail?: string;

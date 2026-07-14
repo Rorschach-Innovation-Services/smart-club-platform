@@ -40,6 +40,8 @@ import {
   tenantConfigKey,
   tenantConfigGsi1,
   tenantsListGsi1pk,
+  exportLogKey,
+  exportLogsListKey,
   userKey,
   userTenantMarkerKey,
   userGsi1,
@@ -49,6 +51,7 @@ import { PLATFORM_TENANT } from './types.js';
 import type {
   Club,
   ClubCommEvent,
+  ExportLogEntry,
   League,
   SendResult,
   Series,
@@ -702,6 +705,34 @@ async function listClubInviteKeys(
     TableName: TABLE,
     KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
     ExpressionAttributeValues: { ':p': pk, ':s': 'INVITE#' },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+// ── Export audit log ──
+
+/**
+ * Record one player-register export. The sk carries the ISO timestamp then a uuid,
+ * so a fresh item is written per export (uuid ⇒ no collision, no condition needed)
+ * and history sorts chronologically under the tenant pk.
+ */
+export async function putExportLog(tenant: string, entry: ExportLogEntry): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...exportLogKey(tenant, entry.at, entry.id), ...entry },
+    }),
+  );
+}
+
+/** Enumerate a tenant's export-log item keys (for erasure — these sit above the pk-prefix sweep). */
+async function listExportLogKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
+  const { pk, skPrefix } = exportLogsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
     ProjectionExpression: 'pk, sk',
   });
   return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
@@ -2535,6 +2566,9 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
   for (const u of await listTenantUsers(tenant)) keys.push(userTenantMarkerKey(u.sub, tenant));
+  // Export-audit items sit at pk `TENANT#<t>` (above the `TENANT#<t>#…` prefix sweep),
+  // so enumerate them explicitly like invite markers.
+  for (const k of await listExportLogKeys(tenant)) keys.push(k);
 
   await batchDelete(keys);
   await deleteUploadObjects(objectKeys);

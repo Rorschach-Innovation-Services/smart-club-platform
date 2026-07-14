@@ -60,7 +60,8 @@ import {
   OVERARCHING_DISTRICT,
 } from './leagues';
 import { cqiBandTone, cqiBandRows, docComplianceRows, docTone } from './insights';
-import { exportRowsToXlsx, clubExportRow } from './exportXlsx';
+import { exportRowsToXlsx, clubExportRow, playerExportRow } from './exportXlsx';
+import { Sentry } from './sentry';
 import { openBccReminder } from './mailto';
 import { EMAIL_RE } from './api';
 import { parseSupport } from './support';
@@ -6575,11 +6576,46 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
   const [page, setPage] = useStateA(1);
   // Row-click opens a read-only detail modal; the row carries the full player + club.
   const [selectedPlayer, setSelectedPlayer] = useStateA(null);
+  // Which export (by scope) is in flight, so the button the admin actually pressed shows
+  // the busy label; null when idle. Both buttons disable while either runs.
+  const [exportingScope, setExportingScope] = useStateA(null);
 
   // Any change to the query inputs resets pagination to the first page.
   const onFilters = (f) => {
     setFilters(f);
     setPage(1);
+  };
+
+  // Build the .xlsx client-side, then best-effort audit the export. The register carries
+  // bulk PII, so every download is recorded — but the log must never fail the download.
+  // Note this audit is a best-effort, client-reported signal (the PII already reached the
+  // browser when the rosters loaded; the download is a local re-encoding), so a failed
+  // write is reported to Sentry rather than swallowed — a silently-broken trail is the one
+  // failure mode a compliance log can't afford.
+  const runExport = async (rows, filename, scope) => {
+    if (!rows.length) return toast?.('No players match — nothing to export', 'warn');
+    // "Export all" while some club rosters failed to load yields a partial file; flag it in
+    // both the toast and the audit record so the trail never reads as a clean full export.
+    const incomplete = scope === 'all' && erroredCount > 0;
+    setExportingScope(scope);
+    try {
+      const data = rows.map((p) => playerExportRow(p, (t) => teamLabel[t] || '', playerRoleLabel));
+      await exportRowsToXlsx(filename, 'Players', data);
+      if (incomplete)
+        toast?.(
+          `Exported ${rows.length} players, but ${erroredCount} club roster${
+            erroredCount === 1 ? '' : 's'
+          } failed to load — the file may be incomplete`,
+          'warn',
+        );
+      api
+        .logPlayerExport({ rowCount: rows.length, scope, erroredClubs: erroredCount })
+        .catch((err) => Sentry.captureException(err, { tags: { audit: 'player-export' } }));
+    } catch {
+      toast?.('Export failed — please retry', 'warn');
+    } finally {
+      setExportingScope(null);
+    }
   };
 
   // Club-scoped but otherwise-unfiltered — feeds the team/district facet
@@ -6610,6 +6646,38 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
           </p>
         </div>
         <div className="ph-actions">
+          {hasActiveFilters(filters) ? (
+            <>
+              <Btn
+                tone="outline"
+                icon={Icon.Download}
+                size="sm"
+                disabled={exportingScope !== null || anyLoading}
+                onClick={() => runExport(filtered, 'players-filtered.xlsx', 'filtered')}
+              >
+                {exportingScope === 'filtered' ? 'Exporting…' : `Export ${filtered.length} shown`}
+              </Btn>
+              <Btn
+                tone="ghost"
+                icon={Icon.Download}
+                size="sm"
+                disabled={exportingScope !== null || anyLoading}
+                onClick={() => runExport(allPlayers, 'players.xlsx', 'all')}
+              >
+                {exportingScope === 'all' ? 'Exporting…' : `Export all ${allPlayers.length}`}
+              </Btn>
+            </>
+          ) : (
+            <Btn
+              tone="outline"
+              icon={Icon.Download}
+              size="sm"
+              disabled={exportingScope !== null || anyLoading}
+              onClick={() => runExport(allPlayers, 'players.xlsx', 'all')}
+            >
+              {exportingScope === 'all' ? 'Exporting…' : 'Export Excel'}
+            </Btn>
+          )}
           <KPI label="Players" num={allPlayers.length} />
         </div>
       </div>
