@@ -74,7 +74,6 @@ import type {
   UserProfile,
   PlayerRegistration,
   PlayerClearance,
-  RegistrationReview,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
 import { orgCopy } from './branding.js';
@@ -419,8 +418,8 @@ app.post('/register/:clubId', async (c) => {
   // Editable current/destination club: the player may register into a club OTHER than the
   // one whose public link they used. The link club (`clubId`) still owns the token, the
   // rate-limit counter, and the presigned ID-doc key; `destClubId` is only the roster the
-  // player lands on. A cross-club destination is a guarded path (the hold branch below),
-  // never a silent write onto another club's active roster.
+  // player lands on. Registering into a different club needs no consent from that club — it
+  // is the same registration path as the link club, just rate-limited per destination below.
   const currentClubId = typeof body.currentClubId === 'string' ? body.currentClubId.trim() : '';
   let destClubId = clubId;
   let destClub = regClub;
@@ -479,12 +478,11 @@ app.post('/register/:clubId', async (c) => {
     throw new HttpError(400, 'previous club cannot be your current club');
   }
 
-  // ── Cross-club HOLD ──
-  // The player used one club's link but chose a DIFFERENT current club. A per-club link
-  // must never silently write onto another club's active roster, so create NO player row
-  // or clearance yet: park the fully-validated registration for the destination chair to
-  // accept or decline. Throttled per destination club so a leaked link can't spam a
-  // victim's roster past the cap, regardless of how many links an attacker holds.
+  // Anti-spam: bound INBOUND self-registrations per destination club when the player picked a
+  // club OTHER than the one whose link they used. A per-club link MAY register a player onto a
+  // different club's roster — the joining club's consent is not required — so this cap is the
+  // guard against a leaked link piling registrations onto a victim club, regardless of how many
+  // links an attacker holds. (Same-club registrations go via their own link and skip this cap.)
   if (destClubId !== clubId) {
     const ok = await repo.bumpClubInboundCounter(
       resolved.tenant,
@@ -498,43 +496,11 @@ app.post('/register/:clubId', async (c) => {
         'that club is receiving too many registrations right now — please try again later',
       );
     }
-    let previousClubName: string | undefined;
-    if (lastClubId) {
-      const sourceClub = await repo.getClub(resolved.tenant, lastClubId);
-      if (!sourceClub) throw new HttpError(400, 'unknown previous club');
-      previousClubName = sourceClub.name;
-      player.lastClub = sourceClub.name;
-    }
-    const typedPrev =
-      !lastClubId && body.lastClub && body.lastClub.trim() !== '—'
-        ? body.lastClub.trim() || undefined
-        : undefined;
-    const review: RegistrationReview = {
-      id: randomUUID(),
-      kind: 'cross-club-hold',
-      playerNaturalKey: naturalKey,
-      playerName: `${player.firstName} ${player.lastName}`,
-      idNumber: player.idNumber,
-      destClubId,
-      destClubName: destClub.name,
-      linkClubId: clubId,
-      linkClubName: regClub.name,
-      typedPreviousClub: typedPrev,
-      previousClubName,
-      // Park without a status — accept sets it ('active', or 'clearance-pending' when a
-      // clearance opens). removeUndefinedValues drops the undefined before the put.
-      pendingPlayer: { ...player, status: undefined },
-      pendingLastClubId: lastClubId || undefined,
-      createdAt: now(),
-      status: 'open',
-      version: 0,
-    };
-    await repo.createRegistrationReview(resolved.tenant, review);
-    return c.json({ ok: true, held: true, destClubName: destClub.name }, 201);
   }
 
-  // ── Same-club registration ── (destination IS the link club). Opens a registration-origin
-  // clearance to the previous club when the player is found there; otherwise a plain row.
+  // ── Register into the chosen club ── (the link club, or a DIFFERENT joining club the player
+  // picked on the form). Opens a registration-origin clearance to the previous club when the
+  // player is found there; otherwise a plain active row on the chosen club's roster.
   try {
     const { clearanceFromName } = await createSelfRegistration(
       resolved.tenant,
@@ -561,9 +527,10 @@ app.post('/register/:clubId', async (c) => {
   }
 
   // Off-system previous club: the player named a club not on the system ("Other" free
-  // text), so no clearance could be opened. The row is already active in their own club;
-  // flag it (best-effort) so admins can see which club was typed. Excludes the '—' first-
-  // registration sentinel so clean first registrations never raise an alert.
+  // text), so no clearance could be opened. The row is already active on the JOINING club's
+  // roster (the link club, or a different club the player picked); flag it (best-effort) so
+  // admins can see which club was typed. Excludes the '—' first-registration sentinel so clean
+  // first registrations never raise an alert.
   const typedOther =
     !lastClubId && body.lastClub && body.lastClub.trim() && body.lastClub.trim() !== '—'
       ? body.lastClub.trim()
@@ -576,8 +543,8 @@ app.post('/register/:clubId', async (c) => {
         playerNaturalKey: naturalKey,
         playerName: `${player.firstName} ${player.lastName}`,
         idNumber: player.idNumber,
-        destClubId: clubId,
-        destClubName: regClub.name,
+        destClubId,
+        destClubName: destClub.name,
         linkClubId: clubId,
         linkClubName: regClub.name,
         typedPreviousClub: typedOther,
@@ -598,10 +565,11 @@ app.post('/register/:clubId', async (c) => {
 // probing/state-flipping via the previous-club path on the submit route.
 const REGISTRATIONS_PER_HOUR = 240;
 
-// Per-destination-club hourly cap on INBOUND cross-club self-registrations (link club ≠
-// current club). Deliberately far tighter than the per-link cap: cross-club holds are a
-// rare, sensitive path, and this bounds how fast a leaked link can pile holds onto any one
-// victim club's review queue regardless of how many links the attacker holds.
+// Per-destination-club hourly cap on INBOUND self-registrations that chose a club OTHER than
+// the one whose link was used (link club ≠ current club). Deliberately far tighter than the
+// per-link cap: registering onto another club's roster needs no consent from that club, so
+// this bounds how fast a leaked link can pile registrations onto any one victim club
+// regardless of how many links the attacker holds.
 const CLUB_INBOUND_PER_HOUR = 30;
 
 /**
@@ -964,8 +932,8 @@ async function findPlayerByIdNumber(
  * there under the same natural key, this becomes a transfer: the row is created as
  * 'clearance-pending' together with a registration-origin clearance the source club (or
  * the union office) must resolve before the player goes active. Otherwise a plain active
- * row is created. Shared by the public register route (same-club path) and the
- * cross-club-hold accept route. Repo errors (dedup/dest conflicts) propagate to the
+ * row is created. Used by the public register route whether the player registers into the
+ * link club or a different joining club. Repo errors (dedup/dest conflicts) propagate to the
  * caller, which maps them. Returns the opened clearance's source-club name, if any.
  */
 async function createSelfRegistration(
@@ -1794,103 +1762,6 @@ app.patch('/clubs/:id/clearances/:cid', async (c) => {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
     if (err instanceof repo.PlayerExistsAtDestinationError) throw new HttpError(409, err.message);
     if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
-    throw err;
-  }
-});
-
-// ── Registration reviews (cross-club holds a club must accept/decline) ──
-
-/**
- * A club's inbound cross-club holds — self-registrations that chose this club via ANOTHER
- * club's link and are parked awaiting this chair's decision. Off-system alerts are
- * admin-only and never returned here. Open holds still carry the self-asserted
- * `pendingPlayer` (the chair needs the detail to decide); resolved ones don't.
- */
-app.get('/clubs/:id/registration-reviews', async (c) => {
-  const ra = c.get('requestAuth')!;
-  const id = c.req.param('id');
-  assertClubAccess(ra, id);
-  const all = await repo.listReviewsForClub(ra.tenant, id);
-  return c.json(all.filter((r) => r.kind === 'cross-club-hold'));
-});
-
-/**
- * Accept a cross-club hold: materialize the parked registration onto this club's roster
- * (opening a registration-origin clearance to the previous club when the player is found
- * there), then mark the review resolved. Materialization is dedup-safe — a repeated accept
- * whose row already exists is treated as success, then the review flip completes.
- */
-app.post('/clubs/:id/registration-reviews/:rid/accept', async (c) => {
-  const ra = c.get('requestAuth')!;
-  const id = c.req.param('id');
-  const rid = c.req.param('rid');
-  assertClubAccess(ra, id);
-  const review = await repo.getRegistrationReview(ra.tenant, id, rid);
-  if (!review || review.kind !== 'cross-club-hold')
-    throw new HttpError(404, 'registration review not found');
-  if (review.status !== 'open') throw new HttpError(409, 'registration review already resolved');
-  const body = await c.req.json<{ version?: number }>().catch(() => ({}) as { version?: number });
-  const destClub = await repo.getClub(ra.tenant, id);
-  if (!destClub) throw new HttpError(404, 'club not found');
-  // Capture the parked payload BEFORE the flip (which strips it), so materialization below
-  // uses this request's in-memory copy.
-  const pending = review.pendingPlayer;
-  if (!pending) throw new HttpError(409, 'nothing to accept');
-  const lastClubId = review.pendingLastClubId ?? '';
-  // CLAIM the review first (version-guarded). This is the single mutual-exclusion point:
-  // a concurrent decline of the same hold loses the version race here and so never purges
-  // the ID doc for a player we're about to add to the roster.
-  let resolved;
-  try {
-    resolved = await repo.resolveReview(ra.tenant, id, rid, {
-      resolution: 'accepted',
-      at: now(),
-      by: ra.email,
-      expectedVersion: body.version,
-    });
-  } catch (err) {
-    if (err instanceof VersionConflictError) throw new HttpError(409, 'review changed; refetch');
-    throw err;
-  }
-  // Now materialize the parked registration (dedup-safe). The review is already claimed, so
-  // on a transient failure here the hold reads 'accepted' with no roster row yet — rare and
-  // recoverable (re-register). A dedup conflict means a prior attempt already created the row.
-  try {
-    await createSelfRegistration(ra.tenant, { ...pending }, destClub, lastClubId);
-  } catch (err: unknown) {
-    if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
-    const dup =
-      err instanceof repo.PlayerExistsAtDestinationError ||
-      err instanceof repo.DuplicatePendingClearanceError ||
-      (err as { name?: string }).name === 'ConditionalCheckFailedException';
-    if (!dup) throw err;
-  }
-  return c.json(resolved);
-});
-
-/**
- * Decline a cross-club hold: no player row was ever created, so this just marks the
- * review resolved and purges the self-asserted ID doc from S3 (POPIA).
- */
-app.post('/clubs/:id/registration-reviews/:rid/decline', async (c) => {
-  const ra = c.get('requestAuth')!;
-  const id = c.req.param('id');
-  const rid = c.req.param('rid');
-  assertClubAccess(ra, id);
-  const review = await repo.getRegistrationReview(ra.tenant, id, rid);
-  if (!review || review.kind !== 'cross-club-hold')
-    throw new HttpError(404, 'registration review not found');
-  if (review.status !== 'open') throw new HttpError(409, 'registration review already resolved');
-  const body = await c.req.json<{ version?: number }>().catch(() => ({}) as { version?: number });
-  try {
-    const resolved = await repo.declineReview(ra.tenant, id, rid, {
-      at: now(),
-      by: ra.email,
-      expectedVersion: body.version,
-    });
-    return c.json(resolved);
-  } catch (err) {
-    if (err instanceof VersionConflictError) throw new HttpError(409, 'review changed; refetch');
     throw err;
   }
 });
@@ -3349,7 +3220,7 @@ app.post('/admin/clearances/:cid/reject', async (c) => {
 
 // ───────────────────── Admin: registration reviews ─────────────────────
 
-/** Every registration review in the tenant (off-system alerts + cross-club holds). */
+/** Every registration review in the tenant — off-system alerts (plus any legacy holds). */
 app.get('/admin/registration-reviews', async (c) => {
   const ra = c.get('requestAuth')!;
   return c.json(await repo.listAllReviews(ra.tenant));
@@ -3357,10 +3228,8 @@ app.get('/admin/registration-reviews', async (c) => {
 
 /**
  * Acknowledge an off-system alert (the player named a club not on the system). Admin-only.
- * Restricted to off-system alerts: cross-club holds are the destination chair's to
- * accept/decline — acking one here would drop the parked registration without materializing
- * it. Carries destClubId (like the clearance override route carries fromClubId) to rebuild
- * the canonical key.
+ * Guarded to off-system alerts only. Carries destClubId (like the clearance override route
+ * carries fromClubId) to rebuild the canonical key.
  */
 app.post('/admin/registration-reviews/:rid/ack', async (c) => {
   const ra = c.get('requestAuth')!;

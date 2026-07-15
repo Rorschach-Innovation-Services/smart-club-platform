@@ -86,9 +86,6 @@ export function RegisterPage() {
   const [clubs, setClubs] = useState<{ id: string; name: string }[]>([]);
   // Set when the submit opened a transfer — drives the clearance success variant.
   const [clearanceFrom, setClearanceFrom] = useState('');
-  // Set (to the destination club name) when the submit was HELD for a cross-club chair to
-  // accept — drives the pending-approval success variant.
-  const [heldAt, setHeldAt] = useState('');
   const [d, setD] = useState(EMPTY);
   const [idFile, setIdFile] = useState<File | null>(null);
   const [error, setError] = useState('');
@@ -258,8 +255,7 @@ export function RegisterPage() {
         guardianName: minor ? d.guardianName : undefined,
         idDocMeta: { objectKey, size: idFile.size, contentType },
       });
-      if (res?.held) setHeldAt(res.destClubName || '');
-      else if (res?.clearance?.fromClubName) setClearanceFrom(res.clearance.fromClubName);
+      if (res?.clearance?.fromClubName) setClearanceFrom(res.clearance.fromClubName);
       setState('done');
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
@@ -290,20 +286,11 @@ export function RegisterPage() {
     );
   }
   if (state === 'done') {
-    if (heldAt) {
-      return (
-        <CenterCard>
-          <h1 className="ps-title" style={{ fontSize: 22 }}>
-            Request sent — pending {heldAt} approval
-          </h1>
-          <p className="ps-desc">
-            Because you chose <strong>{heldAt}</strong> as your current club — different from the
-            club whose link you used — your registration has been sent to {heldAt} to approve. You
-            won&apos;t appear on their roster until they accept it.
-          </p>
-        </CenterCard>
-      );
-    }
+    // The player may have chosen a joining club different from the link club; name that club.
+    const joiningClubName =
+      currentClubId === clubId
+        ? clubName
+        : currentClubOptions.find((c) => c.id === currentClubId)?.name || clubName;
     if (clearanceFrom) {
       return (
         <CenterCard>
@@ -312,7 +299,7 @@ export function RegisterPage() {
           </h1>
           <p className="ps-desc">
             Because you were last registered at <strong>{clearanceFrom}</strong>, a clearance
-            request has been sent to them. You&apos;ll appear on {clubName}&apos;s roster as{' '}
+            request has been sent to them. You&apos;ll appear on {joiningClubName}&apos;s roster as{' '}
             <em>clearance pending</em> until {clearanceFrom} (or the Union office) approves the
             transfer.
           </p>
@@ -324,7 +311,9 @@ export function RegisterPage() {
         <h1 className="ps-title" style={{ fontSize: 22 }}>
           You&apos;re registered 🎉
         </h1>
-        <p className="ps-desc">Thanks — your registration for {clubName} has been received.</p>
+        <p className="ps-desc">
+          Thanks — your registration for {joiningClubName} has been received.
+        </p>
       </CenterCard>
     );
   }

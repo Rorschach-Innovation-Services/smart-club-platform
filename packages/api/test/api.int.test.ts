@@ -1630,7 +1630,7 @@ describe('POST /register/:clubId (public self-registration body)', () => {
   });
 });
 
-describe('POST /register — cross-club holds, off-system alerts, review actions', () => {
+describe('POST /register — cross-club registrations, off-system alerts, admin ack', () => {
   const mkClub = (id: string, name: string) => ({
     id,
     name,
@@ -1649,9 +1649,6 @@ describe('POST /register — cross-club holds, off-system alerts, review actions
     leagues: [],
     version: 1,
   });
-  const DEST_REP = devAuthAs('dest-rep', 'destrep@test', [
-    { tenantId: 'dolphins', role: 'rep', clubIds: ['rdest'] },
-  ]);
   let teamKey: string;
   let linkKey: string;
   let prevKey: string;
@@ -1741,51 +1738,36 @@ describe('POST /register — cross-club holds, off-system alerts, review actions
     assert.equal((await reviewByName('Other Sys'))?.status, 'resolved');
   });
 
-  test('cross-club (currentClubId ≠ link) is HELD — no row until the chair accepts', async () => {
+  test('cross-club (currentClubId ≠ link) with no on-system previous → active at the joining club, no review', async () => {
     const res = await postLink({
       firstName: 'Cross',
-      lastName: 'Hold',
+      lastName: 'Join',
       idNumber: 'RVC',
       currentClubId: 'rdest',
       lastClub: '—',
     });
     assert.equal(res.status, 201);
-    assert.deepEqual(await res.json(), { ok: true, held: true, destClubName: 'Reg Dest CC' });
-    assert.ok(!(await rosterIds('rdest')).includes('RVC'), 'no player row at the destination yet');
+    assert.deepEqual(await res.json(), { ok: true });
+    assert.ok((await rosterIds('rdest')).includes('RVC'), 'player active at the joining club');
     assert.ok(!(await rosterIds('rlink')).includes('RVC'), 'no player row at the link club');
-    const review = await reviewByName('Cross Hold');
-    assert.equal(review?.kind, 'cross-club-hold');
-    assert.equal(review?.destClubId, 'rdest');
-
-    // The destination chair accepts → the player lands on their roster.
-    const accept = await app.request(`/clubs/rdest/registration-reviews/${review!.id}/accept`, {
-      method: 'POST',
-      headers: headers(DEST_REP),
-      body: JSON.stringify({}),
-    });
-    assert.equal(accept.status, 200);
-    assert.ok((await rosterIds('rdest')).includes('RVC'), 'player now active at the destination');
-    assert.equal((await reviewByName('Cross Hold'))?.status, 'resolved');
+    assert.equal(await reviewByName('Cross Join'), undefined, 'no registration review created');
   });
 
-  test('cross-club hold can be DECLINED — the registration is discarded', async () => {
+  test('cross-club with an off-system previous → active at the joining club + alert attributed there', async () => {
     const res = await postLink({
-      firstName: 'Decl',
-      lastName: 'Ined',
-      idNumber: 'RVD',
+      firstName: 'CrossOff',
+      lastName: 'Sys',
+      idNumber: 'RVE',
       currentClubId: 'rdest',
-      lastClub: '—',
+      lastClub: 'Ghost CC',
     });
     assert.equal(res.status, 201);
-    const review = await reviewByName('Decl Ined');
-    const decline = await app.request(`/clubs/rdest/registration-reviews/${review!.id}/decline`, {
-      method: 'POST',
-      headers: headers(DEST_REP),
-      body: JSON.stringify({}),
-    });
-    assert.equal(decline.status, 200);
-    assert.ok(!(await rosterIds('rdest')).includes('RVD'), 'declined player never joined');
-    assert.equal((await reviewByName('Decl Ined'))?.resolution, 'declined');
+    assert.ok((await rosterIds('rdest')).includes('RVE'), 'active at the joining club');
+    const review = await reviewByName('CrossOff Sys');
+    assert.equal(review?.kind, 'off-system-alert');
+    assert.equal(review?.typedPreviousClub, 'Ghost CC');
+    // The alert is attributed to the JOINING club (rdest), not the link club (rlink).
+    assert.equal(review?.destClubId, 'rdest');
   });
 
   test('previous club cannot equal a non-link current club (400)', async () => {
@@ -1820,7 +1802,7 @@ describe('POST /register — cross-club holds, off-system alerts, review actions
     assert.equal(await reviewByName('Return Ing'), undefined);
   });
 
-  test('accepting a cross-club hold whose previous club has a match opens a clearance', async () => {
+  test('cross-club with an on-system previous where the player is rostered opens a clearance immediately', async () => {
     // Seed the player at rprev via that club's own registration link (identical natural key).
     const seed = await app.request('/register/rprev?t=rev-prev-token', {
       method: 'POST',
@@ -1831,30 +1813,50 @@ describe('POST /register — cross-club holds, off-system alerts, review actions
     });
     assert.equal(seed.status, 201);
 
-    // Now the same person cross-registers to rdest via rlink's link, naming rprev as previous.
-    const held = await postLink({
+    // The same person cross-registers into rdest via rlink's link, naming rprev as previous.
+    // No hold — the clearance path handles it directly at registration time.
+    const res = await postLink({
       firstName: 'Trans',
       lastName: 'Fer',
       idNumber: 'RVG',
       currentClubId: 'rdest',
       lastClubId: 'rprev',
     });
-    assert.equal(held.status, 201);
-    const review = await reviewByName('Trans Fer');
-    assert.equal(review?.previousClubName, 'Reg Prev CC');
+    assert.equal(res.status, 201);
+    assert.deepEqual(await res.json(), { ok: true, clearance: { fromClubName: 'Reg Prev CC' } });
+    assert.equal(await reviewByName('Trans Fer'), undefined, 'no registration review created');
 
-    const accept = await app.request(`/clubs/rdest/registration-reviews/${review!.id}/accept`, {
-      method: 'POST',
-      headers: headers(DEST_REP),
-      body: JSON.stringify({}),
-    });
-    assert.equal(accept.status, 200);
-    // A registration-origin clearance rprev → rdest now exists, and the dest row is pending.
-    const clearances = await repo.listAllClearances('dolphins');
-    const clr = clearances.find((c) => c.playerName === 'Trans Fer');
+    // A registration-origin clearance rprev → rdest exists; the dest row is clearance-pending.
+    const clr = (await repo.listAllClearances('dolphins')).find(
+      (c) => c.playerName === 'Trans Fer',
+    );
     assert.equal(clr?.fromClubId, 'rprev');
     assert.equal(clr?.toClubId, 'rdest');
     assert.equal(clr?.origin, 'registration');
+    const destRow = (
+      (await (await app.request('/clubs/rdest/players', { headers: headers(ADMIN) })).json()) as {
+        idNumber?: string;
+        status?: string;
+      }[]
+    ).find((p) => p.idNumber === 'RVG');
+    assert.equal(destRow?.status, 'clearance-pending');
+  });
+
+  test('inbound cap: a foreign link flooding one club 429s past the per-hour limit', async () => {
+    // A dedicated destination club so this test's 30+ inbound registrations stay isolated.
+    await repo.createClub('dolphins', mkClub('rcap', 'Reg Cap CC'));
+    let last: Awaited<ReturnType<typeof postLink>> | undefined;
+    // CLUB_INBOUND_PER_HOUR = 30: the first 30 land active at rcap, the 31st is rate-limited.
+    for (let i = 0; i < 31; i++) {
+      last = await postLink({
+        firstName: 'Flood',
+        lastName: `N${i}`,
+        idNumber: `RVCAP${i}`,
+        currentClubId: 'rcap',
+        lastClub: '—',
+      });
+    }
+    assert.equal(last!.status, 429);
   });
 });
 

@@ -1838,7 +1838,7 @@ export async function rejectClearance(
   return next;
 }
 
-// ── Registration reviews (off-system alerts + cross-club holds) ──
+// ── Registration reviews (off-system alerts) ──
 
 /** The single canonical put item for a review (destination-club partition + gsi1). */
 function reviewItem(tenant: string, r: RegistrationReview) {
@@ -1904,10 +1904,10 @@ export async function listAllReviews(tenant: string): Promise<RegistrationReview
 
 /**
  * Flip an open review to 'resolved' with the given resolution, version-guarded. Also
- * REMOVEs the parked `pendingPlayer`/`pendingLastClubId` so a resolved review keeps no
- * self-asserted PII (the accepted row now lives on the roster; a declined one is gone).
- * The `version = :v AND status = 'open'` guard is the mutual-exclusion: a double-action,
- * or accept racing decline, loses → VersionConflictError → 409 refetch.
+ * REMOVEs any parked `pendingPlayer`/`pendingLastClubId` (a no-op for off-system alerts,
+ * which never carry them) so a resolved review keeps no self-asserted PII. The
+ * `version = :v AND status = 'open'` guard is the mutual-exclusion: a double-action loses →
+ * VersionConflictError → 409 refetch.
  */
 export async function resolveReview(
   tenant: string,
@@ -1951,31 +1951,6 @@ export async function resolveReview(
     }
     throw err;
   }
-}
-
-/**
- * Decline a cross-club hold: flip it to 'resolved'/'declined' (which drops the parked
- * payload) and purge the self-asserted ID doc from S3 (POPIA) — no player row ever
- * existed, so there is nothing else to unwind. The objectKey is captured BEFORE the
- * flip removes `pendingPlayer`; the purge is best-effort (swallowed + lifecycle-recoverable).
- */
-export async function declineReview(
-  tenant: string,
-  destClubId: string,
-  id: string,
-  opts: { at: string; by: string; expectedVersion?: number },
-): Promise<RegistrationReview> {
-  const current = await getRegistrationReview(tenant, destClubId, id);
-  if (!current) throw new Error('registration review not found');
-  const objectKey = current.pendingPlayer?.idDocMeta?.objectKey;
-  const resolved = await resolveReview(tenant, destClubId, id, {
-    resolution: 'declined',
-    at: opts.at,
-    by: opts.by,
-    expectedVersion: opts.expectedVersion,
-  });
-  if (objectKey) await deleteUploadObjects([objectKey]);
-  return resolved;
 }
 
 // ── Registration tokens (global, self-describing) ──

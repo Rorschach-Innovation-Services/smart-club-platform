@@ -6497,10 +6497,7 @@ export function AdminRegistrationReviews({ reviews, onAck, busyId }) {
   );
   const open = all.filter((r) => r.status === 'open');
   const resolved = all.filter((r) => r.status === 'resolved');
-  const offSystem = all.filter((r) => r.kind === 'off-system-alert');
-  const holds = all.filter((r) => r.kind === 'cross-club-hold');
   const list = filter === 'open' ? open : filter === 'resolved' ? resolved : all;
-  const prevLabel = (r) => r.typedPreviousClub || r.previousClubName || 'None';
 
   return (
     <div>
@@ -6511,10 +6508,9 @@ export function AdminRegistrationReviews({ reviews, onAck, busyId }) {
             Registration <em>Reviews</em>
           </h1>
           <p className="ph-desc">
-            Registrations that named a club not on the system (no clearance possible), and
-            cross-club registrations awaiting a destination club's approval. Acknowledge an
-            off-system alert once noted; cross-club holds are accepted or declined by the
-            destination club.
+            Registrations that named a previous club not on the system, so no clearance could be
+            opened. Acknowledge an alert once you've noted the club. Cross-club transfers between
+            clubs on the system open a clearance to the previous club — see Clearances.
           </p>
         </div>
       </div>
@@ -6531,12 +6527,8 @@ export function AdminRegistrationReviews({ reviews, onAck, busyId }) {
           </div>
         </div>
         <div className="players-stat">
-          <div className="players-stat-l">Off-system</div>
-          <div className="players-stat-n">{offSystem.length}</div>
-        </div>
-        <div className="players-stat">
-          <div className="players-stat-l">Cross-club</div>
-          <div className="players-stat-n">{holds.length}</div>
+          <div className="players-stat-l">Resolved</div>
+          <div className="players-stat-n">{resolved.length}</div>
         </div>
       </div>
 
@@ -6574,56 +6566,40 @@ export function AdminRegistrationReviews({ reviews, onAck, busyId }) {
         )}
         {list.map((r) => {
           const busy = busyId === r.id;
-          const isAlert = r.kind === 'off-system-alert';
           return (
             <div key={r.id} className={`clr-card admin ${r.status !== 'open' ? 'resolved' : ''}`}>
               <div className="clr-card-head">
                 <div>
-                  <div className="clr-eyebrow">
-                    {isAlert ? 'Off-system previous club' : 'Cross-club registration'}
-                  </div>
+                  <div className="clr-eyebrow">Off-system previous club</div>
                   <div className="clr-name">
                     {r.playerName}
                     <span style={{ marginLeft: 8 }}>
-                      <Pill tone={isAlert ? 'muted' : 'navy'}>{isAlert ? 'Alert' : 'Hold'}</Pill>
+                      <Pill tone="muted">Alert</Pill>
                     </span>
                   </div>
                   <div className="clr-meta">
-                    ID {r.idNumber || '—'} · Previous: {prevLabel(r)} · {fmtDay(r.createdAt)}
+                    ID {r.idNumber || '—'} · Registered with {r.destClubName} ·{' '}
+                    {fmtDay(r.createdAt)}
                   </div>
-                </div>
-                <div className="clr-route">
-                  <div className="clr-route-from">{r.linkClubName}</div>
-                  <Icon.Arrow />
-                  <div className="clr-route-to">{r.destClubName}</div>
                 </div>
               </div>
 
               {r.status === 'open' ? (
-                isAlert ? (
-                  <div className="clr-override">
-                    <div className="clr-override-text">
-                      <div className="clr-override-title">
-                        Off-system club: "{r.typedPreviousClub}"
-                      </div>
-                      <div className="clr-override-sub">
-                        {r.playerName} registered with {r.destClubName} and named a previous club
-                        that isn't on the system, so no clearance was created. Note the club, then
-                        mark this reviewed.
-                      </div>
+                <div className="clr-override">
+                  <div className="clr-override-text">
+                    <div className="clr-override-title">
+                      Off-system club: "{r.typedPreviousClub}"
                     </div>
-                    <Btn tone="teal" disabled={busy} onClick={() => onAck(r)}>
-                      {busy ? 'Saving…' : 'Mark reviewed'}
-                    </Btn>
-                  </div>
-                ) : (
-                  <div className="clr-status-strip">
-                    <div className="clr-status">
-                      <span className="clr-status-dot" />
-                      Awaiting {r.destClubName}'s decision
+                    <div className="clr-override-sub">
+                      {r.playerName} registered with {r.destClubName} and named a previous club that
+                      isn't on the system, so no clearance was created. Note the club, then mark
+                      this reviewed.
                     </div>
                   </div>
-                )
+                  <Btn tone="teal" disabled={busy} onClick={() => onAck(r)}>
+                    {busy ? 'Saving…' : 'Mark reviewed'}
+                  </Btn>
+                </div>
               ) : (
                 <div className="clr-resolved-bar">
                   <Pill tone={r.resolution === 'declined' ? 'coral' : 'teal'} dot>

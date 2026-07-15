@@ -326,23 +326,8 @@ export const overrideClearance = (clearanceId: string, body: unknown) =>
 export const rejectClearance = (clearanceId: string, body: unknown) =>
   request<PlayerClearance>(`/admin/clearances/${clearanceId}/reject`, { method: 'POST', body });
 
-// ── Registration reviews (off-system alerts + cross-club holds) ──
-// A club's inbound cross-club holds it must accept/decline (off-system alerts are admin-only).
-export const getRegistrationReviews = (clubId: string) =>
-  request<RegistrationReview[]>(`/clubs/${clubId}/registration-reviews`);
-// Accept a hold (materializes the player, opening a clearance to the previous club if found).
-export const acceptRegistrationReview = (clubId: string, reviewId: string, body: unknown) =>
-  request<RegistrationReview>(`/clubs/${clubId}/registration-reviews/${reviewId}/accept`, {
-    method: 'POST',
-    body,
-  });
-// Decline a hold (discards the parked registration; purges the uploaded ID doc).
-export const declineRegistrationReview = (clubId: string, reviewId: string, body: unknown) =>
-  request<RegistrationReview>(`/clubs/${clubId}/registration-reviews/${reviewId}/decline`, {
-    method: 'POST',
-    body,
-  });
-// Admin: every review in the tenant (off-system alerts to action + holds shown read-only).
+// ── Registration reviews (off-system alerts) ──
+// Admin: every review in the tenant (off-system alerts to acknowledge).
 export const getAllRegistrationReviews = () =>
   request<RegistrationReview[]>('/admin/registration-reviews');
 // Admin acknowledges an off-system alert: body { destClubId, version? }.
@@ -410,16 +395,13 @@ export const getRegistration = (clubId: string, token: string) =>
     clubs?: { id: string; name: string }[];
   }>(`/register/${clubId}`, { auth: false, query: { t: token } });
 // `clearance` present ⇔ the registration opened a transfer from the named previous club
-// (the player is pending until that club or the union office approves). `held` present ⇔
-// the player chose a current club different from the link club, so the registration is
-// parked for that club's chair to accept before it lands on the roster (`destClubName`
-// names the club they'll be asked to approve). Body may include `currentClubId`.
+// (the player lands on the joining club's roster as clearance-pending until that club or
+// the union office approves). Body may include `currentClubId` to register into a club
+// other than the one whose link was used — no consent from that club is required.
 export const submitRegistration = (clubId: string, token: string, body: unknown) =>
   request<{
     ok: boolean;
     clearance?: { fromClubName: string };
-    held?: boolean;
-    destClubName?: string;
   }>(`/register/${clubId}`, {
     method: 'POST',
     auth: false,
