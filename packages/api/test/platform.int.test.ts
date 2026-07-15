@@ -261,13 +261,51 @@ describe('tenant create → list → get → patch', () => {
       ground: { venue: 'Secret Oval', address: '1 Private Rd' },
       leagues: ['premier', 'u13'],
       leagueTeams: { premier: 3 },
-      exco: { chair: { name: 'Chair Person', email: 'chair@leaky.test', idNumber: '900101' } },
+      // Named sides carry venue/address/coords the projection must strip to {id,name}.
+      teamRosters: {
+        premier: [
+          {
+            id: 'tm_a',
+            name: 'Leaky A',
+            venue: 'Hidden Nets',
+            address: '2 Secret St',
+            lat: -29.1,
+            lon: 31.1,
+          },
+          { id: 'tm_b', name: 'Leaky B' },
+        ],
+      },
+      exco: {
+        chair: {
+          name: 'Chair Person',
+          email: 'chair@leaky.test',
+          cell: '0821112222',
+          idNumber: '900101',
+        },
+      },
       notes: [{ id: 'n1', text: 'internal admin note', author: 'a', at: '2026-06-01' }],
       playerRegLink: { token: 'live-secret-token', createdAt: '2026-06-01' },
       docMeta: { constitution: { objectKey: 'sharks/leaky/const.pdf', size: 1 } },
       cqiAnswers: { q1: 'answer' },
       version: 1,
     } as unknown as Parameters<typeof repo.createClub>[1]);
+
+    // One REAL player row (bumps the denormalized counter 7 → 8): feeds the
+    // demographics assertions below. Its team key is not in sharks' (empty)
+    // catalogue, so it lands in `unattributed`, never in `perLeague`.
+    await repo.createPlayer('sharks', {
+      naturalKey: 'demo-1',
+      clubId: 'leaky',
+      firstName: 'Demo',
+      lastName: 'Player',
+      dob: '1990-05-05',
+      gender: 'Male',
+      race: 'African',
+      team: 'premier',
+      isMinor: false,
+      consentAt: '2026-06-01T00:00:00.000Z',
+      createdAt: '2026-06-01T00:00:00.000Z',
+    });
 
     // finally, not inline: an assertion failure must still erase the club, or the
     // leak cascades into the later sharks count assertions and buries the real error.
@@ -281,11 +319,21 @@ describe('tenant create → list → get → patch', () => {
         clearances: unknown[];
         leagues: unknown[];
         districts: string[];
+        demographics: {
+          totalPlayers: number;
+          ageGroups: unknown[];
+          gender: Array<{ label: string; count: number }>;
+          race: unknown[];
+          perLeague: Record<string, unknown>;
+          unattributed: { totalPlayers: number };
+        };
       };
       const club = body.clubs.find((c) => c.id === 'leaky')!;
       // Allowlist projection — nothing sensitive may ride along (POPIA + live token).
       assert.deepEqual(Object.keys(club).sort(), [
         'affiliation',
+        'chair',
+        'chairContact',
         'cqi',
         'district',
         'docs',
@@ -294,9 +342,31 @@ describe('tenant create → list → get → patch', () => {
         'leagues',
         'name',
         'players',
+        'teamRosters',
       ]);
-      assert.equal(club.players, 7); // denormalized playerCount surfaces as `players`
+      assert.equal(club.players, 8); // denormalized playerCount (7 seeded + 1 real row)
+      // Chair contact crosses picked field-by-field — the idNumber must not.
+      assert.deepEqual(club.chairContact, {
+        name: 'Chair Person',
+        email: 'chair@leaky.test',
+        cell: '0821112222',
+      });
+      // Rosters are stripped to {id,name} — no venue/address/coords.
+      assert.deepEqual(club.teamRosters, {
+        premier: [
+          { id: 'tm_a', name: 'Leaky A' },
+          { id: 'tm_b', name: 'Leaky B' },
+        ],
+      });
       assert.ok(Array.isArray(body.clearances));
+
+      // Demographics ride the overview payload: buckets only, counted from REAL
+      // player rows (1) — expected to drift from the denormalized `players` (8).
+      assert.equal(body.demographics.totalPlayers, 1);
+      assert.equal(body.demographics.unattributed.totalPlayers, 1);
+      assert.deepEqual(body.demographics.perLeague, {}); // orphaned key ≠ a perLeague entry
+      assert.ok(!('unattributed' in body.demographics.perLeague));
+      assert.equal(body.demographics.gender.find((g) => g.label === 'Male')?.count, 1);
 
       // The list rollup reflects the same club: 3 premier sides + 1 u13 default.
       const list = await app.request('/platform/tenants', { headers: platformHeaders(OPERATOR) });
@@ -305,7 +375,7 @@ describe('tenant create → list → get → patch', () => {
       )!;
       assert.equal(row.clubCount, 1);
       assert.equal(row.teamCount, 4);
-      assert.equal(row.playerCount, 7);
+      assert.equal(row.playerCount, 8); // 7 seeded on the counter + 1 real registration
     } finally {
       // Erase via the real cascade so later sharks count assertions stay unaffected.
       const leaky = await repo.getClub('sharks', 'leaky');

@@ -1957,6 +1957,9 @@
     border-radius:99px;overflow:hidden;
   }
   .insights-bar-fill{
+    /* display:block — inside a clickable (button) row the fills are <span>s; inline
+       boxes ignore height:100%, so blockify them (no-op for the plain div rows). */
+    display:block;
     height:100%;background:var(--green);border-radius:99px;
     transform-origin:left;
     animation:barGrow .9s cubic-bezier(0.16,1,0.3,1) both;
@@ -2019,9 +2022,57 @@
   .insights-card:nth-child(4){animation-delay:.26s}
   .insights-card:nth-child(5){animation-delay:.33s}
   .insights-card:nth-child(6){animation-delay:.40s}
+  .insights-card:nth-child(7){animation-delay:.47s}
+
+  /* Clickable league rows (drill-down): the row is a native <button> — reset the UA
+     chrome so it renders identically to the plain div rows, then add quiet affordance. */
+  button.insights-bar-row{
+    appearance:none;background:none;border:0;font:inherit;color:inherit;
+    width:100%;text-align:left;
+  }
+  .insights-bar-row.clickable{
+    cursor:pointer;margin:0 -4px;padding:5px 4px;border-radius:6px;
+    transition:background .15s ease;
+  }
+  .insights-bar-row.clickable:hover{background:var(--paper2)}
+  .insights-bar-row.clickable:focus-visible{outline:2px solid var(--green);outline-offset:-2px}
+
+  /* League drill-down: compact KPI strip inside the directory card. */
+  .kpi-strip.mini{grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:14px}
+  .kpi-strip.mini .kpi{padding:12px 14px}
+  .kpi-strip.mini .kpi-l{margin-bottom:6px}
+  .kpi-strip.mini .kpi-n{font-size:22px}
+  .kpi-strip.mini .kpi-sub{margin-top:4px}
+
+  /* League drill-down: team directory rows — quiet, data-forward. */
+  .league-directory-row{
+    display:grid;grid-template-columns:1fr 1fr 1.4fr;gap:12px;align-items:baseline;
+    padding:8px 0;border-top:1px solid var(--line2);
+  }
+  .league-directory-team{
+    font-family:'Montserrat',sans-serif;font-size:12.5px;font-weight:600;
+    color:var(--ink);letter-spacing:0.02em;
+  }
+  .league-directory-club{font-size:12px;color:var(--ink3)}
+  .league-directory-club-link{
+    appearance:none;background:none;border:0;padding:0;font:inherit;
+    color:var(--green);font-weight:600;cursor:pointer;text-align:left;
+  }
+  .league-directory-club-link:hover{text-decoration:underline}
+  .league-directory-club-link:focus-visible{outline:2px solid var(--green);outline-offset:2px;border-radius:2px}
+  .league-directory-contact{
+    display:flex;flex-wrap:wrap;gap:4px 12px;justify-content:flex-end;
+    font-size:12px;color:var(--muted);text-align:right;
+  }
+  .league-directory-chair{font-weight:600;color:var(--ink3)}
+  .league-directory-contact a{color:var(--ink3);text-decoration:none}
+  .league-directory-contact a:hover{color:var(--ink);text-decoration:underline}
+
   @media (max-width: 768px){
     .insights-bar-row.duo{grid-template-columns:96px 1fr 22px 28px}
     .insights-bar-row.wide-label{grid-template-columns:104px 1fr 44px}
+    .league-directory-row{grid-template-columns:1fr;gap:2px}
+    .league-directory-contact{justify-content:flex-start;text-align:left}
   }
 
   .resource-list{display:flex;flex-direction:column;gap:10px;margin-top:2px}

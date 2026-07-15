@@ -46,6 +46,7 @@ import {
 } from './auth.js';
 import * as repo from './repo.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
+import { demographicsByLeague, summarizeDemographics } from './demographics.js';
 import {
   validateClubPatch,
   resolveDistricts,
@@ -2420,12 +2421,17 @@ function clubTeamCount(club: Club): number {
 }
 
 /**
- * Cross-tenant-safe club projection for the operator overview. A deliberate ALLOWLIST:
- * exco/chair contacts (POPIA: carries ID numbers), coaches, notes, commLog, docMeta
+ * Cross-tenant-safe club projection for the operator overview. A deliberate ALLOWLIST.
+ * The operator league drill-down needs the chair's name/email/cell (team contact) and
+ * the named-side ids/names, so those DO cross now — but `chairContact` is picked
+ * field-by-field (NEVER spread: `exco.chair` also carries `idNumber` and governance
+ * term dates) and rosters are stripped to {id,name} (no venue/address/coords).
+ * Everything else stays out: exco ID numbers, coaches, notes, commLog, docMeta
  * (S3 keys), cqiAnswers, ground addresses and the LIVE playerRegLink token must never
  * cross the operator surface. Add fields here only after checking what they carry.
  */
 function toInsightsClub(club: Club) {
+  const excoChair = (club.exco?.chair ?? {}) as { name?: string; email?: string; cell?: string };
   return {
     id: club.id,
     name: club.name,
@@ -2436,6 +2442,14 @@ function toInsightsClub(club: Club) {
     leagues: club.leagues ?? [],
     leagueTeams: club.leagueTeams ?? {},
     players: (club as { playerCount?: number }).playerCount ?? 0,
+    chair: club.chair ?? '',
+    chairContact: { name: excoChair.name, email: excoChair.email, cell: excoChair.cell },
+    teamRosters: Object.fromEntries(
+      Object.entries(club.teamRosters ?? {}).map(([key, roster]) => [
+        key,
+        roster.map((t) => ({ id: t.id, name: t.name })),
+      ]),
+    ),
   };
 }
 
@@ -2552,6 +2566,17 @@ app.get('/platform/tenants/:slug/overview', async (c) => {
     repo.listClubs(slug),
     repo.listAllClearances(slug),
   ]);
+  // Anonymised demographics ride the same payload (histogram buckets only — the
+  // repo read is projection-limited; no player rows cross the operator surface).
+  const players = await repo.listPlayerDemographics(
+    slug,
+    clubs.map((cl) => cl.id),
+  );
+  const { perLeague, unattributed } = demographicsByLeague(
+    players,
+    clubs,
+    (config.leagues ?? []).map((l) => l.key),
+  );
   return c.json({
     tenant: slug,
     name: config.branding?.name ?? slug,
@@ -2559,6 +2584,7 @@ app.get('/platform/tenants/:slug/overview', async (c) => {
     districts: resolveDistricts(config),
     clubs: clubs.map(toInsightsClub),
     clearances: clearances.map((r) => ({ status: r.status })),
+    demographics: { ...summarizeDemographics(players), perLeague, unattributed },
   });
 });
 
@@ -3182,6 +3208,32 @@ app.post('/admin/export-log', async (c) => {
     erroredClubs: Number(erroredClubs) || 0,
   });
   return c.json({ ok: true });
+});
+
+/**
+ * GET /admin/insights/demographics — anonymised cohort histograms (age / gender /
+ * race) for the Season Insights dashboard, plus the exact per-league split and the
+ * unattributed remainder. Buckets only — no player rows leave the API (the repo
+ * read is already projection-limited to the five fields the histograms need).
+ * Admin-only via the /admin/* middleware chain. The shape is additive: the
+ * top-level fields are a bare DemographicsSummary, so a consumer that ignores
+ * perLeague/unattributed still works (no deploy-order break).
+ * `unattributed.totalPlayers` is the direct materiality measurement for the
+ * backfill-player-team decision (see docs/runbooks/backfill-player-team.md).
+ */
+app.get('/admin/insights/demographics', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const [config, clubs] = await Promise.all([
+    repo.getTenantConfig(ra.tenant),
+    repo.listClubs(ra.tenant),
+  ]);
+  const players = await repo.listPlayerDemographics(
+    ra.tenant,
+    clubs.map((cl) => cl.id),
+  );
+  const leagueKeys = (config?.leagues ?? []).map((l) => l.key);
+  const { perLeague, unattributed } = demographicsByLeague(players, clubs, leagueKeys);
+  return c.json({ ...summarizeDemographics(players), perLeague, unattributed });
 });
 
 app.get('/admin/clearances', async (c) => {

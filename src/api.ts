@@ -28,6 +28,7 @@ import type {
   LogoUploadPost,
   DnsSheet,
   TenantOverview,
+  DemographicsResponse,
 } from './types';
 
 /**
@@ -325,6 +326,11 @@ export const overrideClearance = (clearanceId: string, body: unknown) =>
 // source player; removes a registration-origin clearance's pending destination row.
 export const rejectClearance = (clearanceId: string, body: unknown) =>
   request<PlayerClearance>(`/admin/clearances/${clearanceId}/reject`, { method: 'POST', body });
+
+// ── Insights ──
+// Anonymised player demographics (age/gender/race buckets + per-league split) —
+// aggregate counts only, no player rows cross the wire.
+export const getDemographics = () => request<DemographicsResponse>('/admin/insights/demographics');
 
 // ── Registration reviews (off-system alerts) ──
 // Admin: every review in the tenant (off-system alerts to acknowledge).

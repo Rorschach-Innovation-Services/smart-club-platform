@@ -10,10 +10,24 @@
  */
 
 import { useCopy } from './branding';
-import { KPI, CountUp, EmptyState, Icon } from './atoms';
+import { KPI, CountUp, EmptyState, Icon, Btn } from './atoms';
 import { REQUIRED_DOCS } from './data';
-import { teamCounts, optionsGroupedByGroup, leagueOptionsForDistrict } from './leagues';
-import type { InsightsClub, League, ClearanceStatus } from './types';
+import {
+  teamCounts,
+  optionsGroupedByGroup,
+  leagueOptionsForDistrict,
+  clubTeamsForLeague,
+  findByKey,
+} from './leagues';
+import type {
+  InsightsClub,
+  League,
+  ClearanceStatus,
+  ChairContact,
+  DemographicBucket,
+  DemographicsSummary,
+  DemographicsResponse,
+} from './types';
 
 /** Sides a club fields in one league — absent map/key counts as 1 (legacy clubs). */
 const teamsIn = (club: InsightsClub, key: string) =>
@@ -171,6 +185,74 @@ export function docComplianceRows(clubs: InsightsClub[]) {
   return { docStats, mostMissing };
 }
 
+/**
+ * Share of total as a display string — one decimal, trailing-zero-free ("37.5%",
+ * "100%", "33.3%"). Zero total guards to '0%'. Convention across the insights cards:
+ * number column = percentage, tooltip = raw count; callout prose and the KPI strip
+ * stay raw counts. Bucket percentages may not sum to exactly 100% (33.3 × 3) —
+ * acceptable, since the tooltips carry the raw counts.
+ */
+export function pct(count: number, total: number): string {
+  return `${pctNum(count, total)}%`;
+}
+
+/** Numeric twin of pct() for CountUp (which animates a number, not a string). */
+export function pctNum(count: number, total: number): number {
+  return total ? Math.round((count / total) * 1000) / 10 : 0;
+}
+
+/**
+ * Resolve a club's chair contact from either wire shape: the operator projection's
+ * picked `chairContact`, else the admin `exco.chair` blob; the display name falls
+ * back to the flat `club.chair` field. Pure, tolerant of legacy/partial records.
+ */
+export function chairContactOf(club: InsightsClub): ChairContact {
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v : undefined);
+  const ex = (club.exco?.chair ?? {}) as Record<string, unknown>;
+  return {
+    name: str(club.chairContact?.name) ?? str(ex.name) ?? str(club.chair),
+    email: str(club.chairContact?.email) ?? str(ex.email),
+    cell: str(club.chairContact?.cell) ?? str(ex.cell),
+  };
+}
+
+export interface LeagueTeamRow {
+  teamId: string;
+  teamName: string;
+  clubId: string;
+  clubName: string;
+  chairName?: string;
+  chairEmail?: string;
+  chairCell?: string;
+}
+
+/**
+ * Every team entered in one league, with its owning club and chair contact — the
+ * drill-down directory. Reuses clubTeamsForLeague so named rosters, padded fallback
+ * sides and the club-is-team single entry match the fixtures pool exactly. Sorted by
+ * club name, then team name.
+ */
+export function leagueTeamDirectory(clubs: InsightsClub[], leagueKey: string): LeagueTeamRow[] {
+  const rows: LeagueTeamRow[] = [];
+  for (const c of clubs || []) {
+    if (!(c.leagues || []).includes(leagueKey)) continue;
+    const chair = chairContactOf(c);
+    for (const t of clubTeamsForLeague(c, leagueKey)) {
+      rows.push({
+        teamId: t.teamId,
+        teamName: t.name,
+        clubId: c.id,
+        clubName: c.name,
+        chairName: chair.name,
+        chairEmail: chair.email,
+        chairCell: chair.cell,
+      });
+    }
+  }
+  rows.sort((a, b) => a.clubName.localeCompare(b.clubName) || a.teamName.localeCompare(b.teamName));
+  return rows;
+}
+
 /* ─── The shared breakdown ─── */
 
 /** Legend for dual-value rows — colour-pairs with DuoRow's bars and numbers. */
@@ -194,6 +276,16 @@ const DuoLegend = () => (
  * entries yet — the teams bar renders as a pale inset over the solid bar instead,
  * so it never hides behind it. The number columns mirror the fill colours
  * (ink = clubs, muted = teams).
+ *
+ * NOTE the deliberately inverted percentage convention here: the number columns keep
+ * RAW counts visible and the percentages live in the tooltip. Club% and team% use
+ * different denominators (cohort clubs vs all teams) while the bars share one
+ * per-card scale — percentages beside the bars would read contradictory in a row.
+ *
+ * `onOpen` makes the row a native <button> (keyboard access for free); the inner
+ * cells switch to <span>s because a button's content model is phrasing content —
+ * divs inside a button are invalid HTML. Without it the row renders exactly as
+ * before, as plain divs.
  */
 function DuoRow({
   label,
@@ -201,33 +293,50 @@ function DuoRow({
   clubCount,
   teamCount,
   max,
+  onOpen,
 }: {
   label: string;
   title?: string;
   clubCount: number;
   teamCount: number;
   max: number;
+  onOpen?: () => void;
 }) {
   // The ghost is absolutely positioned so it always paints over the solid bar:
   // green at low opacity is invisible where they overlap (the solid reads clean) and
   // tints only the extension beyond it. In the inset case it switches to a white
   // overlay, lightening the covered clubs segment — "tinted = teams" either way.
   const teamsInset = teamCount < clubCount;
-  return (
-    <div className="insights-bar-row duo">
-      <div className="insights-bar-label" title={title ?? label}>
+  const Cell: 'span' | 'div' = onOpen ? 'span' : 'div';
+  const cells = (
+    <>
+      <Cell className="insights-bar-label" title={title ?? label}>
         {label}
-      </div>
-      <div className="insights-bar-track">
-        <div className="insights-bar-fill" style={{ width: (clubCount / max) * 100 + '%' }} />
-        <div
+      </Cell>
+      <Cell className="insights-bar-track">
+        <Cell className="insights-bar-fill" style={{ width: (clubCount / max) * 100 + '%' }} />
+        <Cell
           className={`insights-bar-fill ghost${teamsInset ? ' inset' : ''}`}
           style={{ width: (teamCount / max) * 100 + '%' }}
         />
-      </div>
-      <div className="insights-bar-num">{clubCount}</div>
-      <div className="insights-bar-num sub">{teamCount}</div>
-    </div>
+      </Cell>
+      <Cell className="insights-bar-num">{clubCount}</Cell>
+      <Cell className="insights-bar-num sub">{teamCount}</Cell>
+    </>
+  );
+  return onOpen ? (
+    <button
+      type="button"
+      className="insights-bar-row duo clickable"
+      onClick={onOpen}
+      // aria-label overrides the content-derived name, so it must carry BOTH the
+      // counts sighted users see and the action the bare numbers don't announce.
+      aria-label={`${label}: ${clubCount} clubs, ${teamCount} teams — view league team directory`}
+    >
+      {cells}
+    </button>
+  ) : (
+    <div className="insights-bar-row duo">{cells}</div>
   );
 }
 
@@ -238,6 +347,10 @@ interface InsightsBreakdownProps {
   clearances: Array<{ status: ClearanceStatus }>;
   /** 'operator' notes the standard doc set on the compliance card. */
   context?: 'admin' | 'operator';
+  /** When set, league rows become clickable and open the league drill-down. */
+  onOpenLeague?: (key: string) => void;
+  /** Anonymised demographics; the card is skipped while undefined (loading/old backend). */
+  demographics?: DemographicsResponse;
 }
 
 export function InsightsBreakdown({
@@ -246,6 +359,8 @@ export function InsightsBreakdown({
   districts,
   clearances,
   context = 'admin',
+  onOpenLeague,
+  demographics,
 }: InsightsBreakdownProps) {
   if (!clubs.length)
     return (
@@ -270,6 +385,9 @@ export function InsightsBreakdown({
     { senior: 0, women: 0, junior: 0 },
   );
   const teamsTotal = split.senior + split.women + split.junior;
+  // Denormalized sum of club.playerCount (drift documented at repo.ts:865), while
+  // demographics.totalPlayers counts real player rows — brief drift between the two
+  // is expected and self-heals; don't "fix" one against the other.
   const playersTotal = clubs.reduce((s, c) => s + (c.players || 0), 0);
 
   // Dual-bar scale: teams normally dominate, but a cohort with clubs and no league
@@ -291,6 +409,11 @@ export function InsightsBreakdown({
   const { bands, maxBand, submitted, avgCqi } = cqiBandRows(clubs);
   const { docStats, mostMissing } = docComplianceRows(clubs);
   const cc = clearanceCounts(clearances);
+  const ccTotal = cc.pending + cc.approved + cc.adminOverride + cc.rejected;
+  const ccApproved = cc.approved + cc.adminOverride;
+  const pendingPct = pctNum(cc.pending, ccTotal);
+  const approvedPct = pctNum(ccApproved, ccTotal);
+  const rejectedPct = pctNum(cc.rejected, ccTotal);
 
   return (
     <div>
@@ -332,10 +455,11 @@ export function InsightsBreakdown({
                     <DuoRow
                       key={r.key}
                       label={r.label}
-                      title={`${r.label} — ${r.clubCount} clubs, ${r.teamCount} teams`}
+                      title={`${r.label} — ${r.clubCount} clubs (${pct(r.clubCount, clubs.length)} of cohort), ${r.teamCount} teams (${pct(r.teamCount, teamsTotal)} of all teams)`}
                       clubCount={r.clubCount}
                       teamCount={r.teamCount}
                       max={lgMax}
+                      onOpen={onOpenLeague ? () => onOpenLeague(r.key) : undefined}
                     />
                   );
                 })}
@@ -379,8 +503,8 @@ export function InsightsBreakdown({
                 label={r.name}
                 title={
                   r.other
-                    ? `${r.name} — ${r.clubCount} clubs, ${r.teamCount} teams`
-                    : `${r.name} — ${r.clubCount} clubs, ${r.teamCount} teams, ${r.leagueCount} leagues available`
+                    ? `${r.name} — ${r.clubCount} clubs (${pct(r.clubCount, clubs.length)} of cohort), ${r.teamCount} teams (${pct(r.teamCount, teamsTotal)} of all teams)`
+                    : `${r.name} — ${r.clubCount} clubs (${pct(r.clubCount, clubs.length)} of cohort), ${r.teamCount} teams (${pct(r.teamCount, teamsTotal)} of all teams), ${r.leagueCount} leagues available`
                 }
                 clubCount={r.clubCount}
                 teamCount={r.teamCount}
@@ -419,7 +543,9 @@ export function InsightsBreakdown({
                   style={{ width: (r.count / Math.max(1, clubs.length)) * 100 + '%' }}
                 />
               </div>
-              <div className="insights-bar-num">{r.count}</div>
+              <div className="insights-bar-num" title={`${r.count} of ${clubs.length} clubs`}>
+                {pct(r.count, clubs.length)}
+              </div>
             </div>
           ))}
           <div
@@ -447,7 +573,9 @@ export function InsightsBreakdown({
                   style={{ width: (b.count / maxBand) * 100 + '%' }}
                 />
               </div>
-              <div className="insights-bar-num">{b.count}</div>
+              <div className="insights-bar-num" title={`${b.count} of ${clubs.length} clubs`}>
+                {pct(b.count, clubs.length)}
+              </div>
             </div>
           ))}
           <div className="insights-callout good">
@@ -474,8 +602,8 @@ export function InsightsBreakdown({
                   style={{ width: d.pct + '%' }}
                 />
               </div>
-              <div className="insights-bar-num">
-                {d.count}/{d.total}
+              <div className="insights-bar-num" title={`${d.count} of ${d.total} clubs`}>
+                {pct(d.count, d.total)}
               </div>
             </div>
           ))}
@@ -501,8 +629,15 @@ export function InsightsBreakdown({
               </span>
             </div>
             <div className="resource-row">
-              <span className={`resource-num ${cc.pending > 0 ? 'warn' : 'good'}`}>
-                <CountUp to={cc.pending} />
+              <span
+                className={`resource-num ${cc.pending > 0 ? 'warn' : 'good'}`}
+                title={`${cc.pending} of ${ccTotal} clearances`}
+              >
+                <CountUp
+                  to={pendingPct}
+                  decimals={Number.isInteger(pendingPct) ? 0 : 1}
+                  suffix="%"
+                />
               </span>
               <span className="resource-text">
                 <strong>{cc.pending === 1 ? 'clearance' : 'clearances'}</strong> pending — awaiting
@@ -510,8 +645,12 @@ export function InsightsBreakdown({
               </span>
             </div>
             <div className="resource-row">
-              <span className="resource-num good">
-                <CountUp to={cc.approved + cc.adminOverride} />
+              <span className="resource-num good" title={`${ccApproved} of ${ccTotal} clearances`}>
+                <CountUp
+                  to={approvedPct}
+                  decimals={Number.isInteger(approvedPct) ? 0 : 1}
+                  suffix="%"
+                />
               </span>
               <span className="resource-text">
                 <strong>approved</strong>
@@ -519,8 +658,15 @@ export function InsightsBreakdown({
               </span>
             </div>
             <div className="resource-row">
-              <span className={`resource-num ${cc.rejected > 0 ? 'danger' : 'good'}`}>
-                <CountUp to={cc.rejected} />
+              <span
+                className={`resource-num ${cc.rejected > 0 ? 'danger' : 'good'}`}
+                title={`${cc.rejected} of ${ccTotal} clearances`}
+              >
+                <CountUp
+                  to={rejectedPct}
+                  decimals={Number.isInteger(rejectedPct) ? 0 : 1}
+                  suffix="%"
+                />
               </span>
               <span className="resource-text">
                 <strong>rejected</strong> transfer {cc.rejected === 1 ? 'request' : 'requests'}
@@ -528,6 +674,225 @@ export function InsightsBreakdown({
             </div>
           </div>
         </div>
+
+        {/* ─── Player demographics (skipped while the query loads / older backend) ─── */}
+        {demographics && (
+          <DemographicsCard summary={demographics} unattributed={demographics.unattributed} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Player demographics card (shared: cohort card + per-league drill-down) ─── */
+
+/** One demographic section — a labelled group of single-fill percentage rows. */
+function DemographicSection({
+  label,
+  buckets,
+  total,
+}: {
+  label: string;
+  buckets: DemographicBucket[];
+  total: number;
+}) {
+  if (!buckets.length) return null;
+  return (
+    <div>
+      <div className="insights-group-label">{label}</div>
+      {buckets.map((b) => (
+        <div key={b.label} className="insights-bar-row">
+          <div className="insights-bar-label" title={b.label}>
+            {b.label}
+          </div>
+          <div className="insights-bar-track">
+            <div
+              className="insights-bar-fill"
+              style={{ width: (b.count / Math.max(1, total)) * 100 + '%' }}
+            />
+          </div>
+          <div className="insights-bar-num" title={`${b.count} of ${total} players`}>
+            {pct(b.count, total)}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Anonymised player demographics — age groups, gender and race as percentages of the
+ * slice's players (raw counts in the tooltips). Rendered with the cohort summary on
+ * the insights page and with a per-league summary on the drill-down pages.
+ */
+export function DemographicsCard({
+  summary,
+  heading = 'Player Demographics',
+  unattributed,
+}: {
+  summary: DemographicsSummary;
+  heading?: string;
+  /** Cohort card only: players that can't be attributed to a league (see callout). */
+  unattributed?: DemographicsSummary;
+}) {
+  return (
+    <div className="insights-card">
+      <div className="insights-card-head">
+        <div className="insights-card-title">{heading}</div>
+        <div className="insights-card-meta">
+          of {summary.totalPlayers} player{summary.totalPlayers === 1 ? '' : 's'}
+        </div>
+      </div>
+      {summary.totalPlayers === 0 ? (
+        <div className="insights-callout warn">
+          No registered players in this view yet — demographic breakdowns appear once players are
+          registered.
+        </div>
+      ) : (
+        <>
+          <DemographicSection
+            label="Age groups"
+            buckets={summary.ageGroups}
+            total={summary.totalPlayers}
+          />
+          <DemographicSection
+            label="Gender"
+            buckets={summary.gender}
+            total={summary.totalPlayers}
+          />
+          <DemographicSection label="Race" buckets={summary.race} total={summary.totalPlayers} />
+        </>
+      )}
+      {unattributed && unattributed.totalPlayers > 0 && (
+        <div
+          className="insights-callout warn"
+          title={`${unattributed.totalPlayers} of ${summary.totalPlayers} players unattributed`}
+        >
+          <strong>{unattributed.totalPlayers}</strong> player
+          {unattributed.totalPlayers === 1 ? '' : 's'} can't be attributed to a league — registered
+          before league assignment, or their club plays multiple leagues. They count in the totals
+          above but in no per-league breakdown.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── League drill-down: team directory + detail page ─── */
+
+/** tel: hrefs allow only + and digits — strip spaces, hyphens, parens from the cell. */
+const telHref = (cell: string) => cell.replace(/[^+\d]/g, '');
+
+/**
+ * Every team in one league with its owning club and the chair's contact details.
+ * Club name is a button into the club detail when `onOpenClub` is given (admin);
+ * plain text otherwise (operator). Email/cell render as mailto:/tel: links, only
+ * when present.
+ */
+export function LeagueTeamDirectoryCard({
+  clubs,
+  leagueKey,
+  onOpenClub,
+}: {
+  clubs: InsightsClub[];
+  leagueKey: string;
+  onOpenClub?: (clubId: string) => void;
+}) {
+  const rows = leagueTeamDirectory(clubs, leagueKey);
+  if (!rows.length)
+    return (
+      <EmptyState
+        icon={Icon.Clubs}
+        title="No teams entered"
+        sub="No club has entered this league yet — teams appear here once affiliations name it."
+      />
+    );
+  const clubCount = new Set(rows.map((r) => r.clubId)).size;
+  return (
+    <div className="insights-card">
+      <div className="insights-card-head">
+        <div className="insights-card-title">Team Directory</div>
+        <div className="insights-card-meta">chair contact per club</div>
+      </div>
+      <div className="kpi-strip mini">
+        <KPI label="Teams" num={<CountUp to={rows.length} />} sub="in this league" />
+        <KPI label="Clubs" num={<CountUp to={clubCount} />} sub="fielding sides" />
+      </div>
+      {rows.map((r) => (
+        <div key={r.teamId} className="league-directory-row">
+          <div className="league-directory-team">{r.teamName}</div>
+          <div className="league-directory-club">
+            {onOpenClub ? (
+              <button
+                type="button"
+                className="league-directory-club-link"
+                onClick={() => onOpenClub(r.clubId)}
+              >
+                {r.clubName}
+              </button>
+            ) : (
+              <span>{r.clubName}</span>
+            )}
+          </div>
+          <div className="league-directory-contact">
+            {r.chairName && <span className="league-directory-chair">{r.chairName}</span>}
+            {r.chairEmail && <a href={`mailto:${r.chairEmail}`}>{r.chairEmail}</a>}
+            {r.chairCell && <a href={`tel:${telHref(r.chairCell)}`}>{r.chairCell}</a>}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+interface AdminLeagueDetailPageProps {
+  clubs: InsightsClub[];
+  leagues: League[];
+  leagueKey: string;
+  demographics?: DemographicsResponse;
+  onBack: () => void;
+  onOpenClub?: (clubId: string) => void;
+}
+
+/** The league drill-down sub-dashboard (admin Shell). */
+export function AdminLeagueDetailPage({
+  clubs,
+  leagues,
+  leagueKey,
+  demographics,
+  onBack,
+  onOpenClub,
+}: AdminLeagueDetailPageProps) {
+  const copy = useCopy();
+  // Falls back to the raw key for orphaned leagues (deleted from the catalogue).
+  const label = findByKey(leagues, leagueKey)?.label || leagueKey;
+  const leagueDemo = demographics?.perLeague?.[leagueKey];
+  return (
+    <div>
+      <div className="page-head">
+        <div className="ph-left">
+          <div className="ph-crumb">
+            {copy.crumbRoot} · Admin Console / Insights / {label}
+          </div>
+          <h1 className="ph-title">{label}</h1>
+          <p className="ph-desc">
+            Every team entered in this league, the club that fields it, and the chair to contact —
+            plus the league's player demographics.
+          </p>
+        </div>
+        <div className="ph-actions">
+          <Btn tone="outline" size="sm" onClick={onBack}>
+            Back to insights
+          </Btn>
+        </div>
+      </div>
+      <div className="insights-panel">
+        <LeagueTeamDirectoryCard clubs={clubs} leagueKey={leagueKey} onOpenClub={onOpenClub} />
+        {demographics && (
+          <DemographicsCard
+            summary={leagueDemo ?? { totalPlayers: 0, ageGroups: [], gender: [], race: [] }}
+          />
+        )}
       </div>
     </div>
   );
@@ -540,6 +905,8 @@ interface AdminInsightsPageProps {
   leagues: League[];
   districts: string[];
   clearances: Array<{ status: ClearanceStatus }>;
+  onOpenLeague?: (key: string) => void;
+  demographics?: DemographicsResponse;
 }
 
 export function AdminInsightsPage({
@@ -547,6 +914,8 @@ export function AdminInsightsPage({
   leagues,
   districts,
   clearances,
+  onOpenLeague,
+  demographics,
 }: AdminInsightsPageProps) {
   const copy = useCopy();
   return (
@@ -568,6 +937,8 @@ export function AdminInsightsPage({
         leagues={leagues}
         districts={districts}
         clearances={clearances}
+        onOpenLeague={onOpenLeague}
+        demographics={demographics}
       />
     </div>
   );

@@ -8,7 +8,7 @@
  */
 
 import { TEAM_ID_PREFIX } from './types';
-import type { Club, ClubTeam } from './types';
+import type { ClubGround, ClubTeam } from './types';
 
 /** Sentinel district for overarching leagues shown in every district's picker. */
 export const OVERARCHING_DISTRICT = 'All districts';
@@ -52,6 +52,24 @@ export interface TeamParticipant {
 }
 
 /**
+ * The minimal club shape team expansion needs — a pick of Club, deliberately loose so
+ * both the full admin Club and the operator-wire InsightsClub (whose roster entries
+ * carry id/name only, and which has no ground) satisfy it.
+ */
+export interface ClubSidesSource {
+  id: string;
+  name: string;
+  /** Sides per league key; absent map/key counts as 1. */
+  leagueTeams?: Record<string, number>;
+  /** Named sides per league; venue/coords absent on the operator projection. */
+  teamRosters?: Record<
+    string,
+    Array<Pick<ClubTeam, 'id' | 'name'> & Partial<Pick<ClubTeam, 'venue' | 'lat' | 'lon'>>>
+  >;
+  ground?: ClubGround;
+}
+
+/**
  * Expand a club into its sides for one league. A league with count ≥ 2 yields the
  * named roster (padded with defaults if short); otherwise a single participant whose
  * `teamId === clubId` (the club is its own team — legacy-compatible).
@@ -62,7 +80,7 @@ export interface TeamParticipant {
  * derived from (club, league, index) — never a random `makeTeamId()`, which would
  * desync those callers for a legacy club that has a count but no stored roster yet.
  */
-export function clubTeamsForLeague(club: Club, leagueKey: string): TeamParticipant[] {
+export function clubTeamsForLeague(club: ClubSidesSource, leagueKey: string): TeamParticipant[] {
   const count = Math.max(1, Number(club.leagueTeams?.[leagueKey]) || 1);
   const ground = club.ground || {};
   if (count >= 2) {

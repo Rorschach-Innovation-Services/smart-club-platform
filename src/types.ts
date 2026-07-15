@@ -133,12 +133,21 @@ export interface TenantSummary {
   playerCount?: number;
 }
 
+/** Chair contact fields the league drill-down renders. All optional (legacy clubs). */
+export interface ChairContact {
+  name?: string;
+  email?: string;
+  cell?: string;
+}
+
 /**
  * Cross-tenant-safe club projection served by GET /platform/tenants/:slug/overview.
- * A deliberate allowlist — no exco/chair contacts, coach ID numbers, notes, comm log,
- * doc metadata, CQI answers, or live registration tokens ever cross the operator
- * surface. The full admin Club satisfies this shape structurally, so InsightsBreakdown
- * (src/insights.tsx) accepts both.
+ * A deliberate allowlist — the league drill-down widened it to include chair
+ * name/email/cell (`chair`/`chairContact`) and named-side ids/names (`teamRosters`),
+ * but coach ID numbers, chair ID numbers, notes, comm log, doc metadata, CQI answers,
+ * ground addresses/coords, and live registration tokens still never cross the
+ * operator surface. The full admin Club satisfies this shape structurally, so
+ * InsightsBreakdown (src/insights.tsx) accepts both.
  */
 export interface InsightsClub {
   id: string;
@@ -151,7 +160,40 @@ export interface InsightsClub {
   players: number;
   leagues?: string[];
   leagueTeams?: Record<string, number>;
+  /** Named sides per league key — id/name only on the operator wire (no venue/coords). */
+  teamRosters?: Record<string, Array<Pick<ClubTeam, 'id' | 'name'>>>;
+  /** Chair display name (Club.chair on the admin side; projected on the operator wire). */
+  chair?: string;
+  /** Operator-wire chair contact, picked field-by-field (never the full exco.chair). */
+  chairContact?: ChairContact;
+  /** Admin-side office bearers; `exco.chair` carries the chair contact fields. */
+  exco?: Record<string, unknown>;
 }
+
+/** One anonymised demographic bucket — counts only, no player rows. */
+export interface DemographicBucket {
+  label: string;
+  count: number;
+}
+
+/** Aggregated player demographics (age bands / gender / race) for one cohort slice. */
+export interface DemographicsSummary {
+  totalPlayers: number;
+  ageGroups: DemographicBucket[];
+  gender: DemographicBucket[];
+  race: DemographicBucket[];
+}
+
+/**
+ * GET /admin/insights/demographics (and TenantOverview.demographics) — the cohort
+ * summary plus optional per-league split. `perLeague`/`unattributed` are optional for
+ * deploy skew (an older backend serves the bare summary). `'unattributed'` is never a
+ * `perLeague` key — it's the separate field.
+ */
+export type DemographicsResponse = DemographicsSummary & {
+  perLeague?: Record<string, DemographicsSummary>;
+  unattributed?: DemographicsSummary;
+};
 
 /** GET /platform/tenants/:slug/overview — exactly what the operator breakdown renders. */
 export interface TenantOverview {
@@ -161,6 +203,8 @@ export interface TenantOverview {
   districts: string[];
   clubs: InsightsClub[];
   clearances: Array<{ status: ClearanceStatus }>;
+  /** Anonymised player demographics; absent while an older backend serves the route. */
+  demographics?: DemographicsResponse;
 }
 
 /** Presigned-POST grant from POST /platform/tenants/:slug/logo-upload. */

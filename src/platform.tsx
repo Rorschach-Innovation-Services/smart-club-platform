@@ -22,7 +22,7 @@ import { Icon, Pill, Btn, EmptyState, useToast, useEscapeClose } from './atoms';
 import { LeagueForm } from './admin';
 import { DISTRICTS } from './data';
 import { OVERARCHING_DISTRICT } from './leagues';
-import { InsightsBreakdown } from './insights';
+import { InsightsBreakdown, LeagueTeamDirectoryCard, DemographicsCard } from './insights';
 import type { TenantConfig, TenantSummary, BrandingCopy, League } from './types';
 import {
   BRAND_ROLES,
@@ -370,6 +370,10 @@ export function PlatformPortal({
             <Route path="/platform/new" element={<CreateTenantWizard toast={toastShow} />} />
             <Route path="/platform/tenants/:slug" element={<TenantEditPage toast={toastShow} />} />
             <Route path="/platform/tenants/:slug/overview" element={<TenantOverviewPage />} />
+            <Route
+              path="/platform/tenants/:slug/overview/leagues/:leagueKey"
+              element={<TenantLeaguePage />}
+            />
             <Route path="*" element={<Navigate to="/platform" replace />} />
           </Routes>
         </main>
@@ -716,7 +720,88 @@ function TenantOverviewPage() {
         districts={d.districts}
         clearances={d.clearances}
         context="operator"
+        onOpenLeague={(k) =>
+          navigate(`/platform/tenants/${slug}/overview/leagues/${encodeURIComponent(k)}`)
+        }
+        demographics={d.demographics}
       />
+    </div>
+  );
+}
+
+/* ─── League drill-down (read-only; same payload/cache as the overview) ─── */
+
+function TenantLeaguePage() {
+  // React Router already decodes params (falling back to the raw segment on bad
+  // escapes) — decoding again would throw a render-time URIError on e.g. "100%".
+  const { slug = '', leagueKey = '' } = useParams();
+  const navigate = useNavigate();
+  const q = useQuery({
+    queryKey: qk.platformTenantOverview(slug),
+    queryFn: () => api.platformTenantOverview(slug),
+    retry: 0,
+  });
+
+  if (q.isLoading) return <p style={{ color: 'var(--muted)', fontSize: 13 }}>Loading overview…</p>;
+  if (q.isError || !q.data)
+    return (
+      <div>
+        <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 14 }}>
+          {q.error instanceof ApiError && q.error.status === 404
+            ? `No client with slug “${slug}”.`
+            : 'Could not load this client’s overview — refresh to retry.'}
+        </p>
+        <Btn tone="outline" size="sm" onClick={() => navigate('/platform')}>
+          All clients
+        </Btn>
+      </div>
+    );
+  const d = q.data;
+  // Falls back to the raw key for orphaned leagues (deleted from the catalogue).
+  const label = d.leagues.find((l) => l.key === leagueKey)?.label || leagueKey;
+
+  return (
+    <div>
+      <div className="page-head">
+        <div className="ph-left">
+          <div className="ph-crumb">
+            Platform / Clients / {d.name} / Overview / {label}
+          </div>
+          <h1 className="ph-title">{label}</h1>
+          <p className="ph-desc">
+            Every team entered in this league, the club that fields it, and the chair to contact —
+            plus the league's player demographics. Read-only.
+          </p>
+        </div>
+        <div className="ph-actions">
+          <Btn
+            tone="outline"
+            size="sm"
+            onClick={() => navigate(`/platform/tenants/${slug}/overview`)}
+          >
+            Overview
+          </Btn>
+          <Btn tone="outline" size="sm" onClick={() => navigate('/platform')}>
+            All clients
+          </Btn>
+        </div>
+      </div>
+      <div className="insights-panel">
+        <LeagueTeamDirectoryCard clubs={d.clubs} leagueKey={leagueKey} />
+        {/* Unattributed players are a cohort-level concern — deliberately not shown here. */}
+        {d.demographics && (
+          <DemographicsCard
+            summary={
+              d.demographics.perLeague?.[leagueKey] ?? {
+                totalPlayers: 0,
+                ageGroups: [],
+                gender: [],
+                race: [],
+              }
+            }
+          />
+        )}
+      </div>
     </div>
   );
 }

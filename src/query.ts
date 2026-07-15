@@ -31,6 +31,7 @@ export const qk = {
   clearances: (clubId: string) => ['clearances', t(), clubId],
   allClearances: () => ['clearances-all', t()],
   allRegistrationReviews: () => ['registration-reviews-all', t()],
+  demographics: () => ['demographics', t()],
   clubDirectory: () => ['club-directory', t()],
   signupLink: () => ['signup-link', t()],
   // Operator portal keys are deliberately NOT tenant-scoped: /platform/* is

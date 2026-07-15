@@ -863,6 +863,48 @@ export async function listPlayers(tenant: string, clubId: string): Promise<Playe
 }
 
 /**
+ * The demographics projection of every player row across the given clubs — a
+ * parallel per-club fan-out of the listPlayers Query, flattened. Cohorts are
+ * hundreds of players and the fleet is small, so the fan-out matches the
+ * existing fleet-rollup precedent (GET /platform/tenants) — revisit with a
+ * bounded batch once tenants grow past a few dozen clubs.
+ *
+ * The ProjectionExpression is a POPIA data-minimisation measure, not an
+ * optimisation: the insights endpoints only build anonymised histograms, so no
+ * idNumbers/addresses/contact fields ever enter Lambda memory here. `clubId`
+ * IS a stored attribute on every row (written by createPlayer), so no pk
+ * parsing is needed.
+ */
+export async function listPlayerDemographics(
+  tenant: string,
+  clubIds: string[],
+): Promise<Array<Pick<PlayerRegistration, 'clubId' | 'dob' | 'gender' | 'race' | 'team'>>> {
+  const lists = await Promise.all(
+    clubIds.map((clubId) => {
+      const { pk, skPrefix } = playersListKey(tenant, clubId);
+      return queryAll({
+        TableName: TABLE,
+        KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+        ProjectionExpression: '#c, #d, #g, #r, #t',
+        // Alias every projected attribute (same convention as the '#s' status
+        // alias in deletePlayer) so none can ever collide with a reserved word.
+        ExpressionAttributeNames: {
+          '#c': 'clubId',
+          '#d': 'dob',
+          '#g': 'gender',
+          '#r': 'race',
+          '#t': 'team',
+        },
+        ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+      });
+    }),
+  );
+  return lists.flat() as Array<
+    Pick<PlayerRegistration, 'clubId' | 'dob' | 'gender' | 'race' | 'team'>
+  >;
+}
+
+/**
  * Recompute a club's denormalized `playerCount` from the source-of-truth PLAYER# rows and
  * correct any drift with an ATOMIC delta bump (`ADD playerCount :delta`) — never a whole-value
  * SET. The delta is strictly safer than a SET: a registration whose `ADD playerCount` lands
@@ -934,6 +976,40 @@ export async function createPlayer(tenant: string, player: PlayerRegistration): 
     );
   } catch (err: unknown) {
     if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
+  }
+}
+
+/**
+ * Backfill helper (backfill-player-team): set a player's `team` league key ONLY
+ * when the row has no `team` attribute at all. The `attribute_not_exists(team)`
+ * guard makes overwriting a stored value impossible — orphaned keys included:
+ * they are registration-time source data and re-attributing them would be a
+ * separate, explicitly-consented migration. `attribute_exists(pk)` stops a
+ * bare Update from resurrecting a phantom row for a concurrently-deleted
+ * player. Returns false (instead of throwing) when the guard fails — the row
+ * already has a team, or vanished — so the backfill can count skips cheaply.
+ */
+export async function setPlayerTeamIfAbsent(
+  tenant: string,
+  clubId: string,
+  naturalKey: string,
+  team: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: playerKey(tenant, clubId, naturalKey),
+        UpdateExpression: 'SET #t = :t',
+        ConditionExpression: 'attribute_exists(pk) AND attribute_not_exists(#t)',
+        ExpressionAttributeNames: { '#t': 'team' },
+        ExpressionAttributeValues: { ':t': team },
+      }),
+    );
+    return true;
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return false;
+    throw err;
   }
 }
 

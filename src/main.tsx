@@ -68,7 +68,7 @@ import {
   LeagueForm,
   CreateSeriesForm,
 } from './admin';
-import { AdminInsightsPage } from './insights';
+import { AdminInsightsPage, AdminLeagueDetailPage } from './insights';
 import { parseSupport } from './support';
 import {
   ClubHome,
@@ -902,6 +902,17 @@ function Shell({
     const m = location.pathname.match(/^\/admin\/clubs\/([^/]+)/);
     clubId = m ? m[1] : (clubs[0]?.id ?? '');
   }
+  // League drill-down key from /admin/insights/leagues/<key> (URL-encoded league key).
+  // Guarded decode: a hand-typed bad escape ("100%") must not URIError mid-render.
+  const lkm = location.pathname.match(/^\/admin\/insights\/leagues\/([^/]+)/);
+  let activeLeagueKey = '';
+  if (lkm) {
+    try {
+      activeLeagueKey = decodeURIComponent(lkm[1]);
+    } catch {
+      activeLeagueKey = lkm[1];
+    }
+  }
 
   const activeClub = useMemoApp(
     () => clubs.find((c) => c.id === clubId) || clubs[0],
@@ -949,6 +960,13 @@ function Shell({
     queryFn: api.getAllRegistrationReviews,
     enabled: role === 'admin',
   });
+  // Anonymised player demographics for Insights + the league drill-down (admin only;
+  // reps never reach /admin/*). Undefined until loaded — the card is simply skipped.
+  const demographicsQuery = useQuery({
+    queryKey: qk.demographics(),
+    queryFn: api.getDemographics,
+    enabled: role === 'admin',
+  });
   const players = playersQuery.data ?? [];
   const clearances = clearancesQuery.data ?? { incoming: [], outbound: [] };
   const clubDirectory = clubDirectoryQuery.data ?? [];
@@ -961,6 +979,7 @@ function Shell({
   if (role === 'admin') {
     const seg = location.pathname.replace(/^\/admin\/?/, '');
     if (seg.startsWith('clubs/')) view = 'club_detail';
+    else if (seg.startsWith('insights/leagues/')) view = 'insights_league';
     else if (seg === 'clubs') view = 'clubs_list';
     else if (seg === 'cqi') view = 'cqi_admin';
     else if (seg === '' || seg === 'dashboard') view = 'dashboard';
@@ -1329,6 +1348,7 @@ function Shell({
         invalidate(qk.clearances(req.toClubId));
         invalidate(qk.players(req.fromClubId));
         invalidate(qk.players(req.toClubId));
+        invalidate(qk.demographics());
         toastShow(`${req.playerName} cleared to ${req.toClubName} · Union override`);
       })
       .catch(() => {})
@@ -1355,6 +1375,7 @@ function Shell({
         invalidate(qk.clearances(req.toClubId));
         invalidate(qk.players(req.fromClubId));
         invalidate(qk.players(req.toClubId));
+        invalidate(qk.demographics());
         toastShow(
           req.origin === 'registration'
             ? `${req.playerName}'s clearance rejected — they remain at ${req.toClubName}, flagged clearance-rejected`
@@ -1432,6 +1453,8 @@ function Shell({
       invalidate(qk.users());
       invalidate(qk.series());
       invalidate(qk.allClearances());
+      // Club deletion cascades player deletion (repo cascade) — demographics shift.
+      invalidate(qk.demographics());
       gotoAdminView('clubs_list');
       toastShow('Club removed');
     });
@@ -1468,6 +1491,7 @@ function Shell({
         invalidate(qk.players(clubId));
         invalidate(qk.club(clubId));
         invalidate(qk.clubs());
+        invalidate(qk.demographics());
         toastShow(`${playerName} removed`);
       })
       .catch(() => {});
@@ -1622,6 +1646,8 @@ function Shell({
       : [];
 
   const nav = role === 'admin' ? adminNav : clubNav;
+  // The league drill-down is a sub-view of Insights — keep its nav item lit.
+  const navView = view === 'insights_league' ? 'insights' : view;
   const orgName = branding?.name ?? 'Smart Club';
   const orgFooter = branding?.copy?.footer ?? 'Powered by Medicoach';
 
@@ -1765,6 +1791,19 @@ function Shell({
             leagues={allLeagues}
             districts={allDistricts}
             clearances={allClearances}
+            onOpenLeague={(k) => navigate(`/admin/insights/leagues/${encodeURIComponent(k)}`)}
+            demographics={demographicsQuery.data}
+          />
+        );
+      if (view === 'insights_league')
+        return (
+          <AdminLeagueDetailPage
+            clubs={clubs}
+            leagues={allLeagues}
+            leagueKey={activeLeagueKey}
+            demographics={demographicsQuery.data}
+            onBack={() => gotoAdminView('insights')}
+            onOpenClub={setActiveClub}
           />
         );
       if (view === 'players')
@@ -2021,7 +2060,7 @@ function Shell({
           {nav.map((n) => (
             <button
               key={n.v}
-              className={`nav-item ${view === n.v ? 'active' : ''}`}
+              className={`nav-item ${navView === n.v ? 'active' : ''}`}
               onClick={() => {
                 if (n.action) {
                   n.action();

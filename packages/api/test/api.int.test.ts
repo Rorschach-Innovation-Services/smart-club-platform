@@ -4906,3 +4906,113 @@ describe('playerCount — client-clobber guard + drift reconcile', () => {
     assert.deepEqual(again, { previous: 2, actual: 2, delta: 0 });
   });
 });
+
+describe('GET /admin/insights/demographics', () => {
+  const club = (id: string, leagues: string[]) =>
+    ({
+      id,
+      name: `${id} CC`,
+      district: 'Test District',
+      sub: 's',
+      chair: 'Chair',
+      affiliation: 'not_started' as const,
+      cqi: 0,
+      docs: {},
+      players: 0,
+      teams: 0,
+      women: 0,
+      juniors: 0,
+      color: '#123456',
+      ground: {},
+      leagues,
+      version: 1,
+    }) as unknown as Parameters<typeof repo.createClub>[1];
+
+  const player = (clubId: string, n: string, extra: Record<string, unknown>) => ({
+    naturalKey: n,
+    clubId,
+    firstName: n,
+    lastName: 'Player',
+    dob: '1990-05-05',
+    isMinor: false,
+    consentAt: '2026-05-01T00:00:00.000Z',
+    createdAt: '2026-05-01T00:00:00.000Z',
+    ...extra,
+  });
+
+  before(async () => {
+    // Register two demo leagues in the catalogue (merge — never clobber the
+    // seeded config other suites read). Distinct keys keep the perLeague
+    // assertions collision-proof against players other suites created.
+    const cfg = await repo.getTenantConfig('dolphins');
+    await repo.putTenantConfig({
+      ...cfg!,
+      leagues: [
+        ...(cfg!.leagues ?? []),
+        { key: 'demo-premier', label: 'Demo Premier', group: 'Seniors', district: 'Test District' },
+        { key: 'demo-u13', label: 'Demo U13', group: 'Juniors', district: 'Test District' },
+      ],
+    });
+    await repo.createClub('dolphins', club('demoa', ['demo-premier'])); // single-league
+    await repo.createClub('dolphins', club('demob', ['demo-premier', 'demo-u13']));
+    // demoa: declared league, single-league fallback, and an orphaned key.
+    await repo.createPlayer(
+      'dolphins',
+      player('demoa', 'da1', { team: 'demo-premier', gender: 'Male', race: 'African' }),
+    );
+    await repo.createPlayer('dolphins', player('demoa', 'da2', { gender: 'Female' })); // no team → fallback
+    await repo.createPlayer('dolphins', player('demoa', 'da3', { team: 'ghost-league' })); // orphaned
+    // demob: same league key from a DIFFERENT club (cross-club aggregation),
+    // a second league, and an ambiguous no-team row at a multi-league club.
+    await repo.createPlayer(
+      'dolphins',
+      player('demob', 'db1', { team: 'demo-premier', gender: 'Male' }),
+    );
+    await repo.createPlayer(
+      'dolphins',
+      player('demob', 'db2', { team: 'demo-u13', dob: '2015-01-01' }),
+    );
+    await repo.createPlayer('dolphins', player('demob', 'db3', {}));
+  });
+
+  test('aggregates across clubs and splits per league via the attribution ladder', async () => {
+    const res = await app.request('/admin/insights/demographics', { headers: headers(ADMIN) });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      totalPlayers: number;
+      ageGroups: Array<{ label: string; count: number }>;
+      gender: Array<{ label: string; count: number }>;
+      race: Array<{ label: string; count: number }>;
+      perLeague: Record<
+        string,
+        { totalPlayers: number; gender: Array<{ label: string; count: number }> }
+      >;
+      unattributed: { totalPlayers: number };
+    };
+
+    // Cross-club aggregation: da1 + db1 (declared) + da2 (single-league fallback).
+    const premier = body.perLeague['demo-premier'];
+    assert.equal(premier.totalPlayers, 3);
+    assert.deepEqual(premier.gender, [
+      { label: 'Male', count: 2 },
+      { label: 'Female', count: 1 },
+      { label: 'Non-binary', count: 0 },
+    ]);
+    assert.equal(body.perLeague['demo-u13'].totalPlayers, 1);
+
+    // da3 (orphaned key) + db3 (multi-league, no team) land in unattributed —
+    // alongside every other suite's players (their clubs enter no leagues), so ≥.
+    assert.ok(!('unattributed' in body.perLeague));
+    assert.ok(body.unattributed.totalPlayers >= 2);
+
+    // The cohort summary rides the top level and reconciles with the split.
+    const perLeagueTotal = Object.values(body.perLeague).reduce((s, l) => s + l.totalPlayers, 0);
+    assert.equal(body.totalPlayers, perLeagueTotal + body.unattributed.totalPlayers);
+    assert.ok(Array.isArray(body.ageGroups) && Array.isArray(body.race));
+  });
+
+  test('rep role → 403 (the /admin/* middleware chain)', async () => {
+    const res = await app.request('/admin/insights/demographics', { headers: headers(REP) });
+    assert.equal(res.status, 403);
+  });
+});
