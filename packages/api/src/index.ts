@@ -532,10 +532,24 @@ app.post('/register/:clubId', async (c) => {
   // roster (the link club, or a different club the player picked); flag it (best-effort) so
   // admins can see which club was typed. Excludes the '—' first-registration sentinel so clean
   // first registrations never raise an alert.
-  const typedOther =
+  //
+  // A typed name that actually matches a club ON the system is NOT off-system — suppress the
+  // alert (a real club typed into "Other" instead of picked from the list). This is purely a
+  // classification decision: `lastClubId` stays untouched, so routing, the previous==current
+  // guard, and createSelfRegistration all behave exactly as before. Exact normalized-name
+  // match (same idiom as the signup collision check) — near-name variants still alert.
+  const typedPrev =
     !lastClubId && body.lastClub && body.lastClub.trim() && body.lastClub.trim() !== '—'
       ? body.lastClub.trim()
       : undefined;
+  let typedOther: string | undefined;
+  if (typedPrev) {
+    const nameKey = typedPrev.toLowerCase();
+    const onSystem = (await repo.listClubs(resolved.tenant)).some(
+      (cl) => cl.name.trim().toLowerCase() === nameKey,
+    );
+    typedOther = onSystem ? undefined : typedPrev;
+  }
   if (typedOther) {
     try {
       await repo.createRegistrationReview(resolved.tenant, {

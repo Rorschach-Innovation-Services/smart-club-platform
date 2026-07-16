@@ -139,6 +139,16 @@ export function RegisterPage() {
   );
   // The effective destination: the picked current club, or the link club when hidden/default.
   const currentClubId = showCurrentClub ? d.currentClubChoice || clubId : clubId;
+  // Nudge: the player typed a previous club into "Other" that actually names a club on the
+  // system (the link club or a sibling). The server suppresses the off-system alert either
+  // way, but picking it from the list links the registration correctly — so point them at it.
+  // Exact normalized match against the dropdown's own options.
+  const typedOtherOnSystem =
+    d.lastClubChoice === '__other__' && d.lastClub.trim()
+      ? [{ id: clubId, name: clubName }, ...clubs].find(
+          (cl) => cl.name.trim().toLowerCase() === d.lastClub.trim().toLowerCase(),
+        )
+      : undefined;
   const isPassport = d.idType === 'passport';
   // SA citizens derive dob from the RSA ID; non-SA enter it directly (no oracle for a passport).
   const dob = isPassport ? d.dob : dobFromSaId(d.idNumber);
@@ -567,6 +577,12 @@ export function RegisterPage() {
                   onChange={set('lastClub')}
                   placeholder="Name of the club you last registered for"
                 />
+              )}
+              {typedOtherOnSystem && (
+                <div className="reg-span" style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>
+                  {typedOtherOnSystem.name} is on the system — select it from the list above instead
+                  of typing it, so your registration links to that club.
+                </div>
               )}
               {!!d.lastClubChoice &&
                 d.lastClubChoice !== '__first__' &&

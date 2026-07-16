@@ -1770,6 +1770,44 @@ describe('POST /register — cross-club registrations, off-system alerts, admin 
     assert.equal(review?.destClubId, 'rdest');
   });
 
+  test('"Other" free-text that names an ON-system club raises NO off-system alert', async () => {
+    // The club the player typed exists on the system (the link club's own name, mixed case).
+    // It must not be misfiled as off-system just because it was typed rather than picked.
+    const res = await postLink({
+      firstName: 'OnSys',
+      lastName: 'Typed',
+      idNumber: 'RVON1',
+      lastClub: 'reg link cc',
+    });
+    assert.equal(res.status, 201);
+    assert.ok((await rosterIds('rlink')).includes('RVON1'), 'player active in the link club');
+    assert.equal(
+      await reviewByName('OnSys Typed'),
+      undefined,
+      'a typed on-system club raises no off-system alert',
+    );
+  });
+
+  test('cross-club: typing the JOINING club by name in "Other" → 201 + no alert (no 400 regression)', async () => {
+    // Link club's token, but a different joining club whose real name is typed into "Other".
+    // Because the classification check never touches lastClubId, the previous==current guard
+    // does NOT fire (registration succeeds) and the on-system match suppresses the alert.
+    const res = await postLink({
+      firstName: 'CrossSame',
+      lastName: 'Typed',
+      idNumber: 'RVCS1',
+      currentClubId: 'rdest',
+      lastClub: 'Reg Dest CC',
+    });
+    assert.equal(res.status, 201);
+    assert.ok((await rosterIds('rdest')).includes('RVCS1'), 'active at the joining club');
+    assert.equal(
+      await reviewByName('CrossSame Typed'),
+      undefined,
+      'typing the joining club by name raises no off-system alert',
+    );
+  });
+
   test('previous club cannot equal a non-link current club (400)', async () => {
     // previous == current == a sibling (not the link club) is a transfer to yourself → 400.
     const selfGuard = await postLink({
