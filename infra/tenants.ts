@@ -68,10 +68,11 @@ export const SHARED_API_HOST = 'api.club.medicoach.co.za';
 // whenever a tenant has a canonical origin — that D5 hardening applies in prod
 // regardless of arming, since WEB_ORIGIN_MAP is baked for every prod build.)
 export const WEB_CERT_ARN =
-  'arn:aws:acm:us-east-1:433453514361:certificate/5c749bdd-1687-4ecc-a3b7-f4e35aaab487';
+  'arn:aws:acm:us-east-1:433453514361:certificate/0ab0e3a3-4c45-4e37-a94e-6474f9918bfb';
 export const API_CERT_ARN =
   'arn:aws:acm:af-south-1:433453514361:certificate/f485b435-3bef-42f0-a27f-3b798e98c8eb';
-export const SHARED_API_CERT_ARN = '';
+export const SHARED_API_CERT_ARN =
+  'arn:aws:acm:af-south-1:433453514361:certificate/ee6f47b2-4731-40d0-8a14-c18952894d12';
 
 // CloudFront distribution domain (e.g. dxxxx.cloudfront.net). The distribution is
 // never replaced (account CloudFront quota is maxed at 20/20), so this is stable —
@@ -80,7 +81,12 @@ export const SHARED_API_CERT_ARN = '';
 // `aws cloudfront list-distributions --profile medicoach`. Baked into the API as
 // WEB_CNAME_TARGET so the operator DNS sheet shows the real web CNAME target instead
 // of a placeholder. Empty → the DNS sheet shows a "look it up" hint.
-export const WEB_CNAME_TARGET = '';
+// Verified 2026-07-17: distribution E28ENZ488BYMPB (the Smart Club StaticSite). Routing-inert
+// until the wildcard is armed; it only changes the operator DNS-sheet display string — but
+// that display DOES change now (the sheet stops showing the placeholder hint), which the
+// vanity (path 2) onboarding flow also reads. Correct and desired: every vanity alias rides
+// this same distribution.
+export const WEB_CNAME_TARGET = 'd1iklmvwijprzp.cloudfront.net';
 
 export interface VanityDomain {
   /** Tenant slug (matches the DynamoDB CONFIG row / resolveTenant()). */

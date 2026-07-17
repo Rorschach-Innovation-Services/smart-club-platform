@@ -49,6 +49,20 @@ Add the printed validation CNAMEs in the authoritative zone (per step 0). Existi
 re-validate instantly (their CNAMEs already exist); only the new `_x.club.…` and
 `_x.api.club.…` records are new. Wait for both certs to reach **ISSUED** (the tool polls).
 
+> **GO/NO-GO GATE — the web cert is SHARED with the live `dolphins` tenant.** Before landing
+> any config, prove the new us-east-1 cert is a strict **superset** of the old one — a dropped
+> SAN takes `dolphins` down at deploy:
+>
+> ```bash
+> aws acm describe-certificate --profile medicoach --region us-east-1 \
+>   --certificate-arn <NEW WEB_CERT_ARN> \
+>   --query 'Certificate.SubjectAlternativeNames' --output json
+> ```
+>
+> The output MUST contain every SAN the current cert has (`dolphinspipeline.medicoach.co.za`,
+> `www.dolphinspipeline.medicoach.co.za`, plus any other live vanity hosts) **and**
+> `*.club.medicoach.co.za`. If anything is missing, STOP — do not land the ARN.
+
 ## 2. Land the config
 
 In `infra/tenants.ts`, set:
@@ -69,8 +83,16 @@ npx sst diff --stage prod
 
 Expect: viewer-cert swap on the distribution, ONE new alias (`*.club.…`), ONE new API
 Gateway domain + mapping (`api.club.…`), and a **Lambda env update in place — NOT a
-replacement**. No distribution/API replacement. Optionally smoke-test the Origin branch in
-the dev stage first (temporarily point `SHARED_API_HOST` at the dev execute-api host).
+replacement**. No distribution/API replacement.
+
+The `resolveTenant()` Origin branch on `SHARED_API_HOST` (`packages/api/src/auth.ts:133`) has
+never run in prod. Its _logic_ is unit-tested (`packages/api/test/resolve-tenant.test.ts`);
+what tests can't cover — whether API Gateway forwards the `Origin` header to the Lambda on the
+shared host — is the GO/NO-GO gate in **step 4**, run against the deployed domain BEFORE the DNS
+cutover. Note it **cannot** be reproduced in a dev stage: `WILDCARD_ENABLED`, `SHARED_API_HOST`
+and `WILDCARD_WEB_SUFFIX` are hardwired prod-only in `sst.config.ts` (`WILDCARD_ENABLED` derives
+from `wildcardEnabled = isProd && SHARED_API_CERT_ARN !== ''`), so the branch is dead off-prod —
+don't waste time trying.
 
 ## 4. Deploy
 
@@ -82,12 +104,39 @@ npx sst deploy --stage prod
 swap is seamless), its API domain unchanged, and `resolveTenant()`'s first branch (host map)
 unchanged. Record the `sharedApiTarget` output.
 
+**GO/NO-GO GATE — validate Origin-based tenant resolution on the deployed shared host, BEFORE
+the step-5 DNS cutover.** `api.club.…` isn't in public DNS yet, so resolve it manually to the
+API Gateway regional domain (`sharedApiTarget`) and hit the real deployed Lambda — this proves
+API Gateway forwards the `Origin` header end-to-end, the one thing unit tests can't:
+
+```bash
+SHARED_API_TARGET=<sharedApiTarget from above>   # e.g. d-xxxx.execute-api.af-south-1.amazonaws.com
+# Origin present → dolphins JSON:
+curl -s --connect-to api.club.medicoach.co.za:443:${SHARED_API_TARGET}:443 \
+  https://api.club.medicoach.co.za/tenant \
+  -H 'Origin: https://dolphins.club.medicoach.co.za' | head -c 120
+# No Origin → 400 unknown tenant (proves it does NOT fall through to leftmost-label):
+curl -s --connect-to api.club.medicoach.co.za:443:${SHARED_API_TARGET}:443 \
+  https://api.club.medicoach.co.za/tenant | head -c 120
+```
+
+First curl must return dolphins branding JSON. If it returns `400`/HTML instead, **STOP** — do
+NOT proceed to step 5; the wildcard is not public yet, so there is nothing to roll back.
+Investigate Origin forwarding before cutting over DNS.
+
 ## 5. DNS go-live (authoritative zone per step 0)
 
 - Keep `*.club` CNAME → CloudFront distribution domain.
 - Add `api.club` CNAME → the `sharedApiTarget` from step 4 (an explicit record beats the
-  wildcard for API-vs-web routing).
-- Keep both ACM validation CNAMEs **permanently** (renewals reuse them).
+  wildcard for API-vs-web routing). **Load-bearing and silent if forgotten:** without this
+  record `api.club` falls through `*.club` to the CloudFront SPA, so every wildcard tenant's
+  API call returns HTML — a total outage with no error naming the missing record. The step-6
+  `curl …/tenant` with an `Origin` header is the canary; do not skip it.
+- Keep both ACM validation CNAMEs **permanently** (renewals reuse them). ACM DNS renewal now
+  depends on records this repo can't observe — a removed `_x.club.…` ACM validation CNAME (the
+  one validating the `*.club` SAN, distinct from the `*.club` alias record that serves traffic)
+  silently fails renewal ~13 months later and takes `dolphins` down too (shared web cert).
+  Step 7's expiry alarm is the only backstop.
 
 `api.club` is DNS-dead until this step, so any curl before it looks like an outage — expected
 (and a safety property: the shared API can't answer before the web wildcard is live).
