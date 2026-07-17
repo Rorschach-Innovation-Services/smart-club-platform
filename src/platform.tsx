@@ -786,7 +786,7 @@ function TenantLeaguePage() {
           </Btn>
         </div>
       </div>
-      <div className="insights-panel">
+      <div className="insights-panel league-detail">
         <LeagueTeamDirectoryCard clubs={d.clubs} leagueKey={leagueKey} />
         {/* Unattributed players are a cohort-level concern — deliberately not shown here. */}
         {d.demographics && (

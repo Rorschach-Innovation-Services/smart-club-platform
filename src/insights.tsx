@@ -886,7 +886,7 @@ export function AdminLeagueDetailPage({
           </Btn>
         </div>
       </div>
-      <div className="insights-panel">
+      <div className="insights-panel league-detail">
         <LeagueTeamDirectoryCard clubs={clubs} leagueKey={leagueKey} onOpenClub={onOpenClub} />
         {demographics && (
           <DemographicsCard

@@ -2044,9 +2044,35 @@
   .kpi-strip.mini .kpi-n{font-size:22px}
   .kpi-strip.mini .kpi-sub{margin-top:4px}
 
-  /* League drill-down: team directory rows — quiet, data-forward. */
+  /* League drill-down renders two cards, not the cohort page's 3–7, so it gets its own
+     proportions: the data-dense directory takes the width; demographics sits in a
+     comfortable sidebar instead of leaving an empty third column.
+     NB: the cohort .insights-panel media queries below (repeat(2,1fr) ≤1360px; 1fr
+     ≤768px, plus a :last-child:nth-child(odd) span-2 rule) still apply. This modifier
+     (0,2,0) overrides the base grid at every width; the span-2 rule only matches an
+     ODD-indexed last card — never the 2-card case (demographics is child 2). */
+  .insights-panel.league-detail{
+    grid-template-columns:minmax(0,1.7fr) minmax(300px,380px);
+    align-items:start; /* cards size to content — no stretched empty demographics card */
+  }
+  /* Single-child cases (demographics absent, or a no-teams EmptyState with no demo) go
+     full-width instead of sitting at 1.7fr with a dead 380px column. This rule is what
+     governs the lone card ABOVE 1360px, and the EmptyState element (not an .insights-card)
+     at every width. Below 1360px a lone .insights-card is instead handled by the cohort
+     span-2 rule (:last-child:nth-child(odd), 0,4,0) — same full-width result. */
+  .insights-panel.league-detail > :only-child{grid-column:1 / -1}
+  .insights-panel.league-detail .insights-group-label{padding-top:12px}
+  @media (max-width: 900px){
+    /* Stack earlier than the cohort 768px: at ~800px the 1.7fr/380px split leaves the
+       directory's internal 3-column rows too narrow. */
+    .insights-panel.league-detail{grid-template-columns:1fr}
+  }
+
+  /* League drill-down: team directory rows — quiet, data-forward.
+     .league-directory-row is used ONLY by LeagueTeamDirectoryCard (drill-down), so the
+     column ratios below are effectively scoped to this page. */
   .league-directory-row{
-    display:grid;grid-template-columns:1fr 1fr 1.4fr;gap:12px;align-items:baseline;
+    display:grid;grid-template-columns:1.1fr 1fr 1.5fr;gap:12px;align-items:baseline;
     padding:8px 0;border-top:1px solid var(--line2);
   }
   .league-directory-team{
