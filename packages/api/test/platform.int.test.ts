@@ -416,8 +416,7 @@ describe('tenant create → list → get → patch', () => {
       body: JSON.stringify({
         submissionDeadline: '2026-10-31',
         features: { whatsappInvites: true },
-        knownClubs: [{ evil: true }], // outside the whitelist — must be ignored
-        adminCount: 99, // ditto
+        adminCount: 99, // outside the whitelist — must be ignored
       }),
     });
     assert.equal(res.status, 200);
@@ -426,8 +425,40 @@ describe('tenant create → list → get → patch', () => {
     assert.deepEqual(cfg.features, { whatsappInvites: true });
     assert.equal(cfg.branding.name, 'Hollywoodbets Sharks'); // untouched
     const stored = await repo.getTenantConfig('sharks');
-    assert.deepEqual(stored?.knownClubs, []);
     assert.notEqual(stored?.adminCount, 99);
+  });
+
+  test('PUT /platform/tenants/:slug knownClubs: persists normalized entries, rejects junk', async () => {
+    // Ids are derived server-side from the trimmed name — a client-sent id is ignored.
+    const ok = await app.request('/platform/tenants/sharks', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        knownClubs: [{ name: '  Kingsmead CC ', id: 'evil-id' }, { name: 'Umbilo United' }],
+      }),
+    });
+    assert.equal(ok.status, 200);
+    const stored = await repo.getTenantConfig('sharks');
+    assert.deepEqual(stored?.knownClubs, [
+      { id: 'kingsmead-cc', name: 'Kingsmead CC' },
+      { id: 'umbilo-united', name: 'Umbilo United' },
+    ]);
+
+    // Shape junk → 400 (this payload used to be silently ignored pre-directory).
+    const junk = await app.request('/platform/tenants/sharks', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ knownClubs: [{ evil: true }] }),
+    });
+    assert.equal(junk.status, 400);
+
+    // Two names that slug identically are the SAME directory club → 409.
+    const dupes = await app.request('/platform/tenants/sharks', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ knownClubs: [{ name: 'Kingsmead CC' }, { name: 'Kingsmead-CC' }] }),
+    });
+    assert.equal(dupes.status, 409);
   });
 
   test('PUT /platform/tenants/:slug on unknown tenant → 404', async () => {

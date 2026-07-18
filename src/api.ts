@@ -326,6 +326,11 @@ export const overrideClearance = (clearanceId: string, body: unknown) =>
 // source player; removes a registration-origin clearance's pending destination row.
 export const rejectClearance = (clearanceId: string, body: unknown) =>
   request<PlayerClearance>(`/admin/clearances/${clearanceId}/reject`, { method: 'POST', body });
+// Union reallocation of a directory-sourced clearance to a real club that has since
+// registered: body { fromClubId, newFromClubId, version? }. The clearance moves into the
+// target club's queue for its rep to action via the normal flow.
+export const reassignClearance = (clearanceId: string, body: unknown) =>
+  request<PlayerClearance>(`/admin/clearances/${clearanceId}/reassign`, { method: 'POST', body });
 
 // ── Insights ──
 // Anonymised player demographics (age/gender/race buckets + per-league split) —
@@ -388,7 +393,9 @@ export const revokeClubSignupLink = () => request('/admin/club-signup-link', { m
 
 // ── Public registration ──
 // `clubs` = sibling clubs for the previous-club dropdown (absent on older backends —
-// the page falls back to a free-text field).
+// the page falls back to a free-text field). Entries with `directory: true` are
+// operator-entered clubs not yet on the system: valid as a PREVIOUS club (a pick opens
+// a clearance for the union office), never as a current/joining club.
 export const getRegistration = (clubId: string, token: string) =>
   request<{
     tenant: string;
@@ -398,7 +405,7 @@ export const getRegistration = (clubId: string, token: string) =>
     // Tenant district list for the form's picker (absent on older backends —
     // the page falls back to the shared constant).
     districts?: string[];
-    clubs?: { id: string; name: string }[];
+    clubs?: { id: string; name: string; directory?: boolean }[];
   }>(`/register/${clubId}`, { auth: false, query: { t: token } });
 // `clearance` present ⇔ the registration opened a transfer from the named previous club
 // (the player lands on the joining club's roster as clearance-pending until that club or

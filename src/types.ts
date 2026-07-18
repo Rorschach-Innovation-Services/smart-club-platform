@@ -94,13 +94,24 @@ export interface TenantBranding {
   copy: BrandingCopy;
 }
 
+/** An entry in the operator-managed club directory (TenantConfig.knownClubs). */
+export interface DirectoryClub {
+  /** Stable slug derived server-side from the name at save time. */
+  id: string;
+  name: string;
+}
+
 export interface TenantConfig {
   tenant: string;
   branding: TenantBranding;
   /** Per-tenant feature flags (e.g. whatsappInvites). Absent key ⇒ caller default. */
   features?: Record<string, boolean>;
   submissionDeadline: string;
-  knownClubs: unknown[];
+  /**
+   * Operator-managed directory of clubs not yet on the system — feeds the
+   * previous-club dropdown on public registration. Operator-console only.
+   */
+  knownClubs: DirectoryClub[];
   clubSignupLink?: { token: string; createdAt: string };
   leagues?: League[];
   /**
@@ -450,6 +461,11 @@ export interface PlayerClearance {
   note?: string;
   /** 'registration' ⇒ opened by the public registration page; absent ⇒ rep-initiated request. */
   origin?: 'registration' | 'request';
+  /**
+   * True ⇔ the source is a directory (off-system) club. Drives the "Not on
+   * system" pill and the Reallocate action in the admin clearances view.
+   */
+  fromClubDirectory?: boolean;
   feesCleared: boolean;
   misconductCleared: boolean;
   status: ClearanceStatus;

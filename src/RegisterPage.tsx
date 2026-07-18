@@ -83,7 +83,9 @@ export function RegisterPage() {
   // Tenant district list; the constant fallback covers deploy skew (SPA ahead of API).
   const [districts, setDistricts] = useState<string[]>(DISTRICTS);
   // Sibling clubs for the previous-club dropdown; empty ⇒ free-text fallback.
-  const [clubs, setClubs] = useState<{ id: string; name: string }[]>([]);
+  // `directory` entries are operator-entered clubs not yet on the system — previous-club
+  // picks only (a pick opens a union-office clearance), never current-club options.
+  const [clubs, setClubs] = useState<{ id: string; name: string; directory?: boolean }[]>([]);
   // Set when the submit opened a transfer — drives the clearance success variant.
   const [clearanceFrom, setClearanceFrom] = useState('');
   const [d, setD] = useState(EMPTY);
@@ -134,9 +136,12 @@ export function RegisterPage() {
         d.lastClubChoice !== clubId));
   // Options = the link club (default) + every sibling, minus the club chosen as previous
   // (you can't transfer to the club you came from). `clubs` already excludes the link club.
-  const currentClubOptions = [{ id: clubId, name: clubName }, ...clubs].filter(
-    (cl) => cl.id !== d.lastClubChoice,
-  );
+  // Directory entries are excluded too: a club not on the system has no roster to join
+  // (the backend would reject it as an unknown current club).
+  const currentClubOptions = [
+    { id: clubId, name: clubName },
+    ...clubs.filter((cl) => !cl.directory),
+  ].filter((cl) => cl.id !== d.lastClubChoice);
   // The effective destination: the picked current club, or the link club when hidden/default.
   const currentClubId = showCurrentClub ? d.currentClubChoice || clubId : clubId;
   // Nudge: the player typed a previous club into "Other" that actually names a club on the
@@ -302,16 +307,34 @@ export function RegisterPage() {
         ? clubName
         : currentClubOptions.find((c) => c.id === currentClubId)?.name || clubName;
     if (clearanceFrom) {
+      // The server names the clearance's REAL source: it may match the player's directory
+      // pick, or a real club it auto-routed to via the ID-number match — so classify by
+      // what came back, not by what was picked. A directory source has no club on the
+      // system to notify; only the Union office can act on that clearance.
+      const fromDirectory = clubs.some(
+        (cl) => cl.directory && cl.name.trim().toLowerCase() === clearanceFrom.trim().toLowerCase(),
+      );
       return (
         <CenterCard>
           <h1 className="ps-title" style={{ fontSize: 22 }}>
             Registration received — clearance pending
           </h1>
           <p className="ps-desc">
-            Because you were last registered at <strong>{clearanceFrom}</strong>, a clearance
-            request has been sent to them. You&apos;ll appear on {joiningClubName}&apos;s roster as{' '}
-            <em>clearance pending</em> until {clearanceFrom} (or the Union office) approves the
-            transfer.
+            {fromDirectory ? (
+              <>
+                Because you were last registered at <strong>{clearanceFrom}</strong>, a clearance
+                request has been raised for the Union office to review. You&apos;ll appear on{' '}
+                {joiningClubName}&apos;s roster as <em>clearance pending</em> until the Union office
+                approves the transfer.
+              </>
+            ) : (
+              <>
+                Because you were last registered at <strong>{clearanceFrom}</strong>, a clearance
+                request has been sent to them. You&apos;ll appear on {joiningClubName}&apos;s roster
+                as <em>clearance pending</em> until {clearanceFrom} (or the Union office) approves
+                the transfer.
+              </>
+            )}
           </p>
         </CenterCard>
       );
@@ -580,8 +603,8 @@ export function RegisterPage() {
               )}
               {typedOtherOnSystem && (
                 <div className="reg-span" style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>
-                  {typedOtherOnSystem.name} is on the system — select it from the list above instead
-                  of typing it, so your registration links to that club.
+                  {typedOtherOnSystem.name} is in the club list — select it from the dropdown above
+                  instead of typing it, so your registration links to that club.
                 </div>
               )}
               {!!d.lastClubChoice &&
@@ -592,9 +615,9 @@ export function RegisterPage() {
                     className="reg-span"
                     style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
                   >
-                    If you&apos;re still registered there under this ID number, a clearance request
-                    will be sent to that club — they (or the Union office) must approve it before
-                    you join your current club.
+                    {clubs.find((cl) => cl.id === d.lastClubChoice)?.directory
+                      ? 'A clearance request will be raised for the Union office to review before you join your current club.'
+                      : 'If you’re still registered there under this ID number, a clearance request will be sent to that club — they (or the Union office) must approve it before you join your current club.'}
                   </div>
                 )}
               {d.lastClubChoice === clubId && (

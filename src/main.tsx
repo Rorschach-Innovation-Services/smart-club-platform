@@ -1413,6 +1413,35 @@ function Shell({
       .catch(() => {})
       .finally(() => setBusyClearanceId(null));
   }
+  // Admin reallocates a directory-sourced clearance to a real club that has since
+  // registered — it lands in that club's queue for its rep to action normally.
+  function reassignClearanceReq(req, newFromClubId) {
+    setBusyClearanceId(req.id);
+    return withToast(
+      () =>
+        api.reassignClearance(req.id, {
+          fromClubId: req.fromClubId,
+          newFromClubId,
+          version: req.version,
+        }),
+      'Could not reallocate clearance',
+      { rawConflict: true },
+    )
+      .then((next) => {
+        // The clearance moved partitions, the target club gained a placeholder row, and
+        // the destination row's lastClub was rewritten to the new source name.
+        invalidate(qk.allClearances());
+        invalidate(qk.clearances(req.fromClubId));
+        invalidate(qk.clearances(newFromClubId));
+        invalidate(qk.clearances(req.toClubId));
+        invalidate(qk.players(newFromClubId));
+        invalidate(qk.players(req.toClubId));
+        invalidate(qk.demographics());
+        toastShow(`${req.playerName}'s clearance reallocated to ${next.fromClubName}`);
+      })
+      .catch(() => {})
+      .finally(() => setBusyClearanceId(null));
+  }
   // Admin acknowledges an off-system alert (a player named a club not on the system).
   function ackRegistrationReview(review) {
     setBusyReviewId(review.id);
@@ -1855,8 +1884,10 @@ function Shell({
           <AdminClearances
             clearances={allClearances}
             leagues={allLeagues}
+            clubs={clubs}
             onOverride={overrideClearance}
             onReject={rejectClearanceReq}
+            onReassign={reassignClearanceReq}
             busyId={busyClearanceId}
           />
         );

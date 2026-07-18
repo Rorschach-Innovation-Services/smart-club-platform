@@ -67,6 +67,7 @@ import type {
   Club,
   ClubCommEvent,
   ClubSpec,
+  DirectoryClub,
   League,
   Membership,
   Series,
@@ -301,6 +302,27 @@ app.get('/tenant', async (c) => {
   });
 });
 
+/**
+ * The tenant's club directory with malformed entries dropped. The field is typed
+ * DirectoryClub[] but rows can predate the feature or be hand-edited, so readers
+ * never trust the shape.
+ */
+function directoryClubs(cfg: TenantConfig | null | undefined): DirectoryClub[] {
+  if (!cfg || !Array.isArray(cfg.knownClubs)) return [];
+  return cfg.knownClubs.filter(
+    (e): e is DirectoryClub =>
+      !!e &&
+      typeof e === 'object' &&
+      typeof (e as DirectoryClub).id === 'string' &&
+      // The id becomes a clearance partition-key component — constrain stored values to
+      // clubIdFromName's exact output alphabet so a hand-edited row can't inject key
+      // structure (e.g. a '#' delimiter).
+      /^[a-z0-9-]+$/.test((e as DirectoryClub).id) &&
+      typeof (e as DirectoryClub).name === 'string' &&
+      !!(e as DirectoryClub).name.trim(),
+  );
+}
+
 /** Validate a registration link → returns the club name. Token self-describes tenant. */
 app.get('/register/:clubId', async (c) => {
   const token = c.req.query('t');
@@ -317,6 +339,19 @@ app.get('/register/:clubId', async (c) => {
   // the POST handler can validate the chosen team against real keys (names only — same
   // non-sensitive set already exposed on /tenant).
   const cfg = await repo.getTenantConfig(resolved.tenant);
+  // Sibling clubs for the "club for which last registered" dropdown, merged with
+  // the operator-managed club directory (clubs that exist in the real world but
+  // aren't on the system yet). Dedup by slug AND normalized name against ALL real
+  // clubs — including the link club, which is its own dropdown option — so a
+  // directory entry vanishes the moment the real club signs up. Public
+  // (token-gated) exposure of id+name ONLY — the same projection reps get from
+  // /clubs/directory; club names are non-sensitive here.
+  const realClubs = await repo.listClubs(resolved.tenant);
+  const takenIds = new Set(realClubs.map((cl) => cl.id));
+  const takenNames = new Set(realClubs.map((cl) => cl.name.trim().toLowerCase()));
+  const directory = directoryClubs(cfg).filter(
+    (e) => !takenIds.has(e.id) && !takenNames.has(e.name.trim().toLowerCase()),
+  );
   return c.json({
     tenant: resolved.tenant,
     clubId: club.id,
@@ -325,12 +360,10 @@ app.get('/register/:clubId', async (c) => {
     // District picker for the public registration form — same non-sensitive set
     // already exposed on /tenant.
     districts: resolveDistricts(cfg),
-    // Sibling clubs for the "club for which last registered" dropdown. Public
-    // (token-gated) exposure of id+name ONLY — the same projection reps get from
-    // /clubs/directory; club names are non-sensitive here.
-    clubs: (await repo.listClubs(resolved.tenant))
-      .filter((cl) => cl.id !== club.id)
-      .map((cl) => ({ id: cl.id, name: cl.name })),
+    clubs: [
+      ...realClubs.filter((cl) => cl.id !== club.id).map((cl) => ({ id: cl.id, name: cl.name })),
+      ...directory.map((e) => ({ id: e.id, name: e.name, directory: true as const })),
+    ].sort((a, b) => a.name.localeCompare(b.name)),
   });
 });
 
@@ -508,6 +541,7 @@ app.post('/register/:clubId', async (c) => {
       player,
       destClub,
       lastClubId,
+      directoryClubs(cfg),
     );
     if (clearanceFromName) {
       return c.json({ ok: true, clearance: { fromClubName: clearanceFromName } }, 201);
@@ -953,7 +987,13 @@ async function findPlayerByIdNumber(
  *    real club, with a `note` recording the mismatch for whoever reviews it.
  *  - Mid-transfer elsewhere (already 'clearance-pending') → DuplicatePendingClearanceError, so the
  *    caller returns the collapsed 409 rather than opening a competing clearance.
- *  - Not registered anywhere else → a plain active row (first registration / off-system previous).
+ *  - Not registered anywhere else, named an on-system club → a plain active row with the club name
+ *    as history text (no clearance — they aren't actually rostered there).
+ *  - Not registered anywhere else, named a DIRECTORY club (operator-entered `knownClubs`, not on
+ *    the system) → 'clearance-pending' row + a real registration-origin clearance from the
+ *    directory club's slug, flagged fromClubDirectory. The union office override-approves it or
+ *    reallocates it to the real club once that club registers.
+ *  - Not registered anywhere else, no previous club → a plain active row (first registration).
  *
  * Used by the public register route whether the player registers into the link club or a different
  * joining club. Repo errors (dedup/dest conflicts) propagate to the caller, which maps them.
@@ -964,6 +1004,7 @@ async function createSelfRegistration(
   player: PlayerRegistration,
   destClub: Club,
   lastClubId: string,
+  directory: DirectoryClub[],
 ): Promise<{ clearanceFromName?: string }> {
   // Re-registration at the SAME club (previous == the club being joined): record the history name;
   // there is nothing to transfer. Falls through to a plain active row (or the guards below).
@@ -986,10 +1027,13 @@ async function createSelfRegistration(
     let note: string | undefined;
     if (!named) {
       const namedClub = lastClubId ? await repo.getClub(tenant, lastClubId) : null;
+      const namedDirectory = namedClub ? undefined : directory.find((e) => e.id === lastClubId);
       note = lastClubId
         ? namedClub
           ? `Auto-routed: player named "${namedClub.name}" as previous club, but is registered at ${source.clubName}.`
-          : `Auto-routed: the named previous club is not on the system; player is registered at ${source.clubName}.`
+          : namedDirectory
+            ? `Auto-routed: player named "${namedDirectory.name}" (not yet on the system) as previous club, but is registered at ${source.clubName}.`
+            : `Auto-routed: the named previous club is not on the system; player is registered at ${source.clubName}.`
         : `Auto-routed to ${source.clubName}, where the player is registered (no previous club was named).`;
     }
     player.status = 'clearance-pending';
@@ -1024,12 +1068,50 @@ async function createSelfRegistration(
     throw new repo.DuplicatePendingClearanceError();
   }
 
-  // Not registered anywhere else: a genuine new registration. Record the named on-system previous
-  // club as history text (no clearance — they aren't actually rostered there).
+  // Not registered anywhere else: a genuine new registration. A named ON-SYSTEM previous
+  // club is history text only (no clearance — they aren't actually rostered there). A named
+  // DIRECTORY club (operator-entered, not on the system) opens a REAL pending clearance —
+  // the reason the directory exists: a fresh tenant has no on-system data for the
+  // naturalKey match above, so without this branch registrations naming a previous club
+  // produced no clearance at all. The real-club lookup runs FIRST so a club that claimed
+  // the slug between the form's GET and this POST degrades to the harmless history path.
   if (lastClubId && lastClubId !== player.clubId) {
     const sourceClub = await repo.getClub(tenant, lastClubId);
-    if (!sourceClub) throw new HttpError(400, 'unknown previous club');
-    player.lastClub = sourceClub.name;
+    if (sourceClub) {
+      player.lastClub = sourceClub.name;
+    } else {
+      const dirEntry = directory.find((e) => e.id === lastClubId);
+      if (!dirEntry) {
+        // The entry vanished (operator removed/renamed it) between GET and POST. The
+        // player has already uploaded an ID document at this point — guide, don't baffle.
+        throw new HttpError(400, 'that previous club is no longer listed — please re-select it');
+      }
+      player.status = 'clearance-pending';
+      player.lastClub = dirEntry.name;
+      const clearance: PlayerClearance = {
+        id: randomUUID(),
+        playerNaturalKey: player.naturalKey,
+        playerName: `${player.firstName} ${player.lastName}`,
+        idNumber: player.idNumber,
+        team: player.team,
+        fromClubId: dirEntry.id,
+        toClubId: player.clubId,
+        fromClubName: dirEntry.name,
+        toClubName: destClub.name,
+        requestedAt: now(),
+        origin: 'registration',
+        fromClubDirectory: true,
+        note: `"${dirEntry.name}" is not yet on the system — the Union office can approve this clearance, or reallocate it once the club registers.`,
+        feesCleared: false,
+        misconductCleared: false,
+        status: 'pending',
+        clubApprovedAt: null,
+        adminOverrideAt: null,
+        version: 0,
+      };
+      await repo.createPlayerWithDirectoryClearance(tenant, player, clearance);
+      return { clearanceFromName: dirEntry.name };
+    }
   }
   player.status = 'active';
   await repo.createPlayer(tenant, player);
@@ -2350,6 +2432,30 @@ function validateDistricts(districts: unknown): asserts districts is string[] {
 }
 
 /**
+ * Club-directory shape guard: every entry needs a non-blank name (≤80 chars) that
+ * slugs to a non-empty id, and no two entries may share a slug — the slug doubles
+ * as a clearance source partition, so "Kingsmead CC" and "Kingsmead-CC" are the
+ * SAME directory club even though the names differ. Client-sent ids are ignored;
+ * the operator route re-derives them server-side.
+ */
+function validateKnownClubs(entries: unknown): asserts entries is Array<{ name: string }> {
+  if (!Array.isArray(entries)) throw new HttpError(400, 'knownClubs must be an array');
+  // Well below the CONFIG item's 400KB physical ceiling, but failing here keeps the
+  // error honest — the generic ceiling message blames leagues/districts.
+  if (entries.length > 500)
+    throw new HttpError(400, 'the club directory is limited to 500 entries');
+  const names = entries.map((e) => (e as { name?: unknown } | undefined)?.name);
+  if (names.some((n) => typeof n !== 'string' || !n.trim()))
+    throw new HttpError(400, 'every directory club needs a name');
+  if (names.some((n) => (n as string).trim().length > 80))
+    throw new HttpError(400, 'directory club names must be 80 characters or fewer');
+  const ids = names.map((n) => clubIdFromName((n as string).trim()));
+  if (ids.some((id) => !id))
+    throw new HttpError(400, 'directory club names need at least one letter or digit');
+  if (new Set(ids).size !== ids.length) throw new HttpError(409, 'duplicate directory club');
+}
+
+/**
  * League-catalogue shape guard: keys are the matching token stored on clubs, so they
  * must be unique, present and strings. Rejects a malformed payload with a 400 rather
  * than letting a non-array/non-string key TypeError into a 500 or persist junk.
@@ -2384,6 +2490,7 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { tutorials?: unknown }).tutorials;
   delete (patch as { adminCount?: unknown }).adminCount;
   delete (patch as { districts?: unknown }).districts;
+  delete (patch as { knownClubs?: unknown }).knownClubs;
   const next = await applyTenantConfigPatch(tenant, patch);
   return c.json(next);
 });
@@ -2699,6 +2806,17 @@ app.put('/platform/tenants/:slug', async (c) => {
     if (!deadline || Number.isNaN(Date.parse(deadline)))
       throw new HttpError(400, 'valid submissionDeadline required (ISO date)');
     patch.submissionDeadline = body.submissionDeadline;
+  }
+  if (body.knownClubs !== undefined) {
+    validateKnownClubs(body.knownClubs);
+    // Ids are re-derived server-side — a client-sent id is never trusted, so a
+    // crafted entry can't point at an arbitrary clearance partition. No delete
+    // guard: removing an entry only removes a dropdown option; existing
+    // clearances keep their denormalized fromClubId/fromClubName and still work.
+    patch.knownClubs = body.knownClubs.map((e) => {
+      const name = e.name.trim();
+      return { id: clubIdFromName(name), name };
+    });
   }
   const next = await applyTenantConfigPatch(slug, patch);
   return c.json(next);
@@ -3305,6 +3423,70 @@ app.post('/admin/clearances/:cid/override', async (c) => {
 });
 
 /**
+ * Union reallocation: move a DIRECTORY-sourced pending clearance to a real club that has
+ * since registered (possibly under a name that slugs differently from the directory
+ * entry). Admin-only. After the move the clearance is a normal registration-origin one —
+ * the real club's rep sees it in their portal and approves/rejects via the usual flow.
+ * Restricted to fromClubDirectory clearances whose slug is still unclaimed: if a real
+ * club owns the old slug, the clearance is already in that club's queue (it may be
+ * mid-review) and yanking it out from under them would be wrong — its rep must action it.
+ */
+app.post('/admin/clearances/:cid/reassign', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cid = c.req.param('cid');
+  const body = await c.req.json<{
+    fromClubId?: string;
+    newFromClubId?: string;
+    version?: number;
+  }>();
+  if (!body.fromClubId || !body.newFromClubId) {
+    throw new HttpError(400, 'fromClubId and newFromClubId required');
+  }
+  if (body.newFromClubId === body.fromClubId) {
+    throw new HttpError(400, 'the clearance is already assigned to that club');
+  }
+  const current = await repo.getClearance(ra.tenant, body.fromClubId, cid);
+  if (!current) throw new HttpError(404, 'clearance not found');
+  if (current.status !== 'pending') throw new HttpError(409, 'clearance already resolved');
+  if (!current.fromClubDirectory) {
+    throw new HttpError(
+      400,
+      'only clearances from a club not yet on the system can be reallocated',
+    );
+  }
+  if (body.newFromClubId === current.toClubId) {
+    throw new HttpError(400, 'source cannot be the destination club');
+  }
+  if (await repo.getClub(ra.tenant, current.fromClubId)) {
+    throw new HttpError(409, 'that club is now on the system — its rep must action the clearance');
+  }
+  const newFromClub = await repo.getClub(ra.tenant, body.newFromClubId);
+  if (!newFromClub) throw new HttpError(404, 'target club not found');
+  try {
+    const reassigned = await repo.reassignClearanceSource(
+      ra.tenant,
+      body.fromClubId,
+      cid,
+      newFromClub,
+      {
+        expectedVersion: body.version,
+      },
+    );
+    return c.json(reassigned);
+  } catch (err) {
+    if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
+    if (err instanceof repo.PlayerExistsAtSourceError) {
+      throw new HttpError(
+        409,
+        'the player already has a record at that club — use the normal clearance flow or override instead',
+      );
+    }
+    if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
+    throw err;
+  }
+});
+
+/**
  * Union reject: decline a pending clearance on the clubs' behalf. Admin-only (the
  * /admin/* middleware enforces it). For a rep-initiated clearance the source player returns
  * to 'active'. For a REGISTRATION-origin clearance the player STAYS on the destination
@@ -3322,6 +3504,16 @@ app.post('/admin/clearances/:cid/reject', async (c) => {
   const current = await repo.getClearance(ra.tenant, body.fromClubId, cid);
   if (!current) throw new HttpError(404, 'clearance not found');
   if (current.status !== 'pending') throw new HttpError(409, 'clearance already resolved');
+  // A directory-sourced clearance has no club rep who could ever legitimately reject, and
+  // rejection is irreversible (no reactivation endpoint) — server-enforced, not UI copy.
+  // The club-existence check re-permits reject once a real club owns the slug: the
+  // decision is genuinely that club's then.
+  if (current.fromClubDirectory && !(await repo.getClub(ra.tenant, current.fromClubId))) {
+    throw new HttpError(
+      409,
+      'the previous club is not on the system — override & approve or reallocate instead',
+    );
+  }
   try {
     const rejected = await repo.rejectClearance(ra.tenant, body.fromClubId, cid, {
       at: now(),

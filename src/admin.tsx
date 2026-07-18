@@ -6174,10 +6174,20 @@ export function AdminTeamAccessView({
 }
 
 /* ─── AdminClearances — oversight of every clearance across the cohort ─── */
-export function AdminClearances({ clearances, leagues, onOverride, onReject, busyId }) {
+export function AdminClearances({
+  clearances,
+  leagues,
+  clubs,
+  onOverride,
+  onReject,
+  onReassign,
+  busyId,
+}) {
   const [confirm, setConfirm] = useStateA(null);
   // Optional note the admin attaches to a rejection (shown to both clubs).
   const [reason, setReason] = useStateA('');
+  // Target club for a reallocation (the reassign confirm's picker).
+  const [reassignTarget, setReassignTarget] = useStateA('');
   const [filter, setFilter] = useStateA('all');
   const teamLabel = labelByKey(leagues ?? []);
   const fmtDay = (iso) =>
@@ -6281,6 +6291,12 @@ export function AdminClearances({ clearances, leagues, onOverride, onReject, bus
         )}
         {list.map((req) => {
           const busy = busyId === req.id;
+          // Directory-sourced clearance whose club is STILL not on the system: no rep can
+          // ever action it, so the union office overrides — or reallocates it once the
+          // club registers. The club-existence cross-check makes the flag age out when a
+          // club later signs up under the directory entry's exact slug.
+          const offSystem =
+            req.fromClubDirectory === true && !(clubs ?? []).some((c) => c.id === req.fromClubId);
           return (
             <div
               key={req.id}
@@ -6311,7 +6327,14 @@ export function AdminClearances({ clearances, leagues, onOverride, onReject, bus
                   </div>
                 </div>
                 <div className="clr-route">
-                  <div className="clr-route-from">{req.fromClubName}</div>
+                  <div className="clr-route-from">
+                    {req.fromClubName}
+                    {offSystem && (
+                      <div style={{ marginTop: 4 }}>
+                        <Pill tone="gold">Not on system</Pill>
+                      </div>
+                    )}
+                  </div>
                   <Icon.Arrow />
                   <div className="clr-route-to">{req.toClubName}</div>
                 </div>
@@ -6337,35 +6360,65 @@ export function AdminClearances({ clearances, leagues, onOverride, onReject, bus
                       Act on this clearance on the clubs' behalf?
                     </div>
                     <div className="clr-override-sub">
-                      The Union office can override {req.fromClubName}'s approval and issue the
-                      clearance to {req.toClubName} — or reject the request
-                      {req.origin === 'registration'
-                        ? ` (the player stays at ${req.toClubName}, flagged clearance-rejected, and is removed from ${req.fromClubName})`
-                        : ` (the player stays registered at ${req.fromClubName})`}
-                      .
+                      {offSystem
+                        ? `${req.fromClubName} is not yet on the system, so no club rep can approve this. Override & approve it — or reallocate it to the club once they register.`
+                        : `The Union office can override ${req.fromClubName}'s approval and issue the clearance to ${req.toClubName} — or reject the request${
+                            req.origin === 'registration'
+                              ? ` (the player stays at ${req.toClubName}, flagged clearance-rejected, and is removed from ${req.fromClubName})`
+                              : ` (the player stays registered at ${req.fromClubName})`
+                          }.`}
                     </div>
                   </div>
-                  <Btn
-                    tone="outline"
-                    disabled={busy}
-                    onClick={() => {
-                      setReason('');
-                      setConfirm({
-                        kind: 'reject',
-                        title: 'Reject this clearance?',
-                        body:
-                          req.origin === 'registration'
-                            ? `This will reject ${req.playerName}'s clearance on the Union's authority. They stay on ${req.toClubName}'s roster flagged clearance-rejected and are removed from ${req.fromClubName}.`
-                            : `This will reject ${req.playerName}'s transfer to ${req.toClubName} on the Union's authority. They stay registered at ${req.fromClubName}. Both clubs will be notified.`,
-                        onYes: (note) => {
-                          onReject(req, note);
-                          setConfirm(null);
-                        },
-                      });
-                    }}
+                  {offSystem && (
+                    <Btn
+                      tone="outline"
+                      disabled={busy}
+                      onClick={() => {
+                        setReassignTarget('');
+                        setConfirm({
+                          kind: 'reassign',
+                          title: 'Reallocate this clearance?',
+                          body: `${req.fromClubName} has no record on the system. If the club has since registered (perhaps under a slightly different name), reallocate the clearance to it — its rep will then see, and can approve or reject, ${req.playerName}'s transfer to ${req.toClubName}.`,
+                          req,
+                          onYes: (targetId) => {
+                            onReassign(req, targetId);
+                            setConfirm(null);
+                          },
+                        });
+                      }}
+                    >
+                      Reallocate source…
+                    </Btn>
+                  )}
+                  <span
+                    title={
+                      offSystem
+                        ? 'The previous club is not on the system and cannot respond — override & approve or reallocate instead'
+                        : undefined
+                    }
                   >
-                    Reject
-                  </Btn>
+                    <Btn
+                      tone="outline"
+                      disabled={busy || offSystem}
+                      onClick={() => {
+                        setReason('');
+                        setConfirm({
+                          kind: 'reject',
+                          title: 'Reject this clearance?',
+                          body:
+                            req.origin === 'registration'
+                              ? `This will reject ${req.playerName}'s clearance on the Union's authority. They stay on ${req.toClubName}'s roster flagged clearance-rejected and are removed from ${req.fromClubName}.`
+                              : `This will reject ${req.playerName}'s transfer to ${req.toClubName} on the Union's authority. They stay registered at ${req.fromClubName}. Both clubs will be notified.`,
+                          onYes: (note) => {
+                            onReject(req, note);
+                            setConfirm(null);
+                          },
+                        });
+                      }}
+                    >
+                      Reject
+                    </Btn>
+                  </span>
                   <Btn
                     tone="teal"
                     icon={Icon.Arrow}
@@ -6472,6 +6525,23 @@ export function AdminClearances({ clearances, leagues, onOverride, onReject, bus
                   style={{ width: '100%', marginTop: 10, resize: 'vertical', fontSize: 13 }}
                 />
               )}
+              {confirm.kind === 'reassign' && (
+                <select
+                  className="field-input"
+                  value={reassignTarget}
+                  onChange={(e) => setReassignTarget(e.target.value)}
+                  style={{ width: '100%', marginTop: 10, fontSize: 13 }}
+                >
+                  <option value="">Select the club…</option>
+                  {(clubs ?? [])
+                    .filter((c) => c.id !== confirm.req.toClubId)
+                    .map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                </select>
+              )}
               <div className="fix-confirm-actions">
                 <Btn tone="outline" onClick={() => setConfirm(null)}>
                   Cancel
@@ -6479,6 +6549,15 @@ export function AdminClearances({ clearances, leagues, onOverride, onReject, bus
                 {confirm.kind === 'reject' ? (
                   <Btn tone="ink" onClick={() => confirm.onYes(reason.trim())}>
                     Yes, reject clearance
+                  </Btn>
+                ) : confirm.kind === 'reassign' ? (
+                  <Btn
+                    tone="teal"
+                    icon={Icon.Arrow}
+                    disabled={!reassignTarget}
+                    onClick={() => confirm.onYes(reassignTarget)}
+                  >
+                    Reallocate clearance
                   </Btn>
                 ) : (
                   <Btn tone="teal" icon={Icon.Arrow} onClick={() => confirm.onYes()}>

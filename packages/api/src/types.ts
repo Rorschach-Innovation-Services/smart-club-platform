@@ -110,6 +110,13 @@ export interface BrandingCopy {
   crumbRoot?: string;
 }
 
+/** An entry in the operator-managed club directory (TenantConfig.knownClubs). */
+export interface DirectoryClub {
+  /** Stable slug (clubIdFromName) — doubles as a clearance source partition. */
+  id: string;
+  name: string;
+}
+
 export interface TenantConfig {
   tenant: string;
   branding: {
@@ -125,7 +132,17 @@ export interface TenantConfig {
     copy: BrandingCopy & Record<string, string>;
   };
   submissionDeadline: string;
-  knownClubs: unknown[];
+  /**
+   * Operator-managed directory of real-world clubs not yet registered on the
+   * system. Merged (deduped, real club wins) into the previous-club dropdown on
+   * public player registration; a directory pick opens a real pending clearance
+   * from `id` (see PlayerClearance.fromClubDirectory). `id` is derived
+   * server-side from the name at save time and persisted so a later rename can
+   * never orphan a pending clearance's partition. Operator-only: PUT
+   * /tenant/config strips it (ADR 0006), only PUT /platform/tenants/:slug
+   * writes it. Legacy rows hold [].
+   */
+  knownClubs: DirectoryClub[];
   /**
    * Pointer to the tenant-wide club self-signup token (TOKEN# item, kind 'club-signup').
    * Single active link per tenant; regenerating revokes the prior token. Written ONLY via
@@ -492,6 +509,15 @@ export interface PlayerClearance {
    * (destination-rep initiated; the destination row is created on approval).
    */
   origin?: 'registration' | 'request';
+  /**
+   * True ⇔ the source is a tenant-directory (off-system) club: no source player
+   * row or club META existed when the clearance was opened. Listing/UX + route
+   * guards only — resolve/reject branch on the ACTUAL source row's existence,
+   * not this flag, because a club may later sign up under the same slug and
+   * roster the player. Cleared by the admin reassign route, which moves the
+   * clearance to a real club and backfills a placeholder source row.
+   */
+  fromClubDirectory?: boolean;
   feesCleared: boolean;
   misconductCleared: boolean;
   status: ClearanceStatus;

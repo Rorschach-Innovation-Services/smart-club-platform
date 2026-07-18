@@ -5054,3 +5054,506 @@ describe('GET /admin/insights/demographics', () => {
     assert.equal(res.status, 403);
   });
 });
+
+describe('club directory (operator-entered previous clubs → real pending clearances)', () => {
+  // Operators list real-world clubs not yet on the system in TenantConfig.knownClubs.
+  // They merge (deduped) into the previous-club dropdown; a pick opens a REAL pending
+  // clearance flagged fromClubDirectory that the union overrides — or reallocates to
+  // the club once it registers on the system.
+  const mkClub = (id: string, name: string) => ({
+    id,
+    name,
+    district: 'Test District',
+    sub: 's',
+    chair: 'Chair',
+    affiliation: 'not_started' as const,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#abcdef',
+    ground: {},
+    leagues: [],
+    version: 1,
+  });
+  let teamKey: string;
+  let destKey: string; // presigned objectKey under kd-dest
+
+  const regBody = (idNumber: string, extra: Record<string, unknown> = {}) => ({
+    firstName: 'Sipho',
+    lastName: 'Dlamini',
+    idType: 'passport',
+    idNumber,
+    dob: '1998-03-03',
+    nationality: 'Zimbabwean',
+    race: 'African',
+    gender: 'Male',
+    cell: '0837770001',
+    team: teamKey,
+    district: 'Ethekwini',
+    idDocMeta: { objectKey: destKey, size: 100, contentType: 'image/png' },
+    ...extra,
+  });
+
+  const registerAt = (clubId: string, token: string, body: Record<string, unknown>) =>
+    app.request(`/register/${clubId}?t=${token}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  const directoryClearanceFor = async (fromClubId: string, idNumber: string) =>
+    (await repo.listClearancesForSource('dolphins', fromClubId)).find(
+      (x) => x.idNumber === idNumber,
+    );
+
+  before(async () => {
+    await repo.createClub('dolphins', mkClub('kd-dest', 'KD Dest CC'));
+    await repo.createClub('dolphins', mkClub('kd-src', 'KD Source CC'));
+    await repo.createClub('dolphins', mkClub('kd-shadow', 'Shadow CC'));
+    await repo.putToken('kd-dest-token', 'dolphins', 'kd-dest', '2026-06-01T00:00:00.000Z');
+    await repo.putToken('kd-src-token', 'dolphins', 'kd-src', '2026-06-01T00:00:00.000Z');
+    teamKey = ((await repo.getTenantConfig('dolphins'))?.leagues ?? [])[0]?.key ?? '';
+    assert.ok(teamKey, 'precondition: tenant has a league catalogue');
+    const up = await app.request('/register/kd-dest/id-doc/upload-url?t=kd-dest-token', {
+      method: 'POST',
+      body: JSON.stringify({ contentType: 'image/png' }),
+    });
+    destKey = ((await up.json()) as { objectKey: string }).objectKey;
+    // Seed the directory as the operator route would store it (normalized {id,name}).
+    const cfg = (await repo.getTenantConfig('dolphins'))!;
+    await repo.putTenantConfig({
+      ...cfg,
+      knownClubs: [
+        { id: 'pinetown-cc', name: 'Pinetown CC' },
+        { id: 'montclair-cc', name: 'Montclair CC' },
+        { id: 'kloof-cc', name: 'Kloof CC' },
+        { id: 'queensburgh-cc', name: 'Queensburgh CC' },
+        // Same slug as a real club → must be hidden from the dropdown.
+        { id: 'kd-shadow', name: 'KD Shadow Duplicate' },
+        // Different slug but same normalized NAME as a real club → hidden too.
+        { id: 'shadow-cricket-club', name: 'shadow cc' },
+      ],
+    });
+  });
+
+  test('tenant-admin PUT /tenant/config cannot write knownClubs (operator-only)', async () => {
+    const res = await app.request('/tenant/config', {
+      method: 'PUT',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ knownClubs: [{ id: 'evil', name: 'Evil CC' }] }),
+    });
+    assert.equal(res.status, 200, 'the field is stripped, not rejected');
+    const stored = (await repo.getTenantConfig('dolphins'))!;
+    assert.ok(
+      stored.knownClubs.some((e) => e.id === 'pinetown-cc'),
+      'directory unchanged',
+    );
+    assert.ok(!stored.knownClubs.some((e) => (e as { id?: string }).id === 'evil'));
+  });
+
+  test('GET /register merges directory entries (flagged, deduped by slug AND name, sorted)', async () => {
+    const res = await app.request('/register/kd-dest?t=kd-dest-token');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      clubs: { id: string; name: string; directory?: boolean }[];
+    };
+    const byId = Object.fromEntries(body.clubs.map((cl) => [cl.id, cl]));
+    assert.equal(byId['pinetown-cc']?.directory, true, 'directory entry present and flagged');
+    assert.equal(byId['kd-src']?.directory, undefined, 'real clubs carry no flag');
+    assert.ok(!byId['kd-dest'], 'registering club excluded');
+    assert.notEqual(byId['kd-shadow']?.directory, true, 'slug-duplicate entry hidden');
+    assert.ok(
+      !body.clubs.some((cl) => cl.id === 'shadow-cricket-club'),
+      'name-duplicate entry hidden (normalized match)',
+    );
+    assert.ok(
+      !body.clubs.some((cl) => cl.directory && cl.id === 'kd-shadow'),
+      'the real Shadow CC wins over its directory duplicates',
+    );
+    const names = body.clubs.map((cl) => cl.name);
+    assert.deepEqual(
+      names,
+      [...names].sort((a, b) => a.localeCompare(b)),
+      'merged list sorted',
+    );
+  });
+
+  test('a directory pick opens a real pending clearance (flagged) with no source-partition writes', async () => {
+    const res = await registerAt('kd-dest', 'kd-dest-token', {
+      ...regBody('KD9001'),
+      lastClubId: 'pinetown-cc',
+    });
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { clearance?: { fromClubName: string } };
+    assert.equal(body.clearance?.fromClubName, 'Pinetown CC', 'clearance success variant fires');
+
+    const dest = (await repo.listPlayers('dolphins', 'kd-dest')).find(
+      (p) => p.idNumber === 'KD9001',
+    );
+    assert.equal(dest?.status, 'clearance-pending');
+    assert.equal(dest?.lastClub, 'Pinetown CC');
+
+    const clr = await directoryClearanceFor('pinetown-cc', 'KD9001');
+    assert.equal(clr?.origin, 'registration');
+    assert.equal(clr?.fromClubDirectory, true);
+    assert.equal(clr?.status, 'pending');
+
+    // Union sight via the gsi1 the canonical carries.
+    const adminList = (await (
+      await app.request('/admin/clearances', { headers: headers(ADMIN) })
+    ).json()) as { id: string; fromClubDirectory?: boolean }[];
+    const listed = adminList.find((x) => x.id === clr!.id);
+    assert.equal(listed?.fromClubDirectory, true, 'flag rides the admin list');
+
+    // No source partition side effects: no club item, no player rows.
+    assert.equal(await repo.getClub('dolphins', 'pinetown-cc'), null);
+    assert.deepEqual(await repo.listPlayers('dolphins', 'pinetown-cc'), []);
+
+    // Duplicate re-submit is the collapsed conflict (dest row already exists).
+    const dupe = await registerAt('kd-dest', 'kd-dest-token', {
+      ...regBody('KD9001'),
+      lastClubId: 'pinetown-cc',
+    });
+    assert.equal(dupe.status, 409);
+  });
+
+  test('a naturalKey match at a real club beats the directory pick (existing path wins)', async () => {
+    const upSrc = await app.request('/register/kd-src/id-doc/upload-url?t=kd-src-token', {
+      method: 'POST',
+      body: JSON.stringify({ contentType: 'image/png' }),
+    });
+    const srcKey = ((await upSrc.json()) as { objectKey: string }).objectKey;
+    const seeded = await registerAt('kd-src', 'kd-src-token', {
+      ...regBody('KD9002'),
+      idDocMeta: { objectKey: srcKey, size: 100, contentType: 'image/png' },
+    });
+    assert.equal(seeded.status, 201);
+
+    const res = await registerAt('kd-dest', 'kd-dest-token', {
+      ...regBody('KD9002'),
+      lastClubId: 'pinetown-cc',
+    });
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { clearance?: { fromClubName: string } };
+    assert.equal(body.clearance?.fromClubName, 'KD Source CC', 'routed to the REAL club');
+    const clr = (await repo.listClearancesForSource('dolphins', 'kd-src')).find(
+      (x) => x.idNumber === 'KD9002',
+    );
+    assert.equal(clr?.fromClubDirectory, undefined);
+    assert.match(clr?.note ?? '', /Pinetown CC/, 'mismatch note names the directory entry');
+    assert.equal(await directoryClearanceFor('pinetown-cc', 'KD9002'), undefined);
+  });
+
+  test('union override activates the player; no phantom club item at the directory slug', async () => {
+    const clr = (await directoryClearanceFor('pinetown-cc', 'KD9001'))!;
+    const res = await app.request(`/admin/clearances/${clr.id}/override`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'pinetown-cc', version: clr.version }),
+    });
+    assert.equal(res.status, 200);
+    const dest = (await repo.listPlayers('dolphins', 'kd-dest')).find(
+      (p) => p.idNumber === 'KD9001',
+    );
+    assert.equal(dest?.status, 'active');
+    // The resolve must NOT have upserted a phantom club item or left source residue.
+    assert.equal(await repo.getClub('dolphins', 'pinetown-cc'), null);
+    assert.deepEqual(await repo.listPlayers('dolphins', 'pinetown-cc'), []);
+    const resolved = await directoryClearanceFor('pinetown-cc', 'KD9001');
+    assert.equal(resolved?.status, 'admin-override');
+  });
+
+  test('union reject is blocked (409) while the directory club is not on the system', async () => {
+    const reg = await registerAt('kd-dest', 'kd-dest-token', {
+      ...regBody('KD9003'),
+      lastClubId: 'montclair-cc',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await directoryClearanceFor('montclair-cc', 'KD9003'))!;
+    const res = await app.request(`/admin/clearances/${clr.id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'montclair-cc', version: clr.version }),
+    });
+    assert.equal(res.status, 409);
+    assert.equal((await directoryClearanceFor('montclair-cc', 'KD9003'))?.status, 'pending');
+  });
+
+  test('D5: a club signing up under the directory slug inherits the clearance; club-mode approve moves the rostered player cleanly', async () => {
+    const reg = await registerAt('kd-dest', 'kd-dest-token', {
+      ...regBody('KD9004'),
+      lastClubId: 'kloof-cc',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await directoryClearanceFor('kloof-cc', 'KD9004'))!;
+    assert.equal(clr.fromClubDirectory, true);
+
+    // The club registers on the system under a name with the IDENTICAL slug, and its
+    // chair rosters the player (they import their real roster, mid-transfer included).
+    await repo.createClub('dolphins', mkClub('kloof-cc', 'Kloof CC'));
+    const dest = (await repo.listPlayers('dolphins', 'kd-dest')).find(
+      (p) => p.idNumber === 'KD9004',
+    )!;
+    await repo.createPlayer('dolphins', {
+      naturalKey: dest.naturalKey,
+      clubId: 'kloof-cc',
+      firstName: dest.firstName,
+      lastName: dest.lastName,
+      dob: dest.dob,
+      isMinor: dest.isMinor,
+      consentAt: dest.consentAt,
+      createdAt: dest.createdAt,
+      idNumber: dest.idNumber,
+      team: dest.team,
+      status: 'active',
+      version: 0,
+    });
+    assert.equal((await repo.getClub('dolphins', 'kloof-cc'))?.playerCount, 1);
+
+    // The clearance is already in the club's partition — its rep sees and issues it.
+    const REP_KLOOF = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['kloof-cc'] }]);
+    const issued = await app.request(`/clubs/kloof-cc/clearances/${clr.id}`, {
+      method: 'PATCH',
+      headers: headers(REP_KLOOF),
+      body: JSON.stringify({
+        feesCleared: true,
+        misconductCleared: true,
+        action: 'issue',
+        version: clr.version,
+      }),
+    });
+    assert.equal(issued.status, 200);
+    // Source-row-aware resolve: the ROSTERED source row is deleted (no double-roster)
+    // and the club's count balances back to zero.
+    assert.deepEqual(await repo.listPlayers('dolphins', 'kloof-cc'), []);
+    assert.equal((await repo.getClub('dolphins', 'kloof-cc'))?.playerCount, 0);
+    const moved = (await repo.listPlayers('dolphins', 'kd-dest')).find(
+      (p) => p.idNumber === 'KD9004',
+    );
+    assert.equal(moved?.status, 'active');
+  });
+
+  test('reassign guard matrix: non-directory / claimed slug / dest target / missing target / already rostered', async () => {
+    // Non-directory registration-origin clearance (KD9002, sourced at the real kd-src).
+    const real = (await repo.listClearancesForSource('dolphins', 'kd-src')).find(
+      (x) => x.idNumber === 'KD9002',
+    )!;
+    const nonDirectory = await app.request(`/admin/clearances/${real.id}/reassign`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'kd-src', newFromClubId: 'kd-shadow' }),
+    });
+    assert.equal(nonDirectory.status, 400);
+
+    // Directory clearance whose slug a real club claimed (kloof-cc, resolved above) —
+    // build a FRESH pending one against the now-claimed slug via a new registration.
+    const reg = await registerAt('kd-dest', 'kd-dest-token', {
+      ...regBody('KD9005'),
+      lastClubId: 'montclair-cc',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await directoryClearanceFor('montclair-cc', 'KD9005'))!;
+
+    const toDest = await app.request(`/admin/clearances/${clr.id}/reassign`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'montclair-cc', newFromClubId: 'kd-dest' }),
+    });
+    assert.equal(toDest.status, 400, 'source cannot be the destination');
+
+    const missing = await app.request(`/admin/clearances/${clr.id}/reassign`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'montclair-cc', newFromClubId: 'no-such-club' }),
+    });
+    assert.equal(missing.status, 404, 'target club must exist');
+
+    // Player already has a row at the target → 409 with nothing mutated.
+    const dest = (await repo.listPlayers('dolphins', 'kd-dest')).find(
+      (p) => p.idNumber === 'KD9005',
+    )!;
+    await repo.createPlayer('dolphins', {
+      naturalKey: dest.naturalKey,
+      clubId: 'kd-shadow',
+      firstName: dest.firstName,
+      lastName: dest.lastName,
+      dob: dest.dob,
+      isMinor: dest.isMinor,
+      consentAt: dest.consentAt,
+      createdAt: dest.createdAt,
+      idNumber: dest.idNumber,
+      team: dest.team,
+      status: 'active',
+      version: 0,
+    });
+    const collide = await app.request(`/admin/clearances/${clr.id}/reassign`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'montclair-cc', newFromClubId: 'kd-shadow' }),
+    });
+    assert.equal(collide.status, 409);
+    const untouched = await directoryClearanceFor('montclair-cc', 'KD9005');
+    assert.equal(untouched?.status, 'pending', 'failed reassign mutates nothing');
+    assert.equal(untouched?.fromClubDirectory, true);
+
+    // Claimed-slug guard: a pending clearance still sitting at kloof-cc's slug would
+    // belong to the real club now. Mint one by registering another player.
+    const reg2 = await registerAt('kd-dest', 'kd-dest-token', {
+      ...regBody('KD9006'),
+      lastClubId: 'kloof-cc',
+    });
+    // kloof-cc is a REAL club now, so this is the history-text path — no clearance —
+    // which is itself worth asserting: the directory entry is shadowed server-side too.
+    assert.equal(reg2.status, 201);
+    assert.equal(
+      ((await reg2.json()) as { clearance?: unknown }).clearance,
+      undefined,
+      'a real club with the slug wins at POST time (no directory clearance)',
+    );
+  });
+
+  test('reassign moves the clearance to the real club; the normal club flow completes it', async () => {
+    // Montclair registers on the system under a DIFFERENT slug than the directory entry.
+    await repo.createClub('dolphins', mkClub('mc-real', 'Montclair Cricket Club'));
+    const clr = (await directoryClearanceFor('montclair-cc', 'KD9005'))!;
+
+    const res = await app.request(`/admin/clearances/${clr.id}/reassign`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        fromClubId: 'montclair-cc',
+        newFromClubId: 'mc-real',
+        version: clr.version,
+      }),
+    });
+    assert.equal(res.status, 200);
+    const moved = (await res.json()) as {
+      fromClubId: string;
+      fromClubName: string;
+      fromClubDirectory?: boolean;
+    };
+    assert.equal(moved.fromClubId, 'mc-real');
+    assert.equal(moved.fromClubName, 'Montclair Cricket Club');
+    assert.equal(moved.fromClubDirectory, undefined, 'flag cleared — a normal clearance now');
+
+    // Canonical moved partitions; placeholder + count landed at the real club.
+    assert.equal(await directoryClearanceFor('montclair-cc', 'KD9005'), undefined);
+    const atReal = (await repo.listClearancesForSource('dolphins', 'mc-real')).find(
+      (x) => x.idNumber === 'KD9005',
+    );
+    assert.equal(atReal?.status, 'pending');
+    const placeholder = (await repo.listPlayers('dolphins', 'mc-real')).find(
+      (p) => p.idNumber === 'KD9005',
+    );
+    assert.equal(placeholder?.status, 'clearance-pending');
+    assert.equal(placeholder?.idDocMeta, undefined, 'placeholder carries no live doc');
+    assert.equal((await repo.getClub('dolphins', 'mc-real'))?.playerCount, 1);
+    const dest = (await repo.listPlayers('dolphins', 'kd-dest')).find(
+      (p) => p.idNumber === 'KD9005',
+    );
+    assert.equal(dest?.lastClub, 'Montclair Cricket Club', 'dest history updated');
+
+    // The destination mirror the dest rep reads carries the new source name.
+    const inbound = (await repo.listInboundForDest('dolphins', 'kd-dest')).find(
+      (x) => x.idNumber === 'KD9005',
+    );
+    assert.equal(inbound?.fromClubName, 'Montclair Cricket Club');
+
+    // From here the normal club flow completes it.
+    const REP_MC = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['mc-real'] }]);
+    const issued = await app.request(`/clubs/mc-real/clearances/${atReal!.id}`, {
+      method: 'PATCH',
+      headers: headers(REP_MC),
+      body: JSON.stringify({
+        feesCleared: true,
+        misconductCleared: true,
+        action: 'issue',
+        version: atReal!.version,
+      }),
+    });
+    assert.equal(issued.status, 200);
+    assert.deepEqual(
+      (await repo.listPlayers('dolphins', 'mc-real')).filter((p) => p.idNumber === 'KD9005'),
+      [],
+      'placeholder deleted on approval',
+    );
+    assert.equal((await repo.getClub('dolphins', 'mc-real'))?.playerCount, 0);
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'kd-dest')).find((p) => p.idNumber === 'KD9005')?.status,
+      'active',
+    );
+  });
+
+  test('claimed slug: reassign is refused (409); reject unblocks and leaves an active roster row intact', async () => {
+    // A clearance is minted while the directory club is off-system, THEN the club signs
+    // up under the identical slug — the clearance is in its queue now, so an admin must
+    // not be able to yank it out via reassign, and reject becomes legitimately possible.
+    const reg = await registerAt('kd-dest', 'kd-dest-token', {
+      ...regBody('KD9007'),
+      lastClubId: 'queensburgh-cc',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await directoryClearanceFor('queensburgh-cc', 'KD9007'))!;
+    assert.equal(clr.fromClubDirectory, true);
+    await repo.createClub('dolphins', mkClub('queensburgh-cc', 'Queensburgh CC'));
+
+    const yanked = await app.request(`/admin/clearances/${clr.id}/reassign`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'queensburgh-cc', newFromClubId: 'kd-src' }),
+    });
+    assert.equal(yanked.status, 409, 'a claimed slug belongs to the real club now');
+    assert.equal(
+      (await directoryClearanceFor('queensburgh-cc', 'KD9007'))?.status,
+      'pending',
+      'refused reassign mutates nothing',
+    );
+
+    // The club's chair rosters the mid-transfer player as ACTIVE (portal creates have no
+    // cross-club dedup). Reject must still work — and must NOT delete the active row,
+    // decrement the count, or purge its documents (the row isn't held by the clearance).
+    const dest = (await repo.listPlayers('dolphins', 'kd-dest')).find(
+      (p) => p.idNumber === 'KD9007',
+    )!;
+    await repo.createPlayer('dolphins', {
+      naturalKey: dest.naturalKey,
+      clubId: 'queensburgh-cc',
+      firstName: dest.firstName,
+      lastName: dest.lastName,
+      dob: dest.dob,
+      isMinor: dest.isMinor,
+      consentAt: dest.consentAt,
+      createdAt: dest.createdAt,
+      idNumber: dest.idNumber,
+      team: dest.team,
+      status: 'active',
+      version: 0,
+    });
+    assert.equal((await repo.getClub('dolphins', 'queensburgh-cc'))?.playerCount, 1);
+
+    const rejected = await app.request(`/admin/clearances/${clr.id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'queensburgh-cc', version: clr.version }),
+    });
+    assert.equal(rejected.status, 200, 'reject unblocked once the club is on the system');
+    assert.equal((await directoryClearanceFor('queensburgh-cc', 'KD9007'))?.status, 'rejected');
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'kd-dest')).find((p) => p.idNumber === 'KD9007')?.status,
+      'clearance-rejected',
+      'destination row flagged in place',
+    );
+    const rosterRow = (await repo.listPlayers('dolphins', 'queensburgh-cc')).find(
+      (p) => p.idNumber === 'KD9007',
+    );
+    assert.equal(rosterRow?.status, 'active', 'actively-rostered source row survives the reject');
+    assert.equal(
+      (await repo.getClub('dolphins', 'queensburgh-cc'))?.playerCount,
+      1,
+      'no count drift for a row the clearance never held',
+    );
+  });
+});

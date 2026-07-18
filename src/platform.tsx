@@ -23,7 +23,7 @@ import { LeagueForm } from './admin';
 import { DISTRICTS } from './data';
 import { OVERARCHING_DISTRICT } from './leagues';
 import { InsightsBreakdown, LeagueTeamDirectoryCard, DemographicsCard } from './insights';
-import type { TenantConfig, TenantSummary, BrandingCopy, League } from './types';
+import type { TenantConfig, TenantSummary, BrandingCopy, DirectoryClub, League } from './types';
 import {
   BRAND_ROLES,
   HERO_TOKEN,
@@ -690,6 +690,13 @@ function TenantEditPage({ toast }: { toast: Toast }) {
         />
         {/* Districts above leagues: the league form's district picker draws from them. */}
         <DistrictsCard key={`ds-${config.tenant}`} config={config} save={save} toast={toast} />
+        <ClubDirectoryCard
+          key={`kc-${config.tenant}`}
+          slug={slug}
+          config={config}
+          save={save}
+          toast={toast}
+        />
         <LeaguesCard
           key={`lg-${config.tenant}`}
           slug={slug}
@@ -1329,6 +1336,174 @@ function DistrictsCard({
       <div style={{ marginTop: 14 }}>
         <Btn tone="teal" size="sm" onClick={saveIt} disabled={!dirty || busy}>
           {busy ? 'Saving…' : 'Save districts'}
+        </Btn>
+      </div>
+    </Panel>
+  );
+}
+
+/** Mirror of the API's clubIdFromName — display-side dedup only; the server re-derives. */
+function directorySlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+/**
+ * Operator-managed club directory (TenantConfig.knownClubs): real-world clubs not yet
+ * registered on the system. They appear in the previous-club dropdown on public player
+ * registration (merged with real clubs, real club wins) and a pick opens a real pending
+ * clearance the union office overrides or reallocates. Same draft/save shape as
+ * DistrictsCard; entries whose club has since signed up get an "on system" pill (the
+ * registration dropdown already hides them — they can be removed here).
+ */
+function ClubDirectoryCard({
+  slug,
+  config,
+  save,
+  toast,
+}: {
+  slug: string;
+  config: TenantConfig;
+  save: (p: Partial<TenantConfig>) => Promise<TenantConfig>;
+  toast: Toast;
+}) {
+  // Defensive shape filter: the field predates the feature and rows can be hand-edited.
+  // A name that slugs to nothing is dropped too — its derived id would be '', giving
+  // duplicate React keys and a Remove that strips every such entry at once.
+  const stored: DirectoryClub[] = (Array.isArray(config.knownClubs) ? config.knownClubs : [])
+    .filter(
+      (e): e is DirectoryClub =>
+        !!e && typeof e === 'object' && typeof e.name === 'string' && !!directorySlug(e.name),
+    )
+    .map((e) => ({ id: e.id || directorySlug(e.name), name: e.name }));
+  const [draft, setDraft] = useState<DirectoryClub[]>(stored);
+  const [newName, setNewName] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(stored);
+
+  // Real clubs, for "on system" pills and the add guard. The overview payload already
+  // carries the sanitized club projection — no new endpoint.
+  const overview = useQuery({
+    queryKey: qk.platformTenantOverview(slug),
+    queryFn: () => api.platformTenantOverview(slug),
+  });
+  const realClubs = overview.data?.clubs ?? [];
+  const onSystem = (e: DirectoryClub) =>
+    realClubs.find(
+      (cl) => cl.id === e.id || cl.name.trim().toLowerCase() === e.name.trim().toLowerCase(),
+    );
+
+  function addClub() {
+    const name = newName.trim();
+    setErr('');
+    if (!name) return;
+    if (name.length > 80) {
+      setErr('Club names must be 80 characters or fewer');
+      return;
+    }
+    const id = directorySlug(name);
+    if (!id) {
+      setErr('Club names need at least one letter or digit');
+      return;
+    }
+    if (draft.some((e) => e.id === id)) {
+      setErr(`"${name}" is already listed`);
+      return;
+    }
+    const real = onSystem({ id, name });
+    if (real) {
+      setErr(`"${real.name}" is already on the system — players can pick it already`);
+      return;
+    }
+    setDraft([...draft, { id, name }]);
+    setNewName('');
+  }
+
+  async function saveIt() {
+    setErr('');
+    setBusy(true);
+    try {
+      await save({ knownClubs: draft });
+      toast('Club directory saved');
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : 'Could not save — try again';
+      setErr(msg);
+      toast(msg, 'warn');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const rowStyle: CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    padding: '8px 0',
+    borderBottom: '1px solid var(--line2)',
+  };
+
+  return (
+    <Panel
+      title="Club directory"
+      sub="Clubs that exist in the union but aren't on the system yet. Players can pick them as their previous club when registering — that opens a clearance for the Union office to approve or reallocate once the club signs up. Clubs already on the system are excluded automatically."
+    >
+      {draft.map((e) => {
+        const real = onSystem(e);
+        return (
+          <div key={e.id} style={rowStyle}>
+            <div style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>{e.name}</div>
+              {real && (
+                <span
+                  title={`Registered as "${real.name}" — hidden from the dropdown; safe to remove`}
+                >
+                  <Pill tone="teal">on system</Pill>
+                </span>
+              )}
+            </div>
+            <Btn
+              tone="ghost"
+              size="sm"
+              onClick={() => setDraft(draft.filter((x) => x.id !== e.id))}
+            >
+              Remove
+            </Btn>
+          </div>
+        );
+      })}
+      {draft.length === 0 && (
+        <div style={{ fontSize: 12.5, color: 'var(--muted)', padding: '8px 0' }}>
+          No directory clubs — the registration dropdown only offers clubs on the system.
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <input
+          className="field-input"
+          style={{ flex: 1 }}
+          placeholder="e.g. Kingsmead Cricket Club"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addClub())}
+        />
+        {/* Disabled while the club list loads so the on-system add guard can't be raced. */}
+        <Btn
+          tone="outline"
+          size="sm"
+          icon={Icon.Plus}
+          onClick={addClub}
+          disabled={!newName.trim() || overview.isLoading}
+        >
+          Add
+        </Btn>
+      </div>
+      {err && <div style={ERR}>{err}</div>}
+      <div style={{ marginTop: 14 }}>
+        <Btn tone="teal" size="sm" onClick={saveIt} disabled={!dirty || busy}>
+          {busy ? 'Saving…' : 'Save directory'}
         </Btn>
       </div>
     </Panel>
