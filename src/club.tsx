@@ -4205,8 +4205,15 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
       ...g,
       // Only worth a heading when the run actually split into more than one series —
       // a single-stage season reads better as just its series card.
-      heading:
-        g.runId && g.seriesList.length > 1 ? `One season · ${g.seriesList.length} stages` : null,
+      //
+      // Counted by DISTINCT STAGE, not by series: a club fielding two sides in one
+      // league lands in two groups of the same stage, which is two series but still one
+      // stage. Saying "2 stages" there is simply untrue.
+      heading: (() => {
+        if (!g.runId || g.seriesList.length <= 1) return null;
+        const stages = new Set(g.seriesList.map((s) => s.stageSpecId ?? s.id)).size;
+        return `One season · ${stages} stage${stages === 1 ? '' : 's'}`;
+      })(),
     }));
   })();
 
