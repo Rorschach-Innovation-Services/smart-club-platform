@@ -159,6 +159,30 @@ export interface AllocatedFixture extends GeneratedFixture {
 }
 
 /**
+ * The allocated ground's coordinates, shaped like a club ground so `fixtureCost` can cost
+ * the trip to where the match is ACTUALLY played. Undefined for an un-allocated or
+ * unpinned fixture, which makes `fixtureCost` fall back to the home-ground measure.
+ *
+ * The override check is the load-bearing part: a ground typed by hand AFTER the last
+ * allocation leaves the previous ground's coordinates on the fixture, so trusting them
+ * prints the override's name against the old ground's distance and cost.
+ *
+ * Lives here, not in a console, because BOTH consoles need the same answer — they had a
+ * copy each and only one had the guard, so the admin table and the club portal quoted
+ * different travel for the same fixture. The player broadcast applies the same rule
+ * server-side (packages/api/src/index.ts).
+ */
+export function fixtureVenueCoords(
+  f: Pick<AllocatedFixture, 'venueLat' | 'venueLon' | 'venueName' | 'venueOverride'> | undefined,
+): { lat: number; lon: number } | undefined {
+  const override = f?.venueOverride?.trim();
+  if (override && override !== f?.venueName) return undefined;
+  return Number.isFinite(f?.venueLat) && Number.isFinite(f?.venueLon)
+    ? { lat: f!.venueLat!, lon: f!.venueLon! }
+    : undefined;
+}
+
+/**
  * A fixture allocation must not move.
  *
  * `venueLocked` is the explicit flag; `venueOverride` is the one an admin can actually

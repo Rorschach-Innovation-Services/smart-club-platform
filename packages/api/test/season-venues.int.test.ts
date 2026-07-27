@@ -613,6 +613,33 @@ describe('POST /series guards the gsi1 sort key', () => {
     assert.equal(res.status, 201);
     assert.equal((await repo.getSeries('dolphins', 's-guard'))?.startDate, '2026-09-13');
   });
+
+  // `putSeries` is an unconditional Put and this body is always built fresh with
+  // `released: false`, `releasedAt: null`, `version: 1`. Season-run generation derives
+  // deterministic ids, so a client working from a stale series cache can take the create
+  // branch for a series that already exists — silently recalling a schedule clubs and
+  // players have been sent, and resetting the concurrency counter that guards every
+  // subsequent write.
+  test('a POST can never overwrite an existing series', async () => {
+    await repo.updateSeries('dolphins', 's-guard', {
+      released: true,
+      releasedAt: '2026-08-01T00:00:00.000Z',
+      version: 1,
+    });
+
+    const res = await app.request('/series', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify(series({ name: 'Clobber attempt' })),
+    });
+    assert.equal(res.status, 409);
+
+    const after = await repo.getSeries('dolphins', 's-guard');
+    assert.equal(after?.released, true, 'the release must survive');
+    assert.equal(after?.releasedAt, '2026-08-01T00:00:00.000Z');
+    assert.equal(after?.name, 'Guard test', 'and the POSTed body must not have landed');
+    assert.ok((after?.version ?? 0) > 1, 'the version must not reset to 1');
+  });
 });
 
 describe('erasure reaches venues and season runs', () => {

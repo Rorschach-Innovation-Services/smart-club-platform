@@ -63,6 +63,7 @@ import {
   teamLetter,
 } from './leagues';
 import { isActivated, todayIso } from './competition/calendar';
+import { fixtureVenueCoords } from './competition/venues';
 import { shortAddress, suburbOf, SA_BOUNDS, isInSouthAfrica } from './geocode';
 import {
   formatDay,
@@ -4167,18 +4168,9 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
    * match is ACTUALLY played. Undefined for an un-allocated or unpinned fixture, which
    * makes fixtureCost fall back to the home-ground measure.
    */
-  const fixtureVenue = (f) => {
-    // Coordinates are only trustworthy when they describe the ground the row NAMES. An
-    // override typed after the last allocation leaves the previous ground's coordinates
-    // behind, so the portal would print the override's name against the old ground's
-    // distance and cost. PARITY: the broadcast applies the same rule server-side
-    // (packages/api/src/index.ts), and the comment above promises the two can't disagree.
-    const override = f?.venueOverride?.trim();
-    if (override && override !== f?.venueName) return undefined;
-    return Number.isFinite(f?.venueLat) && Number.isFinite(f?.venueLon)
-      ? { lat: f.venueLat, lon: f.venueLon }
-      : undefined;
-  };
+  // Shared with the admin console and mirrored server-side in the broadcast — one rule,
+  // so the two screens can never quote different travel for the same fixture.
+  const fixtureVenue = fixtureVenueCoords;
 
   const today = todayIso();
   const myReleased = (allSeries || []).filter(

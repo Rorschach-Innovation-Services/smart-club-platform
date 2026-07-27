@@ -70,7 +70,7 @@ import {
   todayIso,
 } from './competition/calendar';
 import { fixturesFromPlan, roundsForTeamCount } from './competition/fixtures';
-import { isLocked } from './competition/venues';
+import { fixtureVenueCoords as fixtureVenue, isLocked } from './competition/venues';
 import { isSlotRef, slotRefLabel } from './competition/formats';
 import type { Cadence, SeasonCalendar, TimeSlot, Weekday } from './types';
 import { SeasonRunsPanel } from './season-run';
@@ -119,18 +119,6 @@ import {
   playerStatusPill,
 } from './atoms';
 
-/**
- * The allocated ground's coordinates, denormalised onto the fixture by venue allocation
- * (ADR 0008 phase 2). Shaped like a club ground so `fixtureCost` can cost the trip to
- * where the match is actually played; undefined for an un-allocated or unpinned fixture,
- * which makes fixtureCost fall back to the home-ground measure.
- */
-function fixtureVenue(f) {
-  return Number.isFinite(f?.venueLat) && Number.isFinite(f?.venueLon)
-    ? { lat: f.venueLat, lon: f.venueLon }
-    : undefined;
-}
-
 /* ─── AdminFixtures — series cards + drilldown fixture table with distance + travel-cost ─── */
 export function AdminFixtures({
   clubs,
@@ -145,6 +133,9 @@ export function AdminFixtures({
   allCalendars = [],
   allSeasonRuns = [],
   allVenues = [],
+  venuesFailed = false,
+  structuresFailed = false,
+  seasonRunsFailed = false,
   onSaveVenue,
   onDeleteVenue,
   onAllocateVenues,
@@ -309,6 +300,7 @@ export function AdminFixtures({
               <VenuesCard
                 clubs={clubs}
                 venues={allVenues}
+                loadFailed={venuesFailed}
                 onSave={onSaveVenue}
                 onDelete={onDeleteVenue}
                 toast={toast}
@@ -320,6 +312,7 @@ export function AdminFixtures({
           {tenantConfig && onCreateSeasonRun && (
             <div style={{ marginBottom: 18 }}>
               <SeasonRunsPanel
+                configFailed={structuresFailed || seasonRunsFailed}
                 clubs={clubs}
                 allLeagues={allLeagues}
                 allSeries={allSeries}

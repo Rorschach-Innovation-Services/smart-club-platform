@@ -18,7 +18,7 @@
  */
 import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
+import { BoundedNumber, Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
 import { ApiError } from './api';
 import { findBlock, formatIsoDate, todayIso } from './competition/calendar';
 import { formatStampDay } from './dates';
@@ -329,11 +329,23 @@ function EntrantConfirmForm({
     materialisation.status === 'awaiting-entrants'
       ? materialisation.prefill
       : materialisation.groups.map((g) => ({ id: g.id, label: g.label, entrants: g.entrants }));
-  const labels = stage.groupLabels?.length
+  // The label list must cover every group the seed produces, not just the ones the
+  // operator happened to name. `groupLabels` and the group plan are edited independently
+  // and neither validates the other, so "Top Six, Bottom Six" over a three-group split
+  // used to walk only indices 0 and 1: the third group's sides ended up in no group, were
+  // NOT counted as "not playing" (their assignment isn't undefined), and their dropdown —
+  // holding a value with no matching option — silently displayed "Not playing" while the
+  // state said otherwise. Confirming then dropped them from the season.
+  const namedLabels = stage.groupLabels?.length
     ? stage.groupLabels
     : suggested.length
       ? suggested.map((g) => g.label)
       : ['Group A'];
+  const groupCount = Math.max(namedLabels.length, suggested.length, 1);
+  const labels = Array.from(
+    { length: groupCount },
+    (_, i) => namedLabels[i] ?? `Group ${String.fromCharCode(65 + i)}`,
+  );
   const expected =
     stage.entrants.kind !== 'all-registered' && stage.entrants.groups?.kind === 'sizes'
       ? stage.entrants.groups.sizes
@@ -500,17 +512,17 @@ function EntrantConfirmForm({
                 </td>
                 {ranked && (
                   <td>
-                    <input
-                      className="field-input"
-                      type="number"
+                    <BoundedNumber
                       min={1}
+                      // A position can't exceed the group it's in. Bounding it here is
+                      // what stops "3 → clear → 5" landing as 15 and quietly reordering
+                      // the cross-pool bracket, which no validation downstream would see.
+                      max={Math.max(1, groups[assignment[p.teamId]]?.length ?? 1)}
                       style={{ width: 70 }}
                       // Meaningless for a side that isn't in a group.
                       disabled={assignment[p.teamId] === undefined}
-                      value={assignment[p.teamId] === undefined ? '' : (ranks[p.teamId] ?? '')}
-                      onChange={(e) =>
-                        setRanks((r) => ({ ...r, [p.teamId]: Math.max(1, +e.target.value || 1) }))
-                      }
+                      value={ranks[p.teamId] ?? 1}
+                      onChange={(n) => setRanks((r) => ({ ...r, [p.teamId]: n }))}
                     />
                   </td>
                 )}
@@ -618,8 +630,13 @@ function StageCard({
   // 'generated', so without this there is no "Needs regenerating" pill and no Generate
   // button — the admin's only escape was to remove a side, confirm, re-add it, confirm
   // again. Which is the workflow the Position column exists to serve.
-  const fixtureKey = (fx: Array<{ round?: number; home?: string; away?: string; date?: string }>) =>
-    JSON.stringify((fx ?? []).map((f) => [f?.round, f?.home, f?.away, f?.date]));
+  // PAIRINGS only — deliberately not dates. Rescheduling a rained-off fixture is the most
+  // routine thing an admin does, and `EditFixtureRow` writes exactly that field. With
+  // `date` in the key, one reschedule pinned the stage on a coral "Needs regenerating"
+  // forever, over copy claiming the entrants had changed, offering a button whose only
+  // effect was to destroy the reschedule.
+  const fixtureKey = (fx: Array<{ round?: number; home?: string; away?: string }>) =>
+    JSON.stringify((fx ?? []).map((f) => [f?.round, f?.home, f?.away]));
   const diverged =
     ready &&
     materialisation.groups.some((g) => {
@@ -807,8 +824,11 @@ function StageCard({
             <Btn tone="outline" size="sm" onClick={() => setConfirmRegen(false)}>
               Cancel
             </Btn>
+            {/* `ink`, not `coral` — there is no .btn-coral rule, so the tone rendered
+                with browser-default chrome next to a properly styled Cancel. The most
+                dangerous button in the feature was the least visually weighted. */}
             <Btn
-              tone="coral"
+              tone="ink"
               size="sm"
               onClick={() => {
                 setConfirmRegen(false);
@@ -844,6 +864,7 @@ export function SeasonRunsPanel({
   allSeries,
   runs,
   config,
+  configFailed = false,
   onCreateRun,
   onPatchRun,
   onGenerate,
@@ -855,6 +876,13 @@ export function SeasonRunsPanel({
   allSeries: Series[];
   runs: SeasonRun[];
   config: TenantConfig;
+  /**
+   * The structures or season-runs fetch failed. Without this a loading failure renders as
+   * "No season running" beside a Start CTA whose duplicate guard is checking an empty
+   * list, and StartSeasonForm reports "that competition points at a structure that no
+   * longer exists" about a structure that is perfectly fine.
+   */
+  configFailed?: boolean;
   onCreateRun: (run: SeasonRun) => Promise<void>;
   onPatchRun: (id: string, patch: Partial<SeasonRun>) => Promise<void>;
   onGenerate: (payloads: GenerateGroupPayload[], run: SeasonRun, stage: StageSpec) => Promise<void>;
@@ -865,6 +893,7 @@ export function SeasonRunsPanel({
   const [activeId, setActiveId] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<{ run: SeasonRun; stage: StageSpec } | null>(null);
   const [busyStage, setBusyStage] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const active = runs.find((r) => r.id === activeId) ?? runs[0];
   const seriesById = (id: string) => allSeries.find((s) => s.id === id);
@@ -946,16 +975,27 @@ export function SeasonRunsPanel({
           title="Seasons"
           sub="Run a league's competition through its stages — confirm who plays in each group, then generate that stage's fixtures."
         >
-          <EmptyState
-            icon={Icon.Shield}
-            title="No season running"
-            sub="Start a season to work through a structured competition stage by stage. A simple league can still use Create series."
-            action={
-              <Btn tone="teal" icon={Icon.Plus} onClick={() => setStarting(true)}>
-                Start a season
-              </Btn>
-            }
-          />
+          {/* A failed fetch is not "no season" — and offering Start here would let an
+              admin begin a second run of a season that already exists, because the
+              duplicate guard is checking a list that never loaded. */}
+          {configFailed ? (
+            <EmptyState
+              icon={Icon.Shield}
+              title="Couldn’t load the season setup"
+              sub="This is a loading problem, not an empty season list. Refresh before starting anything — any season already running is safely stored."
+            />
+          ) : (
+            <EmptyState
+              icon={Icon.Shield}
+              title="No season running"
+              sub="Start a season to work through a structured competition stage by stage. A simple league can still use Create series."
+              action={
+                <Btn tone="teal" icon={Icon.Plus} onClick={() => setStarting(true)}>
+                  Start a season
+                </Btn>
+              }
+            />
+          )}
         </Card>
         {starting && (
           <Modal
@@ -1084,7 +1124,11 @@ export function SeasonRunsPanel({
             ))}
 
             <div style={{ marginTop: 12 }}>
-              <Btn tone="ghost" size="sm" onClick={() => onDeleteRun(active.id)}>
+              {/* Confirmed, like every other delete in the console. This removes every
+                  stage's confirmed entrants, the carried-points handover and the whole
+                  audit trail — the governance record relegation rides on. A ghost button
+                  with an explanatory note UNDER it read as information, not a warning. */}
+              <Btn tone="ghost" size="sm" onClick={() => setConfirmDelete(true)}>
                 Delete this season
               </Btn>
               <p style={HINT}>
@@ -1114,6 +1158,36 @@ export function SeasonRunsPanel({
             onClose={() => setStarting(false)}
             toast={toast}
           />
+        </Modal>
+      )}
+
+      {confirmDelete && active && (
+        <Modal title="Delete this season?" onClose={() => setConfirmDelete(false)}>
+          <p style={{ fontSize: 13, lineHeight: 1.6, margin: '0 0 10px' }}>
+            This removes <strong>{active.seasonLabel}</strong> and everything tracked against it:
+            each stage&apos;s confirmed entrants, any carried points, and the record of who
+            confirmed what. That record is what relegation and the points carry rest on, and it
+            cannot be recovered.
+          </p>
+          <p style={{ ...HINT, marginTop: 0 }}>
+            The fixtures themselves are kept — the series stay exactly as they are, they just stop
+            being grouped under this season.
+          </p>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
+            <Btn tone="outline" size="sm" onClick={() => setConfirmDelete(false)}>
+              Cancel
+            </Btn>
+            <Btn
+              tone="ink"
+              size="sm"
+              onClick={() => {
+                setConfirmDelete(false);
+                onDeleteRun(active.id);
+              }}
+            >
+              Delete the season
+            </Btn>
+          </div>
         </Modal>
       )}
 

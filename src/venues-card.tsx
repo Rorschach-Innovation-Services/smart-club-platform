@@ -12,7 +12,7 @@
  */
 import { useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
+import { BoundedNumber, Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
 import { ApiError } from './api';
 import { WEEKDAY_LABELS, isValidIsoDate } from './competition/calendar';
 import { MIN_GEO_COVERAGE, geoCoverage } from './competition/venues';
@@ -179,13 +179,11 @@ function VenueForm({
         </div>
         <div className="field">
           <div className="field-label">Matches per day</div>
-          <input
-            className="field-input"
-            type="number"
+          <BoundedNumber
             min={1}
             max={6}
             value={draft.surfaces ?? 1}
-            onChange={(e) => patch({ surfaces: Math.max(1, +e.target.value || 1) })}
+            onChange={(surfaces) => patch({ surfaces })}
           />
           <p style={HINT}>Grounds with two pitches can host two matches on one day.</p>
         </div>
@@ -465,12 +463,20 @@ export function venuesFromClubGrounds(clubs: Club[], existing: Venue[]): Venue[]
 export function VenuesCard({
   clubs,
   venues,
+  loadFailed = false,
   onSave,
   onDelete,
   toast,
 }: {
   clubs: Club[];
   venues: Venue[];
+  /**
+   * The registry couldn't be fetched. Distinct from "there are none", because the two
+   * look identical here and the consequences are not: an empty list makes every club
+   * ground look new, so the sync CTA would mint a duplicate of every existing ground —
+   * fresh ids, same names — and hand the allocator twice the real capacity.
+   */
+  loadFailed?: boolean;
   onSave: (v: Venue) => Promise<void>;
   onDelete: (id: string) => void;
   toast: Toast;
@@ -479,7 +485,8 @@ export function VenuesCard({
   const [confirm, setConfirm] = useState<Venue | null>(null);
   const [importing, setImporting] = useState(false);
   const coverage = geoCoverage(venues);
-  const derived = venuesFromClubGrounds(clubs, venues);
+  // Nothing to derive from a list we don't trust — this is what hides the sync CTA.
+  const derived = loadFailed ? [] : venuesFromClubGrounds(clubs, venues);
 
   async function runBackfill() {
     setImporting(true);
@@ -528,7 +535,13 @@ export function VenuesCard({
         </div>
       )}
 
-      {venues.length === 0 ? (
+      {loadFailed ? (
+        <EmptyState
+          icon={Icon.Shield}
+          title="Couldn’t load the ground list"
+          sub="This is a loading problem, not an empty registry — so nothing is offered here that would add to it. Refresh; if it persists, the grounds are still safely stored."
+        />
+      ) : venues.length === 0 ? (
         <EmptyState
           icon={Icon.Shield}
           title="No grounds yet"

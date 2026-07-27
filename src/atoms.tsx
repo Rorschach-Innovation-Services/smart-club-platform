@@ -589,6 +589,87 @@ export function MoneyInput({
   );
 }
 
+interface BoundedNumberProps {
+  value: number;
+  onChange: (n: number) => void;
+  /** Inclusive floor. Enforced on blur, never mid-keystroke. */
+  min?: number;
+  /** Inclusive ceiling, enforced the same way. */
+  max?: number;
+  className?: string;
+  style?: CSSProperties;
+  placeholder?: string;
+  disabled?: boolean;
+}
+
+/**
+ * A number input with a floor that doesn't fight the person typing.
+ *
+ * `onChange={(e) => set(Math.max(2, +e.target.value || 2))}` looks harmless and makes
+ * whole ranges unenterable: clear the box to retype and `+'' || 2` snaps it to 2, the
+ * caret lands after the digit, and the next keystroke appends — so 16 becomes 26, and 10
+ * to 19 cannot be entered at all. On a finishing position it is worse than friction:
+ * 3 → clear → 5 silently yields 15, and a wrong cross-pool bracket follows.
+ *
+ * So: hold the raw text while it is being edited, publish upward only when the typed
+ * value is genuinely in range, and clamp (or revert) on blur. Same remedy the sizes,
+ * group-label and lat/lon fields already use, generalised so it stops being re-derived
+ * one input at a time.
+ */
+export function BoundedNumber({
+  value,
+  onChange,
+  min = 0,
+  max,
+  className = 'field-input',
+  style,
+  placeholder,
+  disabled,
+}: BoundedNumberProps) {
+  const [text, setText] = useState(String(value ?? ''));
+  // Re-seed when the model changes from OUTSIDE — a template swap, a reset — but not
+  // from our own keystrokes, which is what tracking the last published value separates.
+  const [published, setPublished] = useState(value);
+  if (value !== published) {
+    setPublished(value);
+    setText(String(value ?? ''));
+  }
+
+  const inRange = (n: number) => n >= min && (max === undefined || n <= max);
+
+  return (
+    <input
+      type="number"
+      className={className}
+      style={style}
+      placeholder={placeholder}
+      disabled={disabled}
+      min={min}
+      max={max}
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value);
+        const n = parseInt(e.target.value, 10);
+        if (Number.isFinite(n) && inRange(n)) {
+          setPublished(n);
+          onChange(n);
+        }
+      }}
+      onBlur={(e) => {
+        const n = parseInt(e.target.value, 10);
+        // Unparseable or out of range on the way out: settle on the nearest legal value
+        // rather than leaving the box saying something the model doesn't hold.
+        const next = Number.isFinite(n)
+          ? Math.min(max ?? Number.MAX_SAFE_INTEGER, Math.max(min, n))
+          : value;
+        setText(String(next));
+        setPublished(next);
+        if (next !== value) onChange(next);
+      }}
+    />
+  );
+}
+
 /* slider input — used in CQI for capped quantities (teams, coaches, fields, %) */
 interface NumSliderProps {
   value?: number | string;
@@ -872,6 +953,7 @@ if (typeof window !== 'undefined')
     YN,
     NumStep,
     NumSlider,
+    BoundedNumber,
     Choice,
     MoneyInput,
     CountUp,

@@ -555,6 +555,16 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   const allStructures = tenantConfigQuery.data?.structures ?? [];
   const allSeasonRuns = seasonRunsQuery.data ?? [];
   const allVenues = venuesQuery.data ?? [];
+  // A FAILED fetch is not an empty registry, and the difference matters: the venues card
+  // reads an empty list as "no grounds yet" and offers to sync every club ground in —
+  // which, against a registry that actually has them, mints a duplicate of each with a
+  // fresh id and hands the allocator twice the capacity. Same shape for structures ("that
+  // competition points at a structure that no longer exists" about one that is fine) and
+  // for season runs (a Start CTA whose duplicate guard checks an empty list). Pass the
+  // failure down so those surfaces can say so instead of inviting the destructive action.
+  const venuesFailed = venuesQuery.isError;
+  const structuresFailed = tenantConfigQuery.isError;
+  const seasonRunsFailed = seasonRunsQuery.isError;
   const onboarded = meQuery.data?.onboardingSeen ?? {};
   const submissionDeadline = tenantConfig?.submissionDeadline ?? SUBMISSION_DEADLINE_DEFAULT;
 
@@ -735,19 +745,34 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
         version: 1,
       };
       // A re-generate replaces the group's series rather than stacking a second one.
+      //
+      // NEVER carry `released`/`releasedAt` into a re-generate: `series` is built fresh
+      // with `released: false`, so patching it wholesale would silently recall a
+      // schedule clubs and players have already been sent. Regeneration changes the
+      // fixtures; whether they are published stays the admin's separate decision.
+      //
+      // `name` is dropped for the same reason: it is rebuilt from the template every
+      // time, so a series the admin renamed would revert on any regenerate.
+      const { released: _r, releasedAt: _ra, name: _n, ...fixturesAndConfig } = series;
+      const patchOver = async (version) =>
+        api.patchSeries(series.id, { ...fixturesAndConfig, version });
+
+      // Which branch is correct is decided by the SERVER, not by this cache. A tab whose
+      // series query hasn't refetched since another admin released this schedule would
+      // otherwise take the create branch and clobber it — POST now 409s in that case, and
+      // we recover by refetching for the real version and patching.
       const existing = allSeries.find((x) => x.id === series.id);
       if (existing) {
-        // NEVER carry `released`/`releasedAt` into a re-generate: `series` is built fresh
-        // with `released: false`, so patching it wholesale would silently recall a
-        // schedule clubs and players have already been sent. Regeneration changes the
-        // fixtures; whether they are published stays the admin's separate decision.
-        //
-        // `name` is dropped for the same reason: it is rebuilt from the template every
-        // time, so a series the admin renamed would revert on any regenerate.
-        const { released: _r, releasedAt: _ra, name: _n, ...fixturesAndConfig } = series;
-        await api.patchSeries(series.id, { ...fixturesAndConfig, version: existing.version });
+        await patchOver(existing.version);
       } else {
-        await api.createSeries(series);
+        try {
+          await api.createSeries(series);
+        } catch (e) {
+          if (!(e instanceof ApiError) || e.status !== 409) throw e;
+          const fresh = (await api.getSeriesList()).find((x) => x.id === series.id);
+          if (!fresh) throw e;
+          await patchOver(fresh.version);
+        }
       }
       created.push({ groupId: p.groupId, seriesId: series.id });
     }
@@ -961,6 +986,9 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   allSeasonRuns,
                   allVenues,
                   allStructures,
+                  venuesFailed,
+                  structuresFailed,
+                  seasonRunsFailed,
                   saveVenue,
                   deleteVenue,
                   allocateSeriesVenues,
@@ -1027,6 +1055,9 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   allSeasonRuns,
                   allVenues,
                   allStructures,
+                  venuesFailed,
+                  structuresFailed,
+                  seasonRunsFailed,
                   saveVenue,
                   deleteVenue,
                   allocateSeriesVenues,

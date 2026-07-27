@@ -410,7 +410,13 @@ function CalendarForm({
       )}
       {(draft.breaks ?? []).map((b, i) => (
         <RangeRow
-          key={`${b.label}-${i}`}
+          // The INDEX, not the label. Keying on the value being edited changes the key on
+          // every keystroke, so React unmounts the row and mounts a fresh one — a new
+          // input node, and focus on <body>. The mid-season break's label was untypeable:
+          // one character per click. Blocks above key on `b.id` because they have one;
+          // `SeasonBreak` doesn't, and the list is append/remove-only with a fully
+          // controlled row, so the index is stable enough.
+          key={i}
           value={b}
           placeholder="Mid-season break"
           onChange={(p) => patchBreak(i, p)}

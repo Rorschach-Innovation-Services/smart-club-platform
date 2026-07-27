@@ -18,7 +18,7 @@
  */
 import { useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
+import { BoundedNumber, Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
 import * as api from './api';
 import { ApiError } from './api';
 import { WEEKDAY_LABELS, describeCadence, findBlock } from './competition/calendar';
@@ -210,14 +210,12 @@ function GroupPlanEditor({
           renders underneath it, and typing there writes a `sizes` plan the dropdown says
           isn't selected. */}
       {kind === 'even' ? (
-        <input
-          className="field-input"
-          type="number"
+        <BoundedNumber
           min={1}
           max={26}
           style={{ width: 90 }}
           value={plan?.kind === 'even' ? plan.count : 2}
-          onChange={(e) => onChange({ kind: 'even', count: Math.max(1, +e.target.value || 1) })}
+          onChange={(count) => onChange({ kind: 'even', count })}
         />
       ) : (
         <input
@@ -487,18 +485,16 @@ function StageRow({
               ))}
             </Select>
             {stage.schedule.cadence.kind === 'every-n-weeks' && (
-              <input
-                className="field-input"
-                type="number"
+              <BoundedNumber
                 min={1}
                 max={12}
                 style={{ width: 80 }}
                 value={stage.schedule.cadence.n}
-                onChange={(e) =>
+                onChange={(n) =>
                   onChange({
                     schedule: {
                       ...stage.schedule,
-                      cadence: { kind: 'every-n-weeks', n: Math.max(1, +e.target.value || 1) },
+                      cadence: { kind: 'every-n-weeks', n },
                     },
                   })
                 }
@@ -698,11 +694,15 @@ function PreviewRail({
     // Counted from the REAL generator over placeholder entrants, not re-derived: the old
     // `perGroup - 1` was right only for a plain knockout — it previewed a single-match
     // stage of six as five fixtures, and was one short for a third-place playoff.
-    const fixturesPerGroup = roundsForFormat(
-      stage.format,
-      Array.from({ length: perGroup }, (_, i) => `t${i + 1}`),
-    ).flat().length;
-    const total = fixturesPerGroup * sizes.length;
+    const fixturesIn = (n: number) =>
+      roundsForFormat(
+        stage.format,
+        Array.from({ length: n }, (_, i) => `t${i + 1}`),
+      ).flat().length;
+    // Summed PER GROUP, because groups differ in size. Multiplying the first group's
+    // count by the number of groups overstated exactly the case exact sizes exist for:
+    // 5, 5, 5, 4 as a double round robin is 20+20+20+12 = 72, not 4 × 20 = 80.
+    const total = sizes.reduce((n, size) => n + fixturesIn(size), 0);
     return {
       stage,
       sizes,
@@ -716,7 +716,11 @@ function PreviewRail({
       // `manual` is exempt: it generates no fixtures BY DESIGN and the admin enters them
       // afterwards, so counting them here would flag a perfectly good structure as broken
       // — the same mistake `materialiseStage` documents and guards against, one layer up.
-      empty: total === 0 && stage.format.kind !== 'manual',
+      // …and a group too small to play anyone is the same failure even when the OTHER
+      // groups produce fixtures, so this asks about the sizes rather than the total.
+      // Reconciling 5, 5, 5, 4 down to 12 preview teams yields a group of 0, which read
+      // "5 groups of 5, 5, 5, 0 · ✓ Fits" because the total was comfortably non-zero.
+      empty: stage.format.kind !== 'manual' && (total === 0 || sizes.some((n) => n < 2)),
       byHand: stage.format.kind === 'manual',
       // A cross-pool bracket is sized by the QUALIFIERS the previous stage sends, not by
       // everyone entered — and nothing in the structure states how many qualify. The
@@ -746,14 +750,12 @@ function PreviewRail({
     >
       <div style={{ ...SECTION, margin: '0 0 8px' }}>Preview</div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
-        <input
-          className="field-input"
-          type="number"
+        <BoundedNumber
           min={2}
           max={200}
           style={{ width: 80 }}
           value={previewTeams}
-          onChange={(e) => onPreviewTeams(Math.max(2, +e.target.value || 2))}
+          onChange={onPreviewTeams}
         />
         <span style={{ fontSize: 12, color: 'var(--muted-2)' }}>teams entered</span>
       </div>
@@ -785,7 +787,9 @@ function PreviewRail({
           </div>
           {r.empty && (
             <div style={{ ...ERR, marginTop: 6, lineHeight: 1.5 }}>
-              This stage generates no fixtures — a group needs at least two teams.
+              {r.sizes.some((n) => n < 2)
+                ? `A group needs at least two teams — this splits ${previewTeams} into ${r.sizes.join(', ')}.`
+                : 'This stage generates no fixtures.'}
             </div>
           )}
           {!r.empty && r.fit && !r.fit.fits && (

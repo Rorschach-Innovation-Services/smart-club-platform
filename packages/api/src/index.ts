@@ -2321,6 +2321,15 @@ app.post('/series', requireAdmin, async (c) => {
   // already written the earlier series.
   if (typeof series?.startDate !== 'string' || !series.startDate.trim())
     throw new HttpError(400, 'a series needs a start date');
+  // A POST must never overwrite an existing series. `putSeries` is an unconditional Put
+  // and this body is built fresh with `released: false`, `releasedAt: null`, `version: 1`
+  // — so a POST landing on a live id would recall a schedule clubs and players have
+  // already been sent AND reset the optimistic-concurrency counter. Season-run generation
+  // derives deterministic ids (`s-<run>-<stage>-<group>`), so a client working from a
+  // stale series cache can pick the create branch for a series that already exists.
+  // 409 rather than silent success: the caller refetches and PATCHes instead.
+  if (await repo.getSeries(tenant, series.id))
+    throw new HttpError(409, 'a series with that id already exists');
   // Fixtures are generated client-side and POSTed whole.
   series.version = 1;
   series.released = series.released ?? false;
