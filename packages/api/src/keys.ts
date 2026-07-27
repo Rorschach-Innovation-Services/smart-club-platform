@@ -7,7 +7,14 @@
  * See docs/architecture/data-model.md for the full access-pattern → key mapping.
  */
 
-export type EntityType = 'CLUB' | 'SERIES' | 'USER' | 'CLEARANCE' | 'REGREVIEW';
+export type EntityType =
+  | 'CLUB'
+  | 'SERIES'
+  | 'SEASONRUN'
+  | 'VENUE'
+  | 'USER'
+  | 'CLEARANCE'
+  | 'REGREVIEW';
 
 const tenantPrefix = (tenant: string) => `TENANT#${tenant}`;
 
@@ -91,6 +98,48 @@ export const seriesGsi1 = (tenant: string, startDate: string) => ({
 });
 
 export const seriesListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#SERIES`;
+
+/**
+ * A season run — one competition being played out across its stages (ADR 0008).
+ * Mirrors the SERIES layout exactly: own partition, `META` sk, gsi1 for the tenant
+ * listing. It holds no fixtures (those live on the Series each stage-group materialises
+ * into), so it stays small however long the season runs.
+ */
+export const seasonRunKey = (tenant: string, runId: string) => ({
+  pk: `${tenantPrefix(tenant)}#SEASONRUN#${runId}`,
+  sk: 'META',
+});
+
+/** Sorted by season label so the listing reads newest-season-last, like series by date. */
+export const seasonRunGsi1 = (tenant: string, seasonLabel: string) => ({
+  gsi1pk: `${tenantPrefix(tenant)}#TYPE#SEASONRUN`,
+  gsi1sk: seasonLabel ?? '',
+});
+
+export const seasonRunsListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#SEASONRUN`;
+
+/**
+ * A venue in the tenant's master ground list (ADR 0008 phase 2).
+ *
+ * Co-located with the tenant CONFIG row (pk `TENANT#<t>`, distinct `VENUE#` sk) rather
+ * than living inside TenantConfig: a region has hundreds of grounds and their
+ * availability windows change constantly, so they are operational data, not setup data
+ * — and an array that size on the CONFIG item would push at the 400KB ceiling and widen
+ * every read-modify-write of unrelated settings.
+ *
+ * Like the EXPORT# items, this sits ABOVE the `TENANT#<t>#…` erasure prefix, so tenant
+ * erasure must enumerate it explicitly (see listVenues).
+ */
+export const venueKey = (tenant: string, venueId: string) => ({
+  pk: tenantPrefix(tenant),
+  sk: `VENUE#${venueId}`,
+});
+
+/** pk + sk-prefix to query a tenant's venues (and to enumerate them for erasure). */
+export const venuesListKey = (tenant: string) => ({
+  pk: tenantPrefix(tenant),
+  skPrefix: 'VENUE#',
+});
 
 /** A player registration, partitioned under its club; naturalKey gives dedup. */
 export const playerKey = (tenant: string, clubId: string, naturalKey: string) => ({

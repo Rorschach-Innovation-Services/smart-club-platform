@@ -24,6 +24,8 @@ import type {
   RegistrationReview,
   League,
   Series,
+  SeasonRun,
+  Venue,
   SendResult,
   LogoUploadPost,
   DnsSheet,
@@ -357,6 +359,29 @@ export const patchSeries = (id: string, patch: unknown) =>
 export const deleteSeriesReq = (id: string) => request(`/series/${id}`, { method: 'DELETE' });
 export const duplicateSeriesReq = (id: string) =>
   request<Series>(`/series/${id}/duplicate`, { method: 'POST' });
+
+// ── Season runs (ADR 0008) ──
+// A run orchestrates one competition's stages for a season; its fixtures live on the
+// Series each stage-group materialises into. Deleting a run leaves those series alone.
+export const getSeasonRuns = () => request<SeasonRun[]>('/season-runs');
+export const createSeasonRun = (run: unknown) =>
+  request<SeasonRun>('/season-runs', { method: 'POST', body: run });
+export const patchSeasonRun = (id: string, patch: unknown) =>
+  request<SeasonRun>(`/season-runs/${id}`, { method: 'PATCH', body: patch });
+export const deleteSeasonRunReq = (id: string) =>
+  request(`/season-runs/${id}`, { method: 'DELETE' });
+
+// ── Venues (ADR 0008 phase 2) ──
+// The master ground list fixture allocation draws on. Admin-managed: ground availability
+// changes week to week and the union office is who knows about it.
+export const getVenues = () => request<Venue[]>('/venues');
+
+// The tenant's own config for signed-in users. Carries the admin-only setup data that
+// deliberately isn't on the unauthenticated GET /tenant — structures in particular.
+export const getTenantConfig = () => request<TenantConfig>('/tenant/config');
+export const putVenue = (id: string, venue: unknown) =>
+  request<Venue>(`/venues/${id}`, { method: 'PUT', body: venue });
+export const deleteVenueReq = (id: string) => request(`/venues/${id}`, { method: 'DELETE' });
 
 // ── Users (admin) ──
 // List every tenant user with role, club scope and sign-in status.

@@ -826,6 +826,56 @@ describe('POST /clubs/:id/send-fixtures', () => {
     assert.equal(body.deduped, true);
     assert.equal(body.results.length, 1);
   });
+
+  /**
+   * Delayed activation (ADR 0008). A junior series is released up front but must stay
+   * invisible until `activateFrom` — including to the player broadcast, which would
+   * otherwise send a schedule the chair can't see in their own portal.
+   */
+  describe('activateFrom delays the broadcast', () => {
+    const putFxSeries = (activateFrom?: string) =>
+      repo.putSeries('dolphins', {
+        id: 'fx-series',
+        name: 'Under 13 · 2026/27',
+        startDate: '2027-01-18',
+        teams: ['testers', 'rivals'],
+        fixtures: [{ home: 'rivals', away: 'testers', date: '2027-01-18', round: 1 }],
+        ...(activateFrom ? { activateFrom } : {}),
+        released: true,
+        releasedAt: '2026-06-01T00:00:00.000Z',
+        version: 1,
+      });
+
+    test('a released series with a future activateFrom is not broadcast', async () => {
+      await putFxSeries('2099-01-18');
+      const res = await send(
+        'testers',
+        { channels: ['email'], idempotencyKey: 'fx-future-activate' },
+        ADMIN,
+      );
+      assert.equal(res.status, 409, 'nothing visible to share yet');
+    });
+
+    test('the same series broadcasts once its activation date has passed', async () => {
+      await putFxSeries('2020-01-18');
+      const res = await send(
+        'testers',
+        { channels: ['email'], idempotencyKey: 'fx-past-activate' },
+        ADMIN,
+      );
+      assert.equal(res.status, 201);
+    });
+
+    test('a series with no activateFrom is unaffected', async () => {
+      await putFxSeries();
+      const res = await send(
+        'testers',
+        { channels: ['email'], idempotencyKey: 'fx-no-activate' },
+        ADMIN,
+      );
+      assert.equal(res.status, 201);
+    });
+  });
 });
 
 describe('eraseTenantData removes INVITE# idempotency markers', () => {

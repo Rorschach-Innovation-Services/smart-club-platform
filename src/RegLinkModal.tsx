@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { Icon, Btn } from './atoms';
 import { currentSeasonLabel } from './data';
 import { useCopy, useFeature } from './branding';
+import { formatStamp } from './dates';
 
 /* ─── RegLinkModal — shared player-registration link modal ───
    Used on BOTH the admin club-detail page and the club portal. A per-club link
@@ -50,15 +51,7 @@ export function RegLinkModal({ club, onClose, onRegenerate, toast }) {
     return `${club.name} player registration · ${season} season: ${url}`;
   }
 
-  const createdLabel = linkRecord
-    ? new Date(linkRecord.createdAt).toLocaleString('en-ZA', {
-        day: 'numeric',
-        month: 'short',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      })
-    : null;
+  const createdLabel = linkRecord ? formatStamp(linkRecord.createdAt) : null;
 
   // Normalise the chair's cell into wa.me format (digits only, 0→27)
   function waNumber(cell) {

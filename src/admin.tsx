@@ -61,7 +61,29 @@ import {
   clubTeamsForLeague,
   OVERARCHING_DISTRICT,
 } from './leagues';
+import {
+  WEEKDAY_LABELS,
+  describeCadence,
+  formatIsoDate,
+  isActivated,
+  planRoundDates,
+  todayIso,
+} from './competition/calendar';
+import { fixturesFromPlan, roundsForTeamCount } from './competition/fixtures';
+import { isLocked } from './competition/venues';
+import { isSlotRef, slotRefLabel } from './competition/formats';
+import type { Cadence, SeasonCalendar, TimeSlot, Weekday } from './types';
+import { SeasonRunsPanel } from './season-run';
+import { VenuesCard } from './venues-card';
 import { cqiBandTone, cqiBandRows, docComplianceRows, docTone } from './insights';
+import {
+  formatDay,
+  formatDayYear,
+  formatStamp,
+  formatStampDay,
+  formatWeekdayDay,
+  formatWeekdayDayYear,
+} from './dates';
 import { exportRowsToXlsx, clubExportRow, playerExportRow } from './exportXlsx';
 import { Sentry } from './sentry';
 import { openBccReminder } from './mailto';
@@ -97,6 +119,18 @@ import {
   playerStatusPill,
 } from './atoms';
 
+/**
+ * The allocated ground's coordinates, denormalised onto the fixture by venue allocation
+ * (ADR 0008 phase 2). Shaped like a club ground so `fixtureCost` can cost the trip to
+ * where the match is actually played; undefined for an un-allocated or unpinned fixture,
+ * which makes fixtureCost fall back to the home-ground measure.
+ */
+function fixtureVenue(f) {
+  return Number.isFinite(f?.venueLat) && Number.isFinite(f?.venueLon)
+    ? { lat: f.venueLat, lon: f.venueLon }
+    : undefined;
+}
+
 /* ─── AdminFixtures — series cards + drilldown fixture table with distance + travel-cost ─── */
 export function AdminFixtures({
   clubs,
@@ -108,6 +142,18 @@ export function AdminFixtures({
   onSetReleased,
   onSetApproved,
   toast,
+  allCalendars = [],
+  allSeasonRuns = [],
+  allVenues = [],
+  onSaveVenue,
+  onDeleteVenue,
+  onAllocateVenues,
+  tenantConfig,
+  allLeagues = [],
+  onCreateSeasonRun,
+  onPatchSeasonRun,
+  onDeleteSeasonRun,
+  onGenerateStageSeries,
 }) {
   const copy = useCopy();
   const [activeId, setActiveId] = useStateA(allSeries[0]?.id);
@@ -126,7 +172,7 @@ export function AdminFixtures({
       const home = teamBy(s, f.home),
         away = teamBy(s, f.away);
       if (!home.clubId || !away.clubId) return;
-      const c = fixtureCost(home, away, s.costPerKm, s.carsPerAwayTrip);
+      const c = fixtureCost(home, away, s.costPerKm, s.carsPerAwayTrip, fixtureVenue(f));
       totalKm += c.roundTripKm;
       totalCost += c.fuelR;
     });
@@ -147,17 +193,14 @@ export function AdminFixtures({
         away?.ground?.lat != null &&
         away?.ground?.lon != null;
       const cost =
-        home && away ? fixtureCost(home, away, active.costPerKm, active.carsPerAwayTrip) : null;
+        home && away
+          ? fixtureCost(home, away, active.costPerKm, active.carsPerAwayTrip, fixtureVenue(f))
+          : null;
       return {
         Round: f.round,
-        Date: new Date(f.date).toLocaleDateString('en-GB', {
-          weekday: 'short',
-          day: 'numeric',
-          month: 'short',
-          year: 'numeric',
-        }),
+        Date: formatWeekdayDayYear(f.date),
         Home: home?.name || 'TBD',
-        Venue: f.venueOverride || home?.ground?.venue || '—',
+        Venue: f.venueOverride || f.venueName || home?.ground?.venue || '—',
         Suburb: home?.ground?.suburb || '',
         Away: away?.name || 'TBD',
         'Distance (km)': hasGeo && cost ? Number(cost.distanceKm.toFixed(1)) : '—',
@@ -261,6 +304,35 @@ export function AdminFixtures({
         />
       ) : (
         <>
+          {onSaveVenue && (
+            <div style={{ marginBottom: 18 }}>
+              <VenuesCard
+                clubs={clubs}
+                venues={allVenues}
+                onSave={onSaveVenue}
+                onDelete={onDeleteVenue}
+                toast={toast}
+              />
+            </div>
+          )}
+          {/* Structured competitions run stage by stage here; the flat series strip below
+              still covers ad-hoc series and everything a season has generated. */}
+          {tenantConfig && onCreateSeasonRun && (
+            <div style={{ marginBottom: 18 }}>
+              <SeasonRunsPanel
+                clubs={clubs}
+                allLeagues={allLeagues}
+                allSeries={allSeries}
+                runs={allSeasonRuns}
+                config={tenantConfig}
+                onCreateRun={onCreateSeasonRun}
+                onPatchRun={onPatchSeasonRun}
+                onGenerate={onGenerateStageSeries}
+                onDeleteRun={onDeleteSeasonRun}
+                toast={toast}
+              />
+            </div>
+          )}
           {/* Series cards strip — each card has its own quick release/recall button */}
           <div className="series-strip">
             {allSeries.map((s) => {
@@ -275,7 +347,17 @@ export function AdminFixtures({
                 >
                   <div className="series-card-head">
                     <div className="series-card-name">{s.name}</div>
-                    {s.released ? (
+                    {/* A released-but-not-yet-active series (juniors) reads as "Released"
+                        everywhere else while clubs still can't see it — say so plainly, or
+                        an admin will report it as a bug. */}
+                    {s.released && !isActivated(s.activateFrom, todayIso()) ? (
+                      <div
+                        className="series-card-draft"
+                        title={`Released, but hidden from clubs until ${formatIsoDate(s.activateFrom)}`}
+                      >
+                        Hidden until {formatIsoDate(s.activateFrom)}
+                      </div>
+                    ) : s.released ? (
                       <div className="series-card-released">Released</div>
                     ) : (
                       <div className="series-card-draft">Draft</div>
@@ -291,16 +373,8 @@ export function AdminFixtures({
                   >
                     {s.teams.length} teams · {s.fixtures.length} fixtures · {s.maxOvers} ov ·{' '}
                     {s.endDate ? '' : 'start '}
-                    {new Date(s.startDate).toLocaleDateString('en-GB', {
-                      day: 'numeric',
-                      month: 'short',
-                    })}
-                    {s.endDate
-                      ? ` – ${new Date(s.endDate).toLocaleDateString('en-GB', {
-                          day: 'numeric',
-                          month: 'short',
-                        })}`
-                      : ''}
+                    {formatDay(s.startDate)}
+                    {s.endDate ? ` – ${formatDay(s.endDate)}` : ''}
                   </div>
                   <div className="series-card-meta">
                     <div className="series-card-stat">
@@ -351,6 +425,8 @@ export function AdminFixtures({
               onApprove={approve}
               onUnapprove={unapprove}
               toast={toast}
+              allCalendars={allCalendars}
+              onAllocateVenues={onAllocateVenues}
             />
           )}
         </>
@@ -429,6 +505,8 @@ export function FixtureTable({
   onApprove,
   onUnapprove,
   toast,
+  allCalendars = [] as SeasonCalendar[],
+  onAllocateVenues,
 }) {
   const copy = useCopy();
   const clubBy = (id) => clubs.find((c) => c.id === id);
@@ -472,14 +550,71 @@ export function FixtureTable({
     setEditingId(newId);
     toast?.('Fixture added — edit details');
   }
+  /**
+   * Rebuild fixtures from the series' own stored schedule.
+   *
+   * A calendar-scheduled series MUST regenerate through the calendar, not the legacy
+   * weekly stepping — otherwise a regenerate would quietly move a whole league's fixtures
+   * into the mid-season break, which is precisely the defect calendars exist to prevent.
+   * A calendar deleted or re-blocked since creation makes the plan unfittable; we refuse
+   * and say so rather than silently falling back to a different schedule.
+   */
   function regenerate() {
-    onUpdateSeries(series.id, (s) => ({
-      ...s,
-      fixtures: generateRoundRobin(s.teams, s.startDate, {
-        endDateISO: s.endDate,
-        spread: resolveSpread(s),
-      }),
-    }));
+    const sched = series.schedule;
+    const calendar = sched && allCalendars.find((c) => c.id === sched.calendarId);
+    if (sched && !calendar) {
+      setConfirm(null);
+      toast?.('That season calendar no longer exists — pick a new schedule first', 'warn');
+      return;
+    }
+    if (sched && calendar) {
+      // Regenerate only knows how to rebuild a SINGLE-LEG ROUND ROBIN. A season-run
+      // series carries its schedule but not its format, so regenerating a double round
+      // would silently halve it and regenerating a knockout would replace the bracket
+      // with a league. Refuse rather than reshape someone's season.
+      if (series.seasonRunId) {
+        setConfirm(null);
+        toast?.(
+          'This series belongs to a season — regenerate it from the season stage so its format is preserved',
+          'warn',
+        );
+        return;
+      }
+      const rounds = roundsForTeamCount(series.teams.length);
+      if (rounds < 1) {
+        setConfirm(null);
+        toast?.('At least two teams are needed to regenerate fixtures', 'warn');
+        return;
+      }
+      const plan = planRoundDates({
+        calendar,
+        blockId: sched.blockId,
+        cadence: sched.cadence,
+        rounds,
+        startDate: series.startDate,
+      });
+      // `fits` is trivially true for zero rounds, and `plan.dates[0]` would then be
+      // undefined — which `removeUndefinedValues` strips, dropping the gsi1sk and making
+      // the series vanish from listSeries permanently. Guarded above and again here.
+      if (!plan.fits || !plan.dates.length) {
+        setConfirm(null);
+        toast?.(plan.summary, 'warn');
+        return;
+      }
+      onUpdateSeries(series.id, (s) => ({
+        ...s,
+        startDate: plan.dates[0],
+        fixtures: fixturesFromPlan(s.teams, plan.dates, sched.slots),
+      }));
+    } else {
+      onUpdateSeries(series.id, (s) => ({
+        ...s,
+        fixtures: generateRoundRobin(s.teams, s.startDate, {
+          endDateISO: s.endDate,
+          spread: resolveSpread(s),
+        }),
+      }));
+    }
     setConfirm(null);
     toast?.(`${series.name} · fixtures regenerated`);
   }
@@ -488,7 +623,7 @@ export function FixtureTable({
   const allRows = series.fixtures.map((f) => {
     const home = teamBy(f.home),
       away = teamBy(f.away);
-    const c = fixtureCost(home, away, series.costPerKm, series.carsPerAwayTrip);
+    const c = fixtureCost(home, away, series.costPerKm, series.carsPerAwayTrip, fixtureVenue(f));
     return { f, home, away, c };
   });
   let totalKm = 0,
@@ -515,8 +650,17 @@ export function FixtureTable({
         <div>
           <div className="fix-header-title">{series.name}</div>
           <div className="fix-header-sub">
-            {series.seriesType} · {series.teams.length} teams · {series.fixtures.length} fixtures ·{' '}
-            {series.maxOvers} overs · {series.category}
+            {[
+              series.seriesType,
+              `${series.teams.length} teams`,
+              `${series.fixtures.length} fixtures`,
+              `${series.maxOvers} overs`,
+              // A season-generated series has no category — the competition already says
+              // what it is. Joining on the present parts avoids a dangling separator.
+              series.category,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
           </div>
         </div>
         <div className="fix-header-aggs">
@@ -581,6 +725,24 @@ export function FixtureTable({
           >
             ↻ Regenerate
           </Btn>
+          {onAllocateVenues && (
+            <Btn
+              tone="outline"
+              size="sm"
+              onClick={() =>
+                setConfirm({
+                  title: 'Allocate venues for every fixture?',
+                  body: series.released
+                    ? `This series is RELEASED. Reallocating rewrites the ground for all ${series.fixtures.length} fixtures — clubs and players have already been sent the current ones, and there is no undo.`
+                    : `Assigns a ground to all ${series.fixtures.length} fixtures, replacing any already set. Hand-picked venues are kept only where the fixture is locked.`,
+                  onYes: () => onAllocateVenues(series),
+                  danger: series.released,
+                })
+              }
+            >
+              ⌖ Allocate venues
+            </Btn>
+          )}
           <Btn
             tone="outline"
             size="sm"
@@ -635,6 +797,9 @@ export function FixtureTable({
                   <EditFixtureRow
                     key={f.id}
                     fixture={f}
+                    // The whole list, so a `win:fN` side can be named ("Winner of
+                    // Semi-final 1") rather than rendered as a raw id.
+                    fixtures={series.fixtures}
                     teams={series.teams.map((id) => {
                       const r = teamBy(id);
                       return { id, name: r.name, ground: r.ground, club: r.club };
@@ -659,13 +824,7 @@ export function FixtureTable({
                     <span className="fix-row-rd">R{f.round}</span>
                   </td>
                   <td>
-                    <span className="fix-row-date">
-                      {new Date(f.date).toLocaleDateString('en-GB', {
-                        weekday: 'short',
-                        day: 'numeric',
-                        month: 'short',
-                      })}
-                    </span>
+                    <span className="fix-row-date">{formatWeekdayDay(f.date)}</span>
                   </td>
                   <td>
                     <div className="fix-row-team">
@@ -681,9 +840,22 @@ export function FixtureTable({
                   <td>
                     <div className="fix-row-venue">
                       <div className="fix-row-venue-name">
-                        {f.venueOverride || home.ground?.venue || '—'}
+                        {f.venueOverride || f.venueName || home.ground?.venue || '—'}
+                        {/* `isLocked`, not `venueLocked` — a hand-typed venueOverride is
+                            what the editor actually writes, so those are precisely the
+                            fixtures allocation won't move. */}
+                        {isLocked(f) && (
+                          <span title="Set by hand — allocation won't move it"> 🔒</span>
+                        )}
                       </div>
-                      <div className="fix-row-venue-suburb">{home.ground?.suburb || ''}</div>
+                      {/* The reason is the whole point of a greedy allocator over a solver:
+                          an operator can argue with "home ground closed for maintenance",
+                          not with an objective value. */}
+                      <div className="fix-row-venue-suburb">
+                        {f.venueReason && f.venueStatus !== 'home'
+                          ? f.venueReason
+                          : home.ground?.suburb || ''}
+                      </div>
                     </div>
                   </td>
                   <td>
@@ -695,17 +867,28 @@ export function FixtureTable({
                       </div>
                     </div>
                   </td>
+                  {/* A knockout fixture whose sides are still `win:fN` has no journey to
+                      cost yet, and neither does an ungeocoded ground — "—" says that,
+                      where "0.0 km" reads as a real measurement of zero. */}
                   <td style={{ textAlign: 'right' }}>
-                    <span className="fix-row-dist">
-                      {c.distanceKm.toFixed(1)}
-                      <span className="unit">km</span>
-                    </span>
+                    {c.distanceKm > 0 ? (
+                      <span className="fix-row-dist">
+                        {c.distanceKm.toFixed(1)}
+                        <span className="unit">km</span>
+                      </span>
+                    ) : (
+                      <span className="fix-row-dist">—</span>
+                    )}
                   </td>
                   <td style={{ textAlign: 'right' }}>
-                    <span className="fix-row-cost">
-                      <span className="cur">R</span>
-                      {Math.round(c.fuelR).toLocaleString()}
-                    </span>
+                    {c.distanceKm > 0 ? (
+                      <span className="fix-row-cost">
+                        <span className="cur">R</span>
+                        {Math.round(c.fuelR).toLocaleString()}
+                      </span>
+                    ) : (
+                      <span className="fix-row-cost">—</span>
+                    )}
                   </td>
                   <td>
                     <span className={`fix-status ${status}`}>{status}</span>
@@ -789,15 +972,8 @@ export function FixtureTable({
                 Fixtures released to all {distinctClubCount(series)} clubs
               </div>
               <div className="fix-release-text-sub">
-                Published{' '}
-                {new Date(series.releasedAt).toLocaleString('en-GB', {
-                  day: 'numeric',
-                  month: 'short',
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })}{' '}
-                · every club portal now shows their schedule + travel costs · email + WhatsApp
-                notifications sent
+                Published {formatStamp(series.releasedAt)} · every club portal now shows their
+                schedule + travel costs · email + WhatsApp notifications sent
               </div>
             </>
           ) : series.approved ? (
@@ -886,7 +1062,7 @@ export function FixtureTable({
 }
 
 /* Inline edit row */
-function EditFixtureRow({ fixture, teams, onSave, onCancel }) {
+function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
   const [draft, setDraft] = useStateA({
     round: fixture.round,
     date: fixture.date,
@@ -934,25 +1110,45 @@ function EditFixtureRow({ fixture, teams, onSave, onCancel }) {
             <label>Date</label>
             <input type="date" value={draft.date} onChange={(e) => u('date', e.target.value)} />
           </div>
+          {/* A knockout side that is still a forward reference (`win:f3`) has no entry in
+              `teams`, so the select would render blank and any touch would silently
+              replace the bracket reference with a concrete club — breaking the link the
+              rest of the round depends on. Show what it is, read-only, instead. */}
           <div className="fix-edit-field">
             <label>Home (host)</label>
-            <select value={draft.home} onChange={(e) => changeHome(e.target.value)}>
-              {teams.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
+            {isSlotRef(draft.home) ? (
+              <input
+                type="text"
+                value={slotRefLabel(draft.home, fixtures) ?? draft.home}
+                disabled
+              />
+            ) : (
+              <select value={draft.home} onChange={(e) => changeHome(e.target.value)}>
+                {teams.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
           <div className="fix-edit-field">
             <label>Away (visitors)</label>
-            <select value={draft.away} onChange={(e) => u('away', e.target.value)}>
-              {teams.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
+            {isSlotRef(draft.away) ? (
+              <input
+                type="text"
+                value={slotRefLabel(draft.away, fixtures) ?? draft.away}
+                disabled
+              />
+            ) : (
+              <select value={draft.away} onChange={(e) => u('away', e.target.value)}>
+                {teams.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
           {(() => {
             // Venue picker driven by the home club's two grounds. The chosen venue is
@@ -1019,14 +1215,59 @@ function EditFixtureRow({ fixture, teams, onSave, onCancel }) {
   );
 }
 
+/* ─── Season-calendar scheduling controls (ADR 0008) ───
+   The cadence union is keyed by `kind`, but a Choice control speaks in labels, so these
+   two map between them. Bi-weekly is the only parameterised option the UI exposes;
+   `every-n-weeks` with other values stays reachable through the API for now. */
+const CADENCE_LABELS = {
+  weekly: 'Weekly',
+  'every-n-weeks': 'Every 2 weeks',
+  weekdays: 'Set days only',
+  spread: 'Spread across block',
+};
+
+function cadenceFromLabel(label) {
+  switch (label) {
+    case CADENCE_LABELS['every-n-weeks']:
+      return { kind: 'every-n-weeks', n: 2 };
+    case CADENCE_LABELS.weekdays:
+      return { kind: 'weekdays', days: [6] }; // Saturday — the EMCU Division 5 default
+    case CADENCE_LABELS.spread:
+      return { kind: 'spread' };
+    default:
+      return { kind: 'weekly' };
+  }
+}
+
+/** The T20 morning/afternoon slots the union's structure document specifies. */
+const T20_SLOTS = [
+  { label: 'Morning', start: '08:00' },
+  { label: 'Afternoon', start: '13:30' },
+];
+
 /* ─── CreateSeriesForm — automated league flow + advanced overrides ─── */
-export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) {
+export function CreateSeriesForm({
+  clubs,
+  onCreate,
+  onClose,
+  allLeagues = [],
+  allCalendars = [] as SeasonCalendar[],
+}) {
   const [d, setD] = useStateA({
     leagueKey: '', // dropdown: pick a league → auto-fills name + teams
     name: '',
     startDate: '',
     endDate: '', // optional; blank keeps the original weekly schedule
     dateMode: '', // '' = smart default by kind · 'spread' | 'reference'
+    // ─ Season-calendar scheduling (ADR 0008). Empty calendarId ⇒ the legacy
+    //   start/end window above drives the dates, exactly as before.
+    calendarId: '',
+    blockId: '',
+    // Annotated so the discriminated union survives useState's inference —
+    // without it every cadence widens to `{ kind: string }`.
+    cadence: { kind: 'weekly' } as Cadence,
+    slots: [] as TimeSlot[],
+    activateFrom: '', // delayed visibility (juniors); blank ⇒ visible on release
     kind: 'series', // "series" or "tournament"
     bulkSend: true, // tick to bulk-send fixtures to stakeholders on create
     divisions: false,
@@ -1117,15 +1358,43 @@ export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) 
   // schedule ('spread') or is reference-only; with no explicit pick we default
   // by format (see resolveSpread — shared with regenerate so they never drift).
   const spread = resolveSpread(d);
-  const roundsNeeded = d.teams.length % 2 === 0 ? d.teams.length - 1 : d.teams.length;
+  const roundsNeeded = roundsForTeamCount(d.teams.length);
   const windowDays = d.endDate
     ? Math.round((new Date(d.endDate).getTime() - new Date(d.startDate).getTime()) / 86400000)
     : null;
   const endBeforeStart = !!d.endDate && d.endDate < d.startDate;
   // Spreading needs at least one day per round after the first.
   const windowTooShort = !!d.endDate && spread && windowDays < roundsNeeded - 1;
+
+  /* ─── Season-calendar scheduling (ADR 0008) ───
+     Two mutually exclusive modes. Picking a calendar hands dating to the engine, which
+     knows about blocks, breaks, excluded dates and cadence; with none picked (or none
+     configured for the tenant) the legacy start/end window runs exactly as before.
+     `plan` is recomputed on every keystroke so the preview and the create button always
+     agree with what would actually be generated. */
+  const calendar = allCalendars.find((c) => c.id === d.calendarId) || null;
+  // Narrowed once here — `d.cadence.days` inside JSX doesn't narrow through the
+  // property chain, and reading it unguarded is a runtime error on other cadences.
+  const selectedDays: Weekday[] = d.cadence.kind === 'weekdays' ? d.cadence.days : [];
+  const plan =
+    calendar && roundsNeeded > 0
+      ? planRoundDates({
+          calendar,
+          blockId: d.blockId,
+          cadence: d.cadence,
+          rounds: roundsNeeded,
+          startDate: d.startDate || undefined,
+        })
+      : null;
+
   const canCreate =
-    d.name && d.startDate && d.teams.length >= 2 && !endBeforeStart && !windowTooShort;
+    d.name &&
+    d.teams.length >= 2 &&
+    (calendar
+      ? // The calendar owns the dates, so startDate isn't required — but a plan that
+        // doesn't fit its block must never be generated into a silently short season.
+        !!plan?.fits
+      : d.startDate && !endBeforeStart && !windowTooShort);
 
   function submit() {
     if (!canCreate) return;
@@ -1141,6 +1410,7 @@ export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) 
         ...(Number.isFinite(p.lat) ? { lat: p.lat } : {}),
         ...(Number.isFinite(p.lon) ? { lon: p.lon } : {}),
       }));
+    const scheduled = !!(calendar && plan);
     const series = {
       id: 's-' + Date.now(),
       ...d,
@@ -1148,13 +1418,29 @@ export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) 
       // Persist the *resolved* mode (not the raw '' default) only when an end
       // date exists, so regenerate reproduces the schedule the admin confirmed.
       dateMode: d.endDate ? (spread ? 'spread' : 'reference') : undefined,
+      // The calendar binding, so `regenerate` reproduces these dates rather than
+      // falling back to legacy weekly stepping. Same parity guarantee as dateMode.
+      schedule: scheduled
+        ? {
+            calendarId: calendar.id,
+            blockId: d.blockId,
+            cadence: d.cadence,
+            ...(d.slots.length ? { slots: d.slots } : {}),
+          }
+        : undefined,
+      // The generated first-round date becomes the series start, so every existing
+      // consumer (list sort, gsi1sk, headers) keeps reading one field.
+      startDate: scheduled ? plan.dates[0] : d.startDate,
+      activateFrom: d.activateFrom || undefined,
       tags: d.tags
         ? d.tags
             .split(',')
             .map((s) => s.trim())
             .filter(Boolean)
         : [],
-      fixtures: generateRoundRobin(d.teams, d.startDate, { endDateISO: d.endDate, spread }),
+      fixtures: scheduled
+        ? fixturesFromPlan(d.teams, plan.dates, d.slots.length ? d.slots : undefined)
+        : generateRoundRobin(d.teams, d.startDate, { endDateISO: d.endDate, spread }),
     };
     onCreate(series);
     onClose();
@@ -1190,41 +1476,216 @@ export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) 
           </select>
         </div>
       </div>
-      <div className="cs-row">
-        <div className="cs-row-label">
-          Start Date<span className="req">*</span>
+      {/* ─── Schedule ───
+          With a season calendar configured the operator's playing blocks and breaks
+          drive the dates; without one this collapses to the original start/end window. */}
+      {allCalendars.length > 0 && (
+        <div className="cs-row">
+          <div className="cs-row-label">Season calendar</div>
+          <div className="cs-row-input">
+            <select
+              className="field-select"
+              value={d.calendarId}
+              onChange={(e) => {
+                const cal = allCalendars.find((c) => c.id === e.target.value);
+                // Default to the first block so the preview has something to say
+                // immediately rather than starting on an error.
+                setD((prev) => ({
+                  ...prev,
+                  calendarId: e.target.value,
+                  blockId: cal?.blocks?.[0]?.id || '',
+                }));
+              }}
+              style={{ minWidth: 280 }}
+            >
+              <option value="">No calendar — use start / end dates below</option>
+              {allCalendars.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
-        <div className="cs-row-input">
-          <input type="date" value={d.startDate} onChange={(e) => u('startDate', e.target.value)} />
-        </div>
-      </div>
-      <div className="cs-row">
-        <div className="cs-row-label">End Date</div>
-        <div className="cs-row-input">
-          <input
-            type="date"
-            value={d.endDate}
-            min={d.startDate}
-            onChange={(e) => u('endDate', e.target.value)}
-          />
-          {d.endDate ? (
-            <div style={{ marginTop: 8 }}>
+      )}
+
+      {calendar ? (
+        <>
+          <div className="cs-row">
+            <div className="cs-row-label">
+              Playing block<span className="req">*</span>
+            </div>
+            <div className="cs-row-input">
+              <select
+                className="field-select"
+                value={d.blockId}
+                onChange={(e) => u('blockId', e.target.value)}
+                style={{ minWidth: 280 }}
+              >
+                {calendar.blocks.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.label} · {formatIsoDate(b.start)} → {formatIsoDate(b.end)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="cs-row">
+            <div className="cs-row-label">Cadence</div>
+            <div className="cs-row-input">
               <Choice
-                value={spread ? 'Spread fixtures across window' : 'Reference only'}
-                onChange={(v) =>
-                  u('dateMode', v === 'Spread fixtures across window' ? 'spread' : 'reference')
-                }
-                options={['Spread fixtures across window', 'Reference only']}
+                value={CADENCE_LABELS[d.cadence.kind] || CADENCE_LABELS.weekly}
+                onChange={(v) => u('cadence', cadenceFromLabel(v))}
+                options={Object.values(CADENCE_LABELS)}
+              />
+              {d.cadence.kind === 'weekdays' && (
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+                  {WEEKDAY_LABELS.map((label, day) => {
+                    const on = selectedDays.includes(day as Weekday);
+                    return (
+                      <button
+                        key={label}
+                        type="button"
+                        onClick={() =>
+                          u('cadence', {
+                            kind: 'weekdays',
+                            days: on
+                              ? selectedDays.filter((x) => x !== day)
+                              : [...selectedDays, day as Weekday].sort((a, b) => a - b),
+                          })
+                        }
+                        style={{
+                          padding: '4px 10px',
+                          borderRadius: 999,
+                          fontSize: 11.5,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          border: '1px solid var(--line)',
+                          background: on ? 'var(--green-pale)' : 'var(--paper)',
+                          color: on ? 'var(--green)' : 'var(--muted-2)',
+                        }}
+                      >
+                        {label.slice(0, 3)}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="cs-row">
+            <div className="cs-row-label">First round</div>
+            <div className="cs-row-input">
+              <input
+                type="date"
+                value={d.startDate}
+                min={calendar.blocks.find((b) => b.id === d.blockId)?.start}
+                max={calendar.blocks.find((b) => b.id === d.blockId)?.end}
+                onChange={(e) => u('startDate', e.target.value)}
               />
               <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
-                {spread
-                  ? 'Rounds are distributed evenly between the start and end date — best for a tournament that runs over a fixed period.'
-                  : 'Fixtures keep the weekly cadence; the end date is saved for display only.'}
+                Optional — leave blank to start on the first day of the block.
               </div>
             </div>
-          ) : null}
-        </div>
-      </div>
+          </div>
+          <div className="cs-row">
+            <div className="cs-row-label">Time slots</div>
+            <div className="cs-row-input">
+              <Choice
+                value={d.slots.length ? 'Morning & afternoon' : 'No set times'}
+                onChange={(v) => u('slots', v === 'No set times' ? [] : T20_SLOTS)}
+                options={['No set times', 'Morning & afternoon']}
+              />
+              <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
+                {d.slots.length
+                  ? 'Fixtures in a round alternate between 08:00 and 13:30 starts.'
+                  : 'Fixtures carry a date only; start times are set later.'}
+              </div>
+            </div>
+          </div>
+          <div className="cs-row">
+            <div className="cs-row-label">Activate from</div>
+            <div className="cs-row-input">
+              <input
+                type="date"
+                value={d.activateFrom}
+                onChange={(e) => u('activateFrom', e.target.value)}
+              />
+              <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
+                Optional — fixtures generate now but stay hidden from clubs until this date. Used
+                for junior leagues that only start in the second half of the season.
+              </div>
+            </div>
+          </div>
+          {/* The preview rail: what will actually be generated, recomputed live. This is
+              where an overflowing block is caught, before anyone clicks create. */}
+          {plan && (
+            <div className="cs-row">
+              <div className="cs-row-label" />
+              <div className="cs-row-input">
+                <div
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: 8,
+                    fontSize: 12.5,
+                    lineHeight: 1.5,
+                    border: '1px solid var(--line)',
+                    background: plan.fits ? 'var(--paper)' : 'var(--coral-pale, #FDECEA)',
+                    color: plan.fits ? 'var(--muted)' : 'var(--coral)',
+                  }}
+                >
+                  <strong style={{ color: plan.fits ? 'var(--ink)' : 'var(--coral)' }}>
+                    {plan.fits ? 'Ready' : 'Does not fit'}
+                  </strong>{' '}
+                  · {plan.summary}
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="cs-row">
+            <div className="cs-row-label">
+              Start Date<span className="req">*</span>
+            </div>
+            <div className="cs-row-input">
+              <input
+                type="date"
+                value={d.startDate}
+                onChange={(e) => u('startDate', e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="cs-row">
+            <div className="cs-row-label">End Date</div>
+            <div className="cs-row-input">
+              <input
+                type="date"
+                value={d.endDate}
+                min={d.startDate}
+                onChange={(e) => u('endDate', e.target.value)}
+              />
+              {d.endDate ? (
+                <div style={{ marginTop: 8 }}>
+                  <Choice
+                    value={spread ? 'Spread fixtures across window' : 'Reference only'}
+                    onChange={(v) =>
+                      u('dateMode', v === 'Spread fixtures across window' ? 'spread' : 'reference')
+                    }
+                    options={['Spread fixtures across window', 'Reference only']}
+                  />
+                  <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
+                    {spread
+                      ? 'Rounds are distributed evenly between the start and end date — best for a tournament that runs over a fixed period.'
+                      : 'Fixtures keep the weekly cadence; the end date is saved for display only.'}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </>
+      )}
       <div className="cs-row">
         <div className="cs-row-label">Format</div>
         <div className="cs-row-input">
@@ -1681,23 +2142,37 @@ export function CreateSeriesForm({ clubs, onCreate, onClose, allLeagues = [] }) 
         >
           {canCreate
             ? `Ready · ${d.kind === 'tournament' ? 'tournament' : 'series'} · ${(d.teams.length * (d.teams.length - 1)) / 2} round-robin fixtures · ${
-                d.endDate && spread
-                  ? `spread from ${d.startDate} to ${d.endDate}`
-                  : d.endDate
-                    ? `weekly from ${d.startDate} · ends ${d.endDate}`
-                    : `weekly from ${d.startDate}`
+                calendar && plan
+                  ? // Calendar mode: report what was actually planned — cadence, real span,
+                    // and any slots — rather than the old hardcoded "weekly from …".
+                    `${describeCadence(d.cadence)} in ${
+                      calendar.blocks.find((b) => b.id === d.blockId)?.label ?? 'the block'
+                    } · ${formatIsoDate(plan.dates[0])} → ${formatIsoDate(
+                      plan.dates[plan.dates.length - 1],
+                    )}${d.slots.length ? ` · ${d.slots.length} time slots` : ''}${
+                      d.activateFrom ? ` · hidden until ${formatIsoDate(d.activateFrom)}` : ''
+                    }`
+                  : d.endDate && spread
+                    ? `spread from ${d.startDate} to ${d.endDate}`
+                    : d.endDate
+                      ? `weekly from ${d.startDate} · ends ${d.endDate}`
+                      : `weekly from ${d.startDate}`
               }${d.bulkSend ? ' · fixtures will be bulk-sent to stakeholders' : ''}`
             : !d.leagueKey || !d.name
               ? 'Pick a league / division to auto-populate teams'
-              : !d.startDate
-                ? 'Add a start date'
-                : d.teams.length < 2
-                  ? 'At least 2 registered teams are required'
-                  : endBeforeStart
-                    ? 'End date must be on or after the start date'
-                    : windowTooShort
-                      ? `Window too short — ${roundsNeeded} rounds need at least ${roundsNeeded - 1} days between start and end (your window is ${windowDays})`
-                      : 'Complete the form to continue'}
+              : d.teams.length < 2
+                ? 'At least 2 registered teams are required'
+                : // In calendar mode the plan's own summary is the most specific thing we
+                  // can say — it names the block, the shortfall and the way out.
+                  calendar
+                  ? (plan?.summary ?? 'Pick a playing block')
+                  : !d.startDate
+                    ? 'Add a start date'
+                    : endBeforeStart
+                      ? 'End date must be on or after the start date'
+                      : windowTooShort
+                        ? `Window too short — ${roundsNeeded} rounds need at least ${roundsNeeded - 1} days between start and end (your window is ${windowDays})`
+                        : 'Complete the form to continue'}
         </div>
         <div className="row" style={{ gap: 8 }}>
           <Btn tone="outline" onClick={onClose}>
@@ -2611,12 +3086,7 @@ export function AdminSettingsView({
             <span style={chip(!!signupLink)}>{signupLink ? 'Link active' : 'No link'}</span>
             {signupLink && (
               <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-                since{' '}
-                {new Date(signupLink.createdAt).toLocaleDateString('en-ZA', {
-                  day: 'numeric',
-                  month: 'short',
-                  year: 'numeric',
-                })}
+                since {formatStampDay(signupLink.createdAt)}
               </span>
             )}
           </div>
@@ -3058,15 +3528,7 @@ function ShareSignupLinkModal({ signupLink, onClose, onGenerate, onRevoke, toast
   const [copied, setCopied] = useStateA(false);
   const [busy, setBusy] = useStateA(null); // null | 'generate' | 'revoke'
 
-  const activeSince = signupLink
-    ? new Date(signupLink.createdAt).toLocaleString('en-ZA', {
-        day: 'numeric',
-        month: 'short',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      })
-    : null;
+  const activeSince = signupLink ? formatStamp(signupLink.createdAt) : null;
 
   function doCopy() {
     if (!url) return;
@@ -4204,13 +4666,7 @@ export function AdminClubDetail({
               // not revertable by the admin (the club self-clears via Undo on its portal).
               const agm = d.key === 'agm' ? agmMeta(meta) : null;
               const agmBooked = !!agm?.meetingBooked;
-              const agmDateLabel =
-                agm?.meetingDate &&
-                new Date(agm.meetingDate).toLocaleDateString('en-GB', {
-                  day: 'numeric',
-                  month: 'short',
-                  year: 'numeric',
-                });
+              const agmDateLabel = agm?.meetingDate && formatDayYear(agm.meetingDate);
               // Safeguarding "override" = any compliant flag the uploads don't
               // justify: explicit sentinel, legacy flag-only (no docMeta — the
               // seeded demo clubs), or a grandfathered single file. All revert.
@@ -4498,12 +4954,9 @@ export function AdminClubDetail({
           <Card title="Communication log">
             <div className="stack" style={{ gap: 8 }}>
               {(() => {
-                const fmtDate = (iso) =>
-                  new Date(iso).toLocaleDateString('en-GB', {
-                    day: 'numeric',
-                    month: 'short',
-                    year: 'numeric',
-                  });
+                // Comm-log entries are INSTANTS — render the local calendar day, or a
+                // 01:00 SAST send shows as the previous date.
+                const fmtDate = (iso) => formatStampDay(iso);
                 // Real communication: admin-added notes + actual invite sends, merged
                 // newest-first by timestamp.
                 const noteItems = (club.notes || []).map((n) => ({
@@ -5886,14 +6339,8 @@ export function AdminTeamAccessView({
   const isLastAdmin = (u) => u.role === 'admin' && adminCount <= 1;
   const isSelf = (u) =>
     !!currentUserEmail && u.email?.toLowerCase() === currentUserEmail.toLowerCase();
-  const fmtDate = (iso) =>
-    iso
-      ? new Date(iso).toLocaleDateString('en-ZA', {
-          day: 'numeric',
-          month: 'short',
-          year: 'numeric',
-        })
-      : '—';
+  // invitedAt is an INSTANT, so the local calendar day is the honest reading.
+  const fmtDate = (iso) => (iso ? formatStampDay(iso) : '—');
 
   async function resend(u) {
     if (!onResend) return;
@@ -6190,8 +6637,9 @@ export function AdminClearances({
   const [reassignTarget, setReassignTarget] = useStateA('');
   const [filter, setFilter] = useStateA('all');
   const teamLabel = labelByKey(leagues ?? []);
-  const fmtDay = (iso) =>
-    iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '';
+  // requestedAt is an INSTANT — the local calendar day, not the UTC one, or a request
+  // logged at 01:00 SAST reads as the previous day.
+  const fmtDay = (iso) => (iso ? formatStampDay(iso) : '');
 
   const all = clearances ?? [];
   // `clearanceOverdue()` now always returns false, so there is no longer an
@@ -6467,13 +6915,8 @@ export function AdminClearances({
                   >
                     {(() => {
                       const at = req.rejectedAt || req.clubApprovedAt || req.adminOverrideAt;
-                      return at
-                        ? new Date(at).toLocaleDateString('en-GB', {
-                            day: 'numeric',
-                            month: 'short',
-                            year: 'numeric',
-                          })
-                        : '';
+                      // Decision stamps are INSTANTS, not calendar days.
+                      return at ? formatStampDay(at) : '';
                     })()}
                   </span>
                 </div>
@@ -6577,14 +7020,8 @@ export function AdminClearances({
 
 export function AdminRegistrationReviews({ reviews, onAck, busyId }) {
   const [filter, setFilter] = useStateA('open');
-  const fmtDay = (iso) =>
-    iso
-      ? new Date(iso).toLocaleDateString('en-GB', {
-          day: 'numeric',
-          month: 'short',
-          year: 'numeric',
-        })
-      : '';
+  // createdAt / resolvedAt are INSTANTS.
+  const fmtDay = (iso) => (iso ? formatStampDay(iso) : '');
   // Newest-first — the gsi1 list arrives oldest-first (createdAt ascending).
   const all = [...(reviews ?? [])].sort((a, b) =>
     (b.createdAt || '').localeCompare(a.createdAt || ''),

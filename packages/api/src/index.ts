@@ -16,6 +16,9 @@ import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { cors } from 'hono/cors';
 import { handle } from 'hono/aws-lambda';
+import dayjs from 'dayjs';
+import dayjsUtc from 'dayjs/plugin/utc.js';
+import dayjsCustomParseFormat from 'dayjs/plugin/customParseFormat.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   S3Client,
@@ -70,7 +73,12 @@ import type {
   DirectoryClub,
   League,
   Membership,
+  CompetitionStructure,
+  SeasonCalendar,
+  SeasonRun,
+  StageRun,
   Series,
+  Venue,
   TenantConfig,
   TutorialVideo,
   UserProfile,
@@ -84,6 +92,21 @@ import { buildTenantConfig, type TenantBrandingInput } from './seed-core.js';
 import { validateTenantSlug } from './tenant-validation.js';
 import { grantTenantAdmin } from './tenant-admin.js';
 import { originAllowed, originAllowedForTenant, canonicalWebOrigin } from './origins.js';
+
+// Strict date-only parsing for calendar validation — dayjs's lenient default would roll
+// '2026-02-31' into March and store a date the operator never entered.
+dayjs.extend(dayjsUtc);
+dayjs.extend(dayjsCustomParseFormat);
+
+/**
+ * The union's wall-clock offset from UTC (SAST, +02:00).
+ *
+ * Lambda runs in UTC, so anything that asks "what day is it" on behalf of a human here
+ * has to add this or it stays on yesterday until 02:00 local. The region has no DST, so
+ * a fixed offset is exact rather than an approximation — see ADR 0008 on why times are
+ * wall-clock and never converted.
+ */
+const TENANT_UTC_OFFSET_MINUTES = 120;
 
 const s3 = new S3Client({});
 
@@ -299,6 +322,16 @@ app.get('/tenant', async (c) => {
     // Per-tenant feature flags (boolean map; defaults resolve client/server-side
     // via hasFeature/useFeature, so an empty map is a valid "all defaults" state).
     features: config.features ?? {},
+    // Season calendars (ADR 0008). As public as league and district names — they are
+    // the union's published playing dates, carry no personal data, and the admin
+    // create-series form reads them off this already-fetched payload. Operator-only to
+    // WRITE (stripped from PUT /tenant/config); public to read.
+    calendars: config.calendars ?? [],
+    // Structures are deliberately NOT here. They are only needed by the authenticated
+    // "Start a season" flow, and GET /tenant is unauthenticated and hit on every public
+    // page load — serving up to 50 structures × 20 stages of competition configuration
+    // anonymously is payload nobody on that path reads. The admin console fetches them
+    // from GET /tenant/config instead.
   });
 });
 
@@ -1143,11 +1176,19 @@ app.patch('/me', async (c) => {
   return c.json(user);
 });
 
-// All /clubs, /series, /tenant/config, /admin routes require a tenant membership.
+// All /clubs, /series, /season-runs, /tenant/config, /admin routes require a tenant
+// membership. Both the bare path and the wildcard are registered for each: Hono's `/x/*`
+// does NOT match `/x`, so omitting the bare form leaves the collection route
+// unauthenticated (and then 403ing on the missing requestAuth) — the exact bug the
+// season-run integration tests caught.
 app.use('/clubs/*', authenticate, requireTenantMembership);
 app.use('/clubs', authenticate, requireTenantMembership);
 app.use('/series/*', authenticate, requireTenantMembership);
 app.use('/series', authenticate, requireTenantMembership);
+app.use('/season-runs/*', authenticate, requireTenantMembership);
+app.use('/season-runs', authenticate, requireTenantMembership);
+app.use('/venues/*', authenticate, requireTenantMembership);
+app.use('/venues', authenticate, requireTenantMembership);
 app.use('/tenant/config', authenticate, requireTenantMembership);
 app.use('/tenant/support', authenticate, requireTenantMembership);
 app.use('/admin/*', authenticate, requireTenantMembership, requireAdmin);
@@ -2220,8 +2261,18 @@ app.post('/clubs/:id/send-fixtures', async (c) => {
   // client for what gets broadcast. If there's nothing to share, release the just-claimed
   // marker so this 409 doesn't poison a legitimate retry once fixtures are released.
   const allSeries = await repo.listSeries(ra.tenant);
+  // The TENANT's calendar day, not the Lambda's. Lambda runs UTC and the union is
+  // UTC+2, so a plain `dayjs()` here is still on yesterday until 02:00 local — long
+  // enough for the chair to see fixtures in the portal (which reads the browser's local
+  // day) while the broadcast refuses to send them, on the one morning that matters.
+  const today = dayjs().utcOffset(TENANT_UTC_OFFSET_MINUTES).format('YYYY-MM-DD');
   const releasedSeries = allSeries.filter((s) => {
     if (!s.released || !Array.isArray(s.teams)) return false;
+    // Delayed activation (ADR 0008): a junior series is released up front but stays
+    // invisible until `activateFrom`. This MIRRORS the club portal's read-side gate —
+    // broadcasting a schedule the chair can't see in their own portal would be worse
+    // than not sending it. Absent/malformed ⇒ visible, so legacy series are unaffected.
+    if (s.activateFrom && s.activateFrom > today) return false;
     // A multi-team club participates under its `tm_…` ids, not its clubId — match
     // against the club's resolved team set so its fixtures aren't missed.
     const mine = new Set(teamIdsForClub(s, id));
@@ -2264,6 +2315,12 @@ app.get('/series', async (c) => {
 app.post('/series', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   const series = await c.req.json<Series>();
+  // `startDate` is the gsi1 SORT KEY. An empty string is rejected outright by DynamoDB
+  // for a key attribute — but dynalite accepts it, so this can only be caught here, and
+  // a client that sent one would 500 mid-way through a multi-group generate having
+  // already written the earlier series.
+  if (typeof series?.startDate !== 'string' || !series.startDate.trim())
+    throw new HttpError(400, 'a series needs a start date');
   // Fixtures are generated client-side and POSTed whole.
   series.version = 1;
   series.released = series.released ?? false;
@@ -2278,6 +2335,14 @@ app.patch('/series/:id', requireAdmin, async (c) => {
   const patch = await c.req.json<Partial<Series>>();
   const current = await repo.getSeries(ra.tenant, id);
   if (!current) throw new HttpError(404, 'series not found');
+  // Same gsi1-sort-key guard as POST. `updateSeries` rewrites `gsi1sk` from the patched
+  // `startDate` on every write, so a blank one here is the identical DynamoDB failure,
+  // with the identical property that dynalite won't catch it.
+  if (
+    patch.startDate !== undefined &&
+    (typeof patch.startDate !== 'string' || !patch.startDate.trim())
+  )
+    throw new HttpError(400, 'a series needs a start date');
   // Approval gate. Approve/unapprove stamps approvedAt server-side. Editing the
   // fixtures of a DRAFT series recalls any prior approval (must re-approve before
   // release); a live series keeps its state so in-season edits still reach clubs.
@@ -2307,6 +2372,197 @@ app.patch('/series/:id', requireAdmin, async (c) => {
 app.delete('/series/:id', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   await repo.deleteSeries(tenant, c.req.param('id'));
+  return c.json({ ok: true });
+});
+
+/* ─── Season runs (ADR 0008) ───
+   A run orchestrates one competition's stages for one season; the fixtures still live on
+   the Series each stage-group materialises into. Admin-only to write, reps read (their
+   club's fixtures resolve through it). Same optimistic concurrency as series. */
+
+app.get('/season-runs', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  return c.json(await repo.listSeasonRuns(tenant));
+});
+
+app.post('/season-runs', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const run = await c.req.json<SeasonRun>();
+  if (!run?.id?.trim()) throw new HttpError(400, 'season run needs an id');
+  if (!run.leagueKey?.trim()) throw new HttpError(400, 'season run needs a league');
+  // Typed, not just truthy: `.trim()` on a non-string TypeErrors into a 500 where the
+  // caller deserves the 400 that says what is wrong.
+  if (typeof run.seasonLabel !== 'string' || !run.seasonLabel.trim())
+    throw new HttpError(400, 'season run needs a season label');
+  // The snapshots are the whole point: a run must keep the structure and calendar it
+  // STARTED with, so a later operator edit can never reshape a season in flight.
+  if (!run.structureSnapshot?.stages?.length)
+    throw new HttpError(400, 'season run needs a structure snapshot');
+  if (!run.calendarSnapshot?.blocks?.length)
+    throw new HttpError(400, 'season run needs a calendar snapshot');
+  // The snapshots are client-supplied and then drive fixture materialisation for the
+  // whole season. Re-use the operator-path guards rather than trusting them: a malformed
+  // snapshot is exactly as damaging here, and it is frozen for the life of the run.
+  validateStructures([run.structureSnapshot]);
+  validateCalendars([run.calendarSnapshot]);
+  if (!run.competitionId?.trim()) throw new HttpError(400, 'season run needs a competition');
+  if (run.stages !== undefined && !Array.isArray(run.stages))
+    throw new HttpError(400, 'season run stages must be an array');
+  if ((run.stages?.length ?? 0) > 20)
+    throw new HttpError(400, 'a season run is limited to 20 stages');
+  if (await repo.getSeasonRun(tenant, run.id))
+    throw new HttpError(409, 'a season run with that id already exists');
+  run.version = 1;
+  run.stages = Array.isArray(run.stages) ? run.stages : [];
+  run.createdAt = now();
+  run.createdBy = c.get('requestAuth')!.email ?? undefined;
+  await repo.putSeasonRun(tenant, run);
+  return c.json(run, 201);
+});
+
+app.get('/season-runs/:id', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const run = await repo.getSeasonRun(tenant, c.req.param('id'));
+  if (!run) throw new HttpError(404, 'season run not found');
+  return c.json(run);
+});
+
+app.patch('/season-runs/:id', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const patch = await c.req.json<Partial<SeasonRun>>();
+  const current = await repo.getSeasonRun(tenant, id);
+  if (!current) throw new HttpError(404, 'season run not found');
+  // The snapshots are immutable for the life of the run — that is what makes them
+  // snapshots. Strip rather than reject so an admin round-tripping a whole run object
+  // (the obvious client implementation) doesn't get a confusing 400.
+  delete (patch as { structureSnapshot?: unknown }).structureSnapshot;
+  delete (patch as { calendarSnapshot?: unknown }).calendarSnapshot;
+  delete (patch as { createdAt?: unknown }).createdAt;
+  delete (patch as { createdBy?: unknown }).createdBy;
+  // The audit trail is APPEND-ONLY, reconstructed here from the stored run rather than
+  // taken from the request.
+  //
+  // The client resubmits the whole accumulated array (it has to — `stages` is a
+  // whole-array replace), so stamping everything it sends would rewrite every earlier
+  // entry with the current admin and the current time: after two confirmations the
+  // trail would read as one person doing both at one instant. Relegation and the points
+  // carry ride on who confirmed which entrants, so that is precisely the record this
+  // exists to protect.
+  //
+  // Stored entries are therefore replayed verbatim and only the appended tail is
+  // stamped. A client that echoes back a truncated or reordered history cannot shorten
+  // it: the stored prefix always wins.
+  const actor = c.get('requestAuth')!.email ?? 'unknown';
+  const at = now();
+  if (patch.stages !== undefined) {
+    // POST's guards apply here too — a run can gain stages through a PATCH, so checking
+    // them only on create leaves the same door open one route along.
+    if (!Array.isArray(patch.stages))
+      throw new HttpError(400, 'season run stages must be an array');
+    if (patch.stages.length > 20) throw new HttpError(400, 'a season run is limited to 20 stages');
+    for (const stage of patch.stages) {
+      if (!stage) continue;
+      // BOTH sides normalised to arrays. A stage arriving with a non-array `audit` and no
+      // stored counterpart would otherwise be persisted raw, and the next PATCH would
+      // read `prior.length` off a string (its character count) — silently dropping the
+      // genuine entry and spreading the old value into single characters.
+      const found = current.stages?.find((s: StageRun) => s.specId === stage.specId);
+      const prior = Array.isArray(found?.audit) ? found.audit : [];
+      const incoming = Array.isArray(stage.audit) ? stage.audit : [];
+      const appended = incoming.slice(prior.length).map((entry) => ({ ...entry, by: actor, at }));
+      stage.audit = [...prior, ...appended];
+    }
+  }
+  // `seasonLabel` is the gsi1 sort key. Blanking it writes an empty `gsi1sk`, which real
+  // DynamoDB rejects (dynalite accepts it, so no test would catch it) — and the run would
+  // vanish from the listing even if it landed.
+  if (
+    patch.seasonLabel !== undefined &&
+    (typeof patch.seasonLabel !== 'string' || !patch.seasonLabel.trim())
+  )
+    throw new HttpError(400, 'season run needs a season label');
+  try {
+    return c.json(await repo.updateSeasonRun(tenant, id, patch));
+  } catch (err) {
+    if (err instanceof VersionConflictError)
+      throw new HttpError(409, 'season run changed; refetch');
+    throw err;
+  }
+});
+
+/**
+ * Deleting a run does NOT delete the series its stages produced. Those are real,
+ * possibly-released fixtures that clubs and players have already seen; orphaning the
+ * back-pointer is recoverable, silently deleting a published schedule is not.
+ */
+app.delete('/season-runs/:id', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  await repo.deleteSeasonRun(tenant, c.req.param('id'));
+  return c.json({ ok: true });
+});
+
+/* ─── Venues (ADR 0008 phase 2) ───
+   The master ground list fixture allocation draws on. Admin-managed, not operator-only:
+   ground availability changes week to week and the union office is who knows about it.
+   Reps read (their club's fixtures name a venue). */
+
+/** Shape guard. Coordinates are optional — there is no geocoder, they are hand-pinned. */
+function validateVenue(v: unknown): asserts v is Venue {
+  const venue = v as Venue | undefined;
+  if (!venue || typeof venue !== 'object') throw new HttpError(400, 'venue must be an object');
+  if (!venue.id?.trim()) throw new HttpError(400, 'venue needs an id');
+  if (!venue.name?.trim()) throw new HttpError(400, 'venue needs a name');
+  if (venue.name.trim().length > 120)
+    throw new HttpError(400, 'venue names must be 120 characters or fewer');
+  const coord = (n: unknown) => n === undefined || (typeof n === 'number' && Number.isFinite(n));
+  if (!coord(venue.lat) || !coord(venue.lon))
+    throw new HttpError(400, 'venue coordinates must be numbers');
+  if (venue.lat !== undefined && (venue.lat < -90 || venue.lat > 90))
+    throw new HttpError(400, 'latitude out of range');
+  if (venue.lon !== undefined && (venue.lon < -180 || venue.lon > 180))
+    throw new HttpError(400, 'longitude out of range');
+  if (venue.surfaces !== undefined && (!Number.isInteger(venue.surfaces) || venue.surfaces < 1))
+    throw new HttpError(400, 'a venue hosts at least one match a day');
+  const isDate = (x: unknown): x is string =>
+    typeof x === 'string' && dayjs.utc(x, 'YYYY-MM-DD', true).isValid();
+  for (const w of venue.unavailable ?? []) {
+    if (!w?.reason?.trim()) throw new HttpError(400, 'every unavailable window needs a reason');
+    if (!isDate(w.start) || !isDate(w.end))
+      throw new HttpError(400, `"${w.reason}" needs valid start and end dates`);
+    if (w.end < w.start) throw new HttpError(400, `"${w.reason}" ends before it starts`);
+  }
+  for (const d of venue.unavailableWeekdays ?? []) {
+    if (!Number.isInteger(d) || d < 0 || d > 6)
+      throw new HttpError(400, 'unavailable weekdays must be 0-6');
+  }
+}
+
+app.get('/venues', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  return c.json(await repo.listVenues(tenant));
+});
+
+app.put('/venues/:id', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const body = await c.req.json<Venue>();
+  // The path owns the id — a body id is ignored so a crafted payload can't write to
+  // another key.
+  const venue = { ...body, id };
+  validateVenue(venue);
+  venue.name = venue.name.trim();
+  return c.json(await repo.putVenue(tenant, venue));
+});
+
+/**
+ * Deleting a venue does NOT rewrite the fixtures allocated to it. Those fixtures keep a
+ * denormalised `venueName`, so a released schedule still reads correctly; re-allocating
+ * is the admin's call, not a side effect of tidying the ground list.
+ */
+app.delete('/venues/:id', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  await repo.deleteVenue(tenant, c.req.param('id'));
   return c.json({ ok: true });
 });
 
@@ -2456,6 +2712,234 @@ function validateKnownClubs(entries: unknown): asserts entries is Array<{ name: 
 }
 
 /**
+ * Season-calendar shape guard (ADR 0008). Calendars drive fixture dates, so a malformed
+ * one silently mis-schedules a whole league — every field is checked here rather than
+ * trusted and discovered at generation time.
+ *
+ * Dates are strict date-only `YYYY-MM-DD`: dayjs's lenient mode would happily accept
+ * '2026-02-31' and roll it into March, which is exactly the kind of quiet corruption a
+ * fixture calendar must not carry. The counts are generous but finite — the CONFIG item
+ * has a hard 400KB ceiling and calendars share it with leagues, knownClubs and branding.
+ */
+function validateCalendars(calendars: unknown): asserts calendars is SeasonCalendar[] {
+  if (!Array.isArray(calendars)) throw new HttpError(400, 'calendars must be an array');
+  if (calendars.length > 20) throw new HttpError(400, 'a client is limited to 20 season calendars');
+
+  const isDate = (v: unknown): v is string =>
+    typeof v === 'string' && dayjs.utc(v, 'YYYY-MM-DD', true).isValid();
+
+  const ids = calendars.map((cal) => (cal as SeasonCalendar | undefined)?.id);
+  if (ids.some((id) => typeof id !== 'string' || !id.trim()))
+    throw new HttpError(400, 'every calendar needs an id');
+  if (new Set(ids).size !== ids.length) throw new HttpError(409, 'duplicate calendar id');
+
+  for (const cal of calendars as SeasonCalendar[]) {
+    const name = cal.label?.trim() || cal.id;
+    if (!cal.label?.trim()) throw new HttpError(400, 'every calendar needs a label');
+    if (cal.label.trim().length > 80)
+      throw new HttpError(400, 'calendar labels must be 80 characters or fewer');
+
+    if (!Array.isArray(cal.blocks) || cal.blocks.length === 0)
+      throw new HttpError(400, `"${name}" needs at least one playing block`);
+    if (cal.blocks.length > 20)
+      throw new HttpError(400, `"${name}" is limited to 20 playing blocks`);
+    const blockIds = cal.blocks.map((b): unknown => b?.id);
+    if (blockIds.some((id) => typeof id !== 'string' || !id.trim()))
+      throw new HttpError(400, `every block in "${name}" needs an id`);
+    if (new Set(blockIds).size !== blockIds.length)
+      throw new HttpError(409, `duplicate block id in "${name}"`);
+    for (const b of cal.blocks) {
+      if (!b.label?.trim()) throw new HttpError(400, `every block in "${name}" needs a label`);
+      if (!isDate(b.start) || !isDate(b.end))
+        throw new HttpError(400, `block "${b.label}" needs valid start and end dates`);
+      if (b.end < b.start) throw new HttpError(400, `block "${b.label}" ends before it starts`);
+    }
+
+    if (cal.breaks !== undefined) {
+      if (!Array.isArray(cal.breaks))
+        throw new HttpError(400, `breaks in "${name}" must be an array`);
+      if (cal.breaks.length > 50) throw new HttpError(400, `"${name}" is limited to 50 breaks`);
+      for (const br of cal.breaks) {
+        if (!br?.label?.trim()) throw new HttpError(400, `every break in "${name}" needs a label`);
+        if (!isDate(br.start) || !isDate(br.end))
+          throw new HttpError(400, `break "${br.label}" needs valid start and end dates`);
+        if (br.end < br.start)
+          throw new HttpError(400, `break "${br.label}" ends before it starts`);
+      }
+    }
+
+    if (cal.excludeDates !== undefined) {
+      if (!Array.isArray(cal.excludeDates))
+        throw new HttpError(400, `excluded dates in "${name}" must be an array`);
+      if (cal.excludeDates.length > 366)
+        throw new HttpError(400, `"${name}" is limited to 366 excluded dates`);
+      const bad = cal.excludeDates.find((v) => !isDate(v));
+      if (bad !== undefined)
+        throw new HttpError(400, `"${bad}" is not a valid excluded date in "${name}"`);
+    }
+  }
+}
+
+const FORMAT_KINDS = new Set(['round-robin', 'knockout', 'single-match', 'manual']);
+const ENTRANT_KINDS = new Set(['all-registered', 'manual', 'seeded-split']);
+const CADENCE_KINDS = new Set(['weekly', 'every-n-weeks', 'weekdays', 'spread']);
+
+/**
+ * Competition-structure shape guard (ADR 0008). A structure decides how a whole league's
+ * fixtures are shaped, so a malformed one is worse than a rejected save.
+ *
+ * The load-bearing check is the LAST one: a `derivedFrom.fromStage` must name an EARLIER
+ * stage. Stages form a pipeline, and a reference forwards (or to itself) is either a
+ * cycle or a stage waiting on results that do not exist yet — both of which would leave
+ * a season permanently unresolvable with no obvious cause.
+ */
+function validateStructures(structures: unknown): asserts structures is CompetitionStructure[] {
+  if (!Array.isArray(structures)) throw new HttpError(400, 'structures must be an array');
+  if (structures.length > 50)
+    throw new HttpError(400, 'a client is limited to 50 competition structures');
+
+  const ids = structures.map((s) => (s as CompetitionStructure | undefined)?.id);
+  if (ids.some((id) => typeof id !== 'string' || !id.trim()))
+    throw new HttpError(400, 'every structure needs an id');
+  if (new Set(ids).size !== ids.length) throw new HttpError(409, 'duplicate structure id');
+
+  for (const st of structures as CompetitionStructure[]) {
+    const name = st.name?.trim() || st.id;
+    if (!st.name?.trim()) throw new HttpError(400, 'every structure needs a name');
+    if (st.name.trim().length > 80)
+      throw new HttpError(400, 'structure names must be 80 characters or fewer');
+    if (!Number.isInteger(st.version) || st.version < 1)
+      throw new HttpError(400, `"${name}" needs a whole version number of 1 or more`);
+
+    if (!Array.isArray(st.stages) || st.stages.length === 0)
+      throw new HttpError(400, `"${name}" needs at least one stage`);
+    if (st.stages.length > 20) throw new HttpError(400, `"${name}" is limited to 20 stages`);
+
+    const stageIds = st.stages.map((s): unknown => s?.id);
+    if (stageIds.some((id) => typeof id !== 'string' || !(id as string).trim()))
+      throw new HttpError(400, `every stage in "${name}" needs an id`);
+    if (new Set(stageIds).size !== stageIds.length)
+      throw new HttpError(409, `duplicate stage id in "${name}"`);
+
+    const seen = new Set<string>();
+    for (const stage of st.stages) {
+      const sName = stage.name?.trim() || stage.id;
+      if (!stage.name?.trim()) throw new HttpError(400, `every stage in "${name}" needs a name`);
+      if (!stage.format || !FORMAT_KINDS.has(stage.format.kind))
+        throw new HttpError(400, `stage "${sName}" has an unknown format`);
+      if (stage.format.kind === 'round-robin' && ![1, 2, 3].includes(stage.format.legs))
+        throw new HttpError(400, `stage "${sName}" must play 1, 2 or 3 legs`);
+      if (!stage.entrants || !ENTRANT_KINDS.has(stage.entrants.kind))
+        throw new HttpError(400, `stage "${sName}" has an unknown entrant rule`);
+      if (!stage.schedule?.blockId?.trim())
+        throw new HttpError(400, `stage "${sName}" needs a playing block`);
+      const cad = stage.schedule.cadence;
+      if (!cad || !CADENCE_KINDS.has(cad.kind))
+        throw new HttpError(400, `stage "${sName}" has an unknown cadence`);
+      // The PAYLOAD matters as much as the kind: a missing `n` renders as "every NaN
+      // weeks" and places exactly one round, reported as an opaque "Block 1 fits 1 at
+      // this cadence"; an out-of-range weekday passes the empty-list guard and then
+      // places nothing at all.
+      if (cad.kind === 'every-n-weeks' && (!Number.isInteger(cad.n) || cad.n < 1 || cad.n > 12))
+        throw new HttpError(400, `stage "${sName}" needs a whole number of weeks between 1 and 12`);
+      if (cad.kind === 'weekdays') {
+        if (!Array.isArray(cad.days) || cad.days.length === 0)
+          throw new HttpError(400, `stage "${sName}" needs at least one playing day`);
+        if (cad.days.some((d) => !Number.isInteger(d) || d < 0 || d > 6))
+          throw new HttpError(400, `stage "${sName}" has a playing day outside 0-6`);
+      }
+      if (
+        stage.format.kind === 'knockout' &&
+        !['seeded', 'cross-pool'].includes(stage.format.pairing)
+      )
+        throw new HttpError(400, `stage "${sName}" has an unknown knockout pairing`);
+      const plan = stage.entrants.kind !== 'all-registered' ? stage.entrants.groups : undefined;
+      if (plan) {
+        if (plan.kind === 'sizes') {
+          if (!Array.isArray(plan.sizes) || plan.sizes.length === 0)
+            throw new HttpError(400, `stage "${sName}" needs at least one group size`);
+          if (plan.sizes.some((n) => !Number.isInteger(n) || n < 1))
+            throw new HttpError(400, `stage "${sName}" has a group size below 1`);
+        } else if (plan.kind === 'even') {
+          if (!Number.isInteger(plan.count) || plan.count < 1 || plan.count > 26)
+            throw new HttpError(400, `stage "${sName}" needs between 1 and 26 groups`);
+        } else {
+          throw new HttpError(400, `stage "${sName}" has an unknown group plan`);
+        }
+      }
+      if (
+        stage.entrants.kind === 'seeded-split' &&
+        !['blocks', 'snake'].includes(stage.entrants.method)
+      )
+        throw new HttpError(400, `stage "${sName}" has an unknown seeding method`);
+
+      const note = stage.entrants.kind === 'manual' ? stage.entrants.derivedFrom : undefined;
+      if (note) {
+        if (!note.fromStage?.trim())
+          throw new HttpError(400, `stage "${sName}" derives from an unnamed stage`);
+        if (!seen.has(note.fromStage))
+          throw new HttpError(
+            400,
+            `stage "${sName}" derives from "${note.fromStage}", which does not come before it`,
+          );
+      }
+      seen.add(stage.id);
+    }
+  }
+}
+
+/**
+ * A league's competition bindings. Each names a structure and a calendar that must
+ * actually exist on the tenant — a dangling reference is a season nobody can start, and
+ * the failure would only surface later at generation time.
+ */
+function validateCompetitions(
+  leagues: League[],
+  structures: CompetitionStructure[],
+  calendars: SeasonCalendar[],
+): void {
+  for (const lg of leagues) {
+    if (lg.competitions === undefined) continue;
+    if (!Array.isArray(lg.competitions))
+      throw new HttpError(400, `competitions on "${lg.label}" must be an array`);
+    if (lg.competitions.length > 10)
+      throw new HttpError(400, `"${lg.label}" is limited to 10 competitions`);
+    const ids = lg.competitions.map((comp): unknown => comp?.id);
+    if (ids.some((id) => typeof id !== 'string' || !(id as string).trim()))
+      throw new HttpError(400, `every competition on "${lg.label}" needs an id`);
+    if (new Set(ids).size !== ids.length)
+      throw new HttpError(409, `duplicate competition id on "${lg.label}"`);
+    for (const comp of lg.competitions) {
+      if (!comp.label?.trim())
+        throw new HttpError(400, `every competition on "${lg.label}" needs a label`);
+      const structure = structures.find((st) => st.id === comp.structureId);
+      if (!structure)
+        throw new HttpError(
+          400,
+          `competition "${comp.label}" points at a structure that doesn't exist`,
+        );
+      const calendar = calendars.find((cal) => cal.id === comp.calendarId);
+      if (!calendar)
+        throw new HttpError(
+          400,
+          `competition "${comp.label}" points at a calendar that doesn't exist`,
+        );
+      // Structures and calendars are authored independently, so a structure's stages can
+      // name blocks the bound calendar has never had. Caught here — the one place all
+      // three are in scope — rather than surfacing months later as "That playing block no
+      // longer exists" the first time someone tries to generate a season.
+      const blockIds = new Set(calendar.blocks.map((b) => b.id));
+      const orphan = structure.stages.find((stage) => !blockIds.has(stage.schedule.blockId));
+      if (orphan)
+        throw new HttpError(
+          400,
+          `competition "${comp.label}": stage "${orphan.name}" plays in a block that isn't on ${calendar.label}`,
+        );
+    }
+  }
+}
+
+/**
  * League-catalogue shape guard: keys are the matching token stored on clubs, so they
  * must be unique, present and strings. Rejects a malformed payload with a 400 rather
  * than letting a non-array/non-string key TypeError into a 500 or persist junk.
@@ -2480,6 +2964,43 @@ function validateLeagues(
   }
 }
 
+/**
+ * GET /tenant/config — the tenant's own configuration, for signed-in users.
+ *
+ * Exists so admin-only setup data doesn't have to ride the UNAUTHENTICATED `GET /tenant`,
+ * which is hit on every public page load. Structures in particular are only read by the
+ * "Start a season" flow; serving them anonymously is payload nobody on that path needs.
+ *
+ * An explicit ALLOWLIST, deliberately — not "the row minus clubSignupLink". Any tenant
+ * member can call this, reps included, and a denylist silently exposes every field added
+ * to `TenantConfig` from then on. What is held back and why:
+ *
+ *   clubSignupLink   a live credential; it has its own route
+ *   knownClubs       the operator's directory, reachable via /clubs/directory
+ *   requiredDocs     compliance config, served with the club record that uses it
+ *   adminCount       an internal counter for the last-admin guard
+ *   setupCompletedBy an operator's email address — not tenant-facing at all
+ */
+app.get('/tenant/config', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const config = await repo.getTenantConfig(tenant);
+  if (!config) throw new HttpError(404, 'tenant not found');
+  return c.json({
+    tenant: config.tenant,
+    branding: config.branding,
+    submissionDeadline: config.submissionDeadline,
+    leagues: config.leagues ?? [],
+    districts: resolveDistricts(config),
+    tutorials: tutorialsFor(config),
+    features: config.features ?? {},
+    calendars: config.calendars ?? [],
+    // The reason this route exists.
+    structures: config.structures ?? [],
+    // The milestone itself is useful on the console; who stamped it is not.
+    setupCompletedAt: config.setupCompletedAt,
+  });
+});
+
 app.put('/tenant/config', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   const patch = await c.req.json<Partial<TenantConfig>>();
@@ -2491,6 +3012,8 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { adminCount?: unknown }).adminCount;
   delete (patch as { districts?: unknown }).districts;
   delete (patch as { knownClubs?: unknown }).knownClubs;
+  delete (patch as { calendars?: unknown }).calendars;
+  delete (patch as { structures?: unknown }).structures;
   const next = await applyTenantConfigPatch(tenant, patch);
   return c.json(next);
 });
@@ -2807,6 +3330,52 @@ app.put('/platform/tenants/:slug', async (c) => {
       throw new HttpError(400, 'valid submissionDeadline required (ISO date)');
     patch.submissionDeadline = body.submissionDeadline;
   }
+  if (body.calendars !== undefined) {
+    validateCalendars(body.calendars); // shape 400s must win over the guard's 409
+    patch.calendars = body.calendars;
+    // Referrer delete guard, mirroring the leagues/districts ones above. A series
+    // stores `schedule.calendarId`; dropping the calendar out from under it would leave
+    // regenerate unable to reproduce that series' dates. Only REMOVED calendars are
+    // checked, so a pre-existing orphan never blocks an unrelated save.
+    const current = await getCurrent();
+    const nextIds = new Set(body.calendars.map((cal) => cal.id));
+    const removed = (current.calendars ?? []).filter((cal) => !nextIds.has(cal.id));
+    if (removed.length > 0) {
+      const allSeries = await repo.listSeries(slug);
+      for (const cal of removed) {
+        const n = allSeries.filter((s) => s.schedule?.calendarId === cal.id).length;
+        if (n > 0)
+          throw new HttpError(
+            409,
+            `${n} series ${n === 1 ? 'is' : 'are'} scheduled against "${cal.label}" — reschedule ${n === 1 ? 'it' : 'them'} before deleting the calendar`,
+          );
+      }
+    }
+  }
+  if (body.structures !== undefined) {
+    validateStructures(body.structures); // shape 400s must win over the guard's 409
+    patch.structures = body.structures;
+    // Referrer delete guard, same basis as leagues/districts/calendars. A running season
+    // snapshots its structure, so deleting one can't corrupt a season in flight — but a
+    // LEAGUE still binding to it would be left pointing at nothing, and no new season
+    // could be started from it.
+    const current = await getCurrent();
+    const nextIds = new Set(body.structures.map((st) => st.id));
+    const removed = (current.structures ?? []).filter((st) => !nextIds.has(st.id));
+    if (removed.length > 0) {
+      const nextLeagues = body.leagues ?? current.leagues ?? [];
+      for (const st of removed) {
+        const refs = nextLeagues.flatMap((l) =>
+          (l.competitions ?? []).filter((comp) => comp.structureId === st.id).map(() => l.label),
+        );
+        if (refs.length > 0)
+          throw new HttpError(
+            409,
+            `"${st.name}" is still used by ${refs.length} competition${refs.length === 1 ? '' : 's'} (${[...new Set(refs)].join(', ')}) — unbind ${refs.length === 1 ? 'it' : 'them'} first`,
+          );
+      }
+    }
+  }
   if (body.knownClubs !== undefined) {
     validateKnownClubs(body.knownClubs);
     // Ids are re-derived server-side — a client-sent id is never trusted, so a
@@ -2817,6 +3386,17 @@ app.put('/platform/tenants/:slug', async (c) => {
       const name = e.name.trim();
       return { id: clubIdFromName(name), name };
     });
+  }
+  // Competitions bind leagues to structures and calendars, so they can only be checked
+  // once all three are known — against the POST-patch view, so one PUT may legitimately
+  // add a structure and the competition that uses it together.
+  if (body.leagues !== undefined || body.structures !== undefined || body.calendars !== undefined) {
+    const current = await getCurrent();
+    validateCompetitions(
+      patch.leagues ?? current.leagues ?? [],
+      patch.structures ?? current.structures ?? [],
+      patch.calendars ?? current.calendars ?? [],
+    );
   }
   const next = await applyTenantConfigPatch(slug, patch);
   return c.json(next);
@@ -3699,7 +4279,11 @@ type LatLon = { lat?: number; lon?: number } | undefined;
 
 /** Great-circle distance in km (mirrors the frontend `haversineKm`); 0 when coords are missing. */
 function haversineKm(a: LatLon, b: LatLon): number {
-  if (!a || !b || a.lat == null || a.lon == null || b.lat == null || b.lon == null) return 0;
+  // Finiteness, not null-ness — parity with the web twin (src/data.ts), where an object
+  // check let NaN through for a side with no coordinates and printed "NaN km".
+  const finite = (p: LatLon): p is { lat: number; lon: number } =>
+    !!p && Number.isFinite(p.lat) && Number.isFinite(p.lon);
+  if (!finite(a) || !finite(b)) return 0;
   const R = 6371;
   const toRad = (x: number) => (x * Math.PI) / 180;
   const dLat = toRad(b.lat - a.lat);
@@ -3773,12 +4357,35 @@ function buildClubSchedule(
       const isHome = f.home != null && mine.has(f.home);
       const me = resolveTeam(s, (isHome ? f.home : f.away) ?? '', clubsById);
       const opp = resolveTeam(s, (isHome ? f.away : f.home) ?? '', clubsById);
-      const venue = isHome
-        ? me.venue || club.ground?.venue || 'Home ground TBA'
-        : opp.venue || 'Opponent ground TBA';
+      // Same precedence as every screen: a HAND-SET ground first, then the allocated
+      // one, then the home side's.
+      //
+      // `venueOverride` is what the fixture editor writes — for the "Secondary ground"
+      // pick as much as for "Other" — without touching `venueName`. Reading only the
+      // allocated name texted players a different ground from the one the portal was
+      // showing them, for the single most common manual venue change there is.
+      const override = (f as { venueOverride?: string }).venueOverride?.trim();
+      const allocated = (f as { venueName?: string }).venueName;
+      const venue =
+        override ||
+        allocated ||
+        (isHome
+          ? me.venue || club.ground?.venue || 'Home ground TBA'
+          : opp.venue || 'Opponent ground TBA');
       let line = `  R${f.round ?? '?'} · ${fmtFixtureDate(f.date)} · ${isHome ? 'Home' : 'Away'} vs ${opp.name} · ${venue}`;
-      if (!isHome) {
-        const km = Math.round(haversineKm({ lat: opp.lat, lon: opp.lon }, club.ground) * 2);
+      // Distance to where the match is actually played; falls back to the opponent's
+      // ground for a series that has never been through allocation.
+      const vLat = (f as { venueLat?: number }).venueLat;
+      const vLon = (f as { venueLon?: number }).venueLon;
+      // Coordinates are only trustworthy when they describe the ground we just NAMED. An
+      // override typed after the last allocation leaves the old ground's coordinates
+      // behind, and quoting a round trip to a ground nobody is going to is worse than
+      // quoting none.
+      const coordsMatchVenue = !override || override === allocated;
+      const pinnedVenue = coordsMatchVenue && Number.isFinite(vLat) && Number.isFinite(vLon);
+      if (!isHome || pinnedVenue) {
+        const to = pinnedVenue ? { lat: vLat, lon: vLon } : { lat: opp.lat, lon: opp.lon };
+        const km = Math.round(haversineKm(to, club.ground) * 2);
         if (km > 0) line += ` · ${km.toLocaleString()} km round-trip`;
       }
       lines.push(line);

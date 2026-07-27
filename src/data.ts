@@ -1,67 +1,68 @@
 /* ─── Sample data ─── */
 
 import type { Club } from './types';
+import { fixturesFromDates, legacyRoundDates, roundRobinPairings } from './competition/fixtures';
+import { slotRefLabel } from './competition/formats';
+import {
+  daysSince,
+  daysUntilDate,
+  formatDay,
+  formatDayLong,
+  formatDayMid,
+  formatStampDay,
+  isRealDate,
+  monthsUntil,
+  timeAgo,
+  todayDate,
+  wholeYearsSince,
+} from './dates';
 
 // 2026/27 season submission deadline — editable by the Dolphins admin via
 // the "Edit deadline" button on the cohort dashboard. Stored as ISO date so
 // date inputs and helpers work naturally.
 export const SUBMISSION_DEADLINE_DEFAULT = '2026-06-21';
 
+/* ─── Deadline display ───
+   Thin wrappers over src/dates.ts, kept under their existing names so every call site is
+   unchanged. The formatting moved to dayjs so month names match the rest of the app —
+   these previously used `en-ZA` ("21 Jun") while the fixtures views used `en-GB`
+   ("13 Sept"), which is an ICU quirk, not a locale choice anyone made.
+
+   A malformed deadline echoes back the raw string rather than rendering blank: it is
+   admin-entered and seeing the bad value is more useful than seeing nothing. */
+
 // "21 June 2026"
 export function formatDeadlineLong(iso) {
   if (!iso) return '';
-  const d = new Date(iso + 'T00:00:00');
-  if (isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString('en-ZA', { day: 'numeric', month: 'long', year: 'numeric' });
+  return formatDayLong(iso) || iso;
 }
 
 // "21 Jun"
 export function formatDeadlineShort(iso) {
   if (!iso) return '';
-  const d = new Date(iso + 'T00:00:00');
-  if (isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short' });
+  return formatDay(iso) || iso;
 }
 
 // "21 June"
 export function formatDeadlineMid(iso) {
   if (!iso) return '';
-  const d = new Date(iso + 'T00:00:00');
-  if (isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString('en-ZA', { day: 'numeric', month: 'long' });
+  return formatDayMid(iso) || iso;
 }
 
 // Whole days between today and the deadline (floor at 0). Past = 0.
 export function daysUntil(iso) {
-  if (!iso) return 0;
-  const target = new Date(iso + 'T00:00:00');
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const diff = Math.ceil((target.getTime() - today.getTime()) / 86400000);
-  return Math.max(0, diff);
+  return daysUntilDate(iso);
 }
 
 // Whole days since a full ISO timestamp (e.g. invitedAt `2026-06-04T…Z`). Floor at 0.
 export function daysAgo(iso) {
-  if (!iso) return null;
-  const then = new Date(iso);
-  if (Number.isNaN(then.getTime())) return null;
-  return Math.max(0, Math.floor((Date.now() - then.getTime()) / 86400000));
+  return daysSince(iso);
 }
 
 // Compact "time ago" label for a full ISO timestamp, e.g. 'just now' / '2h ago' / '3d ago'.
 // `now` is injectable so the output is deterministic under test.
 export function relTimeAgo(iso: string | undefined, now: number = Date.now()): string {
-  if (!iso) return '';
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return '';
-  const secs = Math.max(0, Math.floor((now - then) / 1000));
-  if (secs < 60) return 'just now';
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
+  return timeAgo(iso, now);
 }
 
 /** One row in the cohort-wide "Recent activity" feed. */
@@ -407,9 +408,9 @@ export function dobFromSaId(idNumber) {
   const year = 2000 + yy <= currentYear ? 2000 + yy : 1900 + yy;
   if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return '';
   const iso = `${year}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
-  const d = new Date(iso + 'T00:00:00');
-  if (isNaN(d.getTime()) || d.getTime() > Date.now()) return '';
-  if (d.getMonth() + 1 !== mm || d.getDate() !== dd) return '';
+  // Strict parsing rejects 31 February outright, so the round-trip check the old
+  // lenient-Date version needed (re-reading month/day to spot a rollover) is gone.
+  if (!isRealDate(iso) || iso > todayDate()) return '';
   return iso;
 }
 
@@ -417,12 +418,8 @@ export function dobFromSaId(idNumber) {
 export function ageFromSaId(idNumber) {
   const dob = dobFromSaId(String(idNumber || ''));
   if (!dob) return null;
-  const b = new Date(dob + 'T00:00:00');
-  const now = new Date();
-  let age = now.getFullYear() - b.getFullYear();
-  const m = now.getMonth() - b.getMonth();
-  if (m < 0 || (m === 0 && now.getDate() < b.getDate())) age--;
-  return age >= 0 ? age : null;
+  const age = wholeYearsSince(dob);
+  return age !== null && age >= 0 ? age : null;
 }
 
 /**
@@ -431,14 +428,10 @@ export function ageFromSaId(idNumber) {
  */
 export function termRemaining(termEnd) {
   if (!termEnd) return { years: 0, months: 0, expired: false, label: '' };
-  const end = new Date(termEnd);
-  if (isNaN(end.getTime())) return { years: 0, months: 0, expired: false, label: '' };
-  const now = new Date();
-  if (end.getTime() <= now.getTime())
-    return { years: 0, months: 0, expired: true, label: 'expired' };
-  let months = (end.getFullYear() - now.getFullYear()) * 12 + (end.getMonth() - now.getMonth());
-  if (end.getDate() < now.getDate()) months--;
-  if (months < 0) months = 0;
+  const remaining = monthsUntil(termEnd);
+  if (remaining === null) return { years: 0, months: 0, expired: false, label: '' };
+  if (remaining.expired) return { years: 0, months: 0, expired: true, label: 'expired' };
+  const months = remaining.months;
   const years = Math.floor(months / 12);
   const rem = months % 12;
   const parts = [];
@@ -591,14 +584,7 @@ export function agmMeta(meta) {
 export function docFileMeta(meta) {
   const real = !!(meta && meta.objectKey);
   const fileName = real ? String(meta.objectKey).split('/').pop() : null;
-  const uploadedDate =
-    real && meta.uploadedAt
-      ? new Date(meta.uploadedAt).toLocaleDateString('en-GB', {
-          day: 'numeric',
-          month: 'short',
-          year: 'numeric',
-        })
-      : null;
+  const uploadedDate = real && meta.uploadedAt ? formatStampDay(meta.uploadedAt) : null;
   const sizeMB = real && meta.size ? `${(meta.size / 1e6).toFixed(1)} MB` : null;
   const metaText = [fileName, uploadedDate && `uploaded ${uploadedDate}`, sizeMB]
     .filter(Boolean)
@@ -1005,7 +991,13 @@ export function overallProgress(club) {
    Round-robin schedule generator.
    Travel cost = round-trip distance × cars × cost per km. */
 export function haversineKm(a, b) {
-  if (!a || !b) return 0;
+  // Guarded on the COORDINATES, not on the objects. `{}` is truthy, and a pending
+  // knockout side resolves to `ground: {}` (resolveTeam's slot-ref branch), as does a
+  // club with no ground on record — so an object check let NaN through and every
+  // bracket's later rounds rendered "NaN km" and "R NaN". A missing coordinate means
+  // "unknown distance", and zero is the only honest number to add to a total.
+  const finite = (p) => !!p && Number.isFinite(p.lat) && Number.isFinite(p.lon);
+  if (!finite(a) || !finite(b)) return 0;
   const R = 6371;
   const toRad = (x) => (x * Math.PI) / 180;
   const dLat = toRad(b.lat - a.lat);
@@ -1022,18 +1014,70 @@ export function haversineKm(a, b) {
 export const DEFAULT_COST_PER_KM = 4.5;
 export const DEFAULT_CARS = 3;
 
+/**
+ * Travel distance and fuel cost for one fixture.
+ *
+ * `venue` is the ALLOCATED ground (ADR 0008 phase 2), when there is one. Without it the
+ * cost is the away side's round trip to the home ground — the original model, and still
+ * correct for any series that has never been through allocation.
+ *
+ * With it, both sides travel to wherever the match was actually placed: allocation
+ * routinely moves a fixture off the home ground (maintenance, a double-booking), and
+ * costing that against the home ground understates the away trip and ignores the home
+ * side's entirely. A venue with no pinned coordinates falls back to the old measure
+ * rather than silently costing R0 — `haversineKm` returns 0 for a missing coord, so an
+ * unpinned venue would otherwise read as "no travel at all".
+ *
+ * `distanceKm`/`fuelR` are the COMBINED figure — right for a union's series total, wrong
+ * for one club's fuel budget. `home` and `away` split it per side, so a club portal can
+ * show what THAT club travels rather than the sum of both journeys.
+ */
 export function fixtureCost(
   homeClub,
   awayClub,
   costPerKm = DEFAULT_COST_PER_KM,
   cars = DEFAULT_CARS,
+  venue?: { lat?: number; lon?: number },
 ) {
+  const venuePinned = Number.isFinite(venue?.lat) && Number.isFinite(venue?.lon);
   // Null-safe: a fixture can reference a deleted club (lookup → undefined);
   // haversineKm already returns 0 for a missing coord, so cost degrades to R0.
-  const km = haversineKm(homeClub?.ground, awayClub?.ground);
+  let km, homeLeg, awayLeg;
+  if (venuePinned) {
+    homeLeg = haversineKm(homeClub?.ground, venue);
+    awayLeg = haversineKm(awayClub?.ground, venue);
+    // A home-ground fixture has a zero home leg, so this reduces to the away trip and
+    // matches the pre-allocation number.
+    km = homeLeg + awayLeg;
+  } else {
+    km = haversineKm(homeClub?.ground, awayClub?.ground);
+    // Without an allocated ground the match is at the home side's, so only the away
+    // side travels — which is what the pre-allocation model always meant.
+    homeLeg = 0;
+    awayLeg = km;
+  }
   const roundTripKm = km * 2;
   const fuelR = roundTripKm * cars * costPerKm;
-  return { distanceKm: km, roundTripKm, cars, costPerKm, fuelR };
+  const leg = (oneWayKm) => {
+    const legRoundTripKm = oneWayKm * 2;
+    return {
+      distanceKm: oneWayKm,
+      roundTripKm: legRoundTripKm,
+      fuelR: legRoundTripKm * cars * costPerKm,
+    };
+  };
+  return {
+    distanceKm: km,
+    roundTripKm,
+    cars,
+    costPerKm,
+    fuelR,
+    venuePinned,
+    /** What the HOME side travels — zero unless allocation moved the fixture. */
+    home: leg(homeLeg),
+    /** What the AWAY side travels. */
+    away: leg(awayLeg),
+  };
 }
 
 /* ─── TEAM ↔ CLUB RESOLUTION ───
@@ -1076,6 +1120,14 @@ export function teamIdsForClub(series, clubId) {
 // when set, else the club ground). `clubBy(clubId)` looks up the live club.
 export function resolveTeam(series, teamId, clubBy) {
   const lookup = typeof clubBy === 'function' ? clubBy : () => undefined;
+  // A knockout's later rounds reference earlier fixtures ("win:f3") because the winner
+  // isn't known yet. Resolve those to a readable slot label BEFORE the participant
+  // lookup, which would otherwise find nothing and render "Unknown team" for every
+  // fixture past round one. See competition/formats.ts for the reference format.
+  const slot = slotRefLabel(teamId, series?.fixtures);
+  if (slot) {
+    return { teamId, clubId: undefined, club: undefined, name: slot, ground: {}, pending: true };
+  }
   const parts = series?.participants;
   if (Array.isArray(parts) && parts.length) {
     const p = parts.find((x) => x && x.teamId === teamId);
@@ -1114,51 +1166,21 @@ export function resolveSpread({ dateMode, kind }: { dateMode?: string; kind?: st
   return (dateMode || (kind === 'tournament' ? 'spread' : 'reference')) === 'spread';
 }
 
-// Round-robin: each team plays every other team once. Home/away alternates fairly.
+/**
+ * Round-robin: each team plays every other team once. Home/away alternates fairly.
+ *
+ * Now a thin wrapper over src/competition/fixtures.ts, which owns the pairing rotation
+ * and both date strategies (ADR 0008). Behaviour is unchanged and must stay that way —
+ * the create/regenerate parity test in data.test.ts is the gate.
+ *
+ * For a series scheduled against a season calendar, callers use `fixturesFromPlan` with
+ * dates from `planRoundDates` instead; this signature stays for the legacy path.
+ */
 export function generateRoundRobin(
   teamIds: (string | null)[],
   startDateISO: string,
   options: { endDateISO?: string; spread?: boolean } = {},
 ) {
-  if (teamIds.length < 2) return [];
-  const teams = [...teamIds];
-  if (teams.length % 2 === 1) teams.push(null); // bye
-  const n = teams.length;
-  const rounds = n - 1;
-  const start = new Date(startDateISO);
-  // When an end date drives the schedule, spread rounds evenly across the
-  // [start, end] window (last round lands on the end date); otherwise fall back
-  // to one round per week. A one-day floor keeps the generator self-protecting:
-  // even if a caller passes a window too short for the round count, rounds never
-  // stack onto the same date.
-  const { endDateISO, spread } = options;
-  const end = spread && endDateISO ? new Date(endDateISO) : null;
-  const rawStep =
-    end && rounds > 1 ? (end.getTime() - start.getTime()) / (rounds - 1) : 7 * 86400000;
-  const step = Math.max(rawStep, 86400000);
-  const fixtures = [];
-  let fixtureId = 1;
-  for (let r = 0; r < rounds; r++) {
-    const matchDate = new Date(start.getTime() + r * step);
-    for (let i = 0; i < n / 2; i++) {
-      const home = teams[i],
-        away = teams[n - 1 - i];
-      if (!home || !away) continue;
-      // Alternate home/away by round so it's fair
-      const swap = r % 2 === 1;
-      fixtures.push({
-        id: 'f' + fixtureId++,
-        round: r + 1,
-        date: matchDate.toISOString().slice(0, 10),
-        home: swap ? away : home,
-        away: swap ? home : away,
-      });
-    }
-    // Rotate teams (keep teams[0] fixed)
-    const fixed = teams[0];
-    const rest = teams.slice(1);
-    rest.unshift(rest.pop());
-    teams.splice(0, teams.length, fixed, ...rest);
-  }
-  return fixtures;
+  const rounds = roundRobinPairings(teamIds);
+  return fixturesFromDates(rounds, legacyRoundDates(rounds.length, startDateISO, options));
 }

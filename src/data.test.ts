@@ -11,6 +11,7 @@ import {
   resolveTeam,
   relTimeAgo,
   buildRecentActivity,
+  fixtureCost,
 } from './data';
 
 // 6 teams → 5 single round-robin rounds (each round = one match-day).
@@ -397,5 +398,36 @@ describe('buildRecentActivity', () => {
     const rows = buildRecentActivity(clubs as any, now);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ what: 'Onboarding invite failed to send', tone: 'coral' });
+  });
+});
+
+describe('fixtureCost — per-side legs', () => {
+  // Three Durban grounds, far enough apart that the legs are clearly distinguishable.
+  const home = { ground: { lat: -29.856, lon: 31.03 } }; // Kingsmead
+  const away = { ground: { lat: -29.918, lon: 30.888 } }; // Chatsworth
+  const neutral = { lat: -29.6, lon: 30.39 }; // Pietermaritzburg way
+
+  it('charges the away side only when the match is at the home ground', () => {
+    const c = fixtureCost(home, away, 2, 3);
+    expect(c.home.roundTripKm).toBe(0);
+    expect(c.home.fuelR).toBe(0);
+    expect(c.away.roundTripKm).toBe(c.roundTripKm); // the whole trip is theirs
+    expect(c.away.fuelR).toBe(c.fuelR);
+  });
+
+  it('splits the journey per side once the fixture is allocated to a neutral ground', () => {
+    const c = fixtureCost(home, away, 2, 3, neutral);
+    expect(c.home.roundTripKm).toBeGreaterThan(0); // the HOME side travels too
+    expect(c.away.roundTripKm).toBeGreaterThan(0);
+    // The combined figure is the sum — right for a union's series total, and exactly why
+    // a club portal must not show it as one club's distance.
+    expect(c.home.roundTripKm + c.away.roundTripKm).toBeCloseTo(c.roundTripKm, 6);
+    expect(c.home.fuelR + c.away.fuelR).toBeCloseTo(c.fuelR, 6);
+  });
+
+  it('leaves the home side at zero when allocation put the match at its own ground', () => {
+    const c = fixtureCost(home, away, 2, 3, home.ground);
+    expect(c.home.roundTripKm).toBeCloseTo(0, 6);
+    expect(c.away.roundTripKm).toBeCloseTo(c.roundTripKm, 6);
   });
 });
