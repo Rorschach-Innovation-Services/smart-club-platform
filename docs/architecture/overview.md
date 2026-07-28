@@ -65,5 +65,7 @@ flowchart TB
 | [0004](0004-thin-crud-client-side-compute.md)         | Thin CRUD API, computation stays client-side           |
 | [0005](0005-frozen-catalogues-v1.md)                  | Districts/leagues/CQI frozen shared defaults in v1     |
 | [0006](0006-platform-operator-and-tenant-registry.md) | Platform operator role, tenant registry, `/platform`   |
+| [0007](0007-wildcard-subdomains-shared-api-host.md)   | Wildcard subdomains on one shared API host             |
+| [0008](0008-configurable-league-structures.md)        | Configurable league structures as stage pipelines      |
 
 For the data layout and access patterns, see [data-model.md](data-model.md).

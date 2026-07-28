@@ -15,8 +15,9 @@
  * explicit "Removed club"/"Unknown team").
  */
 import type { Club, Series } from './types.js';
+import { slotRefLabel } from './slot-refs.js';
 
-type ParticipantsOnly = Pick<Series, 'participants'>;
+type ParticipantsOnly = Pick<Series, 'participants'> & Pick<Partial<Series>, 'fixtures'>;
 
 /** The teamIds this club fields in a series. Legacy series ⇒ [clubId]. */
 export function teamIdsForClub(series: ParticipantsOnly, clubId: string): string[] {
@@ -43,6 +44,12 @@ export function resolveTeam(
   teamId: string,
   clubsById: Map<string, Club>,
 ): ResolvedTeam {
+  // Knockout forward references ("win:f3") name a fixture, not a team — the winner isn't
+  // known yet. Render them as a slot label so a broadcast schedule reads "Winner of
+  // Semi-final 1" rather than the participant lookup's "TBA". PARITY: mirrors the same
+  // branch in src/data.ts resolveTeam; the label text is deliberately identical.
+  const slot = slotRefLabel(teamId, series?.fixtures);
+  if (slot) return { teamId, name: slot };
   const parts = series?.participants;
   if (Array.isArray(parts) && parts.length) {
     const p = parts.find((x) => x && x.teamId === teamId);

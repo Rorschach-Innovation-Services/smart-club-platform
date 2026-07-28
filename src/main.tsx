@@ -15,6 +15,8 @@ import {
 } from 'react-router-dom';
 import { QueryClientProvider, useQuery, useQueries } from '@tanstack/react-query';
 import { queryClient, qk } from './query';
+import { leagueParticipants } from './leagues';
+import { allocateVenues, buildLedger } from './competition/venues';
 import * as api from './api';
 import { ApiError } from './api';
 import { resolveTenantSlug, applyTheme, redirectToCanonicalOrigin } from './config';
@@ -39,6 +41,7 @@ import {
   teamIdsForClub,
   distinctClubCount,
   DISTRICTS,
+  resolveTeam,
 } from './data';
 import { exportRowsToXlsx } from './exportXlsx';
 import { openBccReminder } from './mailto';
@@ -451,6 +454,28 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     queryFn: api.getSeriesList,
     enabled: !!membership,
   });
+  // Season runs (ADR 0008). Not part of the initial-load gate: a tenant with no
+  // structured competition has none, and the fixtures page renders fine without them.
+  const seasonRunsQuery = useQuery({
+    queryKey: qk.seasonRuns(),
+    queryFn: api.getSeasonRuns,
+    enabled: !!membership && role === 'admin',
+  });
+  // The master ground list (ADR 0008 phase 2). Admin-only: reps read fixtures, which
+  // already carry a denormalised venue name, so they never need the registry itself.
+  // Admin-only setup config (structures) that deliberately isn't on the public
+  // GET /tenant payload. Merged over `tenantConfig` below so consumers keep reading one
+  // object.
+  const tenantConfigQuery = useQuery({
+    queryKey: qk.tenantConfig(),
+    queryFn: api.getTenantConfig,
+    enabled: !!membership && role === 'admin',
+  });
+  const venuesQuery = useQuery({
+    queryKey: qk.venues(),
+    queryFn: api.getVenues,
+    enabled: !!membership && role === 'admin',
+  });
   const meQuery = useQuery({ queryKey: qk.me(), queryFn: api.getMe, enabled: !!membership });
   // Tenant roster for Team & Access (admins only). Not part of the initial-load gate —
   // the Team page handles its own loading/empty so the rest of the console renders immediately.
@@ -523,6 +548,23 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   // Districts too (operator-managed); legacy tenants without the field fall back
   // to the shared constant — mirrors resolveDistricts on the API.
   const allDistricts = tenantConfig?.districts ?? DISTRICTS;
+  // Season calendars (operator-managed, ADR 0008). Empty ⇒ the create-series form keeps
+  // its legacy single start/end window, so a tenant with none configured is unaffected.
+  const allCalendars = tenantConfig?.calendars ?? [];
+  // Structures live only on the authenticated read; absent for reps, who never need them.
+  const allStructures = tenantConfigQuery.data?.structures ?? [];
+  const allSeasonRuns = seasonRunsQuery.data ?? [];
+  const allVenues = venuesQuery.data ?? [];
+  // A FAILED fetch is not an empty registry, and the difference matters: the venues card
+  // reads an empty list as "no grounds yet" and offers to sync every club ground in —
+  // which, against a registry that actually has them, mints a duplicate of each with a
+  // fresh id and hands the allocator twice the capacity. Same shape for structures ("that
+  // competition points at a structure that no longer exists" about one that is fine) and
+  // for season runs (a Start CTA whose duplicate guard checks an empty list). Pass the
+  // failure down so those surfaces can say so instead of inviting the destructive action.
+  const venuesFailed = venuesQuery.isError;
+  const structuresFailed = tenantConfigQuery.isError;
+  const seasonRunsFailed = seasonRunsQuery.isError;
   const onboarded = meQuery.data?.onboardingSeen ?? {};
   const submissionDeadline = tenantConfig?.submissionDeadline ?? SUBMISSION_DEADLINE_DEFAULT;
 
@@ -625,6 +667,205 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       .then(() => invalidate(qk.series()))
       .catch(() => {});
   }
+  /* ─── Season runs (ADR 0008) ─── */
+  function createSeasonRun(run) {
+    return withToast(() => api.createSeasonRun(run), 'Could not start the season').then((r) => {
+      invalidate(qk.seasonRuns());
+      return r;
+    });
+  }
+  function patchSeasonRun(id, patch) {
+    return withToast(() => api.patchSeasonRun(id, patch), 'Could not save the season', {
+      invalidate: [qk.seasonRuns()],
+    }).then((r) => {
+      invalidate(qk.seasonRuns());
+      return r;
+    });
+  }
+  function deleteSeasonRun(id) {
+    withToast(() => api.deleteSeasonRunReq(id), 'Could not delete the season')
+      .then(() => invalidate(qk.seasonRuns()))
+      .catch(() => {});
+  }
+  /**
+   * Materialise one stage into Series — one per group (ADR 0008), so every downstream
+   * path (approval, release, broadcast, travel cost) is the existing tested one. The run
+   * is patched with each group's seriesId afterwards, so a re-generate replaces rather
+   * than duplicates.
+   */
+  async function generateStageSeries(payloads, run, stage) {
+    return withToast(
+      () => generateStageSeriesInner(payloads, run, stage),
+      'Could not generate the fixtures',
+      { invalidate: [qk.series(), qk.seasonRuns()] },
+    ).catch((e) => {
+      // Partial progress is possible — some groups may already have series. Refresh so
+      // the stage card reflects what actually landed rather than the pre-click state.
+      invalidate(qk.series());
+      invalidate(qk.seasonRuns());
+      throw e;
+    });
+  }
+  async function generateStageSeriesInner(payloads, run, stage) {
+    const created = [];
+    for (const p of payloads) {
+      const participants = leagueParticipants(clubs, run.leagueKey)
+        .filter((t) => p.entrants.includes(t.teamId))
+        .map((t) => ({
+          teamId: t.teamId,
+          clubId: t.clubId,
+          name: t.name,
+          ...(t.venue ? { venue: t.venue } : {}),
+          ...(Number.isFinite(t.lat) ? { lat: t.lat } : {}),
+          ...(Number.isFinite(t.lon) ? { lon: t.lon } : {}),
+        }));
+      const multi = payloads.length > 1;
+      const series = {
+        id: `s-${run.id}-${stage.id}-${p.groupId}`,
+        name: `${p.league?.label ?? run.leagueKey} · ${stage.name}${multi ? ` · ${p.groupLabel}` : ''}`,
+        startDate: p.startDate,
+        teams: p.entrants,
+        participants,
+        fixtures: p.fixtures,
+        schedule: {
+          calendarId: run.calendarSnapshot.id,
+          blockId: stage.schedule.blockId,
+          cadence: stage.schedule.cadence,
+          ...(stage.schedule.slots?.length ? { slots: stage.schedule.slots } : {}),
+        },
+        ...(stage.schedule.activateFrom ? { activateFrom: stage.schedule.activateFrom } : {}),
+        seasonRunId: run.id,
+        stageSpecId: stage.id,
+        groupId: p.groupId,
+        maxOvers: p.competition?.matchFormat?.overs ?? 50,
+        seriesType: p.competition?.label ?? stage.name,
+        kind: 'series',
+        released: false,
+        releasedAt: null,
+        version: 1,
+      };
+      // A re-generate replaces the group's series rather than stacking a second one.
+      //
+      // NEVER carry `released`/`releasedAt` into a re-generate: `series` is built fresh
+      // with `released: false`, so patching it wholesale would silently recall a
+      // schedule clubs and players have already been sent. Regeneration changes the
+      // fixtures; whether they are published stays the admin's separate decision.
+      //
+      // `name` is dropped for the same reason: it is rebuilt from the template every
+      // time, so a series the admin renamed would revert on any regenerate.
+      const { released: _r, releasedAt: _ra, name: _n, ...fixturesAndConfig } = series;
+      const patchOver = async (version) =>
+        api.patchSeries(series.id, { ...fixturesAndConfig, version });
+
+      // Which branch is correct is decided by the SERVER, not by this cache. A tab whose
+      // series query hasn't refetched since another admin released this schedule would
+      // otherwise take the create branch and clobber it — POST now 409s in that case, and
+      // we recover by refetching for the real version and patching.
+      const existing = allSeries.find((x) => x.id === series.id);
+      if (existing) {
+        await patchOver(existing.version);
+      } else {
+        try {
+          await api.createSeries(series);
+        } catch (e) {
+          if (!(e instanceof ApiError) || e.status !== 409) throw e;
+          const fresh = (await api.getSeriesList()).find((x) => x.id === series.id);
+          if (!fresh) throw e;
+          await patchOver(fresh.version);
+        }
+      }
+      created.push({ groupId: p.groupId, seriesId: series.id });
+    }
+    const nextStages = run.structureSnapshot.stages.map((sp) => {
+      const cur = run.stages.find((x) => x.specId === sp.id) ?? {
+        specId: sp.id,
+        status: 'awaiting-entrants',
+        groups: [],
+      };
+      if (sp.id !== stage.id) return cur;
+      // A `seeded-split` or `all-registered` stage is ready on sight, so the admin can
+      // generate without ever opening "Confirm entrants" and `cur.groups` is []. Mapping
+      // over that recorded NO seriesId, which cost three things downstream: the
+      // Released/Draft pill never resolved, the stage could never report itself stale,
+      // and — worst — the released-schedule confirmation was skipped, so a regenerate
+      // silently overwrote a published schedule. So seed the groups from what was
+      // actually generated when there is nothing stored.
+      const base = cur.groups.length
+        ? cur.groups
+        : payloads.map((p) => ({ id: p.groupId, label: p.groupLabel, entrants: p.entrants }));
+      return {
+        ...cur,
+        status: 'generated',
+        groups: base.map((g) => ({
+          ...g,
+          seriesId: created.find((c) => c.groupId === g.id)?.seriesId ?? g.seriesId,
+        })),
+      };
+    });
+    await api.patchSeasonRun(run.id, { stages: nextStages, version: run.version });
+    invalidate(qk.series());
+    invalidate(qk.seasonRuns());
+    toastShow(`${stage.name} · ${payloads.length} series generated`);
+  }
+
+  /**
+   * Allocate venues across one series' fixtures.
+   *
+   * The ledger is built from EVERY series in the tenant, excluding this one — that is
+   * what stops Premier Men 50 Over and Premier Men T20 double-booking the same ground on
+   * the same Saturday, and what stops a side being scheduled twice in a day across two
+   * competitions. Excluding this series lets a re-run move its own fixtures instead of
+   * treating their current placements as conflicts.
+   */
+  function allocateSeriesVenues(series) {
+    if (!allVenues.length) {
+      toastShow('Add some grounds first — there is nowhere to allocate to', 'warn');
+      return;
+    }
+    const ledger = buildLedger(allSeries, { excludeSeriesIds: [series.id] });
+    // A side's home ground: the venue whose homeClubIds names its club, else the ground
+    // recorded on the club itself (which is where the coordinates come from).
+    const venueForClub = new Map();
+    for (const v of allVenues)
+      for (const cid of v.homeClubIds ?? []) if (!venueForClub.has(cid)) venueForClub.set(cid, v);
+    const teamHome = (teamId) => {
+      const t = resolveTeam(series, teamId, (id) => clubs.find((c) => c.id === id));
+      const v = t.clubId ? venueForClub.get(t.clubId) : undefined;
+      return {
+        venueId: v?.id,
+        lat: Number.isFinite(t.ground?.lat) ? t.ground.lat : v?.lat,
+        lon: Number.isFinite(t.ground?.lon) ? t.ground.lon : v?.lon,
+      };
+    };
+    const report = allocateVenues({
+      fixtures: series.fixtures,
+      venues: allVenues,
+      teamHome,
+      ledger,
+    });
+    updateSeries(series.id, (cur) => ({ ...cur, fixtures: report.fixtures }));
+    const placed = report.fixtures.length - report.unresolved;
+    toastShow(
+      `${placed} of ${report.fixtures.length} fixtures allocated` +
+        (report.unresolved ? ` · ${report.unresolved} need a ground` : ''),
+      report.unresolved ? 'warn' : undefined,
+    );
+    for (const w of report.warnings) toastShow(w, 'warn');
+  }
+
+  /* ─── Venues (ADR 0008 phase 2) ─── */
+  function saveVenue(venue) {
+    return withToast(() => api.putVenue(venue.id, venue), 'Could not save the ground').then((v) => {
+      invalidate(qk.venues());
+      return v;
+    });
+  }
+  function deleteVenue(id) {
+    withToast(() => api.deleteVenueReq(id), 'Could not delete the ground')
+      .then(() => invalidate(qk.venues()))
+      .catch(() => {});
+  }
+
   function setReleased(seriesId, value) {
     // Send the cached version so release/recall is race-safe (409 on conflict),
     // not silent last-write-wins.
@@ -741,6 +982,20 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   allSeries,
                   allLeagues,
                   allDistricts,
+                  allCalendars,
+                  allSeasonRuns,
+                  allVenues,
+                  allStructures,
+                  venuesFailed,
+                  structuresFailed,
+                  seasonRunsFailed,
+                  saveVenue,
+                  deleteVenue,
+                  allocateSeriesVenues,
+                  createSeasonRun,
+                  patchSeasonRun,
+                  deleteSeasonRun,
+                  generateStageSeries,
                   toastShow,
                   onboarded,
                   setOnboarded,
@@ -796,6 +1051,20 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   allSeries,
                   allLeagues,
                   allDistricts,
+                  allCalendars,
+                  allSeasonRuns,
+                  allVenues,
+                  allStructures,
+                  venuesFailed,
+                  structuresFailed,
+                  seasonRunsFailed,
+                  saveVenue,
+                  deleteVenue,
+                  allocateSeriesVenues,
+                  createSeasonRun,
+                  patchSeasonRun,
+                  deleteSeasonRun,
+                  generateStageSeries,
                   toastShow,
                   onboarded,
                   setOnboarded,
@@ -860,6 +1129,17 @@ function Shell({
   allSeries,
   allLeagues,
   allDistricts = DISTRICTS,
+  allCalendars = [],
+  allSeasonRuns = [],
+  allVenues = [],
+  allStructures = [],
+  saveVenue,
+  deleteVenue,
+  allocateSeriesVenues,
+  createSeasonRun,
+  patchSeasonRun,
+  deleteSeasonRun,
+  generateStageSeries,
   toastShow,
   onboarded,
   setOnboarded,
@@ -1877,6 +2157,18 @@ function Shell({
             onSetReleased={setReleased}
             onSetApproved={setApproved}
             toast={toastShow}
+            allCalendars={allCalendars}
+            allSeasonRuns={allSeasonRuns}
+            allVenues={allVenues}
+            onSaveVenue={saveVenue}
+            onDeleteVenue={deleteVenue}
+            onAllocateVenues={allocateSeriesVenues}
+            tenantConfig={tenantConfig && { ...tenantConfig, structures: allStructures }}
+            allLeagues={allLeagues}
+            onCreateSeasonRun={createSeasonRun}
+            onPatchSeasonRun={patchSeasonRun}
+            onDeleteSeasonRun={deleteSeasonRun}
+            onGenerateStageSeries={generateStageSeries}
           />
         );
       if (view === 'clearances')
@@ -2377,6 +2669,7 @@ function Shell({
           <CreateSeriesForm
             clubs={clubs}
             allLeagues={allLeagues}
+            allCalendars={allCalendars}
             onCreate={(s) => {
               onCreateSeries(s)
                 .then(() => {

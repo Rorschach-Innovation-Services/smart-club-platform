@@ -208,3 +208,25 @@ export function teamCounts(
   }
   return { senior, women, junior };
 }
+
+/**
+ * Every side registered for a league, in a stable order — the pool a season draws on.
+ *
+ * `excludeTeamIds` (from the bound Competition) drops sides entered in the LEAGUE but not
+ * in this competition: a club that plays the 50 Over and sits out the T20. Honouring it
+ * here is what makes the field true — declared but unread, it promised an exclusion the
+ * runtime ignored, which is worse than not having the field at all.
+ *
+ * It filters on teamId, not clubId, so a club can enter one side and hold another back.
+ */
+export function leagueParticipants<C extends ClubSidesSource & { leagues?: string[] }>(
+  clubs: C[],
+  leagueKey: string,
+  exclude: string[] = [],
+): (TeamParticipant & { club: C })[] {
+  const dropped = new Set(exclude);
+  return (clubs || [])
+    .filter((c) => Array.isArray(c.leagues) && c.leagues.includes(leagueKey))
+    .flatMap((c) => clubTeamsForLeague(c, leagueKey).map((p) => ({ ...p, club: c })))
+    .filter((p) => !dropped.has(p.teamId));
+}

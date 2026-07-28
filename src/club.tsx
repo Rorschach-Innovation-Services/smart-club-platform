@@ -62,7 +62,16 @@ import {
   defaultTeamName,
   teamLetter,
 } from './leagues';
+import { isActivated, todayIso } from './competition/calendar';
+import { fixtureVenueCoords } from './competition/venues';
 import { shortAddress, suburbOf, SA_BOUNDS, isInSouthAfrica } from './geocode';
+import {
+  formatDay,
+  formatDayYear,
+  formatStampDay,
+  formatWeekdayLong,
+  formatWeekdayName,
+} from './dates';
 import { useCopy } from './branding';
 import {
   Icon,
@@ -187,6 +196,41 @@ function DocUploadButton({
 }
 
 /* ─── Ground map (Leaflet + OpenStreetMap + Nominatim geocoding) ─── */
+
+/**
+ * Released series grouped by the season run that produced them (ADR 0008).
+ *
+ * One stage-group materialises into one Series, which is what keeps the whole persistence
+ * and release path unchanged — but it means a Top Six club is in three series for what it
+ * calls one season. Grouping restores that reading without touching how fixtures are
+ * stored. Series with no `seasonRunId` are standalone and keep their existing ungrouped
+ * presentation, so nothing changes for a tenant that never starts a structured season.
+ *
+ * Insertion order is preserved, so a run's stages stay in the order the API returned them
+ * (gsi1-sorted by start date) rather than being reshuffled by grouping.
+ */
+export function groupSeriesBySeason(released) {
+  const byRun = new Map();
+  for (const s of released || []) {
+    const key = s.seasonRunId ? `run:${s.seasonRunId}` : `solo:${s.id}`;
+    if (!byRun.has(key)) byRun.set(key, { key, runId: s.seasonRunId, seriesList: [] });
+    byRun.get(key).seriesList.push(s);
+  }
+  return [...byRun.values()].map((g) => ({
+    ...g,
+    // Only worth a heading when the run actually split into more than one series — a
+    // single-stage season reads better as just its series card.
+    //
+    // Counted by DISTINCT STAGE, not by series: a club fielding two sides in one league
+    // lands in two groups of the same stage, which is two series but still one stage.
+    // Saying "2 stages" there is simply untrue.
+    heading: (() => {
+      if (!g.runId || g.seriesList.length <= 1) return null;
+      const stages = new Set(g.seriesList.map((s) => s.stageSpecId ?? s.id)).size;
+      return `One season · ${stages} stage${stages === 1 ? '' : 's'}`;
+    })(),
+  }));
+}
 
 export function GroundMap({ query, coords: savedPin, onResolved, onAddressPicked }) {
   const elRef = useRefC(null);
@@ -3319,13 +3363,7 @@ export function DocumentsView({
           const demo = import.meta.env.VITE_LOCAL_AUTH === '1';
           const { real, metaText } = docFileMeta(meta);
           const sg = isSafeguarding ? safeguardingMeta(meta) : null;
-          const agmDateLabel = agm?.meetingDate
-            ? new Date(agm.meetingDate).toLocaleDateString('en-GB', {
-                day: 'numeric',
-                month: 'short',
-                year: 'numeric',
-              })
-            : '';
+          const agmDateLabel = agm?.meetingDate ? formatDayYear(agm.meetingDate) : '';
           return (
             <div key={d.key} className={`doc-row ${up ? 'uploaded' : ''}`}>
               <div className="doc-icon">{isExco ? <Icon.Form /> : <Icon.Doc />}</div>
@@ -3401,11 +3439,7 @@ export function DocumentsView({
                       <span>
                         No certificates yet — your people will complete the safeguarding course on{' '}
                         <strong style={{ color: 'var(--navy)' }}>
-                          {new Date(sg.courseDate).toLocaleDateString('en-GB', {
-                            day: 'numeric',
-                            month: 'short',
-                            year: 'numeric',
-                          })}
+                          {formatDayYear(sg.courseDate)}
                         </strong>{' '}
                         ·{' '}
                         <a
@@ -3557,12 +3591,7 @@ export function DocumentsView({
                     </Pill>
                   ) : sg.courseBooked ? (
                     <Pill tone="teal" dot>
-                      Course booked ·{' '}
-                      {new Date(sg.courseDate).toLocaleDateString('en-GB', {
-                        day: 'numeric',
-                        month: 'short',
-                        year: 'numeric',
-                      })}
+                      Course booked · {formatDayYear(sg.courseDate)}
                     </Pill>
                   ) : sg.files.length ? (
                     <Pill tone="gold" dot>
@@ -4162,12 +4191,32 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
   // Only series this club is in AND that have been released by the union office.
   // A multi-team club participates under its `tm_…` ids, so match the club's resolved
   // team set rather than its clubId.
+  //
+  // `activateFrom` adds delayed visibility on top of release (ADR 0008): junior leagues
+  // are generated and released up front but must not surface until the second half of
+  // the season. Gating on read rather than on a scheduled job keeps it stateless — there
+  // is nothing to run, and nothing to go wrong overnight. Mirrored server-side in the
+  // player broadcast, so the portal and the SMS/email can never disagree.
+  /**
+   * The allocated ground's coordinates, denormalised onto the fixture by allocation.
+   * Returned as a ground-shaped object so `fixtureCost` costs the trip to where the
+   * match is ACTUALLY played. Undefined for an un-allocated or unpinned fixture, which
+   * makes fixtureCost fall back to the home-ground measure.
+   */
+  // Shared with the admin console and mirrored server-side in the broadcast — one rule,
+  // so the two screens can never quote different travel for the same fixture.
+  const fixtureVenue = fixtureVenueCoords;
+
+  const today = todayIso();
   const myReleased = (allSeries || []).filter(
     (s) =>
       s.released &&
+      isActivated(s.activateFrom, today) &&
       Array.isArray(s.teams) &&
       teamIdsForClub(s, club.id).some((tid) => s.teams.includes(tid)),
   );
+
+  const seasonGroups = groupSeriesBySeason(myReleased);
 
   // Share-with-players modal state. Hooks must run before the early return below.
   const [shareOpen, setShareOpen] = useStateC(false);
@@ -4266,19 +4315,25 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
       if (!isHome && !mine.has(f.away)) return;
       totalMatches++;
       if (isHome) homeMatches++;
-      else {
-        awayMatches++;
-        const home = resolveTeam(s, f.home, clubBy);
-        if (home.ground && club.ground) {
-          const c = fixtureCost(
-            home,
-            club,
-            s.costPerKm || DEFAULT_COST_PER_KM,
-            s.carsPerAwayTrip || DEFAULT_CARS,
-          );
-          totalKm += c.roundTripKm;
-          totalCost += c.fuelR;
-        }
+      else awayMatches++;
+      // Accumulate THIS club's leg only — `fixtureCost`'s top-level figure sums both
+      // sides once the ground is pinned. A home fixture allocation moved to a neutral
+      // ground counts too: the club really does travel to it.
+      const home = resolveTeam(s, f.home, clubBy);
+      const away = resolveTeam(s, f.away, clubBy);
+      const homeSide = isHome ? club : home;
+      const awaySide = isHome ? away : club;
+      if (homeSide?.ground && awaySide?.ground) {
+        const c = fixtureCost(
+          homeSide,
+          awaySide,
+          s.costPerKm || DEFAULT_COST_PER_KM,
+          s.carsPerAwayTrip || DEFAULT_CARS,
+          fixtureVenue(f),
+        );
+        const mineLeg = isHome ? c.home : c.away;
+        totalKm += mineLeg.roundTripKm;
+        totalCost += mineLeg.fuelR;
       }
       if (f.date >= todayISO && (!nextFixture || f.date < nextFixture.date)) {
         nextFixture = { ...f, seriesName: s.name, _series: s };
@@ -4382,13 +4437,8 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                 {nextIsHome ? 'vs' : 'away to'} <strong>{nextOppName}</strong>
               </div>
               <div className="club-fix-next-sub">
-                {new Date(nextFixture.date).toLocaleDateString('en-GB', {
-                  weekday: 'long',
-                  day: 'numeric',
-                  month: 'long',
-                  year: 'numeric',
-                })}{' '}
-                · {nextFixture.seriesName} · Round {nextFixture.round}
+                {formatWeekdayLong(nextFixture.date)} · {nextFixture.seriesName} · Round{' '}
+                {nextFixture.round}
               </div>
             </div>
             <div className="club-fix-next-tag">
@@ -4406,179 +4456,205 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
         </div>
       )}
 
-      {/* One block per released series */}
-      {myReleased.map((s) => {
-        const myTeamIds = new Set(teamIdsForClub(s, club.id));
-        const mine = s.fixtures
-          .filter((f) => myTeamIds.has(f.home) || myTeamIds.has(f.away))
-          .sort((a, b) => a.date.localeCompare(b.date));
+      {/* One block per released series — grouped by season run (ADR 0008). A split
+          league materialises into one series PER GROUP, so a Top Six club would otherwise
+          see three unrelated cards for what it thinks of as one season. Standalone series
+          (no run) render exactly as before, ungrouped. */}
+      {seasonGroups.map((grp) => (
+        <div key={grp.key}>
+          {grp.heading && <div className="club-fix-run-head">{grp.heading}</div>}
+          {grp.seriesList.map((s) => {
+            const myTeamIds = new Set(teamIdsForClub(s, club.id));
+            const mine = s.fixtures
+              .filter((f) => myTeamIds.has(f.home) || myTeamIds.has(f.away))
+              .sort((a, b) => a.date.localeCompare(b.date));
 
-        return (
-          <div key={s.id} className="club-fix-series">
-            <div className="club-fix-series-head">
-              <div>
-                <div className="club-fix-series-eyebrow">
-                  Released ·{' '}
-                  {new Date(s.releasedAt).toLocaleDateString('en-GB', {
-                    day: 'numeric',
-                    month: 'short',
-                    year: 'numeric',
-                  })}
+            return (
+              <div key={s.id} className="club-fix-series">
+                <div className="club-fix-series-head">
+                  <div>
+                    <div className="club-fix-series-eyebrow">
+                      Released · {formatStampDay(s.releasedAt)}
+                    </div>
+                    <div className="club-fix-series-name">{s.name}</div>
+                    <div className="club-fix-series-meta">
+                      {s.teams.length} teams · {s.maxOvers} overs · {s.seriesType} · {mine.length}{' '}
+                      of your matches
+                    </div>
+                  </div>
+                  <div className="club-fix-series-tags">
+                    {(s.tags || []).map((t, i) => (
+                      <Pill key={i} tone="muted">
+                        {t}
+                      </Pill>
+                    ))}
+                  </div>
                 </div>
-                <div className="club-fix-series-name">{s.name}</div>
-                <div className="club-fix-series-meta">
-                  {s.teams.length} teams · {s.maxOvers} overs · {s.seriesType} · {mine.length} of
-                  your matches
-                </div>
-              </div>
-              <div className="club-fix-series-tags">
-                {(s.tags || []).map((t, i) => (
-                  <Pill key={i} tone="muted">
-                    {t}
-                  </Pill>
-                ))}
-              </div>
-            </div>
 
-            <div className="tbl-w">
-              <table className="tbl">
-                <thead>
-                  <tr>
-                    <th style={{ width: 50 }}>Rd</th>
-                    <th>Date</th>
-                    <th>Opponent</th>
-                    <th>H/A</th>
-                    <th>Venue</th>
-                    <th style={{ textAlign: 'right' }}>Distance</th>
-                    <th style={{ textAlign: 'right' }}>Travel cost</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {mine.map((f) => {
-                    const isHome = myTeamIds.has(f.home);
-                    const oppId = isHome ? f.away : f.home;
-                    // Resolve through the series snapshot — names/coords survive a later
-                    // roster edit, and an intra-club derby names the other side correctly.
-                    const opp = resolveTeam(s, oppId, clubBy);
-                    const mySide = resolveTeam(s, f.home, clubBy);
-                    const venueName = isHome
-                      ? mySide.ground?.venue || club.ground?.venue || 'Home ground TBA'
-                      : opp.ground?.venue || 'Opponent ground TBA';
-                    let dist = null,
-                      cost = null;
-                    if (!isHome && opp.ground && club.ground) {
-                      const c = fixtureCost(
-                        opp,
-                        club,
-                        s.costPerKm || DEFAULT_COST_PER_KM,
-                        s.carsPerAwayTrip || DEFAULT_CARS,
-                      );
-                      dist = c.roundTripKm;
-                      cost = c.fuelR;
-                    }
-                    return (
-                      <tr key={f.id}>
-                        <td>
-                          <span
-                            style={{
-                              fontFamily: "'Montserrat',sans-serif",
-                              fontWeight: 700,
-                              color: 'var(--muted)',
-                            }}
-                          >
-                            R{f.round}
-                          </span>
-                        </td>
-                        <td>
-                          <div
-                            style={{
-                              fontFamily: "'Montserrat',sans-serif",
-                              fontWeight: 700,
-                              fontSize: 13,
-                              color: 'var(--ink)',
-                            }}
-                          >
-                            {new Date(f.date).toLocaleDateString('en-GB', {
-                              day: 'numeric',
-                              month: 'short',
-                            })}
-                          </div>
-                          <div
-                            style={{
-                              fontSize: 10.5,
-                              color: 'var(--muted)',
-                              fontWeight: 500,
-                              fontFamily: "'Montserrat',sans-serif",
-                            }}
-                          >
-                            {new Date(f.date).toLocaleDateString('en-GB', { weekday: 'long' })}
-                          </div>
-                        </td>
-                        <td>
-                          {/* Show the opponent's team name with its club's avatar/short. */}
-                          <ClubNameCell
-                            club={
-                              opp.club
-                                ? { ...opp.club, name: opp.name }
-                                : { name: opp.name, short: 'TBA' }
-                            }
-                          />
-                        </td>
-                        <td>
-                          {isHome ? (
-                            <Pill tone="teal" dot>
-                              Home
-                            </Pill>
-                          ) : (
-                            <Pill tone="gold" dot>
-                              Away
-                            </Pill>
-                          )}
-                        </td>
-                        <td>
-                          <div
-                            style={{
-                              fontSize: 12.5,
-                              fontFamily: "'Montserrat',sans-serif",
-                              fontWeight: 600,
-                              color: 'var(--ink)',
-                            }}
-                          >
-                            {venueName}
-                          </div>
-                          {!isHome && opp?.ground?.suburb && (
-                            <div style={{ fontSize: 10.5, color: 'var(--muted)' }}>
-                              {opp.ground.suburb}
-                            </div>
-                          )}
-                        </td>
-                        <td style={{ textAlign: 'right', fontFamily: "'Montserrat',sans-serif" }}>
-                          {dist !== null ? (
-                            <span style={{ fontWeight: 700, fontSize: 12.5 }}>
-                              {Math.round(dist)} km
-                            </span>
-                          ) : (
-                            <span style={{ color: 'var(--muted-2)' }}>—</span>
-                          )}
-                        </td>
-                        <td style={{ textAlign: 'right', fontFamily: "'Montserrat',sans-serif" }}>
-                          {cost !== null ? (
-                            <span style={{ fontWeight: 800, color: 'var(--green)', fontSize: 13 }}>
-                              R {Math.round(cost).toLocaleString()}
-                            </span>
-                          ) : (
-                            <span style={{ color: 'var(--muted-2)' }}>—</span>
-                          )}
-                        </td>
+                <div className="tbl-w">
+                  <table className="tbl">
+                    <thead>
+                      <tr>
+                        <th style={{ width: 50 }}>Rd</th>
+                        <th>Date</th>
+                        <th>Opponent</th>
+                        <th>H/A</th>
+                        <th>Venue</th>
+                        <th style={{ textAlign: 'right' }}>Distance</th>
+                        <th style={{ textAlign: 'right' }}>Travel cost</th>
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        );
-      })}
+                    </thead>
+                    <tbody>
+                      {mine.map((f) => {
+                        const isHome = myTeamIds.has(f.home);
+                        const oppId = isHome ? f.away : f.home;
+                        // Resolve through the series snapshot — names/coords survive a later
+                        // roster edit, and an intra-club derby names the other side correctly.
+                        const opp = resolveTeam(s, oppId, clubBy);
+                        const mySide = resolveTeam(s, f.home, clubBy);
+                        // The allocated ground wins (ADR 0008 phase 2). Deriving from the
+                        // home side would tell the two clubs to go to different grounds
+                        // whenever allocation has moved a fixture — which is routine.
+                        const venueName =
+                          f.venueOverride ||
+                          f.venueName ||
+                          (isHome
+                            ? mySide.ground?.venue || club.ground?.venue || 'Home ground TBA'
+                            : opp.ground?.venue || 'Opponent ground TBA');
+                        // THIS club's journey, not the fixture's total. `fixtureCost`
+                        // sums both sides' legs when the ground is pinned — right for a
+                        // union's series total, wrong on a screen a club budgets fuel
+                        // from. And a HOME fixture allocation has moved to a neutral
+                        // ground is a real trip, so it is no longer skipped.
+                        let dist = null,
+                          cost = null;
+                        const homeSide = isHome ? club : opp;
+                        const awaySide = isHome ? opp : club;
+                        if (homeSide?.ground && awaySide?.ground) {
+                          const c = fixtureCost(
+                            homeSide,
+                            awaySide,
+                            s.costPerKm || DEFAULT_COST_PER_KM,
+                            s.carsPerAwayTrip || DEFAULT_CARS,
+                            fixtureVenue(f),
+                          );
+                          // `myLeg`, not `mine` — the enclosing scope already binds
+                          // `mine` to this club's fixtures, and two different meanings
+                          // one screen apart is needless work for the next reader.
+                          const myLeg = isHome ? c.home : c.away;
+                          if (myLeg.roundTripKm > 0) {
+                            dist = myLeg.roundTripKm;
+                            cost = myLeg.fuelR;
+                          }
+                        }
+                        return (
+                          <tr key={f.id}>
+                            <td>
+                              <span
+                                style={{
+                                  fontFamily: "'Montserrat',sans-serif",
+                                  fontWeight: 700,
+                                  color: 'var(--muted)',
+                                }}
+                              >
+                                R{f.round}
+                              </span>
+                            </td>
+                            <td>
+                              <div
+                                style={{
+                                  fontFamily: "'Montserrat',sans-serif",
+                                  fontWeight: 700,
+                                  fontSize: 13,
+                                  color: 'var(--ink)',
+                                }}
+                              >
+                                {formatDay(f.date)}
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: 10.5,
+                                  color: 'var(--muted)',
+                                  fontWeight: 500,
+                                  fontFamily: "'Montserrat',sans-serif",
+                                }}
+                              >
+                                {formatWeekdayName(f.date)}
+                              </div>
+                            </td>
+                            <td>
+                              {/* Show the opponent's team name with its club's avatar/short. */}
+                              <ClubNameCell
+                                club={
+                                  opp.club
+                                    ? { ...opp.club, name: opp.name }
+                                    : { name: opp.name, short: 'TBA' }
+                                }
+                              />
+                            </td>
+                            <td>
+                              {isHome ? (
+                                <Pill tone="teal" dot>
+                                  Home
+                                </Pill>
+                              ) : (
+                                <Pill tone="gold" dot>
+                                  Away
+                                </Pill>
+                              )}
+                            </td>
+                            <td>
+                              <div
+                                style={{
+                                  fontSize: 12.5,
+                                  fontFamily: "'Montserrat',sans-serif",
+                                  fontWeight: 600,
+                                  color: 'var(--ink)',
+                                }}
+                              >
+                                {venueName}
+                              </div>
+                              {!isHome && opp?.ground?.suburb && (
+                                <div style={{ fontSize: 10.5, color: 'var(--muted)' }}>
+                                  {opp.ground.suburb}
+                                </div>
+                              )}
+                            </td>
+                            <td
+                              style={{ textAlign: 'right', fontFamily: "'Montserrat',sans-serif" }}
+                            >
+                              {dist !== null ? (
+                                <span style={{ fontWeight: 700, fontSize: 12.5 }}>
+                                  {Math.round(dist)} km
+                                </span>
+                              ) : (
+                                <span style={{ color: 'var(--muted-2)' }}>—</span>
+                              )}
+                            </td>
+                            <td
+                              style={{ textAlign: 'right', fontFamily: "'Montserrat',sans-serif" }}
+                            >
+                              {cost !== null ? (
+                                <span
+                                  style={{ fontWeight: 800, color: 'var(--green)', fontSize: 13 }}
+                                >
+                                  R {Math.round(cost).toLocaleString()}
+                                </span>
+                              ) : (
+                                <span style={{ color: 'var(--muted-2)' }}>—</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ))}
 
       {/* Footnote */}
       <div className="club-fix-foot">
@@ -4639,8 +4715,11 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
 }
 
 /* ─── Phase 03 · Player roster ─── */
-const fmtDay = (iso) =>
-  iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '';
+// Clearance stamps (requestedAt, rejectedAt, clubApprovedAt, adminOverrideAt) are
+// INSTANTS, so they render in local time — the admin console's twin does the same
+// (admin.tsx). Through a UTC date-only formatter the two consoles would disagree by a
+// day for anything actioned between 00:00 and 02:00 SAST.
+const fmtDay = (iso) => (iso ? formatStampDay(iso) : '');
 
 export function ClubPlayersView({
   club,

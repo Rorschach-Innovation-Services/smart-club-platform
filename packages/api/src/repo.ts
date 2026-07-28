@@ -24,6 +24,11 @@ import {
   seriesKey,
   seriesGsi1,
   seriesListGsi1pk,
+  seasonRunKey,
+  seasonRunGsi1,
+  seasonRunsListGsi1pk,
+  venueKey,
+  venuesListKey,
   playerKey,
   playersListKey,
   clearanceKey,
@@ -55,6 +60,8 @@ import type {
   League,
   SendResult,
   Series,
+  SeasonRun,
+  Venue,
   TenantConfig,
   UserProfile,
   PlayerRegistration,
@@ -815,6 +822,133 @@ export async function updateSeries(
 
 export async function deleteSeries(tenant: string, seriesId: string): Promise<void> {
   await ddb.send(new DeleteCommand({ TableName: TABLE, Key: seriesKey(tenant, seriesId) }));
+}
+
+// ── Season runs (ADR 0008) ──
+// Same shape as Series, one level up: a run orchestrates the stages, the Series each
+// stage-group materialises into still owns the fixtures. A run therefore stays small
+// (it holds group memberships and an audit trail, never a fixture list), so unlike
+// listSeries this needs no pagination note — but it uses queryAll anyway for symmetry.
+
+export async function listSeasonRuns(tenant: string): Promise<SeasonRun[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    IndexName: 'gsi1',
+    KeyConditionExpression: 'gsi1pk = :p',
+    ExpressionAttributeValues: { ':p': seasonRunsListGsi1pk(tenant) },
+  });
+  return items.map((i) => stripKeys<SeasonRun>(i)!);
+}
+
+export async function getSeasonRun(tenant: string, runId: string): Promise<SeasonRun | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: seasonRunKey(tenant, runId) }),
+  );
+  return stripKeys<SeasonRun>(res.Item);
+}
+
+export async function putSeasonRun(tenant: string, run: SeasonRun): Promise<SeasonRun> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...seasonRunKey(tenant, run.id),
+        ...seasonRunGsi1(tenant, run.seasonLabel),
+        ...run,
+        version: run.version ?? 1,
+      },
+    }),
+  );
+  return run;
+}
+
+/**
+ * Version-checked replace. Two admins resolving the same stage's entrants is a real
+ * scenario (one confirms the swap while the other is still looking at the prefill), so
+ * this carries the same optimistic concurrency as Series — 409 and refetch, never a
+ * silent last-write-wins over a relegation decision.
+ */
+export async function updateSeasonRun(
+  tenant: string,
+  runId: string,
+  patch: Partial<SeasonRun>,
+): Promise<SeasonRun> {
+  const current = await getSeasonRun(tenant, runId);
+  if (!current) throw new Error('season run not found');
+  const expectedVersion = (patch.version as number | undefined) ?? current.version ?? 0;
+  const next: SeasonRun = {
+    ...current,
+    ...patch,
+    id: runId,
+    version: expectedVersion + 1,
+  };
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...seasonRunKey(tenant, runId),
+          ...seasonRunGsi1(tenant, next.seasonLabel),
+          ...next,
+        },
+        ConditionExpression: 'version = :v',
+        ExpressionAttributeValues: { ':v': expectedVersion },
+      }),
+    );
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      throw new VersionConflictError();
+    }
+    throw err;
+  }
+  return next;
+}
+
+export async function deleteSeasonRun(tenant: string, runId: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: seasonRunKey(tenant, runId) }));
+}
+
+// ── Venues (ADR 0008 phase 2) ──
+// One item per ground, co-located with the tenant CONFIG row. Unlike series there is no
+// optimistic concurrency: a venue is a small, rarely-contended record, and a lost update
+// on an availability window is recoverable in a way a lost fixture list is not.
+
+export async function listVenues(tenant: string): Promise<Venue[]> {
+  const { pk, skPrefix } = venuesListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<Venue>(i)!);
+}
+
+/** pk/sk pairs for a tenant's venues — the erasure sweep needs keys, not records. */
+async function listVenueKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
+  const { pk, skPrefix } = venuesListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+export async function getVenue(tenant: string, venueId: string): Promise<Venue | null> {
+  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: venueKey(tenant, venueId) }));
+  return stripKeys<Venue>(res.Item);
+}
+
+export async function putVenue(tenant: string, venue: Venue): Promise<Venue> {
+  await ddb.send(
+    new PutCommand({ TableName: TABLE, Item: { ...venueKey(tenant, venue.id), ...venue } }),
+  );
+  return venue;
+}
+
+export async function deleteVenue(tenant: string, venueId: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: venueKey(tenant, venueId) }));
 }
 
 /**
@@ -3010,10 +3144,15 @@ export async function eraseTenantData(tenant: string): Promise<number> {
     for (const k of await listClubInviteKeys(tenant, club.id)) keys.push(k);
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
+  // Season runs are cohort data like series; leaving them behind would strand a
+  // tenant's competition history in the table after erasure.
+  for (const r of await listSeasonRuns(tenant)) keys.push(seasonRunKey(tenant, r.id));
   for (const u of await listTenantUsers(tenant)) keys.push(userTenantMarkerKey(u.sub, tenant));
   // Export-audit items sit at pk `TENANT#<t>` (above the `TENANT#<t>#…` prefix sweep),
-  // so enumerate them explicitly like invite markers.
+  // so enumerate them explicitly like invite markers. Venues share that partition and
+  // the same exposure — miss them and a deleted tenant's ground list survives.
   for (const k of await listExportLogKeys(tenant)) keys.push(k);
+  for (const k of await listVenueKeys(tenant)) keys.push(k);
 
   await batchDelete(keys);
   await deleteUploadObjects(objectKeys);
@@ -3050,6 +3189,7 @@ export async function clearCohort(tenant: string): Promise<number> {
     for (const k of await listClubInviteKeys(tenant, club.id)) keys.push(k);
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
+  for (const r of await listSeasonRuns(tenant)) keys.push(seasonRunKey(tenant, r.id));
 
   // Safety: never delete the tenant config or any user record.
   for (const k of keys) {

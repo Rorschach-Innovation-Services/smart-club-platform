@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { Icon, Btn, useEscapeClose, playerStatusPill } from './atoms';
 import { getPlayerIdDocViewUrl } from './api';
 import type { PlayerRegistration } from './types';
+import { formatDayYear, formatStampDay } from './dates';
 
 /** Single human-readable role label, mirroring the admin/club rosters. */
 function roleLabel(p: PlayerRegistration): string {
@@ -20,12 +21,20 @@ function roleLabel(p: PlayerRegistration): string {
   return bits.join(' · ') || '—';
 }
 
+/**
+ * A DATE-ONLY value (a DOB). Rendered as UTC so the calendar day can't shift with the
+ * host's zone — west of Greenwich a local read shows the previous day.
+ */
 function fmtDate(iso?: string): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime())
-    ? '—'
-    : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  return formatDayYear(iso) || '—';
+}
+
+/**
+ * An INSTANT (`2026-06-04T12:34:56Z` — a registration or a clearance decision).
+ * Rendered in local time, which is the day it happened for the person reading it.
+ */
+function fmtStamp(iso?: string): string {
+  return formatStampDay(iso) || '—';
 }
 
 const SectionTitle = ({ children }: { children: React.ReactNode }) => (
@@ -164,7 +173,7 @@ export function PlayerDetailModal({
             label="Registered via"
             value={player.registeredVia === 'portal' ? 'Portal' : 'Link'}
           />
-          <Row label="Registered on" value={fmtDate(player.createdAt)} />
+          <Row label="Registered on" value={fmtStamp(player.createdAt)} />
           {player.status === 'clearance-rejected' && (
             <div
               style={{
@@ -179,7 +188,7 @@ export function PlayerDetailModal({
             >
               <strong style={{ color: 'var(--coral, #c0392b)' }}>Clearance rejected</strong>
               {player.lastClub && player.lastClub !== '—' ? ` by ${player.lastClub}` : ''}
-              {player.clearanceRejectedAt ? ` · ${fmtDate(player.clearanceRejectedAt)}` : ''}
+              {player.clearanceRejectedAt ? ` · ${fmtStamp(player.clearanceRejectedAt)}` : ''}
               {player.clearanceRejectedReason ? ` — “${player.clearanceRejectedReason}”` : ''}
             </div>
           )}

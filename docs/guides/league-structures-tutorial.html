@@ -1,0 +1,1211 @@
+<!doctype html>
+<html lang="en-ZA">
+<head>
+<meta charset="utf-8">
+<title>Setting up how a league works — Smart Club Platform</title>
+<style>
+  /* ── Print setup ──────────────────────────────────────────────────────────
+     A4 with generous outer margins. This is read on paper or in a PDF reader,
+     not on a screen at arm's length, so the measure is narrower and the body
+     type is a serif — it holds up over long passages in print in a way a UI
+     sans does not. */
+  @page { size: A4; margin: 20mm 18mm 18mm; }
+
+  :root {
+    --ink:        #14201B;   /* body text — near-black with a green cast */
+    --ink-2:      #3E4C46;   /* secondary */
+    --ink-3:      #6B7A73;   /* muted */
+    --green:      #0E3529;   /* brand primary — structure, headings */
+    --green-mid:  #215F47;
+    --green-tint: #E8F0EB;
+    --gold:       #B89B4A;   /* the single accent. Used only to mean "look here" */
+    --sand:       #E7DDC6;   /* brand neutral */
+    --paper:      #FBFAF7;
+    --rule:       #D8D2C4;
+    --rule-soft:  #EAE5D9;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font: 10.5pt/1.62 "Charter", "Iowan Old Style", Georgia, "Times New Roman", serif;
+    color: var(--ink);
+    background: #fff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Headings, labels and anything structural take the sans — the contrast
+     between the two families is what makes the page scannable. */
+  h1, h2, h3, h4, .ui, .label, .tag, th, .num, figcaption {
+    font-family: "Helvetica Neue", "Avenir Next", Helvetica, Arial, sans-serif;
+  }
+
+  code, .path, .field {
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 0.88em;
+    background: var(--green-tint);
+    padding: 0.5pt 3pt;
+    border-radius: 2px;
+    color: var(--green);
+  }
+
+  /* ── Cover ─────────────────────────────────────────────────────────────── */
+  .cover {
+    height: 247mm;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    break-after: page;
+  }
+  .cover-top { border-top: 3px solid var(--green); padding-top: 10mm; }
+  .cover-eyebrow {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 9pt; font-weight: 700; letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--gold);
+  }
+  .cover h1 {
+    font-size: 34pt; line-height: 1.08; font-weight: 600;
+    letter-spacing: -0.02em; color: var(--green);
+    margin: 8mm 0 0; max-width: 15cm;
+  }
+  .cover .sub {
+    font-size: 13pt; line-height: 1.5; color: var(--ink-2);
+    margin: 6mm 0 0; max-width: 13cm;
+  }
+  .cover-foot {
+    display: flex; justify-content: space-between; align-items: flex-end;
+    border-top: 1px solid var(--rule); padding-top: 4mm;
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8.5pt; color: var(--ink-3);
+  }
+  .cover-foot strong { color: var(--green); font-weight: 600; }
+
+  /* A cover ornament that means something: the stage pipeline this whole
+     document is about, drawn once. */
+  /* Pinned low on the cover rather than tucked under the title: it leaves ONE
+     intentional void between the title block and the furniture, instead of a gap
+     in the middle that reads as unfinished. */
+  .pipeline {
+    display: flex; align-items: center; gap: 0; margin: 0 0 14mm;
+  }
+  .pipeline-cap {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8pt; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--ink-3); margin-bottom: 4mm;
+  }
+  .pipeline .node {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8pt; font-weight: 600; letter-spacing: 0.04em;
+    padding: 3mm 4mm; border: 1px solid var(--green);
+    color: var(--green); background: #fff; white-space: nowrap;
+  }
+  .pipeline .node.fill { background: var(--green); color: var(--sand); }
+  .pipeline .arm { height: 1px; background: var(--green); width: 7mm; }
+
+  /* ── Parts and sections ────────────────────────────────────────────────── */
+  .part { break-before: page; }
+  .part-head { border-top: 3px solid var(--green); padding-top: 5mm; margin-bottom: 8mm; }
+  .part-num {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8.5pt; font-weight: 700; letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--gold);
+  }
+  h2 {
+    font-size: 20pt; font-weight: 600; letter-spacing: -0.015em;
+    color: var(--green); margin: 3mm 0 0; line-height: 1.16;
+  }
+  .part-head .lede {
+    font-size: 11pt; color: var(--ink-2); margin: 4mm 0 0; max-width: 14cm;
+  }
+  h3 {
+    font-size: 12.5pt; font-weight: 600; color: var(--green);
+    margin: 9mm 0 2.5mm; letter-spacing: -0.01em;
+    break-after: avoid;
+  }
+  h4 {
+    font-size: 10pt; font-weight: 700; color: var(--ink);
+    margin: 6mm 0 1.5mm; letter-spacing: 0.01em;
+    break-after: avoid;
+  }
+  p { margin: 0 0 3.5mm; max-width: 15.5cm; }
+  ul, ol { margin: 0 0 3.5mm; padding-left: 5mm; max-width: 15cm; }
+  li { margin-bottom: 1.5mm; }
+  strong { font-weight: 600; }
+
+  /* ── Contents ──────────────────────────────────────────────────────────── */
+  .toc { break-after: page; }
+  .toc ol { list-style: none; padding: 0; max-width: 14cm; counter-reset: toc; }
+  .toc li {
+    display: flex; gap: 4mm; align-items: baseline;
+    padding: 2.5mm 0; border-bottom: 1px solid var(--rule-soft);
+    font-family: "Helvetica Neue", Helvetica, sans-serif; font-size: 10pt;
+  }
+  .toc .n {
+    color: var(--gold); font-weight: 700; font-size: 8.5pt;
+    min-width: 12mm; letter-spacing: 0.1em;
+  }
+  .toc .t { color: var(--ink); font-weight: 500; }
+  .toc .d { color: var(--ink-3); font-size: 9pt; margin-left: auto; text-align: right; max-width: 7cm; }
+
+  /* ── Numbered steps — the spine of the walkthroughs ────────────────────── */
+  .steps { counter-reset: step; margin: 0 0 6mm; }
+  .step {
+    position: relative; padding: 0 0 0 13mm; margin: 0 0 6mm;
+    break-inside: avoid;
+  }
+  .step::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 0; top: -0.5mm;
+    width: 8mm; height: 8mm; border-radius: 50%;
+    background: var(--green); color: var(--sand);
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 9pt; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step h4 { margin-top: 0; }
+  .step p:last-child, .step ul:last-child { margin-bottom: 0; }
+
+  /* ── Callouts. Three kinds, three meanings, no decoration. ─────────────── */
+  .note, .warn, .why {
+    padding: 4mm 5mm; margin: 0 0 4.5mm; break-inside: avoid;
+    font-size: 9.8pt; line-height: 1.55; max-width: 15.5cm;
+  }
+  .note { background: var(--green-tint); border-left: 2.5pt solid var(--green-mid); }
+  .warn { background: #FBF3E0; border-left: 2.5pt solid var(--gold); }
+  .why  { background: var(--paper); border-left: 2.5pt solid var(--rule); color: var(--ink-2); }
+  .note p:last-child, .warn p:last-child, .why p:last-child { margin-bottom: 0; }
+  .callout-label {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8pt; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase; display: block; margin-bottom: 1.5mm;
+  }
+  .note .callout-label { color: var(--green-mid); }
+  .warn .callout-label { color: #8A6D1E; }
+  .why  .callout-label { color: var(--ink-3); }
+
+  /* ── Tables ────────────────────────────────────────────────────────────── */
+  table {
+    width: 100%; border-collapse: collapse; margin: 0 0 5mm;
+    font-size: 9.5pt; break-inside: avoid;
+  }
+  th {
+    text-align: left; font-size: 8pt; font-weight: 700;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3);
+    border-bottom: 1.5px solid var(--green); padding: 0 3mm 2mm 0;
+  }
+  td { padding: 2.5mm 3mm 2.5mm 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  td:last-child, th:last-child { padding-right: 0; }
+  tbody tr:last-child td { border-bottom: none; }
+  .t-narrow td:first-child, .t-narrow th:first-child { width: 32%; }
+
+  /* One table in this document is longer than a page (the message reference). Keeping
+     it whole strands its own part heading on an otherwise empty page, so this one is
+     allowed to break — with the header row repeated on each page it lands on, and rows
+     kept intact. */
+  .t-long { break-inside: auto; }
+  .t-long thead { display: table-header-group; }
+  .t-long tr { break-inside: avoid; }
+
+  /* ── UI chrome references — what the operator actually sees ────────────── */
+  .ui {
+    display: inline-block; font-size: 8.8pt; font-weight: 600;
+    padding: 0.8pt 4pt; border: 1px solid var(--rule);
+    border-radius: 3px; background: #fff; color: var(--ink);
+    white-space: nowrap;
+  }
+  .pill {
+    display: inline-block; font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8pt; font-weight: 700; letter-spacing: 0.04em;
+    padding: 1pt 5pt; border-radius: 9pt; white-space: nowrap;
+  }
+  .pill.teal  { background: var(--green-tint); color: var(--green); }
+  .pill.muted { background: #EFEFEC; color: var(--ink-2); }
+  .pill.coral { background: #F8E4E0; color: #9B3A2A; }
+
+  /* ── The worked-structure diagram ──────────────────────────────────────── */
+  .flow { margin: 0 0 5mm; break-inside: avoid; }
+  .flow-stage {
+    border: 1px solid var(--rule); border-left: 3px solid var(--green-mid);
+    padding: 3mm 4mm; margin-bottom: 2mm; background: #fff;
+  }
+  .flow-stage .st {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 7.5pt; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--gold);
+  }
+  .flow-stage .sn { font-weight: 600; font-size: 10.5pt; color: var(--green); margin-top: 0.5mm; }
+  .flow-stage .sd { font-size: 9.3pt; color: var(--ink-2); margin-top: 1mm; }
+  .flow-down {
+    text-align: center; color: var(--rule); font-size: 11pt;
+    line-height: 1; margin: 0 0 2mm;
+  }
+
+  /* ── Definition list for the glossary ──────────────────────────────────── */
+  .terms { margin: 0; }
+  .terms dt {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-weight: 700; font-size: 9.5pt; color: var(--green);
+    margin-top: 4mm;
+  }
+  .terms dd { margin: 1mm 0 0; font-size: 10pt; color: var(--ink-2); }
+
+  .lead-in { font-size: 11.5pt; color: var(--ink-2); max-width: 14.5cm; margin-bottom: 6mm; }
+
+  .colophon {
+    margin-top: 10mm; padding-top: 4mm; border-top: 1px solid var(--rule);
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8.5pt; color: var(--ink-3);
+  }
+</style>
+</head>
+<body>
+
+<!-- ══ COVER ══════════════════════════════════════════════════════════════ -->
+<section class="cover">
+  <div class="cover-top">
+    <div class="cover-eyebrow">Smart Club Platform · Operator &amp; Administrator Guide</div>
+    <h1>Setting up how a league works</h1>
+    <p class="sub">
+      Season calendars, competition structures, running a season stage by stage,
+      and allocating grounds. A complete walkthrough for the union office.
+    </p>
+  </div>
+
+  <div class="cover-bottom">
+    <div class="pipeline-cap">How a fixture comes to exist</div>
+    <div class="pipeline">
+      <span class="node fill">Competition</span><span class="arm"></span>
+      <span class="node">Season</span><span class="arm"></span>
+      <span class="node">Stage</span><span class="arm"></span>
+      <span class="node">Group</span><span class="arm"></span>
+      <span class="node">Fixtures</span>
+    </div>
+
+    <div class="cover-foot">
+    <div>
+      <strong>Who this is for</strong><br>
+      Platform operators setting a client up, and union administrators running the season.
+      No technical knowledge assumed.
+    </div>
+    <div style="text-align:right">
+      2026 / 27 Season<br>
+      Version 1.0
+    </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ CONTENTS ═══════════════════════════════════════════════════════════ -->
+<section class="toc">
+  <div class="part-head">
+    <div class="part-num">Contents</div>
+    <h2>What's in this guide</h2>
+  </div>
+  <ol>
+    <li><span class="n">One</span><span class="t">How a season is put together</span><span class="d">The four ideas everything else rests on</span></li>
+    <li><span class="n">Two</span><span class="t">Season calendars</span><span class="d">Playing blocks, breaks and excluded dates</span></li>
+    <li><span class="n">Three</span><span class="t">Venues</span><span class="d">The ground list, and why pinning matters</span></li>
+    <li><span class="n">Four</span><span class="t">Competition structures</span><span class="d">Building the shape of a competition</span></li>
+    <li><span class="n">Five</span><span class="t">Binding a competition to a league</span><span class="d">Where structures meet real clubs</span></li>
+    <li><span class="n">Six</span><span class="t">Running a season</span><span class="d">The administrator's stage-by-stage walkthrough</span></li>
+    <li><span class="n">Seven</span><span class="t">Allocating grounds</span><span class="d">What the allocator does, and how to argue with it</span></li>
+    <li><span class="n">Eight</span><span class="t">Worked examples</span><span class="d">Four real KZNCU and EMCU competitions</span></li>
+    <li><span class="n">Nine</span><span class="t">What the messages mean</span><span class="d">Every warning, and what to do about it</span></li>
+    <li><span class="n">Ten</span><span class="t">Reference</span><span class="d">Glossary and who can do what</span></li>
+  </ol>
+</section>
+
+<!-- ══ PART ONE ═══════════════════════════════════════════════════════════ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part One</div>
+    <h2>How a season is put together</h2>
+    <p class="lede">
+      Before any clicking, four ideas. They take five minutes and they make the rest
+      of this guide obvious rather than fiddly.
+    </p>
+  </div>
+
+  <h3>A league is not a competition</h3>
+
+  <p>
+    In the old model a league was just a name, and it ran one flat round robin. That works
+    for EMCU Division 2. It does not work for KZNCU Premier Men, which runs
+    <strong>two competitions at once</strong>: a T20 Pink Ball tournament in seeded pools,
+    and a 50 Over Red Ball league split into a Top Six and a Bottom Six.
+  </p>
+
+  <p>
+    So a league now holds one or more <strong>competitions</strong>. Each competition is a
+    format stream with its own shape and its own dates. The same twelve clubs can be in both,
+    grouped completely differently.
+  </p>
+
+  <h3>A competition is a pipeline of stages</h3>
+
+  <p>
+    A stage is one phase of play. Premier Men 50 Over has two: a double round robin, then a
+    final round after the mid-season swap. Each stage answers three questions, and only three.
+  </p>
+
+  <table class="t-narrow">
+    <thead><tr><th>The question</th><th>What you choose</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Who plays?</strong></td><td>Every registered side · seeded into groups · entered by an administrator</td></tr>
+      <tr><td><strong>Who plays whom?</strong></td><td>Round robin (1, 2 or 3 legs) · knockout · single match · entered by hand</td></tr>
+      <tr><td><strong>When?</strong></td><td>Which playing block, and at what cadence</td></tr>
+    </tbody>
+  </table>
+
+  <div class="why">
+    <span class="callout-label">Why so few options</span>
+    <p>
+      The list is deliberately short and closed. Every one of the thirteen documented KZNCU
+      and EMCU structures is expressible with these pieces, and a shorter list is a list
+      you can hold in your head. If something genuinely doesn't fit, that is a conversation
+      with the platform team, not a setting.
+    </p>
+  </div>
+
+  <h3>One group becomes one series</h3>
+
+  <p>
+    When a stage generates, each of its groups becomes a <strong>series</strong> — the same
+    thing the platform has always had. So approving, releasing, the player broadcast and the
+    travel-cost figures all work exactly as they do today. Nothing new to learn there.
+  </p>
+
+  <p>
+    A Top Six therefore produces one series and a Bottom Six another. In the club portal
+    those appear under a single season heading, so a club sees one competition rather than
+    two loose lists.
+  </p>
+
+  <h3>Standings are typed by a human, on purpose</h3>
+
+  <p>
+    The platform does not record results. There is no ladder. That means a stage which depends
+    on finishing order — the mid-season swap, the top four qualifying for semi-finals — cannot
+    work itself out.
+  </p>
+
+  <p>
+    Rather than pretend, such a stage stops and asks. It quotes the rule back to you in the
+    operator's own words, proposes the best grouping it honestly can, and waits. What you
+    chose, what was proposed, and whether you accepted it are all recorded against your name.
+  </p>
+
+  <div class="note">
+    <span class="callout-label">The one thing to take from Part One</span>
+    <p>
+      The operator builds the <em>shape</em> once. The administrator runs the
+      <em>season</em> through it every year, filling in the things only a human knows.
+      Those are two different jobs, done by two different people, at two different times.
+    </p>
+  </div>
+</section>
+
+<!-- ══ PART TWO ═══════════════════════════════════════════════════════════ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Two · Operator</div>
+    <h2>Season calendars</h2>
+    <p class="lede">
+      Start here. Structures reference calendars, and leagues reference both, so the
+      calendar has to exist before anything can point at it.
+    </p>
+  </div>
+
+  <p>
+    A season is not one continuous window. The KZNCU season is two <strong>blocks</strong> with
+    a mid-season break between them: roughly 13 September to 13 December, then nothing until
+    the third week of January, then through to the end of March.
+  </p>
+
+  <p>
+    Getting this right is what stops a ten-round league quietly scheduling its last three
+    rounds into the Christmas holidays.
+  </p>
+
+  <h3>Building one</h3>
+
+  <div class="steps">
+    <div class="step">
+      <h4>Open the operator console and find <span class="ui">Season calendars</span></h4>
+      <p>It sits on the client's settings page, above Venues and the structure library.</p>
+    </div>
+
+    <div class="step">
+      <h4>Give it a label you'll recognise next year</h4>
+      <p>
+        <span class="field">2026/27</span> is enough. This is what administrators see when they
+        start a season, so it should read the way the union talks about the season.
+      </p>
+    </div>
+
+    <div class="step">
+      <h4>Add a block for each continuous stretch of play</h4>
+      <p>
+        Name it the way the union names it — <span class="field">Block 1</span>,
+        <span class="field">First half</span>, whatever people actually say. Then set the first
+        and last date on which a match could be played.
+      </p>
+      <p>
+        Dates are <span class="field">YYYY-MM-DD</span>. A block that ends before it starts is
+        refused, as is 31 February.
+      </p>
+    </div>
+
+    <div class="step">
+      <h4>Add the breaks</h4>
+      <p>
+        A break is a stretch inside the season when nobody plays. Fixture generation steps
+        <em>over</em> a break rather than dropping the rounds that would have fallen in it, so
+        a ten-round league still gets ten rounds, just later.
+      </p>
+    </div>
+
+    <div class="step">
+      <h4>Add excluded dates</h4>
+      <p>
+        Single days that are out: public holidays, exam weekends, the union's own AGM. Same
+        behaviour as a break, just for one day.
+      </p>
+    </div>
+  </div>
+
+  <div class="warn">
+    <span class="callout-label">Before you save</span>
+    <p>
+      A calendar a series is already scheduled against cannot be deleted. The platform will
+      refuse and tell you which competitions are using it. That is deliberate — deleting it
+      would strand a season nobody could regenerate.
+    </p>
+  </div>
+
+  <h3>What good looks like</h3>
+
+  <table>
+    <thead><tr><th>Field</th><th>KZNCU 2026/27</th></tr></thead>
+    <tbody>
+      <tr><td>Label</td><td>2026/27</td></tr>
+      <tr><td>Block 1</td><td>13 Sep 2026 → 13 Dec 2026</td></tr>
+      <tr><td>Block 2</td><td>18 Jan 2027 → 28 Mar 2027</td></tr>
+      <tr><td>Break</td><td>Mid-season break · 14 Dec 2026 → 17 Jan 2027</td></tr>
+      <tr><td>Excluded</td><td>24 Sep 2026 (Heritage Day)</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ══ PART THREE ═════════════════════════════════════════════════════════ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Three · Operator</div>
+    <h2>Venues</h2>
+    <p class="lede">
+      The master list of grounds fixtures can be played at. Second, because the allocator
+      needs it and because you can seed most of it automatically.
+    </p>
+  </div>
+
+  <h3>Seed it from the clubs you already have</h3>
+
+  <p>
+    Clubs have already told you their grounds during affiliation. The
+    <span class="ui">Sync from club records</span> button reads
+    every club's primary and secondary ground and creates a venue for each, with the club
+    attached as a home side.
+  </p>
+
+  <p>
+    Two clubs naming the same ground get one venue with both attached. Ground-sharing is
+    routine in club cricket and the allocator needs to know about it — it is exactly why
+    "play at home" sometimes cannot be satisfied for both sides on the same Saturday.
+  </p>
+
+  <h3>Then pin the coordinates by hand</h3>
+
+  <div class="warn">
+    <span class="callout-label">There is no geocoder</span>
+    <p>
+      The platform cannot look up a ground's position from its address. Somebody has to type
+      the latitude and longitude. Secondary grounds have no coordinates at all in the club
+      records, so they always start unpinned.
+    </p>
+    <p style="margin-top:2.5mm">
+      This matters more than it sounds. The allocator ranks grounds partly by travel, and a
+      ground with no position would otherwise look like it is zero kilometres from everywhere
+      and win every time.
+    </p>
+  </div>
+
+  <p>
+    So the Venues card shows a <strong>coverage figure</strong>: the share of grounds that have
+    a position. Below 60%, the allocator switches distance ranking off entirely and falls back
+    to home-ground preference alone. It tells you it has done this rather than quietly
+    producing worse answers.
+  </p>
+
+  <p>
+    Getting a latitude and longitude is a thirty-second job: find the ground in Google Maps,
+    right-click the middle of the square, and the first line of the menu is the pair of numbers.
+    Durban grounds look like <span class="field">-29.85</span> and
+    <span class="field">31.03</span> — southern latitudes are negative.
+  </p>
+
+  <h3>The fields, and what each one changes</h3>
+
+  <table class="t-narrow">
+    <thead><tr><th>Field</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td>Ground name</td><td>What clubs and players see on the schedule. Required.</td></tr>
+      <tr><td>Suburb, Address</td><td>Display only. Helpful on a printed fixture list.</td></tr>
+      <tr><td>Latitude / Longitude</td><td>Enables distance ranking. Optional, but see the coverage note above.</td></tr>
+      <tr><td>Matches per day</td><td>How many fixtures can be played here on one date. A two-pitch ground takes two. Default 1.</td></tr>
+      <tr><td>Home clubs</td><td>Which clubs call this home. Drives the "play at home" preference.</td></tr>
+      <tr><td>Unavailable windows</td><td>Maintenance, another sport's season, an exam period. Needs a reason — the reason is shown to the administrator when a fixture gets moved.</td></tr>
+      <tr><td>Unavailable weekdays</td><td>A ground that is never free on Sundays.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <span class="callout-label">Reasons are not paperwork</span>
+    <p>
+      When the allocator moves a fixture it quotes your reason back: <em>"Home ground outfield
+      relaid — moved to the away side's ground."</em> A club secretary can argue with that. They
+      cannot argue with a fixture that simply appeared somewhere unexpected.
+    </p>
+  </div>
+</section>
+
+<!-- ══ PART FOUR ══════════════════════════════════════════════════════════ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Four · Operator</div>
+    <h2>Competition structures</h2>
+    <p class="lede">
+      The shape of a competition, built once and reused. This is the heart of the feature
+      and the part worth taking slowly.
+    </p>
+  </div>
+
+  <h3>Start from a template, almost always</h3>
+
+  <p>
+    Four templates ship, and between them they cover all thirteen documented KZNCU and EMCU
+    structures. A template is a <strong>copy</strong>, not a link — once you pick one it is
+    yours and fully editable, and changing it later never affects anything else.
+  </p>
+
+  <table>
+    <thead><tr><th>Template</th><th>Use it for</th></tr></thead>
+    <tbody>
+      <tr><td>Flat round robin</td><td>Every EMCU division. One stage, everyone plays everyone.</td></tr>
+      <tr><td>Split league with mid-season swap</td><td>KZNCU Premier Men 50 Over, Premier Women 30 Over.</td></tr>
+      <tr><td>Seeded pools → cross-pool semis → final</td><td>Every T20 Pink Ball competition.</td></tr>
+      <tr><td>Stream + knockout cup</td><td>Promotion Men — streams plus the Kingsmead Cup.</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <span class="ui">Build from scratch</span> is there when nothing fits, and
+    <span class="ui">Import JSON</span> is how you move a structure between clients or seed
+    several at once without twenty rounds of clicking.
+  </p>
+
+  <h3>Reading a stage</h3>
+
+  <p>
+    Collapsed, each stage is one plain sentence. That sentence is the point — you should be
+    able to read a whole structure without expanding anything.
+  </p>
+
+  <div class="flow">
+    <div class="flow-stage">
+      <div class="st">Stage 1</div>
+      <div class="sn">Double round</div>
+      <div class="sd">2 groups of 6 · plays every team twice, home and away · weekly, Block 1</div>
+    </div>
+    <div class="flow-down">↓</div>
+    <div class="flow-stage">
+      <div class="st">Stage 2</div>
+      <div class="sn">Final round</div>
+      <div class="sd">Entered by an administrator · plays every team once · weekly, Block 2</div>
+    </div>
+  </div>
+
+  <h3>The four controls inside a stage</h3>
+
+  <h4>Format — who plays whom</h4>
+  <table class="t-narrow">
+    <thead><tr><th>Choice</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Single round robin</td><td>Everyone plays everyone once.</td></tr>
+      <tr><td>Double round robin</td><td>Twice, home and away. The second leg mirrors the first.</td></tr>
+      <tr><td>Triple round robin</td><td>Three times. Rare, but the model supports it.</td></tr>
+      <tr><td>Knockout — seeded</td><td>Standard bracket from the entrant order. Top two seeds can only meet in the final. A field that isn't a power of two gets a preliminary round automatically.</td></tr>
+      <tr><td>Knockout — cross-pool</td><td>Pool winners paired against other pools' runners-up. Needs the previous stage's finishing positions — see Part Six.</td></tr>
+      <tr><td>Single match</td><td>One fixture. A final, a playoff.</td></tr>
+      <tr><td>Entered by hand</td><td>The escape hatch. Generates no fixtures; the administrator adds them manually afterwards.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Teams — where the entrants come from</h4>
+  <table class="t-narrow">
+    <thead><tr><th>Choice</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Every registered side</td><td>Everyone entered in the league. One group.</td></tr>
+      <tr><td>Seeded into groups</td><td>Split by seeding order. <strong>Snake</strong> puts seeds 1 and 2 in different pools; <strong>top-down blocks</strong> puts the top half in one group.</td></tr>
+      <tr><td>Entered by an administrator</td><td>A human types the groups. Used whenever the answer depends on standings.</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    For the last two you also set the group plan: <strong>even groups</strong> (say 4 groups,
+    remainder lands in the earlier ones) or <strong>exact sizes</strong>
+    (<span class="field">5, 5, 5, 4</span> — the only way to express the 19-team Promotion Men
+    split).
+  </p>
+
+  <h4>The rule, for administrator-entered stages</h4>
+  <p>
+    When a stage depends on an earlier one, write the rule in plain English. This sentence is
+    shown to the administrator when they confirm, and it is the whole instruction they get:
+  </p>
+  <p style="padding-left:6mm; border-left:2.5pt solid var(--gold); font-style:italic; color:var(--ink-2)">
+    Top Six 6th ↔ Bottom Six 1st, carrying the outgoing position's points
+  </p>
+  <p>
+    Tick <strong>points move with the position</strong> if the swap carries points. The
+    administrator then gets a box to enter them, and they are recorded as carried rather than
+    calculated.
+  </p>
+
+  <h4>Schedule — when it is played</h4>
+  <table class="t-narrow">
+    <thead><tr><th>Cadence</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Weekly</td><td>One round per week.</td></tr>
+      <tr><td>Every N weeks</td><td>Fortnightly for EMCU Division 3 Stream 2 and Division 4.</td></tr>
+      <tr><td>Set days only</td><td>Saturdays only, for EMCU Division 5.</td></tr>
+      <tr><td>Spread across block</td><td>Rounds spaced evenly to fill the block.</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    You can also add <strong>time slots</strong> (a T20 morning and afternoon), and an
+    <strong>activation date</strong> — junior fixtures generated in September but not visible
+    to clubs until the third week of January.
+  </p>
+
+  <h3>Watch the preview rail</h3>
+
+  <p>
+    The panel beside the editor recalculates on every change, for a hypothetical number of
+    teams you set. It shows fixture counts per group, rounds against cadence, the resulting
+    date span, and whether it fits the block.
+  </p>
+
+  <div class="note">
+    <span class="callout-label">This is where mistakes get caught</span>
+    <p>
+      <em>"11 rounds × every 2 weeks = 22 weeks. Block 1 is 13 weeks — 9 weeks over."</em>
+    </p>
+    <p style="margin-top:2.5mm">
+      That is the EMCU Division 4 problem, found at design time in the operator console rather
+      than in February with a club secretary on the phone. Shorten the cadence, split across
+      blocks, or extend the block.
+    </p>
+  </div>
+</section>
+
+<!-- ══ PART FIVE ══════════════════════════════════════════════════════════ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Five · Operator</div>
+    <h2>Binding a competition to a league</h2>
+    <p class="lede">
+      The last operator step, and the one that makes everything else reachable. Until a
+      league has a competition, an administrator cannot start a season on it.
+    </p>
+  </div>
+
+  <p>
+    Open <span class="ui">Leagues</span> in the operator console and add a competition to the
+    league. Each competition needs four things:
+  </p>
+
+  <table class="t-narrow">
+    <thead><tr><th>Field</th><th>Example</th></tr></thead>
+    <tbody>
+      <tr><td>Label</td><td>50 Over (Red Ball)</td></tr>
+      <tr><td>Structure</td><td>Split league with mid-season swap</td></tr>
+      <tr><td>Calendar</td><td>2026/27</td></tr>
+      <tr><td>Match format</td><td>50 overs, red ball</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Add a second competition to the same league for the T20 stream, pointing at a different
+    structure. Those are the two competitions Premier Men runs in parallel.
+  </p>
+
+  <div class="warn">
+    <span class="callout-label">Two cross-checks happen on save</span>
+    <p>
+      The structure and calendar must both still exist, and every stage's playing block must
+      exist on the bound calendar. A structure whose stages reference "Block 2" cannot be bound
+      to a single-block calendar — you get told which stage and which calendar, on save, rather
+      than months later at generation time.
+    </p>
+  </div>
+
+  <div class="note">
+    <span class="callout-label">Nothing breaks if you stop here</span>
+    <p>
+      A league with no competition behaves exactly as it always has: the administrator uses
+      <span class="ui">Create a series</span> and gets a flat round robin. Structured seasons
+      are opt-in, league by league.
+    </p>
+  </div>
+</section>
+
+<!-- ══ PART SIX ═══════════════════════════════════════════════════════════ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Six · Administrator</div>
+    <h2>Running a season</h2>
+    <p class="lede">
+      The operator's work is done. This is the part the union office does every year.
+    </p>
+  </div>
+
+  <h3>Start it</h3>
+
+  <div class="steps">
+    <div class="step">
+      <h4>Admin console → <span class="ui">Seasons</span> → <span class="ui">Start a season</span></h4>
+      <p>
+        Pick the league, then the competition, then confirm the season label. If the league has
+        no competition configured you will be told so plainly and pointed at your platform
+        operator.
+      </p>
+    </div>
+    <div class="step">
+      <h4>The structure and calendar are frozen at this moment</h4>
+      <p>
+        A copy is taken. If the operator edits the template next week, your running season is
+        untouched. This is deliberate and there is no way to un-freeze it — start a new season
+        instead.
+      </p>
+    </div>
+  </div>
+
+  <h3>Work the stages</h3>
+
+  <p>Each stage shows a status, and the status tells you what it needs:</p>
+
+  <table class="t-narrow">
+    <thead><tr><th>Status</th><th>What it means</th></tr></thead>
+    <tbody>
+      <tr><td><span class="pill muted">Awaiting entrants</span></td><td>The stage cannot work out who plays. It will show you the rule and a suggestion. Your move.</td></tr>
+      <tr><td><span class="pill muted">Ready to generate</span></td><td>Everything it needs is known. Press the button.</td></tr>
+      <tr><td><span class="pill teal">Generated</span></td><td>Fixtures exist as series. Approve and release them from the series list.</td></tr>
+      <tr><td><span class="pill coral">Needs regenerating</span></td><td>Something changed after generation and the live fixtures no longer match.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Confirming entrants</h3>
+
+  <p>
+    <span class="ui">Confirm entrants</span> opens a table of every registered side with a group
+    dropdown against each. The rule is quoted at the top, and a suggestion is pre-filled — for
+    a swap, the previous stage's groups with the two sides already exchanged.
+  </p>
+
+  <p>
+    <span class="ui">Use the suggestion</span> accepts it in one click. Or reassign by hand.
+    <strong>Not playing</strong> is a legitimate answer for a side registered in the league but
+    sitting this competition out.
+  </p>
+
+  <p>Live counts against the structure's expected sizes catch a miscount before it becomes a fixture list.</p>
+
+  <div class="warn">
+    <span class="callout-label">The Position column</span>
+    <p>
+      On a pool stage that feeds a cross-pool knockout, an extra <strong>Position</strong>
+      column appears. Fill it in. The later bracket pairs the winner of one pool against
+      another pool's runner-up, so the order inside each group decides who plays whom.
+    </p>
+    <p style="margin-top:2.5mm">
+      Without it the draw falls back to a seeded bracket over the same teams and says so on the
+      stage card. Right people, wrong pairings.
+    </p>
+  </div>
+
+  <h3>Generating</h3>
+
+  <p>
+    <span class="ui">Generate</span> creates one series per group, named after the league and
+    the stage. From there it is the ordinary path you already know: check the fixtures, approve,
+    release. Clubs and players see nothing until you release.
+  </p>
+
+  <div class="warn">
+    <span class="callout-label">Regenerating a released schedule</span>
+    <p>
+      If the fixtures have already gone out, regenerating replaces them and there is no undo.
+      You will get a confirmation naming how many series are affected. Read it.
+    </p>
+  </div>
+
+  <h3>Stages wait for each other, and that is fine</h3>
+
+  <p>
+    A split league's first round generates and releases in September while the post-swap final
+    round sits at <span class="pill muted">Awaiting entrants</span> until December. The season
+    view shows both plainly, so nobody thinks half a season is missing.
+  </p>
+
+  <div class="note">
+    <span class="callout-label">Every confirmation is recorded</span>
+    <p>
+      Who confirmed a stage's entrants, when, what was suggested, and whether they accepted it.
+      Relegation and points carry ride on these decisions, so the trail is a governance record
+      rather than a nicety. It cannot be edited or shortened afterwards.
+    </p>
+  </div>
+</section>
+
+<!-- ══ PART SEVEN ═════════════════════════════════════════════════════════ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Seven · Administrator</div>
+    <h2>Allocating grounds</h2>
+    <p class="lede">
+      A separate pass, run after fixtures exist. It decides where each match is played.
+    </p>
+  </div>
+
+  <h3>What it is trying to do</h3>
+
+  <p>In order of priority, and the order is yours to change:</p>
+
+  <ol>
+    <li><strong>Home preference.</strong> Play at the home side's ground.</li>
+    <li><strong>Distance.</strong> Prefer the ground with less combined travel.</li>
+    <li><strong>Availability.</strong> Prefer a quieter ground, all else equal.</li>
+  </ol>
+
+  <p>When the home ground will not work, it falls back in this order:</p>
+
+  <p style="padding-left:6mm">
+    home ground → the club's secondary ground → the away side's ground → the nearest available neutral ground
+  </p>
+
+  <h3>The ledger covers every competition at once</h3>
+
+  <div class="note">
+    <span class="callout-label">The single most important thing here</span>
+    <p>
+      Allocation looks at <strong>every series in the union</strong>, not just the one you are
+      allocating. Premier Men 50 Over and Premier Men T20 compete for the same grounds on the
+      same Saturday, and a side must not be scheduled twice in one day across two competitions.
+    </p>
+  </div>
+
+  <h3>Reading the result</h3>
+
+  <table class="t-narrow">
+    <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Home</td><td>At the home side's ground, as intended.</td></tr>
+      <tr><td>Alternative</td><td>Moved to the away side's ground. The reason says why.</td></tr>
+      <tr><td>Neutral</td><td>Neither side's ground. The reason says why, with the travel figure.</td></tr>
+      <tr><td>Unresolved</td><td>It could not place this fixture and is telling you rather than guessing.</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Every fixture carries a reason. That is the deliberate trade: a cleverer algorithm could
+    squeeze out a few more kilometres, but it could not explain itself to a club secretary on
+    the phone.
+  </p>
+
+  <h3>Hand-picked grounds are kept</h3>
+
+  <p>
+    Set a ground by hand on a fixture and re-allocation will not move it. It claims its slot
+    before everything else competes, so a manual decision is never quietly undone. A padlock on
+    the row shows which fixtures are held.
+  </p>
+
+  <h3>Two reports worth reading afterwards</h3>
+
+  <p>
+    <strong>Home and away balance</strong> per side — the crude alternation can leave a club
+    with six home and four away. Worth a look before release.
+  </p>
+  <p>
+    <strong>Travel per club</strong> — minimising total kilometres can quietly dump the burden
+    on one club. The per-club figure is the one that matters for fairness.
+  </p>
+</section>
+
+<!-- ══ PART EIGHT ═════════════════════════════════════════════════════════ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Eight</div>
+    <h2>Worked examples</h2>
+    <p class="lede">
+      Four real competitions, exactly as they are configured.
+    </p>
+  </div>
+
+  <h3>EMCU Division 4 — the simplest thing that works</h3>
+  <div class="flow">
+    <div class="flow-stage">
+      <div class="st">Single stage</div>
+      <div class="sn">League season</div>
+      <div class="sd">Every registered side · plays every team once · every 2 weeks, Block 1</div>
+    </div>
+  </div>
+  <p>
+    One stage, template untouched. The only unusual thing is the fortnightly cadence — and it is
+    the reason to watch the preview rail, because eleven rounds at that cadence needs 22 weeks
+    and Block 1 is 13.
+  </p>
+
+  <h3>KZNCU Premier Men · 50 Over Red Ball</h3>
+  <div class="flow">
+    <div class="flow-stage">
+      <div class="st">Stage 1</div>
+      <div class="sn">Double round</div>
+      <div class="sd">2 groups of 6, entered by an administrator · plays every team twice · weekly, Block 1</div>
+    </div>
+    <div class="flow-down">↓ &nbsp;<span style="font-size:8.5pt; color:var(--ink-3)">6th of the Top Six swaps with 1st of the Bottom Six, carrying points</span></div>
+    <div class="flow-stage">
+      <div class="st">Stage 2</div>
+      <div class="sn">Final round</div>
+      <div class="sd">2 groups of 6, entered by an administrator · plays every team once · weekly, Block 2</div>
+    </div>
+  </div>
+  <p>
+    30 fixtures per group in stage 1, ten per team — matching the union's own spreadsheet. The
+    swap is the interesting part: it is a rule written in words, a suggestion the platform
+    pre-fills, and a human decision recorded against a name.
+  </p>
+
+  <h3>KZNCU Premier Men · T20 Pink Ball</h3>
+  <div class="flow">
+    <div class="flow-stage">
+      <div class="st">Stage 1</div>
+      <div class="sn">Group stage</div>
+      <div class="sd">2 pools of 6, snake-seeded · plays every team once · weekly, Block 1</div>
+    </div>
+    <div class="flow-down">↓ &nbsp;<span style="font-size:8.5pt; color:var(--ink-3)">top two of each pool qualify · <strong>set the Position column</strong></span></div>
+    <div class="flow-stage">
+      <div class="st">Stage 2</div>
+      <div class="sn">Cross-pool semi-finals and final</div>
+      <div class="sd">Entered by an administrator · knockout, cross-pool · Block 2</div>
+    </div>
+  </div>
+  <p>
+    Snake seeding puts the top two seeds in different pools. The semis pair A1 against B2 and
+    B1 against A2, then the final references the two winners — so the bracket reads
+    "Winner of Semi-final 1" until the results are known.
+  </p>
+
+  <h3>KZNCU Promotion Men · Hollywoodbets Kingsmead Cup</h3>
+  <div class="flow">
+    <div class="flow-stage">
+      <div class="st">Single stage</div>
+      <div class="sn">Kingsmead Cup</div>
+      <div class="sd">9 sides, entered by an administrator · knockout, seeded · weekly, Block 2</div>
+    </div>
+  </div>
+  <p>
+    The bottom ten minus the last-placed side leaves nine. Nine is not a power of two, so one
+    preliminary match reduces it to eight, then quarter-finals, semi-finals and a final. The
+    preliminary is derived automatically — you enter nine names and get the right bracket.
+  </p>
+  <div class="why">
+    <span class="callout-label">One deliberate divergence</span>
+    <p>
+      The union's spreadsheet pairs its semi-finals in a way that would let seeds 1 and 2 meet
+      before the final. The platform uses the standard bracket instead, which keeps them apart.
+      The set of quarter-finals is identical; only the semi-final pairing differs.
+    </p>
+  </div>
+</section>
+
+<!-- ══ PART NINE ══════════════════════════════════════════════════════════ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Nine</div>
+    <h2>What the messages mean</h2>
+    <p class="lede">
+      Everything the console might tell you, and what to do about it.
+    </p>
+  </div>
+
+  <table class="t-narrow t-long">
+    <thead><tr><th>Message</th><th>What to do</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>11 rounds × every 2 weeks = 22 weeks. Block 1 is 13 weeks — 9 weeks over.</td>
+        <td>The stage does not fit its block. Shorten the cadence, move it to a longer block, split it across two, or extend the block on the calendar.</td>
+      </tr>
+      <tr>
+        <td>Group B has no sides, so it generates no fixtures.</td>
+        <td>A group was left empty when entrants were confirmed. Reopen <span class="ui">Edit entrants</span> and assign somebody, or reduce the group count on the structure.</td>
+      </tr>
+      <tr>
+        <td>Group A has one side — it would play nobody.</td>
+        <td>Same fix. A group needs at least two.</td>
+      </tr>
+      <tr>
+        <td>Give every side in Group A a finishing position.</td>
+        <td>You are on a stage that feeds a cross-pool draw and a side has no position. Fill in the Position column for everyone in the group.</td>
+      </tr>
+      <tr>
+        <td>Group A has two sides in the same position.</td>
+        <td>Two sides share a finishing position. One of them has to move.</td>
+      </tr>
+      <tr>
+        <td>Paired as a seeded bracket, not cross-pool.</td>
+        <td>The qualifying pools do not line up with this stage's entrants. Confirm the pool stage's finishing positions, then re-check this stage. The fixtures are correct in personnel, just not paired across pools.</td>
+      </tr>
+      <tr>
+        <td>3 registered sides are in no group.</td>
+        <td>Clubs joined the league after entrants were confirmed. The confirmation is deliberately frozen, so open <span class="ui">Edit entrants</span> and add them.</td>
+      </tr>
+      <tr>
+        <td>1 side in a group is no longer registered.</td>
+        <td>A club left the league. Remove it from the group, then regenerate.</td>
+      </tr>
+      <tr>
+        <td>The entrants changed after these fixtures were generated.</td>
+        <td>The live series still hold the old groups. Regenerate to bring them into line — and read the confirmation carefully if they are released.</td>
+      </tr>
+      <tr>
+        <td>Only 40% of venues have a pinned location.</td>
+        <td>Travel distance was ignored for this allocation. Pin more grounds and re-allocate to get distance ranking back.</td>
+      </tr>
+      <tr>
+        <td>One of these sides already has a match that day.</td>
+        <td>The fixture is unresolved because a side is already committed, possibly in another competition. Move the date, or accept it and place the fixture by hand.</td>
+      </tr>
+      <tr>
+        <td>Every available ground is already booked that day.</td>
+        <td>More fixtures than ground capacity. Add grounds, raise "matches per day" on a two-pitch ground, or spread the round.</td>
+      </tr>
+      <tr>
+        <td>That competition points at a structure that no longer exists.</td>
+        <td>The structure was deleted after the competition was bound to it. Your operator needs to re-point the competition.</td>
+      </tr>
+      <tr>
+        <td>No structure configured for this league.</td>
+        <td>Nobody has bound a competition to this league yet. Ask your platform operator, or use <span class="ui">Create a series</span> for a simple league.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ══ PART TEN ═══════════════════════════════════════════════════════════ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Ten</div>
+    <h2>Reference</h2>
+  </div>
+
+  <h3>Who can do what</h3>
+
+  <table>
+    <thead><tr><th>Task</th><th>Operator</th><th>Administrator</th><th>Club rep</th></tr></thead>
+    <tbody>
+      <tr><td>Season calendars</td><td>Create and edit</td><td>Read</td><td>—</td></tr>
+      <tr><td>Competition structures</td><td>Create and edit</td><td>Read</td><td>—</td></tr>
+      <tr><td>Bind competitions to leagues</td><td>Yes</td><td>—</td><td>—</td></tr>
+      <tr><td>Venues</td><td>—</td><td>Create and edit</td><td>Read</td></tr>
+      <tr><td>Start and run a season</td><td>—</td><td>Yes</td><td>—</td></tr>
+      <tr><td>Confirm entrants</td><td>—</td><td>Yes</td><td>—</td></tr>
+      <tr><td>Generate, approve, release</td><td>—</td><td>Yes</td><td>—</td></tr>
+      <tr><td>Allocate grounds</td><td>—</td><td>Yes</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <div class="why">
+    <span class="callout-label">Why venues are the administrator's, not the operator's</span>
+    <p>
+      A ground going out for maintenance is a week-to-week fact the union office learns first.
+      Routing it through the platform operator would make the schedule permanently stale.
+    </p>
+  </div>
+
+  <h3>Glossary</h3>
+
+  <dl class="terms">
+    <dt>Block</dt>
+    <dd>A continuous stretch of the season during which matches are played. A season usually has two, separated by a break.</dd>
+
+    <dt>Cadence</dt>
+    <dd>How often rounds are played: weekly, every N weeks, on set weekdays, or spread evenly across the block.</dd>
+
+    <dt>Competition</dt>
+    <dd>One format stream inside a league — "50 Over Red Ball". A league can run several at once.</dd>
+
+    <dt>Cross-pool</dt>
+    <dd>A knockout that pairs one pool's winner against another pool's runner-up, so pool rivals cannot meet again immediately.</dd>
+
+    <dt>Group</dt>
+    <dd>A set of teams within a stage that play each other. A Top Six is a group. Each group becomes one series.</dd>
+
+    <dt>Preliminary round</dt>
+    <dd>An extra opening round that trims a knockout field to a power of two. Nine entrants need one; eight need none.</dd>
+
+    <dt>Season run</dt>
+    <dd>One competition being played out for one season. Holds which teams are in which group at each stage, and freezes the structure and calendar it started with.</dd>
+
+    <dt>Series</dt>
+    <dd>The existing unit of fixtures. One stage-group becomes one series, so everything downstream is unchanged.</dd>
+
+    <dt>Snake seeding</dt>
+    <dd>Splitting seeds 1,2,3,4 into two pools as A,B,B,A rather than A,A,B,B — it keeps the top seeds apart.</dd>
+
+    <dt>Stage</dt>
+    <dd>One phase of a competition. A split league has two: the double round and the final round.</dd>
+
+    <dt>Structure</dt>
+    <dd>The reusable shape of a competition — its stages, in order. Built once by the operator and used season after season.</dd>
+
+    <dt>Unresolved</dt>
+    <dd>A fixture the allocator could not place, shown with the reason. Deliberately visible rather than placed somewhere wrong.</dd>
+  </dl>
+
+  <h3>Two things this does not do yet</h3>
+
+  <p>
+    <strong>Results and standings.</strong> The platform does not record scores, so no stage can
+    work out its own qualifiers. Every standings-dependent decision is typed by a human and
+    recorded. If results capture is ever added, the rules already written into your structures
+    become automatic without you re-entering anything.
+  </p>
+
+  <p>
+    <strong>Scoring-platform sync.</strong> Not built. It needs the scoring platform named, its
+    API documented, and a decision on how team identities map between the two systems.
+  </p>
+
+  <div class="colophon">
+    Smart Club Platform · Setting up how a league works · Version 1.0<br>
+    Technical detail: <span class="path">docs/architecture/0008-configurable-league-structures.md</span><br>
+    Deploying this feature: <span class="path">docs/runbooks/configurable-league-structures.md</span>
+  </div>
+</section>
+
+</body>
+</html>

@@ -98,6 +98,20 @@ after(() => {
   ddbServer?.close();
 });
 
+describe('malformed request bodies', () => {
+  test('a body that is not JSON is 400, not 500', async () => {
+    // Hono throws SyntaxError out of c.req.json(). Answering 500 blames the server for
+    // the caller's mistake and pages Sentry on every truncated payload.
+    const res = await app.request('/tenant/support', {
+      method: 'PUT',
+      headers: headers(ADMIN),
+      body: '{"support": "half a pay',
+    });
+    assert.equal(res.status, 400);
+    assert.match(((await res.json()) as { error: string }).error, /valid JSON/i);
+  });
+});
+
 describe('PUT /tenant/support', () => {
   test('admin can edit; value is recombined as "Name · email"', async () => {
     const res = await app.request('/tenant/support', {
@@ -825,6 +839,56 @@ describe('POST /clubs/:id/send-fixtures', () => {
     const body = (await retry.json()) as { deduped?: boolean; results: unknown[] };
     assert.equal(body.deduped, true);
     assert.equal(body.results.length, 1);
+  });
+
+  /**
+   * Delayed activation (ADR 0008). A junior series is released up front but must stay
+   * invisible until `activateFrom` — including to the player broadcast, which would
+   * otherwise send a schedule the chair can't see in their own portal.
+   */
+  describe('activateFrom delays the broadcast', () => {
+    const putFxSeries = (activateFrom?: string) =>
+      repo.putSeries('dolphins', {
+        id: 'fx-series',
+        name: 'Under 13 · 2026/27',
+        startDate: '2027-01-18',
+        teams: ['testers', 'rivals'],
+        fixtures: [{ home: 'rivals', away: 'testers', date: '2027-01-18', round: 1 }],
+        ...(activateFrom ? { activateFrom } : {}),
+        released: true,
+        releasedAt: '2026-06-01T00:00:00.000Z',
+        version: 1,
+      });
+
+    test('a released series with a future activateFrom is not broadcast', async () => {
+      await putFxSeries('2099-01-18');
+      const res = await send(
+        'testers',
+        { channels: ['email'], idempotencyKey: 'fx-future-activate' },
+        ADMIN,
+      );
+      assert.equal(res.status, 409, 'nothing visible to share yet');
+    });
+
+    test('the same series broadcasts once its activation date has passed', async () => {
+      await putFxSeries('2020-01-18');
+      const res = await send(
+        'testers',
+        { channels: ['email'], idempotencyKey: 'fx-past-activate' },
+        ADMIN,
+      );
+      assert.equal(res.status, 201);
+    });
+
+    test('a series with no activateFrom is unaffected', async () => {
+      await putFxSeries();
+      const res = await send(
+        'testers',
+        { channels: ['email'], idempotencyKey: 'fx-no-activate' },
+        ADMIN,
+      );
+      assert.equal(res.status, 201);
+    });
   });
 });
 

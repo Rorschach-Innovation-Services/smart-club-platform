@@ -1,6 +1,6 @@
 /* ─── Shared atom components ─── */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useId } from 'react';
 import type { ReactNode, CSSProperties, ComponentType, ButtonHTMLAttributes } from 'react';
 import { CQI_STRUCTURE } from './data';
 import type { Club } from './types';
@@ -589,6 +589,95 @@ export function MoneyInput({
   );
 }
 
+interface BoundedNumberProps {
+  value: number;
+  onChange: (n: number) => void;
+  /** Inclusive floor. Enforced on blur, never mid-keystroke. */
+  min?: number;
+  /** Inclusive ceiling, enforced the same way. */
+  max?: number;
+  className?: string;
+  style?: CSSProperties;
+  placeholder?: string;
+  disabled?: boolean;
+  /**
+   * Accessible name, for the cases where the visible caption is a separate node the
+   * input isn't bound to — a table column header, or a `field-label` beside it. Prefer
+   * `Field`, which binds a real label; use this where the layout has no room for one.
+   */
+  ariaLabel?: string;
+}
+
+/**
+ * A number input with a floor that doesn't fight the person typing.
+ *
+ * `onChange={(e) => set(Math.max(2, +e.target.value || 2))}` looks harmless and makes
+ * whole ranges unenterable: clear the box to retype and `+'' || 2` snaps it to 2, the
+ * caret lands after the digit, and the next keystroke appends — so 16 becomes 26, and 10
+ * to 19 cannot be entered at all. On a finishing position it is worse than friction:
+ * 3 → clear → 5 silently yields 15, and a wrong cross-pool bracket follows.
+ *
+ * So: hold the raw text while it is being edited, publish upward only when the typed
+ * value is genuinely in range, and clamp (or revert) on blur. Same remedy the sizes,
+ * group-label and lat/lon fields already use, generalised so it stops being re-derived
+ * one input at a time.
+ */
+export function BoundedNumber({
+  value,
+  onChange,
+  min = 0,
+  max,
+  className = 'field-input',
+  style,
+  placeholder,
+  disabled,
+  ariaLabel,
+}: BoundedNumberProps) {
+  const [text, setText] = useState(String(value ?? ''));
+  // Re-seed when the model changes from OUTSIDE — a template swap, a reset — but not
+  // from our own keystrokes, which is what tracking the last published value separates.
+  const [published, setPublished] = useState(value);
+  if (value !== published) {
+    setPublished(value);
+    setText(String(value ?? ''));
+  }
+
+  const inRange = (n: number) => n >= min && (max === undefined || n <= max);
+
+  return (
+    <input
+      type="number"
+      className={className}
+      style={style}
+      placeholder={placeholder}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      min={min}
+      max={max}
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value);
+        const n = parseInt(e.target.value, 10);
+        if (Number.isFinite(n) && inRange(n)) {
+          setPublished(n);
+          onChange(n);
+        }
+      }}
+      onBlur={(e) => {
+        const n = parseInt(e.target.value, 10);
+        // Unparseable or out of range on the way out: settle on the nearest legal value
+        // rather than leaving the box saying something the model doesn't hold.
+        const next = Number.isFinite(n)
+          ? Math.min(max ?? Number.MAX_SAFE_INTEGER, Math.max(min, n))
+          : value;
+        setText(String(next));
+        setPublished(next);
+        if (next !== value) onChange(next);
+      }}
+    />
+  );
+}
+
 /* slider input — used in CQI for capped quantities (teams, coaches, fields, %) */
 interface NumSliderProps {
   value?: number | string;
@@ -858,6 +947,42 @@ export function useToast(): [(m: string, t?: string, act?: ToastAction | null) =
 
 // Expose atoms on window for the legacy inline prototype; guarded so importing
 // this module in a non-browser context (tests, SSR) doesn't throw.
+/**
+ * A labelled form field.
+ *
+ * The visible label used to be a plain `<div className="field-label">` sitting BESIDE the
+ * input, which associates them for a sighted user and for nobody else: a screen reader
+ * announces "edit text, blank", and no test can ask for the box by its name either. This
+ * renders the same markup with the label bound to the control, so the caption becomes the
+ * control's accessible name.
+ *
+ * The id is generated, so callers never invent one:
+ *
+ *   <Field label="Latitude" required>
+ *     {(id) => <input id={id} className="field-input" … />}
+ *   </Field>
+ */
+export function Field({
+  label,
+  required,
+  children,
+}: {
+  label: string;
+  required?: boolean;
+  children: (id: string) => ReactNode;
+}) {
+  const id = useId();
+  return (
+    <div className="field">
+      <label className="field-label" htmlFor={id}>
+        {label}
+        {required && <span className="req">*</span>}
+      </label>
+      {children(id)}
+    </div>
+  );
+}
+
 if (typeof window !== 'undefined')
   Object.assign(window, {
     Icon,
@@ -872,6 +997,8 @@ if (typeof window !== 'undefined')
     YN,
     NumStep,
     NumSlider,
+    BoundedNumber,
+    Field,
     Choice,
     MoneyInput,
     CountUp,

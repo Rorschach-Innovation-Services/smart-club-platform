@@ -38,5 +38,14 @@ export default defineConfig({
     // so root vitest doesn't try to collect it.
     include: ['src/**/*.{test,spec}.{js,jsx,ts,tsx}'],
     exclude: ['**/node_modules/**', 'packages/**'],
+    /*
+     * Two environments on purpose. The pure-logic suites (`*.test.ts`) stay on `node` —
+     * they are the bulk of the run and jsdom would cost every one of them a synthetic
+     * DOM they never touch. Component suites opt in by extension: `*.dom.test.tsx` gets
+     * jsdom plus the RTL matchers and auto-cleanup from vitest.setup.ts.
+     */
+    environment: 'node',
+    environmentMatchGlobs: [['src/**/*.dom.test.tsx', 'jsdom']],
+    setupFiles: ['./vitest.setup.ts'],
   },
 });

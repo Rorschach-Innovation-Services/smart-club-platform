@@ -23,7 +23,17 @@ import { LeagueForm } from './admin';
 import { DISTRICTS } from './data';
 import { OVERARCHING_DISTRICT } from './leagues';
 import { InsightsBreakdown, LeagueTeamDirectoryCard, DemographicsCard } from './insights';
-import type { TenantConfig, TenantSummary, BrandingCopy, DirectoryClub, League } from './types';
+import { CalendarsCard } from './platform-calendars';
+import { formatDayYear, formatStampDay } from './dates';
+import { StructuresCard, CompetitionsModal } from './platform-structures';
+import type {
+  TenantConfig,
+  TenantSummary,
+  BrandingCopy,
+  DirectoryClub,
+  League,
+  Competition,
+} from './types';
 import {
   BRAND_ROLES,
   HERO_TOKEN,
@@ -142,10 +152,7 @@ const KNOWN_FLAGS = [
   },
 ];
 
-const fmtDate = (iso?: string) =>
-  iso
-    ? new Date(iso).toLocaleDateString('en-ZA', { day: 'numeric', month: 'short', year: 'numeric' })
-    : '—';
+const fmtDate = (iso?: string) => (iso ? formatDayYear(iso) : '—');
 
 const MONO: CSSProperties = {
   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
@@ -699,6 +706,24 @@ function TenantEditPage({ toast }: { toast: Toast }) {
         />
         <LeaguesCard
           key={`lg-${config.tenant}`}
+          slug={slug}
+          config={config}
+          save={save}
+          toast={toast}
+        />
+        {/* Calendars after leagues: a league's series is scheduled against one, so the
+            reading order matches the setup order (leagues exist, then when they play). */}
+        <CalendarsCard
+          key={`cal-${config.tenant}`}
+          slug={slug}
+          config={config}
+          save={save}
+          toast={toast}
+        />
+        {/* Structures after calendars: a stage names a playing block, so the calendar
+            has to exist first for the block picker to have anything in it. */}
+        <StructuresCard
+          key={`str-${config.tenant}`}
           slug={slug}
           config={config}
           save={save}
@@ -1554,6 +1579,7 @@ function LeaguesCard({
 }) {
   const [form, setForm] = useState<League | 'new' | null>(null);
   const [confirm, setConfirm] = useState<League | null>(null);
+  const [competitionsFor, setCompetitionsFor] = useState<League | null>(null);
   const leagues = config.leagues ?? [];
 
   /**
@@ -1589,6 +1615,16 @@ function LeaguesCard({
       // key is the immutable matching token stored on clubs — never overwritten
       return fresh.map((l) => (l.key === key ? { ...l, ...patch, key: l.key } : l));
     }, 'Could not save league');
+  const onSaveCompetitions = (key: string, competitions: Competition[]) =>
+    saveLeagues(
+      (fresh) =>
+        fresh.map((l) =>
+          l.key === key
+            ? { ...l, competitions: competitions.length ? competitions : undefined }
+            : l,
+        ),
+      'Could not save competitions',
+    );
   function onDelete(league: League) {
     setConfirm(null);
     saveLeagues((fresh) => fresh.filter((l) => l.key !== league.key), 'Could not delete league')
@@ -1622,7 +1658,8 @@ function LeaguesCard({
                   <th>District</th>
                   <th>Group</th>
                   <th>Note</th>
-                  <th style={{ width: 130 }}></th>
+                  <th>Competitions</th>
+                  <th style={{ width: 210 }}></th>
                 </tr>
               </thead>
               <tbody>
@@ -1641,7 +1678,23 @@ function LeaguesCard({
                       <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{L.note ?? ''}</span>
                     </td>
                     <td>
+                      {L.competitions?.length ? (
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                          {L.competitions.map((comp) => (
+                            <Pill key={comp.id} tone="muted">
+                              {comp.label}
+                            </Pill>
+                          ))}
+                        </div>
+                      ) : (
+                        <span style={{ fontSize: 12.5, color: 'var(--muted-2)' }}>Flat</span>
+                      )}
+                    </td>
+                    <td>
                       <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                        <Btn tone="outline" size="sm" onClick={() => setCompetitionsFor(L)}>
+                          Competitions
+                        </Btn>
                         <Btn tone="outline" size="sm" onClick={() => setForm(L)}>
                           Edit
                         </Btn>
@@ -1690,6 +1743,16 @@ function LeaguesCard({
             toast={toast}
           />
         </LeagueModal>
+      )}
+
+      {competitionsFor && (
+        <CompetitionsModal
+          league={competitionsFor}
+          config={config}
+          onSave={onSaveCompetitions}
+          onClose={() => setCompetitionsFor(null)}
+          toast={toast}
+        />
       )}
 
       {confirm &&
@@ -2605,6 +2668,11 @@ function SetupCard({ slug, config, toast }: { slug: string; config: TenantConfig
     { label: 'Submission deadline set', done: !!config.submissionDeadline },
     { label: 'Districts configured', done: (config.districts?.length ?? 0) > 0 },
     { label: 'Leagues configured', done: (config.leagues?.length ?? 0) > 0 },
+    { label: 'Season calendar set', done: (config.calendars?.length ?? 0) > 0 },
+    {
+      label: 'Competitions bound to leagues',
+      done: (config.leagues ?? []).some((l) => (l.competitions?.length ?? 0) > 0),
+    },
     { label: 'First admin added', done: (config.adminCount ?? 0) > 0 },
   ];
 
@@ -2632,7 +2700,8 @@ function SetupCard({ slug, config, toast }: { slug: string; config: TenantConfig
             <SetupChip complete />
             <span>
               Marked complete{config.setupCompletedBy ? ` by ${config.setupCompletedBy}` : ''}
-              {config.setupCompletedAt ? ` · ${fmtDate(config.setupCompletedAt)}` : ''}
+              {/* setupCompletedAt is an INSTANT; fmtDate above is for the date-only deadline. */}
+              {config.setupCompletedAt ? ` · ${formatStampDay(config.setupCompletedAt)}` : ''}
             </span>
           </div>
           <div style={{ display: 'grid', gap: 8, marginBottom: 16 }}>
