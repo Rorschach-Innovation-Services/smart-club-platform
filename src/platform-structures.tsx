@@ -16,7 +16,7 @@
  * where a 12-team bi-weekly division needing 20 weeks in a 13-week block gets caught,
  * rather than at generation time in front of a club secretary.
  */
-import { useState, type CSSProperties, type ReactNode } from 'react';
+import { useState, useId, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { BoundedNumber, Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
 import * as api from './api';
@@ -76,13 +76,25 @@ function Modal({
   children?: ReactNode;
 }) {
   useEscapeClose(onClose);
+  // A dialog with no role is, to assistive tech, an ordinary div: nothing announces that
+  // a modal opened, nothing scopes the reading order to it, and Escape is the only thing
+  // that behaves. `aria-labelledby` points at the visible heading so it gets a name too.
+  const titleId = useId();
   return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="task-modal" style={wide ? { maxWidth: 1040 } : undefined}>
+      <div
+        className="task-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        style={wide ? { maxWidth: 1040 } : undefined}
+      >
         <div className="task-modal-head">
           <div className="task-modal-head-text">
             <div className="task-modal-head-eyebrow">Platform · Competition structures</div>
-            <div className="task-modal-head-title">{title}</div>
+            <div className="task-modal-head-title" id={titleId}>
+              {title}
+            </div>
           </div>
           <button className="task-modal-close" onClick={onClose} title="Close">
             <Icon.X />
@@ -143,15 +155,23 @@ function Select({
   onChange,
   children,
   width,
+  label,
 }: {
   value: string;
   onChange: (v: string) => void;
   children: ReactNode;
   width?: number;
+  /**
+   * Accessible name. The visible caption beside these pickers is a `field-label` div,
+   * which associates the two for a sighted reader and for nobody else — a screen reader
+   * announces a bare combobox with no indication of what it selects.
+   */
+  label?: string;
 }) {
   return (
     <select
       className="field-select"
+      aria-label={label}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       style={width ? { minWidth: width } : undefined}
@@ -381,7 +401,12 @@ function StageRow({
 
           <div style={SECTION}>Format</div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <Select value={formatLabel(stage.format)} onChange={setFormat} width={220}>
+            <Select
+              value={formatLabel(stage.format)}
+              onChange={setFormat}
+              width={220}
+              label="Format"
+            >
               {FORMAT_OPTIONS.map((o) => (
                 <option key={o.label} value={o.label}>
                   {o.label}
@@ -408,7 +433,7 @@ function StageRow({
 
           <div style={SECTION}>Teams</div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <Select value={stage.entrants.kind} onChange={setEntrantKind} width={220}>
+            <Select value={stage.entrants.kind} onChange={setEntrantKind} width={220} label="Teams">
               {ENTRANT_OPTIONS.map((o) => (
                 <option key={o.key} value={o.key}>
                   {o.label}
@@ -469,6 +494,7 @@ function StageRow({
               value={stage.schedule.blockId}
               onChange={(v) => onChange({ schedule: { ...stage.schedule, blockId: v } })}
               width={240}
+              label="Playing block"
             >
               <option value="">Pick a playing block…</option>
               {(calendar?.blocks ?? []).map((b) => (
@@ -477,7 +503,7 @@ function StageRow({
                 </option>
               ))}
             </Select>
-            <Select value={stage.schedule.cadence.kind} onChange={setCadence}>
+            <Select value={stage.schedule.cadence.kind} onChange={setCadence} label="Cadence">
               {CADENCE_OPTIONS.map((o) => (
                 <option key={o.key} value={o.key}>
                   {o.label}
@@ -631,13 +657,23 @@ function DerivationEditor({
       {note && (
         <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <Select value={note.rule} onChange={(v) => update({ rule: v })} width={190}>
+            <Select
+              value={note.rule}
+              onChange={(v) => update({ rule: v })}
+              width={190}
+              label="Rule"
+            >
               <option value="from-standings">Top finishers</option>
               <option value="swap">Swap between groups</option>
               <option value="winners-of">Winners of</option>
               <option value="carry-forward">Carried forward</option>
             </Select>
-            <Select value={note.fromStage} onChange={(v) => update({ fromStage: v })} width={200}>
+            <Select
+              value={note.fromStage}
+              onChange={(v) => update({ fromStage: v })}
+              width={200}
+              label="Draws from"
+            >
               <option value="">Pick the earlier stage…</option>
               {earlierStages.map((s) => (
                 <option key={s.id} value={s.id}>
@@ -934,7 +970,7 @@ function StructureEditor({
         </div>
         <div>
           <div className="field-label">Preview against</div>
-          <Select value={calendarId} onChange={setCalendarId} width={200}>
+          <Select value={calendarId} onChange={setCalendarId} width={200} label="Preview against">
             <option value="">No calendar</option>
             {calendars.map((c) => (
               <option key={c.id} value={c.id}>
@@ -1470,7 +1506,12 @@ export function CompetitionsEditor({
                 </option>
               ))}
             </Select>
-            <Select value={c.calendarId} onChange={(v) => patch(i, { calendarId: v })} width={160}>
+            <Select
+              value={c.calendarId}
+              onChange={(v) => patch(i, { calendarId: v })}
+              width={160}
+              label="Calendar"
+            >
               <option value="">Calendar…</option>
               {calendars.map((cal) => (
                 <option key={cal.id} value={cal.id}>

@@ -16,7 +16,10 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
-    "types": ["vite/client", "node"],
+    // `@testing-library/jest-dom/vitest` augments vitest's Assertion interface with the
+    // DOM matchers (toHaveValue, toBeVisible…). Without it the type gate rejects every
+    // component test even though they run fine.
+    "types": ["vite/client", "node", "@testing-library/jest-dom/vitest"],
 
     "esModuleInterop": true,
     "skipLibCheck": true,

@@ -16,7 +16,7 @@
  * One stage-group becomes one Series, so everything downstream (approval, release, the
  * player broadcast, travel cost) is the existing, tested path.
  */
-import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
+import { useMemo, useState, useId, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { BoundedNumber, Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
 import { ApiError } from './api';
@@ -60,13 +60,25 @@ function Modal({
   children?: ReactNode;
 }) {
   useEscapeClose(onClose);
+  // A dialog with no role is, to assistive tech, an ordinary div: nothing announces that
+  // a modal opened, nothing scopes the reading order to it, and Escape is the only thing
+  // that behaves. `aria-labelledby` points at the visible heading so it gets a name too.
+  const titleId = useId();
   return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="task-modal" style={wide ? { maxWidth: 900 } : undefined}>
+      <div
+        className="task-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        style={wide ? { maxWidth: 900 } : undefined}
+      >
         <div className="task-modal-head">
           <div className="task-modal-head-text">
             <div className="task-modal-head-eyebrow">Fixtures · Season</div>
-            <div className="task-modal-head-title">{title}</div>
+            <div className="task-modal-head-title" id={titleId}>
+              {title}
+            </div>
           </div>
           <button className="task-modal-close" onClick={onClose} title="Close">
             <Icon.X />
@@ -679,7 +691,9 @@ function StageCard({
         <span style={{ fontSize: 11, color: 'var(--muted-2)', fontWeight: 700 }}>
           STAGE {index + 1}
         </span>
-        <span style={{ fontWeight: 700, fontSize: 14 }}>{stage.name}</span>
+        {/* A heading, not a styled span: this is the title of a section a screen reader
+            should be able to jump to, and the season is a list of these. */}
+        <h3 style={{ fontWeight: 700, fontSize: 14, margin: 0 }}>{stage.name}</h3>
         {generated ? (
           <Pill tone="teal">Generated</Pill>
         ) : stale ? (

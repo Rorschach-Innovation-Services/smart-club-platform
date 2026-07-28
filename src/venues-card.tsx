@@ -10,9 +10,9 @@
  * distance ranking below a threshold. Saying so here is the difference between "the
  * allocator ignored travel" and "the allocator seems to pick odd grounds".
  */
-import { useState, type CSSProperties, type ReactNode } from 'react';
+import { useState, useId, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { BoundedNumber, Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
+import { BoundedNumber, Btn, Card, EmptyState, Field, Icon, Pill, useEscapeClose } from './atoms';
 import { ApiError } from './api';
 import { WEEKDAY_LABELS, isValidIsoDate } from './competition/calendar';
 import { MIN_GEO_COVERAGE, geoCoverage } from './competition/venues';
@@ -54,13 +54,19 @@ function Modal({
   children?: ReactNode;
 }) {
   useEscapeClose(onClose);
+  // A dialog with no role is, to assistive tech, an ordinary div: nothing announces that
+  // a modal opened, nothing scopes the reading order to it, and Escape is the only thing
+  // that behaves. `aria-labelledby` points at the visible heading so it gets a name too.
+  const titleId = useId();
   return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="task-modal">
+      <div className="task-modal" role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <div className="task-modal-head">
           <div className="task-modal-head-text">
             <div className="task-modal-head-eyebrow">Fixtures · Venues</div>
-            <div className="task-modal-head-title">{title}</div>
+            <div className="task-modal-head-title" id={titleId}>
+              {title}
+            </div>
           </div>
           <button className="task-modal-close" onClick={onClose} title="Close">
             <Icon.X />
@@ -155,28 +161,30 @@ function VenueForm({
 
   return (
     <div>
-      <div className="field">
-        <div className="field-label">
-          Ground name <span className="req">*</span>
-        </div>
-        <input
-          className="field-input"
-          value={draft.name}
-          onChange={(e) => patch({ name: e.target.value })}
-          placeholder="e.g. Kingsmead"
-          autoFocus
-        />
-      </div>
+      <Field label="Ground name" required>
+        {(id) => (
+          <input
+            id={id}
+            className="field-input"
+            value={draft.name}
+            onChange={(e) => patch({ name: e.target.value })}
+            placeholder="e.g. Kingsmead"
+            autoFocus
+          />
+        )}
+      </Field>
 
       <div className="field-grid-2">
-        <div className="field">
-          <div className="field-label">Suburb</div>
-          <input
-            className="field-input"
-            value={draft.suburb ?? ''}
-            onChange={(e) => patch({ suburb: e.target.value })}
-          />
-        </div>
+        <Field label="Suburb">
+          {(id) => (
+            <input
+              id={id}
+              className="field-input"
+              value={draft.suburb ?? ''}
+              onChange={(e) => patch({ suburb: e.target.value })}
+            />
+          )}
+        </Field>
         <div className="field">
           <div className="field-label">Matches per day</div>
           <BoundedNumber
@@ -184,19 +192,22 @@ function VenueForm({
             max={6}
             value={draft.surfaces ?? 1}
             onChange={(surfaces) => patch({ surfaces })}
+            ariaLabel="Matches per day"
           />
           <p style={HINT}>Grounds with two pitches can host two matches on one day.</p>
         </div>
       </div>
 
-      <div className="field">
-        <div className="field-label">Address</div>
-        <input
-          className="field-input"
-          value={draft.address ?? ''}
-          onChange={(e) => patch({ address: e.target.value })}
-        />
-      </div>
+      <Field label="Address">
+        {(id) => (
+          <input
+            id={id}
+            className="field-input"
+            value={draft.address ?? ''}
+            onChange={(e) => patch({ address: e.target.value })}
+          />
+        )}
+      </Field>
 
       <div style={SECTION}>Location</div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -204,6 +215,7 @@ function VenueForm({
           className="field-input"
           style={{ width: 150 }}
           placeholder="Latitude"
+          aria-label="Latitude"
           inputMode="decimal"
           value={latText}
           onChange={(e) => setLatText(e.target.value)}
@@ -212,6 +224,7 @@ function VenueForm({
           className="field-input"
           style={{ width: 150 }}
           placeholder="Longitude"
+          aria-label="Longitude"
           inputMode="decimal"
           value={lonText}
           onChange={(e) => setLonText(e.target.value)}
