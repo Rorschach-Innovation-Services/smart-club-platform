@@ -26,9 +26,12 @@ npm run lint && npm run format:check
 All four must be clean. `format:check` has three pre-existing warnings this branch never
 touched (`.eslintrc.cjs`, ADR 0007, the OTP runbook) — those are expected.
 
-> **Not yet verified end to end.** At the time of writing this feature has been proven by
-> unit and integration tests only; nobody has clicked through it in a running app. Do the
-> local walkthrough in step 1 before deploying to prod, not after.
+> **Verified end to end locally**, including both multi-stage paths: the KZNCU mid-season
+> swap (points carried by position) and seeded pools → cross-pool semis. Doing the
+> walkthrough in step 1 again is still worth the ten minutes before a prod deploy — the
+> worst defect found in this feature was a prefill that proposed relegating an entire
+> group, and it was invisible until someone confirmed a stage with clubs that were **not**
+> in alphabetical order. Use real club names, not `A/B/C`.
 
 ## 1. Local walkthrough (do this first)
 
