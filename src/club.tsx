@@ -197,6 +197,41 @@ function DocUploadButton({
 
 /* ─── Ground map (Leaflet + OpenStreetMap + Nominatim geocoding) ─── */
 
+/**
+ * Released series grouped by the season run that produced them (ADR 0008).
+ *
+ * One stage-group materialises into one Series, which is what keeps the whole persistence
+ * and release path unchanged — but it means a Top Six club is in three series for what it
+ * calls one season. Grouping restores that reading without touching how fixtures are
+ * stored. Series with no `seasonRunId` are standalone and keep their existing ungrouped
+ * presentation, so nothing changes for a tenant that never starts a structured season.
+ *
+ * Insertion order is preserved, so a run's stages stay in the order the API returned them
+ * (gsi1-sorted by start date) rather than being reshuffled by grouping.
+ */
+export function groupSeriesBySeason(released) {
+  const byRun = new Map();
+  for (const s of released || []) {
+    const key = s.seasonRunId ? `run:${s.seasonRunId}` : `solo:${s.id}`;
+    if (!byRun.has(key)) byRun.set(key, { key, runId: s.seasonRunId, seriesList: [] });
+    byRun.get(key).seriesList.push(s);
+  }
+  return [...byRun.values()].map((g) => ({
+    ...g,
+    // Only worth a heading when the run actually split into more than one series — a
+    // single-stage season reads better as just its series card.
+    //
+    // Counted by DISTINCT STAGE, not by series: a club fielding two sides in one league
+    // lands in two groups of the same stage, which is two series but still one stage.
+    // Saying "2 stages" there is simply untrue.
+    heading: (() => {
+      if (!g.runId || g.seriesList.length <= 1) return null;
+      const stages = new Set(g.seriesList.map((s) => s.stageSpecId ?? s.id)).size;
+      return `One season · ${stages} stage${stages === 1 ? '' : 's'}`;
+    })(),
+  }));
+}
+
 export function GroundMap({ query, coords: savedPin, onResolved, onAddressPicked }) {
   const elRef = useRefC(null);
   const mapRef = useRefC(null);
@@ -4181,41 +4216,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
       teamIdsForClub(s, club.id).some((tid) => s.teams.includes(tid)),
   );
 
-  /**
-   * Released series grouped by the season run that produced them (ADR 0008).
-   *
-   * One stage-group materialises into one Series, which is what keeps the whole
-   * persistence and release path unchanged — but it means a Top Six club is in three
-   * series for what it calls one season. Grouping restores that reading without touching
-   * how fixtures are stored. Series with no `seasonRunId` are standalone and keep their
-   * existing ungrouped presentation, so nothing about the current experience changes for
-   * a tenant that never starts a structured season.
-   *
-   * Insertion order is preserved, so the run's stages stay in the order the API returned
-   * them (gsi1-sorted by start date) rather than being reshuffled by grouping.
-   */
-  const seasonGroups = (() => {
-    const byRun = new Map();
-    for (const s of myReleased) {
-      const key = s.seasonRunId ? `run:${s.seasonRunId}` : `solo:${s.id}`;
-      if (!byRun.has(key)) byRun.set(key, { key, runId: s.seasonRunId, seriesList: [] });
-      byRun.get(key).seriesList.push(s);
-    }
-    return [...byRun.values()].map((g) => ({
-      ...g,
-      // Only worth a heading when the run actually split into more than one series —
-      // a single-stage season reads better as just its series card.
-      //
-      // Counted by DISTINCT STAGE, not by series: a club fielding two sides in one
-      // league lands in two groups of the same stage, which is two series but still one
-      // stage. Saying "2 stages" there is simply untrue.
-      heading: (() => {
-        if (!g.runId || g.seriesList.length <= 1) return null;
-        const stages = new Set(g.seriesList.map((s) => s.stageSpecId ?? s.id)).size;
-        return `One season · ${stages} stage${stages === 1 ? '' : 's'}`;
-      })(),
-    }));
-  })();
+  const seasonGroups = groupSeriesBySeason(myReleased);
 
   // Share-with-players modal state. Hooks must run before the early return below.
   const [shareOpen, setShareOpen] = useStateC(false);

@@ -1,0 +1,331 @@
+/**
+ * FixtureTable — the admin's schedule editor.
+ *
+ * Everything here was verified by hand and by nothing else until now, and three defects
+ * in one week came out of exactly these paths:
+ *
+ *   - clearing an allocated ground left `venueId` behind, so the booking ledger kept the
+ *     old venue reserved for a match that had moved and never booked the new one
+ *   - "Add fixture" asked for `nextRound` dates ANCHORED AT the last fixture, compounding
+ *     the two, so round 4 landed three weeks late
+ *   - the picker had no way to put an allocated fixture back on its home ground at all
+ *
+ * The venue tests assert on what is SAVED, not on which option is selected: the precedence
+ * is override → allocated → home, and every one of these bugs was a fixture displaying one
+ * ground while the data said another.
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { FixtureTable } from './admin';
+import { renderWithProviders } from './test-utils';
+import type { Club, SeasonCalendar, Series } from './types';
+
+const calendar: SeasonCalendar = {
+  id: 'cal',
+  label: '2026/27',
+  blocks: [
+    { id: 'b1', label: 'Block 1', start: '2026-09-12', end: '2026-12-12' },
+    { id: 'b2', label: 'Block 2', start: '2027-01-16', end: '2027-03-27' },
+  ],
+  breaks: [{ label: 'Festive break', start: '2026-12-13', end: '2027-01-15' }],
+  excludeDates: [],
+};
+
+const clubs = [
+  {
+    id: 'spartan',
+    name: 'Spartan Sporting CC',
+    ground: { venue: 'Spartan Park', suburb: 'Mount Edgecombe', secondaryVenue: 'Spartan Two' },
+  },
+  { id: 'tongaat', name: 'Tongaat CC', ground: { venue: 'Tongaat Oval', suburb: 'Tongaat' } },
+  { id: 'ilembe', name: 'Ilembe CC', ground: { venue: 'KwaDukuza Stadium', suburb: 'KwaDukuza' } },
+] as unknown as Club[];
+
+const series = (over: Partial<Series> = {}): Series =>
+  ({
+    id: 's1',
+    name: 'EMCU Division 2 · 2026/27',
+    startDate: '2026-08-08',
+    teams: ['spartan', 'tongaat', 'ilembe'],
+    maxOvers: 50,
+    seriesType: 'One-Day (40-50 overs)',
+    released: false,
+    approved: false,
+    version: 1,
+    fixtures: [
+      { id: 'f1', round: 1, date: '2026-08-08', home: 'spartan', away: 'tongaat' },
+      { id: 'f2', round: 2, date: '2026-08-15', home: 'ilembe', away: 'spartan' },
+      { id: 'f3', round: 3, date: '2026-08-22', home: 'tongaat', away: 'ilembe' },
+    ],
+    ...over,
+  }) as unknown as Series;
+
+const setup = (s: Series = series()) => {
+  const onUpdateSeries = vi.fn();
+  const user = userEvent.setup();
+  renderWithProviders(
+    <FixtureTable
+      series={s}
+      clubs={clubs}
+      allCalendars={[calendar]}
+      onUpdateSeries={onUpdateSeries}
+      onDeleteSeries={vi.fn()}
+      onDuplicateSeries={vi.fn()}
+      onSetReleased={vi.fn()}
+      onAskRelease={vi.fn()}
+      onAskRecall={vi.fn()}
+      onApprove={vi.fn()}
+      onUnapprove={vi.fn()}
+      onAllocateVenues={vi.fn()}
+      toast={vi.fn()}
+    />,
+  );
+  return { user, onUpdateSeries };
+};
+
+/** Apply the updater `onUpdateSeries` was called with, and return the resulting fixtures. */
+const resultingFixtures = (onUpdateSeries: ReturnType<typeof vi.fn>, from: Series) => {
+  const updater = onUpdateSeries.mock.calls.at(-1)![1];
+  return updater(from).fixtures as Array<Record<string, unknown>>;
+};
+
+const openEditor = async (user: ReturnType<typeof userEvent.setup>, rowText: RegExp) => {
+  const row = screen.getByRole('row', { name: rowText });
+  await user.click(within(row).getByTitle('Edit fixture'));
+};
+
+beforeEach(() => vi.clearAllMocks());
+
+describe('the venue picker', () => {
+  const allocated = () =>
+    series({
+      fixtures: [
+        {
+          id: 'f1',
+          round: 1,
+          date: '2026-08-08',
+          home: 'spartan',
+          away: 'tongaat',
+          venueId: 'v-kingsmead',
+          venueName: 'Kingsmead Stadium',
+          venueLat: -29.8493,
+          venueLon: 31.0294,
+        },
+      ],
+    } as Partial<Series>);
+
+  it('opens on the allocated ground, matching what the row displays', async () => {
+    const { user } = setup(allocated());
+    await openEditor(user, /kingsmead/i);
+
+    const picker = screen.getByLabelText('Venue') as HTMLSelectElement;
+    expect(picker.options[picker.selectedIndex].text).toMatch(/allocated · kingsmead/i);
+  });
+
+  it('clears EVERY denormalised field when moved back to the home ground', async () => {
+    // `venueId` is the one that matters most: buildLedger counts a ground as booked from
+    // it and travelPerTeam measures distance to it. A stale id keeps the old venue
+    // reserved against a match that has moved, and never books the one it moved to.
+    const s = allocated();
+    const { user, onUpdateSeries } = setup(s);
+    await openEditor(user, /kingsmead/i);
+
+    await user.selectOptions(screen.getByLabelText('Venue'), 'primary');
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+
+    const [f] = resultingFixtures(onUpdateSeries, s);
+    expect(f.venueId).toBeUndefined();
+    expect(f.venueName).toBe('');
+    expect(f.venueLat).toBeUndefined();
+    expect(f.venueLon).toBeUndefined();
+    expect(f.venueOverride).toBe('');
+  });
+
+  it('clears the allocation when moved to the club’s secondary ground', async () => {
+    const s = allocated();
+    const { user, onUpdateSeries } = setup(s);
+    await openEditor(user, /kingsmead/i);
+
+    await user.selectOptions(screen.getByLabelText('Venue'), 'secondary');
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+
+    const [f] = resultingFixtures(onUpdateSeries, s);
+    expect(f.venueOverride).toBe('Spartan Two');
+    expect(f.venueId).toBeUndefined();
+    expect(f.venueName).toBe('');
+  });
+
+  it('restores the allocation when the admin changes their mind', async () => {
+    // The option is built from the STORED fixture, so it keeps reading "Allocated ·
+    // Kingsmead" after a detour through Primary. Selecting it has to put the ground
+    // back — otherwise it offers a venue it doesn't save and the match reverts to home.
+    const s = allocated();
+    const { user, onUpdateSeries } = setup(s);
+    await openEditor(user, /kingsmead/i);
+
+    await user.selectOptions(screen.getByLabelText('Venue'), 'primary');
+    await user.selectOptions(screen.getByLabelText('Venue'), 'allocated');
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+
+    const [f] = resultingFixtures(onUpdateSeries, s);
+    expect(f.venueName).toBe('Kingsmead Stadium');
+    expect(f.venueId).toBe('v-kingsmead');
+    expect(f.venueLat).toBe(-29.8493);
+    expect(f.venueOverride).toBe('');
+  });
+
+  it('offers no allocated option on a fixture that was never allocated', async () => {
+    const { user } = setup();
+    await openEditor(user, /spartan park/i);
+
+    expect(screen.queryByRole('option', { name: /^allocated/i })).toBeNull();
+  });
+
+  it('saves a hand-typed ground as the override', async () => {
+    const s = series();
+    const { user, onUpdateSeries } = setup(s);
+    await openEditor(user, /spartan park/i);
+
+    await user.selectOptions(screen.getByLabelText('Venue'), 'custom');
+    await user.type(screen.getByLabelText(/custom venue/i), 'Kingsmead');
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+
+    expect(resultingFixtures(onUpdateSeries, s)[0].venueOverride).toBe('Kingsmead');
+  });
+
+  it('drops a secondary-ground pick when the home club changes', async () => {
+    // The secondary is the PREVIOUS club's ground; carrying it over would host a match
+    // at a ground belonging to a club that is no longer playing at home.
+    const s = series();
+    const { user, onUpdateSeries } = setup(s);
+    await openEditor(user, /spartan park/i);
+
+    await user.selectOptions(screen.getByLabelText('Venue'), 'secondary');
+    await user.selectOptions(screen.getByLabelText(/home \(host\)/i), 'ilembe');
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+
+    const [f] = resultingFixtures(onUpdateSeries, s);
+    expect(f.home).toBe('ilembe');
+    expect(f.venueOverride).toBe('');
+  });
+});
+
+describe('the lock indicator', () => {
+  it('marks a hand-set ground so nobody expects allocation to move it', () => {
+    setup(
+      series({
+        fixtures: [
+          {
+            id: 'f1',
+            round: 1,
+            date: '2026-08-08',
+            home: 'spartan',
+            away: 'tongaat',
+            venueOverride: 'Kingsmead',
+          },
+        ],
+      } as Partial<Series>),
+    );
+
+    expect(screen.getByTitle(/allocation won’t move it|allocation won't move it/i)).toBeVisible();
+  });
+
+  it('leaves an allocated fixture unlocked, because allocation may move it again', () => {
+    setup(
+      series({
+        fixtures: [
+          {
+            id: 'f1',
+            round: 1,
+            date: '2026-08-08',
+            home: 'spartan',
+            away: 'tongaat',
+            venueName: 'Kingsmead',
+          },
+        ],
+      } as Partial<Series>),
+    );
+
+    expect(screen.queryByTitle(/allocation won’t move it|allocation won't move it/i)).toBeNull();
+  });
+});
+
+describe('adding a fixture', () => {
+  it('steps one week on from the last fixture on a legacy series', async () => {
+    // Asking for `nextRound` dates ANCHORED AT the last fixture compounds the two:
+    // round 4 from 22 Aug landed on 12 Sep instead of 29 Aug.
+    const s = series();
+    const { user, onUpdateSeries } = setup(s);
+    await user.click(screen.getByRole('button', { name: /add fixture/i }));
+
+    const added = resultingFixtures(onUpdateSeries, s).at(-1)!;
+    expect(added.round).toBe(4);
+    expect(added.date).toBe('2026-08-29');
+  });
+
+  it('dates through the calendar when the series is bound to one', async () => {
+    const s = series({
+      schedule: { calendarId: 'cal', blockId: 'b1', cadence: { kind: 'weekly' } },
+    } as Partial<Series>);
+    const { user, onUpdateSeries } = setup(s);
+    await user.click(screen.getByRole('button', { name: /add fixture/i }));
+
+    // Block 1 opens 12 Sep; round 4 weekly is 3 Oct. The legacy step would have said
+    // 29 Aug, which is outside the playing block entirely.
+    const added = resultingFixtures(onUpdateSeries, s).at(-1)!;
+    expect(added.date).toBe('2026-10-03');
+  });
+
+  it('never proposes a side against itself', async () => {
+    const s = series({ teams: ['spartan', 'tongaat'] } as Partial<Series>);
+    const { user, onUpdateSeries } = setup(s);
+    await user.click(screen.getByRole('button', { name: /add fixture/i }));
+
+    const added = resultingFixtures(onUpdateSeries, s).at(-1)!;
+    expect(added.home).not.toBe(added.away);
+  });
+
+  it('starts at round 1 on an empty series', async () => {
+    const s = series({ fixtures: [] } as Partial<Series>);
+    const { user, onUpdateSeries } = setup(s);
+    await user.click(screen.getByRole('button', { name: /add fixture/i }));
+
+    const added = resultingFixtures(onUpdateSeries, s).at(-1)!;
+    expect(added.round).toBe(1);
+    expect(added.date).toBe('2026-08-08');
+  });
+});
+
+describe('a knockout side that is still a forward reference', () => {
+  const bracket = () =>
+    series({
+      teams: ['spartan', 'tongaat', 'ilembe'],
+      fixtures: [
+        { id: 'f1', round: 1, date: '2026-09-12', home: 'spartan', away: 'tongaat' },
+        { id: 'f2', round: 2, date: '2026-09-19', home: 'win:f1', away: 'ilembe' },
+      ],
+    } as Partial<Series>);
+
+  it('shows the reference read-only instead of a blank club picker', async () => {
+    // A `win:f1` side has no entry in `teams`, so a select renders blank and any touch
+    // silently replaces the bracket link the rest of the round depends on.
+    const { user } = setup(bracket());
+    const row = screen.getAllByRole('row').find((r) => /winner/i.test(r.textContent ?? ''))!;
+    await user.click(within(row).getByTitle('Edit fixture'));
+
+    const home = screen.getByLabelText(/home \(host\)/i);
+    expect(home).toBeDisabled();
+    expect((home as HTMLInputElement).value).toMatch(/winner/i);
+  });
+
+  it('leaves the reference intact when the fixture is saved', async () => {
+    const s = bracket();
+    const { user, onUpdateSeries } = setup(s);
+    const row = screen.getAllByRole('row').find((r) => /winner/i.test(r.textContent ?? ''))!;
+    await user.click(within(row).getByTitle('Edit fixture'));
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+
+    expect(resultingFixtures(onUpdateSeries, s)[1].home).toBe('win:f1');
+  });
+});

@@ -1,6 +1,6 @@
 /* ─── Admin views ─── */
 
-import { useState as useStateA, useMemo as useMemoA, useEffect as useEffectA } from 'react';
+import { useState as useStateA, useMemo as useMemoA, useEffect as useEffectA, useId } from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { useQueries } from '@tanstack/react-query';
@@ -1075,6 +1075,10 @@ export function FixtureTable({
 
 /* Inline edit row */
 function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
+  // Each label is bound to its control. These sit BESIDE their inputs, so without an id
+  // pairing a screen reader announces a row of unnamed boxes — and several fixtures can
+  // be open at once, so the ids have to be per-row rather than global.
+  const uid = useId();
   const [draft, setDraft] = useStateA({
     round: fixture.round,
     date: fixture.date,
@@ -1125,6 +1129,18 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
     venueLat: undefined,
     venueLon: undefined,
   };
+  /**
+   * …and the way back. Switching to Primary and changing your mind must restore the
+   * allocation, not just stop overriding it: the option still reads "Allocated ·
+   * Kingsmead" (it is built from the STORED fixture, not the draft), so without this it
+   * offers a ground it then doesn't save, and the match silently reverts to home.
+   */
+  const restoreAllocated = {
+    venueId: fixture.venueId,
+    venueName: fixture.venueName ?? '',
+    venueLat: fixture.venueLat,
+    venueLon: fixture.venueLon,
+  };
   // A "secondary" pick stored the *current* home club's secondary venue name; changing
   // Home would otherwise persist the previous club's venue. Reset that pick to primary
   // on a home change. A custom free-text override is club-agnostic, so it's preserved.
@@ -1141,8 +1157,9 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
       <td colSpan={9}>
         <div className="fix-edit-grid">
           <div className="fix-edit-field">
-            <label>Round</label>
+            <label htmlFor={`${uid}-round`}>Round</label>
             <input
+              id={`${uid}-round`}
               type="number"
               min="1"
               value={draft.round}
@@ -1150,23 +1167,33 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
             />
           </div>
           <div className="fix-edit-field">
-            <label>Date</label>
-            <input type="date" value={draft.date} onChange={(e) => u('date', e.target.value)} />
+            <label htmlFor={`${uid}-date`}>Date</label>
+            <input
+              id={`${uid}-date`}
+              type="date"
+              value={draft.date}
+              onChange={(e) => u('date', e.target.value)}
+            />
           </div>
           {/* A knockout side that is still a forward reference (`win:f3`) has no entry in
               `teams`, so the select would render blank and any touch would silently
               replace the bracket reference with a concrete club — breaking the link the
               rest of the round depends on. Show what it is, read-only, instead. */}
           <div className="fix-edit-field">
-            <label>Home (host)</label>
+            <label htmlFor={`${uid}-home`}>Home (host)</label>
             {isSlotRef(draft.home) ? (
               <input
+                id={`${uid}-home`}
                 type="text"
                 value={slotRefLabel(draft.home, fixtures) ?? draft.home}
                 disabled
               />
             ) : (
-              <select value={draft.home} onChange={(e) => changeHome(e.target.value)}>
+              <select
+                id={`${uid}-home`}
+                value={draft.home}
+                onChange={(e) => changeHome(e.target.value)}
+              >
                 {teams.map((t) => (
                   <option key={t.id} value={t.id}>
                     {t.name}
@@ -1176,15 +1203,20 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
             )}
           </div>
           <div className="fix-edit-field">
-            <label>Away (visitors)</label>
+            <label htmlFor={`${uid}-away`}>Away (visitors)</label>
             {isSlotRef(draft.away) ? (
               <input
+                id={`${uid}-away`}
                 type="text"
                 value={slotRefLabel(draft.away, fixtures) ?? draft.away}
                 disabled
               />
             ) : (
-              <select value={draft.away} onChange={(e) => u('away', e.target.value)}>
+              <select
+                id={`${uid}-away`}
+                value={draft.away}
+                onChange={(e) => u('away', e.target.value)}
+              >
                 {teams.map((t) => (
                   <option key={t.id} value={t.id}>
                     {t.name}
@@ -1203,8 +1235,9 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
             return (
               <>
                 <div className="fix-edit-field">
-                  <label>Venue</label>
+                  <label htmlFor={`${uid}-venue`}>Venue</label>
                   <select
+                    id={`${uid}-venue`}
                     value={venueMode}
                     onChange={(e) => {
                       const m = e.target.value;
@@ -1212,7 +1245,8 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
                       // Every pick other than "keep the allocated ground" clears what
                       // allocation put on the fixture, so the display precedence
                       // (override → allocated → home) actually lands where the picker says.
-                      if (m === 'allocated') setDraft((p) => ({ ...p, venueOverride: '' }));
+                      if (m === 'allocated')
+                        setDraft((p) => ({ ...p, ...restoreAllocated, venueOverride: '' }));
                       else if (m === 'secondary')
                         setDraft((p) => ({ ...p, ...clearAllocated, venueOverride: secondary }));
                       else setDraft((p) => ({ ...p, ...clearAllocated, venueOverride: '' }));
@@ -1227,8 +1261,9 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
                   </select>
                 </div>
                 <div className="fix-edit-field">
-                  <label>Custom venue</label>
+                  <label htmlFor={`${uid}-custom`}>Custom venue</label>
                   <input
+                    id={`${uid}-custom`}
                     type="text"
                     placeholder="Only for an off-site venue"
                     disabled={venueMode !== 'custom'}
@@ -1240,8 +1275,12 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
             );
           })()}
           <div className="fix-edit-field">
-            <label>Status</label>
-            <select value={draft.status} onChange={(e) => u('status', e.target.value)}>
+            <label htmlFor={`${uid}-status`}>Status</label>
+            <select
+              id={`${uid}-status`}
+              value={draft.status}
+              onChange={(e) => u('status', e.target.value)}
+            >
               <option value="scheduled">Scheduled</option>
               <option value="completed">Completed</option>
               <option value="postponed">Postponed</option>
@@ -1512,6 +1551,7 @@ export function CreateSeriesForm({
         <div className="cs-row-input">
           <select
             className="field-select"
+            aria-label="League"
             value={d.leagueKey}
             onChange={(e) => pickLeague(e.target.value)}
             style={{ minWidth: 280 }}
@@ -1541,6 +1581,7 @@ export function CreateSeriesForm({
           <div className="cs-row-input">
             <select
               className="field-select"
+              aria-label="Season calendar"
               value={d.calendarId}
               onChange={(e) => {
                 const cal = allCalendars.find((c) => c.id === e.target.value);
@@ -1574,6 +1615,7 @@ export function CreateSeriesForm({
             <div className="cs-row-input">
               <select
                 className="field-select"
+                aria-label="Playing block"
                 value={d.blockId}
                 onChange={(e) => u('blockId', e.target.value)}
                 style={{ minWidth: 280 }}
@@ -1634,6 +1676,7 @@ export function CreateSeriesForm({
             <div className="cs-row-input">
               <input
                 type="date"
+                aria-label="First round"
                 value={d.startDate}
                 min={calendar.blocks.find((b) => b.id === d.blockId)?.start}
                 max={calendar.blocks.find((b) => b.id === d.blockId)?.end}
@@ -1664,6 +1707,7 @@ export function CreateSeriesForm({
             <div className="cs-row-input">
               <input
                 type="date"
+                aria-label="Activate from"
                 value={d.activateFrom}
                 onChange={(e) => u('activateFrom', e.target.value)}
               />
