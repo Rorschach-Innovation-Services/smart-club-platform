@@ -20,7 +20,7 @@ import {
   slotSource,
 } from './formats';
 import { groupSizes, resolveEntrants } from './entrants';
-import type { SeasonCalendar, StageSpec } from '../types';
+import type { EntrantSpec, SeasonCalendar, StageSpec } from '../types';
 
 /** The union's real 2026/27 calendar. */
 const CAL: SeasonCalendar = {
@@ -1054,5 +1054,100 @@ describe('format and entrant primitives', () => {
       context: { registered: ['only'] },
     });
     expect(m.status).toBe('awaiting-entrants');
+  });
+});
+
+describe('a standings-dependent stage prefills from the stage it draws from', () => {
+  /*
+   * The KZNCU swap: 6 teams split 3/3, then ONE side goes down and one comes up. The
+   * suggestion has to start from where stage 1 actually ended, not from the registered
+   * list — whose order is alphabetical and means nothing at this point in the season.
+   *
+   * With the registered list as the pool, a Top Six of [harlequins, ilembe, ukzn] gets a
+   * stage-2 suggestion of [chatsworth, clares, crusaders]: the exact inverse, and an
+   * admin who accepts it relegates the whole top group. This only looked correct in
+   * testing because the sample clubs happened to be alphabetical in the first season.
+   */
+  const REGISTERED = ['chatsworth', 'clares', 'crusaders', 'harlequins', 'ilembe', 'ukzn'];
+  const SWAP: EntrantSpec = {
+    kind: 'manual',
+    groups: { kind: 'sizes', sizes: [3, 3] },
+    derivedFrom: {
+      rule: 'swap',
+      fromStage: 'double-round',
+      detail: 'Top Six 3rd ↔ Bottom Six 1st',
+      carryPoints: true,
+    },
+  };
+  const PRIOR = [
+    ['harlequins', 'ilembe', 'ukzn'],
+    ['chatsworth', 'clares', 'crusaders'],
+  ];
+
+  it('carries the prior stage forward instead of re-blocking the alphabet', () => {
+    const r = resolveEntrants(SWAP, {
+      registered: REGISTERED,
+      seedOrder: REGISTERED,
+      priorGroups: PRIOR,
+      labels: ['Top Six', 'Bottom Six'],
+    });
+    expect(r.status).toBe('awaiting');
+    if (r.status !== 'awaiting') return;
+    expect(r.prefill.map((g) => g.entrants)).toEqual(PRIOR);
+  });
+
+  it('drops a side that has withdrawn since the previous stage', () => {
+    const r = resolveEntrants(SWAP, {
+      registered: REGISTERED.filter((t) => t !== 'ukzn'),
+      priorGroups: PRIOR,
+      labels: ['Top Six', 'Bottom Six'],
+    });
+    if (r.status !== 'awaiting') throw new Error('expected awaiting');
+    expect(r.prefill.flatMap((g) => g.entrants)).not.toContain('ukzn');
+  });
+
+  it('appends a side registered since, rather than silently losing it', () => {
+    const r = resolveEntrants(SWAP, {
+      registered: [...REGISTERED, 'newcomer'],
+      priorGroups: PRIOR,
+      labels: ['Top Six', 'Bottom Six'],
+    });
+    if (r.status !== 'awaiting') throw new Error('expected awaiting');
+    expect(r.prefill.flatMap((g) => g.entrants)).toContain('newcomer');
+  });
+
+  it('falls back to the registered list when the prior stage is unconfirmed', () => {
+    const r = resolveEntrants(SWAP, {
+      registered: REGISTERED,
+      seedOrder: REGISTERED,
+      labels: ['Top Six', 'Bottom Six'],
+    });
+    if (r.status !== 'awaiting') throw new Error('expected awaiting');
+    expect(r.prefill[0].entrants).toEqual(['chatsworth', 'clares', 'crusaders']);
+  });
+
+  it('ignores prior groups when the stage names no source stage', () => {
+    // A plain `manual` stage — a new client with no prior-season log — has nothing to
+    // carry forward, so the registered list is genuinely the best available guess.
+    const r = resolveEntrants(
+      { kind: 'manual', groups: { kind: 'sizes', sizes: [3, 3] } },
+      { registered: REGISTERED, priorGroups: PRIOR, labels: ['A', 'B'] },
+    );
+    if (r.status !== 'awaiting') throw new Error('expected awaiting');
+    expect(r.prefill[0].entrants).toEqual(['chatsworth', 'clares', 'crusaders']);
+  });
+
+  it('gives a knockout its qualifiers in pool order, not alphabetical order', () => {
+    // One group, so the pools flatten — but they flatten in CONFIRMED order, which is
+    // what a cross-pool bracket reads to pair A1 against B2.
+    const r = resolveEntrants(
+      {
+        kind: 'manual',
+        derivedFrom: { rule: 'from-standings', fromStage: 'pools', detail: 'Top two per pool' },
+      },
+      { registered: REGISTERED, priorGroups: PRIOR },
+    );
+    if (r.status !== 'awaiting') throw new Error('expected awaiting');
+    expect(r.prefill[0].entrants).toEqual([...PRIOR[0], ...PRIOR[1]]);
   });
 });

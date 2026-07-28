@@ -91,6 +91,20 @@ function Modal({
   );
 }
 
+/**
+ * The confirmed groups of the stage a standings-dependent stage draws from.
+ *
+ * `undefined` when the rule names no source, the source hasn't been confirmed yet, or the
+ * stage isn't standings-dependent at all — in which case the prefill falls back to the
+ * registered list, which is the best that can honestly be offered.
+ */
+function derivedFromGroups(stage: StageSpec, run: SeasonRun): string[][] | undefined {
+  const from = stage.entrants.kind === 'manual' ? stage.entrants.derivedFrom?.fromStage : undefined;
+  if (!from) return undefined;
+  const groups = run.stages.find((s) => s.specId === from)?.groups ?? [];
+  return groups.length ? groups.map((g) => g.entrants) : undefined;
+}
+
 /** A league is season-capable only once the operator has bound a competition to it. */
 export function seasonCapableLeagues(allLeagues: League[]): League[] {
   return (allLeagues || []).filter((l) => (l.competitions?.length ?? 0) > 0);
@@ -931,6 +945,14 @@ export function SeasonRunsPanel({
           registered: participants.map((p) => p.teamId),
           seedOrder: participants.map((p) => p.teamId),
           confirmed: stageRun?.groups.length ? stageRun.groups.map((g) => g.entrants) : undefined,
+          /*
+           * The groups of the stage this one's rule DRAWS FROM — the whole point of
+           * recording `fromStage`. A swap moves one side between two groups, so the
+           * suggestion has to start from where those groups actually ended up. Without
+           * it the prefill blocks the registered list into the right SIZES and calls
+           * that a proposal, which for a swap proposes relegating the entire top group.
+           */
+          priorGroups: derivedFromGroups(stage, active),
         },
         crossPoolQualifiers: crossPoolQualifiersFor(stage, structure.stages[i - 1], active),
       });

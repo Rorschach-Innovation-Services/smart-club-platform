@@ -494,3 +494,68 @@ describe('failure states', () => {
     expect(screen.queryByRole('button', { name: /start a season/i })).toBeNull();
   });
 });
+
+describe('the swap prefill starts from where the previous stage ended', () => {
+  /*
+   * Found by running the app, not by any gate. Stage 1 was confirmed as
+   * Top Six = [Club 7, 8, 9] and stage 2 proposed Top Six = [Club 1, 2, 3] — the exact
+   * inverse — because the prefill blocked the REGISTERED list into the right sizes and
+   * called that a suggestion. A swap moves one side; this moved all six.
+   *
+   * It passed an earlier manual walkthrough only because that season's clubs happened to
+   * sit in alphabetical order, so the wrong answer and the right one coincided.
+   */
+  const stage1Confirmed = (top: string[], bottom: string[]) =>
+    run(SPLIT_LEAGUE, {
+      stages: [
+        {
+          specId: 'double-round',
+          status: 'generated',
+          groups: [
+            { id: 'g0', label: 'Top Six', entrants: top },
+            { id: 'g1', label: 'Bottom Six', entrants: bottom },
+          ],
+          audit: [],
+        },
+      ],
+    });
+
+  const groupOf = (side: string) => {
+    const row = within(dialog())
+      .getAllByRole('row')
+      .find((r) => r.textContent?.startsWith(side));
+    const sel = within(row!).getByRole('combobox') as HTMLSelectElement;
+    return sel.options[sel.selectedIndex].text;
+  };
+
+  it('proposes the previous stage’s groups, not the registration order', async () => {
+    const { user } = setup(SPLIT_LEAGUE, [
+      // Deliberately NOT alphabetical — the case the earlier walkthrough couldn't see.
+      stage1Confirmed(
+        ['c7', 'c8', 'c9', 'c10', 'c11', 'c12'],
+        ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'],
+      ),
+    ]);
+    await openConfirm(user, /^Final round$/);
+
+    expect(groupOf('Club 7')).toBe('Top Six');
+    expect(groupOf('Club 12')).toBe('Top Six');
+    // Blocking the registered list would have put Club 1 top. It finished bottom.
+    expect(groupOf('Club 1')).toBe('Bottom Six');
+    expect(groupOf('Club 6')).toBe('Bottom Six');
+  });
+
+  it('leaves every other side where it was, so accepting it swaps nobody', async () => {
+    const top = ['c7', 'c8', 'c9', 'c10', 'c11', 'c12'];
+    const bottom = ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'];
+    const { user, onPatchRun } = setup(SPLIT_LEAGUE, [stage1Confirmed(top, bottom)]);
+    await openConfirm(user, /^Final round$/);
+    await user.click(confirmBtn());
+
+    const finalRound = onPatchRun.mock.calls[0][1].stages.find(
+      (s: { specId: string }) => s.specId === 'final-round',
+    );
+    expect(finalRound.groups[0].entrants).toEqual(top);
+    expect(finalRound.groups[1].entrants).toEqual(bottom);
+  });
+});

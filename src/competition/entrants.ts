@@ -40,6 +40,17 @@ export interface ResolveContext {
   seedOrder?: string[];
   /** Group labels from the stage spec, e.g. ["Top Six", "Bottom Six"]. */
   labels?: string[];
+  /**
+   * The CONFIRMED groups of the stage this one's DerivationNote draws from.
+   *
+   * Without it a standings-dependent stage prefills by blocking the registered list into
+   * the required sizes — which is to say alphabetically. For a mid-season swap that is
+   * not merely unhelpful, it is the inverse of the answer: the rule moves ONE side
+   * between groups, and the suggestion moves every side, so an admin who takes it
+   * relegates the whole top group. It looked correct in testing only because the sample
+   * clubs happened to be in alphabetical order in the first season.
+   */
+  priorGroups?: string[][];
 }
 
 /** 0→'A', 1→'B', … — the fallback group label. */
@@ -209,7 +220,25 @@ export function resolveEntrants(spec: EntrantSpec, ctx: ResolveContext = {}): En
   // that has no prior-season log to seed from. (A confirmed grouping was already handled
   // above, for every resolver.)
   const note = spec.derivedFrom;
-  const pool = ctx.seedOrder ?? ctx.registered ?? [];
+  /*
+   * Carry the previous stage forward when the note names one.
+   *
+   * Flattened in confirmed order and re-blocked into this stage's sizes, that reproduces
+   * the prior grouping EXACTLY when the shapes match (a swap, a carry-forward), and
+   * gives qualifiers-in-pool-order when they don't (a knockout drawing from pools). Both
+   * beat the registered list, whose order is alphabetical and means nothing here.
+   *
+   * Sides that have since withdrawn drop out; sides registered since are appended rather
+   * than silently lost, so a late entry still appears for the admin to place.
+   */
+  const registered = ctx.registered ?? [];
+  const carried = note && ctx.priorGroups?.length ? ctx.priorGroups.flat() : null;
+  const pool = carried
+    ? [
+        ...carried.filter((t) => !registered.length || registered.includes(t)),
+        ...registered.filter((t) => !carried.includes(t)),
+      ]
+    : (ctx.seedOrder ?? registered);
   const sizes = groupSizes(spec.groups, pool.length);
   const prefill = pool.length
     ? intoBlocks(pool, sizes).map((entrants, i) => makeGroup(i, labels, entrants))
