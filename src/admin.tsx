@@ -6295,12 +6295,17 @@ function RoleScopeModal({ user, clubs = [], mode, lockRep, onClose, onSave, toas
                   onChange={(e) => setRole(e.target.value)}
                   style={{ width: '100%', marginTop: 4 }}
                 >
-                  <option value="rep" disabled={clubs.length === 0}>
+                  {/* `lockRep` means "lock OUT rep": this is the only administrator, so
+                      demoting them leaves the union with nobody who can invite one back.
+                      The disable belongs on REP — it was on `admin`, which merely stopped
+                      them re-picking the role they already held while leaving the
+                      lockout one click away, directly contradicting the note below. The
+                      API rejects it atomically either way; this is about saying so before
+                      the request rather than through a 409. */}
+                  <option value="rep" disabled={clubs.length === 0 || lockRep}>
                     Club rep — scoped to selected clubs
                   </option>
-                  <option value="admin" disabled={lockRep && user.role === 'admin'}>
-                    Administrator — whole union
-                  </option>
+                  <option value="admin">Administrator — whole union</option>
                 </select>
               </label>
             )}
