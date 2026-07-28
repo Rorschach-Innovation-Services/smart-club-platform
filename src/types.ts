@@ -302,6 +302,17 @@ export interface CompetitionStructure {
   version: number;
   /** Provenance only — which starter template this was cloned from, if any. */
   templateId?: string;
+  /**
+   * The calendar this structure's `blockId`s were authored against.
+   *
+   * Not a binding — a competition still names its own calendar, and the same structure
+   * can be reused across seasons. This exists so the editor reopens on the right one: a
+   * structure built against 2027/28 used to reopen against `calendars[0]`, where every
+   * stage's block picker fell back to "Pick a playing block…" and the preview rail
+   * reported a perfectly good structure as not fitting — while the stored blockIds were
+   * fine and Save stayed enabled, so touching a picker to "fix" it wrote the wrong one.
+   */
+  calendarId?: string;
   stages: StageSpec[];
 }
 
@@ -356,10 +367,13 @@ export interface Competition {
   label: string;
   matchFormat?: { overs?: number; ballType?: string; label?: string };
   structureId: string;
-  /** The structure version this competition is pinned to. */
-  structureVersion?: number;
   calendarId: string;
-  /** Sides entered in the league but not this competition. */
+  /**
+   * Sides entered in the LEAGUE but not in this competition — a club that plays the
+   * 50 Over but sits out the T20. Honoured by `leagueParticipants`, so a season run
+   * never offers them; there is no UI for it yet, so today it is set through the
+   * operator API or a JSON import.
+   */
   excludeTeamIds?: string[];
 }
 

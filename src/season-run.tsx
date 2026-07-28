@@ -28,7 +28,7 @@ import {
   materialiseStage,
   type StageMaterialisation,
 } from './competition/structure';
-import { clubTeamsForLeague, findByKey } from './leagues';
+import { findByKey, leagueParticipants } from './leagues';
 import { currentSeasonLabel } from './data';
 import type {
   Club,
@@ -79,13 +79,6 @@ function Modal({
   );
 }
 
-/** Every side registered for a league, in a stable order — the pool a season draws on. */
-export function leagueParticipants(clubs: Club[], leagueKey: string) {
-  return (clubs || [])
-    .filter((c) => Array.isArray(c.leagues) && c.leagues.includes(leagueKey))
-    .flatMap((c) => clubTeamsForLeague(c, leagueKey).map((p) => ({ ...p, club: c })));
-}
-
 /** A league is season-capable only once the operator has bound a competition to it. */
 export function seasonCapableLeagues(allLeagues: League[]): League[] {
   return (allLeagues || []).filter((l) => (l.competitions?.length ?? 0) > 0);
@@ -121,7 +114,7 @@ function StartSeasonForm({
   const competition = league?.competitions?.find((c) => c.id === competitionId);
   const structure = (config.structures ?? []).find((s) => s.id === competition?.structureId);
   const calendar = (config.calendars ?? []).find((c) => c.id === competition?.calendarId);
-  const teams = league ? leagueParticipants(clubs, league.key) : [];
+  const teams = league ? leagueParticipants(clubs, league.key, competition?.excludeTeamIds) : [];
   const duplicate = existingRuns.some(
     (r) =>
       r.leagueKey === leagueKey &&
@@ -261,8 +254,8 @@ function StartSeasonForm({
         </div>
       )}
 
-      {problems.map((p) => (
-        <div key={p} style={ERR}>
+      {problems.map((p, i) => (
+        <div key={i} style={ERR}>
           {p}
         </div>
       ))}
@@ -572,8 +565,8 @@ function EntrantConfirmForm({
         )}
       </div>
 
-      {problems.map((p) => (
-        <div key={p} style={ERR}>
+      {problems.map((p, i) => (
+        <div key={i} style={ERR}>
           {p}
         </div>
       ))}
@@ -779,7 +772,12 @@ function StageCard({
               <Btn tone="teal" size="sm" onClick={requestGenerate} disabled={!fits || busy}>
                 {busy
                   ? 'Generating…'
-                  : `${stale ? 'Regenerate' : 'Generate'} ${materialisation.totalFixtures} fixtures`}
+                  : // A by-hand stage generates nothing by design, so "Generate 0
+                    // fixtures" reads as a bug rather than "create the empty series to
+                    // enter fixtures into". The preview rail already words this properly.
+                    stage.format.kind === 'manual'
+                    ? `${stale ? 'Rebuild' : 'Create'} the series to enter fixtures`
+                    : `${stale ? 'Regenerate' : 'Generate'} ${materialisation.totalFixtures} fixtures`}
               </Btn>
             )}
             <Btn tone="outline" size="sm" onClick={onConfirm}>
@@ -902,7 +900,12 @@ export function SeasonRunsPanel({
     if (!active) return null;
     const league = findByKey(allLeagues, active.leagueKey) as League | undefined;
     const competition = league?.competitions?.find((c) => c.id === active.competitionId);
-    const participants = leagueParticipants(clubs, active.leagueKey);
+    /*
+     * `excludeTeamIds` is read live rather than snapshotted: it only feeds the prefill for
+     * stages nobody has confirmed yet, and a side excluded mid-season (a withdrawal) should
+     * stop being offered. Stages already confirmed keep their stored entrants either way.
+     */
+    const participants = leagueParticipants(clubs, active.leagueKey, competition?.excludeTeamIds);
     const structure: CompetitionStructure = active.structureSnapshot;
     const calendar: SeasonCalendar = active.calendarSnapshot;
     const materialisations = structure.stages.map((stage, i) => {
@@ -964,7 +967,12 @@ export function SeasonRunsPanel({
         audit: [...(existing?.audit ?? []), { at: '', by: '', prefill, accepted }],
       };
     });
-    await onPatchRun(run.id, { stages: nextStages, version: run.version });
+    // The version comes from the CURRENT run in props, not the one captured when the
+    // modal opened. On a 409 the modal stays open (right — the admin's work is still on
+    // screen), but resending the stale version made every retry fail identically, with
+    // closing and reopening as the only undiscoverable fix.
+    const current = runs.find((r) => r.id === run.id) ?? run;
+    await onPatchRun(run.id, { stages: nextStages, version: current.version });
     setConfirming(null);
   }
 

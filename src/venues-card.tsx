@@ -370,8 +370,8 @@ function VenueForm({
         </Btn>
       </div>
 
-      {problems.map((p) => (
-        <div key={p} style={ERR}>
+      {problems.map((p, i) => (
+        <div key={i} style={ERR}>
           {p}
         </div>
       ))}

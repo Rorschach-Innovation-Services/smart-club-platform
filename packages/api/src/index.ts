@@ -2933,6 +2933,19 @@ function validateCompetitions(
           400,
           `competition "${comp.label}" points at a calendar that doesn't exist`,
         );
+      // There is no UI for exclusions yet — they arrive by JSON import or a raw API call,
+      // which is exactly when a shape guard earns its keep. A bare string here would be
+      // iterated character by character on the client and silently drop the wrong sides.
+      if (comp.excludeTeamIds !== undefined) {
+        if (
+          !Array.isArray(comp.excludeTeamIds) ||
+          comp.excludeTeamIds.some((id): boolean => typeof id !== 'string' || !id.trim())
+        )
+          throw new HttpError(
+            400,
+            `competition "${comp.label}": excludeTeamIds must be an array of team ids`,
+          );
+      }
       // Structures and calendars are authored independently, so a structure's stages can
       // name blocks the bound calendar has never had. Caught here — the one place all
       // three are in scope — rather than surfacing months later as "That playing block no
@@ -4520,6 +4533,10 @@ function hashCode(s: string): number {
 
 app.onError((err, c) => {
   if (err instanceof HttpError) return c.json({ error: err.message }, err.status as 400);
+  // A body that isn't JSON throws SyntaxError out of `c.req.json()`. That is the caller's
+  // mistake, not ours: answering 500 blames the server for it AND pages Sentry every time
+  // a script sends a truncated payload. Nothing else in a request throws SyntaxError.
+  if (err instanceof SyntaxError) return c.json({ error: 'body must be valid JSON' }, 400);
   // Unexpected (non-HttpError) → report. Tenant/user/role were tagged in authenticate.
   // No-op when Sentry was not initialised (no DSN). 4xx HttpErrors are intentionally
   // excluded above so expected validation/auth failures don't create noise.

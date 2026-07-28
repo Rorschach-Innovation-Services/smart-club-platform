@@ -252,6 +252,8 @@ export interface CompetitionStructure {
   version: number;
   /** Provenance only — which starter template this was cloned from, if any. */
   templateId?: string;
+  /** The calendar the blocks were authored against — reopens the editor on it. */
+  calendarId?: string;
   stages: StageSpec[];
 }
 
@@ -306,10 +308,8 @@ export interface Competition {
   label: string;
   matchFormat?: { overs?: number; ballType?: string; label?: string };
   structureId: string;
-  /** The structure version this competition is pinned to. */
-  structureVersion?: number;
   calendarId: string;
-  /** Sides entered in the league but not this competition. */
+  /** Sides entered in the LEAGUE but not in this competition. Honoured client-side. */
   excludeTeamIds?: string[];
 }
 

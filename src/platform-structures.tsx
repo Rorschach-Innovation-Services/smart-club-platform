@@ -834,7 +834,14 @@ function StructureEditor({
   toast: Toast;
 }) {
   const [draft, setDraft] = useState<CompetitionStructure>(initial);
-  const [calendarId, setCalendarId] = useState(calendars[0]?.id ?? '');
+  // Reopen on the calendar this structure was AUTHORED against, not whichever happens to
+  // be first. Falling back to calendars[0] blanked every block picker for a structure
+  // built against a later season, and made the preview rail call it "doesn't fit".
+  const [calendarId, setCalendarId] = useState(
+    initial.calendarId && calendars.some((c) => c.id === initial.calendarId)
+      ? initial.calendarId
+      : (calendars[0]?.id ?? ''),
+  );
   const [previewTeams, setPreviewTeams] = useState(DEFAULT_PREVIEW_TEAMS);
   const [expanded, setExpanded] = useState<string | null>(initial.stages[0]?.id ?? null);
   const [saveErr, setSaveErr] = useState('');
@@ -871,7 +878,13 @@ function StructureEditor({
     if (s.schedule.cadence.kind === 'weekdays' && !s.schedule.cadence.days.length)
       errors.push(`"${s.name}" needs at least one playing day.`);
     const note = s.entrants.kind === 'manual' ? s.entrants.derivedFrom : undefined;
-    if (note && !seen.has(note.fromStage))
+    // Two different mistakes, two different messages. An unpicked source (the "Pick the
+    // earlier stage…" placeholder, `fromStage: ''`) is not the same as pointing at a
+    // stage that comes later, and telling an operator the second when they did the first
+    // sends them looking for a problem that isn't there.
+    if (note && !note.fromStage)
+      errors.push(`"${s.name || 'A stage'}" needs the earlier stage it draws from.`);
+    else if (note && !seen.has(note.fromStage))
       errors.push(`"${s.name}" draws from a stage that doesn't come before it.`);
     seen.add(s.id);
   }
@@ -881,7 +894,14 @@ function StructureEditor({
     setSaveErr('');
     setBusy(true);
     try {
-      await onSave({ ...draft, name: draft.name.trim() });
+      // Record the calendar the blocks were authored against, so the next open lands on
+      // it. Not a binding — a competition still names its own.
+      const next: CompetitionStructure = { ...draft, name: draft.name.trim() };
+      // Assign or DELETE — a bare `...(calendarId ? {calendarId} : {})` leaves the value
+      // already on the draft in place, so picking "No calendar" would silently do nothing.
+      if (calendarId) next.calendarId = calendarId;
+      else delete next.calendarId;
+      await onSave(next);
       toast(`${draft.name.trim()} · saved`);
       onClose();
     } catch (e) {
@@ -979,8 +999,8 @@ function StructureEditor({
         />
       </div>
 
-      {errors.map((e) => (
-        <div key={e} style={ERR}>
+      {errors.map((e, i) => (
+        <div key={i} style={ERR}>
           {e}
         </div>
       ))}
@@ -1504,8 +1524,8 @@ export function CompetitionsEditor({
         Add competition
       </Btn>
 
-      {errors.map((e) => (
-        <div key={e} style={ERR}>
+      {errors.map((e, i) => (
+        <div key={i} style={ERR}>
           {e}
         </div>
       ))}

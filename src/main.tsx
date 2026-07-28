@@ -15,7 +15,7 @@ import {
 } from 'react-router-dom';
 import { QueryClientProvider, useQuery, useQueries } from '@tanstack/react-query';
 import { queryClient, qk } from './query';
-import { leagueParticipants } from './season-run';
+import { leagueParticipants } from './leagues';
 import { allocateVenues, buildLedger } from './competition/venues';
 import * as api from './api';
 import { ApiError } from './api';

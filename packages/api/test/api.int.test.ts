@@ -98,6 +98,20 @@ after(() => {
   ddbServer?.close();
 });
 
+describe('malformed request bodies', () => {
+  test('a body that is not JSON is 400, not 500', async () => {
+    // Hono throws SyntaxError out of c.req.json(). Answering 500 blames the server for
+    // the caller's mistake and pages Sentry on every truncated payload.
+    const res = await app.request('/tenant/support', {
+      method: 'PUT',
+      headers: headers(ADMIN),
+      body: '{"support": "half a pay',
+    });
+    assert.equal(res.status, 400);
+    assert.match(((await res.json()) as { error: string }).error, /valid JSON/i);
+  });
+});
+
 describe('PUT /tenant/support', () => {
   test('admin can edit; value is recombined as "Name · email"', async () => {
     const res = await app.request('/tenant/support', {

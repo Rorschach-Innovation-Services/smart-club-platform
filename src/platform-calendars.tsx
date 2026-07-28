@@ -487,8 +487,8 @@ function CalendarForm({
       <div style={sectionHead}>Preview</div>
       <Timeline calendar={draft} />
 
-      {errors.map((e) => (
-        <div key={e} style={ERR}>
+      {errors.map((e, i) => (
+        <div key={i} style={ERR}>
           {e}
         </div>
       ))}

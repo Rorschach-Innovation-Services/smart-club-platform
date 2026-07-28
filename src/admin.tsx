@@ -69,7 +69,7 @@ import {
   planRoundDates,
   todayIso,
 } from './competition/calendar';
-import { fixturesFromPlan, roundsForTeamCount } from './competition/fixtures';
+import { fixturesFromPlan, legacyRoundDates, roundsForTeamCount } from './competition/fixtures';
 import { fixtureVenueCoords as fixtureVenue, isLocked } from './competition/venues';
 import { isSlotRef, slotRefLabel } from './competition/formats';
 import type { Cadence, SeasonCalendar, TimeSlot, Weekday } from './types';
@@ -526,15 +526,34 @@ export function FixtureTable({
     const newId = 'f' + Date.now();
     const last = series.fixtures[series.fixtures.length - 1];
     const nextRound = last ? last.round + 1 : 1;
-    const baseDate = last ? new Date(last.date) : new Date(series.startDate);
-    baseDate.setDate(baseDate.getDate() + 7);
+    // Date the new round through the SERIES' OWN CALENDAR when it has one. The old
+    // "+7 days from the last fixture" would step straight into the mid-season break —
+    // the exact defect season calendars exist to remove — and it parsed with a lenient
+    // `new Date()` in a module that otherwise went strict-dayjs everywhere.
+    const calendar = allCalendars.find((c) => c.id === series.schedule?.calendarId);
+    const planned =
+      series.schedule && calendar
+        ? planRoundDates({
+            calendar,
+            blockId: series.schedule.blockId,
+            cadence: series.schedule.cadence,
+            rounds: nextRound,
+          }).dates[nextRound - 1]
+        : undefined;
     // Default to two distinct teams so a fresh row isn't a team-vs-itself fixture
     // (matters for a 2-side derby series where teams[1] is the only alternative).
     const t = series.teams || [];
+    // Legacy fallback for a series with no calendar binding — every series created
+    // before ADR 0008. One week on from the last fixture, which is what this button
+    // always did. Asking for `nextRound` dates ANCHORED AT the last fixture compounds
+    // the two, so round 4 would land three weeks past where it belongs.
+    const legacy = last?.date
+      ? legacyRoundDates(2, last.date).at(-1)
+      : legacyRoundDates(1, series.startDate).at(-1);
     const newFix = {
       id: newId,
       round: nextRound,
-      date: baseDate.toISOString().slice(0, 10),
+      date: planned ?? legacy,
       home: t[0],
       away: t.find((x) => x !== t[0]) || t[1] || t[0],
       status: 'scheduled',
@@ -1062,6 +1081,11 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
     home: fixture.home,
     away: fixture.away,
     venueOverride: fixture.venueOverride || '',
+    // Carried so the picker can CLEAR them — see the venue-mode note below. Without
+    // these in the draft, "Primary" could never undo an allocation.
+    venueName: fixture.venueName ?? '',
+    venueLat: fixture.venueLat,
+    venueLon: fixture.venueLon,
     status: fixture.status || 'scheduled',
   });
   function u(k, v) {
@@ -1069,12 +1093,38 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
   }
   // Venue picker mode is UI-only state (so "Other" can hold an empty text box without
   // collapsing back to "primary"). The stored value is always draft.venueOverride.
+  //
+  // ALLOCATION is a fourth state. A fixture the allocator moved carries `venueName` with
+  // no override, and the row above renders `venueOverride || venueName || home ground` —
+  // so opening the picker on "Primary" contradicted the row, and choosing Primary wrote
+  // an empty override while leaving `venueName`, meaning the fixture still displayed the
+  // allocated ground. Putting an allocated fixture back on its home ground was not
+  // reachable through this editor at all.
   const homeClub0 = teams.find((t) => t.id === fixture.home);
   const secondary0 = homeClub0?.ground?.secondaryVenue || '';
   const initialOv = fixture.venueOverride || '';
+  const allocatedName = fixture.venueName || '';
   const [venueMode, setVenueMode] = useStateA(
-    initialOv === '' ? 'primary' : secondary0 && initialOv === secondary0 ? 'secondary' : 'custom',
+    initialOv !== ''
+      ? secondary0 && initialOv === secondary0
+        ? 'secondary'
+        : 'custom'
+      : allocatedName
+        ? 'allocated'
+        : 'primary',
   );
+  /**
+   * Clearing the allocated ground means clearing EVERYTHING allocation denormalised onto
+   * the fixture. `venueId` matters most: `buildLedger` counts a ground as booked from it
+   * and `travelPerTeam` measures distance to it, so a stale id keeps the old venue booked
+   * against a match that has moved and never books the one it moved to.
+   */
+  const clearAllocated = {
+    venueId: undefined,
+    venueName: '',
+    venueLat: undefined,
+    venueLon: undefined,
+  };
   // A "secondary" pick stored the *current* home club's secondary venue name; changing
   // Home would otherwise persist the previous club's venue. Reset that pick to primary
   // on a home change. A custom free-text override is club-agnostic, so it's preserved.
@@ -1159,11 +1209,18 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
                     onChange={(e) => {
                       const m = e.target.value;
                       setVenueMode(m);
-                      if (m === 'primary') u('venueOverride', '');
-                      else if (m === 'secondary') u('venueOverride', secondary);
-                      else u('venueOverride', '');
+                      // Every pick other than "keep the allocated ground" clears what
+                      // allocation put on the fixture, so the display precedence
+                      // (override → allocated → home) actually lands where the picker says.
+                      if (m === 'allocated') setDraft((p) => ({ ...p, venueOverride: '' }));
+                      else if (m === 'secondary')
+                        setDraft((p) => ({ ...p, ...clearAllocated, venueOverride: secondary }));
+                      else setDraft((p) => ({ ...p, ...clearAllocated, venueOverride: '' }));
                     }}
                   >
+                    {allocatedName && (
+                      <option value="allocated">Allocated · {allocatedName}</option>
+                    )}
                     <option value="primary">Primary{primary ? ` · ${primary}` : ' ground'}</option>
                     {secondary && <option value="secondary">Secondary · {secondary}</option>}
                     <option value="custom">Other (type below)</option>
@@ -1404,9 +1461,15 @@ export function CreateSeriesForm({
         ...(Number.isFinite(p.lon) ? { lon: p.lon } : {}),
       }));
     const scheduled = !!(calendar && plan);
+    // The form model's own scheduling fields are DROPPED here — `calendarId`, `blockId`,
+    // `cadence` and `slots` are the inputs that produce `schedule` below, and spreading
+    // them too stored the same binding twice on every calendar-scheduled series. Nothing
+    // reads the strays today, which is exactly how a second source of truth survives
+    // until something does.
+    const { calendarId: _cid, blockId: _bid, cadence: _cad, slots: _slots, ...seriesFields } = d;
     const series = {
       id: 's-' + Date.now(),
-      ...d,
+      ...seriesFields,
       participants,
       // Persist the *resolved* mode (not the raw '' default) only when an end
       // date exists, so regenerate reproduces the schedule the admin confirmed.

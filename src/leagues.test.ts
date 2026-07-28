@@ -11,6 +11,7 @@ import {
   teamLetter,
   defaultTeamName,
   clubTeamsForLeague,
+  leagueParticipants,
 } from './leagues';
 
 const LEAGUES = [
@@ -271,5 +272,68 @@ describe('clubTeamsForLeague', () => {
     expect(clubTeamsForLeague(c as any, 'premier').map((t) => t.teamId)).toEqual(
       teams.map((t) => t.teamId),
     );
+  });
+});
+
+describe('leagueParticipants', () => {
+  const clubs = [
+    {
+      id: 'glenwood',
+      name: 'Glenwood',
+      leagues: ['premier', 't20'],
+      leagueTeams: { premier: 2 },
+      teamRosters: {
+        premier: [
+          { id: 'tm_a', name: 'Glenwood A' },
+          { id: 'tm_b', name: 'Glenwood B' },
+        ],
+      },
+      ground: { venue: 'Glenwood Oval' },
+    },
+    { id: 'berea', name: 'Berea', leagues: ['premier'], ground: { venue: 'Berea Park' } },
+    { id: 'ukzn', name: 'UKZN', leagues: ['t20'], ground: {} },
+  ];
+
+  it('draws only the clubs registered for the league, expanded into sides', () => {
+    expect(leagueParticipants(clubs as any, 'premier').map((p) => p.teamId)).toEqual([
+      'tm_a',
+      'tm_b',
+      'berea',
+    ]);
+  });
+
+  it('carries the club through on each side', () => {
+    const [first] = leagueParticipants(clubs as any, 'premier');
+    expect(first.club.id).toBe('glenwood');
+  });
+
+  it('drops sides listed in excludeTeamIds', () => {
+    expect(leagueParticipants(clubs as any, 'premier', ['tm_b']).map((p) => p.teamId)).toEqual([
+      'tm_a',
+      'berea',
+    ]);
+  });
+
+  it('excludes one side of a club without excluding the other', () => {
+    // A club may enter its A side in the T20 and hold the B side back, so the filter
+    // has to be on teamId, not clubId.
+    const left = leagueParticipants(clubs as any, 'premier', ['tm_a']);
+    expect(left.map((p) => p.teamId)).toEqual(['tm_b', 'berea']);
+  });
+
+  it('ignores exclusions that name a side in another league', () => {
+    expect(leagueParticipants(clubs as any, 'premier', ['ukzn']).map((p) => p.teamId)).toEqual([
+      'tm_a',
+      'tm_b',
+      'berea',
+    ]);
+  });
+
+  it('defaults to no exclusions and tolerates a missing club list', () => {
+    expect(leagueParticipants(clubs as any, 't20').map((p) => p.teamId)).toEqual([
+      'glenwood',
+      'ukzn',
+    ]);
+    expect(leagueParticipants(undefined as any, 'premier')).toEqual([]);
   });
 });

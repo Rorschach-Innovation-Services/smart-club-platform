@@ -4537,10 +4537,13 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                             s.carsPerAwayTrip || DEFAULT_CARS,
                             fixtureVenue(f),
                           );
-                          const mine = isHome ? c.home : c.away;
-                          if (mine.roundTripKm > 0) {
-                            dist = mine.roundTripKm;
-                            cost = mine.fuelR;
+                          // `myLeg`, not `mine` — the enclosing scope already binds
+                          // `mine` to this club's fixtures, and two different meanings
+                          // one screen apart is needless work for the next reader.
+                          const myLeg = isHome ? c.home : c.away;
+                          if (myLeg.roundTripKm > 0) {
+                            dist = myLeg.roundTripKm;
+                            cost = myLeg.fuelR;
                           }
                         }
                         return (

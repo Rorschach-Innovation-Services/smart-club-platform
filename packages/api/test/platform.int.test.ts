@@ -1808,6 +1808,42 @@ describe('competition structures (ADR 0008)', () => {
     assert.equal(ok.status, 200);
   });
 
+  test('excludeTeamIds must be an array of team ids', async () => {
+    const league = { key: 'premier', label: 'Premier', group: 'Senior', district: 'All districts' };
+    const comp = (excludeTeamIds: unknown) => ({
+      leagues: [
+        {
+          ...league,
+          competitions: [
+            {
+              id: 'c1',
+              label: '50 Over',
+              structureId: 'split-league',
+              calendarId: 'cal',
+              excludeTeamIds,
+            },
+          ],
+        },
+      ],
+    });
+
+    // A bare string is iterable, so it would pass a naive check and then be read
+    // character by character on the client — the exact silent-wrong-answer case.
+    const asString = await put(comp('tm_a'));
+    assert.equal(asString.status, 400);
+    assert.match(await errorOf(asString), /excludeTeamIds must be an array/);
+
+    const withBlank = await put(comp(['tm_a', '  ']));
+    assert.equal(withBlank.status, 400);
+
+    const ok = await put(comp(['tm_a', 'tm_b']));
+    assert.equal(ok.status, 200);
+    assert.deepEqual(
+      (await repo.getTenantConfig(T))?.leagues?.[0]?.competitions?.[0]?.excludeTeamIds,
+      ['tm_a', 'tm_b'],
+    );
+  });
+
   test('deleting a structure a competition still binds to is blocked', async () => {
     const res = await put({ structures: [] });
     assert.equal(res.status, 409);
