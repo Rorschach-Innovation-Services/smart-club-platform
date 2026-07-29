@@ -6850,6 +6850,29 @@ export function AdminClearances({
           // club later signs up under the directory entry's exact slug.
           const offSystem =
             req.fromClubDirectory === true && !(clubs ?? []).some((c) => c.id === req.fromClubId);
+          // Three states, not two — `sourceRostered` is derived by the API, and web and API
+          // deploy separately, so "unknown" is a real state and must not be collapsed into
+          // either answer:
+          //   sourcelessKnown — the API said the source club holds no row for this player. It
+          //     cannot decide on an informed basis ("we have no record of them" is what a roster
+          //     still being digitised looks like, not a finding that the transfer is bogus), so
+          //     the server refuses Reject and permits Reallocate. Only this state may drive
+          //     ASSERTIVE copy or offer Reallocate — claiming it on an unknown would tell an
+          //     admin something false about a genuine transfer, and offer an action that 409s.
+          //   rejectBlocked — fails CLOSED on unknown too. Reject is the one irreversible
+          //     control here; the server 409s anyway if the clearance really is sourceless, so a
+          //     wrongly-disabled button costs a refresh, while a wrongly-enabled one is terminal.
+          const pendingRegistration = req.status === 'pending' && req.origin === 'registration';
+          const sourcelessKnown = pendingRegistration && req.sourceRostered === false;
+          const sourcelessUnknown = pendingRegistration && req.sourceRostered === undefined;
+          const rejectBlocked = offSystem || sourcelessKnown || sourcelessUnknown;
+          // Reallocation mirrors the server rule: sourceless, but NOT a directory entry whose
+          // slug a real club has since claimed — that clearance is genuinely in its rep's queue.
+          // `offSystem` stays an independent trigger so an off-system clearance never loses its
+          // only recovery control just because `sourceRostered` is absent.
+          const canReallocate =
+            (offSystem || sourcelessKnown) &&
+            !(req.fromClubDirectory === true && (clubs ?? []).some((c) => c.id === req.fromClubId));
           return (
             <div
               key={req.id}
@@ -6914,15 +6937,19 @@ export function AdminClearances({
                     </div>
                     <div className="clr-override-sub">
                       {offSystem
-                        ? `${req.fromClubName} is not yet on the system, so no club rep can approve this. Override & approve it — or reallocate it to the club once they register.`
-                        : `The Union office can override ${req.fromClubName}'s approval and issue the clearance to ${req.toClubName} — or reject the request${
-                            req.origin === 'registration'
-                              ? ` (the player stays at ${req.toClubName}, flagged clearance-rejected, and is removed from ${req.fromClubName})`
-                              : ` (the player stays registered at ${req.fromClubName})`
-                          }.`}
+                        ? `${req.fromClubName} is not yet on the system, so no club rep can approve this. Override & approve it${canReallocate ? ' — or reallocate it to the club once they register' : ''}.`
+                        : sourcelessKnown
+                          ? `${req.fromClubName} has no record of this player on its roster, so it cannot judge the transfer — which is what a club still adding its squad looks like. Override & approve it${canReallocate ? ', or reallocate it to the club they actually left' : ''}. Rejecting is not available: it would permanently flag a legitimately registered player.`
+                          : sourcelessUnknown
+                            ? `Could not confirm whether ${req.fromClubName} holds this player on its roster, so rejecting is disabled — it is irreversible and must not be done on a guess. Refresh to try again, or override & approve.`
+                            : `The Union office can override ${req.fromClubName}'s approval and issue the clearance to ${req.toClubName} — or reject the request${
+                                req.origin === 'registration'
+                                  ? ` (the player stays at ${req.toClubName}, permanently flagged clearance-rejected, and is removed from ${req.fromClubName})`
+                                  : ` (the player stays registered at ${req.fromClubName})`
+                              }.`}
                     </div>
                   </div>
-                  {offSystem && (
+                  {canReallocate && (
                     <Btn
                       tone="outline"
                       disabled={busy}
@@ -6947,12 +6974,16 @@ export function AdminClearances({
                     title={
                       offSystem
                         ? 'The previous club is not on the system and cannot respond — override & approve or reallocate instead'
-                        : undefined
+                        : sourcelessKnown
+                          ? `${req.fromClubName} has no record of this player, so it cannot judge the transfer — override & approve${canReallocate ? ', or reallocate to the club they actually left' : ''}`
+                          : sourcelessUnknown
+                            ? `Could not confirm whether ${req.fromClubName} holds this player — rejecting is irreversible, so it stays disabled until it is known. Refresh to try again`
+                            : undefined
                     }
                   >
                     <Btn
                       tone="outline"
-                      disabled={busy || offSystem}
+                      disabled={busy || rejectBlocked}
                       onClick={() => {
                         setReason('');
                         setConfirm({
@@ -6960,7 +6991,7 @@ export function AdminClearances({
                           title: 'Reject this clearance?',
                           body:
                             req.origin === 'registration'
-                              ? `This will reject ${req.playerName}'s clearance on the Union's authority. They stay on ${req.toClubName}'s roster flagged clearance-rejected and are removed from ${req.fromClubName}.`
+                              ? `This will reject ${req.playerName}'s clearance on the Union's authority. They stay on ${req.toClubName}'s roster, flagged clearance-rejected — which is permanent: there is no way to return them to active, and this is their only registration record. Any record of them at ${req.fromClubName} is removed.`
                               : `This will reject ${req.playerName}'s transfer to ${req.toClubName} on the Union's authority. They stay registered at ${req.fromClubName}. Both clubs will be notified.`,
                           onYes: (note) => {
                             onReject(req, note);
@@ -6976,17 +7007,20 @@ export function AdminClearances({
                     tone="teal"
                     icon={Icon.Arrow}
                     disabled={busy}
-                    onClick={() =>
+                    onClick={() => {
+                      setReason('');
                       setConfirm({
                         kind: 'override',
                         title: 'Issue this clearance?',
-                        body: `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf. Both clubs will be notified.`,
-                        onYes: () => {
-                          onOverride(req);
+                        body: sourcelessKnown
+                          ? `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf — even though ${req.fromClubName} has no record of them. If this registration should not exist at all, issue it and then remove the player from ${req.toClubName}'s roster (Clubs → ${req.toClubName} → Players). Say which you are doing: the reason is shown to both clubs, and recorded against your name for the union's record.`
+                          : `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf. Both clubs will be notified.`,
+                        onYes: (note) => {
+                          onOverride(req, note);
                           setConfirm(null);
                         },
-                      })
-                    }
+                      });
+                    }}
                   >
                     {busy ? 'Issuing…' : 'Override & approve'}
                   </Btn>
@@ -7002,13 +7036,20 @@ export function AdminClearances({
                   ) : (
                     <Pill tone="teal" dot>
                       {req.status === 'admin-override'
-                        ? 'Union override'
+                        ? `Union override${req.overriddenBy ? ` · ${req.overriddenBy}` : ''}`
                         : 'Cleared by source club'}
                     </Pill>
                   )}
                   {req.status === 'rejected' && req.rejectReason && (
                     <span style={{ fontSize: 11, color: 'var(--muted)' }}>
                       "{req.rejectReason}"
+                    </span>
+                  )}
+                  {/* The whole point of capturing it: an override used to DISPOSE of a
+                      clearance must not read as an approved transfer in the history. */}
+                  {req.status === 'admin-override' && req.overrideReason && (
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                      "{req.overrideReason}"
                     </span>
                   )}
                   <span
@@ -7062,12 +7103,16 @@ export function AdminClearances({
               </div>
               <div className="fix-confirm-title">{confirm.title}</div>
               <div className="fix-confirm-body">{confirm.body}</div>
-              {confirm.kind === 'reject' && (
+              {(confirm.kind === 'reject' || confirm.kind === 'override') && (
                 <textarea
                   className="field-input"
                   rows={2}
                   maxLength={500}
-                  placeholder="Reason (optional — shown to both clubs)"
+                  placeholder={
+                    confirm.kind === 'reject'
+                      ? 'Reason (optional — shown to both clubs)'
+                      : 'Reason (optional — shown to both clubs, recorded against your name)'
+                  }
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
                   style={{ width: '100%', marginTop: 10, resize: 'vertical', fontSize: 13 }}
@@ -7082,7 +7127,11 @@ export function AdminClearances({
                 >
                   <option value="">Select the club…</option>
                   {(clubs ?? [])
-                    .filter((c) => c.id !== confirm.req.toClubId)
+                    // Never the destination (it would approve its own incoming transfer), and
+                    // never the club it is already assigned to — since on-system sourceless
+                    // clearances became reallocatable, the current source IS in this list, and
+                    // picking it returns a raw 400.
+                    .filter((c) => c.id !== confirm.req.toClubId && c.id !== confirm.req.fromClubId)
                     .map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
@@ -7097,6 +7146,10 @@ export function AdminClearances({
                 {confirm.kind === 'reject' ? (
                   <Btn tone="ink" onClick={() => confirm.onYes(reason.trim())}>
                     Yes, reject clearance
+                  </Btn>
+                ) : confirm.kind === 'override' ? (
+                  <Btn tone="teal" icon={Icon.Arrow} onClick={() => confirm.onYes(reason.trim())}>
+                    Yes, issue clearance
                   </Btn>
                 ) : confirm.kind === 'reassign' ? (
                   <Btn

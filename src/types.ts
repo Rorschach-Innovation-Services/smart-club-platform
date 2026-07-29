@@ -839,8 +839,35 @@ export interface PlayerClearance {
   rejectedAt?: string | null;
   rejectedBy?: string;
   rejectReason?: string;
+  /**
+   * Free text on an override: why the union issued the clearance on the clubs' behalf. Written
+   * only on an ADMIN override, but SHOWN TO BOTH CLUBS — it rides the mirror as well as the
+   * canonical, exactly like rejectReason. Load-bearing when override is used to DISPOSE of a
+   * clearance that should never have existed (junk registration, or a player who named a club
+   * they never played for) — reject is refused for sourceless clearances and deletion is
+   * blocked while pending, so override is the only exit, and without this the resolved record
+   * reads as a genuine approved transfer.
+   */
+  overrideReason?: string;
+  /** Email of the union admin who overrode, mirroring rejectedBy. Admin overrides only. */
+  overriddenBy?: string;
   version: number;
 }
+
+/**
+ * A clearance as GET /admin/clearances returns it — the stored row plus one derived field.
+ * Deliberately NOT on PlayerClearance: every writer spreads a whole clearance, so a derived
+ * field on the persisted type is one pass-through away from being stored. ABSENT means unknown
+ * (older API, the derivation failed, or that pair could not be read) and must be treated as its
+ * own state, not folded into either answer — the console fails closed on the irreversible
+ * action when it is.
+ *
+ * NOTE this copy is DOCUMENTATION ONLY for now. The compiler enforcement it describes is real
+ * on the API side (packages/api/src/types.ts); here AdminClearances' props are untyped and
+ * tsconfig.app.json still has noImplicitAny off, so nothing checks it until the strict ratchet
+ * lands. Do not read it as a guarantee on this side of the wire.
+ */
+export type AdminClearanceView = PlayerClearance & { sourceRostered?: boolean };
 
 export type RegistrationReviewKind = 'off-system-alert' | 'cross-club-hold';
 export type RegistrationReviewStatus = 'open' | 'resolved';

@@ -2039,6 +2039,31 @@ describe('POST /register — cross-club registrations, off-system alerts, admin 
     }
     assert.equal(last!.status, 429);
   });
+
+  test('source cap: flooding one club with clearance requests 429s past the per-hour limit', async () => {
+    // Naming a club as the previous one is its own write primitive now — it queues a clearance
+    // in that club's portal whether or not it has ever rostered the player. The inbound cap
+    // does NOT bound this: it is keyed on the destination, and registering into the link club's
+    // own roster (as here) skips it entirely. Without a source cap, one link is worth a full
+    // token quota of junk clearances aimed at a single victim.
+    // CLUB_SOURCE_PER_HOUR = 60 — its own constant, deliberately looser than the inbound cap,
+    // since a real end-of-season exodus concentrates on one source club.
+    await repo.createClub('dolphins', mkClub('rsrc', 'Reg Source CC'));
+    let last: Awaited<ReturnType<typeof postLink>> | undefined;
+    for (let i = 0; i < 61; i++) {
+      last = await postLink({
+        firstName: 'Aimed',
+        lastName: `N${i}`,
+        idNumber: `RVSRC${i}`,
+        lastClubId: 'rsrc',
+      });
+    }
+    assert.equal(last!.status, 429);
+    assert.match(
+      ((await last!.json()) as { error?: string }).error ?? '',
+      /previous club is receiving too many/i,
+    );
+  });
 });
 
 describe('/admin/users', () => {
@@ -3532,17 +3557,283 @@ describe('registration-origin clearances (previous-club dropdown on the public f
     assert.equal(destClub?.playerCount, 1, 'no double-increment on approval');
   });
 
-  test('no ID match at the claimed club falls back to a plain registration', async () => {
+  test('no ID match at the claimed club still opens a clearance to it', async () => {
+    // The claimed club is on the system but has no roster record of this player — which is
+    // what a club still digitising its squad looks like. The transfer is real to the player,
+    // so it must not register as a fresh signing: open the clearance and let the claimed club
+    // (or the union office) say otherwise.
     const res = await registerAt('rc-b', 'rc-b-token', {
       ...regBody({ idNumber: 'RC9002', cell: '0830000003' }),
       lastClubId: 'rc-a',
     });
     assert.equal(res.status, 201);
-    const body = (await res.json()) as { clearance?: unknown };
-    assert.equal(body.clearance, undefined, 'no clearance opened');
+    const body = (await res.json()) as { clearance?: { fromClubName: string } };
+    assert.equal(
+      body.clearance?.fromClubName,
+      'RC Alpha CC',
+      'clearance opened to the claimed club',
+    );
+
     const row = (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9002');
-    assert.equal(row?.status, 'active');
-    assert.equal(row?.lastClub, 'RC Alpha CC', 'claimed club stored as text');
+    assert.equal(row?.status, 'clearance-pending', 'destination row held pending');
+    assert.equal(row?.lastClub, 'RC Alpha CC');
+
+    const clr = (await repo.listClearancesForSource('dolphins', 'rc-a')).find(
+      (x) => x.idNumber === 'RC9002',
+    );
+    assert.equal(clr?.origin, 'registration');
+    assert.equal(clr?.status, 'pending');
+    assert.equal(
+      clr?.fromClubDirectory,
+      undefined,
+      'a real on-system club is not a directory entry',
+    );
+    // Sourceless: the claimed club never had this player, so nothing is written into its
+    // partition beyond the clearance itself (resolve/reject branch on the row's absence).
+    const srcRow = (await repo.listPlayers('dolphins', 'rc-a')).find(
+      (p) => p.idNumber === 'RC9002',
+    );
+    assert.equal(srcRow, undefined, 'no placeholder row invented at the claimed club');
+  });
+
+  test('a sourceless clearance resolves: dest activated, source count untouched, no phantom row', async () => {
+    // The load-bearing behaviour of the sourceless shape. resolveClearance tolerates a missing
+    // source row for registration-origin clearances by branching on its ACTUAL absence, so
+    // approval must activate the destination in place and leave the source club untouched — its
+    // playerCount was never incremented, so it must not be decremented either.
+    const before = (await repo.getClub('dolphins', 'rc-a'))?.playerCount ?? 0;
+    const clr = (await repo.listClearancesForSource('dolphins', 'rc-a')).find(
+      (x) => x.idNumber === 'RC9002',
+    )!;
+    const res = await app.request(`/clubs/rc-a/clearances/${clr.id}`, {
+      method: 'PATCH',
+      headers: headers(REP_RCA),
+      body: JSON.stringify({
+        feesCleared: true,
+        misconductCleared: true,
+        action: 'issue',
+        version: clr.version,
+      }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9002')?.status,
+      'active',
+      'destination row activated in place',
+    );
+    assert.equal(
+      (await repo.getClub('dolphins', 'rc-a'))?.playerCount,
+      before,
+      'source count unchanged — never incremented for a sourceless clearance',
+    );
+    assert.deepEqual(
+      (await repo.listPlayers('dolphins', 'rc-a')).filter((p) => p.idNumber === 'RC9002'),
+      [],
+      'no row conjured at the source club by resolution',
+    );
+  });
+
+  test('a sourceless clearance cannot be rejected; admin override completes it instead', async () => {
+    // The source club has no record to reject ON, so reject is refused server-side: it would
+    // flag a legitimately active player 'clearance-rejected', which is terminal and would be
+    // their only surviving registration record.
+    const reg = await registerAt('rc-b', 'rc-b-token', {
+      ...regBody({ idNumber: 'RC9020', cell: '0830000020' }),
+      lastClubId: 'rc-a',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await repo.listClearancesForSource('dolphins', 'rc-a')).find(
+      (x) => x.idNumber === 'RC9020',
+    )!;
+
+    const rejected = await app.request(`/admin/clearances/${clr.id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'rc-a', reason: 'never played for us' }),
+    });
+    assert.equal(rejected.status, 409, 'reject refused for a sourceless clearance');
+    assert.equal(
+      (await repo.listClearancesForSource('dolphins', 'rc-a')).find((x) => x.idNumber === 'RC9020')
+        ?.status,
+      'pending',
+      'refused reject mutates nothing',
+    );
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9020')?.status,
+      'clearance-pending',
+      'player not flagged by the refused reject',
+    );
+
+    // The console surfaces the same fact, so the button is disabled rather than 409-ing.
+    const adminList = (await (
+      await app.request('/admin/clearances', { headers: headers(ADMIN) })
+    ).json()) as { id: string; sourceRostered?: boolean }[];
+    assert.equal(adminList.find((x) => x.id === clr.id)?.sourceRostered, false);
+
+    // Override is the exit, and it takes a reason — because it is doing double duty here. The
+    // resolved record would otherwise read as "the Union approved this transfer" for a transfer
+    // that never happened, and this history is read for disputes.
+    const override = await app.request(`/admin/clearances/${clr.id}/override`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        fromClubId: 'rc-a',
+        version: clr.version,
+        reason: '  not a real registration, removing  ',
+      }),
+    });
+    assert.equal(override.status, 200, 'override is the available resolution');
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9020')?.status,
+      'active',
+    );
+    assert.equal(
+      (await repo.listClearancesForSource('dolphins', 'rc-a')).find((x) => x.idNumber === 'RC9020')
+        ?.overrideReason,
+      'not a real registration, removing',
+      'annotation trimmed and recorded on the resolved clearance',
+    );
+
+    // …and disposal completes: the player is active now, so the delete guard no longer blocks.
+    // That two-step is the documented way to remove a junk registration (deletePlayer also
+    // purges the ID docs from S3).
+    const REP_RCB = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['rc-b'] }]);
+    const nk = (await repo.listPlayers('dolphins', 'rc-b')).find(
+      (p) => p.idNumber === 'RC9020',
+    )!.naturalKey;
+    const removed = await app.request(`/clubs/rc-b/players/${nk}`, {
+      method: 'DELETE',
+      headers: headers(REP_RCB),
+    });
+    assert.equal(removed.status, 200, 'a resolved clearance no longer blocks deletion');
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9020'),
+      undefined,
+    );
+  });
+
+  test('a club approval carries no override reason', async () => {
+    // overrideReason is admin-only; a club issuing normally must not inherit a stale one.
+    const reg = await registerAt('rc-b', 'rc-b-token', {
+      ...regBody({ idNumber: 'RC9023', cell: '0830000024' }),
+      lastClubId: 'rc-a',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await repo.listClearancesForSource('dolphins', 'rc-a')).find(
+      (x) => x.idNumber === 'RC9023',
+    )!;
+    const issued = await app.request(`/clubs/rc-a/clearances/${clr.id}`, {
+      method: 'PATCH',
+      headers: headers(REP_RCA),
+      body: JSON.stringify({
+        feesCleared: true,
+        misconductCleared: true,
+        action: 'issue',
+        version: clr.version,
+      }),
+    });
+    assert.equal(issued.status, 200);
+    assert.equal(
+      (await repo.listClearancesForSource('dolphins', 'rc-a')).find((x) => x.idNumber === 'RC9023')
+        ?.overrideReason,
+      undefined,
+    );
+  });
+
+  test('a sourceless clearance from a real club can be reallocated to the club they actually left', async () => {
+    // The player picked the wrong on-system club. The named club has no record, so it cannot
+    // decide — reallocation is the safe admin tool, and the one the old fromClubDirectory-keyed
+    // guard refused for this shape.
+    await repo.createClub('dolphins', mkClub('rc-d', 'RC Delta CC'));
+    const reg = await registerAt('rc-b', 'rc-b-token', {
+      ...regBody({ idNumber: 'RC9021', cell: '0830000021' }),
+      lastClubId: 'rc-a',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await repo.listClearancesForSource('dolphins', 'rc-a')).find(
+      (x) => x.idNumber === 'RC9021',
+    )!;
+
+    const moved = await app.request(`/admin/clearances/${clr.id}/reassign`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'rc-a', newFromClubId: 'rc-d', version: clr.version }),
+    });
+    assert.equal(moved.status, 200);
+    assert.equal(
+      (await repo.listClearancesForSource('dolphins', 'rc-a')).find((x) => x.idNumber === 'RC9021'),
+      undefined,
+      'canonical left the wrongly-named club',
+    );
+    const atReal = (await repo.listClearancesForSource('dolphins', 'rc-d')).find(
+      (x) => x.idNumber === 'RC9021',
+    );
+    assert.equal(atReal?.status, 'pending');
+    assert.equal(atReal?.fromClubName, 'RC Delta CC');
+    // Reallocation gives the new source a placeholder, so from here it is a normal
+    // registration-origin clearance — including reject becoming permitted again, which is the
+    // round trip that makes reallocation a real escape from the sourceless dead end.
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'rc-d')).find((p) => p.idNumber === 'RC9021')?.status,
+      'clearance-pending',
+    );
+    assert.equal(
+      (
+        await app.request(`/admin/clearances/${atReal!.id}/reject`, {
+          method: 'POST',
+          headers: headers(ADMIN),
+          body: JSON.stringify({ fromClubId: 'rc-d', reason: 'not our player after all' }),
+        })
+      ).status,
+      200,
+      'reject is available again once a source row exists',
+    );
+    // The stale note named the club the clearance was moved AWAY from — it must not survive.
+    assert.equal(atReal?.note, undefined, 'note dropped on reallocation');
+  });
+
+  test('a mid-transfer player cannot open a competing clearance by registering again', async () => {
+    // RC9022 ends up clearance-pending at rc-b (sourceless, from rc-a) AND active at rc-c —
+    // routine while clubs are still digitising. Unless the mid-transfer check runs BEFORE the
+    // active-source branch, registering again opens a SECOND clearance from rc-c; both could
+    // then resolve (the first deletes the source row, the second finds it already gone and
+    // activates its destination anyway) and land one person active at two clubs.
+    const reg = await registerAt('rc-b', 'rc-b-token', {
+      ...regBody({ idNumber: 'RC9022', cell: '0830000022' }),
+      lastClubId: 'rc-a',
+    });
+    assert.equal(reg.status, 201);
+    const pending = (await repo.listPlayers('dolphins', 'rc-b')).find(
+      (p) => p.idNumber === 'RC9022',
+    )!;
+    await repo.createPlayer('dolphins', {
+      naturalKey: pending.naturalKey,
+      clubId: 'rc-d',
+      firstName: pending.firstName,
+      lastName: pending.lastName,
+      dob: pending.dob,
+      isMinor: pending.isMinor,
+      consentAt: pending.consentAt,
+      createdAt: pending.createdAt,
+      idNumber: pending.idNumber,
+      team: pending.team,
+      status: 'active',
+      version: 0,
+    });
+
+    const again = await registerAt('rc-a', 'rc-a-token', {
+      ...regBody({ idNumber: 'RC9022', cell: '0830000023' }),
+      lastClubId: 'rc-d',
+      idDocMeta: { objectKey: keyA, size: 100, contentType: 'image/png' },
+    });
+    assert.equal(again.status, 409, 'collapsed 409 — no competing clearance opened');
+    assert.deepEqual(
+      (await repo.listClearancesForSource('dolphins', 'rc-d')).filter(
+        (x) => x.idNumber === 'RC9022',
+      ),
+      [],
+      'no second clearance from the club that rosters them',
+    );
   });
 
   test('self-referential lastClubId (== the club being joined) is a re-registration', async () => {
@@ -5405,12 +5696,15 @@ describe('club directory (operator-entered previous clubs → real pending clear
     const real = (await repo.listClearancesForSource('dolphins', 'kd-src')).find(
       (x) => x.idNumber === 'KD9002',
     )!;
+    // kd-src holds KD9002 on its roster, so its rep is the one who decides — reallocation is
+    // refused on the SOURCE-ROW test, not on fromClubDirectory (a sourceless clearance from a
+    // real club is reallocatable; see the on-system sourceless case below).
     const nonDirectory = await app.request(`/admin/clearances/${real.id}/reassign`, {
       method: 'POST',
       headers: headers(ADMIN),
       body: JSON.stringify({ fromClubId: 'kd-src', newFromClubId: 'kd-shadow' }),
     });
-    assert.equal(nonDirectory.status, 400);
+    assert.equal(nonDirectory.status, 409);
 
     // Directory clearance whose slug a real club claimed (kloof-cc, resolved above) —
     // build a FRESH pending one against the now-claimed slug via a new registration.
@@ -5469,13 +5763,22 @@ describe('club directory (operator-entered previous clubs → real pending clear
       ...regBody('KD9006'),
       lastClubId: 'kloof-cc',
     });
-    // kloof-cc is a REAL club now, so this is the history-text path — no clearance —
-    // which is itself worth asserting: the directory entry is shadowed server-side too.
+    // kloof-cc is a REAL club now, so the clearance opens against the club, not the shadowed
+    // directory entry — worth asserting: the entry is shadowed server-side too.
     assert.equal(reg2.status, 201);
     assert.equal(
-      ((await reg2.json()) as { clearance?: unknown }).clearance,
+      ((await reg2.json()) as { clearance?: { fromClubName: string } }).clearance?.fromClubName,
+      'Kloof CC',
+      'a real club with the slug wins at POST time',
+    );
+    const claimed = (await repo.listClearancesForSource('dolphins', 'kloof-cc')).find(
+      (x) => x.idNumber === 'KD9006',
+    );
+    assert.equal(claimed?.status, 'pending');
+    assert.equal(
+      claimed?.fromClubDirectory,
       undefined,
-      'a real club with the slug wins at POST time (no directory clearance)',
+      'opened against the real club, not the directory entry',
     );
   });
 

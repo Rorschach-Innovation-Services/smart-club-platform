@@ -12,6 +12,7 @@ import {
   QueryCommand,
   DeleteCommand,
   BatchWriteCommand,
+  BatchGetCommand,
   TransactWriteCommand,
   type QueryCommandInput,
 } from '@aws-sdk/lib-dynamodb';
@@ -51,6 +52,9 @@ import {
   userTenantMarkerKey,
   userGsi1,
   usersListGsi1pk,
+  operatorMarkerKey,
+  operatorGsi1,
+  OPERATORS_GSI1PK,
 } from './keys.js';
 import { PLATFORM_TENANT } from './types.js';
 import type {
@@ -997,6 +1001,64 @@ export async function listPlayers(tenant: string, clubId: string): Promise<Playe
 }
 
 /**
+ * Which of these (club, player) pairs actually have a roster row?
+ *
+ * Returns BOTH the pairs found and the ones that could not be answered, as
+ * `${clubId}#${naturalKey}` keys. The split matters: the caller (the admin clearances listing)
+ * turns this into an affordance hint, and folding "we could not check" into "not rostered"
+ * would state the confident answer on no evidence — telling an admin a real transfer's source
+ * club has no record of the player, and offering an action the server refuses. Unresolved pairs
+ * must reach the console as ABSENT, its own third state.
+ *
+ * BatchGet over the EXACT pairs rather than a query per club: the caller knows precisely which
+ * rows it is asking about, so reading whole rosters to extract a key set would scale with roster
+ * size instead of with the question, and would pull idNumbers, addresses and contact fields into
+ * Lambda memory to throw them away. Like listPlayerDemographics, the ProjectionExpression is
+ * POPIA data-minimisation first and an optimisation second.
+ *
+ * Chunks (DynamoDB caps BatchGet at 100 keys) run in parallel, each retried once for
+ * UnprocessedKeys — throttling returns them rather than failing. Anything still unprocessed
+ * after that is reported as unresolved, never as absent.
+ */
+export async function filterExistingPlayers(
+  tenant: string,
+  pairs: Array<{ clubId: string; naturalKey: string }>,
+): Promise<{ found: Set<string>; unresolved: Set<string> }> {
+  const found = new Set<string>();
+  const unresolved = new Set<string>();
+  const unique = new Map(pairs.map((p) => [`${p.clubId}#${p.naturalKey}`, p]));
+  const all = [...unique.values()];
+  const chunks: Array<typeof all> = [];
+  for (let i = 0; i < all.length; i += 100) chunks.push(all.slice(i, i + 100));
+
+  await Promise.all(
+    chunks.map(async (chunk) => {
+      let batch = chunk.map((p) => playerKey(tenant, p.clubId, p.naturalKey));
+      for (let attempt = 0; attempt < 2 && batch.length; attempt++) {
+        const res = await ddb.send(
+          new BatchGetCommand({
+            RequestItems: {
+              // Key attributes only — the caller wants existence, not the player.
+              [TABLE]: { Keys: batch, ProjectionExpression: 'pk, sk' },
+            },
+          }),
+        );
+        for (const item of res.Responses?.[TABLE] ?? []) {
+          const clubId = String(item.pk).split('#CLUB#')[1];
+          if (clubId) found.add(`${clubId}#${String(item.sk).slice('PLAYER#'.length)}`);
+        }
+        batch = (res.UnprocessedKeys?.[TABLE]?.Keys ?? []) as typeof batch;
+      }
+      for (const key of batch) {
+        const clubId = String(key.pk).split('#CLUB#')[1];
+        if (clubId) unresolved.add(`${clubId}#${String(key.sk).slice('PLAYER#'.length)}`);
+      }
+    }),
+  );
+  return { found, unresolved };
+}
+
+/**
  * The demographics projection of every player row across the given clubs — a
  * parallel per-club fan-out of the listPlayers Query, flattened. Cohorts are
  * hundreds of players and the fleet is small, so the fan-out matches the
@@ -1576,22 +1638,36 @@ export async function createPlayerWithClearance(
 }
 
 /**
- * Directory-source variant of createPlayerWithClearance: the named previous club is an
- * operator-entered DIRECTORY entry (TenantConfig.knownClubs) with no club META item and
- * no player rows, so there are NO source-partition operations — no status flip, no
- * playerCount, nothing to condition on. The canonical clearance still lands under
- * clearanceKey(tenant, fromClubId, …), a partition with no club item: admin listing works
- * via the gsi1 it carries, and tenant erasure sweeps it via the TENANT#<t> prefix. If the
- * club later signs up under the SAME slug, the clearance appears in its portal
- * automatically (listClearancesForSource is a plain pk query).
+ * Sourceless variant of createPlayerWithClearance: the named previous club has NO player
+ * row for this person, so there are NO source-partition operations — no status flip, no
+ * playerCount, nothing to condition on. Two shapes reach here:
+ *   - an operator-entered DIRECTORY entry (TenantConfig.knownClubs), which has no club
+ *     META item either (fromClubDirectory: true);
+ *   - a real ON-SYSTEM club whose roster simply never included this player — routine while
+ *     a club is still digitising, and the reason a declared transfer must still open a
+ *     clearance instead of registering as a fresh player.
+ * The canonical clearance lands under clearanceKey(tenant, fromClubId, …) either way, so an
+ * on-system source sees it in its portal immediately, and a directory source sees it if the
+ * club later signs up under the SAME slug (listClearancesForSource is a plain pk query).
+ * Admin listing works via the gsi1 it carries, and tenant erasure sweeps it via the
+ * TENANT#<t> prefix.
+ *
+ * resolveClearance/rejectClearance both branch on the source row's ACTUAL absence rather
+ * than on fromClubDirectory, so a clearance opened here resolves correctly whether or not a
+ * row for this player appears at the source before it is actioned.
  *
  * Without a source item the race-safe duplicate guard createPlayerWithClearance gets from
  * its source status flip does not exist here: two concurrent registrations of the same
  * person at two different clubs can both succeed (each guarded only by the caller's
- * findPlayerAcrossClubs fast-path). That is PARITY with plain createPlayer's existing
- * concurrent window, not a new guarantee — do not assume the invariant holds.
+ * findPlayerAcrossClubs fast-path). The duplicate ROWS are parity with plain createPlayer's
+ * existing concurrent window, but this path leaves MORE than that behind — two independently
+ * resolvable pending clearances, since each canonical put is guarded on attribute_not_exists
+ * over a fresh randomUUID and so never collides. Resolving both would activate both
+ * destinations. The caller's mid-transfer check (createSelfRegistration refuses when the
+ * person is clearance-pending anywhere) is what keeps that window to a true race rather than
+ * a reachable sequence — do not assume the invariant holds here.
  */
-export async function createPlayerWithDirectoryClearance(
+export async function createPlayerWithSourcelessClearance(
   tenant: string,
   player: PlayerRegistration,
   c: PlayerClearance,
@@ -1788,7 +1864,13 @@ export async function resolveClearance(
   tenant: string,
   fromClubId: string,
   id: string,
-  opts: { mode: 'club' | 'admin'; at: string; expectedVersion?: number },
+  opts: {
+    mode: 'club' | 'admin';
+    at: string;
+    by?: string;
+    reason?: string;
+    expectedVersion?: number;
+  },
 ): Promise<PlayerClearance> {
   const current = await getClearance(tenant, fromClubId, id);
   if (!current) throw new Error('clearance not found');
@@ -1814,6 +1896,15 @@ export async function resolveClearance(
     misconductCleared: opts.mode === 'admin' ? current.misconductCleared : true,
     clubApprovedAt: opts.mode === 'club' ? opts.at : (current.clubApprovedAt ?? null),
     adminOverrideAt: opts.mode === 'admin' ? opts.at : (current.adminOverrideAt ?? null),
+    // Why, and who. Set on an ADMIN override only — a club approval's record is its tick-boxes,
+    // so passing mode 'club' also scrubs any value that somehow reached here. Both ride the
+    // canonical AND the mirror (clearanceItems spreads the whole object), so both clubs see
+    // them: deliberate, and the same audience rejectReason/rejectedBy already have. It matters
+    // most when override is being used to DISPOSE of a clearance that should never have existed
+    // — the resolved record would otherwise read as a genuine approved transfer, and in a
+    // dispute who signed off is as load-bearing as why.
+    overrideReason: opts.mode === 'admin' ? opts.reason : undefined,
+    overriddenBy: opts.mode === 'admin' ? opts.by : undefined,
     version: expectedVersion + 1,
   };
 
@@ -2252,8 +2343,12 @@ export async function rejectClearance(
  * override/reject) treats it as a normal registration-origin clearance:
  * fromClubDirectory is dropped and a source row exists.
  *
- * The ROUTE guards intent (pending + fromClubDirectory + old slug unclaimed + target
- * exists); this function re-guards what must hold transactionally.
+ * The ROUTE guards intent (pending + registration-origin + the source club holds NO row for
+ * this player + not a directory slug a real club has claimed + target exists); this function
+ * re-guards what must hold transactionally. Note the source-row check is the route's alone —
+ * it is the sole enforcement of this function's load-bearing precondition that the OLD source
+ * partition needs no cleanup, since nothing here touches it. A clearance moved out from under
+ * a real source row would strand that row 'clearance-pending' forever.
  */
 export async function reassignClearanceSource(
   tenant: string,
@@ -2277,6 +2372,11 @@ export async function reassignClearanceSource(
     // removeUndefinedValues drops it from the stored items — the clearance is a
     // normal registration-origin one from here on.
     fromClubDirectory: undefined,
+    // The note explained the OLD source ("X has no roster record…", "X is not yet on the
+    // system…") and is rendered verbatim to both the new rep and the admin. Carrying it over
+    // would name the wrong club on every card. Dropped rather than rewritten: the reallocation
+    // itself is the explanation, and inventing new prose here would outlive its accuracy too.
+    note: undefined,
     version: expectedVersion + 1,
   };
   const { canonical, mirror } = clearanceItems(tenant, next);
@@ -2675,15 +2775,87 @@ export async function bumpClubInboundCounter(
   nowIso: string,
   limit: number,
 ): Promise<boolean> {
+  return bumpClubWindowCounter(tenant, clubId, nowIso, limit, {
+    start: 'inboundRegWindowStart',
+    count: 'inboundRegCount',
+  });
+}
+
+/**
+ * Per-SOURCE-club hourly cap on self-registrations naming a club as the previous one. The
+ * inbound counter above throttles the club a player registers INTO; this throttles the club a
+ * registration points AT, which since the declared-previous-club rule is a separate write
+ * primitive: naming a club opens a pending clearance in its queue whether or not it has ever
+ * heard of the player. Without this, one leaked link is worth ~REGISTRATIONS_PER_HOUR junk
+ * clearances aimed at a single victim club, and the union's only disposal is a manual two-step
+ * per item. The inbound cap does not cover it — that one is keyed on the destination and is
+ * skipped entirely when the player registers into the link club's own roster.
+ */
+export async function bumpClubSourceCounter(
+  tenant: string,
+  clubId: string,
+  nowIso: string,
+  limit: number,
+): Promise<boolean> {
+  return bumpClubWindowCounter(tenant, clubId, nowIso, limit, {
+    start: 'sourceRegWindowStart',
+    count: 'sourceRegCount',
+  });
+}
+
+/**
+ * Read-only companion to bumpClubSourceCounter: is this club's source window already at its
+ * limit? Split from the bump because the two happen at different moments — the CHECK guards the
+ * request before any work, the BUMP happens only once a clearance was actually opened.
+ *
+ * Charging on attempt instead would hand an attacker a cheaper weapon than the one the cap
+ * exists to remove: replaying one fabricated identity produces a duplicate-clearance 409 every
+ * time after the first, and if each of those spent a slot, ~30 requests would exhaust a club's
+ * hourly quota and start refusing GENUINE players naming that club. The cap must bound
+ * clearances landing in a club's queue, not attempts aimed at it.
+ *
+ * The gap between check and bump can admit a few over the limit under concurrency — the same
+ * tolerance bumpClubWindowCounter already documents, and in the safe direction.
+ */
+export async function isClubSourceCapped(
+  tenant: string,
+  clubId: string,
+  nowIso: string,
+  limit: number,
+): Promise<boolean> {
+  const club = await getClub(tenant, clubId);
+  if (!club) return false;
+  const row = club as unknown as { sourceRegWindowStart?: string; sourceRegCount?: number };
   const cutoff = new Date(new Date(nowIso).getTime() - SIGNUP_WINDOW_MS).toISOString();
+  // A window that has aged out is no window at all — the next bump opens a fresh one.
+  if (!row.sourceRegWindowStart || row.sourceRegWindowStart < cutoff) return false;
+  return (row.sourceRegCount ?? 0) >= limit;
+}
+
+/**
+ * Shared window/increment discipline for the per-club caps. Two steps, deliberately: open a
+ * fresh window if none is live, otherwise increment within it. A window-boundary race only ever
+ * ADMITS a request the cap might have refused, never blocks a legitimate one. Parameterised
+ * rather than copied so the subtle part exists once.
+ */
+async function bumpClubWindowCounter(
+  tenant: string,
+  clubId: string,
+  nowIso: string,
+  limit: number,
+  attrs: { start: string; count: string },
+): Promise<boolean> {
+  const cutoff = new Date(new Date(nowIso).getTime() - SIGNUP_WINDOW_MS).toISOString();
+  const names = { '#start': attrs.start, '#count': attrs.count };
   try {
     await ddb.send(
       new UpdateCommand({
         TableName: TABLE,
         Key: clubKey(tenant, clubId),
-        UpdateExpression: 'SET inboundRegWindowStart = :now, inboundRegCount = :one',
+        UpdateExpression: 'SET #start = :now, #count = :one',
         ConditionExpression:
-          'attribute_exists(pk) AND (attribute_not_exists(inboundRegWindowStart) OR inboundRegWindowStart < :cutoff)',
+          'attribute_exists(pk) AND (attribute_not_exists(#start) OR #start < :cutoff)',
+        ExpressionAttributeNames: names,
         ExpressionAttributeValues: { ':now': nowIso, ':one': 1, ':cutoff': cutoff },
       }),
     );
@@ -2696,8 +2868,9 @@ export async function bumpClubInboundCounter(
       new UpdateCommand({
         TableName: TABLE,
         Key: clubKey(tenant, clubId),
-        UpdateExpression: 'SET inboundRegCount = inboundRegCount + :one',
-        ConditionExpression: 'inboundRegWindowStart >= :cutoff AND inboundRegCount < :limit',
+        UpdateExpression: 'SET #count = #count + :one',
+        ConditionExpression: '#start >= :cutoff AND #count < :limit',
+        ExpressionAttributeNames: names,
         ExpressionAttributeValues: { ':one': 1, ':cutoff': cutoff, ':limit': limit },
       }),
     );
@@ -2793,7 +2966,49 @@ async function reconcileUserMarkers(user: UserProfile): Promise<void> {
       );
     }
   }
+
+  // The operator marker rides its OWN namespace (PLATFORM#OPERATORS), so operators stay
+  // invisible to every tenant roster query while still being enumerable — which tenant
+  // creation needs in order to auto-grant admin without scanning the whole table.
+  const isOperator = user.memberships.some(
+    (m) => m.tenantId === PLATFORM_TENANT && m.role === 'operator',
+  );
+  writes.push(
+    isOperator
+      ? ddb.send(
+          new PutCommand({
+            TableName: TABLE,
+            Item: {
+              ...operatorMarkerKey(user.sub),
+              ...operatorGsi1(user.email),
+              sub: user.sub,
+              email: user.email,
+            },
+          }),
+        )
+      : // Unconditional delete: an operator demoted to nothing must stop being enumerated,
+        // and deleting a key that was never there is a no-op.
+        ddb.send(new DeleteCommand({ TableName: TABLE, Key: operatorMarkerKey(user.sub) })),
+  );
+
   await Promise.all(writes);
+}
+
+/**
+ * Every platform operator, via the PLATFORM#OPERATORS marker index.
+ *
+ * Used by tenant creation to auto-grant tenant-admin. Deliberately NOT reachable through
+ * `listTenantUsers` — operators are not members of any tenant, and conflating the two
+ * would leak them into tenant user lists.
+ */
+export async function listOperators(): Promise<Array<{ sub: string; email: string }>> {
+  const items = await queryAll({
+    TableName: TABLE,
+    IndexName: 'gsi1',
+    KeyConditionExpression: 'gsi1pk = :p',
+    ExpressionAttributeValues: { ':p': OPERATORS_GSI1PK },
+  });
+  return items.map((i) => ({ sub: String(i.sub), email: String(i.email) }));
 }
 
 /**

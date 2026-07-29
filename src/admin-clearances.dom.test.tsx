@@ -118,6 +118,37 @@ describe('an ordinary clearance', () => {
     expect(onOverride).toHaveBeenCalledTimes(1);
   });
 
+  it('carries the override reason the admin typed', async () => {
+    // Override doubles as the disposal path, so the reason is the only thing distinguishing
+    // "the Union approved this transfer" from "this should never have existed". It has to
+    // reach the handler intact — and the textarea is shared with the reject confirmation,
+    // which is exactly the kind of coupling that regresses silently.
+    const { user, onOverride } = setup([request()]);
+
+    await user.click(within(card()).getByRole('button', { name: /override & approve/i }));
+    await user.type(screen.getByRole('textbox'), '  not a real registration, removing  ');
+    await user.click(screen.getByRole('button', { name: /yes, issue clearance/i }));
+
+    expect(onOverride).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'clr-1' }),
+      'not a real registration, removing',
+    );
+  });
+
+  it('shows the override reason and who signed off on a resolved card', async () => {
+    // The whole reason it is captured: a disposal must not read as an approved transfer.
+    setup([
+      request({
+        status: 'admin-override',
+        overrideReason: 'not a real registration, removing',
+        overriddenBy: 'union@dolphins.test',
+      }),
+    ]);
+
+    expect(within(card()).getByText(/not a real registration, removing/i)).toBeVisible();
+    expect(within(card()).getByText(/union@dolphins\.test/i)).toBeVisible();
+  });
+
   it('confirms before rejecting, and names what happens to the player', async () => {
     const { user, onReject } = setup([request()]);
 
@@ -126,16 +157,46 @@ describe('an ordinary clearance', () => {
     expect(onReject).not.toHaveBeenCalled();
   });
 
-  it('describes a registration-origin rejection differently', async () => {
+  it('describes a registration-origin rejection differently, and says it is permanent', async () => {
     // A transfer bounces the player back; a registration-origin rejection leaves them at
     // the NEW club flagged, and removes them from the old one. Saying the wrong one
-    // misinforms the decision.
-    const { user } = setup([request({ origin: 'registration' })]);
+    // misinforms the decision. Permanence is the load-bearing part: there is no reactivation
+    // endpoint, so this flag is the player's final state and the copy has to say so.
+    // `sourceRostered: true` — the source club DOES hold this player, which is what makes
+    // rejection a legitimately available (and informed) decision here.
+    const { user } = setup([request({ origin: 'registration', sourceRostered: true })]);
 
     await user.click(within(card()).getByRole('button', { name: /^reject$/i }));
+    // Scoped to phrasing unique to the confirmation body — the card summary above it also
+    // mentions the flag, so a bare /clearance-rejected/ matches twice.
     expect(
-      screen.getByText(/flagged clearance-rejected and are removed from Berea CC/i),
+      screen.getByText(
+        /flagged clearance-rejected — which is permanent.*only registration record.*Any record of them at Berea CC is removed/i,
+      ),
     ).toBeVisible();
+  });
+
+  it('blocks rejection when the source club has no record of the player', async () => {
+    // The source cannot decide on an informed basis, so Reject would flag a legitimately
+    // registered player permanently. Reallocation is offered in its place.
+    setup([request({ origin: 'registration', sourceRostered: false })]);
+
+    expect(within(card()).getByRole('button', { name: /^reject$/i })).toBeDisabled();
+    expect(within(card()).getByRole('button', { name: /reallocate source/i })).toBeVisible();
+  });
+
+  it('blocks rejection when the API did not say whether the source holds the player', async () => {
+    // Web and API deploy separately, so `sourceRostered` can be absent — and a partial read can
+    // leave it absent for individual clearances too. Unknown must fail CLOSED on the
+    // irreversible action, WITHOUT asserting the sourceless story or offering the action the
+    // server would refuse. Folding unknown back into `sourceless` is the specific regression
+    // this pins.
+    setup([request({ origin: 'registration' })]);
+
+    expect(within(card()).getByRole('button', { name: /^reject$/i })).toBeDisabled();
+    expect(within(card()).queryByRole('button', { name: /reallocate source/i })).toBeNull();
+    expect(screen.getByText(/could not confirm whether Berea CC holds this player/i)).toBeVisible();
+    expect(screen.queryByText(/has no record of this player on its roster/i)).toBeNull();
   });
 
   it('disables the actions while one is in flight', () => {
@@ -184,6 +245,20 @@ describe('the request list', () => {
     await user.click(screen.getByRole('button', { name: /reallocate clearance/i }));
 
     expect(onReassign).toHaveBeenCalledWith(expect.objectContaining({ id: 'clr-1' }), 'berea');
+  });
+
+  it('never offers the club the clearance is already assigned to', async () => {
+    // On-system sourceless clearances became reallocatable, so unlike the directory case the
+    // current source IS in the club list — picking it would 400.
+    const { user } = setup([
+      request({ origin: 'registration', sourceRostered: false, fromClubId: 'berea' }),
+    ]);
+    await user.click(within(card()).getByRole('button', { name: /reallocate source/i }));
+
+    const options = within(screen.getByRole('combobox'))
+      .getAllByRole('option')
+      .map((o) => (o as HTMLOptionElement).value);
+    expect(options).not.toContain('berea');
   });
 
   it('never offers the destination club as a reallocation target', async () => {

@@ -49,6 +49,12 @@ import {
 } from './auth.js';
 import * as repo from './repo.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
+import { clubIdFromName } from './club-id.js';
+import {
+  validateCalendars,
+  validateStructures,
+  validateCompetitions,
+} from './config-validation.js';
 import { demographicsByLeague, summarizeDemographics } from './demographics.js';
 import {
   validateClubPatch,
@@ -73,8 +79,6 @@ import type {
   DirectoryClub,
   League,
   Membership,
-  CompetitionStructure,
-  SeasonCalendar,
   SeasonRun,
   StageRun,
   Series,
@@ -84,13 +88,14 @@ import type {
   UserProfile,
   PlayerRegistration,
   PlayerClearance,
+  AdminClearanceView,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
 import { orgCopy } from './branding.js';
 import { hasFeature } from './features.js';
 import { buildTenantConfig, type TenantBrandingInput } from './seed-core.js';
 import { validateTenantSlug } from './tenant-validation.js';
-import { grantTenantAdmin } from './tenant-admin.js';
+import { grantTenantAdmin, addAdminMembership } from './tenant-admin.js';
 import { originAllowed, originAllowedForTenant, canonicalWebOrigin } from './origins.js';
 
 // Strict date-only parsing for calendar validation — dayjs's lenient default would roll
@@ -409,10 +414,17 @@ app.post('/register/:clubId', async (c) => {
   if (!resolved || resolved.clubId !== clubId) {
     throw new HttpError(404, 'invalid registration link');
   }
-  // Same per-token cap as the presign route (shared counter). The submit is
-  // unauthenticated, and the previous-club path below both reveals whether an ID
-  // number is registered at a named club and flips that player to
-  // 'clearance-pending' — neither may be an unthrottled anonymous primitive.
+  // Same per-token cap as the presign route (shared counter). The submit is unauthenticated
+  // and the previous-club path below is a write primitive aimed at a club the caller names:
+  // it reveals whether an ID number is registered there, flips that player to
+  // 'clearance-pending', and — since a DECLARED previous club now opens a clearance whether or
+  // not it rosters the player — can put a pending item in ANY on-system club's queue for an
+  // identity that club has never seen. None of that may be unthrottled.
+  //
+  // Three caps stack on this route: this per-token one, CLUB_INBOUND_PER_HOUR on the
+  // DESTINATION club, and bumpClubSourceCounter on a named on-system PREVIOUS club (below) —
+  // the last because naming a club now queues a clearance in its portal regardless of whether
+  // it has ever rostered the player.
   const allowed = await repo.bumpSignupTokenCounter(token, now(), REGISTRATIONS_PER_HOUR);
   if (!allowed) throw new HttpError(429, 'too many registrations — please try again later');
   // cfg feeds the team/league validation below; the club read is the 404 check.
@@ -565,6 +577,33 @@ app.post('/register/:clubId', async (c) => {
     }
   }
 
+  // Anti-spam, the other direction: bound registrations that NAME a club as the previous one.
+  // Since a declared previous club opens a clearance whether or not it rosters the player, this
+  // is a write primitive pointed at a third party — an attacker with one link can queue junk
+  // clearances in any on-system club's portal under fabricated identities, and the union's only
+  // disposal is a manual two-step per item. The inbound cap above does not cover it: that one is
+  // keyed on the DESTINATION and is skipped entirely when the player registers into the link
+  // club's own roster, which is the cheapest way to run this attack. Only the on-system case is
+  // capped — a directory slug has no club item to hold a counter, and no rep to spam.
+  //
+  // CHECK here, CHARGE only once a clearance is actually opened (below). Charging on attempt
+  // would hand out a cheaper attack than the one being prevented: replaying one fabricated
+  // identity 409s after the first, and if every replay spent a slot then ~CLUB_SOURCE_PER_HOUR
+  // requests would exhaust the quota and start refusing GENUINE players naming that club.
+  const namedSourceOnSystem =
+    !!lastClubId &&
+    lastClubId !== destClubId &&
+    !!(await repo.getClub(resolved.tenant, lastClubId));
+  if (
+    namedSourceOnSystem &&
+    (await repo.isClubSourceCapped(resolved.tenant, lastClubId, now(), CLUB_SOURCE_PER_HOUR))
+  ) {
+    throw new HttpError(
+      429,
+      'that previous club is receiving too many clearance requests right now — please try again later',
+    );
+  }
+
   // ── Register into the chosen club ── (the link club, or a DIFFERENT joining club the player
   // picked on the form). Opens a registration-origin clearance to the previous club when the
   // player is found there; otherwise a plain active row on the chosen club's roster.
@@ -577,6 +616,14 @@ app.post('/register/:clubId', async (c) => {
       directoryClubs(cfg),
     );
     if (clearanceFromName) {
+      // CHARGE the source club's quota only now, having actually put a clearance in its queue.
+      // Best-effort: the clearance is already committed, so a counter failure must not turn a
+      // successful registration into an error — worst case the cap is briefly under-counted.
+      if (namedSourceOnSystem) {
+        await repo
+          .bumpClubSourceCounter(resolved.tenant, lastClubId, now(), CLUB_SOURCE_PER_HOUR)
+          .catch((err) => console.error('source-club counter bump failed', err));
+      }
       return c.json({ ok: true, clearance: { fromClubName: clearanceFromName } }, 201);
     }
   } catch (err: unknown) {
@@ -653,6 +700,14 @@ const REGISTRATIONS_PER_HOUR = 240;
 // this bounds how fast a leaked link can pile registrations onto any one victim club
 // regardless of how many links the attacker holds.
 const CLUB_INBOUND_PER_HOUR = 30;
+
+// Per-SOURCE-club hourly cap on registrations NAMING a club as the previous one. A separate
+// constant from the inbound cap, not a reuse: the two bound different distributions. Inbound is
+// "how many people join THIS club" — naturally small. Source is "how many people leave it",
+// summed across every destination in the union, and a real end-of-season exodus concentrates
+// hard (the 29 Jul backfill found 9 players moving Harlequins → Forest Hills alone). Sized so a
+// genuine cluster never trips it while an attacker still cannot bury one club's queue.
+const CLUB_SOURCE_PER_HOUR = 60;
 
 /**
  * Mint a presigned PUT for a self-registering player's ID document (image or PDF). Token-
@@ -1020,12 +1075,14 @@ async function findPlayerByIdNumber(
  *    real club, with a `note` recording the mismatch for whoever reviews it.
  *  - Mid-transfer elsewhere (already 'clearance-pending') → DuplicatePendingClearanceError, so the
  *    caller returns the collapsed 409 rather than opening a competing clearance.
- *  - Not registered anywhere else, named an on-system club → a plain active row with the club name
- *    as history text (no clearance — they aren't actually rostered there).
+ *  - Not registered anywhere else, named an on-system club → 'clearance-pending' row + a
+ *    registration-origin clearance from that club, even though it has no roster record of them:
+ *    a club still digitising its squad is indistinguishable from one the player never played for,
+ *    and the clearance is what settles fees/misconduct either way. That club approves in its own
+ *    portal, or the union office overrides.
  *  - Not registered anywhere else, named a DIRECTORY club (operator-entered `knownClubs`, not on
- *    the system) → 'clearance-pending' row + a real registration-origin clearance from the
- *    directory club's slug, flagged fromClubDirectory. The union office override-approves it or
- *    reallocates it to the real club once that club registers.
+ *    the system) → the same, additionally flagged fromClubDirectory. The union office
+ *    override-approves it or reallocates it to the real club once that club registers.
  *  - Not registered anywhere else, no previous club → a plain active row (first registration).
  *
  * Used by the public register route whether the player registers into the link club or a different
@@ -1050,6 +1107,18 @@ async function createSelfRegistration(
   // mis-route the clearance or leave the player active at two clubs.
   const elsewhere = await repo.findPlayerAcrossClubs(tenant, player.naturalKey, player.clubId);
   const activeSources = elsewhere.filter((e) => e.status === 'active');
+
+  // Mid-transfer check runs FIRST, before the active-source branch: a person can be BOTH
+  // clearance-pending at one club and active at another (their previous club rosters them
+  // while a transfer is open, which is routine while clubs are still digitising). Letting the
+  // active branch win there opens a SECOND clearance from the same source club, and both can
+  // then resolve — the first deletes the source row, the second finds it already gone and,
+  // being registration-origin, activates its destination anyway. That lands one person active
+  // at two clubs. Refusing the registration outright is what this function already documents.
+  if (elsewhere.some((e) => e.status === 'clearance-pending')) {
+    // Already mid-transfer under this identity — don't open a competing clearance or a second row.
+    throw new repo.DuplicatePendingClearanceError();
+  }
 
   if (activeSources.length > 0) {
     // Route to the club they NAMED only if that's genuinely where they are; otherwise auto-route
@@ -1096,55 +1165,53 @@ async function createSelfRegistration(
     return { clearanceFromName: source.clubName };
   }
 
-  if (elsewhere.some((e) => e.status === 'clearance-pending')) {
-    // Already mid-transfer under this identity — don't open a competing clearance or a second row.
-    throw new repo.DuplicatePendingClearanceError();
-  }
-
-  // Not registered anywhere else: a genuine new registration. A named ON-SYSTEM previous
-  // club is history text only (no clearance — they aren't actually rostered there). A named
-  // DIRECTORY club (operator-entered, not on the system) opens a REAL pending clearance —
-  // the reason the directory exists: a fresh tenant has no on-system data for the
-  // naturalKey match above, so without this branch registrations naming a previous club
-  // produced no clearance at all. The real-club lookup runs FIRST so a club that claimed
-  // the slug between the form's GET and this POST degrades to the harmless history path.
+  // Not registered anywhere else, but the player DECLARED a previous club: open a pending
+  // clearance to it regardless of whether that club has them on its roster here. Roster
+  // absence is not evidence the transfer isn't real — a club still digitising its squad
+  // looks identical to one the player never played for, and the fees/misconduct obligation
+  // the clearance exists to settle is owed in the real world either way. Two source shapes,
+  // both sourceless (no player row to flip):
+  //   - a real ON-SYSTEM club → it approves in its own portal, or the Union office overrides;
+  //   - a DIRECTORY club (operator-entered, not on the system) → flagged fromClubDirectory so
+  //     the Union office can approve it or reallocate it once the club registers.
+  // The real-club lookup runs FIRST so a club that claimed a directory slug between the
+  // form's GET and this POST is treated as the on-system club it now is.
   if (lastClubId && lastClubId !== player.clubId) {
     const sourceClub = await repo.getClub(tenant, lastClubId);
-    if (sourceClub) {
-      player.lastClub = sourceClub.name;
-    } else {
-      const dirEntry = directory.find((e) => e.id === lastClubId);
-      if (!dirEntry) {
-        // The entry vanished (operator removed/renamed it) between GET and POST. The
-        // player has already uploaded an ID document at this point — guide, don't baffle.
-        throw new HttpError(400, 'that previous club is no longer listed — please re-select it');
-      }
-      player.status = 'clearance-pending';
-      player.lastClub = dirEntry.name;
-      const clearance: PlayerClearance = {
-        id: randomUUID(),
-        playerNaturalKey: player.naturalKey,
-        playerName: `${player.firstName} ${player.lastName}`,
-        idNumber: player.idNumber,
-        team: player.team,
-        fromClubId: dirEntry.id,
-        toClubId: player.clubId,
-        fromClubName: dirEntry.name,
-        toClubName: destClub.name,
-        requestedAt: now(),
-        origin: 'registration',
-        fromClubDirectory: true,
-        note: `"${dirEntry.name}" is not yet on the system — the Union office can approve this clearance, or reallocate it once the club registers.`,
-        feesCleared: false,
-        misconductCleared: false,
-        status: 'pending',
-        clubApprovedAt: null,
-        adminOverrideAt: null,
-        version: 0,
-      };
-      await repo.createPlayerWithDirectoryClearance(tenant, player, clearance);
-      return { clearanceFromName: dirEntry.name };
+    const dirEntry = sourceClub ? undefined : directory.find((e) => e.id === lastClubId);
+    if (!sourceClub && !dirEntry) {
+      // The entry vanished (operator removed/renamed it) between GET and POST. The
+      // player has already uploaded an ID document at this point — guide, don't baffle.
+      throw new HttpError(400, 'that previous club is no longer listed — please re-select it');
     }
+    const fromClubName = sourceClub ? sourceClub.name : dirEntry!.name;
+    player.status = 'clearance-pending';
+    player.lastClub = fromClubName;
+    const clearance: PlayerClearance = {
+      id: randomUUID(),
+      playerNaturalKey: player.naturalKey,
+      playerName: `${player.firstName} ${player.lastName}`,
+      idNumber: player.idNumber,
+      team: player.team,
+      fromClubId: lastClubId,
+      toClubId: player.clubId,
+      fromClubName,
+      toClubName: destClub.name,
+      requestedAt: now(),
+      origin: 'registration',
+      ...(sourceClub ? {} : { fromClubDirectory: true }),
+      note: sourceClub
+        ? `${fromClubName} has no roster record of this player. If they did play there, ${fromClubName} can approve the clearance as usual. If they did not, the Union office can reallocate it to the club they actually left — declining is deliberately not an option, since it would permanently flag a legitimately registered player.`
+        : `"${fromClubName}" is not yet on the system — the Union office can approve this clearance, or reallocate it once the club registers.`,
+      feesCleared: false,
+      misconductCleared: false,
+      status: 'pending',
+      clubApprovedAt: null,
+      adminOverrideAt: null,
+      version: 0,
+    };
+    await repo.createPlayerWithSourcelessClearance(tenant, player, clearance);
+    return { clearanceFromName: fromClubName };
   }
   player.status = 'active';
   await repo.createPlayer(tenant, player);
@@ -2721,247 +2788,6 @@ function validateKnownClubs(entries: unknown): asserts entries is Array<{ name: 
 }
 
 /**
- * Season-calendar shape guard (ADR 0008). Calendars drive fixture dates, so a malformed
- * one silently mis-schedules a whole league — every field is checked here rather than
- * trusted and discovered at generation time.
- *
- * Dates are strict date-only `YYYY-MM-DD`: dayjs's lenient mode would happily accept
- * '2026-02-31' and roll it into March, which is exactly the kind of quiet corruption a
- * fixture calendar must not carry. The counts are generous but finite — the CONFIG item
- * has a hard 400KB ceiling and calendars share it with leagues, knownClubs and branding.
- */
-function validateCalendars(calendars: unknown): asserts calendars is SeasonCalendar[] {
-  if (!Array.isArray(calendars)) throw new HttpError(400, 'calendars must be an array');
-  if (calendars.length > 20) throw new HttpError(400, 'a client is limited to 20 season calendars');
-
-  const isDate = (v: unknown): v is string =>
-    typeof v === 'string' && dayjs.utc(v, 'YYYY-MM-DD', true).isValid();
-
-  const ids = calendars.map((cal) => (cal as SeasonCalendar | undefined)?.id);
-  if (ids.some((id) => typeof id !== 'string' || !id.trim()))
-    throw new HttpError(400, 'every calendar needs an id');
-  if (new Set(ids).size !== ids.length) throw new HttpError(409, 'duplicate calendar id');
-
-  for (const cal of calendars as SeasonCalendar[]) {
-    const name = cal.label?.trim() || cal.id;
-    if (!cal.label?.trim()) throw new HttpError(400, 'every calendar needs a label');
-    if (cal.label.trim().length > 80)
-      throw new HttpError(400, 'calendar labels must be 80 characters or fewer');
-
-    if (!Array.isArray(cal.blocks) || cal.blocks.length === 0)
-      throw new HttpError(400, `"${name}" needs at least one playing block`);
-    if (cal.blocks.length > 20)
-      throw new HttpError(400, `"${name}" is limited to 20 playing blocks`);
-    const blockIds = cal.blocks.map((b): unknown => b?.id);
-    if (blockIds.some((id) => typeof id !== 'string' || !id.trim()))
-      throw new HttpError(400, `every block in "${name}" needs an id`);
-    if (new Set(blockIds).size !== blockIds.length)
-      throw new HttpError(409, `duplicate block id in "${name}"`);
-    for (const b of cal.blocks) {
-      if (!b.label?.trim()) throw new HttpError(400, `every block in "${name}" needs a label`);
-      if (!isDate(b.start) || !isDate(b.end))
-        throw new HttpError(400, `block "${b.label}" needs valid start and end dates`);
-      if (b.end < b.start) throw new HttpError(400, `block "${b.label}" ends before it starts`);
-    }
-
-    if (cal.breaks !== undefined) {
-      if (!Array.isArray(cal.breaks))
-        throw new HttpError(400, `breaks in "${name}" must be an array`);
-      if (cal.breaks.length > 50) throw new HttpError(400, `"${name}" is limited to 50 breaks`);
-      for (const br of cal.breaks) {
-        if (!br?.label?.trim()) throw new HttpError(400, `every break in "${name}" needs a label`);
-        if (!isDate(br.start) || !isDate(br.end))
-          throw new HttpError(400, `break "${br.label}" needs valid start and end dates`);
-        if (br.end < br.start)
-          throw new HttpError(400, `break "${br.label}" ends before it starts`);
-      }
-    }
-
-    if (cal.excludeDates !== undefined) {
-      if (!Array.isArray(cal.excludeDates))
-        throw new HttpError(400, `excluded dates in "${name}" must be an array`);
-      if (cal.excludeDates.length > 366)
-        throw new HttpError(400, `"${name}" is limited to 366 excluded dates`);
-      const bad = cal.excludeDates.find((v) => !isDate(v));
-      if (bad !== undefined)
-        throw new HttpError(400, `"${bad}" is not a valid excluded date in "${name}"`);
-    }
-  }
-}
-
-const FORMAT_KINDS = new Set(['round-robin', 'knockout', 'single-match', 'manual']);
-const ENTRANT_KINDS = new Set(['all-registered', 'manual', 'seeded-split']);
-const CADENCE_KINDS = new Set(['weekly', 'every-n-weeks', 'weekdays', 'spread']);
-
-/**
- * Competition-structure shape guard (ADR 0008). A structure decides how a whole league's
- * fixtures are shaped, so a malformed one is worse than a rejected save.
- *
- * The load-bearing check is the LAST one: a `derivedFrom.fromStage` must name an EARLIER
- * stage. Stages form a pipeline, and a reference forwards (or to itself) is either a
- * cycle or a stage waiting on results that do not exist yet — both of which would leave
- * a season permanently unresolvable with no obvious cause.
- */
-function validateStructures(structures: unknown): asserts structures is CompetitionStructure[] {
-  if (!Array.isArray(structures)) throw new HttpError(400, 'structures must be an array');
-  if (structures.length > 50)
-    throw new HttpError(400, 'a client is limited to 50 competition structures');
-
-  const ids = structures.map((s) => (s as CompetitionStructure | undefined)?.id);
-  if (ids.some((id) => typeof id !== 'string' || !id.trim()))
-    throw new HttpError(400, 'every structure needs an id');
-  if (new Set(ids).size !== ids.length) throw new HttpError(409, 'duplicate structure id');
-
-  for (const st of structures as CompetitionStructure[]) {
-    const name = st.name?.trim() || st.id;
-    if (!st.name?.trim()) throw new HttpError(400, 'every structure needs a name');
-    if (st.name.trim().length > 80)
-      throw new HttpError(400, 'structure names must be 80 characters or fewer');
-    if (!Number.isInteger(st.version) || st.version < 1)
-      throw new HttpError(400, `"${name}" needs a whole version number of 1 or more`);
-
-    if (!Array.isArray(st.stages) || st.stages.length === 0)
-      throw new HttpError(400, `"${name}" needs at least one stage`);
-    if (st.stages.length > 20) throw new HttpError(400, `"${name}" is limited to 20 stages`);
-
-    const stageIds = st.stages.map((s): unknown => s?.id);
-    if (stageIds.some((id) => typeof id !== 'string' || !(id as string).trim()))
-      throw new HttpError(400, `every stage in "${name}" needs an id`);
-    if (new Set(stageIds).size !== stageIds.length)
-      throw new HttpError(409, `duplicate stage id in "${name}"`);
-
-    const seen = new Set<string>();
-    for (const stage of st.stages) {
-      const sName = stage.name?.trim() || stage.id;
-      if (!stage.name?.trim()) throw new HttpError(400, `every stage in "${name}" needs a name`);
-      if (!stage.format || !FORMAT_KINDS.has(stage.format.kind))
-        throw new HttpError(400, `stage "${sName}" has an unknown format`);
-      if (stage.format.kind === 'round-robin' && ![1, 2, 3].includes(stage.format.legs))
-        throw new HttpError(400, `stage "${sName}" must play 1, 2 or 3 legs`);
-      if (!stage.entrants || !ENTRANT_KINDS.has(stage.entrants.kind))
-        throw new HttpError(400, `stage "${sName}" has an unknown entrant rule`);
-      if (!stage.schedule?.blockId?.trim())
-        throw new HttpError(400, `stage "${sName}" needs a playing block`);
-      const cad = stage.schedule.cadence;
-      if (!cad || !CADENCE_KINDS.has(cad.kind))
-        throw new HttpError(400, `stage "${sName}" has an unknown cadence`);
-      // The PAYLOAD matters as much as the kind: a missing `n` renders as "every NaN
-      // weeks" and places exactly one round, reported as an opaque "Block 1 fits 1 at
-      // this cadence"; an out-of-range weekday passes the empty-list guard and then
-      // places nothing at all.
-      if (cad.kind === 'every-n-weeks' && (!Number.isInteger(cad.n) || cad.n < 1 || cad.n > 12))
-        throw new HttpError(400, `stage "${sName}" needs a whole number of weeks between 1 and 12`);
-      if (cad.kind === 'weekdays') {
-        if (!Array.isArray(cad.days) || cad.days.length === 0)
-          throw new HttpError(400, `stage "${sName}" needs at least one playing day`);
-        if (cad.days.some((d) => !Number.isInteger(d) || d < 0 || d > 6))
-          throw new HttpError(400, `stage "${sName}" has a playing day outside 0-6`);
-      }
-      if (
-        stage.format.kind === 'knockout' &&
-        !['seeded', 'cross-pool'].includes(stage.format.pairing)
-      )
-        throw new HttpError(400, `stage "${sName}" has an unknown knockout pairing`);
-      const plan = stage.entrants.kind !== 'all-registered' ? stage.entrants.groups : undefined;
-      if (plan) {
-        if (plan.kind === 'sizes') {
-          if (!Array.isArray(plan.sizes) || plan.sizes.length === 0)
-            throw new HttpError(400, `stage "${sName}" needs at least one group size`);
-          if (plan.sizes.some((n) => !Number.isInteger(n) || n < 1))
-            throw new HttpError(400, `stage "${sName}" has a group size below 1`);
-        } else if (plan.kind === 'even') {
-          if (!Number.isInteger(plan.count) || plan.count < 1 || plan.count > 26)
-            throw new HttpError(400, `stage "${sName}" needs between 1 and 26 groups`);
-        } else {
-          throw new HttpError(400, `stage "${sName}" has an unknown group plan`);
-        }
-      }
-      if (
-        stage.entrants.kind === 'seeded-split' &&
-        !['blocks', 'snake'].includes(stage.entrants.method)
-      )
-        throw new HttpError(400, `stage "${sName}" has an unknown seeding method`);
-
-      const note = stage.entrants.kind === 'manual' ? stage.entrants.derivedFrom : undefined;
-      if (note) {
-        if (!note.fromStage?.trim())
-          throw new HttpError(400, `stage "${sName}" derives from an unnamed stage`);
-        if (!seen.has(note.fromStage))
-          throw new HttpError(
-            400,
-            `stage "${sName}" derives from "${note.fromStage}", which does not come before it`,
-          );
-      }
-      seen.add(stage.id);
-    }
-  }
-}
-
-/**
- * A league's competition bindings. Each names a structure and a calendar that must
- * actually exist on the tenant — a dangling reference is a season nobody can start, and
- * the failure would only surface later at generation time.
- */
-function validateCompetitions(
-  leagues: League[],
-  structures: CompetitionStructure[],
-  calendars: SeasonCalendar[],
-): void {
-  for (const lg of leagues) {
-    if (lg.competitions === undefined) continue;
-    if (!Array.isArray(lg.competitions))
-      throw new HttpError(400, `competitions on "${lg.label}" must be an array`);
-    if (lg.competitions.length > 10)
-      throw new HttpError(400, `"${lg.label}" is limited to 10 competitions`);
-    const ids = lg.competitions.map((comp): unknown => comp?.id);
-    if (ids.some((id) => typeof id !== 'string' || !(id as string).trim()))
-      throw new HttpError(400, `every competition on "${lg.label}" needs an id`);
-    if (new Set(ids).size !== ids.length)
-      throw new HttpError(409, `duplicate competition id on "${lg.label}"`);
-    for (const comp of lg.competitions) {
-      if (!comp.label?.trim())
-        throw new HttpError(400, `every competition on "${lg.label}" needs a label`);
-      const structure = structures.find((st) => st.id === comp.structureId);
-      if (!structure)
-        throw new HttpError(
-          400,
-          `competition "${comp.label}" points at a structure that doesn't exist`,
-        );
-      const calendar = calendars.find((cal) => cal.id === comp.calendarId);
-      if (!calendar)
-        throw new HttpError(
-          400,
-          `competition "${comp.label}" points at a calendar that doesn't exist`,
-        );
-      // There is no UI for exclusions yet — they arrive by JSON import or a raw API call,
-      // which is exactly when a shape guard earns its keep. A bare string here would be
-      // iterated character by character on the client and silently drop the wrong sides.
-      if (comp.excludeTeamIds !== undefined) {
-        if (
-          !Array.isArray(comp.excludeTeamIds) ||
-          comp.excludeTeamIds.some((id): boolean => typeof id !== 'string' || !id.trim())
-        )
-          throw new HttpError(
-            400,
-            `competition "${comp.label}": excludeTeamIds must be an array of team ids`,
-          );
-      }
-      // Structures and calendars are authored independently, so a structure's stages can
-      // name blocks the bound calendar has never had. Caught here — the one place all
-      // three are in scope — rather than surfacing months later as "That playing block no
-      // longer exists" the first time someone tries to generate a season.
-      const blockIds = new Set(calendar.blocks.map((b) => b.id));
-      const orphan = structure.stages.find((stage) => !blockIds.has(stage.schedule.blockId));
-      if (orphan)
-        throw new HttpError(
-          400,
-          `competition "${comp.label}": stage "${orphan.name}" plays in a block that isn't on ${calendar.label}`,
-        );
-    }
-  }
-}
-
-/**
  * League-catalogue shape guard: keys are the matching token stored on clubs, so they
  * must be unique, present and strings. Rejects a malformed payload with a 400 rather
  * than letting a non-array/non-string key TypeError into a 500 or persist junk.
@@ -3218,8 +3044,58 @@ app.post('/platform/tenants', async (c) => {
       throw new HttpError(409, `tenant "${slug}" already exists`);
     throw err;
   }
-  return c.json(config, 201);
+  const operatorAdmins = await grantAdminToOperators(slug);
+  return c.json({ ...config, operatorAdmins }, 201);
 });
+
+/**
+ * Give every platform operator tenant-admin on a newly created tenant.
+ *
+ * ⚠️ This is a DELIBERATE widening of the tenant boundary, applied on ALL stages
+ * including prod: from creation, every operator can read that tenant's clubs, chair
+ * contact details and player registrations. An operator membership alone grants none of
+ * that (`requireTenantMembership` matches `tenantId === tenant`, and an operator's is the
+ * `'*'` sentinel), so without this a new tenant is invisible to them until someone runs
+ * `bootstrap-admin` by hand. Requested explicitly; see the POPIA note in
+ * docs/runbooks/seeding-a-test-cohort.md before widening it further.
+ *
+ * The grants are ordinary, explicit memberships — visible on each USER# record, listed in
+ * the tenant's Team & Access page, and individually revocable. Nothing is implicit.
+ *
+ * BEST-EFFORT: the tenant is already created by the time this runs, so a failure here
+ * must not turn a successful creation into a 500 the operator would retry into a 409.
+ * Failures are logged and reported in the response instead.
+ */
+async function grantAdminToOperators(
+  tenant: string,
+): Promise<{ granted: string[]; failed: string[] }> {
+  const granted: string[] = [];
+  const failed: string[] = [];
+  try {
+    const operators = await repo.listOperators();
+    for (const op of operators) {
+      try {
+        // By SUB, not email: the operator index already carries their real sub, so
+        // re-resolving it through Cognito would be a needless round-trip per operator per
+        // tenant — and would write to the wrong record wherever email→sub resolution
+        // differs from what is stored. Same membership shape and adminCount recount as a
+        // hand-run bootstrap-admin.
+        await addAdminMembership(op.sub, op.email, tenant);
+        granted.push(op.email);
+      } catch (err) {
+        failed.push(op.email);
+        console.warn(`auto-grant admin on "${tenant}" failed for ${op.email}:`, err);
+      }
+    }
+  } catch (err) {
+    // Could not even enumerate operators — log and continue; the tenant still exists.
+    console.warn(`auto-grant admin on "${tenant}": could not list operators:`, err);
+    Sentry.captureException(err);
+  }
+  if (granted.length)
+    console.log(`tenant "${tenant}": auto-granted admin to ${granted.join(', ')}`);
+  return { granted, failed };
+}
 
 /** GET /platform/tenants/:slug — the full config row (operator edit form). */
 app.get('/platform/tenants/:slug', async (c) => {
@@ -3993,19 +3869,62 @@ app.get('/admin/insights/demographics', async (c) => {
 
 app.get('/admin/clearances', async (c) => {
   const ra = c.get('requestAuth')!;
-  return c.json(await repo.listAllClearances(ra.tenant));
+  const list = await repo.listAllClearances(ra.tenant);
+  // `sourceRostered` is derived for the console, never stored: it says whether the source club
+  // actually holds this player. Reject and reassign both key on it server-side, so the console
+  // must be able to disable the one and offer the other rather than failing the admin after a
+  // confirmation dialog. Only a PENDING REGISTRATION-origin clearance can be sourceless, so
+  // that slice is all we ask about — see repo.filterExistingPlayers for the read shape.
+  //
+  // Three outcomes per clearance, and the third is not optional: rostered, not rostered, or NOT
+  // ANSWERED. An unanswered pair must arrive at the console as an ABSENT field, never as
+  // `false` — `false` is the confident state that disables Reject and asserts in copy that the
+  // source club has no record of this player.
+  const pending = list.filter((x) => x.status === 'pending' && x.origin === 'registration');
+  let found = new Set<string>();
+  let unresolved = new Set<string>();
+  let derived = true;
+  try {
+    ({ found, unresolved } = await repo.filterExistingPlayers(
+      ra.tenant,
+      pending.map((x) => ({ clubId: x.fromClubId, naturalKey: x.playerNaturalKey })),
+    ));
+  } catch (err) {
+    // An optional affordance hint must never take down the list it decorates. Omitting the
+    // field is safe: the console fails CLOSED on absence (Reject stays disabled) and the
+    // reject/reassign routes re-derive it themselves before mutating anything.
+    derived = false;
+    console.error('admin/clearances: sourceRostered derivation failed, omitting', err);
+  }
+  const view: AdminClearanceView[] = list.map((x) => {
+    if (!derived || x.status !== 'pending' || x.origin !== 'registration') return x;
+    const key = `${x.fromClubId}#${x.playerNaturalKey}`;
+    return unresolved.has(key) ? x : { ...x, sourceRostered: found.has(key) };
+  });
+  return c.json(view);
 });
 
 /**
  * Union override: approve a clearance the source club has left unactioned, issuing it
  * on their behalf. Admin-only (the /admin/* middleware enforces it). There is no longer
  * a time window — any still-pending clearance can be overridden.
+ *
+ * The optional `reason` exists because override is doing double duty. It is also the only exit
+ * for a clearance that should never have existed — a junk registration from a leaked link, or
+ * a player who named a club they never played for — since reject is refused for sourceless
+ * clearances and deletion is blocked while pending. (Disposal is: override, then DELETE the
+ * now-active player, which also purges their ID docs from S3.) Without a note the resolved
+ * record reads as "the Union approved this transfer" for a transfer that never happened, and
+ * this history is read for disputes. The note is how it says otherwise.
  */
 app.post('/admin/clearances/:cid/override', async (c) => {
   const ra = c.get('requestAuth')!;
   const cid = c.req.param('cid');
-  const body = await c.req.json<{ fromClubId?: string; version?: number }>();
+  const body = await c.req.json<{ fromClubId?: string; version?: number; reason?: string }>();
   if (!body.fromClubId) throw new HttpError(400, 'fromClubId required');
+  if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 500)) {
+    throw new HttpError(400, 'reason must be a string of at most 500 characters');
+  }
   const current = await repo.getClearance(ra.tenant, body.fromClubId, cid);
   if (!current) throw new HttpError(404, 'clearance not found');
   if (current.status !== 'pending') throw new HttpError(409, 'clearance already resolved');
@@ -4013,6 +3932,8 @@ app.post('/admin/clearances/:cid/override', async (c) => {
     const resolved = await repo.resolveClearance(ra.tenant, body.fromClubId, cid, {
       mode: 'admin',
       at: now(),
+      by: ra.email,
+      reason: body.reason?.trim() || undefined,
       expectedVersion: body.version,
     });
     return c.json(resolved);
@@ -4025,13 +3946,21 @@ app.post('/admin/clearances/:cid/override', async (c) => {
 });
 
 /**
- * Union reallocation: move a DIRECTORY-sourced pending clearance to a real club that has
- * since registered (possibly under a name that slugs differently from the directory
- * entry). Admin-only. After the move the clearance is a normal registration-origin one —
- * the real club's rep sees it in their portal and approves/rejects via the usual flow.
- * Restricted to fromClubDirectory clearances whose slug is still unclaimed: if a real
- * club owns the old slug, the clearance is already in that club's queue (it may be
- * mid-review) and yanking it out from under them would be wrong — its rep must action it.
+ * Union reallocation: move a SOURCELESS pending clearance to the club the player actually
+ * left. Admin-only. Two shapes qualify, and the test is the same for both — the current
+ * source club holds no row for this player:
+ *   - a directory entry, for a club that has since registered (possibly under a name that
+ *     slugs differently from the entry);
+ *   - a real on-system club the player named but never played for — a mis-picked club, or
+ *     one whose roster the player was never on.
+ * After the move the clearance is a normal registration-origin one — the new club's rep sees
+ * it in their portal and approves/rejects via the usual flow.
+ *
+ * Refused once the source club holds the player: the clearance is then genuinely in that
+ * club's queue (it may be mid-review) and yanking it out from under them would be wrong.
+ * That guard also makes the move safe mechanically — reassignClearanceSource writes a
+ * placeholder at the NEW source and never touches the old partition, so a source row left
+ * behind would be stranded 'clearance-pending' forever.
  */
 app.post('/admin/clearances/:cid/reassign', async (c) => {
   const ra = c.get('requestAuth')!;
@@ -4050,17 +3979,29 @@ app.post('/admin/clearances/:cid/reassign', async (c) => {
   const current = await repo.getClearance(ra.tenant, body.fromClubId, cid);
   if (!current) throw new HttpError(404, 'clearance not found');
   if (current.status !== 'pending') throw new HttpError(409, 'clearance already resolved');
-  if (!current.fromClubDirectory) {
-    throw new HttpError(
-      400,
-      'only clearances from a club not yet on the system can be reallocated',
-    );
+  if (current.origin !== 'registration') {
+    throw new HttpError(400, 'only registration-origin clearances can be reallocated');
   }
   if (body.newFromClubId === current.toClubId) {
     throw new HttpError(400, 'source cannot be the destination club');
   }
-  if (await repo.getClub(ra.tenant, current.fromClubId)) {
+  // A directory entry whose slug a real club has since claimed under the SAME name is almost
+  // certainly the club the player meant: the clearance is in that club's queue now (it may be
+  // mid-review) and an admin must not yank it out from under them.
+  if (current.fromClubDirectory && (await repo.getClub(ra.tenant, current.fromClubId))) {
     throw new HttpError(409, 'that club is now on the system — its rep must action the clearance');
+  }
+  // Otherwise reallocation is safe exactly when the clearance is SOURCELESS — the current
+  // source club holds no row for this player — because reassignClearanceSource writes a
+  // placeholder at the NEW source and never touches the old partition, so a source row left
+  // behind would be stranded 'clearance-pending' forever. Sourceless also means that club
+  // cannot action the clearance on an informed basis, which is what makes reallocation the
+  // right tool rather than a yank away from a rep who could have decided.
+  if (await repo.getPlayer(ra.tenant, current.fromClubId, current.playerNaturalKey)) {
+    throw new HttpError(
+      409,
+      'that club holds this player on its roster — its rep must action the clearance',
+    );
   }
   const newFromClub = await repo.getClub(ra.tenant, body.newFromClubId);
   if (!newFromClub) throw new HttpError(404, 'target club not found');
@@ -4094,6 +4035,14 @@ app.post('/admin/clearances/:cid/reassign', async (c) => {
  * to 'active'. For a REGISTRATION-origin clearance the player STAYS on the destination
  * (current) club's roster flagged 'clearance-rejected' (reason copied onto the row) and is
  * removed from the source (previous) club. Same 404/409 semantics as the override route.
+ *
+ * TWO guards 409 before any of that, both because rejection is irreversible — there is no
+ * reactivation endpoint, and for a registration-origin clearance the destination row is the
+ * player's only surviving record:
+ *   1. a directory source with no real club behind the slug — nobody exists to reject;
+ *   2. a source club holding NO row for this player — nothing exists to reject ON.
+ * Both route the admin to override & approve, or to reallocate. See the runbook at
+ * docs/runbooks/backfill-declared-club-clearance.md.
  */
 app.post('/admin/clearances/:cid/reject', async (c) => {
   const ra = c.get('requestAuth')!;
@@ -4114,6 +4063,21 @@ app.post('/admin/clearances/:cid/reject', async (c) => {
     throw new HttpError(
       409,
       'the previous club is not on the system — override & approve or reallocate instead',
+    );
+  }
+  // Same irreversibility, different reason: a registration-origin clearance whose source club
+  // holds NO row for this player gives its rep nothing to reject ON. That club is real and has
+  // a rep, but "we have no record of them" is the EXPECTED answer — it is what a roster still
+  // being digitised looks like — not a finding that the transfer is bogus. Acting on it would
+  // flag a legitimately active player 'clearance-rejected', which is terminal and would be
+  // their only surviving record. Override & approve or reallocate to the right club instead.
+  if (
+    current.origin === 'registration' &&
+    !(await repo.getPlayer(ra.tenant, current.fromClubId, current.playerNaturalKey))
+  ) {
+    throw new HttpError(
+      409,
+      'the previous club has no record of this player — override & approve, or reallocate to the club they actually left',
     );
   }
   try {
@@ -4478,18 +4442,6 @@ function buildInitialExco(spec: ClubSpec): Record<string, unknown> | undefined {
   const cell = spec.chairCell?.trim();
   if (!name && !email && !cell) return undefined;
   return { chair: { name: name ?? '', email: email ?? '', cell: cell ?? '' } };
-}
-
-/**
- * Canonical club id from a name. Shared by buildClubFromSpec and the public
- * signup's collision pre-check, which MUST slug exactly the way the id is built
- * ("Kingsmead-CC" and "Kingsmead CC" are distinct names but the same id).
- */
-function clubIdFromName(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
 }
 
 function buildClubFromSpec(spec: ClubSpec): Club {

@@ -1041,6 +1041,87 @@ describe('POST /platform/tenants/:slug/admins (grantTenantAdmin)', () => {
   });
 });
 
+/**
+ * Auto-granting tenant-admin to every operator on tenant creation.
+ *
+ * This deliberately widens the tenant boundary (an operator membership alone grants no
+ * club access), so the behaviour is pinned here rather than left to manual checking —
+ * including the negative: someone who is NOT an operator must not be swept in.
+ */
+describe('POST /platform/tenants — auto-grant admin to operators', () => {
+  test('every operator gets tenant-admin on a newly created tenant', async () => {
+    // Two operators, indexed via the PLATFORM#OPERATORS marker that putUser maintains.
+    for (const [sub, email] of [
+      ['auto-op-1', 'autoop1@platform'],
+      ['auto-op-2', 'autoop2@platform'],
+    ]) {
+      await repo.putUser({
+        sub,
+        email,
+        memberships: [{ tenantId: '*', role: 'operator', clubIds: [] }],
+        onboardingSeen: {},
+      });
+    }
+    // A non-operator who must NOT be granted anything.
+    await repo.putUser({
+      sub: 'auto-rep-1',
+      email: 'autorep@test',
+      memberships: [{ tenantId: 'dolphins', role: 'rep', clubIds: ['ukzn'] }],
+      onboardingSeen: {},
+    });
+
+    const res = await app.request('/platform/tenants', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        slug: 'autograntunion',
+        branding: { name: 'Auto Grant Union' },
+        submissionDeadline: '2027-06-01',
+      }),
+    });
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as { operatorAdmins: { granted: string[]; failed: string[] } };
+
+    assert.deepEqual(body.operatorAdmins.failed, [], 'no grant failed');
+    for (const email of ['autoop1@platform', 'autoop2@platform'])
+      assert.ok(body.operatorAdmins.granted.includes(email), `${email} granted`);
+
+    for (const sub of ['auto-op-1', 'auto-op-2']) {
+      const user = await repo.getUser(sub);
+      assert.ok(
+        user?.memberships.some((m) => m.tenantId === 'autograntunion' && m.role === 'admin'),
+        `${sub} holds admin on the new tenant`,
+      );
+      assert.ok(
+        user?.memberships.some((m) => m.tenantId === '*' && m.role === 'operator'),
+        `${sub} keeps its operator membership`,
+      );
+    }
+
+    const rep = await repo.getUser('auto-rep-1');
+    assert.ok(
+      !rep?.memberships.some((m) => m.tenantId === 'autograntunion'),
+      'a non-operator is NOT swept into the grant',
+    );
+
+    // adminCount drives the transactional last-admin guard; a wrong value here would
+    // either lock the tenant or let its last admin be removed.
+    const cfg = await repo.getTenantConfig('autograntunion');
+    assert.ok((cfg?.adminCount ?? 0) >= 2, 'adminCount reflects the auto-granted admins');
+  });
+
+  test('operators are enumerable without appearing in any tenant roster', async () => {
+    const operators = await repo.listOperators();
+    const emails = operators.map((o) => o.email);
+    assert.ok(emails.includes('autoop1@platform'), 'operator is in the operator index');
+
+    // The invariant reconcileUserMarkers protects: '*' is not a tenant, so an operator
+    // must never surface in a tenant's user listing.
+    const roster = await repo.listTenantUsers('*');
+    assert.deepEqual(roster, [], 'no tenant roster exists for the platform sentinel');
+  });
+});
+
 describe('POST /platform/tenants/:slug/logo-upload', () => {
   test('presigned POST with size + content-type policy and a public URL', async () => {
     const res = await app.request('/platform/tenants/sharks/logo-upload', {
