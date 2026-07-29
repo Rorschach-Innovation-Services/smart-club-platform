@@ -254,5 +254,27 @@ export const userGsi1 = (tenant: string, email: string) => ({
 
 export const usersListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#USER`;
 
+/**
+ * Marker making PLATFORM OPERATORS enumerable — deliberately in its own namespace, NOT
+ * the per-tenant roster one above.
+ *
+ * The `'*'` membership is skipped by the tenant-roster markers on purpose: `'*'` is not a
+ * tenant, and an operator must never surface in a tenant's user list. That invariant is
+ * preserved here — this marker's gsi1pk is `PLATFORM#OPERATORS`, which no tenant query can
+ * ever match. It exists because tenant creation needs to enumerate operators, and the only
+ * alternative was a full table scan on every create.
+ */
+export const operatorMarkerKey = (sub: string) => ({
+  pk: `USER#${sub}`,
+  sk: 'PLATFORM#OPERATOR',
+});
+
+export const operatorGsi1 = (email: string) => ({
+  gsi1pk: OPERATORS_GSI1PK,
+  gsi1sk: email,
+});
+
+export const OPERATORS_GSI1PK = 'PLATFORM#OPERATORS';
+
 /** Prefix used to erase an entire tenant's non-user items. */
 export const tenantErasurePrefix = (tenant: string) => `${tenantPrefix(tenant)}#`;

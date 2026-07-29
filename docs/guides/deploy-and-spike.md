@@ -230,4 +230,8 @@ npm run deploy:remove
   [auth-and-roles.md](auth-and-roles.md).
 - **Email delivery:** Cognito's default email has a low daily cap — fine for the spike.
   For real use, wire SES (available in af-south-1).
+- **Test data with logins:** `seed --demo` loads clubs only (no calendars, structures or
+  season runs, and no user accounts). To stand up a cohort that exercises leagues and
+  fixtures _and_ can be signed into, see
+  [seeding-a-test-cohort.md](../runbooks/seeding-a-test-cohort.md).
 - **POPIA / erasure:** see [popia-compliance.md](popia-compliance.md).

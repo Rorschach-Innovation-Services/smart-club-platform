@@ -1641,10 +1641,15 @@ function Shell({
       .finally(() => setBusyClearanceId(null));
   }
   // Admin overrides an overdue request, issuing it on the source club's behalf.
-  function overrideClearance(req) {
+  function overrideClearance(req, reason) {
     setBusyClearanceId(req.id);
     return withToast(
-      () => api.overrideClearance(req.id, { fromClubId: req.fromClubId, version: req.version }),
+      () =>
+        api.overrideClearance(req.id, {
+          fromClubId: req.fromClubId,
+          version: req.version,
+          reason: reason || undefined,
+        }),
       'Could not override clearance',
       { rawConflict: true },
     )
@@ -1657,7 +1662,14 @@ function Shell({
         invalidate(qk.players(req.fromClubId));
         invalidate(qk.players(req.toClubId));
         invalidate(qk.demographics());
-        toastShow(`${req.playerName} cleared to ${req.toClubName} · Union override`);
+        // A reason means the admin was explaining something — often that they are DISPOSING of a
+        // clearance that should never have existed, in which case "cleared to X" is the wrong
+        // sentence. Stay neutral when one was given.
+        toastShow(
+          reason
+            ? `${req.playerName}'s clearance resolved · Union override`
+            : `${req.playerName} cleared to ${req.toClubName} · Union override`,
+        );
       })
       .catch(() => {})
       .finally(() => setBusyClearanceId(null));

@@ -5,9 +5,10 @@
   "type": "module",
   "description": "Smart Club Platform — multi-tenant API (Hono on Lambda) + tenant repo, auth, seed",
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.seed.json",
     "test": "tsx --test test/*.test.ts",
     "seed": "tsx src/seed.ts",
+    "seed-cohort": "tsx src/seed-cohort.ts",
     "bootstrap-admin": "tsx src/bootstrap-admin.ts",
     "bootstrap-operator": "tsx src/bootstrap-operator.ts",
     "request-cert": "tsx src/request-cert.ts",

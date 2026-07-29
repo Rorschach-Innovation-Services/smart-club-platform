@@ -1,0 +1,24 @@
+{
+  /*
+   * Type-check project for seed-cohort.ts alone.
+   *
+   * The CLI is the one place the two trees meet: it persists through packages/api
+   * (strict) while importing the fixture-generation engine from src/competition/*
+   * (strict: false, and typed against the frontend's own src/types.ts). Checking it in
+   * the api project would drag that tree in under strict rules it was never written for.
+   *
+   * `lib` stays ES2022 with no DOM: the competition modules are pure TS — dayjs and type
+   * imports only — and src/types.ts references no DOM types. If that ever stops being
+   * true, this file failing is the signal.
+   */
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["src/seed-cohort.ts"],
+  "exclude": []
+}

@@ -881,8 +881,37 @@ export interface PlayerClearance {
   /** Email of the union admin who rejected on the clubs' behalf. */
   rejectedBy?: string;
   rejectReason?: string;
+  /**
+   * Free text on an override: why the union issued the clearance on the clubs' behalf. Written
+   * only on an ADMIN override, but SHOWN TO BOTH CLUBS — it rides the mirror as well as the
+   * canonical, exactly like rejectReason. Load-bearing when override is used to DISPOSE of a
+   * clearance that should never have existed (junk registration, or a player who named a club
+   * they never played for) — reject is refused for sourceless clearances and deletion is
+   * blocked while pending, so override is the only exit, and without this the resolved record
+   * reads as a genuine approved transfer.
+   */
+  overrideReason?: string;
+  /** Email of the union admin who overrode, mirroring rejectedBy. Admin overrides only. */
+  overriddenBy?: string;
   version: number;
 }
+
+/**
+ * A clearance as the ADMIN LISTING returns it: the stored row plus one derived field.
+ *
+ * `sourceRostered` is kept OFF PlayerClearance on purpose. Every writer spreads a whole
+ * clearance (clearanceItems puts `...c` into both the canonical and the mirror), so a derived
+ * field living on the persisted type is one careless pass-through away from being stored. Here
+ * the compiler enforces what a comment used to: a value of this type cannot be handed to
+ * resolveClearance/rejectClearance/clearanceItems without being narrowed first.
+ *
+ * Set only for PENDING REGISTRATION-origin clearances: does the source club actually hold this
+ * player? `false` ⇒ sourceless, so the source cannot decide on an informed basis — the reject
+ * route refuses and the reassign route permits, and the console mirrors both. ABSENT means
+ * unknown (older API, or the derivation failed), which the console must treat as its own state
+ * rather than folding into either answer.
+ */
+export type AdminClearanceView = PlayerClearance & { sourceRostered?: boolean };
 
 export type RegistrationReviewKind = 'off-system-alert' | 'cross-club-hold';
 export type RegistrationReviewStatus = 'open' | 'resolved';

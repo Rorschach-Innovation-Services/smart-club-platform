@@ -5243,6 +5243,16 @@ export function ClubClearancesView({
                     </div>
                     <div className="clr-name">{req.playerName}</div>
                     <div className="clr-meta">Now at {req.toClubName}</div>
+                    {/* An override issued on YOUR behalf is exactly the case where "Now at X"
+                        can mislead — the union may have used it to dispose of a registration
+                        that should never have existed, after which the player is not at X at
+                        all. The reason is why it was captured; show it here, not just to the
+                        union office. `overriddenBy` is deliberately NOT rendered club-side: the
+                        club view shows rejectReason without rejectedBy, and union staff email
+                        addresses are not a club-facing detail. It stays in the admin console. */}
+                    {req.status === 'admin-override' && req.overrideReason && (
+                      <div className="clr-note">"{req.overrideReason}"</div>
+                    )}
                   </div>
                   <Pill tone="teal" dot>
                     {req.status === 'admin-override' ? 'Union approved' : 'Cleared'}
@@ -5280,6 +5290,14 @@ export function ClubClearancesView({
                     <div className="clr-meta">
                       From <strong>{req.fromClubName}</strong> · Requested {fmtDay(req.requestedAt)}
                     </div>
+                    {/* THIS club is the destination, so it is the one now holding the player —
+                        and if the union used the override to dispose of a registration that
+                        should not exist, it is the club that most needs to know why. A bare
+                        "Cleared" pill would read as a completed transfer. (No overriddenBy: see
+                        the incoming card.) */}
+                    {req.status === 'admin-override' && req.overrideReason && (
+                      <div className="clr-note">"{req.overrideReason}"</div>
+                    )}
                   </div>
                   {req.status === 'pending' ? (
                     <Pill tone="gold" dot>
@@ -5291,7 +5309,7 @@ export function ClubClearancesView({
                     </Pill>
                   ) : (
                     <Pill tone="teal" dot>
-                      Cleared
+                      {req.status === 'admin-override' ? 'Union approved' : 'Cleared'}
                     </Pill>
                   )}
                 </div>
