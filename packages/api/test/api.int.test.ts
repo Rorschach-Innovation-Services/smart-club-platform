@@ -1852,10 +1852,12 @@ describe('POST /register — cross-club registrations, off-system alerts, admin 
     );
   });
 
-  test('cross-club: typing the JOINING club by name in "Other" → 201 + no alert (no 400 regression)', async () => {
-    // Link club's token, but a different joining club whose real name is typed into "Other".
-    // Because the classification check never touches lastClubId, the previous==current guard
-    // does NOT fire (registration succeeds) and the on-system match suppresses the alert.
+  test('cross-club: typing the JOINING club by name in "Other" → same 400 as picking it', async () => {
+    // Link club's token, a different joining club, and that joining club's own name typed into
+    // "Other". An exact on-system name is promoted to lastClubId before anything keys on it,
+    // so this hits the previous==current guard exactly as the dropdown pick does (see the
+    // non-link 400 test below) — typed and picked input must be one flow, or the typed form
+    // becomes a way around every rule the dropdown enforces.
     const res = await postLink({
       firstName: 'CrossSame',
       lastName: 'Typed',
@@ -1863,13 +1865,39 @@ describe('POST /register — cross-club registrations, off-system alerts, admin 
       currentClubId: 'rdest',
       lastClub: 'Reg Dest CC',
     });
+    assert.equal(res.status, 400);
+    assert.ok(!(await rosterIds('rdest')).includes('RVCS1'), 'nothing registered');
+  });
+
+  test('an exact on-system club name typed into "Other" opens the same clearance as picking it', async () => {
+    // The last silent gap: an exact (normalised) on-system name typed as free text used to
+    // register as a fresh signing — no clearance AND no off-system alert, since exact matches
+    // deliberately don't alert. Promotion to lastClubId closes it: mixed case and stray
+    // whitespace still resolve, the clearance lands in the named club's queue, and the stored
+    // history carries the club's canonical name, not the player's typing.
+    const res = await postLink({
+      firstName: 'TypedExact',
+      lastName: 'Transfer',
+      idNumber: 'RVTE1',
+      lastClub: '  reg dest cc ',
+    });
     assert.equal(res.status, 201);
-    assert.ok((await rosterIds('rdest')).includes('RVCS1'), 'active at the joining club');
-    assert.equal(
-      await reviewByName('CrossSame Typed'),
-      undefined,
-      'typing the joining club by name raises no off-system alert',
+    const body = (await res.json()) as { clearance?: { fromClubName: string } };
+    assert.equal(body.clearance?.fromClubName, 'Reg Dest CC', 'clearance opened to the typed club');
+
+    const row = (await (
+      await app.request('/clubs/rlink/players', { headers: headers(ADMIN) })
+    ).json()) as { idNumber?: string; status?: string; lastClub?: string }[];
+    const stored = row.find((p) => p.idNumber === 'RVTE1');
+    assert.equal(stored?.status, 'clearance-pending', 'held pending like a dropdown transfer');
+    assert.equal(stored?.lastClub, 'Reg Dest CC', 'canonical club name, not the typed variant');
+    assert.ok(
+      (await repo.listClearancesForSource('dolphins', 'rdest')).some(
+        (x) => x.idNumber === 'RVTE1' && x.status === 'pending' && x.origin === 'registration',
+      ),
+      'canonical clearance in the named club queue',
     );
+    assert.equal(await reviewByName('TypedExact Transfer'), undefined, 'no off-system alert');
   });
 
   test('previous club cannot equal a non-link current club (400)', async () => {

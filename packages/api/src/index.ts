@@ -548,7 +548,24 @@ app.post('/register/:clubId', async (c) => {
     createdAt: now(),
   };
 
-  const lastClubId = typeof body.lastClubId === 'string' ? body.lastClubId.trim() : '';
+  let lastClubId = typeof body.lastClubId === 'string' ? body.lastClubId.trim() : '';
+  // An EXACT on-system club name typed into "Other" is the same declaration as picking that
+  // club from the list, and must take the same path — resolved HERE, before anything keys on
+  // lastClubId, so the previous==current guard, the source-club cap, and the clearance
+  // decision all see one flow. Left as free text it would register as a fresh signing with no
+  // clearance AND no off-system alert (exact matches deliberately don't alert), which was the
+  // one way a declared transfer could still slip through silently. Same normalised-name idiom
+  // as the signup collision check; near-name variants stay free text and alert as before.
+  if (!lastClubId && typeof body.lastClub === 'string') {
+    const typed = body.lastClub.trim();
+    if (typed && typed !== '—') {
+      const nameKey = typed.toLowerCase();
+      const match = (await repo.listClubs(resolved.tenant)).find(
+        (cl) => cl.name.trim().toLowerCase() === nameKey,
+      );
+      if (match) lastClubId = match.id;
+    }
+  }
   // The previous club can't be the current club — a transfer to the club you're leaving is
   // meaningless — UNLESS both are the LINK club, which is a legitimate re-registration at the
   // same club (handled without a clearance in createSelfRegistration). So only reject
@@ -647,23 +664,14 @@ app.post('/register/:clubId', async (c) => {
   // admins can see which club was typed. Excludes the '—' first-registration sentinel so clean
   // first registrations never raise an alert.
   //
-  // A typed name that actually matches a club ON the system is NOT off-system — suppress the
-  // alert (a real club typed into "Other" instead of picked from the list). This is purely a
-  // classification decision: `lastClubId` stays untouched, so routing, the previous==current
-  // guard, and createSelfRegistration all behave exactly as before. Exact normalized-name
-  // match (same idiom as the signup collision check) — near-name variants still alert.
-  const typedPrev =
+  // No on-system re-check here: an exact on-system name was already promoted to lastClubId
+  // before registration (and took the clearance path above), so surviving free text is by
+  // construction NOT an exact match — a genuinely off-system club, or a near-name variant of
+  // an on-system one, and both deserve the alert.
+  const typedOther =
     !lastClubId && body.lastClub && body.lastClub.trim() && body.lastClub.trim() !== '—'
       ? body.lastClub.trim()
       : undefined;
-  let typedOther: string | undefined;
-  if (typedPrev) {
-    const nameKey = typedPrev.toLowerCase();
-    const onSystem = (await repo.listClubs(resolved.tenant)).some(
-      (cl) => cl.name.trim().toLowerCase() === nameKey,
-    );
-    typedOther = onSystem ? undefined : typedPrev;
-  }
   if (typedOther) {
     try {
       await repo.createRegistrationReview(resolved.tenant, {

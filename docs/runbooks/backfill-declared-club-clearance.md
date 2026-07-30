@@ -73,14 +73,16 @@ Per-player transactions are isolated: one conflicting row does not abandon the r
 `TransactionCanceledException` is reported with its `CancellationReasons` codes
 (`[0]` clearance id replay, `[1]` mirror, `[2]` player row gone or no longer active).
 
-### Known scope caveat
+### Known scope caveat (closed 30 Jul 2026)
 
-The live rule keys on the `lastClubId` the form posted; the script keys on a normalised
-**name** match, because `lastClubId` is not persisted on the row. It is therefore slightly
-broader: a player who typed an exact on-system club name into "Other" is swept here but would
-not be by the live path. That is deliberate — they declared that club either way — but it
-means the two predicates are not identical, and after the fact there is no way to tell which
-of the 46 came from the dropdown and which from free text.
+The script keys on a normalised **name** match, because `lastClubId` is not persisted on the
+row. Originally the live rule keyed on the `lastClubId` the form posted, which made the script
+slightly broader: a player who typed an exact on-system club name into "Other" was swept here
+but silently missed by the live path — no clearance AND no off-system alert (exact matches
+deliberately don't alert). Since 30 Jul the register route promotes an exact normalised name
+match to `lastClubId` before anything keys on it, so typed and picked input take one flow and
+the two predicates agree. The script's dry run remains the detector of record: run it after
+any registration surge, and a non-zero count means something new slipped through.
 
 ## Procedure
 
