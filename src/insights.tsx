@@ -9,9 +9,11 @@
  * The derivation helpers are pure and exported for tests, mirroring src/leagues.ts.
  */
 
+import { useState as useStateA } from 'react';
 import { useCopy } from './branding';
 import { KPI, CountUp, EmptyState, Icon, Btn } from './atoms';
 import { REQUIRED_DOCS } from './data';
+import { exportSheetsToXlsx } from './exportXlsx';
 import {
   teamCounts,
   optionsGroupedByGroup,
@@ -199,6 +201,173 @@ export function pct(count: number, total: number): string {
 /** Numeric twin of pct() for CountUp (which animates a number, not a string). */
 export function pctNum(count: number, total: number): number {
   return total ? Math.round((count / total) * 1000) / 10 : 0;
+}
+
+/**
+ * The aggregate workbook behind the admin Insights export. Keeping the mapping
+ * beside the display derivations ensures the download reports the same totals,
+ * labels and percentage convention as the cards above it.
+ */
+export function insightsExportSheets({
+  clubs,
+  leagues,
+  districts,
+  clearances,
+  demographics,
+}: InsightsBreakdownProps) {
+  const split = clubs.reduce(
+    (acc, c) => {
+      const t = teamCounts(c.leagues || [], leagues, c.leagueTeams);
+      return {
+        senior: acc.senior + t.senior,
+        women: acc.women + t.women,
+        junior: acc.junior + t.junior,
+      };
+    },
+    { senior: 0, women: 0, junior: 0 },
+  );
+  const teamsTotal = split.senior + split.women + split.junior;
+  const playersTotal = clubs.reduce((sum, club) => sum + (club.players || 0), 0);
+  const { rows: leagueRows, orphans } = leagueBreakdown(clubs, leagues);
+  const districtBreakdown = districtRows(clubs, leagues, districts);
+  const affiliations = affiliationRows(clubs);
+  const { bands, submitted, avgCqi } = cqiBandRows(clubs);
+  const { docStats } = docComplianceRows(clubs);
+  const counts = clearanceCounts(clearances);
+  const clearanceTotal = counts.pending + counts.approved + counts.adminOverride + counts.rejected;
+  const approvedTotal = counts.approved + counts.adminOverride;
+
+  const sheets: { name: string; rows: Record<string, unknown>[] }[] = [
+    {
+      name: 'Summary',
+      rows: [
+        { Metric: 'Clubs', Value: clubs.length, Detail: 'in the cohort' },
+        {
+          Metric: 'Teams entered',
+          Value: teamsTotal,
+          Detail: `${split.senior} senior · ${split.women} women · ${split.junior} junior`,
+        },
+        { Metric: 'Players registered', Value: playersTotal, Detail: 'across the cohort' },
+        {
+          Metric: 'Leagues',
+          Value: leagues.length,
+          Detail: `${leagueRows.filter((row) => row.clubCount > 0).length} with entries`,
+        },
+        { Metric: 'Pending clearances', Value: counts.pending, Detail: 'awaiting action' },
+        { Metric: 'Average CQI', Value: avgCqi, Detail: `${submitted.length} clubs submitted CQI` },
+      ],
+    },
+    {
+      name: 'League breakdown',
+      rows: [
+        ...leagueRows.map((row) => ({
+          League: row.label,
+          Group: row.group,
+          Clubs: row.clubCount,
+          Teams: row.teamCount,
+        })),
+        ...(orphans.keys.length
+          ? [
+              {
+                League: 'Removed / missing leagues',
+                Group: orphans.keys.join(', '),
+                Clubs: orphans.clubCount,
+                Teams: orphans.teamCount,
+              },
+            ]
+          : []),
+      ],
+    },
+    {
+      name: 'District breakdown',
+      rows: districtBreakdown.map((row) => ({
+        District: row.name,
+        Clubs: row.clubCount,
+        Teams: row.teamCount,
+        'Leagues available': row.leagueCount,
+      })),
+    },
+    {
+      name: 'Affiliation',
+      rows: affiliations.map((row) => ({
+        Status: row.label,
+        Clubs: row.count,
+        Percentage: pct(row.count, clubs.length),
+      })),
+    },
+    {
+      name: 'CQI',
+      rows: bands.map((band) => ({
+        Band: band.label,
+        Clubs: band.count,
+        Percentage: pct(band.count, clubs.length),
+      })),
+    },
+    {
+      name: 'Document compliance',
+      rows: docStats.map((doc) => ({
+        Document: doc.name,
+        'Clubs uploaded': doc.count,
+        'Total clubs': doc.total,
+        Percentage: pct(doc.count, doc.total),
+      })),
+    },
+    {
+      name: 'Clearances',
+      rows: [
+        { Metric: 'Players registered', Count: playersTotal, Percentage: '' },
+        {
+          Metric: 'Pending',
+          Count: counts.pending,
+          Percentage: pct(counts.pending, clearanceTotal),
+        },
+        {
+          Metric: 'Approved (including admin overrides)',
+          Count: approvedTotal,
+          Percentage: pct(approvedTotal, clearanceTotal),
+        },
+        {
+          Metric: 'Admin overrides',
+          Count: counts.adminOverride,
+          Percentage: pct(counts.adminOverride, clearanceTotal),
+        },
+        {
+          Metric: 'Rejected',
+          Count: counts.rejected,
+          Percentage: pct(counts.rejected, clearanceTotal),
+        },
+      ],
+    },
+  ];
+
+  if (demographics) {
+    const demographicRows = (category: string, buckets: DemographicBucket[]) =>
+      buckets.map((bucket) => ({
+        Category: category,
+        Bucket: bucket.label,
+        Players: bucket.count,
+        Percentage: pct(bucket.count, demographics.totalPlayers),
+      }));
+    sheets.push({
+      name: 'Demographics',
+      rows: [
+        ...demographicRows('Age groups', demographics.ageGroups),
+        ...demographicRows('Gender', demographics.gender),
+        ...demographicRows('Race', demographics.race),
+        ...(demographics.unattributed
+          ? [
+              {
+                Category: 'Unattributed',
+                Bucket: 'Not attributable to a league',
+                Players: demographics.unattributed.totalPlayers,
+                Percentage: pct(demographics.unattributed.totalPlayers, demographics.totalPlayers),
+              },
+            ]
+          : []),
+      ],
+    });
+  }
+  return sheets;
 }
 
 /**
@@ -907,6 +1076,7 @@ interface AdminInsightsPageProps {
   clearances: Array<{ status: ClearanceStatus }>;
   onOpenLeague?: (key: string) => void;
   demographics?: DemographicsResponse;
+  toast?: (message: string, tone?: string) => void;
 }
 
 export function AdminInsightsPage({
@@ -916,8 +1086,26 @@ export function AdminInsightsPage({
   clearances,
   onOpenLeague,
   demographics,
+  toast,
 }: AdminInsightsPageProps) {
   const copy = useCopy();
+  const [exporting, setExporting] = useStateA(false);
+
+  const exportInsights = async () => {
+    if (!clubs.length) return;
+    setExporting(true);
+    try {
+      await exportSheetsToXlsx(
+        'season-insights.xlsx',
+        insightsExportSheets({ clubs, leagues, districts, clearances, demographics }),
+      );
+    } catch {
+      toast?.('Export failed — please retry', 'warn');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div>
       <div className="page-head">
@@ -930,6 +1118,17 @@ export function AdminInsightsPage({
             How the cohort is organised — clubs and teams across every league, district and status,
             plus the player and clearance pipeline.
           </p>
+        </div>
+        <div className="ph-actions">
+          <Btn
+            tone="outline"
+            icon={Icon.Download}
+            size="sm"
+            disabled={exporting || !clubs.length}
+            onClick={exportInsights}
+          >
+            {exporting ? 'Exporting…' : 'Export Excel'}
+          </Btn>
         </div>
       </div>
       <InsightsBreakdown

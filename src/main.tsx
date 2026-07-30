@@ -2142,6 +2142,7 @@ function Shell({
             clearances={allClearances}
             onOpenLeague={(k) => navigate(`/admin/insights/leagues/${encodeURIComponent(k)}`)}
             demographics={demographicsQuery.data}
+            toast={toastShow}
           />
         );
       if (view === 'insights_league')

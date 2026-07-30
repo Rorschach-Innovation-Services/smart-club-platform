@@ -10,6 +10,7 @@ import {
   leagueTeamDirectory,
   chairContactOf,
   pct,
+  insightsExportSheets,
 } from './insights';
 import type { InsightsClub, League, ClearanceStatus } from './types';
 
@@ -146,6 +147,84 @@ describe('pct', () => {
 
   it('guards a zero total to 0%', () => {
     expect(pct(0, 0)).toBe('0%');
+  });
+});
+
+describe('insightsExportSheets', () => {
+  it('exports the same aggregate breakdowns shown on the dashboard, without club or player rows', () => {
+    const sheets = insightsExportSheets({
+      clubs: [
+        club({
+          id: 'north',
+          district: 'North',
+          players: 4,
+          affiliation: 'complete',
+          cqi: 80,
+          leagues: ['premier', 'gone'],
+          leagueTeams: { premier: 2, gone: 3 },
+          docs: { constitution: true },
+        }),
+      ],
+      leagues: LEAGUES,
+      districts: DISTRICTS,
+      clearances: [
+        { status: 'pending' },
+        { status: 'approved' },
+        { status: 'admin-override' },
+        { status: 'rejected' },
+      ],
+      demographics: {
+        totalPlayers: 4,
+        ageGroups: [{ label: '18–34', count: 4 }],
+        gender: [{ label: 'Male', count: 3 }],
+        race: [{ label: 'African', count: 2 }],
+        unattributed: { totalPlayers: 1, ageGroups: [], gender: [], race: [] },
+      },
+    });
+
+    expect(sheets.map((sheet) => sheet.name)).toEqual([
+      'Summary',
+      'League breakdown',
+      'District breakdown',
+      'Affiliation',
+      'CQI',
+      'Document compliance',
+      'Clearances',
+      'Demographics',
+    ]);
+    expect(sheets[0].rows).toContainEqual({
+      Metric: 'Teams entered',
+      Value: 5,
+      Detail: '5 senior · 0 women · 0 junior',
+    });
+    expect(sheets[1].rows).toContainEqual({
+      League: 'Removed / missing leagues',
+      Group: 'gone',
+      Clubs: 1,
+      Teams: 3,
+    });
+    expect(sheets[6].rows).toContainEqual({
+      Metric: 'Approved (including admin overrides)',
+      Count: 2,
+      Percentage: '50%',
+    });
+    expect(sheets[7].rows).toContainEqual({
+      Category: 'Unattributed',
+      Bucket: 'Not attributable to a league',
+      Players: 1,
+      Percentage: '25%',
+    });
+    expect(JSON.stringify(sheets)).not.toContain('north');
+  });
+
+  it('omits demographics when that optional dashboard card is unavailable', () => {
+    const sheets = insightsExportSheets({
+      clubs: [club({ leagues: ['premier'] })],
+      leagues: LEAGUES,
+      districts: DISTRICTS,
+      clearances: [],
+    });
+    expect(sheets.some((sheet) => sheet.name === 'Demographics')).toBe(false);
   });
 });
 
