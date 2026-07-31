@@ -559,3 +559,86 @@ describe('the swap prefill starts from where the previous stage ended', () => {
     expect(finalRound.groups[1].entrants).toEqual(bottom);
   });
 });
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Group labels. There were three spellings of one fallback — `labelFor` in the
+   engine ("Group A"), `String.fromCharCode(65 + i)` in this form (identical
+   until index 26, where it emits "Group ["), and `Group ${i + 1}` on the save
+   path. So an unnamed stage DISPLAYED "Group A" and PERSISTED "Group 1", which
+   is visible in the live dev data: a human-reconfirmed stage reads "Group 1"
+   beside CLI-written ones reading "Group A".
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('a group is called the same thing wherever it is written', () => {
+  /** Two groups, deliberately unnamed, so the fallback is what gets stored. */
+  const UNNAMED: CompetitionStructure = {
+    id: 'unnamed',
+    name: 'Two pools',
+    version: 1,
+    stages: [
+      stage({
+        id: 'pools',
+        name: 'Pools',
+        entrants: { kind: 'seeded-split', method: 'blocks', groups: { kind: 'even', count: 2 } },
+      }),
+    ],
+  } as unknown as CompetitionStructure;
+
+  it('stores Group A and Group B, not Group 1 and Group 2', async () => {
+    const { user, onPatchRun } = setup(UNNAMED, [run(UNNAMED)]);
+    await openConfirm(user, /^Pools$/);
+    await user.click(confirmBtn());
+
+    const stored = onPatchRun.mock.calls[0][1].stages[0].groups.map(
+      (g: { label: string }) => g.label,
+    );
+    expect(stored).toEqual(['Group A', 'Group B']);
+  });
+
+  it('shows the admin the same names it is about to store', async () => {
+    const { user } = setup(UNNAMED, [run(UNNAMED)]);
+    await openConfirm(user, /^Pools$/);
+    const shown = Array.from((groupPickers()[0] as HTMLSelectElement).options).map((o) => o.text);
+    expect(shown).toEqual(['Not playing', 'Group A', 'Group B']);
+  });
+});
+
+describe('two groups may share a name', () => {
+  // `groupLabels` is free text from a comma box and nothing — client or server —
+  // checks it for uniqueness. Keying the option list by label made a duplicate a
+  // React key collision with unstable reconciliation, on the control that decides
+  // who gets relegated.
+  const SAME_NAME: CompetitionStructure = {
+    id: 'same',
+    name: 'Two pools, one name',
+    version: 1,
+    stages: [
+      stage({
+        id: 'pools',
+        name: 'Pools',
+        entrants: { kind: 'seeded-split', method: 'blocks', groups: { kind: 'even', count: 2 } },
+        groupLabels: ['Pool A', 'Pool A'],
+      }),
+    ],
+  } as unknown as CompetitionStructure;
+
+  it('renders both without a duplicate-key warning, and keeps them distinct', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { user, onPatchRun } = setup(SAME_NAME, [run(SAME_NAME)]);
+    await openConfirm(user, /^Pools$/);
+
+    expect(spy.mock.calls.some((c) => String(c[0]).includes('same key'))).toBe(false);
+
+    // Both groups are offered, and picking the SECOND puts the side in the second
+    // group — not the first one that happens to share its name.
+    const options = Array.from((groupPickers()[0] as HTMLSelectElement).options);
+    expect(options.map((o) => o.text)).toEqual(['Not playing', 'Pool A', 'Pool A']);
+    await user.selectOptions(groupPickers()[0], '1');
+    await user.click(confirmBtn());
+
+    const groups = onPatchRun.mock.calls[0][1].stages[0].groups;
+    expect(groups[1].entrants).toContain('c1');
+    expect(groups[0].entrants).not.toContain('c1');
+    spy.mockRestore();
+  });
+});

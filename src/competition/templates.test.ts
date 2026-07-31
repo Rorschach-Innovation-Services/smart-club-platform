@@ -8,7 +8,7 @@ import {
   structureToJson,
 } from './templates';
 import { materialiseStage, describeStage } from './structure';
-import type { SeasonCalendar } from '../types';
+import type { CompetitionStructure, SeasonCalendar } from '../types';
 
 const CAL: SeasonCalendar = {
   id: 'cal',
@@ -144,6 +144,22 @@ describe('JSON import / export', () => {
   it('drops the tenant-local id on export', () => {
     const json = structureToJson(instantiateTemplate(findTemplate('flat-round-robin')!, CAL));
     expect(JSON.parse(json).id).toBeUndefined();
+  });
+
+  // The export has always CARRIED calendarId; the import used to rebuild the object
+  // field by field and drop it. So a round trip produced a structure with real block
+  // ids and no record of which calendar they belong to — the exact shape that makes
+  // the editor open on the wrong calendar with every block picker blank, and Save
+  // still enabled over the wrong blocks. Manufacturable on demand until now.
+  it('keeps the calendar the blocks were authored against', () => {
+    const original: CompetitionStructure = {
+      ...instantiateTemplate(findTemplate('split-league-swap')!, CAL),
+      calendarId: CAL.id,
+    };
+    const parsed = parseStructureJson(structureToJson(original));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.structure.calendarId).toBe(CAL.id);
   });
 
   it('explains what is wrong rather than throwing', () => {

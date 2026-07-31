@@ -295,6 +295,35 @@ harmless — a re-seed converges on them, because the venue ids are derived from
 
 ---
 
+## Block ids, and why a re-seed never renames them
+
+A calendar the seed creates gets block ids namespaced by calendar
+(`cal-2026-27-block-1`, …). A calendar that **already exists** keeps the block ids it has;
+only the dates are refreshed, and the structures written in the same run are rewritten to
+match.
+
+That asymmetry is deliberate. Block ids are referenced from three places that a rename
+would break at once, none of which fails loudly:
+
+- `Series.schedule.blockId` is persisted per series. `addFixture` (`src/admin.tsx`) reads
+  it back to date the next round; a miss doesn't error, it silently falls through to the
+  legacy "+7 days" path — straight into the mid-season break that season calendars exist
+  to remove.
+- Any **operator-authored** structure bound to that calendar would start failing
+  `validateCompetitions`, which runs on every `PUT /platform/tenants/:slug`. That takes
+  down the re-seed _and_ leaves the tenant unsaveable from the console until someone
+  hand-edits the structure.
+- `CompetitionStructure.calendarId` resolution (`resolveDesignCalendarId`) uses block
+  coverage as a fallback, so renamed blocks make a structure look like it belongs
+  nowhere.
+
+Before namespacing existed, every seeded calendar used bare `block-1`/`block-2`. Two
+seasons seeded into one tenant therefore share block ids _and_ labels, which the operator
+console cannot disambiguate — it will ask you which calendar a structure belongs to rather
+than guess. Answer it once and save; the structure records `calendarId` from then on.
+
+---
+
 ## What it deliberately does not do
 
 - **No results or standings.** They do not exist in the model — ADR 0008 makes standings

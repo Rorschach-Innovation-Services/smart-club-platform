@@ -64,7 +64,17 @@ function groupLetter(i: number): string {
   return s;
 }
 
-function labelFor(labels: string[] | undefined, i: number): string {
+/**
+ * The group label at index `i` — a named one where the operator supplied it, else the
+ * `Group A`/`Group B`/… fallback.
+ *
+ * Exported because it is the ONLY correct spelling of that fallback, and the console had
+ * grown two others: `String.fromCharCode(65 + i)` in the confirm form (which emits
+ * `Group [` at index 26, where `groupLetter` gives `Group AA`), and a numeric
+ * `Group ${i + 1}` on the save path — so a stage could display "Group A" and persist
+ * "Group 1". Callers use this rather than rolling their own.
+ */
+export function labelFor(labels: string[] | undefined, i: number): string {
   return labels?.[i]?.trim() || `Group ${groupLetter(i)}`;
 }
 
@@ -259,7 +269,10 @@ export function resolveEntrants(spec: EntrantSpec, ctx: ResolveContext = {}): En
 export function describeEntrants(spec: EntrantSpec): string {
   switch (spec.kind) {
     case 'all-registered':
-      return 'Every side registered for the league';
+      // Matches ENTRANT_OPTIONS in the operator console verbatim. "in one group" is the
+      // load-bearing half: this kind cannot be split, and an operator who reads only
+      // "every registered side" discovers that mid-season in the confirm modal.
+      return 'Every registered side, in one group';
     case 'seeded-split': {
       const plan = spec.groups;
       const shape = plan.kind === 'sizes' ? plan.sizes.join(' + ') : `${plan.count} even groups`;

@@ -175,6 +175,10 @@ export function instantiateTemplate(
     name: name?.trim() || template.name,
     version: 1,
     templateId: template.id,
+    // The blockIds just came from this calendar, so record it. Leaving it off meant a
+    // brand-new structure was born in the shape the editor can't resolve — the same
+    // state every seeded structure was in, and the one that produces blank block pickers.
+    ...(calendar ? { calendarId: calendar.id } : {}),
     stages: template.stages.map((stage, i) => ({
       ...stage,
       schedule: { ...stage.schedule, blockId: i === 0 ? first : second },
@@ -191,6 +195,9 @@ export function blankStructure(
     id: newStructureId(),
     name,
     version: 1,
+    // As in `instantiateTemplate`: `blankStage` takes its blockId from this calendar, so
+    // the structure records which one that was.
+    ...(calendar ? { calendarId: calendar.id } : {}),
     stages: [blankStage(calendar, 'League season')],
   };
 }
@@ -245,6 +252,15 @@ export function parseStructureJson(
       name: candidate.name.trim(),
       version: 1,
       templateId: candidate.templateId,
+      // Carried, because `structureToJson` EXPORTS it — rebuilding the object without it
+      // meant an export→import round trip manufactured a structure with real block ids
+      // and no record of which calendar they belong to, which is exactly the shape that
+      // makes the editor open on the wrong calendar with every block picker blank.
+      // An id from a foreign tenant is harmless: `resolveDesignCalendarId` only honours
+      // one that exists here, and saving overwrites it with the resolved value. Still
+      // type-checked, because every other field here is and a non-string would otherwise
+      // ride untouched into the tenant config — `validateStructures` never inspects it.
+      calendarId: typeof candidate.calendarId === 'string' ? candidate.calendarId : undefined,
       stages: candidate.stages,
     },
   };

@@ -29,6 +29,7 @@
  *
  * See docs/runbooks/seeding-a-test-cohort.md.
  */
+import { pathToFileURL } from 'node:url';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import * as repo from './repo.js';
 import { clubIdFromName } from './club-id.js';
@@ -285,15 +286,21 @@ function buildCalendar(season: string, startYear: number): SeasonCalendar {
     // 24-club roster needs 25 rounds, and a block that fits fewer does not fail — it
     // silently generates a TRUNCATED season where some sides never play each other, which
     // looks like real data and is not. seedSeason warns if a stage still overflows.
+    // Block ids are namespaced by CALENDAR. Bare `block-1`/`block-2` made every seeded
+    // season's blocks identical in both id and label, so two calendars were
+    // indistinguishable to anything matching a structure back to the calendar it belongs
+    // to — and a structure built for 2026/27 resolved just as well against 2027/28, over
+    // the wrong dates. Deriving from the calendar id keeps them unique without making
+    // them random (this seed is re-runnable and its ids must be stable).
     blocks: [
       {
-        id: 'block-1',
+        id: `${calendarId(season)}-block-1`,
         label: 'First half',
         start: `${startYear}-08-01`,
         end: `${startYear}-12-19`,
       },
       {
-        id: 'block-2',
+        id: `${calendarId(season)}-block-2`,
         label: 'Second half',
         start: `${startYear + 1}-01-16`,
         end: `${startYear + 1}-05-29`,
@@ -331,6 +338,11 @@ function buildStructures(season: string, calendar: SeasonCalendar): CompetitionS
       name: template.name,
       version: 1,
       templateId: template.id,
+      // The calendar these blockIds were authored against. Without it the operator
+      // console opens every seeded structure against whichever calendar happens to be
+      // first, where the stored blocks resolve to nothing: blank pickers, a preview rail
+      // calling a good structure broken, and Save still enabled over the wrong blocks.
+      calendarId: calendar.id,
       stages: template.stages.map((stage, i) => ({
         ...stage,
         schedule: { ...stage.schedule, blockId: i === 0 ? first : second },
@@ -390,11 +402,79 @@ function buildLeague(
 }
 
 /**
+ * Rewrite an incoming calendar to reuse the block IDs the tenant already has, and point
+ * the incoming structures at them.
+ *
+ * Matched **by label first**, position only as a fallback. The seed's own block shape is
+ * fixed, but the shape of the calendar it is merging INTO is not — an operator can
+ * reorder or delete blocks from the calendars card. Matching purely by index there is
+ * silent relocation of exactly the kind this function exists to prevent: if the operator
+ * has put Second half first, `block-2` — the id every persisted `Series.schedule.blockId`
+ * knows as the January window — comes back carrying August dates, and `addFixture` starts
+ * scheduling a January competition in August with no error anywhere.
+ *
+ * Labels (`First half`/`Second half`) are stable across seed runs and are what existing
+ * seeded calendars already carry, so the label pass hits in every real case. Matched ids
+ * are consumed, so a block that misses on label can't positionally steal one another
+ * block already claimed. Anything still unmatched keeps its incoming (namespaced) id: it
+ * is genuinely new, so nothing can be pointing at it yet.
+ *
+ * Exported for testing: this is the whole of the data-safety guarantee that a re-seed
+ * never dangles a `Series.schedule.blockId`, and it is not otherwise reachable.
+ */
+export function keepExistingBlockIds(
+  existing: SeasonCalendar,
+  incoming: SeasonCalendar,
+  structures: CompetitionStructure[],
+): { calendar: SeasonCalendar; structures: CompetitionStructure[] } {
+  const taken = new Set<string>();
+  const keptIds: string[] = [];
+
+  // Pass 1 — same label wins, wherever it sits.
+  incoming.blocks.forEach((b, i) => {
+    const hit = existing.blocks.find((x) => !taken.has(x.id) && x.label.trim() === b.label.trim());
+    if (hit) {
+      taken.add(hit.id);
+      keptIds[i] = hit.id;
+    }
+  });
+
+  // Pass 2 — whatever is left over, in order, for blocks the labels didn't match
+  // (an operator who renamed one). Best effort, and it cannot collide: every id pass 1
+  // claimed is already consumed.
+  const leftover = existing.blocks.filter((x) => !taken.has(x.id)).map((x) => x.id);
+  incoming.blocks.forEach((b, i) => {
+    if (keptIds[i]) return;
+    keptIds[i] = leftover.shift() ?? b.id;
+  });
+
+  const rename = new Map(incoming.blocks.map((b, i) => [b.id, keptIds[i]]));
+  return {
+    calendar: {
+      ...incoming,
+      blocks: incoming.blocks.map((b, i) => ({ ...b, id: keptIds[i] })),
+    },
+    structures: structures.map((st) => ({
+      ...st,
+      stages: st.stages.map((s) => ({
+        ...s,
+        schedule: { ...s.schedule, blockId: rename.get(s.schedule.blockId) ?? s.schedule.blockId },
+      })),
+    })),
+  };
+}
+
+/**
  * Merge the cohort's config into whatever is already there.
  *
  * Read-modify-write, merged BY ID — never a blind overwrite. The CONFIG row is the tenant
  * registry's source of truth and carries branding, `adminCount` and `clubSignupLink` that
  * a re-seed must not clobber, plus any leagues/calendars the tenant authored itself.
+ *
+ * Returns the calendar and structures AS WRITTEN, which may differ from what was passed
+ * in — see `keepExistingBlockIds`. The caller has to seed seasons against the written
+ * values, not the built ones, or the run would reference blocks the stored calendar
+ * doesn't have.
  */
 async function mergeConfig(
   tenant: string,
@@ -404,9 +484,33 @@ async function mergeConfig(
     leagues: League[];
     districts: string[];
   },
-): Promise<void> {
+): Promise<{ calendar: SeasonCalendar; structures: CompetitionStructure[] }> {
   const config = await repo.getTenantConfig(tenant);
   if (!config) throw new Error(`tenant "${tenant}" not found — run \`seed -- ${tenant}\` first`);
+
+  /*
+   * Block IDs are namespaced for a calendar this run CREATES, and never for one that
+   * already exists.
+   *
+   * A calendar is merged by id, so re-seeding a tenant replaces its blocks in place. Had
+   * that carried new ids, everything already pointing at the old ones would dangle at
+   * once: `Series.schedule.blockId` is persisted, and `addFixture` (src/admin.tsx) reads
+   * it back to date the next round — a miss there doesn't error, it silently falls
+   * through to the legacy "+7 days" path, straight into the mid-season break that season
+   * calendars exist to remove. Any operator-authored structure bound to the calendar
+   * would also fail `validateCompetitions` below, taking the whole re-seed — and every
+   * later tenant PUT — down with it.
+   *
+   * So: keep the existing ids, take the incoming dates. Positional, because
+   * `buildCalendar` emits a fixed two-block shape and `buildStructures` assigns them by
+   * index. Fresh tenants still get namespaced ids, which is where the ambiguity this
+   * guards against actually arises.
+   */
+  const existingCalendar = (config.calendars ?? []).find((c) => c.id === cohort.calendar.id);
+  if (existingCalendar) {
+    const kept = keepExistingBlockIds(existingCalendar, cohort.calendar, cohort.structures);
+    cohort = { ...cohort, calendar: kept.calendar, structures: kept.structures };
+  }
 
   const mergeById = <T extends { id: string }>(existing: T[] | undefined, incoming: T[]): T[] => {
     const out = [...(existing ?? [])];
@@ -438,6 +542,7 @@ async function mergeConfig(
 
   const next: TenantConfig = { ...config, calendars, structures, leagues, districts };
   await repo.putTenantConfig(next);
+  return { calendar: cohort.calendar, structures: cohort.structures };
 }
 
 /* ─────────────────────────── Clubs and venues ─────────────────────────── */
@@ -837,9 +942,15 @@ async function main(): Promise<void> {
   const clubs = buildClubs(args.clubs, args.leagueKeys, args.perLeague);
   const districts = Array.from(new Set(clubs.map((c) => c.district)));
 
-  await mergeConfig(args.tenant, { calendar, structures, leagues, districts });
+  // AS WRITTEN, not as built: re-seeding an existing tenant keeps that calendar's block
+  // ids, so seeding a season against the built values would reference blocks the stored
+  // calendar doesn't have.
+  const { calendar: writtenCalendar, structures: writtenStructures } = await mergeConfig(
+    args.tenant,
+    { calendar, structures, leagues, districts },
+  );
   console.log(
-    `· config: calendar "${calendar.label}", ${structures.length} structures, ` +
+    `· config: calendar "${writtenCalendar.label}", ${writtenStructures.length} structures, ` +
       `${leagues.length} leagues (${leagues.map((l) => l.label).join(', ')})`,
   );
 
@@ -857,7 +968,7 @@ async function main(): Promise<void> {
 
   // The flat round robin is the one that generates unattended: `all-registered` resolves
   // from the club list alone. The other structures are installed for hand-driving.
-  const flat = structures.find((s) => s.templateId === 'flat-round-robin')!;
+  const flat = writtenStructures.find((s) => s.templateId === 'flat-round-robin')!;
   let totalSeries = 0;
   let totalFixtures = 0;
   for (const league of leagues) {
@@ -868,7 +979,7 @@ async function main(): Promise<void> {
       league,
       structure: flat,
       competition,
-      calendar,
+      calendar: writtenCalendar,
       season: args.season,
     });
     const fixtures = series.reduce((n, s) => n + s.fixtures.length, 0);
@@ -913,7 +1024,12 @@ async function main(): Promise<void> {
     );
 }
 
-main().catch((err) => {
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
-});
+// Only run as a CLI — the test imports `keepExistingBlockIds` directly, and an
+// unguarded main() would parse the test runner's argv and exit before it got there.
+// Same guard as backfill-player-team.ts.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.message : err);
+    process.exit(1);
+  });
+}

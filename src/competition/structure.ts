@@ -228,6 +228,76 @@ export function previewFit(
   });
 }
 
+/* ─── Design-time calendar resolution ───
+   Which calendar a structure should be EDITED against. Structures and calendars are
+   authored independently and a structure names only block IDs, so getting this wrong
+   makes every block picker fall back to its placeholder and the preview rail report a
+   perfectly good structure as broken. */
+
+/**
+ * Stages whose stored `blockId` names nothing on `calendar`.
+ *
+ * An EMPTY blockId is deliberately not reported: that is a stage nobody has scheduled
+ * yet, it has its own "needs a playing block" error, and folding the two together would
+ * tell an operator their data had gone missing when they simply hadn't entered it.
+ */
+export function stagesOffCalendar(stages: StageSpec[], calendar: SeasonCalendar): StageSpec[] {
+  return stages.filter((s) => !!s.schedule.blockId && !findBlock(calendar, s.schedule.blockId));
+}
+
+/**
+ * The calendar to open a structure's editor against.
+ *
+ * Ordered by how much the answer is actually KNOWN rather than guessed:
+ *
+ *   1. `structure.calendarId` — recorded authorial intent. Inference never overrides it;
+ *      when it is explicitly wrong the editor says so rather than silently retargeting.
+ *   2. The calendar named by the competitions that BIND this structure. This beats
+ *      block-coverage because it is what the server enforces — `validateCompetitions`
+ *      rejects a save whose blocks aren't on the bound calendar, so editing against
+ *      anything else is editing against a calendar with no authority over the outcome.
+ *   3. Block-id coverage — the one calendar that has every block this structure names.
+ *   4. Nothing.
+ *
+ * Step 4 returns `''` (No calendar) rather than `calendars[0]`, and that is the whole
+ * point of this function. Tenants seeded before block ids were namespaced carry the same
+ * ids AND labels (`block-1`/`First half`, …) on every calendar, so two seasons there are
+ * indistinguishable by coverage. Picking one by array order renders a correct-LOOKING
+ * picker over the wrong season's dates — invisibly wrong, and worse than saying nothing.
+ *
+ * `''` is NOT "the operator hasn't chosen": the editor must render it as a question, with
+ * each stage's stored block still visible and named. Gating the off-calendar display on a
+ * selected calendar turns this answer back into the blank-picker trap it exists to avoid.
+ */
+export function resolveDesignCalendarId(
+  structure: CompetitionStructure,
+  calendars: SeasonCalendar[],
+  /** Calendars named by competitions bound to this structure. Order is irrelevant. */
+  boundCalendarIds: readonly string[] = [],
+): string {
+  const exists = (id: string | undefined) => !!id && calendars.some((c) => c.id === id);
+
+  if (exists(structure.calendarId)) return structure.calendarId!;
+
+  // Deduped: one structure is routinely bound by several leagues' competitions, and on
+  // dev all three name the SAME calendar — counting the bindings rather than the distinct
+  // calendars would read that as ambiguous and fall through for no reason.
+  const bound = [...new Set(boundCalendarIds.filter(exists))];
+  if (bound.length === 1) return bound[0];
+
+  const wanted = [...new Set(structure.stages.map((s) => s.schedule.blockId).filter(Boolean))];
+  if (wanted.length) {
+    const covering = calendars.filter((c) => wanted.every((b) => !!findBlock(c, b)));
+    // Exactly one, or the ambiguity described above. Narrow by the bindings first — if
+    // several calendars cover and the bindings name some of them, those win.
+    if (covering.length === 1) return covering[0].id;
+    const boundCovering = covering.filter((c) => bound.includes(c.id));
+    if (boundCovering.length === 1) return boundCovering[0].id;
+  }
+
+  return '';
+}
+
 /* ─── Cross-pool wiring ───
    These two decide who plays whom in every cross-pool knockout, and they are pure
    functions over SeasonRun/StageSpec with no React in them. They live here rather than in

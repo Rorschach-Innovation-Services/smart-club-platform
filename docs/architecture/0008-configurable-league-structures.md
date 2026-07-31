@@ -225,6 +225,36 @@ edits its roster. [Score7](https://kb.score7.io/docs/getting-started/multi-stage
 solves the same problem by forbidding format changes after creation; a tenant-configured
 platform cannot take that option, so it pays for it with snapshots.
 
+### A structure records the calendar its blocks were authored against, and never guesses
+
+A `StageSpec` names a `blockId` and nothing else, so "which calendar does this structure
+belong to" is a question the model cannot answer from the stage alone. `CompetitionStructure`
+therefore carries `calendarId` — provenance, not a binding, since a competition still names
+its own calendar and one structure can be reused across seasons.
+
+Where it is absent (structures written before the field, imported JSON, or the seed CLI),
+the editor resolves it in a fixed order: **recorded `calendarId` → the calendar named by the
+competitions that bind this structure → the one calendar whose blocks cover every stage →
+nothing.**
+
+The bound competition beats block coverage because it is what the _server_ enforces:
+`validateCompetitions` rejects a save whose blocks aren't on the bound calendar, so editing
+against any other calendar is editing against one with no authority over the outcome.
+
+The last step is the load-bearing one. It returns **nothing** rather than falling back to
+the first calendar. Block ids are not globally unique — tenants seeded before ids were
+namespaced carry identical ids _and_ labels on every calendar — and choosing between them by
+array order renders a correct-_looking_ block picker over the wrong season's dates. That is
+invisibly wrong, where an unanswered picker is visibly unanswered. The console renders the
+refusal as a question naming each stage's block and its candidate calendars, because
+"nothing" is only a safe answer if the operator can see it was asked.
+
+The corollary is that the editor must never treat "no calendar selected" as "no blocks to
+show": a stage's stored block stays visible and named in that state. Hiding it reproduces the
+original defect — a scheduled stage rendering an empty picker, inviting an operator to
+"fix" it by writing a blockId from a calendar the structure isn't bound to, which
+`validateCompetitions` then rejects for the whole tenant.
+
 ### Storage: config for setup data, own items for operational data
 
 | Entity                        | Location                                         | Reason                                                                                                                                                                                                                                                 |

@@ -9,7 +9,14 @@
  * as much as a regression net.
  */
 import { describe, it, expect } from 'vitest';
-import { crossPoolQualifiersFor, feedsCrossPool, materialiseStage, previewFit } from './structure';
+import {
+  crossPoolQualifiersFor,
+  feedsCrossPool,
+  materialiseStage,
+  previewFit,
+  resolveDesignCalendarId,
+  stagesOffCalendar,
+} from './structure';
 import {
   crossPoolRounds,
   knockoutShape,
@@ -19,8 +26,8 @@ import {
   slotRefLabel,
   slotSource,
 } from './formats';
-import { groupSizes, resolveEntrants } from './entrants';
-import type { EntrantSpec, SeasonCalendar, StageSpec } from '../types';
+import { groupSizes, labelFor, resolveEntrants } from './entrants';
+import type { CompetitionStructure, EntrantSpec, SeasonCalendar, StageSpec } from '../types';
 
 /** The union's real 2026/27 calendar. */
 const CAL: SeasonCalendar = {
@@ -35,6 +42,15 @@ const CAL: SeasonCalendar = {
 
 const WEEKLY_B1 = { blockId: 'b1', cadence: { kind: 'weekly' as const } };
 const WEEKLY_B2 = { blockId: 'b2', cadence: { kind: 'weekly' as const } };
+
+/** A minimal valid stage, for tests that care only about its schedule. */
+const STAGE: StageSpec = {
+  id: 's',
+  name: 'Stage',
+  format: { kind: 'round-robin', legs: 1 },
+  entrants: { kind: 'all-registered' },
+  schedule: WEEKLY_B1,
+};
 
 /** Confirmed 2026/27 groupings, verbatim from the source documents. */
 const PREMIER_MEN_TOP_SIX = [
@@ -1149,5 +1165,158 @@ describe('a standings-dependent stage prefills from the stage it draws from', ()
     );
     if (r.status !== 'awaiting') throw new Error('expected awaiting');
     expect(r.prefill[0].entrants).toEqual([...PRIOR[0], ...PRIOR[1]]);
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Design-time calendar resolution.
+
+   A structure names block IDs and nothing else, so "which calendar does this
+   belong to" is a real question with a wrong answer that looks right. These pin
+   the order the answer is derived in, and — more importantly — pin that an
+   ambiguous answer is refused rather than guessed.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('which calendar a structure should be edited against', () => {
+  const CAL_A: SeasonCalendar = {
+    id: 'cal-a',
+    label: '2026/27 season',
+    blocks: [
+      { id: 'a1', label: 'First half', start: '2026-08-01', end: '2026-12-19' },
+      { id: 'a2', label: 'Second half', start: '2027-01-16', end: '2027-05-29' },
+    ],
+  };
+  const CAL_B: SeasonCalendar = {
+    id: 'cal-b',
+    label: 'Premier League - 2026/27',
+    blocks: [
+      { id: 'b1x', label: 'Block 1', start: '2026-09-27', end: '2026-11-01' },
+      { id: 'b2x', label: 'Block 2', start: '2026-11-08', end: '2026-12-06' },
+    ],
+  };
+  /** Two seeded seasons: identical block ids AND labels, different dates. */
+  const TWIN_1: SeasonCalendar = {
+    id: 'cal-2026-27',
+    label: '2026/27 season',
+    blocks: [{ id: 'block-1', label: 'First half', start: '2026-08-01', end: '2026-12-19' }],
+  };
+  const TWIN_2: SeasonCalendar = {
+    id: 'cal-2027-28',
+    label: '2027/28 season',
+    blocks: [{ id: 'block-1', label: 'First half', start: '2027-08-01', end: '2027-12-19' }],
+  };
+
+  const structure = (over: Partial<CompetitionStructure> = {}): CompetitionStructure => ({
+    id: 'st',
+    name: 'Split league',
+    version: 1,
+    stages: [
+      { ...STAGE, id: 's1', name: 'Double round', schedule: { ...WEEKLY_B1, blockId: 'a1' } },
+    ],
+    ...over,
+  });
+
+  it('honours the calendar the structure records, without second-guessing it', () => {
+    expect(resolveDesignCalendarId(structure({ calendarId: 'cal-b' }), [CAL_A, CAL_B])).toBe(
+      'cal-b',
+    );
+  });
+
+  it('falls through when the recorded calendar has since been deleted', () => {
+    // Not an error and not a guess: coverage answers it, because only one calendar
+    // actually has the block this structure names.
+    expect(resolveDesignCalendarId(structure({ calendarId: 'gone' }), [CAL_A, CAL_B])).toBe(
+      'cal-a',
+    );
+  });
+
+  it('opens on the calendar whose blocks the stages name, not whichever is first', () => {
+    // The reported bug: every seeded structure has no calendarId, and calendars[0]
+    // was a different season whose block ids match nothing here.
+    expect(resolveDesignCalendarId(structure(), [CAL_B, CAL_A])).toBe('cal-a');
+  });
+
+  it('prefers the calendar the bound competition names, which is the one the server enforces', () => {
+    // Coverage would say cal-a; the binding says cal-b. `validateCompetitions` only
+    // accepts blocks on the BOUND calendar, so editing anywhere else is editing
+    // against a calendar with no authority over the save.
+    expect(resolveDesignCalendarId(structure(), [CAL_A, CAL_B], ['cal-b'])).toBe('cal-b');
+  });
+
+  it('is not confused by one structure bound through several leagues', () => {
+    // Dev binds one structure through three leagues, all naming the same calendar.
+    // Counting bindings rather than distinct calendars would read that as ambiguous.
+    expect(resolveDesignCalendarId(structure(), [CAL_A, CAL_B], ['cal-b', 'cal-b', 'cal-b'])).toBe(
+      'cal-b',
+    );
+  });
+
+  it('picks NOTHING when two calendars are indistinguishable, rather than guessing', () => {
+    // seed-cohort used to mint `block-1`/`First half` for every season, so two
+    // calendars covered equally. Choosing by array order renders a correct-LOOKING
+    // picker over the wrong season's dates — invisibly wrong, and strictly worse
+    // than a blank one the operator can see is unanswered.
+    const twin = structure({
+      stages: [{ ...STAGE, id: 's1', schedule: { ...WEEKLY_B1, blockId: 'block-1' } }],
+    });
+    expect(resolveDesignCalendarId(twin, [TWIN_1, TWIN_2])).toBe('');
+  });
+
+  it('breaks that tie when a binding names one of them', () => {
+    const twin = structure({
+      stages: [{ ...STAGE, id: 's1', schedule: { ...WEEKLY_B1, blockId: 'block-1' } }],
+    });
+    expect(resolveDesignCalendarId(twin, [TWIN_1, TWIN_2], ['cal-2027-28'])).toBe('cal-2027-28');
+  });
+
+  it('returns nothing when there are no calendars at all', () => {
+    expect(resolveDesignCalendarId(structure(), [])).toBe('');
+  });
+});
+
+describe('stages whose block is not on a given calendar', () => {
+  const CAL_A: SeasonCalendar = {
+    id: 'cal-a',
+    label: '2026/27',
+    blocks: [{ id: 'a1', label: 'First half', start: '2026-08-01', end: '2026-12-19' }],
+  };
+
+  it('names a stage holding a block from somewhere else', () => {
+    const off = stagesOffCalendar(
+      [{ ...STAGE, id: 's1', name: 'Double round', schedule: { ...WEEKLY_B1, blockId: 'other' } }],
+      CAL_A,
+    );
+    expect(off.map((s) => s.name)).toEqual(['Double round']);
+  });
+
+  it('ignores a stage nobody has scheduled yet', () => {
+    // An EMPTY blockId is a different mistake with its own "needs a playing block"
+    // error. Folding the two together would tell an operator their data had gone
+    // missing when they simply hadn't entered it.
+    expect(
+      stagesOffCalendar([{ ...STAGE, id: 's1', schedule: { ...WEEKLY_B1, blockId: '' } }], CAL_A),
+    ).toEqual([]);
+  });
+});
+
+describe('the one spelling of a group label', () => {
+  it('falls back to Group A, Group B when the operator named nothing', () => {
+    expect(labelFor(undefined, 0)).toBe('Group A');
+    expect(labelFor(undefined, 1)).toBe('Group B');
+  });
+
+  it('uses a named label where there is one', () => {
+    expect(labelFor(['Top Six', 'Bottom Six'], 1)).toBe('Bottom Six');
+  });
+
+  it('treats a blank label as unnamed rather than rendering an empty group', () => {
+    expect(labelFor(['   '], 0)).toBe('Group A');
+  });
+
+  it('keeps going past Z', () => {
+    // The confirm form used to spell this `String.fromCharCode(65 + i)`, which emits
+    // "Group [" here. Two spellings of one fallback is how the save path drifted to
+    // a third ("Group 1").
+    expect(labelFor(undefined, 26)).toBe('Group AA');
   });
 });

@@ -21,6 +21,7 @@ import { createPortal } from 'react-dom';
 import { BoundedNumber, Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
 import { ApiError } from './api';
 import { findBlock, formatIsoDate, todayIso } from './competition/calendar';
+import { describeEntrants, groupSizes, labelFor } from './competition/entrants';
 import { formatStampDay } from './dates';
 import {
   crossPoolQualifiersFor,
@@ -274,9 +275,40 @@ function StartSeasonForm({
           <strong style={{ color: 'var(--ink)' }}>{structure.name}</strong> (v{structure.version}) ·{' '}
           {calendar.label}
           <br />
-          {structure.stages.map((s) => s.name).join(' → ')}
-          <br />
           {teams.length} side{teams.length === 1 ? '' : 's'} registered for {league?.label}
+          {/* The GROUP SHAPE, per stage. The card already named the structure and its
+              stages, but not how many groups each makes — which is the whole difference
+              between competitions on the same league ("50 Over" is one flat group,
+              "Premier League" is two). Without it, picking a competition is picking a
+              name. Sized against the real roster, so it reads "2 groups of 6, 6" rather
+              than an abstract count. */}
+          <div style={{ marginTop: 6, display: 'grid', gap: 2 }}>
+            {structure.stages.map((s) => {
+              const plan = s.entrants.kind === 'all-registered' ? undefined : s.entrants.groups;
+              const sizes = groupSizes(plan, teams.length);
+              // A `manual` stage with no plan is not "one group" — it is however many the
+              // admin confirms, which nothing here can predict. Saying "one group of 12"
+              // would assert a shape, which is the opposite of what this line is for.
+              //
+              // `all-registered` says "in one group" in its own description, so adding a
+              // shape clause there reads "one group of 12 · Every registered side, in one
+              // group". The COUNT is the new information; the shape isn't.
+              const shape =
+                !plan && s.entrants.kind === 'manual'
+                  ? 'groups set when you confirm entrants'
+                  : s.entrants.kind === 'all-registered'
+                    ? `${sizes[0]} sides`
+                    : sizes.length === 1
+                      ? `one group of ${sizes[0]}`
+                      : `${sizes.length} groups of ${sizes.join(', ')}`;
+              return (
+                <div key={s.id}>
+                  <strong style={{ color: 'var(--ink)' }}>{s.name}</strong> · {shape} ·{' '}
+                  {describeEntrants(s.entrants)}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -361,10 +393,10 @@ function EntrantConfirmForm({
       ? suggested.map((g) => g.label)
       : ['Group A'];
   const groupCount = Math.max(namedLabels.length, suggested.length, 1);
-  const labels = Array.from(
-    { length: groupCount },
-    (_, i) => namedLabels[i] ?? `Group ${String.fromCharCode(65 + i)}`,
-  );
+  // `labelFor`, not a local `String.fromCharCode(65 + i)`: that spelling emits "Group ["
+  // at index 26 where the shared fallback gives "Group AA", and having two of them is how
+  // the save path drifted to a third ("Group 1").
+  const labels = Array.from({ length: groupCount }, (_, i) => labelFor(namedLabels, i));
   const expected =
     stage.entrants.kind !== 'all-registered' && stage.entrants.groups?.kind === 'sizes'
       ? stage.entrants.groups.sizes
@@ -522,8 +554,13 @@ function EntrantConfirmForm({
                     }
                   >
                     <option value="">Not playing</option>
+                    {/* Keyed by INDEX, not label: the index is the identity here (it is
+                        what `assignment` stores), and `groupLabels` is free text with no
+                        uniqueness check anywhere — so two groups may legitimately share a
+                        name. Keying by label made that a duplicate-key error with
+                        unstable reconciliation, on the control that decides relegation. */}
                     {labels.map((l, i) => (
-                      <option key={l} value={i}>
+                      <option key={i} value={i}>
                         {l}
                       </option>
                     ))}
@@ -571,7 +608,7 @@ function EntrantConfirmForm({
           const want = expected?.[i];
           const okCount = want === undefined ? n >= 2 : n === want;
           return (
-            <Pill key={l} tone={okCount ? 'teal' : 'muted'}>
+            <Pill key={i} tone={okCount ? 'teal' : 'muted'}>
               {l}: {n}
               {want !== undefined ? ` of ${want}` : ''} {okCount ? '✓' : ''}
             </Pill>
@@ -967,9 +1004,6 @@ export function SeasonRunsPanel({
     carriedPoints: Record<string, number>,
     prefill: string[][],
   ) {
-    const labels = stage.groupLabels?.length
-      ? stage.groupLabels
-      : groups.map((_, i) => `Group ${i + 1}`);
     const accepted = JSON.stringify(prefill) === JSON.stringify(groups);
     const nextStages: StageRun[] = run.structureSnapshot.stages.map((s) => {
       const existing = run.stages.find((x) => x.specId === s.id);
@@ -990,9 +1024,15 @@ export function SeasonRunsPanel({
         // 'generated' stranded the admin: the card showed the new groups next to a
         // released series still holding the old ones, with no way to regenerate.
         status: existing?.status === 'generated' && !changed ? 'generated' : 'ready',
+        // `labelFor` is the same fallback the materialisation and the confirm form use.
+        // The old local spelling was `Group ${i + 1}`, so an unnamed stage DISPLAYED
+        // "Group A" and PERSISTED "Group 1" — visible in the dev data, where a
+        // human-reconfirmed stage reads "Group 1" beside CLI-written ones reading
+        // "Group A". Display-only: `g.id` is the join key to `seriesId`, and series names
+        // are built from the materialisation's label (main.tsx), never this one.
         groups: groups.map((entrants, i) => ({
           id: `g${i + 1}`,
-          label: labels[i] ?? `Group ${i + 1}`,
+          label: labelFor(stage.groupLabels, i),
           entrants,
           seriesId: existing?.groups?.[i]?.seriesId,
         })),
