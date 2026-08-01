@@ -136,6 +136,7 @@ export function AdminFixtures({
   venuesFailed = false,
   structuresFailed = false,
   seasonRunsFailed = false,
+  seasonSetupLoading = false,
   onSaveVenue,
   onDeleteVenue,
   onAllocateVenues,
@@ -246,9 +247,9 @@ export function AdminFixtures({
             Fixtures &amp; <em>Venues</em>
           </h1>
           <p className="ph-desc">
-            Auto-generated round-robin schedules across each Cricket Services series. Home venues
-            flow from the affiliation form. Travel distance and fuel cost are calculated for every
-            away fixture.
+            Run structured seasons stage by stage, or create ad-hoc series with auto-generated
+            round-robin schedules. Home venues flow from the affiliation form. Travel distance and
+            fuel cost are calculated for every away fixture.
           </p>
         </div>
         <div className="ph-actions">
@@ -282,17 +283,18 @@ export function AdminFixtures({
         </div>
       </div>
 
-      {allSeries.length === 0 ? (
-        <EmptyState
-          icon={Icon.Field}
-          title="No series yet"
-          sub="Create your first fixture series to auto-generate round-robin schedules and calculate travel cost for every away fixture."
-          action={
-            <Btn tone="teal" icon={Icon.Plus} onClick={onCreateSeries}>
-              Create your first series
-            </Btn>
-          }
-        />
+      {/* Venues + seasons render regardless of series count: generating a season stage is
+          what CREATES the first series, so a zero-series tenant needs the Start-a-season
+          flow most of all. While the season-setup queries are in flight, hold the space
+          with a plain card — an unloaded runs list rendered as "No season running" offers
+          a Start CTA whose duplicate guard is checking a list that never arrived. */}
+      {seasonSetupLoading ? (
+        <div style={{ marginBottom: 18 }}>
+          <Card
+            title="Seasons"
+            sub="Loading the season setup — venues, structures and any season already running."
+          />
+        </div>
       ) : (
         <>
           {onSaveVenue && (
@@ -326,6 +328,26 @@ export function AdminFixtures({
               />
             </div>
           )}
+        </>
+      )}
+
+      {allSeries.length === 0 ? (
+        // The empty state's copy points "above" at the season setup panel — while that
+        // panel is still loading, there's nothing there yet to point at, so render nothing.
+        seasonSetupLoading ? null : (
+          <EmptyState
+            icon={Icon.Field}
+            title="No series yet"
+            sub="Start a season above to generate fixtures stage by stage, or create an ad-hoc series for a simple round-robin."
+            action={
+              <Btn tone="teal" icon={Icon.Plus} onClick={onCreateSeries}>
+                Create your first series
+              </Btn>
+            }
+          />
+        )
+      ) : (
+        <>
           {/* Series cards strip — each card has its own quick release/recall button */}
           <div className="series-strip">
             {allSeries.map((s) => {

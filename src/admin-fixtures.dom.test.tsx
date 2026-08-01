@@ -17,9 +17,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { FixtureTable } from './admin';
+import { AdminFixtures, FixtureTable } from './admin';
 import { renderWithProviders } from './test-utils';
-import type { Club, SeasonCalendar, Series } from './types';
+import type { Club, SeasonCalendar, Series, TenantConfig } from './types';
 
 const calendar: SeasonCalendar = {
   id: 'cal',
@@ -327,5 +327,61 @@ describe('a knockout side that is still a forward reference', () => {
     await user.click(screen.getByRole('button', { name: /save changes/i }));
 
     expect(resultingFixtures(onUpdateSeries, s)[1].home).toBe('win:f1');
+  });
+});
+
+describe('a tenant with no series still gets the season machinery', () => {
+  // Generating a season stage is what CREATES the first series. Gating the whole page on
+  // allSeries.length hid the only way in — the exact tenant state after clear-cohort or a
+  // fresh onboarding — so the panels must render regardless of series count.
+  const tenantConfig: Partial<TenantConfig> = { structures: [], calendars: [] };
+
+  const renderPage = (over: Record<string, unknown> = {}) =>
+    renderWithProviders(
+      <AdminFixtures
+        clubs={clubs}
+        allSeries={[]}
+        onCreateSeries={vi.fn()}
+        onUpdateSeries={vi.fn()}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onSetReleased={vi.fn()}
+        onSetApproved={vi.fn()}
+        toast={vi.fn()}
+        allVenues={[]}
+        allSeasonRuns={[]}
+        allLeagues={[]}
+        tenantConfig={tenantConfig as TenantConfig}
+        onSaveVenue={vi.fn()}
+        onDeleteVenue={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCreateSeasonRun={vi.fn()}
+        onPatchSeasonRun={vi.fn()}
+        onDeleteSeasonRun={vi.fn()}
+        onGenerateStageSeries={vi.fn()}
+        {...over}
+      />,
+    );
+
+  it('renders the venues registry, the Start-a-season flow and the scoped series empty state', () => {
+    renderPage();
+    expect(screen.getByRole('heading', { name: /venues/i })).toBeTruthy();
+    expect(screen.getByText(/no season running/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /start a season/i })).toBeTruthy();
+    expect(screen.getByText(/no series yet/i)).toBeTruthy();
+  });
+
+  it('holds the space while the season setup is loading instead of offering Start', () => {
+    // An unloaded runs list rendered as "No season running" offers a Start CTA whose
+    // duplicate guard is checking a list that never arrived.
+    renderPage({ seasonSetupLoading: true });
+    expect(screen.queryByRole('button', { name: /start a season/i })).toBeNull();
+    expect(screen.getByText(/loading the season setup/i)).toBeTruthy();
+  });
+
+  it('reports a failed season-setup fetch rather than rendering it as an empty season list', () => {
+    renderPage({ structuresFailed: true });
+    expect(screen.queryByRole('button', { name: /start a season/i })).toBeNull();
+    expect(screen.getByText(/couldn.t load the season setup/i)).toBeTruthy();
   });
 });

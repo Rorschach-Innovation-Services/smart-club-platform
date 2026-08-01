@@ -565,6 +565,13 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   const venuesFailed = venuesQuery.isError;
   const structuresFailed = tenantConfigQuery.isError;
   const seasonRunsFailed = seasonRunsQuery.isError;
+  // Same reasoning for IN FLIGHT: these queries sit outside the initial-load gate, and
+  // `?? []` above makes "still loading" indistinguishable from "empty" — which the fixtures
+  // page would render as "No season running" with a live Start CTA. Loading, not failed.
+  // `isPending` (not `isLoading`) so an offline admin's paused queries still count as
+  // not-ready instead of rendering as empty.
+  const seasonSetupLoading =
+    venuesQuery.isPending || tenantConfigQuery.isPending || seasonRunsQuery.isPending;
   const onboarded = meQuery.data?.onboardingSeen ?? {};
   const submissionDeadline = tenantConfig?.submissionDeadline ?? SUBMISSION_DEADLINE_DEFAULT;
 
@@ -989,6 +996,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   venuesFailed,
                   structuresFailed,
                   seasonRunsFailed,
+                  seasonSetupLoading,
                   saveVenue,
                   deleteVenue,
                   allocateSeriesVenues,
@@ -1058,6 +1066,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   venuesFailed,
                   structuresFailed,
                   seasonRunsFailed,
+                  seasonSetupLoading,
                   saveVenue,
                   deleteVenue,
                   allocateSeriesVenues,
@@ -1133,6 +1142,10 @@ function Shell({
   allSeasonRuns = [],
   allVenues = [],
   allStructures = [],
+  venuesFailed = false,
+  structuresFailed = false,
+  seasonRunsFailed = false,
+  seasonSetupLoading = false,
   saveVenue,
   deleteVenue,
   allocateSeriesVenues,
@@ -2173,6 +2186,10 @@ function Shell({
             allCalendars={allCalendars}
             allSeasonRuns={allSeasonRuns}
             allVenues={allVenues}
+            venuesFailed={venuesFailed}
+            structuresFailed={structuresFailed}
+            seasonRunsFailed={seasonRunsFailed}
+            seasonSetupLoading={seasonSetupLoading}
             onSaveVenue={saveVenue}
             onDeleteVenue={deleteVenue}
             onAllocateVenues={allocateSeriesVenues}
@@ -2500,7 +2517,13 @@ function Shell({
           </div>
         </aside>
 
-        <main className={`main ${view === 'fixtures' && allSeries.length > 0 ? 'fullbleed' : ''}`}>
+        {/* Admin is always fullbleed on fixtures (the season panels render regardless of
+            series count); the rep view keeps its original series-gated fullbleed. */}
+        <main
+          className={`main ${
+            view === 'fixtures' && (role === 'admin' || allSeries.length > 0) ? 'fullbleed' : ''
+          }`}
+        >
           <ErrorBoundary
             FallbackComponent={ViewErrorFallback}
             resetKeys={[view]}
