@@ -262,9 +262,15 @@ export interface LadderSpec {
   order: string[];
 }
 
-/** When a stage plays. The calendar itself is named once by the Competition. */
+/**
+ * When a stage plays. Names a POSITION into whichever calendar the competition binds,
+ * not a calendar or block directly — a structure carries no calendar identity of its own,
+ * so the same structure can be reused against different calendars. The Competition's
+ * binding supplies the actual blocks at generation time.
+ */
 export interface StageSchedule {
-  blockId: string;
+  /** 0-based index into the bound calendar's `blocks` array. */
+  blockIndex: number;
   cadence: Cadence;
   slots?: TimeSlot[];
   /** Generate now, surface to clubs from this date (junior leagues). */
@@ -302,17 +308,6 @@ export interface CompetitionStructure {
   version: number;
   /** Provenance only — which starter template this was cloned from, if any. */
   templateId?: string;
-  /**
-   * The calendar this structure's `blockId`s were authored against.
-   *
-   * Not a binding — a competition still names its own calendar, and the same structure
-   * can be reused across seasons. This exists so the editor reopens on the right one: a
-   * structure built against 2027/28 used to reopen against `calendars[0]`, where every
-   * stage's block picker fell back to "Pick a playing block…" and the preview rail
-   * reported a perfectly good structure as not fitting — while the stored blockIds were
-   * fine and Save stayed enabled, so touching a picker to "fix" it wrote the wrong one.
-   */
-  calendarId?: string;
   stages: StageSpec[];
 }
 

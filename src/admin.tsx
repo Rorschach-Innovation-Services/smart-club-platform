@@ -63,9 +63,11 @@ import {
 } from './leagues';
 import {
   WEEKDAY_LABELS,
+  calendarSpan,
   describeCadence,
   formatIsoDate,
   isActivated,
+  isValidIsoDate,
   planRoundDates,
   todayIso,
 } from './competition/calendar';
@@ -73,7 +75,7 @@ import { fixturesFromPlan, legacyRoundDates, roundsForTeamCount } from './compet
 import { fixtureVenueCoords as fixtureVenue, isLocked } from './competition/venues';
 import { isSlotRef, slotRefLabel } from './competition/formats';
 import type { Cadence, SeasonCalendar, TimeSlot, Weekday } from './types';
-import { SeasonRunsPanel } from './season-run';
+import { SeasonRunsPanel, GenerateFixturesLauncher } from './season-run';
 import { VenuesCard } from './venues-card';
 import { cqiBandTone, cqiBandRows, docComplianceRows, docTone } from './insights';
 import {
@@ -148,6 +150,10 @@ export function AdminFixtures({
   onGenerateStageSeries,
 }) {
   const copy = useCopy();
+  // The single "Generate fixtures" entry point — the league picked here decides whether
+  // the admin lands in StartSeasonForm or the flat CreateSeriesForm. Owned here, not in
+  // SeasonRunsPanel, so its own "Start a season" button and the header button can share it.
+  const [launcherOpen, setLauncherOpen] = useStateA(false);
   const [activeId, setActiveId] = useStateA(allSeries[0]?.id);
   const active = allSeries.find((s) => s.id === activeId) || allSeries[0];
   const [confirm, setConfirm] = useStateA(null); // shared confirmation modal state
@@ -256,8 +262,8 @@ export function AdminFixtures({
           <Btn tone="outline" icon={Icon.Download} size="sm" onClick={exportSchedule}>
             Export schedule
           </Btn>
-          <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={onCreateSeries}>
-            Create series
+          <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={() => setLauncherOpen(true)}>
+            Generate fixtures
           </Btn>
           {/* Primary CTA — always visible. State reflects the active series.
               Release is gated on admin approval; approve first, then release. */}
@@ -319,12 +325,10 @@ export function AdminFixtures({
                 allLeagues={allLeagues}
                 allSeries={allSeries}
                 runs={allSeasonRuns}
-                config={tenantConfig}
-                onCreateRun={onCreateSeasonRun}
+                onOpenLauncher={() => setLauncherOpen(true)}
                 onPatchRun={onPatchSeasonRun}
                 onGenerate={onGenerateStageSeries}
                 onDeleteRun={onDeleteSeasonRun}
-                toast={toast}
               />
             </div>
           )}
@@ -338,10 +342,10 @@ export function AdminFixtures({
           <EmptyState
             icon={Icon.Field}
             title="No series yet"
-            sub="Start a season above to generate fixtures stage by stage, or create an ad-hoc series for a simple round-robin."
+            sub="Generate fixtures to work through a structured competition stage by stage, or create an ad-hoc series for a simple round-robin."
             action={
-              <Btn tone="teal" icon={Icon.Plus} onClick={onCreateSeries}>
-                Create your first series
+              <Btn tone="teal" icon={Icon.Plus} onClick={() => setLauncherOpen(true)}>
+                Generate fixtures
               </Btn>
             }
           />
@@ -503,6 +507,22 @@ export function AdminFixtures({
           </div>,
           document.body,
         )}
+
+      {launcherOpen && (
+        <GenerateFixturesLauncher
+          clubs={clubs}
+          allLeagues={allLeagues}
+          config={tenantConfig || { structures: [], calendars: [] }}
+          existingRuns={allSeasonRuns}
+          onCreateRun={
+            onCreateSeasonRun ||
+            (() => Promise.reject(new Error('season-run creation is not wired for this host')))
+          }
+          onCreateSeries={(leagueKey) => onCreateSeries(leagueKey)}
+          onClose={() => setLauncherOpen(false)}
+          toast={toast}
+        />
+      )}
     </div>
   );
 }
@@ -1363,6 +1383,7 @@ export function CreateSeriesForm({
   onClose,
   allLeagues = [],
   allCalendars = [] as SeasonCalendar[],
+  initialLeagueKey = undefined,
 }) {
   const [d, setD] = useStateA({
     leagueKey: '', // dropdown: pick a league → auto-fills name + teams
@@ -1464,6 +1485,13 @@ export function CreateSeriesForm({
       tags: L ? `${L.group}, ${L.label}` : prev.tags,
     }));
   }
+
+  // Preselected by the "Generate fixtures" launcher — the same auto-fill a manual pick
+  // gets, run once on mount so a later league change from the select isn't fought back.
+  useEffectA(() => {
+    if (initialLeagueKey) pickLeague(initialLeagueKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // End date is optional. When set, the admin picks whether it drives the
   // schedule ('spread') or is reference-only; with no explicit pick we default
@@ -1620,7 +1648,7 @@ export function CreateSeriesForm({
               <option value="">No calendar — use start / end dates below</option>
               {allCalendars.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.label}
+                  {`${c.label} · ${calendarSpan(c)}`}
                 </option>
               ))}
             </select>

@@ -17,6 +17,7 @@ import { QueryClientProvider, useQuery, useQueries } from '@tanstack/react-query
 import { queryClient, qk } from './query';
 import { leagueParticipants } from './leagues';
 import { allocateVenues, buildLedger } from './competition/venues';
+import { findBlock } from './competition/calendar';
 import * as api from './api';
 import { ApiError } from './api';
 import { resolveTenantSlug, applyTheme, redirectToCanonicalOrigin } from './config';
@@ -417,7 +418,9 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   const location = useLocation();
   const [toastShow, toastNode] = useToast();
   const [showOnboarding, setShowOnboarding] = useStateApp(false);
-  const [showCreateSeries, setShowCreateSeries] = useStateApp(false);
+  // false = closed; true = open, no league prefilled; a league key = open, prefilled —
+  // set by the "Generate fixtures" launcher routing a flat/ad-hoc pick to this form.
+  const [showCreateSeries, setShowCreateSeries] = useStateApp<string | boolean>(false);
   // null = closed; {} = create; a league object = edit
   const [showLeagueForm, setShowLeagueForm] = useStateApp(null);
   const [showHelp, setShowHelp] = useStateApp(false);
@@ -714,6 +717,14 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     });
   }
   async function generateStageSeriesInner(payloads, run, stage) {
+    // The stage names a POSITION into the run's bound calendar, not a block id — resolve
+    // it once against the snapshot before building any series.
+    const resolvedBlock = findBlock(run.calendarSnapshot, stage.schedule.blockIndex);
+    if (!resolvedBlock) {
+      throw new Error(
+        `${stage.name} points at a playing block that no longer exists on this calendar`,
+      );
+    }
     const created = [];
     for (const p of payloads) {
       const participants = leagueParticipants(clubs, run.leagueKey)
@@ -736,7 +747,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
         fixtures: p.fixtures,
         schedule: {
           calendarId: run.calendarSnapshot.id,
-          blockId: stage.schedule.blockId,
+          blockId: resolvedBlock.id,
           cadence: stage.schedule.cadence,
           ...(stage.schedule.slots?.length ? { slots: stage.schedule.slots } : {}),
         },
@@ -2176,7 +2187,7 @@ function Shell({
           <AdminFixtures
             clubs={clubs}
             allSeries={allSeries}
-            onCreateSeries={() => setShowCreateSeries(true)}
+            onCreateSeries={(leagueKey) => setShowCreateSeries(leagueKey ?? true)}
             onUpdateSeries={updateSeries}
             onDeleteSeries={deleteSeries}
             onDuplicateSeries={duplicateSeries}
@@ -2706,6 +2717,7 @@ function Shell({
             clubs={clubs}
             allLeagues={allLeagues}
             allCalendars={allCalendars}
+            initialLeagueKey={typeof showCreateSeries === 'string' ? showCreateSeries : undefined}
             onCreate={(s) => {
               onCreateSeries(s)
                 .then(() => {

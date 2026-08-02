@@ -481,8 +481,12 @@ export const platformGetTenant = (slug: string) =>
 // PUT merge-patches only branding / features / submissionDeadline; each key present
 // REPLACES that key wholesale (same shallow merge as PUT /tenant/config), so callers
 // must send the full branding object, not a fragment.
+//
+// `warnings` is informational-only (ADR 0008 phase 1 gap 4): present only when a
+// calendar edit lands on blocks a series' schedule still references — the save always
+// succeeds regardless, this is never a rejection.
 export const platformUpdateTenant = (slug: string, patch: Partial<TenantConfig>) =>
-  request<TenantConfig>(`/platform/tenants/${encodeURIComponent(slug)}`, {
+  request<TenantConfig & { warnings?: string[] }>(`/platform/tenants/${encodeURIComponent(slug)}`, {
     method: 'PUT',
     body: patch,
   });

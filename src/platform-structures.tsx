@@ -21,14 +21,14 @@ import { createPortal } from 'react-dom';
 import { BoundedNumber, Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
 import * as api from './api';
 import { ApiError } from './api';
-import { WEEKDAY_LABELS, describeCadence, findBlock } from './competition/calendar';
 import {
-  describeStage,
-  previewFit,
-  previewRounds,
-  resolveDesignCalendarId,
-  stagesOffCalendar,
-} from './competition/structure';
+  WEEKDAY_LABELS,
+  calendarSpan,
+  describeCadence,
+  findBlock,
+  formatIsoDate,
+} from './competition/calendar';
+import { describeStage, previewFit, previewRounds } from './competition/structure';
 import { groupSizes } from './competition/entrants';
 import { roundsForFormat } from './competition/formats';
 import {
@@ -57,37 +57,70 @@ import type {
 type Toast = (m: string, t?: string) => void;
 
 /**
- * The calendar a blockId actually belongs to, and its label there.
+ * Which calendar the structure editor should preview against.
  *
- * The whole reason the "block no longer exists" message misleads: two calendars routinely
- * carry blocks with the SAME LABEL and different ids ("Block 1" on both), so telling an
- * operator a block is missing while one of that name sits in the picker below reads as
- * data loss. Naming the OWNER turns it into a statement of fact they can act on.
+ * A structure carries no calendar identity of its own (`blockIndex` is a bare position,
+ * meaningful only once a calendar is chosen), so — unlike the old id-based `blockId` —
+ * there is nothing here to resolve FROM the structure itself. The fallback is therefore:
+ * the operator's own current pick, else the tenant's only calendar (nothing to choose),
+ * else the calendar the bindings agree on, else none.
+ *
+ * "The bindings agree on" is deliberately not "the first binding" — several competitions
+ * routinely bind one structure, and taking `bindingCalendarIds[0]` picked whichever
+ * happened to sort first even when the others named a DIFFERENT calendar (or one that no
+ * longer exists). Ask, don't guess: only a single distinct, real calendar id resolves.
  */
-function blockOwners(
+function resolvePreviewCalendarId(
+  selectedId: string | undefined,
   calendars: SeasonCalendar[],
-  blockId: string,
-): Array<{ calendar: SeasonCalendar; label: string }> {
-  const out: Array<{ calendar: SeasonCalendar; label: string }> = [];
-  for (const calendar of calendars) {
-    const block = findBlock(calendar, blockId);
-    if (block) out.push({ calendar, label: block.label });
-  }
-  return out;
+  bindingCalendarIds: string[],
+): string {
+  if (selectedId) return selectedId;
+  if (calendars.length === 1) return calendars[0].id;
+  const real = [...new Set(bindingCalendarIds)].filter((id) => calendars.some((c) => c.id === id));
+  return real.length === 1 ? real[0] : '';
 }
 
 /**
- * "Block 1 on 2026/27 season", or a bare id when nothing owns it any more.
- *
- * Reports EVERY owner, not the first. Block ids are not globally unique — the whole
- * reason this module exists is that two calendars can carry the same one — so naming the
- * first match would state as fact something that is a coin flip, in the very message
- * meant to replace a misleading one.
+ * Stages whose block position doesn't exist on `calendar` — the index-based twin of the
+ * old id-based "block no longer exists" check. A position has no identity beyond "the
+ * Nth block of whichever calendar it's read against", so unlike the old blockId model
+ * there is no "which OTHER calendar does this really belong to" to report — out of range
+ * is all that can be said.
  */
-function describeBlockOrigin(calendars: SeasonCalendar[], blockId: string): string {
-  const owners = blockOwners(calendars, blockId);
-  if (!owners.length) return `an unknown block (${blockId})`;
-  return `${owners[0].label} on ${owners.map((o) => o.calendar.label).join(' and ')}`;
+function stagesOffCalendar(stages: StageSpec[], calendar: SeasonCalendar | undefined): StageSpec[] {
+  return stages.filter((s) => s.schedule.blockIndex >= (calendar?.blocks.length ?? 0));
+}
+
+// Capped at 20 because `validateStructures` caps `blockIndex` at 19 — a stage can never
+// legitimately name a position past this list. Read against a shorter calendar it still
+// renders (see `stagesOffCalendar`'s off-calendar option), hence the numeric fallback.
+const ORDINALS = [
+  'First',
+  'Second',
+  'Third',
+  'Fourth',
+  'Fifth',
+  'Sixth',
+  'Seventh',
+  'Eighth',
+  'Ninth',
+  'Tenth',
+  'Eleventh',
+  'Twelfth',
+  'Thirteenth',
+  'Fourteenth',
+  'Fifteenth',
+  'Sixteenth',
+  'Seventeenth',
+  'Eighteenth',
+  'Nineteenth',
+  'Twentieth',
+];
+
+/** `0` → "First", `1` → "Second", … the operator-facing name for a 0-based block position. */
+function ordinal(i: number): string {
+  return ORDINALS[i] ?? `${i + 1}th`;
 }
 
 const ERR: CSSProperties = { color: 'var(--coral, #C0392B)', fontSize: 12, marginTop: 6 };
@@ -352,8 +385,7 @@ function StageRow({
   // a structure belongs to, and gating this on `calendar` there left a scheduled stage
   // rendering "Pick a playing block…" over a real value, with Save enabled: the exact
   // misread this option exists to prevent.
-  const offCalendar =
-    !!stage.schedule.blockId && (!calendar || !findBlock(calendar, stage.schedule.blockId));
+  const offCalendar = !calendar || stage.schedule.blockIndex >= calendar.blocks.length;
 
   const setFormat = (label: string) => {
     const opt = FORMAT_OPTIONS.find((o) => o.label === label);
@@ -581,25 +613,27 @@ function StageRow({
           <div style={SECTION}>Schedule</div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <Select
-              value={stage.schedule.blockId}
-              onChange={(v) => onChange({ schedule: { ...stage.schedule, blockId: v } })}
+              value={String(stage.schedule.blockIndex)}
+              onChange={(v) => onChange({ schedule: { ...stage.schedule, blockIndex: Number(v) } })}
               width={240}
               label="Playing block"
             >
-              <option value="">Pick a playing block…</option>
-              {/* A block this stage really holds, that just isn't on the calendar being
-                  previewed. Without an option carrying that value the select falls back
-                  to the placeholder — showing "Pick a playing block…" over a stage that
-                  IS scheduled. That misread is what makes an operator "fix" it, writing a
-                  foreign blockId that the server then rejects for the whole tenant. */}
+              {/* The stage's own position, kept selectable even when it doesn't exist on
+                  the calendar being previewed — dropping it would silently rewrite the
+                  stage to whatever the select falls back to, the moment the operator
+                  opens a picker that was never meant to touch it. Worded two ways: with
+                  no calendar chosen there's nothing to compare against, so it's a plain
+                  ordinal; with one chosen but too short, say so. */}
               {offCalendar && (
-                <option value={stage.schedule.blockId}>
-                  {describeBlockOrigin(calendars, stage.schedule.blockId)}
+                <option value={String(stage.schedule.blockIndex)}>
+                  {calendar
+                    ? `${ordinal(stage.schedule.blockIndex)} block (this calendar has fewer blocks)`
+                    : `${ordinal(stage.schedule.blockIndex)} block`}
                 </option>
               )}
-              {(calendar?.blocks ?? []).map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.label}
+              {(calendar?.blocks ?? []).map((b, i) => (
+                <option key={b.id} value={String(i)}>
+                  {`${ordinal(i)} block — ${b.label} · ${formatIsoDate(b.start)} → ${formatIsoDate(b.end)}`}
                 </option>
               ))}
             </Select>
@@ -705,7 +739,7 @@ function StageRow({
                 ? // Not `fit.summary` — that says "no longer exists on this calendar",
                   // which is true of the previewed calendar and reads as data loss.
                   // Nothing is lost; the preview is pointed elsewhere.
-                  `This stage plays in ${describeBlockOrigin(calendars, stage.schedule.blockId)} — not on ${calendar.label}. Switch “Preview against” back, or pick a block on this calendar.`
+                  `This stage plays block position ${stage.schedule.blockIndex + 1}, which ${calendar.label} doesn't have. Switch "Show dates from" back, or pick a block on this calendar.`
                 : `${rounds} round${rounds === 1 ? '' : 's'} per group at ${perGroup} teams · ${fit?.summary}`}
           </div>
         </div>
@@ -872,12 +906,10 @@ function PreviewRail({
       // labelled or an operator will read it as the real round count.
       qualifierBound:
         stage.format.kind === 'knockout' && stage.format.pairing === 'cross-pool' && rounds > 0,
-      block: calendar ? findBlock(calendar, stage.schedule.blockId)?.label : undefined,
-      // Set, but not reachable from the previewed calendar — reported as "which calendar
-      // owns it" rather than the generic "no longer exists", which reads as data loss.
-      // True with no calendar selected too: see the note on `offCalendar` in StageRow.
-      offCalendar:
-        !!stage.schedule.blockId && (!calendar || !findBlock(calendar, stage.schedule.blockId)),
+      block: calendar ? findBlock(calendar, stage.schedule.blockIndex)?.label : undefined,
+      // Out of range for the previewed calendar. True with no calendar selected too: see
+      // the note on `offCalendar` in StageRow.
+      offCalendar: !calendar || stage.schedule.blockIndex >= calendar.blocks.length,
     };
   });
   const anyEmpty = rows.some((r) => r.empty);
@@ -947,8 +979,8 @@ function PreviewRail({
           )}
           {r.offCalendar ? (
             <div style={{ ...ERR, marginTop: 6, lineHeight: 1.5 }}>
-              Plays in {describeBlockOrigin(calendars, r.stage.schedule.blockId)}
-              {calendar ? ` — not on ${calendar.label}.` : '.'}
+              Plays block position {r.stage.schedule.blockIndex + 1}
+              {calendar ? `, which ${calendar.label} doesn't have.` : '.'}
             </div>
           ) : (
             !r.empty &&
@@ -1007,14 +1039,12 @@ function StructureEditor({
   toast: Toast;
 }) {
   const [draft, setDraft] = useState<CompetitionStructure>(initial);
-  // Reopen on the calendar this structure was AUTHORED against, not whichever happens to
-  // be first. Falling back to calendars[0] blanked every block picker for a structure
-  // built against a later season, and made the preview rail call it "doesn't fit" — and
-  // for a structure with no `calendarId` at all (everything the seed CLI wrote, and
-  // anything imported before that field was carried) it did that every single time.
+  // A structure carries no calendar identity of its own any more, so there is nothing
+  // stored to reopen against — only the tenant's own calendar or the binding(s) that use
+  // this structure can suggest one. See `resolvePreviewCalendarId`.
   const [calendarId, setCalendarId] = useState(() =>
-    resolveDesignCalendarId(
-      initial,
+    resolvePreviewCalendarId(
+      undefined,
       calendars,
       bindings.map((b) => b.calendarId),
     ),
@@ -1065,7 +1095,10 @@ function StructureEditor({
   const seen = new Set<string>();
   for (const s of draft.stages) {
     if (!s.name.trim()) errors.push('Every stage needs a name.');
-    if (!s.schedule.blockId) errors.push(`"${s.name || 'A stage'}" needs a playing block.`);
+    // No "needs a playing block" check any more — `blockIndex` is a plain number and
+    // always has a value (defaulting to 0), so there is no unset state left to catch
+    // here. Whether that position actually exists on the bound calendar is the
+    // off-calendar check below, which the server also enforces at save time.
     if (s.schedule.cadence.kind === 'weekdays' && !s.schedule.cadence.days.length)
       errors.push(`"${s.name}" needs at least one playing day.`);
     const note = s.entrants.kind === 'manual' ? s.entrants.derivedFrom : undefined;
@@ -1109,13 +1142,12 @@ function StructureEditor({
     // from creating: switch the preview, then "fix" the blank picker on one stage and
     // leave the rest. All-on and all-off are both coherent and both allowed; only the
     // mixture is a structure nothing can schedule.
-    const isSplit = (stages: StageSpec[]) =>
-      stagesOffCalendar(stages, calendar).length > 0 &&
-      stages.some((s) => !!s.schedule.blockId && !!findBlock(calendar, s.schedule.blockId));
+    const isSplit = (stages: StageSpec[]) => {
+      const off = stagesOffCalendar(stages, calendar);
+      return off.length > 0 && off.length < stages.length;
+    };
     const off = stagesOffCalendar(draft.stages, calendar);
-    const on = draft.stages.filter(
-      (s) => !!s.schedule.blockId && !!findBlock(calendar, s.schedule.blockId),
-    );
+    const on = draft.stages.filter((s) => !off.includes(s));
     // Only a split THIS SESSION created. One that arrived already split is pre-existing
     // damage, and blocking on it would stop an operator renaming the structure or fixing
     // a cadence until they had first edited a stage they never came here to touch — the
@@ -1150,70 +1182,23 @@ function StructureEditor({
     );
   }
 
-  /*
-   * Retargeting a structure to the calendar being previewed.
-   *
-   * The gap this fills: an operator switching "Preview against" to another calendar is
-   * usually trying to MOVE the structure there, and every route used to dead-end in blank
-   * pickers. Matching by block LABEL is the only signal available — ids are opaque — and
-   * it is offered, never automatic, because labels are not unique (nothing validates
-   * them) and a silent rewrite on a preview switch would be a worse version of the bug
-   * this fixes. The target dates are shown for exactly that reason: "Block 1" on two
-   * calendars can mean two completely different fortnights.
-   *
-   * Only for an UNBOUND structure. `validateCompetitions` requires every stage's block to
-   * be on each bound competition's calendar, so a remap on a bound structure produces a
-   * save the server refuses — offering the button there would be a trap dressed as a fix.
-   */
   // With no calendar selected, EVERY scheduled stage is off it — which is the honest
   // answer, and what makes the banner below appear for a structure whose calendar
   // couldn't be resolved rather than leaving the operator with silent blank pickers.
-  const offPreview = calendar
-    ? stagesOffCalendar(draft.stages, calendar)
-    : draft.stages.filter((s) => !!s.schedule.blockId);
-  const remap = calendar
-    ? offPreview
-        .map((s) => {
-          const from = blockOwners(calendars, s.schedule.blockId)[0];
-          const to = calendar.blocks.find((b) => b.label.trim() === from?.label.trim());
-          return to ? { stageId: s.id, stageName: s.name, to } : null;
-        })
-        .filter((x): x is { stageId: string; stageName: string; to: SeasonCalendar['blocks'][0] } =>
-          Boolean(x),
-        )
-    : [];
-  const canRemap =
-    bindings.length === 0 &&
-    remap.length > 0 &&
-    // All or nothing: a partial remap is precisely the split-across-calendars state the
-    // save gate refuses, so offering one would be offering to break the structure.
-    remap.length === offPreview.length &&
-    // And no two stages onto the same block. Labels are not unique within a calendar
-    // either, so two stages whose source blocks share a name would silently collapse
-    // into one window — a structure that looks remapped and plays twice over itself.
-    new Set(remap.map((r) => r.to.id)).size === remap.length;
-
-  const applyRemap = () =>
-    setDraft((d) => ({
-      ...d,
-      stages: d.stages.map((s) => {
-        const hit = remap.find((r) => r.stageId === s.id);
-        return hit ? { ...s, schedule: { ...s.schedule, blockId: hit.to.id } } : s;
-      }),
-    }));
+  //
+  // There is no label-matching "Move to this calendar" remap any more: a `blockIndex` is
+  // a bare position with no identity beyond "the Nth block of whatever calendar it's read
+  // against", so there is nothing left to match a stage's OLD block against on the newly
+  // previewed calendar — that entire retargeting feature depended on blockId's cross-
+  // calendar identity, which the index model deliberately does not have.
+  const offPreview = calendar ? stagesOffCalendar(draft.stages, calendar) : draft.stages;
 
   async function submit() {
     if (errors.length || busy) return;
     setSaveErr('');
     setBusy(true);
     try {
-      // Record the calendar the blocks were authored against, so the next open lands on
-      // it. Not a binding — a competition still names its own.
       const next: CompetitionStructure = { ...draft, name: draft.name.trim() };
-      // Assign or DELETE — a bare `...(calendarId ? {calendarId} : {})` leaves the value
-      // already on the draft in place, so picking "No calendar" would silently do nothing.
-      if (calendarId) next.calendarId = calendarId;
-      else delete next.calendarId;
       await onSave(next);
       toast(`${draft.name.trim()} · saved`);
       onClose();
@@ -1246,12 +1231,12 @@ function StructureEditor({
           />
         </div>
         <div>
-          <div className="field-label">Preview against</div>
-          <Select value={calendarId} onChange={pickCalendar} width={200} label="Preview against">
+          <div className="field-label">Show dates from</div>
+          <Select value={calendarId} onChange={pickCalendar} width={260} label="Show dates from">
             <option value="">No calendar</option>
             {calendars.map((c) => (
               <option key={c.id} value={c.id}>
-                {c.label}
+                {`${c.label} · ${calendarSpan(c)}`}
               </option>
             ))}
           </Select>
@@ -1272,10 +1257,10 @@ function StructureEditor({
         className="structure-editor-grid"
       >
         <div>
-          {/* Nothing resolved: the structure names blocks, but no single calendar
-              accounts for them — twin seeded calendars, or an import from another
-              tenant. "No calendar" would otherwise read as "you haven't picked one",
-              while the real message is "we can't tell, and only you can say". */}
+          {/* Nothing resolved: no calendar could be picked automatically — more than one
+              on the tenant, and no competition binds this structure yet. "No calendar"
+              would otherwise read as "you haven't picked one", while the real message is
+              "we can't tell, and only you can say". */}
           {!calendar && !calendarChosen && offPreview.length > 0 && (
             <div
               style={{
@@ -1288,14 +1273,11 @@ function StructureEditor({
                 lineHeight: 1.55,
               }}
             >
-              This structure&apos;s stages name blocks that no one calendar accounts for — pick the
-              calendar it belongs to under <strong>Preview against</strong>.
+              Pick a calendar under <strong>Show dates from</strong> to check this structure&apos;s
+              stages fit.
               <div style={{ ...HINT, marginTop: 6 }}>
                 {offPreview
-                  .map(
-                    (s) =>
-                      `${s.name || 'a stage'} → ${describeBlockOrigin(calendars, s.schedule.blockId)}`,
-                  )
+                  .map((s) => `${s.name || 'a stage'} → position ${s.schedule.blockIndex + 1}`)
                   .join(' · ')}
               </div>
             </div>
@@ -1315,30 +1297,17 @@ function StructureEditor({
                 lineHeight: 1.55,
               }}
             >
-              {offPreview.length === 1 ? 'One stage plays' : `${offPreview.length} stages play`} on
-              a different calendar — nothing is missing, the preview is pointed at{' '}
-              <strong>{calendar.label}</strong>.
-              {canRemap ? (
-                <div style={{ marginTop: 8 }}>
-                  <Btn tone="outline" size="sm" onClick={applyRemap}>
-                    Move to {calendar.label}
-                  </Btn>
-                  <div style={{ ...HINT, marginTop: 6 }}>
-                    Matches by block name:{' '}
-                    {remap
-                      .map((r) => `${r.stageName || 'a stage'} → ${r.to.label} (${r.to.start})`)
-                      .join(' · ')}
-                  </div>
-                </div>
-              ) : bindings.length > 0 ? (
+              {offPreview.length === 1 ? 'One stage plays' : `${offPreview.length} stages play`} a
+              block position <strong>{calendar.label}</strong> doesn&apos;t have.
+              {bindings.length > 0 ? (
                 <div style={{ ...HINT, marginTop: 6 }}>
-                  This structure can&apos;t be moved here while{' '}
+                  This structure is bound while{' '}
                   {[...new Set(bindings.map((b) => `${b.competition} (${b.league})`))].join(', ')}{' '}
                   {bindings.length === 1 ? 'uses' : 'use'}{' '}
                   {[...new Set(bindings.map((b) => b.calendarId))]
                     .map((id) => calendars.find((c) => c.id === id)?.label ?? id)
                     .join(', ')}
-                  . Switch <strong>Preview against</strong> back to{' '}
+                  . Switch <strong>Show dates from</strong> back to{' '}
                   {[...new Set(bindings.map((b) => b.calendarId))]
                     .map((id) => calendars.find((c) => c.id === id)?.label ?? id)
                     .join(' or ')}{' '}
@@ -1346,10 +1315,7 @@ function StructureEditor({
                   clone this structure to run it here.
                 </div>
               ) : (
-                <div style={{ ...HINT, marginTop: 6 }}>
-                  No block on {calendar.label} shares a name with the ones this structure uses —
-                  pick each stage&apos;s block by hand.
-                </div>
+                <div style={{ ...HINT, marginTop: 6 }}>Pick each stage&apos;s block by hand.</div>
               )}
             </div>
           )}
@@ -1497,8 +1463,7 @@ function StartPicker({
             ))}
           </Select>
           <p style={HINT}>
-            The template&apos;s stages are scheduled against this calendar&apos;s blocks, and the
-            structure records it.
+            The template&apos;s stages are scheduled against this calendar&apos;s blocks.
           </p>
         </div>
       )}
@@ -1579,18 +1544,44 @@ export function StructuresCard({
     saveStructures((fresh) => {
       const i = fresh.findIndex((s) => s.id === structure.id);
       if (i === -1) return [...fresh, structure];
-      // Editing mints a new VERSION. Running seasons hold their own snapshot, so this
-      // never reshapes a season in flight — it only affects seasons started from here on.
+      // Editing mints a new VERSION — but the number itself is SERVER-OWNED (ADR 0008
+      // phase 1): the server deep-compares this against the stored structure and decides
+      // whether anything actually changed. `save`'s response seeds the query cache, so
+      // the real version flows back from there rather than being guessed here. Running
+      // seasons hold their own snapshot, so this never reshapes a season in flight — it
+      // only affects seasons started from here on.
       const next = [...fresh];
-      next[i] = { ...structure, version: (fresh[i].version ?? 1) + 1 };
+      next[i] = structure;
       return next;
     }, 'Could not save structure');
 
-  function onDelete(structure: CompetitionStructure) {
+  async function onDelete(structure: CompetitionStructure) {
     setConfirm(null);
-    saveStructures((fresh) => fresh.filter((s) => s.id !== structure.id), 'Could not delete')
-      .then(() => toast(`${structure.name} · deleted`))
-      .catch(() => {}); // the 409 referrer guard is toasted above
+    try {
+      // Cascade: the server 409s a delete while any league still binds the structure, so
+      // the bindings come off in the SAME PUT. A RUNNING season is unaffected either
+      // way — it holds its own snapshot; this only stops new seasons starting from it.
+      const current = await api.platformGetTenant(slug);
+      const patch: Partial<TenantConfig> = {
+        structures: (current.structures ?? []).filter((s) => s.id !== structure.id),
+      };
+      const bound = (current.leagues ?? []).filter((l) =>
+        (l.competitions ?? []).some((c) => c.structureId === structure.id),
+      );
+      if (bound.length > 0)
+        patch.leagues = (current.leagues ?? []).map((l) =>
+          bound.includes(l)
+            ? {
+                ...l,
+                competitions: (l.competitions ?? []).filter((c) => c.structureId !== structure.id),
+              }
+            : l,
+        );
+      await save(patch);
+      toast(`${structure.name} · deleted`);
+    } catch (e) {
+      toast(e instanceof ApiError ? e.message : 'Could not delete', 'warn');
+    }
   }
 
   const usedBy = (id: string) =>
@@ -1610,12 +1601,21 @@ export function StructuresCard({
         .map((c) => ({ league: l.label, competition: c.label, calendarId: c.calendarId })),
     );
 
-  /** Blocks a bound competition's calendar doesn't have — the editor will refuse to save. */
-  const mismatchFor = (s: CompetitionStructure) =>
-    [...new Set(bindingsFor(s.id).map((b) => b.calendarId))].some((id) => {
+  /**
+   * Blocks a bound competition's calendar doesn't have — the editor will refuse to save.
+   * `needed` is read off the structure itself (its highest position + 1, not a stored
+   * count), `has` off the first mismatched bound calendar found.
+   */
+  const mismatchFor = (s: CompetitionStructure): { needed: number; has: number } | null => {
+    for (const id of [...new Set(bindingsFor(s.id).map((b) => b.calendarId))]) {
       const bound = calendars.find((c) => c.id === id);
-      return !!bound && stagesOffCalendar(s.stages, bound).length > 0;
-    });
+      if (bound && stagesOffCalendar(s.stages, bound).length > 0) {
+        const needed = Math.max(...s.stages.map((st) => st.schedule.blockIndex)) + 1;
+        return { needed, has: bound.blocks.length };
+      }
+    }
+    return null;
+  };
 
   return (
     <Card
@@ -1649,6 +1649,7 @@ export function StructuresCard({
               <tbody>
                 {structures.map((s) => {
                   const leagues = usedBy(s.id);
+                  const mismatch = mismatchFor(s);
                   return (
                     <tr key={s.id}>
                       <td>
@@ -1677,9 +1678,9 @@ export function StructuresCard({
                               .join(', ')}
                           </div>
                         )}
-                        {mismatchFor(s) && (
+                        {mismatch && (
                           <div style={{ marginTop: 4 }}>
-                            <Pill tone="coral">Block mismatch</Pill>
+                            <Pill tone="coral">{`needs ${mismatch.needed} blocks, calendar has ${mismatch.has}`}</Pill>
                           </div>
                         )}
                       </td>
@@ -1774,8 +1775,18 @@ export function StructuresCard({
               </div>
               <div className="fix-confirm-title">Delete “{confirm.name}”?</div>
               <div className="fix-confirm-body">
-                Seasons already running keep their own copy and are unaffected. If a league still
-                binds a competition to it, the delete is blocked.
+                {usedBy(confirm.id).length > 0 && (
+                  <>
+                    Also removes its competition from{' '}
+                    <strong>
+                      {usedBy(confirm.id)
+                        .map((l) => l.label)
+                        .join(', ')}
+                    </strong>
+                    .{' '}
+                  </>
+                )}
+                Seasons already running keep their own copy and are unaffected.
               </div>
               <div className="fix-confirm-actions">
                 <Btn tone="outline" onClick={() => setConfirm(null)}>
@@ -1920,20 +1931,20 @@ export function CompetitionsEditor({
               <option value="">Structure…</option>
               {structures.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.name} (v{s.version})
+                  {s.name}
                 </option>
               ))}
             </Select>
             <Select
               value={c.calendarId}
               onChange={(v) => patch(i, { calendarId: v })}
-              width={160}
+              width={220}
               label="Calendar"
             >
               <option value="">Calendar…</option>
               {calendars.map((cal) => (
                 <option key={cal.id} value={cal.id}>
-                  {cal.label}
+                  {`${cal.label} · ${calendarSpan(cal)}`}
                 </option>
               ))}
             </Select>

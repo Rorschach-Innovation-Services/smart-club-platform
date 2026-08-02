@@ -209,9 +209,15 @@ export interface LadderSpec {
   order: string[];
 }
 
-/** When a stage plays. The calendar itself is named once by the Competition. */
+/**
+ * When a stage plays. Names a POSITION into whichever calendar the competition binds,
+ * not a calendar or block directly — a structure carries no calendar identity of its own,
+ * so the same structure can be reused against different calendars. The Competition's
+ * binding supplies the actual blocks at generation time.
+ */
 export interface StageSchedule {
-  blockId: string;
+  /** 0-based index into the bound calendar's `blocks` array. */
+  blockIndex: number;
   cadence: Cadence;
   slots?: TimeSlot[];
   /** Generate now, surface to clubs from this date (junior leagues). */
@@ -252,15 +258,15 @@ export interface CompetitionStructure {
   version: number;
   /** Provenance only — which starter template this was cloned from, if any. */
   templateId?: string;
-  /** The calendar the blocks were authored against — reopens the editor on it. */
-  calendarId?: string;
   stages: StageSpec[];
 }
 
-/* ─── VENUES (ADR 0008, phase 2) ───
-   The master list of grounds fixtures are allocated to. Its own DynamoDB item per venue
-   rather than a TenantConfig array: a region has hundreds, and availability windows
-   change constantly, so they are operational data rather than setup data. */
+/* ─── VENUES (ADR 0008) ───
+   The master list of grounds fixtures are allocated to. Implemented: allocation runs
+   client-side and writes venueId/venueStatus/venueReason onto each fixture (see
+   src/competition/venues.ts and docs/api/series.md). Its own DynamoDB item per venue rather
+   than a TenantConfig array: a region has hundreds, and availability windows change
+   constantly, so they are operational data rather than setup data. */
 
 /** A window in which a ground can't be used — maintenance, another sport's season, exams. */
 export interface VenueUnavailable {

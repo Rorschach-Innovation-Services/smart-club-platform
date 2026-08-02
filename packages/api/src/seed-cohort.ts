@@ -59,6 +59,7 @@ import type {
 // React, no DOM). Type-checked by tsconfig.seed.json, which is scoped to this file
 // precisely because that tree is `strict: false` while the api project is strict.
 import { materialiseStage } from '../../../src/competition/structure.js';
+import { findBlock } from '../../../src/competition/calendar.js';
 import { STRUCTURE_TEMPLATES } from '../../../src/competition/templates.js';
 import { leagueParticipants } from '../../../src/leagues.js';
 
@@ -331,21 +332,15 @@ function buildStructures(season: string, calendar: SeasonCalendar): CompetitionS
   return wanted.map((templateId) => {
     const template = STRUCTURE_TEMPLATES.find((t) => t.id === templateId);
     if (!template) throw new Error(`unknown structure template "${templateId}"`);
-    const first = calendar.blocks[0].id;
-    const second = calendar.blocks[1]?.id ?? first;
+    const second = calendar.blocks.length > 1 ? 1 : 0;
     return {
       id: structureId(season, templateId),
       name: template.name,
       version: 1,
       templateId: template.id,
-      // The calendar these blockIds were authored against. Without it the operator
-      // console opens every seeded structure against whichever calendar happens to be
-      // first, where the stored blocks resolve to nothing: blank pickers, a preview rail
-      // calling a good structure broken, and Save still enabled over the wrong blocks.
-      calendarId: calendar.id,
       stages: template.stages.map((stage, i) => ({
         ...stage,
-        schedule: { ...stage.schedule, blockId: i === 0 ? first : second },
+        schedule: { ...stage.schedule, blockIndex: i === 0 ? 0 : second },
       })),
     };
   });
@@ -402,79 +397,11 @@ function buildLeague(
 }
 
 /**
- * Rewrite an incoming calendar to reuse the block IDs the tenant already has, and point
- * the incoming structures at them.
- *
- * Matched **by label first**, position only as a fallback. The seed's own block shape is
- * fixed, but the shape of the calendar it is merging INTO is not — an operator can
- * reorder or delete blocks from the calendars card. Matching purely by index there is
- * silent relocation of exactly the kind this function exists to prevent: if the operator
- * has put Second half first, `block-2` — the id every persisted `Series.schedule.blockId`
- * knows as the January window — comes back carrying August dates, and `addFixture` starts
- * scheduling a January competition in August with no error anywhere.
- *
- * Labels (`First half`/`Second half`) are stable across seed runs and are what existing
- * seeded calendars already carry, so the label pass hits in every real case. Matched ids
- * are consumed, so a block that misses on label can't positionally steal one another
- * block already claimed. Anything still unmatched keeps its incoming (namespaced) id: it
- * is genuinely new, so nothing can be pointing at it yet.
- *
- * Exported for testing: this is the whole of the data-safety guarantee that a re-seed
- * never dangles a `Series.schedule.blockId`, and it is not otherwise reachable.
- */
-export function keepExistingBlockIds(
-  existing: SeasonCalendar,
-  incoming: SeasonCalendar,
-  structures: CompetitionStructure[],
-): { calendar: SeasonCalendar; structures: CompetitionStructure[] } {
-  const taken = new Set<string>();
-  const keptIds: string[] = [];
-
-  // Pass 1 — same label wins, wherever it sits.
-  incoming.blocks.forEach((b, i) => {
-    const hit = existing.blocks.find((x) => !taken.has(x.id) && x.label.trim() === b.label.trim());
-    if (hit) {
-      taken.add(hit.id);
-      keptIds[i] = hit.id;
-    }
-  });
-
-  // Pass 2 — whatever is left over, in order, for blocks the labels didn't match
-  // (an operator who renamed one). Best effort, and it cannot collide: every id pass 1
-  // claimed is already consumed.
-  const leftover = existing.blocks.filter((x) => !taken.has(x.id)).map((x) => x.id);
-  incoming.blocks.forEach((b, i) => {
-    if (keptIds[i]) return;
-    keptIds[i] = leftover.shift() ?? b.id;
-  });
-
-  const rename = new Map(incoming.blocks.map((b, i) => [b.id, keptIds[i]]));
-  return {
-    calendar: {
-      ...incoming,
-      blocks: incoming.blocks.map((b, i) => ({ ...b, id: keptIds[i] })),
-    },
-    structures: structures.map((st) => ({
-      ...st,
-      stages: st.stages.map((s) => ({
-        ...s,
-        schedule: { ...s.schedule, blockId: rename.get(s.schedule.blockId) ?? s.schedule.blockId },
-      })),
-    })),
-  };
-}
-
-/**
  * Merge the cohort's config into whatever is already there.
  *
  * Read-modify-write, merged BY ID — never a blind overwrite. The CONFIG row is the tenant
  * registry's source of truth and carries branding, `adminCount` and `clubSignupLink` that
  * a re-seed must not clobber, plus any leagues/calendars the tenant authored itself.
- *
- * Returns the calendar and structures AS WRITTEN, which may differ from what was passed
- * in — see `keepExistingBlockIds`. The caller has to seed seasons against the written
- * values, not the built ones, or the run would reference blocks the stored calendar
- * doesn't have.
  */
 async function mergeConfig(
   tenant: string,
@@ -488,30 +415,6 @@ async function mergeConfig(
   const config = await repo.getTenantConfig(tenant);
   if (!config) throw new Error(`tenant "${tenant}" not found — run \`seed -- ${tenant}\` first`);
 
-  /*
-   * Block IDs are namespaced for a calendar this run CREATES, and never for one that
-   * already exists.
-   *
-   * A calendar is merged by id, so re-seeding a tenant replaces its blocks in place. Had
-   * that carried new ids, everything already pointing at the old ones would dangle at
-   * once: `Series.schedule.blockId` is persisted, and `addFixture` (src/admin.tsx) reads
-   * it back to date the next round — a miss there doesn't error, it silently falls
-   * through to the legacy "+7 days" path, straight into the mid-season break that season
-   * calendars exist to remove. Any operator-authored structure bound to the calendar
-   * would also fail `validateCompetitions` below, taking the whole re-seed — and every
-   * later tenant PUT — down with it.
-   *
-   * So: keep the existing ids, take the incoming dates. Positional, because
-   * `buildCalendar` emits a fixed two-block shape and `buildStructures` assigns them by
-   * index. Fresh tenants still get namespaced ids, which is where the ambiguity this
-   * guards against actually arises.
-   */
-  const existingCalendar = (config.calendars ?? []).find((c) => c.id === cohort.calendar.id);
-  if (existingCalendar) {
-    const kept = keepExistingBlockIds(existingCalendar, cohort.calendar, cohort.structures);
-    cohort = { ...cohort, calendar: kept.calendar, structures: kept.structures };
-  }
-
   const mergeById = <T extends { id: string }>(existing: T[] | undefined, incoming: T[]): T[] => {
     const out = [...(existing ?? [])];
     for (const item of incoming) {
@@ -522,6 +425,31 @@ async function mergeConfig(
     return out;
   };
 
+  // A calendar match is BY ID, so a re-seed of a tenant whose calendar predates
+  // namespaced block ids replaces its blocks wholesale rather than merging them —
+  // `keepExistingBlockIds` machinery that would have preserved them was deliberately
+  // deleted (ADR 0008 ordinal-refs addendum). Every stored `Series.schedule.blockId`
+  // naming a now-gone block goes DANGLING silently unless someone is told. This is not
+  // fixed here — reschedule/migrate-block-index.ts is the fix — only surfaced loudly.
+  const existingCalendar = (config.calendars ?? []).find((c) => c.id === cohort.calendar.id);
+  if (existingCalendar) {
+    const nextBlockIds = new Set(cohort.calendar.blocks.map((b) => b.id));
+    const removedBlockIds = existingCalendar.blocks
+      .map((b) => b.id)
+      .filter((id) => !nextBlockIds.has(id));
+    if (removedBlockIds.length > 0) {
+      // Season-run snapshots are NOT affected: a run resolves only against its own frozen
+      // calendarSnapshot, which a re-seed never touches. Only live Series.schedule refs
+      // dangle, and their remedy is a reschedule — the migration script rewrites
+      // structures, not series.
+      console.warn(
+        `⚠ re-seeding "${tenant}": calendar "${cohort.calendar.id}" is being replaced ` +
+          `wholesale — block id(s) ${removedBlockIds.join(', ')} no longer exist. Any ` +
+          `Series.schedule.blockId referencing them is now DANGLING; reschedule those ` +
+          `series before regenerating.`,
+      );
+    }
+  }
   const calendars = mergeById(config.calendars, [cohort.calendar]);
   const structures = mergeById(config.structures, cohort.structures);
   const leagues = [...(config.leagues ?? [])];
@@ -794,7 +722,9 @@ async function seedSeason(
         fixtures: group.fixtures,
         schedule: {
           calendarId: calendar.id,
-          blockId: stage.schedule.blockId,
+          // Series.schedule is still id-based (ADR 0008 parity guarantee) — resolve the
+          // stage's POSITION against the calendar this run is actually generating from.
+          blockId: findBlock(calendar, stage.schedule.blockIndex)?.id ?? '',
           cadence: stage.schedule.cadence,
           ...(stage.schedule.slots?.length ? { slots: stage.schedule.slots } : {}),
         },
@@ -1024,7 +954,7 @@ async function main(): Promise<void> {
     );
 }
 
-// Only run as a CLI — the test imports `keepExistingBlockIds` directly, and an
+// Only run as a CLI — the test imports this module's helpers directly, and an
 // unguarded main() would parse the test runner's argv and exit before it got there.
 // Same guard as backfill-player-team.ts.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

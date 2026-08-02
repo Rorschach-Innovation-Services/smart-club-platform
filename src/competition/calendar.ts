@@ -154,14 +154,32 @@ export function blockedReason(calendar: SeasonCalendar, iso: IsoDate): string | 
   return null;
 }
 
-/** Find a block by id; `undefined` when the operator has deleted it out from under a series. */
-export function findBlock(calendar: SeasonCalendar, blockId: string): SeasonBlock | undefined {
-  return (calendar.blocks ?? []).find((b) => b.id === blockId);
+/**
+ * Find a block by position; `undefined` when the index is out of range — a structure's
+ * stage names a POSITION into whichever calendar the competition binds, and that
+ * calendar can have fewer blocks than the position expects.
+ */
+export function findBlock(calendar: SeasonCalendar, blockIndex: number): SeasonBlock | undefined {
+  return (calendar.blocks ?? [])[blockIndex];
 }
 
 /** Whole days in a block, inclusive of both ends. */
 export function blockLengthDays(block: SeasonBlock): number {
   return daysBetween(block.start, block.end) + 1;
+}
+
+/**
+ * `1 Sep 2026 → 30 Nov 2026` — first block's start to last block's end, the same span
+ * CalendarsCard's table shows. A bare calendar label leaves no way to tell two
+ * same-named seasons ("2026/27" vs "2026/27 (draft)") apart in a select — used by every
+ * calendar/block picker (structures, competitions, admin create-series, the season wizard).
+ */
+export function calendarSpan(cal: SeasonCalendar): string {
+  const usable = cal.blocks.filter((b) => isValidIsoDate(b.start) && isValidIsoDate(b.end));
+  if (!usable.length) return 'no dates yet';
+  const first = usable.reduce((a, b) => (b.start < a ? b.start : a), usable[0].start);
+  const last = usable.reduce((a, b) => (b.end > a ? b.end : a), usable[0].end);
+  return `${formatIsoDate(first)} → ${formatIsoDate(last)}`;
 }
 
 /** Human cadence label — shared by the preview rail and the series summary line. */
@@ -274,7 +292,11 @@ export function planRoundDates(req: DatePlanRequest): DatePlan {
 
   if (requested === 0) return empty('No rounds to schedule');
 
-  const block = findBlock(calendar, blockId);
+  // `DatePlanRequest.blockId` is still a concrete id — this plans dates for a persisted
+  // `SeriesSchedule` (id-based) as much as a design-time `StageSchedule` (index-based, via
+  // the block a caller has already resolved with the exported `findBlock`), so the lookup
+  // here stays by id rather than going through the index-based `findBlock`.
+  const block = (calendar.blocks ?? []).find((b) => b.id === blockId);
   if (!block) return empty('That playing block no longer exists on this calendar');
   if (!isValidIsoDate(block.start) || !isValidIsoDate(block.end))
     return empty(`${block.label} has an invalid start or end date`);
@@ -363,8 +385,8 @@ function uniqueReasons(skipped: SkippedDate[]): string {
 /**
  * The slot for the i-th fixture within a round, cycling through the configured slots.
  * A round with three fixtures across morning/afternoon slots plays 1st and 3rd in the
- * morning, 2nd in the afternoon — a reasonable default that venue allocation (ADR 0008
- * phase 6) later refines with real ground availability.
+ * morning, 2nd in the afternoon — a reasonable default that venue allocation
+ * (`src/competition/venues.ts`, ADR 0008) refines with real ground availability.
  */
 export function slotForIndex(
   slots: TimeSlot[] | undefined,

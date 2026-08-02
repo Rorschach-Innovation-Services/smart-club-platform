@@ -42,7 +42,10 @@ const clubs = Array.from({ length: 8 }, (_, i) => ({
   ground: { venue: `Ground ${i + 1}` },
 })) as unknown as Club[];
 
-const setup = ({ withCalendar = true }: { withCalendar?: boolean } = {}) => {
+const setup = ({
+  withCalendar = true,
+  initialLeagueKey,
+}: { withCalendar?: boolean; initialLeagueKey?: string } = {}) => {
   const onCreate = vi.fn().mockResolvedValue(undefined);
   const user = userEvent.setup();
   renderWithProviders(
@@ -50,6 +53,7 @@ const setup = ({ withCalendar = true }: { withCalendar?: boolean } = {}) => {
       clubs={clubs}
       allLeagues={leagues as never[]}
       allCalendars={withCalendar ? [calendar] : []}
+      initialLeagueKey={initialLeagueKey}
       onCreate={onCreate}
       onClose={vi.fn()}
     />,
@@ -191,5 +195,24 @@ describe('picking a league', () => {
     const created = onCreate.mock.calls[0][0];
     expect(created.participants).toHaveLength(8);
     expect(created.participants[0]).toMatchObject({ teamId: expect.any(String), name: 'Club 1' });
+  });
+});
+
+describe('opened from the "Generate fixtures" launcher with a league already chosen', () => {
+  it('prefills the league, the name and every registered side — same as a manual pick', async () => {
+    const { user, onCreate } = setup({ initialLeagueKey: 'emcuD1' });
+
+    expect(screen.getByLabelText('League')).toHaveValue('emcuD1');
+    await user.selectOptions(screen.getByLabelText('Season calendar'), 'cal');
+    await user.click(createBtn());
+
+    const created = onCreate.mock.calls[0][0];
+    expect(created.teams).toHaveLength(8);
+    expect(created.name).toMatch(/EMCU Division 1/);
+  });
+
+  it('leaves the league unset without one — the ad-hoc case', () => {
+    setup();
+    expect(screen.getByLabelText('League')).toHaveValue('');
   });
 });

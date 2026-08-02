@@ -354,9 +354,9 @@ describe('blockedReason / findBlock', () => {
     );
   });
 
-  it('finds a block by id', () => {
-    expect(findBlock(KZNCU, 'b2')?.label).toBe('Block 2');
-    expect(findBlock(KZNCU, 'nope')).toBeUndefined();
+  it('finds a block by position', () => {
+    expect(findBlock(KZNCU, 1)?.label).toBe('Block 2');
+    expect(findBlock(KZNCU, 5)).toBeUndefined();
   });
 });
 

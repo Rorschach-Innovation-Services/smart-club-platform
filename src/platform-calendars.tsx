@@ -9,16 +9,18 @@
  * Lives outside platform.tsx (already 3,300 lines) and imports only from atoms/api/types,
  * so there is no import cycle back into the console shell.
  */
-import { useState, useId, type CSSProperties, type ReactNode } from 'react';
+import { useState, useEffect, useId, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
 import * as api from './api';
 import { ApiError } from './api';
 import {
+  addDays,
   blockLengthDays,
   daysBetween,
   formatIsoDate,
   isValidIsoDate,
+  todayIso,
 } from './competition/calendar';
 import type { SeasonBlock, SeasonBreak, SeasonCalendar, TenantConfig } from './types';
 
@@ -26,6 +28,13 @@ type Toast = (m: string, t?: string) => void;
 
 const ERR: CSSProperties = { color: 'var(--coral, #C0392B)', fontSize: 12, marginTop: 6 };
 const HINT: CSSProperties = { fontSize: 11.5, color: 'var(--muted-2)', margin: '8px 0 0' };
+
+// A brand-new block used to default to blank start/end dates — technically correct (the
+// operator has to pick real ones anyway) but it also meant the very first thing a new
+// calendar showed was an error, and the Timeline preview stayed empty until every field
+// was filled by hand. Eight weeks is a plausible first playing block for most union
+// formats and is trivially edited, so it defaults to something real instead of nothing.
+const DEFAULT_BLOCK_DAYS = 56;
 
 /** A local id for a new block — stable across edits so a rename can't orphan a series. */
 function newId(prefix: string): string {
@@ -277,18 +286,27 @@ function RangeRow({
   );
 }
 
-function CalendarForm({
+export function CalendarForm({
   calendar,
   allCalendars,
   onSave,
   onClose,
   toast,
+  embedded,
+  onDraftChange,
 }: {
   calendar: SeasonCalendar | null;
   allCalendars: SeasonCalendar[];
   onSave: (cal: SeasonCalendar) => Promise<void>;
   onClose: () => void;
   toast: Toast;
+  /**
+   * Embedded in the season wizard's "Season dates" step: hides the Save/Cancel footer
+   * (the wizard commits everything in one PUT from its Review step, not here) and
+   * reports the live draft upward instead of waiting for a save-button press.
+   */
+  embedded?: boolean;
+  onDraftChange?: (draft: SeasonCalendar, valid: boolean) => void;
 }) {
   const editing = !!calendar;
   const [draft, setDraft] = useState<SeasonCalendar>(
@@ -296,7 +314,14 @@ function CalendarForm({
       calendar ?? {
         id: newId('cal'),
         label: '',
-        blocks: [{ id: newId('blk'), label: 'Block 1', start: '', end: '' }],
+        blocks: [
+          {
+            id: newId('blk'),
+            label: 'Block 1',
+            start: todayIso(),
+            end: addDays(todayIso(), DEFAULT_BLOCK_DAYS),
+          },
+        ],
         breaks: [],
         excludeDates: [],
       },
@@ -309,7 +334,15 @@ function CalendarForm({
   const dupLabel =
     !editing &&
     allCalendars.some((c) => c.label.trim() === draft.label.trim() && draft.label.trim());
-  const canSave = errors.length === 0 && !dupLabel && !busy;
+  const valid = errors.length === 0 && !dupLabel;
+  const canSave = valid && !busy;
+
+  // The wizard has no save button of its own for this step — it reads the draft (and
+  // whether it's valid) on every change so its own Continue button can gate on it.
+  useEffect(() => {
+    onDraftChange?.(draft, valid);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft, valid]);
 
   const patch = (p: Partial<SeasonCalendar>) => setDraft((d) => ({ ...d, ...p }));
   const patchBlock = (i: number, p: Partial<SeasonBlock>) =>
@@ -395,14 +428,24 @@ function CalendarForm({
           tone="outline"
           size="sm"
           icon={Icon.Plus}
-          onClick={() =>
+          onClick={() => {
+            // Chains off the block ABOVE it, not off `today` again — a season's blocks
+            // run back to back far more often than not, and re-defaulting to today would
+            // make every added block overlap the one before it.
+            const prev = draft.blocks[draft.blocks.length - 1];
+            const start = prev && isValidIsoDate(prev.end) ? addDays(prev.end, 1) : todayIso();
             patch({
               blocks: [
                 ...draft.blocks,
-                { id: newId('blk'), label: `Block ${draft.blocks.length + 1}`, start: '', end: '' },
+                {
+                  id: newId('blk'),
+                  label: `Block ${draft.blocks.length + 1}`,
+                  start,
+                  end: addDays(start, DEFAULT_BLOCK_DAYS),
+                },
               ],
-            })
-          }
+            });
+          }}
         >
           Add block
         </Btn>
@@ -505,14 +548,16 @@ function CalendarForm({
       ))}
       {saveErr && <div style={ERR}>{saveErr}</div>}
 
-      <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
-        <Btn tone="teal" onClick={submit} disabled={!canSave}>
-          {busy ? 'Saving…' : editing ? 'Save calendar' : 'Create calendar'}
-        </Btn>
-        <Btn tone="outline" onClick={onClose}>
-          Cancel
-        </Btn>
-      </div>
+      {!embedded && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
+          <Btn tone="teal" onClick={submit} disabled={!canSave}>
+            {busy ? 'Saving…' : editing ? 'Save calendar' : 'Create calendar'}
+          </Btn>
+          <Btn tone="outline" onClick={onClose}>
+            Cancel
+          </Btn>
+        </div>
+      )}
     </div>
   );
 }
@@ -522,11 +567,14 @@ export function CalendarsCard({
   config,
   save,
   toast,
+  onOpenWizard,
 }: {
   slug: string;
   config: TenantConfig;
   save: (p: Partial<TenantConfig>) => Promise<TenantConfig>;
   toast: Toast;
+  /** Launches the season setup wizard — the primary path for first setup (ADR 0008 phase 3). */
+  onOpenWizard?: () => void;
 }) {
   const [form, setForm] = useState<SeasonCalendar | 'new' | null>(null);
   const [confirm, setConfirm] = useState<SeasonCalendar | null>(null);
@@ -562,17 +610,50 @@ export function CalendarsCard({
       return fresh.map((c) => (c.id === cal.id ? cal : c));
     }, 'Could not save calendar');
 
-  function onDelete(cal: SeasonCalendar) {
+  /** Leagues whose competitions bind `cal` — drives the cascade warning and the cascade. */
+  const leaguesBinding = (cal: SeasonCalendar) =>
+    (config.leagues ?? []).filter((l) =>
+      (l.competitions ?? []).some((comp) => comp.calendarId === cal.id),
+    );
+
+  async function onDelete(cal: SeasonCalendar) {
     setConfirm(null);
-    saveCalendars((fresh) => fresh.filter((c) => c.id !== cal.id), 'Could not delete calendar')
-      .then(() => toast(`${cal.label} · deleted`))
-      .catch(() => {}); // the 409 referrer guard is already toasted above
+    try {
+      // Cascade: a competition pointing at a deleted calendar would fail the server's
+      // cross-check, so the bindings go in the SAME PUT. Series scheduled against the
+      // calendar still hard-block server-side — that guard is the one worth keeping,
+      // and its 409 message is surfaced as-is.
+      const current = await api.platformGetTenant(slug);
+      const patch: Partial<TenantConfig> = {
+        calendars: (current.calendars ?? []).filter((c) => c.id !== cal.id),
+      };
+      const bound = (current.leagues ?? []).filter((l) =>
+        (l.competitions ?? []).some((comp) => comp.calendarId === cal.id),
+      );
+      if (bound.length > 0)
+        patch.leagues = (current.leagues ?? []).map((l) =>
+          bound.includes(l)
+            ? { ...l, competitions: (l.competitions ?? []).filter((c) => c.calendarId !== cal.id) }
+            : l,
+        );
+      await save(patch);
+      toast(`${cal.label} · deleted`);
+    } catch (e) {
+      toast(e instanceof ApiError ? e.message : 'Could not delete calendar', 'warn');
+    }
   }
 
   return (
     <Card
       title="Season calendars"
-      sub="The playing blocks, breaks and excluded dates fixtures are scheduled against. A calendar a series is already scheduled against can't be deleted."
+      sub="A season's real-world time — playing blocks, breaks and excluded dates. One calendar is usually shared by every league playing that season; breaks entered here are respected by all of them."
+      action={
+        calendars.length > 0 && onOpenWizard ? (
+          <Btn tone="teal" size="sm" onClick={onOpenWizard}>
+            Set up a season
+          </Btn>
+        ) : undefined
+      }
     >
       {calendars.length === 0 ? (
         <EmptyState
@@ -580,9 +661,15 @@ export function CalendarsCard({
           title="No season calendars yet"
           sub="Set the season's playing blocks and mid-season break before this client generates fixtures — otherwise every league schedules straight through the break."
           action={
-            <Btn tone="teal" icon={Icon.Plus} onClick={() => setForm('new')}>
-              Create your first calendar
-            </Btn>
+            onOpenWizard ? (
+              <Btn tone="teal" icon={Icon.Plus} onClick={onOpenWizard}>
+                Set up a season
+              </Btn>
+            ) : (
+              <Btn tone="teal" icon={Icon.Plus} onClick={() => setForm('new')}>
+                Create your first calendar
+              </Btn>
+            )
           }
         />
       ) : (
@@ -648,11 +735,10 @@ export function CalendarsCard({
               </tbody>
             </table>
           </div>
-          <div style={{ marginTop: 14 }}>
-            <Btn tone="teal" size="sm" icon={Icon.Plus} onClick={() => setForm('new')}>
-              Create calendar
-            </Btn>
-          </div>
+          {/* No standalone "Create calendar" — the wizard is the one creation path (its
+              league step can be skipped wholesale, which IS "just a calendar"). A second
+              button here made two doors to the same room. Rows keep Edit/Delete; the
+              form-only fallback survives above for the no-wizard embedding. */}
         </>
       )}
 
@@ -706,6 +792,17 @@ export function CalendarsCard({
               </div>
               <div className="fix-confirm-title">Delete “{confirm.label}”?</div>
               <div className="fix-confirm-body">
+                {leaguesBinding(confirm).length > 0 && (
+                  <>
+                    Also removes its competition from{' '}
+                    <strong>
+                      {leaguesBinding(confirm)
+                        .map((l) => l.label)
+                        .join(', ')}
+                    </strong>
+                    .{' '}
+                  </>
+                )}
                 New series can no longer be scheduled against it. If a series already uses this
                 calendar, the delete is blocked.
               </div>

@@ -62,6 +62,12 @@ strip-and-merge core backs the operator's `PUT /platform/tenants/:slug`
 > district or the "All districts" sentinel) and operator-editable via
 > `PUT /platform/tenants/:slug` — the operator route additionally rejects (409)
 > removing a league clubs are still registered for.
+>
+> `League.competitions` (the structure/calendar bindings) are **operator-only**, even
+> though `leagues` itself is tenant-editable here: a tenant-admin PUT that touches `leagues`
+> has each incoming league's `competitions` overwritten with whatever is currently stored
+> for that key, so this route can rename or reorder leagues but can never mint or drop a
+> binding. Bind competitions via `PUT /platform/tenants/:slug` only.
 
 > `districts` is **operator-only** (stripped here like `features`/`tutorials`/`adminCount`,
 > ADR 0006) and edited via `PUT /platform/tenants/:slug`, which rejects (409) removing a
@@ -81,6 +87,16 @@ strip-and-merge core backs the operator's `PUT /platform/tenants/:slug`
 > against the post-patch view of structures and calendars, so one PUT may legitimately add
 > a structure and the competition that uses it together. Read via the authenticated
 > `GET /tenant/config`, not the public `GET /tenant`.
+>
+> Each `StageSpec.schedule` names a `blockIndex` (0-based position into whichever calendar
+> the competition binds), not a calendar or block id — a structure carries no calendar
+> identity of its own, so the same structure is reusable across different calendars. See
+> the [ordinal block refs addendum](../architecture/0008-configurable-league-structures.md#addendum-2026-08-02-ordinal-block-references-and-the-season-wizard).
+>
+> `structure.version` is **server-owned**: a client's `version` in the body is ignored, and
+> the server deep-compares incoming content (everything but `version`) against what's
+> stored for that id, minting `existing.version + 1` only when something actually changed.
+> A no-op resave keeps the existing number; an unrecognised id starts at `1`.
 
 > `calendars` (season calendars — playing blocks, breaks, excluded dates) is
 > **operator-only** on the same basis, edited via `PUT /platform/tenants/:slug`, which
@@ -90,6 +106,13 @@ strip-and-merge core backs the operator's `PUT /platform/tenants/:slug`
 > March). Public to READ — playing dates carry no personal data and the create-series form
 > reads them off the `GET /tenant` payload. See
 > [ADR 0008](../architecture/0008-configurable-league-structures.md).
+>
+> Editing a calendar's blocks while a series is still scheduled against it is **not**
+> rejected — the response gains a `warnings[]` array ("N series are scheduled against
+> '<label>'; regenerating them will follow the new dates") when this happens, present only
+> when non-empty so an unaffected save's response shape is unchanged. Only removing the
+> calendar outright (or a block a stage still needs) 409s; editing its dates is a live
+> reference by design — see the addendum linked above.
 
 ## `GET /me` — current user (authenticated)
 

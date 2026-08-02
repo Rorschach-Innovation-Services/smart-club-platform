@@ -8,7 +8,7 @@ import {
   structureToJson,
 } from './templates';
 import { materialiseStage, describeStage } from './structure';
-import type { CompetitionStructure, SeasonCalendar } from '../types';
+import type { SeasonCalendar } from '../types';
 
 const CAL: SeasonCalendar = {
   id: 'cal',
@@ -39,10 +39,11 @@ describe('starter templates', () => {
     }
   });
 
-  // Templates can't know block ids — they belong to a calendar the template never saw.
-  it('carries no block ids until it is bound to a calendar', () => {
+  // Templates can't know real block positions — every stage defaults to 0 and
+  // `instantiateTemplate` remaps them once a real calendar is bound.
+  it('defaults every stage to block position 0 until it is bound to a calendar', () => {
     for (const t of STRUCTURE_TEMPLATES) {
-      for (const s of t.stages) expect(s.schedule.blockId).toBe('');
+      for (const s of t.stages) expect(s.schedule.blockIndex).toBe(0);
     }
   });
 });
@@ -50,14 +51,14 @@ describe('starter templates', () => {
 describe('instantiateTemplate', () => {
   it('opens in the first block and moves later stages after the break', () => {
     const st = instantiateTemplate(findTemplate('split-league-swap')!, CAL);
-    expect(st.stages[0].schedule.blockId).toBe('b1');
-    expect(st.stages[1].schedule.blockId).toBe('b2');
+    expect(st.stages[0].schedule.blockIndex).toBe(0);
+    expect(st.stages[1].schedule.blockIndex).toBe(1);
   });
 
   it('keeps everything in one block when the calendar has only one', () => {
     const single: SeasonCalendar = { ...CAL, blocks: [CAL.blocks[0]] };
     const st = instantiateTemplate(findTemplate('split-league-swap')!, single);
-    expect(st.stages.map((s) => s.schedule.blockId)).toEqual(['b1', 'b1']);
+    expect(st.stages.map((s) => s.schedule.blockIndex)).toEqual([0, 0]);
   });
 
   it('records provenance and mints a fresh id each time', () => {
@@ -111,13 +112,13 @@ describe('blankStructure', () => {
   it('starts with one workable stage in the first block', () => {
     const st = blankStructure(CAL);
     expect(st.stages).toHaveLength(1);
-    expect(st.stages[0].schedule.blockId).toBe('b1');
+    expect(st.stages[0].schedule.blockIndex).toBe(0);
     expect(st.templateId).toBeUndefined();
   });
 
   it('survives a tenant with no calendar configured yet', () => {
     const st = blankStructure(undefined);
-    expect(st.stages[0].schedule.blockId).toBe('');
+    expect(st.stages[0].schedule.blockIndex).toBe(0);
   });
 });
 
@@ -146,20 +147,26 @@ describe('JSON import / export', () => {
     expect(JSON.parse(json).id).toBeUndefined();
   });
 
-  // The export has always CARRIED calendarId; the import used to rebuild the object
-  // field by field and drop it. So a round trip produced a structure with real block
-  // ids and no record of which calendar they belong to — the exact shape that makes
-  // the editor open on the wrong calendar with every block picker blank, and Save
-  // still enabled over the wrong blocks. Manufacturable on demand until now.
-  it('keeps the calendar the blocks were authored against', () => {
-    const original: CompetitionStructure = {
-      ...instantiateTemplate(findTemplate('split-league-swap')!, CAL),
-      calendarId: CAL.id,
+  // A structure carries no calendar identity of its own (ADR 0008 Phase 1) — stages name
+  // a block POSITION, and the Competition binding supplies the calendar at generation
+  // time. Export/import round-trips the stages as-is; there is no calendarId to lose.
+  it('rejects a legacy export that still carries concrete blockId references', () => {
+    const legacy = {
+      name: 'Old export',
+      stages: [
+        {
+          id: 's1',
+          name: 'Stage',
+          format: { kind: 'round-robin', legs: 1 },
+          entrants: { kind: 'all-registered' },
+          schedule: { blockId: 'b1', cadence: { kind: 'weekly' } },
+        },
+      ],
     };
-    const parsed = parseStructureJson(structureToJson(original));
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
-    expect(parsed.structure.calendarId).toBe(CAL.id);
+    expect(parseStructureJson(JSON.stringify(legacy))).toEqual({
+      ok: false,
+      error: 'this structure JSON uses the old blockId format — regenerate it with blockIndex',
+    });
   });
 
   it('explains what is wrong rather than throwing', () => {
@@ -177,5 +184,37 @@ describe('JSON import / export', () => {
       ok: false,
       error: 'Stage "A" has no format.',
     });
+  });
+
+  // A missing or string `blockIndex` used to round-trip to NaN in the block picker and
+  // only die as a server 400 — this is the local catch for that.
+  it('rejects a stage with no blockIndex', () => {
+    const stage = {
+      id: 's1',
+      name: 'Stage',
+      format: { kind: 'round-robin', legs: 1 },
+      entrants: { kind: 'all-registered' },
+      schedule: { cadence: { kind: 'weekly' } },
+    };
+    expect(parseStructureJson(JSON.stringify({ name: 'X', stages: [stage] }))).toMatchObject({
+      ok: false,
+      error: 'Stage "Stage" has no valid playing block.',
+    });
+  });
+
+  it('rejects a stage whose blockIndex is not a non-negative integer', () => {
+    const base = {
+      id: 's1',
+      name: 'Stage',
+      format: { kind: 'round-robin', legs: 1 },
+      entrants: { kind: 'all-registered' },
+    };
+    for (const blockIndex of ['0', -1, 1.5, null]) {
+      const stage = { ...base, schedule: { blockIndex, cadence: { kind: 'weekly' } } };
+      expect(parseStructureJson(JSON.stringify({ name: 'X', stages: [stage] }))).toMatchObject({
+        ok: false,
+        error: 'Stage "Stage" has no valid playing block.',
+      });
+    }
   });
 });

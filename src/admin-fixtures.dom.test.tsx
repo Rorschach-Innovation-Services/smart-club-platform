@@ -385,3 +385,128 @@ describe('a tenant with no series still gets the season machinery', () => {
     expect(screen.getByText(/couldn.t load the season setup/i)).toBeTruthy();
   });
 });
+
+describe('the "Generate fixtures" launcher — one entry point, routed by league', () => {
+  // A minimal bound competition so `premier` is season-capable; `friendlies` has none, so
+  // it stays on the flat path. Both leagues share the same registered clubs.
+  const structure = {
+    id: 'struct-1',
+    name: 'Straight round robin',
+    version: 1,
+    stages: [
+      {
+        id: 'only-stage',
+        name: 'League',
+        format: { kind: 'round-robin', legs: 1 },
+        entrants: { kind: 'all-registered' },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+      },
+    ],
+  } as unknown as import('./types').CompetitionStructure;
+
+  const seasonCalendar = {
+    id: 'cal-1',
+    label: '2026/27',
+    blocks: [{ id: 'b1', label: 'Block 1', start: '2026-09-12', end: '2026-12-12' }],
+    breaks: [],
+    excludeDates: [],
+  } as unknown as SeasonCalendar;
+
+  const leagues = [
+    {
+      key: 'premier',
+      label: 'Premier League',
+      group: 'Senior',
+      district: 'All districts',
+      competitions: [{ id: 'c1', label: '50 Over', structureId: 'struct-1', calendarId: 'cal-1' }],
+    },
+    { key: 'friendlies', label: 'Friendlies', group: 'Senior', district: 'All districts' },
+  ] as unknown as import('./types').League[];
+
+  const registeredClubs = [
+    { id: 'c1', name: 'Club 1', affiliation: 'complete', leagues: ['premier', 'friendlies'] },
+    { id: 'c2', name: 'Club 2', affiliation: 'complete', leagues: ['premier', 'friendlies'] },
+  ] as unknown as Club[];
+
+  // `onCreateSeries` is a callback AdminFixtures only forwards — the actual flat-form modal
+  // is hosted a level up, in main.tsx (see admin-create-series.dom.test.tsx for what that
+  // form does with the prefilled league once it opens). What belongs to THIS boundary is
+  // the routing decision: which league sends the admin to the season form, versus which
+  // ones — including ad-hoc — hand back a leagueKey (or `null`) for the flat form to open.
+  const renderPage = (onCreateSeries = vi.fn()) => ({
+    onCreateSeries,
+    ...renderWithProviders(
+      <AdminFixtures
+        clubs={registeredClubs}
+        allSeries={[]}
+        onCreateSeries={onCreateSeries}
+        onUpdateSeries={vi.fn()}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onSetReleased={vi.fn()}
+        onSetApproved={vi.fn()}
+        toast={vi.fn()}
+        allVenues={[]}
+        allSeasonRuns={[]}
+        allLeagues={leagues}
+        tenantConfig={{ structures: [structure], calendars: [seasonCalendar] } as TenantConfig}
+        onSaveVenue={vi.fn()}
+        onDeleteVenue={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCreateSeasonRun={vi.fn().mockResolvedValue(undefined)}
+        onPatchSeasonRun={vi.fn()}
+        onDeleteSeasonRun={vi.fn()}
+        onGenerateStageSeries={vi.fn()}
+      />,
+    ),
+  });
+
+  // Two buttons open the same launcher with no series yet (the header action and the
+  // empty-state CTA) — either proves the wiring, so the first one found is enough.
+  const openLauncher = async (user: ReturnType<typeof userEvent.setup>) =>
+    user.click(screen.getAllByRole('button', { name: /generate fixtures/i })[0]);
+
+  const launcher = () => screen.getByRole('dialog', { name: /generate fixtures/i });
+  const continueBtn = () => within(launcher()).getByRole('button', { name: /continue/i });
+
+  it('routes a season-capable league straight to the season form, in the same modal', async () => {
+    const user = userEvent.setup();
+    const { onCreateSeries } = renderPage();
+    await openLauncher(user);
+
+    await user.selectOptions(within(launcher()).getByRole('combobox'), 'premier');
+    await user.click(continueBtn());
+
+    expect(screen.getByRole('dialog', { name: /start.*season/i })).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: /^generate fixtures$/i })).toBeNull();
+    expect(onCreateSeries).not.toHaveBeenCalled();
+  });
+
+  it('hands a flat league to the create-series flow instead of the season form', async () => {
+    const user = userEvent.setup();
+    const { onCreateSeries } = renderPage();
+    await openLauncher(user);
+
+    await user.selectOptions(within(launcher()).getByRole('combobox'), 'friendlies');
+    await user.click(continueBtn());
+
+    expect(onCreateSeries).toHaveBeenCalledWith('friendlies');
+    // The launcher itself is done — no season form appeared for a league with no
+    // competition bound to it.
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('hands `null` — no league — for an ad-hoc series', async () => {
+    const user = userEvent.setup();
+    const { onCreateSeries } = renderPage();
+    await openLauncher(user);
+
+    await user.selectOptions(
+      within(launcher()).getByRole('combobox'),
+      within(launcher()).getByRole('option', { name: /ad-hoc series/i }),
+    );
+    await user.click(continueBtn());
+
+    expect(onCreateSeries).toHaveBeenCalledWith(null);
+  });
+});

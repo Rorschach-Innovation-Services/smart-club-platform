@@ -54,6 +54,8 @@ import {
   validateCalendars,
   validateStructures,
   validateCompetitions,
+  assertValidCadence,
+  assertValidTimeSlots,
 } from './config-validation.js';
 import { demographicsByLeague, summarizeDemographics } from './demographics.js';
 import {
@@ -82,6 +84,7 @@ import type {
   SeasonRun,
   StageRun,
   Series,
+  SeriesSchedule,
   Venue,
   TenantConfig,
   TutorialVideo,
@@ -2382,6 +2385,37 @@ app.post('/clubs/:id/send-fixtures', async (c) => {
 
 // ───────────────────────── Series ─────────────────────────
 
+/**
+ * `Series.schedule` shape guard (ADR 0008): the calendar binding a create/regenerate
+ * confirmed, so a later regenerate reproduces the same dates. Unlike a competition's
+ * binding (`validateCompetitions`), a series names a concrete BLOCK, not a position — it
+ * is generated once against whatever calendar was current at the time, not resolved
+ * through a structure. Checked against the tenant's OWN config, so a dangling
+ * calendarId/blockId can never be written from either POST or PATCH.
+ */
+function validateSeriesSchedule(
+  schedule: unknown,
+  config: TenantConfig,
+): asserts schedule is SeriesSchedule {
+  const sched = schedule as Partial<SeriesSchedule> | undefined;
+  if (!sched || typeof sched !== 'object')
+    throw new HttpError(400, 'series schedule must be an object');
+  if (typeof sched.calendarId !== 'string' || !sched.calendarId.trim())
+    throw new HttpError(400, 'series schedule needs a calendarId');
+  const calendar = (config.calendars ?? []).find((cal) => cal.id === sched.calendarId);
+  if (!calendar)
+    throw new HttpError(400, `series schedule points at a calendar that doesn't exist`);
+  if (typeof sched.blockId !== 'string' || !sched.blockId.trim())
+    throw new HttpError(400, 'series schedule needs a blockId');
+  if (!calendar.blocks.some((b) => b.id === sched.blockId))
+    throw new HttpError(
+      400,
+      `series schedule points at a block that doesn't exist on that calendar`,
+    );
+  assertValidCadence(sched.cadence, 'series schedule');
+  if (sched.slots !== undefined) assertValidTimeSlots(sched.slots, 'series schedule');
+}
+
 app.get('/series', async (c) => {
   const { tenant } = c.get('requestAuth')!;
   return c.json(await repo.listSeries(tenant));
@@ -2405,6 +2439,17 @@ app.post('/series', requireAdmin, async (c) => {
   // 409 rather than silent success: the caller refetches and PATCHes instead.
   if (await repo.getSeries(tenant, series.id))
     throw new HttpError(409, 'a series with that id already exists');
+  // A schedule binding is optional (legacy series schedule from startDate/endDate), but
+  // when present it must name a real calendarId/blockId on THIS tenant with a valid
+  // cadence — regenerate trusts it blindly, so a dangling reference here would only
+  // surface much later as a silent no-op. Unlike PATCH, `null` is NOT a special case
+  // here — there is no stored binding on a brand-new series for it to clear, so it just
+  // 400s through the same "must be an object" guard as any other non-object.
+  if (series.schedule !== undefined) {
+    const config = await repo.getTenantConfig(tenant);
+    if (!config) throw new HttpError(404, 'tenant not found');
+    validateSeriesSchedule(series.schedule, config);
+  }
   // Fixtures are generated client-side and POSTed whole.
   series.version = 1;
   series.released = series.released ?? false;
@@ -2427,6 +2472,19 @@ app.patch('/series/:id', requireAdmin, async (c) => {
     (typeof patch.startDate !== 'string' || !patch.startDate.trim())
   )
     throw new HttpError(400, 'a series needs a start date');
+  // Same schedule-binding guard as POST — a PATCH can introduce or replace the
+  // calendar/block a regenerate reproduces, so it needs the identical check. `null` is
+  // the one exception: a PATCH (never POST — there is nothing to clear on a brand-new
+  // series) may send it to CLEAR a stored binding, reverting the series to legacy
+  // startDate/endDate scheduling. Anything else non-object still 400s via the guard.
+  if (patch.schedule === null) {
+    // Passed through as-is below; `updateSeries` spreads the patch over `current`, so
+    // this null overwrites whatever binding was stored.
+  } else if (patch.schedule !== undefined) {
+    const config = await repo.getTenantConfig(ra.tenant);
+    if (!config) throw new HttpError(404, 'tenant not found');
+    validateSeriesSchedule(patch.schedule, config);
+  }
   // Approval gate. Approve/unapprove stamps approvedAt server-side. Editing the
   // fixtures of a DRAFT series recalls any prior approval (must re-approve before
   // release); a live series keeps its state so in-season edits still reach clubs.
@@ -2682,6 +2740,7 @@ const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 async function applyTenantConfigPatch(
   tenant: string,
   patch: Partial<TenantConfig>,
+  opts: { preserveCompetitions?: boolean } = {},
 ): Promise<TenantConfig> {
   const current = await repo.getTenantConfig(tenant);
   if (!current) throw new HttpError(404, 'tenant not found');
@@ -2709,7 +2768,12 @@ async function applyTenantConfigPatch(
     validateDistricts(patch.districts);
     patch.districts = patch.districts.map((d) => d.trim());
   }
-  if (patch.leagues !== undefined)
+  if (patch.leagues !== undefined) {
+    // validateLeagues runs against the RAW incoming body, before preserveCompetitions
+    // below discards whatever competitions data the client sent — so a tenant PUT can
+    // still 400 (e.g. duplicate key) on a league whose competitions edit was never
+    // going to be kept. Accepted: pre-stripping every incoming league's competitions
+    // field before validating just to avoid that wasted 400 costs more than it saves.
     validateLeagues(
       patch.leagues,
       // A league's district must be real for the tenant — or the overarching
@@ -2721,6 +2785,19 @@ async function applyTenantConfigPatch(
         ...(current.leagues ?? []).map((l) => l.district),
       ]),
     );
+    // Competition bindings (League.competitions) are operator-only (ADR 0008) — the
+    // tenant-admin path can rename/reorder leagues but must never mint or drop a
+    // binding. Overwrite each incoming league's competitions with whatever is
+    // CURRENTLY STORED for that key, ignoring the patch's value entirely.
+    if (opts.preserveCompetitions) {
+      // A key with no stored counterpart (a brand-new league) sets `competitions:
+      // undefined` explicitly rather than omitting the property — safe only because
+      // the repo write marshals with removeUndefinedValues, so it never lands on the
+      // row as a literal `null`/`undefined` attribute.
+      const storedByKey = new Map((current.leagues ?? []).map((l) => [l.key, l.competitions]));
+      patch.leagues = patch.leagues.map((l) => ({ ...l, competitions: storedByKey.get(l.key) }));
+    }
+  }
   const next = { ...current, ...patch, tenant };
   try {
     await repo.putTenantConfig(next);
@@ -2870,7 +2947,7 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { knownClubs?: unknown }).knownClubs;
   delete (patch as { calendars?: unknown }).calendars;
   delete (patch as { structures?: unknown }).structures;
-  const next = await applyTenantConfigPatch(tenant, patch);
+  const next = await applyTenantConfigPatch(tenant, patch, { preserveCompetitions: true });
   return c.json(next);
 });
 
@@ -3150,6 +3227,32 @@ app.get('/platform/tenants/:slug/overview', async (c) => {
 });
 
 /**
+ * Deterministic deep-equality for plain JSON-shaped values: object keys compare
+ * order-independent (two structures built by different code paths may key their fields
+ * in different orders), arrays compare order-sensitive (stage order is meaningful).
+ * Used only to detect whether an operator's structure edit actually changed anything, so
+ * version numbers can stay server-owned (see the structures block in
+ * `PUT /platform/tenants/:slug`) without false-positive bumps on a no-op resave.
+ *
+ * Not a true value-equality: `{a: undefined}` stringifies differently from `{}` (the key
+ * still appears, JSON.stringify-style), while DynamoDB's removeUndefinedValues marshalling
+ * stores both identically. So a round-trip through the two can mint a spurious version
+ * bump for content the table considers unchanged. Accepted — narrower than the false
+ * positives this exists to prevent, and no caller here constructs objects with explicit
+ * `undefined` values by hand.
+ */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value as Record<string, unknown>).sort();
+    return `{${keys
+      .map((k) => `${JSON.stringify(k)}:${stableStringify((value as Record<string, unknown>)[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
  * PUT /platform/tenants/:slug — merge-patch branding / features / leagues /
  * districts / submissionDeadline (whitelisted: the operator portal edits nothing
  * else). Shares applyTenantConfigPatch with PUT /tenant/config, so the same
@@ -3173,6 +3276,9 @@ app.put('/platform/tenants/:slug', async (c) => {
   };
   let tenantClubs: Club[] | undefined;
   const getClubs = async (): Promise<Club[]> => (tenantClubs ??= await repo.listClubs(slug));
+  // Informational only (never blocks the save) — populated by the calendars block below
+  // when a block edit lands on a calendar series still reference.
+  const warnings: string[] = [];
   if (body.branding !== undefined) patch.branding = body.branding;
   if (body.features !== undefined) patch.features = body.features;
   if (body.leagues !== undefined) {
@@ -3246,7 +3352,16 @@ app.put('/platform/tenants/:slug', async (c) => {
     const current = await getCurrent();
     const nextIds = new Set(body.calendars.map((cal) => cal.id));
     const removed = (current.calendars ?? []).filter((cal) => !nextIds.has(cal.id));
-    if (removed.length > 0) {
+    // Blocks-changed detection (dates and/or ids differ from what's stored) feeds the
+    // informational warning below — only for a calendar that still exists post-patch;
+    // a REMOVED calendar is handled by the delete guard, not a warning.
+    const changed = body.calendars.filter((cal) => {
+      const existing = (current.calendars ?? []).find((c) => c.id === cal.id);
+      return (
+        existing !== undefined && stableStringify(cal.blocks) !== stableStringify(existing.blocks)
+      );
+    });
+    if (removed.length > 0 || changed.length > 0) {
       const allSeries = await repo.listSeries(slug);
       for (const cal of removed) {
         const n = allSeries.filter((s) => s.schedule?.calendarId === cal.id).length;
@@ -3256,16 +3371,45 @@ app.put('/platform/tenants/:slug', async (c) => {
             `${n} series ${n === 1 ? 'is' : 'are'} scheduled against "${cal.label}" — reschedule ${n === 1 ? 'it' : 'them'} before deleting the calendar`,
           );
       }
+      // NOT a blocking guard — a live series' schedule stays a live reference to its
+      // calendar on purpose (mid-season date edits flowing into regenerate is the
+      // feature, ADR 0008 phase 1 gap 4). This just makes that fact visible to the
+      // operator instead of leaving it a silent surprise at next regenerate.
+      for (const cal of changed) {
+        const n = allSeries.filter((s) => s.schedule?.calendarId === cal.id).length;
+        if (n > 0)
+          warnings.push(
+            `${n} series ${n === 1 ? 'is' : 'are'} scheduled against '${cal.label}'; regenerating ${n === 1 ? 'it' : 'them'} will follow the new dates`,
+          );
+      }
     }
   }
   if (body.structures !== undefined) {
     validateStructures(body.structures); // shape 400s must win over the guard's 409
-    patch.structures = body.structures;
+    const current = await getCurrent();
+    // Version numbers are SERVER-OWNED, not client-minted (ADR 0008 phase 1): a client's
+    // `version` is ignored outright. Content is deep-compared (excluding `version` itself)
+    // against the stored structure of the same id — only a REAL change mints
+    // `existing.version + 1`; a no-op resave keeps the existing number. An id with no
+    // stored counterpart is a brand-new structure and starts at 1.
+    //
+    // Known race: two concurrent operator PUTs can both read the same `current` version
+    // (e.g. 3) and each mint `existing.version + 1` (4) for DIFFERENT content — whichever
+    // write lands second wins with no conflict signalled. No conditional write here yet;
+    // same accepted-window spirit as the referrer guards above, recorded rather than fixed.
+    const existingById = new Map((current.structures ?? []).map((st) => [st.id, st]));
+    patch.structures = body.structures.map((st) => {
+      const existing = existingById.get(st.id);
+      if (!existing) return { ...st, version: 1 };
+      const { version: _incomingVersion, ...incomingContent } = st;
+      const { version: _existingVersion, ...existingContent } = existing;
+      const changed = stableStringify(incomingContent) !== stableStringify(existingContent);
+      return { ...st, version: changed ? existing.version + 1 : existing.version };
+    });
     // Referrer delete guard, same basis as leagues/districts/calendars. A running season
     // snapshots its structure, so deleting one can't corrupt a season in flight — but a
     // LEAGUE still binding to it would be left pointing at nothing, and no new season
     // could be started from it.
-    const current = await getCurrent();
     const nextIds = new Set(body.structures.map((st) => st.id));
     const removed = (current.structures ?? []).filter((st) => !nextIds.has(st.id));
     if (removed.length > 0) {
@@ -3305,7 +3449,9 @@ app.put('/platform/tenants/:slug', async (c) => {
     );
   }
   const next = await applyTenantConfigPatch(slug, patch);
-  return c.json(next);
+  // `warnings` is informational-only and additive — only present when non-empty, so an
+  // unaffected save's response shape is byte-for-byte what it was before this existed.
+  return c.json(warnings.length > 0 ? { ...next, warnings } : next);
 });
 
 /**

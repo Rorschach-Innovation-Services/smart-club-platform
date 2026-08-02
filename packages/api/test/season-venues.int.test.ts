@@ -69,7 +69,7 @@ const STRUCTURE: CompetitionStructure = {
       name: 'League',
       format: { kind: 'round-robin', legs: 1 },
       entrants: { kind: 'all-registered' },
-      schedule: { blockId: 'b1', cadence: { kind: 'weekly' } },
+      schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
     },
   ],
 };
@@ -639,6 +639,137 @@ describe('POST /series guards the gsi1 sort key', () => {
     assert.equal(after?.releasedAt, '2026-08-01T00:00:00.000Z');
     assert.equal(after?.name, 'Guard test', 'and the POSTed body must not have landed');
     assert.ok((after?.version ?? 0) > 1, 'the version must not reset to 1');
+  });
+});
+
+/**
+ * `POST`/`PATCH /series` schedule validation (ADR 0008) — `validateSeriesSchedule` in
+ * index.ts. Unlike a structure's stage (a POSITION into whichever calendar the
+ * competition binds), a persisted series names a CONCRETE calendarId/blockId, generated
+ * once against whatever calendar was current — so this is checked against the tenant's
+ * own stored calendars, on a real server/app instance, not a unit test over the guard
+ * in isolation.
+ */
+describe('POST /series schedule validation', () => {
+  const T = 'seriesschedule';
+  const SCHED_ADMIN = devAuth('sched-admin@test', [{ tenantId: T, role: 'admin', clubIds: [] }]);
+  const H = { 'x-tenant': T, 'x-dev-auth': SCHED_ADMIN, 'content-type': 'application/json' };
+
+  const CAL = {
+    id: 'cal-2627',
+    label: '2026/27',
+    blocks: [{ id: 'b1', label: 'Block 1', start: '2026-09-13', end: '2026-12-13' }],
+  };
+
+  before(async () => {
+    await repo.putTenantConfig({
+      tenant: T,
+      branding: { name: 'Schedule Union', title: 'Sched', logoUrl: '', colors: {}, copy: {} },
+      submissionDeadline: '2026-12-31',
+      knownClubs: [],
+      leagues: [],
+      calendars: [CAL],
+    });
+  });
+
+  const series = (over: Record<string, unknown> = {}) => ({
+    id: `s-sched-${Math.random().toString(36).slice(2, 8)}`,
+    name: 'Schedule test',
+    startDate: '2026-09-13',
+    teams: ['alpha', 'bravo'],
+    fixtures: [],
+    schedule: { calendarId: 'cal-2627', blockId: 'b1', cadence: { kind: 'weekly' } },
+    ...over,
+  });
+
+  const post = (body: unknown) =>
+    app.request('/series', { method: 'POST', headers: H, body: JSON.stringify(body) });
+
+  test('a valid schedule is accepted', async () => {
+    const s = series();
+    const res = await post(s);
+    assert.equal(res.status, 201);
+    assert.equal((await repo.getSeries(T, s.id))?.schedule?.blockId, 'b1');
+  });
+
+  test('a dangling calendarId is rejected', async () => {
+    const s = series({
+      schedule: { calendarId: 'ghost', blockId: 'b1', cadence: { kind: 'weekly' } },
+    });
+    const res = await post(s);
+    assert.equal(res.status, 400);
+    const err = ((await res.json()) as { error: string }).error;
+    assert.match(err, /calendar that doesn't exist/);
+    assert.equal(await repo.getSeries(T, s.id), null);
+  });
+
+  test('a dangling blockId on a real calendar is rejected', async () => {
+    const s = series({
+      schedule: { calendarId: 'cal-2627', blockId: 'nope', cadence: { kind: 'weekly' } },
+    });
+    const res = await post(s);
+    assert.equal(res.status, 400);
+    const err = ((await res.json()) as { error: string }).error;
+    assert.match(err, /block that doesn't exist on that calendar/);
+    assert.equal(await repo.getSeries(T, s.id), null);
+  });
+
+  test('a bad cadence is rejected', async () => {
+    const s = series({
+      schedule: { calendarId: 'cal-2627', blockId: 'b1', cadence: { kind: 'lunar' } },
+    });
+    const res = await post(s);
+    assert.equal(res.status, 400);
+    const err = ((await res.json()) as { error: string }).error;
+    assert.match(err, /unknown cadence/);
+    assert.equal(await repo.getSeries(T, s.id), null);
+  });
+
+  test('PATCH /series/:id applies the same guard', async () => {
+    const s = series();
+    await post(s);
+    const res = await app.request(`/series/${s.id}`, {
+      method: 'PATCH',
+      headers: H,
+      body: JSON.stringify({
+        schedule: { calendarId: 'ghost', blockId: 'b1', cadence: { kind: 'weekly' } },
+      }),
+    });
+    assert.equal(res.status, 400);
+    // The original schedule must survive a rejected patch.
+    assert.equal((await repo.getSeries(T, s.id))?.schedule?.calendarId, 'cal-2627');
+  });
+
+  test('malformed slots are rejected', async () => {
+    const s = series({
+      schedule: {
+        calendarId: 'cal-2627',
+        blockId: 'b1',
+        cadence: { kind: 'weekly' },
+        slots: [{ label: 'Morning', start: 'nine-ish' }],
+      },
+    });
+    const res = await post(s);
+    assert.equal(res.status, 400);
+    const err = ((await res.json()) as { error: string }).error;
+    assert.match(err, /valid HH:MM start time/);
+    assert.equal(await repo.getSeries(T, s.id), null);
+  });
+
+  test('PATCH schedule: null clears the stored binding', async () => {
+    const s = series();
+    await post(s);
+    const res = await app.request(`/series/${s.id}`, {
+      method: 'PATCH',
+      headers: H,
+      body: JSON.stringify({ schedule: null }),
+    });
+    assert.equal(res.status, 200);
+    // Reverted to legacy startDate/endDate scheduling — the binding is gone, the rest
+    // of the series untouched.
+    const after = await repo.getSeries(T, s.id);
+    assert.equal(after?.schedule, null);
+    assert.equal(after?.startDate, '2026-09-13');
   });
 });
 

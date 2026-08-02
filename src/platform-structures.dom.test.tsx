@@ -18,6 +18,7 @@ import userEvent from '@testing-library/user-event';
 import { StructuresCard } from './platform-structures';
 import type { CompetitionStructure, League, SeasonCalendar, TenantConfig } from './types';
 import * as api from './api';
+import { ApiError } from './api';
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api');
@@ -35,28 +36,32 @@ const calendar: SeasonCalendar = {
   excludeDates: [],
 };
 
+/**
+ * `blockIndex` is a bare position into whichever calendar the editor previews against —
+ * a structure carries no calendar identity of its own (ADR 0008 Phase 1). Index 0/1 lands
+ * on `calendar`'s two blocks, and on `otherCalendar`'s (also two blocks) alike.
+ */
 const structure = (over: Partial<CompetitionStructure> = {}): CompetitionStructure =>
   ({
     id: 'flat',
     name: 'Flat round robin',
     version: 1,
-    calendarId: 'cal',
     stages: [
       {
         id: 's1',
         name: 'League',
         format: { kind: 'round-robin', legs: 1 },
         entrants: { kind: 'all-registered' },
-        schedule: { blockId: 'b1', cadence: { kind: 'weekly' } },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
       },
     ],
     ...over,
   }) as CompetitionStructure;
 
 /**
- * A second calendar whose blocks share the LABELS of `calendar`'s but not their ids —
- * the shape that made "That playing block no longer exists on this calendar" so
- * misleading, because a block of that exact name is sitting in the picker below.
+ * A second calendar with the same LABELS as `calendar`'s blocks but a different id and
+ * different dates — enough to prove the preview rail is reading the previewed calendar's
+ * own blocks, not carrying over the first one's.
  */
 const otherCalendar: SeasonCalendar = {
   id: 'other',
@@ -65,6 +70,15 @@ const otherCalendar: SeasonCalendar = {
     { id: 'x1', label: 'Block 1', start: '2026-09-27', end: '2026-11-01' },
     { id: 'x2', label: 'Block 2', start: '2026-11-08', end: '2026-12-06' },
   ],
+  breaks: [],
+  excludeDates: [],
+};
+
+/** One block only — switching the preview here strands any stage scheduled at position 1. */
+const smallCalendar: SeasonCalendar = {
+  id: 'small',
+  label: 'One block only',
+  blocks: [{ id: 'y1', label: 'Block 1', start: '2026-09-12', end: '2026-12-12' }],
   breaks: [],
   excludeDates: [],
 };
@@ -86,7 +100,7 @@ const setup = (
   return { user, save, toast };
 };
 
-/** Two stages on two different blocks — enough to be split across calendars. */
+/** Two stages on two different blocks — both in range on either fixture calendar. */
 const twoStage = (): CompetitionStructure =>
   structure({
     id: 'split',
@@ -97,14 +111,14 @@ const twoStage = (): CompetitionStructure =>
         name: 'Double round',
         format: { kind: 'round-robin', legs: 2 },
         entrants: { kind: 'all-registered' },
-        schedule: { blockId: 'b1', cadence: { kind: 'weekly' } },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
       },
       {
         id: 's2',
         name: 'Final round',
         format: { kind: 'round-robin', legs: 1 },
         entrants: { kind: 'all-registered' },
-        schedule: { blockId: 'b2', cadence: { kind: 'weekly' } },
+        schedule: { blockIndex: 1, cadence: { kind: 'weekly' } },
       },
     ],
   } as Partial<CompetitionStructure>);
@@ -117,8 +131,8 @@ const boundLeague = (structureId: string, calendarId: string): League =>
     competitions: [{ id: 'c1', label: '50 Over', structureId, calendarId }],
   }) as unknown as League;
 
-/** The "Preview against" calendar picker. */
-const previewPicker = () => screen.getByRole('combobox', { name: /preview against/i });
+/** The "Show dates from" calendar picker. */
+const previewPicker = () => screen.getByRole('combobox', { name: /show dates from/i });
 /** A stage's playing-block picker. */
 const blockPicker = () => screen.getAllByRole('combobox', { name: /playing block/i })[0];
 const saveBtn = () => screen.getByRole('button', { name: /save structure/i });
@@ -142,7 +156,7 @@ describe('preview rail — fixture counts come from the real generator', () => {
             name: 'Final',
             format: { kind: 'single-match' },
             entrants: { kind: 'all-registered' },
-            schedule: { blockId: 'b2', cadence: { kind: 'weekly' } },
+            schedule: { blockIndex: 1, cadence: { kind: 'weekly' } },
           },
         ],
       } as Partial<CompetitionStructure>),
@@ -169,7 +183,7 @@ describe('preview rail — fixture counts come from the real generator', () => {
               method: 'blocks',
               groups: { kind: 'sizes', sizes: [5, 5, 5, 4] },
             },
-            schedule: { blockId: 'b1', cadence: { kind: 'weekly' } },
+            schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
           },
         ],
       } as Partial<CompetitionStructure>),
@@ -198,7 +212,7 @@ describe('preview rail — fixture counts come from the real generator', () => {
               method: 'blocks',
               groups: { kind: 'sizes', sizes: [5, 5, 5, 4] },
             },
-            schedule: { blockId: 'b1', cadence: { kind: 'weekly' } },
+            schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
           },
         ],
       } as Partial<CompetitionStructure>),
@@ -223,7 +237,7 @@ describe('preview rail — fixture counts come from the real generator', () => {
             name: 'Cup',
             format: { kind: 'manual' },
             entrants: { kind: 'manual' },
-            schedule: { blockId: 'b1', cadence: { kind: 'weekly' } },
+            schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
           },
         ],
       } as Partial<CompetitionStructure>),
@@ -245,7 +259,7 @@ describe('preview rail — fixture counts come from the real generator', () => {
             name: 'Semis',
             format: { kind: 'knockout', pairing: 'cross-pool' },
             entrants: { kind: 'manual' },
-            schedule: { blockId: 'b2', cadence: { kind: 'weekly' } },
+            schedule: { blockIndex: 1, cadence: { kind: 'weekly' } },
           },
         ],
       } as Partial<CompetitionStructure>),
@@ -268,7 +282,7 @@ describe('preview rail — calendar fit', () => {
             name: 'League',
             format: { kind: 'round-robin', legs: 1 },
             entrants: { kind: 'all-registered' },
-            schedule: { blockId: 'b1', cadence: { kind: 'every-n-weeks', n: 2 } },
+            schedule: { blockIndex: 0, cadence: { kind: 'every-n-weeks', n: 2 } },
           },
         ],
       } as Partial<CompetitionStructure>),
@@ -282,44 +296,14 @@ describe('preview rail — calendar fit', () => {
   });
 
   it('says fit cannot be checked with no calendar selected', async () => {
-    const { user } = setup([structure({ calendarId: undefined })]);
+    // With only one calendar on the tenant, the editor auto-resolves it — deliberately
+    // clear the picker to reach the "no calendar" state.
+    const { user } = setup([structure()]);
     await openEditor(user);
 
-    await user.selectOptions(screen.getByRole('combobox', { name: /preview against/i }), '');
+    await user.selectOptions(screen.getByRole('combobox', { name: /show dates from/i }), '');
 
     expect(within(preview()).getByText(/fit can't be checked until one is/i)).toBeVisible();
-  });
-});
-
-describe('structure editor — the design-time calendar', () => {
-  it('persists the calendar the blocks were authored against', async () => {
-    const { user, save } = setup([structure({ calendarId: undefined })]);
-    await openEditor(user);
-
-    await user.selectOptions(screen.getByRole('combobox', { name: /preview against/i }), 'cal');
-    await user.click(screen.getByRole('button', { name: /save structure/i }));
-
-    expect(save.mock.calls[0][0].structures[0]).toMatchObject({ calendarId: 'cal' });
-  });
-
-  it('CLEARS the calendar when the operator picks "No calendar"', async () => {
-    // A bare `...(calendarId ? {calendarId} : {})` keeps the value already on the draft,
-    // so the picker could set but never unset.
-    const { user, save } = setup([structure({ calendarId: 'cal' })]);
-    await openEditor(user);
-
-    await user.selectOptions(screen.getByRole('combobox', { name: /preview against/i }), '');
-    await user.click(screen.getByRole('button', { name: /save structure/i }));
-
-    expect(save.mock.calls[0][0].structures[0]).not.toHaveProperty('calendarId');
-  });
-
-  it('mints a new version on every edit, so running seasons are untouched', async () => {
-    const { user, save } = setup([structure({ version: 3 })]);
-    await openEditor(user);
-    await user.click(screen.getByRole('button', { name: /save structure/i }));
-
-    expect(save.mock.calls[0][0].structures[0].version).toBe(4);
   });
 });
 
@@ -344,14 +328,14 @@ describe('structure editor — validation', () => {
               kind: 'manual',
               derivedFrom: { rule: 'swap', fromStage: 's2', detail: 'Swap' },
             },
-            schedule: { blockId: 'b1', cadence: { kind: 'weekly' } },
+            schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
           },
           {
             id: 's2',
             name: 'Second',
             format: { kind: 'round-robin', legs: 1 },
             entrants: { kind: 'all-registered' },
-            schedule: { blockId: 'b2', cadence: { kind: 'weekly' } },
+            schedule: { blockIndex: 1, cadence: { kind: 'weekly' } },
           },
         ],
       } as Partial<CompetitionStructure>),
@@ -365,128 +349,177 @@ describe('structure editor — validation', () => {
 });
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   The structure/calendar trap.
+   Which calendar the editor previews against.
 
-   Reported as "the league setup won't let me add teams to groups". It was not
-   that at all: a structure that fits perfectly reports every stage as broken the
-   moment the editor previews it against a calendar it doesn't belong to, and the
-   blank pickers that result invite an edit that the server rejects for the whole
-   tenant. Two triggers — switching "Preview against", and a structure with no
-   `calendarId` opening on whichever calendar happens to be first.
+   A structure carries no calendar identity of its own any more (Phase 1 deleted
+   `CompetitionStructure.calendarId`), so there is nothing stored to reopen against:
+   only the tenant's own single calendar, or a bound competition's calendar, can say
+   which one to preview. `resolvePreviewCalendarId` in platform-structures.tsx is the
+   pure function behind this; these pin what the editor actually renders from it.
    ───────────────────────────────────────────────────────────────────────────── */
 
-describe('opening a structure that records no calendar', () => {
-  it('opens on the calendar whose blocks the stages actually name', async () => {
-    // `other` is first, so `calendars[0]` — the old fallback — is the wrong answer.
-    // Every structure the seed CLI wrote is in exactly this shape.
-    const { user } = setup([structure({ calendarId: undefined })], {
-      calendars: [otherCalendar, calendar],
-    });
+describe('resolving which calendar to preview against', () => {
+  it('auto-selects the tenant’s only calendar', async () => {
+    const { user } = setup([structure()], { calendars: [calendar] });
     await openEditor(user);
     expect(previewPicker()).toHaveValue('cal');
-    expect(screen.queryByText(/no longer exists|isn.t on/i)).toBeNull();
   });
 
-  it('prefers the calendar its bound competition names', async () => {
-    // Both calendars carry `b1` here, so coverage can't decide. The binding can —
-    // and it is the one the server enforces on save.
-    const shared: SeasonCalendar = { ...otherCalendar, blocks: [...calendar.blocks] };
-    const { user } = setup([structure({ calendarId: undefined })], {
-      calendars: [calendar, shared],
+  it('auto-selects the calendar a bound competition names, when there is more than one', async () => {
+    const { user } = setup([structure()], {
+      calendars: [calendar, otherCalendar],
       leagues: [boundLeague('flat', 'other')],
     });
     await openEditor(user);
     expect(previewPicker()).toHaveValue('other');
   });
 
-  it('picks nothing rather than guessing between indistinguishable calendars', async () => {
-    // Two seeded seasons used to share block ids AND labels. Choosing by array order
-    // renders a correct-LOOKING picker over the wrong season's dates.
-    const twin: SeasonCalendar = { ...otherCalendar, id: 'twin', blocks: [...calendar.blocks] };
-    const { user } = setup([structure({ calendarId: undefined })], {
-      calendars: [calendar, twin],
-    });
+  it('resolves nothing when there are several calendars and no binding to prefer', async () => {
+    const { user } = setup([structure()], { calendars: [calendar, otherCalendar] });
     await openEditor(user);
     expect(previewPicker()).toHaveValue('');
   });
+});
 
-  it('does not ask the question when the operator answered "No calendar"', async () => {
-    // Resolution returning nothing and the operator CHOOSING nothing are both `''` and
-    // mean opposite things. Conflating them put an error-styled box on a healthy
-    // structure, asserting no calendar accounted for its blocks — directly above its own
-    // detail line naming the one that does.
-    const { user, save } = setup([structure()], { calendars: [calendar] });
+/* ─────────────────────────────────────────────────────────────────────────────
+   The refusal banner — simplified to two branches now that a `blockIndex` has no
+   cross-calendar identity to remap by: either the editor can't tell which calendar to
+   preview against ("pick one"), or it can and some stage's position doesn't exist on
+   it ("bound elsewhere" when a competition names a different calendar, else "pick each
+   stage's block by hand"). There is no more "Move to X" remap — that depended on the
+   old id-based blockId matching same-named blocks across calendars, which the index
+   model deliberately has no equivalent of.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('the refusal banner — nothing resolved', () => {
+  it('asks the operator to pick a calendar, naming each stage’s stranded position', async () => {
+    const { user } = setup([structure()], { calendars: [calendar, otherCalendar] });
     await openEditor(user);
-    await user.selectOptions(previewPicker(), '');
 
-    expect(screen.queryByText(/no one calendar accounts for/i)).toBeNull();
+    // The sentence wraps a `<strong>Show dates from</strong>` — Testing Library's default
+    // text matcher only concatenates a node's own direct text children, so the assertion
+    // stays on either side of that boundary rather than spanning it. "Show dates from"
+    // also names the field label and the combobox, hence getAllByText over getByText.
+    expect(screen.getByText(/pick a calendar under/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/show dates from/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/League.*position 1/i)).toBeInTheDocument();
+  });
+
+  it('does not block saving while the question is still open', async () => {
+    const { user, save } = setup([structure()], { calendars: [calendar, otherCalendar] });
+    await openEditor(user);
     expect(saveBtn()).toBeEnabled();
     await user.click(saveBtn());
     expect(save).toHaveBeenCalled();
-  });
-
-  it('turns that refusal into a question, instead of silent blank pickers', async () => {
-    // Refusing to guess is only right if the operator can SEE the refusal. Gating the
-    // off-calendar display on a selected calendar made "no calendar" indistinguishable
-    // from "you haven't picked one": a scheduled stage rendered "Pick a playing block…"
-    // over a real value, no banner, and Save enabled — the exact trap, restored.
-    const twin: SeasonCalendar = { ...otherCalendar, id: 'twin', blocks: [...calendar.blocks] };
-    const { user } = setup([structure({ calendarId: undefined })], {
-      calendars: [calendar, twin],
-    });
-    await openEditor(user);
-
-    expect(screen.getByText(/no one calendar accounts for/i)).toBeInTheDocument();
-    // The stage's stored block is still on screen, named, and SELECTED — the picker does
-    // not fall back to its placeholder over a stage that is in fact scheduled.
-    const picker = blockPicker() as HTMLSelectElement;
-    expect(picker).toHaveValue('b1');
-    expect(picker.options[picker.selectedIndex].text).not.toMatch(/pick a playing block/i);
-    // And it says the block is claimed by BOTH calendars rather than picking one.
-    expect(screen.getAllByText(/Block 1 on 2026\/27 and test/i).length).toBeGreaterThan(0);
   });
 });
 
-describe('previewing against a calendar the structure does not live on', () => {
-  it('names the calendar the block belongs to, instead of saying it no longer exists', async () => {
-    // The recording's exact sequence. Both calendars have a block LABELLED "Block 1",
-    // so "no longer exists" is not merely unhelpful — one of that name is on screen.
+describe('the refusal banner — a resolved calendar can’t place every stage', () => {
+  /** Out of range for every fixture calendar here (both have two blocks, indices 0/1). */
+  const strandedStage = structure({
+    stages: [
+      {
+        id: 's1',
+        name: 'League',
+        format: { kind: 'round-robin', legs: 1 },
+        entrants: { kind: 'all-registered' },
+        schedule: { blockIndex: 5, cadence: { kind: 'weekly' } },
+      },
+    ],
+  } as Partial<CompetitionStructure>);
+
+  it('names the bound competition and offers a way out, when this structure is bound', async () => {
+    const { user } = setup([strandedStage], {
+      calendars: [calendar, otherCalendar],
+      leagues: [boundLeague('flat', 'other')],
+    });
+    await openEditor(user);
+
+    expect(previewPicker()).toHaveValue('other');
+    expect(screen.getByText(/plays a\s*block position/i)).toBeInTheDocument();
+    // Named both in the "Used by" column and the banner's own explanation.
+    expect(screen.getAllByText(/50 Over \(Premier Men\)/i).length).toBeGreaterThan(0);
+  });
+
+  it('tells the operator to pick each stage’s block by hand, when nothing binds it', async () => {
+    const { user } = setup([strandedStage], { calendars: [calendar] });
+    await openEditor(user);
+
+    expect(previewPicker()).toHaveValue('cal');
+    expect(screen.getByText(/pick each stage.s block by hand/i)).toBeInTheDocument();
+  });
+
+  it('keeps the stage’s own position selectable, rather than falling back to a placeholder', async () => {
+    const { user } = setup([strandedStage], { calendars: [calendar] });
+    await openEditor(user);
+
+    const picker = blockPicker() as HTMLSelectElement;
+    expect(picker).toHaveValue('5');
+    expect(picker.options[picker.selectedIndex].text).toMatch(
+      /sixth block.*this calendar has fewer blocks/i,
+    );
+  });
+});
+
+describe('the playing-block picker — ordinal labels', () => {
+  it('shows each block’s ordinal position, label and dates once a calendar is chosen', async () => {
+    const { user } = setup([structure()], { calendars: [calendar] });
+    await openEditor(user);
+
+    const picker = blockPicker() as HTMLSelectElement;
+    const texts = [...picker.options].map((o) => o.text);
+    expect(texts).toContain('First block — Block 1 · 12 Sep 2026 → 12 Dec 2026');
+    expect(texts).toContain('Second block — Block 2 · 16 Jan 2027 → 27 Mar 2027');
+  });
+
+  it('falls back to a plain ordinal with no calendar to read dates from', async () => {
+    // Two calendars and no binding — resolution can't pick one (see "resolving which
+    // calendar to preview against"), so the picker has nothing to read block dates off.
     const { user } = setup([structure()], { calendars: [calendar, otherCalendar] });
     await openEditor(user);
-    await user.selectOptions(previewPicker(), 'other');
-    expect(screen.getAllByText(/Block 1 on 2026\/27/i).length).toBeGreaterThan(0);
-    expect(screen.getByText(/plays on a different calendar/i)).toBeInTheDocument();
-  });
+    expect(previewPicker()).toHaveValue('');
 
-  it('shows the stored block in the picker rather than an empty placeholder', async () => {
-    // The blank picker is what makes an operator "fix" a stage that was never broken.
-    const { user } = setup([structure()], { calendars: [calendar, otherCalendar] });
-    await openEditor(user);
-    await user.selectOptions(previewPicker(), 'other');
-    expect(blockPicker()).toHaveValue('b1');
+    const picker = blockPicker() as HTMLSelectElement;
+    expect(picker.options[picker.selectedIndex].text).toBe('First block');
   });
+});
 
-  it('still allows saving — nothing was edited, and the server accepts it', async () => {
-    // Deliberately not blocked: `validateStructures` never checks blockIds, so
-    // refusing here would be stricter than the API and would strand an operator
-    // renaming a structure while a control labelled "Preview" points elsewhere.
-    const { user, save } = setup([structure()], { calendars: [calendar, otherCalendar] });
-    await openEditor(user);
-    await user.selectOptions(previewPicker(), 'other');
-    expect(saveBtn()).toBeEnabled();
-    await user.click(saveBtn());
-    expect(save).toHaveBeenCalled();
-  });
+describe('a structure left split across calendars in this session', () => {
+  /** Both stages at position 1 — out of range on `smallCalendar` (one block), uniformly. */
+  const bothOffSmall = (): CompetitionStructure =>
+    structure({
+      id: 'split',
+      name: 'Split league',
+      stages: [
+        {
+          id: 's1',
+          name: 'Double round',
+          format: { kind: 'round-robin', legs: 2 },
+          entrants: { kind: 'all-registered' },
+          schedule: { blockIndex: 1, cadence: { kind: 'weekly' } },
+        },
+        {
+          id: 's2',
+          name: 'Final round',
+          format: { kind: 'round-robin', legs: 1 },
+          entrants: { kind: 'all-registered' },
+          schedule: { blockIndex: 1, cadence: { kind: 'weekly' } },
+        },
+      ],
+    } as Partial<CompetitionStructure>);
 
-  it('refuses to save a structure left split across two calendars', async () => {
-    // The corrupting act, and the one the recording was a click away from: switch the
-    // preview, then "fix" the blank picker on ONE stage and leave the other. The
-    // result is a structure no calendar can run — and if it is bound, a save that
-    // 400s the entire tenant PUT.
-    const { user, save } = setup([twoStage()], { calendars: [calendar, otherCalendar] });
+  it('refuses to save when the operator half-fixes a uniformly-stranded structure', async () => {
+    // Both stages start off `smallCalendar`, consistently — not a split, just entirely
+    // pointed elsewhere. Repicking ONLY the first stage's block onto `smallCalendar`
+    // (its one available option) leaves the second stranded — a split created by THIS
+    // edit, which no calendar can run.
+    const { user, save } = setup([bothOffSmall()], { calendars: [calendar, smallCalendar] });
     await openEditor(user, /split league/i);
-    await user.selectOptions(previewPicker(), 'other');
-    await user.selectOptions(blockPicker(), 'x1');
+    await user.selectOptions(previewPicker(), 'small');
+    expect(screen.queryByText(/split across calendars/i)).toBeNull(); // uniform, not split
+
+    await user.selectOptions(blockPicker(), '0');
+
     expect(screen.getByText(/split across calendars/i)).toBeInTheDocument();
     expect(saveBtn()).toBeDisabled();
     await user.click(saveBtn());
@@ -494,67 +527,19 @@ describe('previewing against a calendar the structure does not live on', () => {
   });
 
   it('does not block a structure that ARRIVED split, only one split in this session', async () => {
-    // Pre-existing damage is a warning, not a save gate. Blocking on arrival would stop
-    // an operator renaming the structure or fixing a cadence until they had first edited
-    // a stage they never came here to touch — the same over-blocking this module
-    // explicitly rejects for stored blocks generally.
-    const alreadySplit = {
-      ...twoStage(),
-      stages: [
-        { ...twoStage().stages[0] }, // b1 — on `calendar`
-        {
-          ...twoStage().stages[1],
-          schedule: { blockId: 'x2', cadence: { kind: 'weekly' } },
-        }, // on `other`
-      ],
-    } as CompetitionStructure;
-    const { user, save } = setup([alreadySplit], { calendars: [calendar, otherCalendar] });
+    // `twoStage` already has one stage in range on `smallCalendar` and one out of it —
+    // split from the moment the preview lands there, with no edit at all. Pre-existing
+    // damage is a warning, not a save gate: blocking on arrival would stop an operator
+    // renaming the structure or fixing a cadence until they had first edited a stage
+    // they never came here to touch.
+    const { user, save } = setup([twoStage()], { calendars: [calendar, smallCalendar] });
     await openEditor(user, /split league/i);
+    await user.selectOptions(previewPicker(), 'small');
 
     expect(screen.queryByText(/split across calendars/i)).toBeNull();
     expect(saveBtn()).toBeEnabled();
     await user.click(saveBtn());
     expect(save).toHaveBeenCalled();
-  });
-
-  it('mirrors the server when a bound competition is on another calendar', async () => {
-    // `validateCompetitions` rejects this outright, discarding the whole edit and
-    // naming a calendar the operator was never shown. Say it here, in their words.
-    const { user, save } = setup([structure({ calendarId: 'cal' })], {
-      calendars: [calendar, otherCalendar],
-      leagues: [boundLeague('flat', 'other')],
-    });
-    await openEditor(user);
-    expect(screen.getByText(/the calendar 50 Over \(Premier Men\) uses/i)).toBeInTheDocument();
-    expect(saveBtn()).toBeDisabled();
-    await user.click(saveBtn());
-    expect(save).not.toHaveBeenCalled();
-  });
-});
-
-describe('moving a structure to another calendar', () => {
-  it('offers a name-matched remap when nothing is bound to it', async () => {
-    const { user } = setup([structure()], { calendars: [calendar, otherCalendar] });
-    await openEditor(user);
-    await user.selectOptions(previewPicker(), 'other');
-    await user.click(screen.getByRole('button', { name: /move to test/i }));
-    // Remapped onto the same-named block, and the complaint clears.
-    expect(blockPicker()).toHaveValue('x1');
-    expect(screen.queryByText(/plays on a different calendar/i)).toBeNull();
-    expect(saveBtn()).toBeEnabled();
-  });
-
-  it('refuses to offer it for a bound structure, and says what must change first', async () => {
-    // A remap here produces a save the server rejects — offering the button would
-    // be a trap dressed as a fix.
-    const { user } = setup([structure()], {
-      calendars: [calendar, otherCalendar],
-      leagues: [boundLeague('flat', 'cal')],
-    });
-    await openEditor(user);
-    await user.selectOptions(previewPicker(), 'other');
-    expect(screen.queryByRole('button', { name: /move to test/i })).toBeNull();
-    expect(screen.getByText(/can.t be moved here while/i)).toBeInTheDocument();
   });
 });
 
@@ -566,17 +551,107 @@ describe('the structures list — the mismatch is visible before opening', () =>
   });
 
   it('flags a structure whose blocks are not on its bound calendar', async () => {
-    setup([structure()], {
+    const stranded = structure({
+      stages: [
+        {
+          id: 's1',
+          name: 'League',
+          format: { kind: 'round-robin', legs: 1 },
+          entrants: { kind: 'all-registered' },
+          // Out of range for `otherCalendar` (two blocks, indices 0/1) — the bound one.
+          schedule: { blockIndex: 5, cadence: { kind: 'weekly' } },
+        },
+      ],
+    } as Partial<CompetitionStructure>);
+    setup([stranded], {
       calendars: [calendar, otherCalendar],
       leagues: [boundLeague('flat', 'other')],
     });
     const row = screen.getByRole('row', { name: /flat round robin/i });
-    expect(within(row).getByText(/block mismatch/i)).toBeInTheDocument();
+    // Highest position used is 5 (0-based), so the structure needs 6 blocks; the bound
+    // calendar (`otherCalendar`) only has 2.
+    expect(within(row).getByText(/needs 6 blocks, calendar has 2/i)).toBeInTheDocument();
   });
 
   it('leaves a well-formed structure unflagged', async () => {
     setup([structure()], { calendars: [calendar], leagues: [boundLeague('flat', 'cal')] });
     const row = screen.getByRole('row', { name: /flat round robin/i });
-    expect(within(row).queryByText(/block mismatch/i)).toBeNull();
+    expect(within(row).queryByText(/needs \d+ blocks/i)).toBeNull();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Deleting a structure bound by a league's competition (StructuresCard's `onDelete`,
+   platform-structures.tsx ~:1553). The server 409s a delete while any league still binds
+   the structure, so the binding is stripped in the SAME PUT — but only the competition
+   pointing at the deleted structure, not every competition the league runs.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('StructuresCard — deleting a bound structure cascades to its competition', () => {
+  const leagueWith = (bound: string, elsewhere: string): League =>
+    ({
+      key: 'premier',
+      label: 'Premier Men',
+      group: 'Senior',
+      district: 'All districts',
+      competitions: [
+        { id: 'c1', label: '50 Over', structureId: bound, calendarId: 'cal' },
+        { id: 'c2', label: 'T20', structureId: elsewhere, calendarId: 'cal' },
+      ],
+    }) as unknown as League;
+
+  it('strips only the competition bound to the deleted structure, in one save', async () => {
+    const bound = structure({ id: 'flat-one', name: 'Flat one' });
+    const other = structure({ id: 'flat-two', name: 'Flat two' });
+    const league = leagueWith('flat-one', 'flat-two');
+    const save = vi.fn().mockResolvedValue({});
+    const toast = vi.fn();
+    const user = userEvent.setup();
+    const config = {
+      structures: [bound, other],
+      calendars: [calendar],
+      leagues: [league],
+    } as unknown as TenantConfig;
+    vi.mocked(api.platformGetTenant).mockResolvedValue(config);
+
+    render(<StructuresCard slug="dolphins" config={config} save={save} toast={toast} />);
+
+    await user.click(within(screen.getByRole('row', { name: /flat one/i })).getByText(/delete/i));
+
+    // The confirm dialog names the affected league before anything is deleted. Scoped to
+    // the dialog itself — the "Used by" column also names Premier Men on both rows.
+    const confirmBox = document.querySelector('.fix-confirm-box') as HTMLElement;
+    expect(within(confirmBox).getByText(/premier men/i)).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: /yes, delete/i }));
+
+    expect(save).toHaveBeenCalledTimes(1);
+    const patch = save.mock.calls[0][0];
+    expect(patch.structures.map((s: CompetitionStructure) => s.id)).toEqual(['flat-two']);
+    // The competition on the SURVIVING structure is untouched.
+    expect(patch.leagues[0].competitions).toHaveLength(1);
+    expect(patch.leagues[0].competitions[0]).toMatchObject({ id: 'c2', structureId: 'flat-two' });
+  });
+
+  it('surfaces a save rejection via toast and deletes nothing locally', async () => {
+    // A running season keeps its own snapshot, but the server still 409s while a league
+    // is bound to the structure — the version-drift guard.
+    const bound = structure({ id: 'flat-one', name: 'Flat one' });
+    const save = vi
+      .fn()
+      .mockRejectedValue(new ApiError(409, 'A league is still bound to this structure.'));
+    const toast = vi.fn();
+    const user = userEvent.setup();
+    const config = { structures: [bound], calendars: [calendar] } as unknown as TenantConfig;
+    vi.mocked(api.platformGetTenant).mockResolvedValue(config);
+
+    render(<StructuresCard slug="dolphins" config={config} save={save} toast={toast} />);
+
+    await user.click(within(screen.getByRole('row', { name: /flat one/i })).getByText(/delete/i));
+    await user.click(screen.getByRole('button', { name: /yes, delete/i }));
+
+    expect(toast).toHaveBeenCalledWith('A league is still bound to this structure.', 'warn');
+    // Nothing removed locally — the structure's row is still there.
+    expect(screen.getByRole('row', { name: /flat one/i })).toBeInTheDocument();
   });
 });

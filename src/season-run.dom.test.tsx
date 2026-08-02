@@ -17,7 +17,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { SeasonRunsPanel } from './season-run';
+import { GenerateFixturesLauncher, SeasonRunsPanel } from './season-run';
 import type {
   Club,
   CompetitionStructure,
@@ -53,7 +53,7 @@ const stage = (over: Partial<StageSpec>): StageSpec =>
     name: 'Stage',
     format: { kind: 'round-robin', legs: 1 },
     entrants: { kind: 'all-registered' },
-    schedule: { blockId: 'b1', cadence: { kind: 'weekly' } },
+    schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
     ...over,
   }) as StageSpec;
 
@@ -85,7 +85,7 @@ const SPLIT_LEAGUE: CompetitionStructure = {
         },
       },
       groupLabels: ['Top Six', 'Bottom Six'],
-      schedule: { blockId: 'b2', cadence: { kind: 'weekly' } },
+      schedule: { blockIndex: 1, cadence: { kind: 'weekly' } },
     }),
   ],
 } as unknown as CompetitionStructure;
@@ -114,7 +114,7 @@ const POOLS_THEN_CROSS: CompetitionStructure = {
           detail: 'Top two from each pool',
         },
       },
-      schedule: { blockId: 'b2', cadence: { kind: 'weekly' } },
+      schedule: { blockIndex: 1, cadence: { kind: 'weekly' } },
     }),
   ],
 } as unknown as CompetitionStructure;
@@ -144,7 +144,7 @@ const run = (structure: CompetitionStructure, over: Partial<SeasonRun> = {}): Se
 const setup = (structure: CompetitionStructure, runs: SeasonRun[]) => {
   const onPatchRun = vi.fn().mockResolvedValue(undefined);
   const onGenerate = vi.fn().mockResolvedValue(undefined);
-  const onCreateRun = vi.fn().mockResolvedValue(undefined);
+  const onOpenLauncher = vi.fn();
   const onDeleteRun = vi.fn();
   const user = userEvent.setup();
   render(
@@ -153,15 +153,13 @@ const setup = (structure: CompetitionStructure, runs: SeasonRun[]) => {
       allLeagues={[league(structure.id)]}
       allSeries={[]}
       runs={runs}
-      config={{ structures: [structure], calendars: [calendar] } as unknown as TenantConfig}
-      onCreateRun={onCreateRun}
+      onOpenLauncher={onOpenLauncher}
       onPatchRun={onPatchRun}
       onGenerate={onGenerate}
       onDeleteRun={onDeleteRun}
-      toast={vi.fn()}
     />,
   );
-  return { user, onPatchRun, onGenerate, onCreateRun, onDeleteRun };
+  return { user, onPatchRun, onGenerate, onOpenLauncher, onDeleteRun };
 };
 
 /** The open modal. Every confirm-form query scopes to it — the stage card behind it
@@ -479,13 +477,11 @@ describe('failure states', () => {
         allLeagues={[]}
         allSeries={[]}
         runs={[]}
-        config={{} as TenantConfig}
         configFailed
-        onCreateRun={vi.fn()}
+        onOpenLauncher={vi.fn()}
         onPatchRun={vi.fn()}
         onGenerate={vi.fn()}
         onDeleteRun={vi.fn()}
-        toast={vi.fn()}
       />,
     );
 
@@ -640,5 +636,49 @@ describe('two groups may share a name', () => {
     expect(groups[1].entrants).toContain('c1');
     expect(groups[0].entrants).not.toContain('c1');
     spy.mockRestore();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   GenerateFixturesLauncher — routing into StartSeasonForm and back.
+
+   Once routed past the league picker there used to be no way back to it short of
+   closing the whole modal — which threw away the league choice too, not just the
+   in-progress form. Back returns to the picker without calling `onClose`.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
+  it('returns to the league picker rather than closing the launcher', async () => {
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    const config = {
+      structures: [SPLIT_LEAGUE],
+      calendars: [calendar],
+    } as unknown as TenantConfig;
+
+    render(
+      <GenerateFixturesLauncher
+        clubs={clubs}
+        allLeagues={[league(SPLIT_LEAGUE.id)]}
+        config={config}
+        existingRuns={[]}
+        onCreateRun={vi.fn().mockResolvedValue(undefined)}
+        onCreateSeries={vi.fn()}
+        onClose={onClose}
+        toast={vi.fn()}
+      />,
+    );
+
+    // The one season-capable league routes straight into StartSeasonForm.
+    await user.click(screen.getByRole('button', { name: /^continue$/i }));
+    expect(screen.getByRole('button', { name: /^start season$/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /^back$/i }));
+
+    // Back at the league picker — Continue is there again, and the launcher itself
+    // was never told to close.
+    expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^start season$/i })).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

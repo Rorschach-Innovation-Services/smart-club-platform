@@ -45,7 +45,7 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
         name: 'League season',
         format: { kind: 'round-robin', legs: 1 },
         entrants: { kind: 'all-registered' },
-        schedule: { blockId: '', cadence: { kind: 'weekly' } },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
         outcome: { champion: [1] },
       },
     ],
@@ -62,7 +62,7 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
         name: 'Double round',
         format: { kind: 'round-robin', legs: 2 },
         entrants: { kind: 'manual', groups: { kind: 'even', count: 2 } },
-        schedule: { blockId: '', cadence: { kind: 'weekly' } },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
         groupLabels: ['Top group', 'Bottom group'],
       },
       {
@@ -80,7 +80,7 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
             carryPoints: true,
           },
         },
-        schedule: { blockId: '', cadence: { kind: 'weekly' } },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
         groupLabels: ['Top group', 'Bottom group'],
         outcome: { champion: [1], relegated: [-1] },
       },
@@ -98,7 +98,7 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
         name: 'Pool stage',
         format: { kind: 'round-robin', legs: 1 },
         entrants: { kind: 'seeded-split', groups: { kind: 'even', count: 2 }, method: 'snake' },
-        schedule: { blockId: '', cadence: { kind: 'weekly' } },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
       },
       {
         id: 'finals',
@@ -112,7 +112,7 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
             detail: 'Top two from each pool, paired across pools',
           },
         },
-        schedule: { blockId: '', cadence: { kind: 'weekly' } },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
         outcome: { champion: [1] },
       },
     ],
@@ -129,7 +129,7 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
         name: 'Stream round robin',
         format: { kind: 'round-robin', legs: 1 },
         entrants: { kind: 'manual', groups: { kind: 'even', count: 2 } },
-        schedule: { blockId: '', cadence: { kind: 'weekly' } },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
         groupLabels: ['Top stream', 'Bottom stream'],
       },
       {
@@ -144,7 +144,7 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
             detail: 'The bottom stream minus its last-placed side, seeded by finishing position',
           },
         },
-        schedule: { blockId: '', cadence: { kind: 'weekly' } },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
         outcome: { champion: [1] },
       },
     ],
@@ -156,32 +156,41 @@ export function findTemplate(id: string): StructureTemplate | undefined {
 }
 
 /**
- * Clone a template into an editable structure bound to a real calendar.
+ * The block position a template's Nth stage lands on for a given calendar: stage 0 opens
+ * in the first block; every later stage goes to the second if the calendar has one, else
+ * stays in the first. That matches how both unions actually run a season — group phase
+ * before the mid-season break, deciders after it — and an operator who wants otherwise
+ * just changes the dropdown.
  *
- * Stage 0 opens in the first block; later stages go to the second if the calendar has
- * one, else stay in the first. That matches how both unions actually run a season — group
- * phase before the mid-season break, deciders after it — and an operator who wants
- * otherwise just changes the dropdown.
+ * Shared by `instantiateTemplate` (mapping at pick time) and the season wizard's step-0
+ * Continue handler (re-mapping a held NEW structure if the operator goes back and changes
+ * the calendar's block count after picking a template) — one rule, so the two can't drift.
  */
+export function templateBlockIndexForStage(
+  i: number,
+  calendar: SeasonCalendar | undefined,
+): number {
+  // Positions, not ids — a structure names no calendar of its own, so this is just "first
+  // block" / "second block" wherever the bound calendar turns out to be. `calendar` still
+  // decides whether a second block actually exists to distinguish stage 0 from the rest.
+  const second = (calendar?.blocks?.length ?? 0) > 1 ? 1 : 0;
+  return i === 0 ? 0 : second;
+}
+
+/** Clone a template into an editable structure bound to a real calendar. */
 export function instantiateTemplate(
   template: StructureTemplate,
   calendar: SeasonCalendar | undefined,
   name?: string,
 ): CompetitionStructure {
-  const first = calendar?.blocks?.[0]?.id ?? '';
-  const second = calendar?.blocks?.[1]?.id ?? first;
   return {
     id: newStructureId(),
     name: name?.trim() || template.name,
     version: 1,
     templateId: template.id,
-    // The blockIds just came from this calendar, so record it. Leaving it off meant a
-    // brand-new structure was born in the shape the editor can't resolve — the same
-    // state every seeded structure was in, and the one that produces blank block pickers.
-    ...(calendar ? { calendarId: calendar.id } : {}),
     stages: template.stages.map((stage, i) => ({
       ...stage,
-      schedule: { ...stage.schedule, blockId: i === 0 ? first : second },
+      schedule: { ...stage.schedule, blockIndex: templateBlockIndexForStage(i, calendar) },
     })),
   };
 }
@@ -195,21 +204,24 @@ export function blankStructure(
     id: newStructureId(),
     name,
     version: 1,
-    // As in `instantiateTemplate`: `blankStage` takes its blockId from this calendar, so
-    // the structure records which one that was.
-    ...(calendar ? { calendarId: calendar.id } : {}),
     stages: [blankStage(calendar, 'League season')],
   };
 }
 
-/** A new stage, defaulted to the simplest thing that generates something sensible. */
-export function blankStage(calendar: SeasonCalendar | undefined, name = 'New stage'): StageSpec {
+/**
+ * A new stage, defaulted to the simplest thing that generates something sensible.
+ *
+ * `calendar` is accepted (not read) to keep this call-compatible with `blankStructure`'s
+ * stage-0 case and `instantiateTemplate`'s per-stage mapping, both of which pass whatever
+ * calendar is in scope — a fresh stage always opens at block position 0 regardless.
+ */
+export function blankStage(_calendar: SeasonCalendar | undefined, name = 'New stage'): StageSpec {
   return {
     id: newStructureId('stg'),
     name,
     format: { kind: 'round-robin', legs: 1 },
     entrants: { kind: 'all-registered' },
-    schedule: { blockId: calendar?.blocks?.[0]?.id ?? '', cadence: { kind: 'weekly' } },
+    schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
   };
 }
 
@@ -244,6 +256,20 @@ export function parseStructureJson(
       return { ok: false, error: `Stage "${stage.name}" has no entrant rule.` };
     if (!stage.schedule?.cadence?.kind)
       return { ok: false, error: `Stage "${stage.name}" has no cadence.` };
+    // A structure exported before the ordinal-ref change carries `blockId` — a calendar
+    // identity this format no longer has room for. Rejected rather than silently
+    // coerced: guessing a position from a foreign id would place the stage somewhere the
+    // operator never chose. Checked before the `blockIndex` presence check below, since a
+    // legacy export has no `blockIndex` at all and deserves the more specific message.
+    if ('blockId' in (stage.schedule as unknown as Record<string, unknown>))
+      return {
+        ok: false,
+        error: 'this structure JSON uses the old blockId format — regenerate it with blockIndex',
+      };
+    // A missing or non-numeric `blockIndex` round-trips to NaN in the block picker and
+    // only dies as a server 400 — caught here instead, before it is ever rendered.
+    if (!Number.isInteger(stage.schedule.blockIndex) || stage.schedule.blockIndex < 0)
+      return { ok: false, error: `Stage "${stage.name}" has no valid playing block.` };
   }
   return {
     ok: true,
@@ -252,15 +278,6 @@ export function parseStructureJson(
       name: candidate.name.trim(),
       version: 1,
       templateId: candidate.templateId,
-      // Carried, because `structureToJson` EXPORTS it — rebuilding the object without it
-      // meant an export→import round trip manufactured a structure with real block ids
-      // and no record of which calendar they belong to, which is exactly the shape that
-      // makes the editor open on the wrong calendar with every block picker blank.
-      // An id from a foreign tenant is harmless: `resolveDesignCalendarId` only honours
-      // one that exists here, and saving overwrites it with the resolved value. Still
-      // type-checked, because every other field here is and a non-string would otherwise
-      // ride untouched into the tenant config — `validateStructures` never inspects it.
-      calendarId: typeof candidate.calendarId === 'string' ? candidate.calendarId : undefined,
       stages: candidate.stages,
     },
   };

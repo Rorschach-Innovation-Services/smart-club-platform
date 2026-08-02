@@ -227,6 +227,11 @@ platform cannot take that option, so it pays for it with snapshots.
 
 ### A structure records the calendar its blocks were authored against, and never guesses
 
+> **Superseded** — see the [2026-08-02 addendum](#addendum-2026-08-02-ordinal-block-references-and-the-season-wizard).
+> `calendarId` provenance and the resolution chain below were removed once stages stopped
+> naming a concrete `blockId` at all. Kept here for the record of what the resolution
+> problem actually was and why it needed four separate mechanisms to compensate for it.
+
 A `StageSpec` names a `blockId` and nothing else, so "which calendar does this structure
 belong to" is a question the model cannot answer from the stage alone. `CompetitionStructure`
 therefore carries `calendarId` — provenance, not a binding, since a competition still names
@@ -418,3 +423,125 @@ benefit, which is the argument 0004 already made.
   constraint density; here it trades explainability for optimality we do not need.
 - **A new entity for fixtures under `SeasonRun`.** Cleaner on paper; puts every working
   release, broadcast and travel-cost path into scope for a change about team composition.
+
+## Addendum (2026-08-02): ordinal block references and the season wizard
+
+The "records the calendar its blocks were authored against" section above shipped, got used,
+and turned out to be solving the wrong problem. This addendum is the record of what actually
+strained and what replaced it.
+
+### The strain point was the reference itself, not the resolution
+
+`StageSpec.schedule` named a concrete `blockId`. That is a reference that crosses a boundary
+the structure doesn't own: a structure has no calendar of its own — a competition binds one at
+the league level, and the same structure is meant to be reusable across seasons and calendars.
+So "which calendar does this `blockId` belong to" was a question the stage's own data could
+never answer, and everything downstream of that gap was compensation:
+
+- `CompetitionStructure.calendarId` — provenance recorded because the stage couldn't carry it.
+- A four-step resolution chain (recorded id → the calendar the competition binds → the one
+  calendar whose blocks cover every stage → nothing) — needed because provenance goes missing
+  (structures written before the field, imported JSON, the seed CLI).
+- A refusal banner naming each stage and its candidate calendars — needed because the last
+  resolution step deliberately returned nothing rather than guess, and "nothing" is only a
+  safe answer if the operator can see it was asked.
+- A remap flow — needed to let an operator resolve the refusal by hand.
+- Non-unique block ids namespaced apart on every calendar — needed because two tenants seeded
+  before ids were namespaced could carry identical `blockId`s on different calendars, which is
+  exactly the ambiguity the resolution chain existed to detect.
+
+Four mechanisms, each earning its keep, all downstream of one modelling choice: a stage
+referencing a block **directly** instead of by its place in whatever calendar turns out to
+be bound to it.
+
+### What replaced it: position, not identity
+
+`StageSchedule.blockId: string` became `StageSchedule.blockIndex: number` — a 0-based position
+into the bound calendar's `blocks` array. A stage now says "I play in the Nth block of
+whatever the competition binds", not "I play in block `xyz123`". The structure genuinely
+carries no calendar identity, which was always the intent — it just took shipping the
+`calendarId`-provenance version to see that identity was the wrong thing to be resolving in
+the first place.
+
+This is a breaking change to the stored shape, accepted because there was no production data
+to carry forward (the KZNCU/EMCU launch hadn't happened yet). It deleted, outright:
+
+- `CompetitionStructure.calendarId` and the provenance it recorded.
+- `resolveDesignCalendarId`, the four-step resolution chain.
+- `stagesOffCalendar` and the refusal-question banner it fed.
+- The remap flow in the structure editor.
+- `keepExistingBlockIds` in the seed CLI, and the rationale comment explaining why it existed.
+
+Dev data predating the change is handled by a one-off script,
+`packages/api/scripts/migrate-block-index.ts` (dry-run by default), documented in the
+[runbook](../runbooks/configurable-league-structures.md). Prod carries no ADR-0008 data, so
+it never runs there.
+
+`Series.schedule` (the binding a _generated series_ carries) is unchanged — a series is
+produced once, against a specific calendar and a specific block, and regenerate should
+reproduce exactly that. Position semantics only apply to a structure's stages, because a
+structure is the reusable part. A series is not.
+
+### Versioning moved server-side for the same reason
+
+Structure `version` was client-minted: the operator console incremented it on every save.
+That is trustworthy right up until two things are true at once — a save that changes nothing
+(a re-open-and-save, or a save alongside an unrelated field) still minted a version, and nothing
+stopped a client from getting the arithmetic wrong. Versioning exists so a running `SeasonRun`
+can tell whether its `structureSnapshot` still matches the live template; a version number that
+increments on a no-op change makes that check noisier than the thing it's protecting against.
+
+The server now deep-compares incoming structure content (everything except `version` itself)
+against what's stored for that id, and mints `existing.version + 1` only when something
+actually changed. A no-op resave keeps the existing number. The client no longer sends a
+version to mint — it sends content, and finds out what version it landed on from the response.
+
+### Calendar edits warn; they don't guard
+
+A `Series.schedule.calendarId`/`blockId` stays a live reference to the calendar row, on
+purpose: `PUT /platform/tenants/:slug` lets an operator edit a calendar's block dates even
+when series are scheduled against it, and the next regenerate follows the new dates. This
+was a deliberate call, not an oversight, and it is worth stating why explicitly because the
+instinct when you see "live reference to a mutable row" is to reach for a guard.
+
+[PlayHQ's regrading model](https://support.playhq.com/hc/en-au/articles/900003188503-Understanding-the-impact-of-regrading-on-a-grade-s-fixture)
+is the industry precedent: mid-season interruptions (a ground lost to weather, a break moved,
+a whole block shifted) are common enough that operators expect the platform to let the season
+flex around them, not to freeze the original dates the moment a fixture exists. A hard guard
+— refuse to save a calendar edit while series reference it — would make the one thing operators
+actually need (push a block back two weeks after a washout) impossible without deleting and
+recreating series wholesale.
+
+So the edit is allowed, and what changed is visibility: the PUT response carries
+`warnings[]` when an edited calendar's blocks are referenced by scheduled series ("N series
+are scheduled against this calendar; regenerating them will follow the new dates"), surfaced
+in the operator console as a toast. It's informational, never blocking, and additive to the
+response shape — an unaffected save looks exactly as it did before this existed. The guard
+that _does_ block is narrower and different: deleting a calendar outright, or removing a
+block a stage still needs, still 409s, because that isn't "the season moved", it's "the
+season lost its ground to stand on".
+
+### The wizard, not the cards, is the primary setup path
+
+Three cards — calendars, structures, leagues/bindings — always contained everything needed to
+set a league up. What research across comparable platforms (PlayHQ, Spawtz, SportsEngine,
+GameDay, LeagueRepublic, Play-Cricket) converged on is that the _cards_ are not where operators
+start: they start from "set up a season", and the platform should walk them calendar → structure
+→ binding as one guided sequence, not hand them three independent settings pages and trust them
+to visit all three in the right order.
+
+The industry pattern is also specifically **league-first**, not a shared season-date layer that
+every league is forced through before it can be configured. A season calendar in this platform
+is still shared across leagues — that part of the model doesn't change — but the wizard treats
+it as step one of _a league's_ setup, with a skip option per league, rather than a tenant-wide
+prerequisite gating everything downstream. That distinction matters for exactly the case ADR
+0008 was written for: EMCU divisions need no stage model at all, and forcing them through a
+structure step before they can get a calendar would be the inner-platform effect creeping into
+the setup flow itself.
+
+`SeasonSetupWizard` (`src/platform-season-wizard.tsx`) is that flow: season dates (embedding
+the existing calendar form) → per-league structure choice (template, existing structure, or
+skip) with a live fit verdict against the chosen calendar → a single review-and-commit PUT.
+The three cards do not go away — they remain the library surfaces for editing a structure in
+detail, extending a calendar mid-season, or fixing a single binding — but the wizard is what a
+new tenant's setup checklist points at first.

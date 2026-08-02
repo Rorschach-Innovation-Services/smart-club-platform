@@ -26,6 +26,7 @@ import { InsightsBreakdown, LeagueTeamDirectoryCard, DemographicsCard } from './
 import { CalendarsCard } from './platform-calendars';
 import { formatDayYear, formatStampDay } from './dates';
 import { StructuresCard, CompetitionsModal } from './platform-structures';
+import { SeasonSetupWizard } from './platform-season-wizard';
 import type {
   TenantConfig,
   TenantSummary,
@@ -595,6 +596,7 @@ function TenantEditPage({ toast }: { toast: Toast }) {
     queryFn: () => api.platformGetTenant(slug),
     retry: 0,
   });
+  const [seasonWizard, setSeasonWizard] = useState(false);
 
   if (q.isLoading) return <p style={{ color: 'var(--muted)', fontSize: 13 }}>Loading client…</p>;
   if (q.isError || !q.data)
@@ -620,7 +622,16 @@ function TenantEditPage({ toast }: { toast: Toast }) {
    */
   async function save(patch: Partial<TenantConfig>): Promise<TenantConfig> {
     const next = await api.platformUpdateTenant(slug, patch);
-    queryClient.setQueryData(qk.platformTenant(slug), next);
+    // Informational only (ADR 0008 phase 1 gap 4) — a calendar block edit landed on
+    // dates a series already schedules against; the save still succeeded. Shared by
+    // every save path (calendars/structures/competitions all funnel through here).
+    next.warnings?.forEach((w) => toast(w, 'warn'));
+    // `warnings` is a one-time signal off THIS response, not part of the tenant's state —
+    // caching it would leave a phantom `warnings` key on the config until the next
+    // refetch quietly drops it.
+    const { warnings: _warnings, ...cached } = next;
+    void _warnings;
+    queryClient.setQueryData(qk.platformTenant(slug), cached);
     queryClient.invalidateQueries({ queryKey: qk.platformTenants() });
     // The Overview button makes edit→overview a one-click flow; without this the
     // breakdown can show pre-edit leagues/districts/name for up to staleTime (30s).
@@ -696,7 +707,9 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           toast={toast}
         />
         {/* Districts above leagues: the league form's district picker draws from them. */}
-        <DistrictsCard key={`ds-${config.tenant}`} config={config} save={save} toast={toast} />
+        <div id="setup-districts">
+          <DistrictsCard key={`ds-${config.tenant}`} config={config} save={save} toast={toast} />
+        </div>
         <ClubDirectoryCard
           key={`kc-${config.tenant}`}
           slug={slug}
@@ -704,34 +717,52 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           save={save}
           toast={toast}
         />
-        <LeaguesCard
-          key={`lg-${config.tenant}`}
-          slug={slug}
-          config={config}
-          save={save}
-          toast={toast}
-        />
+        <div id="setup-leagues">
+          <LeaguesCard
+            key={`lg-${config.tenant}`}
+            slug={slug}
+            config={config}
+            save={save}
+            toast={toast}
+          />
+        </div>
         {/* Calendars after leagues: a league's series is scheduled against one, so the
             reading order matches the setup order (leagues exist, then when they play). */}
-        <CalendarsCard
-          key={`cal-${config.tenant}`}
-          slug={slug}
-          config={config}
-          save={save}
-          toast={toast}
-        />
+        <div id="setup-calendars">
+          <CalendarsCard
+            key={`cal-${config.tenant}`}
+            slug={slug}
+            config={config}
+            save={save}
+            toast={toast}
+            onOpenWizard={() => setSeasonWizard(true)}
+          />
+        </div>
         {/* Structures after calendars: a stage names a playing block, so the calendar
             has to exist first for the block picker to have anything in it. */}
-        <StructuresCard
-          key={`str-${config.tenant}`}
-          slug={slug}
-          config={config}
-          save={save}
-          toast={toast}
-        />
+        <div id="setup-structures">
+          <StructuresCard
+            key={`str-${config.tenant}`}
+            slug={slug}
+            config={config}
+            save={save}
+            toast={toast}
+          />
+        </div>
         <SetupCard key={`setup-${config.tenant}`} slug={slug} config={config} toast={toast} />
         <DnsPanel slug={slug} />
       </div>
+
+      {seasonWizard && (
+        <SeasonSetupWizard
+          slug={slug}
+          config={latest()}
+          save={save}
+          toast={toast}
+          onClose={() => setSeasonWizard(false)}
+          onDone={() => setSeasonWizard(false)}
+        />
+      )}
     </div>
   );
 }
@@ -2662,16 +2693,39 @@ function SetupCard({ slug, config, toast }: { slug: string; config: TenantConfig
     }
   }
 
-  const checklist: Array<{ label: string; done: boolean }> = [
+  /** Scrolls to a card rendered elsewhere on this same page — the checklist's whole point
+      is "here's what's missing", so a row that names a card should jump to it. */
+  const jumpTo = (id: string) => () =>
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  const checklist: Array<{ label: string; done: boolean; anchor?: string }> = [
     { label: 'Logo uploaded', done: !!config.branding?.logoUrl },
     { label: 'Brand colours set', done: Object.keys(config.branding?.colors ?? {}).length > 0 },
     { label: 'Submission deadline set', done: !!config.submissionDeadline },
-    { label: 'Districts configured', done: (config.districts?.length ?? 0) > 0 },
-    { label: 'Leagues configured', done: (config.leagues?.length ?? 0) > 0 },
-    { label: 'Season calendar set', done: (config.calendars?.length ?? 0) > 0 },
+    {
+      label: 'Districts configured',
+      done: (config.districts?.length ?? 0) > 0,
+      anchor: 'setup-districts',
+    },
+    {
+      label: 'Leagues configured',
+      done: (config.leagues?.length ?? 0) > 0,
+      anchor: 'setup-leagues',
+    },
+    {
+      label: 'Season calendar set',
+      done: (config.calendars?.length ?? 0) > 0,
+      anchor: 'setup-calendars',
+    },
+    {
+      label: 'Competition structures',
+      done: (config.structures?.length ?? 0) > 0,
+      anchor: 'setup-structures',
+    },
     {
       label: 'Competitions bound to leagues',
       done: (config.leagues ?? []).some((l) => (l.competitions?.length ?? 0) > 0),
+      anchor: 'setup-leagues',
     },
     { label: 'First admin added', done: (config.adminCount ?? 0) > 0 },
   ];
@@ -2742,9 +2796,29 @@ function SetupCard({ slug, config, toast }: { slug: string; config: TenantConfig
                 style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12.5 }}
               >
                 <span className={`sdot ${item.done ? 'teal' : 'muted'}`} />
-                <span style={{ color: item.done ? 'var(--ink)' : 'var(--muted)' }}>
-                  {item.label}
-                </span>
+                {item.anchor ? (
+                  <button
+                    type="button"
+                    onClick={jumpTo(item.anchor)}
+                    style={{
+                      background: 'none',
+                      border: 0,
+                      padding: 0,
+                      font: 'inherit',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      textDecoration: 'underline',
+                      textDecorationColor: 'var(--line)',
+                      color: item.done ? 'var(--ink)' : 'var(--muted)',
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                ) : (
+                  <span style={{ color: item.done ? 'var(--ink)' : 'var(--muted)' }}>
+                    {item.label}
+                  </span>
+                )}
               </li>
             ))}
           </ul>

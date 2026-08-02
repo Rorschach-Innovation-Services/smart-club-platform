@@ -14,8 +14,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { CalendarsCard } from './platform-calendars';
-import type { SeasonCalendar, TenantConfig } from './types';
+import type { League, SeasonCalendar, TenantConfig } from './types';
 import * as api from './api';
+import { ApiError } from './api';
 
 // The ONLY mock here, and it is a real system boundary: the card refetches the tenant
 // before every write so two operators editing different calendars can't erase each other.
@@ -51,6 +52,16 @@ const setup = (calendars: SeasonCalendar[] = []) => {
 
 const openNew = async (user: ReturnType<typeof userEvent.setup>) => {
   await user.click(screen.getByRole('button', { name: /create your first calendar/i }));
+};
+
+/** `YYYY-MM-DD` for local "now" — matches `todayIso`, which deliberately reads local time
+ * rather than UTC (see its own doc comment), so this must too or the two disagree near
+ * midnight in timezones ahead of UTC. */
+const localToday = () => {
+  const n = new Date();
+  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(
+    n.getDate(),
+  ).padStart(2, '0')}`;
 };
 
 /** The two `type="date"` boxes on the first block row, in document order. */
@@ -127,13 +138,45 @@ describe('CalendarsCard — validation before anything is generated', () => {
     await openNew(user);
 
     await user.type(screen.getByPlaceholderText('e.g. 2026/27'), '2026/27');
+    // The first block now defaults to real dates (today → +8 weeks), so both boxes need
+    // clearing first — typing into a pre-filled date input appends to it rather than
+    // replacing it.
     const [start, end] = dateBoxes();
+    await user.clear(start);
     await user.type(start, '2026-12-12');
+    await user.clear(end);
     await user.type(end, '2026-09-12');
 
     expect(screen.getByText(/ends before it starts/i)).toBeVisible();
     await user.click(screen.getByRole('button', { name: /^create calendar$|^save/i }));
     expect(save).not.toHaveBeenCalled();
+  });
+
+  it('defaults the first block of a new calendar to today through eight weeks out', async () => {
+    const { user } = setup([]);
+    await openNew(user);
+
+    const [start, end] = dateBoxes();
+    expect(start).toHaveValue(localToday());
+    // 8 weeks = 56 days. Comparing the label rather than reimplementing date math here —
+    // the point under test is that it's non-blank and after `start`, not the exact
+    // calendar arithmetic (that's `addDays`'s own test).
+    expect(end.value > start.value).toBe(true);
+  });
+
+  it('chains a newly added block off the one before it, not off today again', async () => {
+    const { user } = setup([]);
+    await openNew(user);
+
+    await user.click(screen.getByRole('button', { name: /add block/i }));
+
+    const boxes = [...document.querySelectorAll<HTMLInputElement>('input[type="date"]')];
+    // Row 0 is the first block (today → +8 weeks); row 1 is the new second block.
+    const firstEnd = boxes[1].value;
+    const secondStart = boxes[2].value;
+    // Day after the first block's end, not another `today`.
+    expect(secondStart > firstEnd).toBe(true);
+    expect(secondStart).not.toBe(localToday());
   });
 
   it('refuses a break that swallows a whole block', async () => {
@@ -213,5 +256,75 @@ describe('CalendarsCard — concurrent edits', () => {
       expect.stringMatching(/deleted in another session/i),
       'warn',
     );
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Deleting a calendar bound by a league's competition (CalendarsCard's `onDelete`,
+   platform-calendars.tsx ~:619). A competition pointing at a deleted calendar would fail
+   the server's cross-check, so the binding is stripped in the SAME PUT — but only the
+   binding that actually points at the deleted calendar, not every competition the league
+   runs.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('CalendarsCard — deleting a bound calendar cascades to its competition', () => {
+  const leagueWith = (bound: string, elsewhere: string): League =>
+    ({
+      key: 'premier',
+      label: 'Premier Men',
+      group: 'Senior',
+      district: 'All districts',
+      competitions: [
+        { id: 'c1', label: '50 Over', structureId: 's1', calendarId: bound },
+        { id: 'c2', label: 'T20', structureId: 's2', calendarId: elsewhere },
+      ],
+    }) as unknown as League;
+
+  it('strips only the competition bound to the deleted calendar, in one save', async () => {
+    const bound = cal({ id: 'cal1', label: 'Cal 1' });
+    const other = cal({ id: 'cal2', label: 'Cal 2' });
+    const league = leagueWith('cal1', 'cal2');
+    const save = vi.fn().mockResolvedValue({});
+    const toast = vi.fn();
+    const user = userEvent.setup();
+    const config = { calendars: [bound, other], leagues: [league] } as unknown as TenantConfig;
+    vi.mocked(api.platformGetTenant).mockResolvedValue(config);
+
+    render(<CalendarsCard slug="dolphins" config={config} save={save} toast={toast} />);
+
+    await user.click(within(screen.getByRole('row', { name: /cal 1/i })).getByText(/delete/i));
+
+    // The confirm dialog names the affected league before anything is deleted.
+    expect(screen.getByText(/premier men/i)).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: /yes, delete/i }));
+
+    expect(save).toHaveBeenCalledTimes(1);
+    const patch = save.mock.calls[0][0];
+    expect(patch.calendars.map((c: SeasonCalendar) => c.id)).toEqual(['cal2']);
+    // The competition on the SURVIVING calendar is untouched.
+    expect(patch.leagues[0].competitions).toHaveLength(1);
+    expect(patch.leagues[0].competitions[0]).toMatchObject({ id: 'c2', calendarId: 'cal2' });
+  });
+
+  it('surfaces a save rejection via toast and deletes nothing locally', async () => {
+    // The series-scheduled guard: the server 409s rather than orphan a running series.
+    const bound = cal({ id: 'cal1', label: 'Cal 1' });
+    const save = vi
+      .fn()
+      .mockRejectedValue(new ApiError(409, 'A series already schedules against this calendar.'));
+    const toast = vi.fn();
+    const user = userEvent.setup();
+    const config = { calendars: [bound] } as unknown as TenantConfig;
+    vi.mocked(api.platformGetTenant).mockResolvedValue(config);
+
+    render(<CalendarsCard slug="dolphins" config={config} save={save} toast={toast} />);
+
+    await user.click(within(screen.getByRole('row', { name: /cal 1/i })).getByText(/delete/i));
+    await user.click(screen.getByRole('button', { name: /yes, delete/i }));
+
+    expect(toast).toHaveBeenCalledWith('A series already schedules against this calendar.', 'warn');
+    // Nothing removed locally — the calendar's row is still there.
+    expect(screen.getByRole('row', { name: /cal 1/i })).toBeInTheDocument();
   });
 });

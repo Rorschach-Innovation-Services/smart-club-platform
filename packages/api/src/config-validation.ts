@@ -15,7 +15,11 @@ import dayjs from 'dayjs';
 import dayjsUtc from 'dayjs/plugin/utc.js';
 import dayjsCustomParseFormat from 'dayjs/plugin/customParseFormat.js';
 import { HttpError } from './auth.js';
-import type { CompetitionStructure, League, SeasonCalendar } from './types.js';
+import type { Cadence, CompetitionStructure, League, SeasonCalendar, TimeSlot } from './types.js';
+
+// `HH:MM`, 24h — matches the `IsoTime` doc comment on types.ts, not parsed via dayjs
+// since a bare wall-clock time (no date) is outside what its strict-parse plugins cover.
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 // Strict date-only parsing (`YYYY-MM-DD`) needs both plugins. Idempotent — dayjs
 // ignores a repeat extend, so this is safe alongside index.ts doing the same.
@@ -96,6 +100,52 @@ const ENTRANT_KINDS = new Set(['all-registered', 'manual', 'seeded-split']);
 const CADENCE_KINDS = new Set(['weekly', 'every-n-weeks', 'weekdays', 'spread']);
 
 /**
+ * Shape guard for a `Cadence`, shared by structure-stage validation and series-schedule
+ * validation (`POST`/`PATCH /series`) so the two paths can never drift apart on what
+ * counts as a valid cadence. `context` names the thing being checked (e.g. `stage "X"`)
+ * for the error message.
+ *
+ * The PAYLOAD matters as much as the kind: a missing `n` renders as "every NaN weeks" and
+ * places exactly one round, reported as an opaque "Block 1 fits 1 at this cadence"; an
+ * out-of-range weekday passes the empty-list guard and then places nothing at all.
+ */
+export function assertValidCadence(cad: unknown, context: string): asserts cad is Cadence {
+  if (!cad || !CADENCE_KINDS.has((cad as Cadence).kind))
+    throw new HttpError(400, `${context} has an unknown cadence`);
+  const cadence = cad as Cadence;
+  if (
+    cadence.kind === 'every-n-weeks' &&
+    (!Number.isInteger(cadence.n) || cadence.n < 1 || cadence.n > 12)
+  )
+    throw new HttpError(400, `${context} needs a whole number of weeks between 1 and 12`);
+  if (cadence.kind === 'weekdays') {
+    if (!Array.isArray(cadence.days) || cadence.days.length === 0)
+      throw new HttpError(400, `${context} needs at least one playing day`);
+    if (cadence.days.some((d) => !Number.isInteger(d) || d < 0 || d > 6))
+      throw new HttpError(400, `${context} has a playing day outside 0-6`);
+  }
+}
+
+/**
+ * `TimeSlot[]` shape guard, shared by series-schedule validation (`POST`/`PATCH /series`)
+ * so any future structure-stage caller inherits the identical check. `slots` is optional
+ * everywhere it appears — this only fires when the array itself is present, same as
+ * `assertValidCadence` is only reached once its parent field exists.
+ */
+export function assertValidTimeSlots(slots: unknown, context: string): asserts slots is TimeSlot[] {
+  if (!Array.isArray(slots)) throw new HttpError(400, `${context} slots must be an array`);
+  for (const slot of slots) {
+    if (!slot || typeof (slot as TimeSlot).label !== 'string' || !(slot as TimeSlot).label.trim())
+      throw new HttpError(400, `every slot in ${context} needs a label`);
+    if (typeof (slot as TimeSlot).start !== 'string' || !TIME_RE.test((slot as TimeSlot).start))
+      throw new HttpError(
+        400,
+        `slot "${(slot as TimeSlot).label}" in ${context} needs a valid HH:MM start time`,
+      );
+  }
+}
+
+/**
  * Competition-structure shape guard (ADR 0008). A structure decides how a whole league's
  * fixtures are shaped, so a malformed one is worse than a rejected save.
  *
@@ -144,23 +194,21 @@ export function validateStructures(
         throw new HttpError(400, `stage "${sName}" must play 1, 2 or 3 legs`);
       if (!stage.entrants || !ENTRANT_KINDS.has(stage.entrants.kind))
         throw new HttpError(400, `stage "${sName}" has an unknown entrant rule`);
-      if (!stage.schedule?.blockId?.trim())
-        throw new HttpError(400, `stage "${sName}" needs a playing block`);
-      const cad = stage.schedule.cadence;
-      if (!cad || !CADENCE_KINDS.has(cad.kind))
-        throw new HttpError(400, `stage "${sName}" has an unknown cadence`);
-      // The PAYLOAD matters as much as the kind: a missing `n` renders as "every NaN
-      // weeks" and places exactly one round, reported as an opaque "Block 1 fits 1 at
-      // this cadence"; an out-of-range weekday passes the empty-list guard and then
-      // places nothing at all.
-      if (cad.kind === 'every-n-weeks' && (!Number.isInteger(cad.n) || cad.n < 1 || cad.n > 12))
-        throw new HttpError(400, `stage "${sName}" needs a whole number of weeks between 1 and 12`);
-      if (cad.kind === 'weekdays') {
-        if (!Array.isArray(cad.days) || cad.days.length === 0)
-          throw new HttpError(400, `stage "${sName}" needs at least one playing day`);
-        if (cad.days.some((d) => !Number.isInteger(d) || d < 0 || d > 6))
-          throw new HttpError(400, `stage "${sName}" has a playing day outside 0-6`);
-      }
+      // blockIndex names a POSITION into whichever calendar the competition later binds
+      // (validateCompetitions checks the bound calendar actually has that many blocks) —
+      // the structure itself has no calendar to check the index against.
+      if (
+        !Number.isInteger(stage.schedule?.blockIndex) ||
+        stage.schedule.blockIndex < 0 ||
+        stage.schedule.blockIndex > 19
+      )
+        throw new HttpError(
+          400,
+          `stage "${sName}" needs a playing block position between 0 and 19`,
+        );
+      assertValidCadence(stage.schedule.cadence, `stage "${sName}"`);
+      if (stage.schedule.slots !== undefined)
+        assertValidTimeSlots(stage.schedule.slots, `stage "${sName}"`);
       if (
         stage.format.kind === 'knockout' &&
         !['seeded', 'cross-pool'].includes(stage.format.pairing)
@@ -251,15 +299,16 @@ export function validateCompetitions(
           );
       }
       // Structures and calendars are authored independently, so a structure's stages can
-      // name blocks the bound calendar has never had. Caught here — the one place all
-      // three are in scope — rather than surfacing months later as "That playing block no
-      // longer exists" the first time someone tries to generate a season.
-      const blockIds = new Set(calendar.blocks.map((b) => b.id));
-      const orphan = structure.stages.find((stage) => !blockIds.has(stage.schedule.blockId));
-      if (orphan)
+      // name a position past the end of the bound calendar's blocks. Caught here — the one
+      // place all three are in scope — rather than surfacing months later as "That playing
+      // block no longer exists" the first time someone tries to generate a season.
+      const overrun = structure.stages.find(
+        (stage) => stage.schedule.blockIndex >= calendar.blocks.length,
+      );
+      if (overrun)
         throw new HttpError(
           400,
-          `competition "${comp.label}": stage "${orphan.name}" plays in a block that isn't on ${calendar.label}`,
+          `competition "${comp.label}": stage "${overrun.name}" plays in block ${overrun.schedule.blockIndex + 1} but calendar ${calendar.label} has only ${calendar.blocks.length} block${calendar.blocks.length === 1 ? '' : 's'}`,
         );
     }
   }

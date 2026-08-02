@@ -121,6 +121,8 @@ function StartSeasonForm({
   onCreate,
   onClose,
   toast,
+  initialLeagueKey,
+  onBack,
 }: {
   clubs: Club[];
   allLeagues: League[];
@@ -129,9 +131,13 @@ function StartSeasonForm({
   onCreate: (run: SeasonRun) => Promise<void>;
   onClose: () => void;
   toast: Toast;
+  /** Preselected by the launcher — the admin already chose this league there. */
+  initialLeagueKey?: string;
+  /** Routes back to the league picker instead of closing outright — see `GenerateFixturesLauncher`. */
+  onBack?: () => void;
 }) {
   const capable = seasonCapableLeagues(allLeagues);
-  const [leagueKey, setLeagueKey] = useState(capable[0]?.key ?? '');
+  const [leagueKey, setLeagueKey] = useState(initialLeagueKey ?? capable[0]?.key ?? '');
   const league = capable.find((l) => l.key === leagueKey);
   const [competitionId, setCompetitionId] = useState(league?.competitions?.[0]?.id ?? '');
   const [seasonLabel, setSeasonLabel] = useState(currentSeasonLabel());
@@ -197,7 +203,7 @@ function StartSeasonForm({
           here.
         </p>
         <p style={{ ...HINT }}>
-          In the meantime, the existing <em>Create series</em> flow still works for a simple league.
+          In the meantime, Generate fixtures still works for a simple league.
         </p>
         <div style={{ marginTop: 16 }}>
           <Btn tone="outline" onClick={onClose}>
@@ -229,23 +235,35 @@ function StartSeasonForm({
             </option>
           ))}
         </select>
+        {capable.length < allLeagues.length && (
+          <p style={HINT}>
+            Only leagues your platform operator has bound a competition to appear here.
+          </p>
+        )}
       </div>
 
       <div className="field">
         <div className="field-label">
           Competition <span className="req">*</span>
         </div>
-        <select
-          className="field-select"
-          value={competitionId}
-          onChange={(e) => setCompetitionId(e.target.value)}
-        >
-          {(league?.competitions ?? []).map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.label}
-            </option>
-          ))}
-        </select>
+        {/* A league usually has ONE competition — a dropdown there implies a choice that
+            doesn't exist. The select only appears for leagues running parallel format
+            streams (e.g. a 50 Over and a T20 competition over the same clubs). */}
+        {(league?.competitions ?? []).length === 1 ? (
+          <div style={{ fontSize: 13.5, padding: '6px 0' }}>{league?.competitions?.[0]?.label}</div>
+        ) : (
+          <select
+            className="field-select"
+            value={competitionId}
+            onChange={(e) => setCompetitionId(e.target.value)}
+          >
+            {(league?.competitions ?? []).map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
       <div className="field">
@@ -320,6 +338,14 @@ function StartSeasonForm({
       {err && <div style={ERR}>{err}</div>}
 
       <div style={{ display: 'flex', gap: 8 }}>
+        {/* Once routed here from the league picker there was no way back to it — Cancel
+            closes the whole modal, discarding the league choice too. Matches the wizard's
+            footRow Back/ghost idiom (see `SeasonSetupWizard`). */}
+        {onBack && (
+          <Btn tone="ghost" onClick={onBack} disabled={busy}>
+            Back
+          </Btn>
+        )}
         <Btn tone="teal" onClick={submit} disabled={!!problems.length || busy}>
           {busy ? 'Starting…' : 'Start season'}
         </Btn>
@@ -328,6 +354,115 @@ function StartSeasonForm({
         </Btn>
       </div>
     </div>
+  );
+}
+
+/* ─── Generate fixtures — the single entry point, routed by league ─── */
+
+/** The select's sentinel for "no particular league" — a hand-picked, ad-hoc series. */
+const AD_HOC = '__ad-hoc__';
+
+/**
+ * One button, two engines. The admin used to choose the ENGINE first — "Start a season"
+ * versus "Create series" — which only makes sense once you already know whether your
+ * league has a competition bound to it. Here they choose the LEAGUE, and the console picks
+ * the engine: a season-capable league swaps this same modal to `StartSeasonForm`; anything
+ * else (including "ad-hoc") hands off to the existing flat Create-series flow.
+ */
+export function GenerateFixturesLauncher({
+  clubs,
+  allLeagues,
+  config,
+  existingRuns,
+  onCreateRun,
+  onCreateSeries,
+  onClose,
+  toast,
+}: {
+  clubs: Club[];
+  allLeagues: League[];
+  config: TenantConfig;
+  existingRuns: SeasonRun[];
+  onCreateRun: (run: SeasonRun) => Promise<void>;
+  /** `null` for ad-hoc — the series form opens with no league prefilled. */
+  onCreateSeries: (leagueKey: string | null) => void;
+  onClose: () => void;
+  toast: Toast;
+}) {
+  const capable = seasonCapableLeagues(allLeagues);
+  const isCapable = (key: string) => capable.some((l) => l.key === key);
+  const [leagueKey, setLeagueKey] = useState(allLeagues[0]?.key ?? AD_HOC);
+  const [routed, setRouted] = useState(false);
+
+  if (routed) {
+    return (
+      <Modal
+        title={
+          <>
+            Start a <em>season</em>
+          </>
+        }
+        onClose={onClose}
+      >
+        <StartSeasonForm
+          clubs={clubs}
+          allLeagues={allLeagues}
+          config={config}
+          existingRuns={existingRuns}
+          initialLeagueKey={leagueKey}
+          onCreate={onCreateRun}
+          onClose={onClose}
+          onBack={() => setRouted(false)}
+          toast={toast}
+        />
+      </Modal>
+    );
+  }
+
+  function submit() {
+    if (leagueKey !== AD_HOC && isCapable(leagueKey)) {
+      setRouted(true);
+      return;
+    }
+    onCreateSeries(leagueKey === AD_HOC ? null : leagueKey);
+    onClose();
+  }
+
+  return (
+    <Modal title="Generate fixtures" onClose={onClose}>
+      <div style={{ display: 'grid', gap: 14 }}>
+        <div className="field">
+          <div className="field-label">
+            League <span className="req">*</span>
+          </div>
+          <select
+            className="field-select"
+            value={leagueKey}
+            onChange={(e) => setLeagueKey(e.target.value)}
+          >
+            {allLeagues.map((l) => (
+              <option key={l.key} value={l.key}>
+                {l.label}
+                {isCapable(l.key) ? ' · structured season' : ''}
+              </option>
+            ))}
+            <option value={AD_HOC}>Ad-hoc series — pick the sides by hand</option>
+          </select>
+          <p style={HINT}>
+            Leagues with a competition run a structured season; the rest generate a simple series.
+          </p>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Btn tone="teal" onClick={submit}>
+            Continue
+          </Btn>
+          <Btn tone="outline" onClick={onClose}>
+            Cancel
+          </Btn>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -926,19 +1061,16 @@ export function SeasonRunsPanel({
   allLeagues,
   allSeries,
   runs,
-  config,
   configFailed = false,
-  onCreateRun,
+  onOpenLauncher,
   onPatchRun,
   onGenerate,
   onDeleteRun,
-  toast,
 }: {
   clubs: Club[];
   allLeagues: League[];
   allSeries: Series[];
   runs: SeasonRun[];
-  config: TenantConfig;
   /**
    * The structures or season-runs fetch failed. Without this a loading failure renders as
    * "No season running" beside a Start CTA whose duplicate guard is checking an empty
@@ -946,13 +1078,13 @@ export function SeasonRunsPanel({
    * longer exists" about a structure that is perfectly fine.
    */
   configFailed?: boolean;
-  onCreateRun: (run: SeasonRun) => Promise<void>;
+  /** Opens the shared "Generate fixtures" launcher — this panel no longer hosts its own
+   *  Start-season modal, so both the top action and the empty-state CTA route through it. */
+  onOpenLauncher: () => void;
   onPatchRun: (id: string, patch: Partial<SeasonRun>) => Promise<void>;
   onGenerate: (payloads: GenerateGroupPayload[], run: SeasonRun, stage: StageSpec) => Promise<void>;
   onDeleteRun: (id: string) => void;
-  toast: Toast;
 }) {
-  const [starting, setStarting] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<{ run: SeasonRun; stage: StageSpec } | null>(null);
   const [busyStage, setBusyStage] = useState<string | null>(null);
@@ -1072,35 +1204,15 @@ export function SeasonRunsPanel({
             <EmptyState
               icon={Icon.Shield}
               title="No season running"
-              sub="Start a season to work through a structured competition stage by stage. A simple league can still use Create series."
+              sub="Generate fixtures to work through a structured competition stage by stage, or to create a simple series for any other league."
               action={
-                <Btn tone="teal" icon={Icon.Plus} onClick={() => setStarting(true)}>
+                <Btn tone="teal" icon={Icon.Plus} onClick={onOpenLauncher}>
                   Start a season
                 </Btn>
               }
             />
           )}
         </Card>
-        {starting && (
-          <Modal
-            title={
-              <>
-                Start a <em>season</em>
-              </>
-            }
-            onClose={() => setStarting(false)}
-          >
-            <StartSeasonForm
-              clubs={clubs}
-              allLeagues={allLeagues}
-              config={config}
-              existingRuns={runs}
-              onCreate={onCreateRun}
-              onClose={() => setStarting(false)}
-              toast={toast}
-            />
-          </Modal>
-        )}
       </>
     );
   }
@@ -1111,7 +1223,7 @@ export function SeasonRunsPanel({
         title="Seasons"
         sub="Each stage confirms who plays, then generates its fixtures. A stage whose teams depend on earlier results waits for you."
         action={
-          <Btn tone="teal" size="sm" icon={Icon.Plus} onClick={() => setStarting(true)}>
+          <Btn tone="teal" size="sm" icon={Icon.Plus} onClick={onOpenLauncher}>
             Start a season
           </Btn>
         }
@@ -1192,7 +1304,7 @@ export function SeasonRunsPanel({
                         // through a loop that has already written the earlier groups.
                         startDate:
                           g.plan.dates[0] ??
-                          findBlock(active.calendarSnapshot, stage.schedule.blockId)?.start ??
+                          findBlock(active.calendarSnapshot, stage.schedule.blockIndex)?.start ??
                           todayIso(),
                         league: runContext.league,
                         competition: runContext.competition,
@@ -1223,27 +1335,6 @@ export function SeasonRunsPanel({
           </>
         )}
       </Card>
-
-      {starting && (
-        <Modal
-          title={
-            <>
-              Start a <em>season</em>
-            </>
-          }
-          onClose={() => setStarting(false)}
-        >
-          <StartSeasonForm
-            clubs={clubs}
-            allLeagues={allLeagues}
-            config={config}
-            existingRuns={runs}
-            onCreate={onCreateRun}
-            onClose={() => setStarting(false)}
-            toast={toast}
-          />
-        </Modal>
-      )}
 
       {confirmDelete && active && (
         <Modal title="Delete this season?" onClose={() => setConfirmDelete(false)}>
