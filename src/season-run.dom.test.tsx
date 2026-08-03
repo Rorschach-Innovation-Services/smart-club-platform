@@ -1066,6 +1066,22 @@ describe('buildFlatSeasonRun', () => {
     expect(run.calendarSnapshot.blocks[1].start).toBe(calendar.blocks[1].start);
   });
 
+  it('ignores a firstRound after the block ends, leaving the block unchanged', () => {
+    const run = buildFlatSeasonRun({
+      id: 'run-x',
+      league: flatLeague,
+      seasonLabel: '2026/27',
+      calendar,
+      blockIndex: 1,
+      seriesType: 'Twenty20 (16-25 overs)',
+      overs: 20,
+      // After block 2's end (2027-03-27) — outside its range.
+      firstRound: '2027-04-01',
+    });
+
+    expect(run.calendarSnapshot.blocks[1].start).toBe(calendar.blocks[1].start);
+  });
+
   it('ignores a malformed, non-ISO firstRound string, leaving the block unchanged', () => {
     const run = buildFlatSeasonRun({
       id: 'run-x',

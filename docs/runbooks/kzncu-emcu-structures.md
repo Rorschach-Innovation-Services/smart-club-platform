@@ -8,8 +8,10 @@ activate-from dates, and per-stage time slots — already ships (see
 new capability; it is the mapping from the requirements document's checklist items to the
 existing starter templates and controls.
 
-Build calendars and venues first (see the runbook above, step 4, items 1–2), then work down
-this list league by league in **Structures** and **Leagues → Competitions**.
+Build calendars and venues first (see
+[`configurable-league-structures.md`](./configurable-league-structures.md), step 4, items
+1–2), then work down this list league by league in **Structures** and **Leagues →
+Competitions**.
 
 ## Template quick-reference
 
@@ -24,7 +26,7 @@ this list league by league in **Structures** and **Leagues → Competitions**.
 
 | League                              | Template            | What to edit                                                                                                                                                                                                                                                                                                           | Block                                                                                                       |
 | ----------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| KZNCU Premier Men 50-Over           | `split-league-swap` | Group labels → "Top Six" / "Bottom Six" on both stages. Both stages default to a double round robin already — leave as is (the template's final round is single by default for this league per the doc; confirm cadence stays Weekly).                                                                                 | Block 1 → carries into Block 2 (template auto-places stage 2 in the second block when the calendar has one) |
+| KZNCU Premier Men 50-Over           | `split-league-swap` | Group labels → "Top Six" / "Bottom Six" on both stages. Leave the round format as is — the template's opening stage already defaults to a double round robin and its final round already defaults to a single round robin, matching the doc for this league; confirm cadence stays Weekly.                             | Block 1 → carries into Block 2 (template auto-places stage 2 in the second block when the calendar has one) |
 | KZNCU Premier Men T20               | `pools-to-knockout` | Seeded-split, count = 2 groups (12 entrants → 6 each), seeded from the prior season's log/standings. Time slots default to Morning (08:00) / Afternoon (13:30) already — no change needed.                                                                                                                             | Block 1                                                                                                     |
 | KZNCU Promotion 50-Over / Kingsmead | `stream-and-cup`    | Group labels → "Top 10" / "Bottom 10" on the streams stage. Kingsmead Cup stage needs no manual entrant-count edit — the 9-team preliminary auto-derives from entrant count (`knockoutShape`, `src/competition/formats.ts`): 9 qualifiers trims to an 8-side main draw via one preliminary among the two lowest seeds. | Block 1                                                                                                     |
 | KZNCU Promotion T20                 | `pools-to-knockout` | Seeded-split, count = 4 groups (20 entrants → 5 each). Time slots default to T20 morning/afternoon — no change needed.                                                                                                                                                                                                 | Block 1                                                                                                     |
@@ -37,8 +39,8 @@ this list league by league in **Structures** and **Leagues → Competitions**.
 | EMCU Division 3 Stream 2            | Flat season         | Cadence → "Every 2 weeks" (`every-n-weeks`, n=2). Set a first-round anchor so the stride lands on Saturdays: either set **Scheduling options → First round** to a Saturday, or simply start the season's calendar block on a Saturday.                                                                                 | Block 1                                                                                                     |
 | EMCU Division 4                     | Flat season         | Same as Division 3 Stream 2 — cadence "Every 2 weeks", anchor the first round (or the block start) on a Saturday.                                                                                                                                                                                                      | Block 1                                                                                                     |
 | EMCU Division 5                     | Flat season         | Cadence → "Set days only", tick Saturday only.                                                                                                                                                                                                                                                                         | Block 1                                                                                                     |
-| Juniors U11                         | Flat season         | Scheduling options → **Activate from** set to the third week of January.                                                                                                                                                                                                                                               | Block 2                                                                                                     |
-| Juniors U13                         | Flat season         | Scheduling options → **Activate from** set to the third week of January.                                                                                                                                                                                                                                               | Block 2                                                                                                     |
+| Juniors U11                         | Flat season         | On the Start flat season form, the standalone **Activate from** field (after Match format, not inside Scheduling options) set to the third week of January.                                                                                                                                                            | Block 2                                                                                                     |
+| Juniors U13                         | Flat season         | On the Start flat season form, the standalone **Activate from** field (after Match format, not inside Scheduling options) set to the third week of January.                                                                                                                                                            | Block 2                                                                                                     |
 
 ## Notes on specific controls
 
@@ -59,14 +61,14 @@ this list league by league in **Structures** and **Leagues → Competitions**.
   literally "Every 2 weeks" (`CADENCE_LABELS`, `src/competition/calendar.ts`); the underlying
   `n` isn't operator-editable through the labelled control, which is fine since n=2 is what
   every bi-weekly EMCU division needs.
-- **First-round anchoring for bi-weekly cadences** lives under the flat create-series form's
-  collapsed "Scheduling options" section, alongside cadence and Activate from — it defaults to
-  the block's start date if left blank, so anchoring on a Saturday only matters when the block
-  itself doesn't already start on one.
-- **Activate from applies to both flat seasons and structure stages** — the flat create-series
-  form has its own "Activate from" field under Scheduling options (used here for the Juniors
-  divisions); a stage inside a structure has the same field per-stage, for competitions that
-  need a stage to open late mid-structure.
+- **First-round anchoring for bi-weekly cadences** lives under the Start flat season form's
+  collapsed "Scheduling options" section, alongside cadence — it defaults to the block's start
+  date if left blank, so anchoring on a Saturday only matters when the block itself doesn't
+  already start on one.
+- **Activate from applies to both flat seasons and structure stages** — the Start flat season
+  form has its own standalone "Activate from" field, after Match format and NOT inside
+  Scheduling options (used here for the Juniors divisions); a stage inside a structure has the
+  same field per-stage, for competitions that need a stage to open late mid-structure.
 
 ## See also
 

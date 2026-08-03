@@ -44,18 +44,14 @@ const clubs = Array.from({ length: 8 }, (_, i) => ({
 
 const setup = ({
   withCalendar = true,
-  initialLeagueKey,
   onCreate = vi.fn().mockResolvedValue(undefined),
   onClose = vi.fn(),
   onBack,
-  lockLeague,
 }: {
   withCalendar?: boolean;
-  initialLeagueKey?: string;
   onCreate?: ReturnType<typeof vi.fn>;
   onClose?: ReturnType<typeof vi.fn>;
   onBack?: ReturnType<typeof vi.fn>;
-  lockLeague?: boolean;
 } = {}) => {
   const user = userEvent.setup();
   renderWithProviders(
@@ -63,11 +59,9 @@ const setup = ({
       clubs={clubs}
       allLeagues={leagues as never[]}
       allCalendars={withCalendar ? [calendar] : []}
-      initialLeagueKey={initialLeagueKey}
       onCreate={onCreate}
       onClose={onClose}
       onBack={onBack}
-      lockLeague={lockLeague}
     />,
   );
   return { user, onCreate, onClose, onBack };
@@ -266,25 +260,6 @@ describe('picking a league', () => {
   });
 });
 
-describe('opened from the "Generate fixtures" launcher with a league already chosen', () => {
-  it('prefills the league, the name and every registered side — same as a manual pick', async () => {
-    const { user, onCreate } = setup({ initialLeagueKey: 'emcuD1' });
-
-    expect(screen.getByLabelText('League')).toHaveValue('emcuD1');
-    await user.selectOptions(screen.getByLabelText('Dates'), 'cal');
-    await user.click(createBtn());
-
-    const created = onCreate.mock.calls[0][0];
-    expect(created.teams).toHaveLength(8);
-    expect(created.name).toMatch(/EMCU Division 1/);
-  });
-
-  it('leaves the league unset without one — the ad-hoc case', () => {
-    setup();
-    expect(screen.getByLabelText('League')).toHaveValue('');
-  });
-});
-
 describe('the optional Back button (embedded in the "Generate fixtures" launcher)', () => {
   it('is absent when no onBack is supplied — the standalone/legacy use', () => {
     setup();
@@ -297,20 +272,6 @@ describe('the optional Back button (embedded in the "Generate fixtures" launcher
 
     await user.click(screen.getByRole('button', { name: /^back$/i }));
     expect(onBack).toHaveBeenCalled();
-  });
-});
-
-describe('lockLeague — embedded with a real league the launcher already picked', () => {
-  it('replaces the league select with static text naming the locked league', () => {
-    setup({ initialLeagueKey: 'emcuD1', lockLeague: true });
-
-    expect(screen.queryByLabelText('League')).toBeNull();
-    expect(screen.getByText(/EMCU Division 1 · 2026\/27/)).toBeInTheDocument();
-  });
-
-  it('keeps the free select when not locked — the ad-hoc case', () => {
-    setup();
-    expect(screen.getByLabelText('League')).toBeInTheDocument();
   });
 });
 
@@ -333,7 +294,7 @@ describe('Back discards an edited form only with confirmation', () => {
     vi.spyOn(window, 'confirm').mockReturnValue(false);
     const { user } = setup({ onBack });
 
-    await pickLeague(user); // a user-driven edit, not the initialLeagueKey prefill
+    await pickLeague(user); // a user-driven edit
     await user.click(screen.getByRole('button', { name: /^back$/i }));
 
     expect(window.confirm).toHaveBeenCalled();

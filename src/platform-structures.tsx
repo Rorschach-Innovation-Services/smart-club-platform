@@ -342,7 +342,6 @@ function StageRow({
   index,
   total,
   calendar,
-  calendars,
   earlierStages,
   previewTeams,
   expanded,
@@ -355,8 +354,6 @@ function StageRow({
   index: number;
   total: number;
   calendar: SeasonCalendar | undefined;
-  /** Every calendar on the tenant — used to say where an off-calendar block lives. */
-  calendars: SeasonCalendar[];
   earlierStages: StageSpec[];
   previewTeams: number;
   expanded: boolean;
@@ -727,7 +724,6 @@ function StageRow({
                   // absent `slots` as "no slots"; persisting `slots: []` is a different,
                   // invalid state, not merely an empty one.
                   const { slots: _slots, ...rest } = stage.schedule;
-                  void _slots;
                   onChange({ schedule: rest });
                 }
               }}
@@ -910,13 +906,11 @@ function DerivationEditor({
 function PreviewRail({
   structure,
   calendar,
-  calendars,
   previewTeams,
   onPreviewTeams,
 }: {
   structure: CompetitionStructure;
   calendar: SeasonCalendar | undefined;
-  calendars: SeasonCalendar[];
   previewTeams: number;
   onPreviewTeams: (n: number) => void;
 }) {
@@ -1161,6 +1155,13 @@ function StructureEditor({
     // off-calendar check below, which the server also enforces at save time.
     if (s.schedule.cadence.kind === 'weekdays' && !s.schedule.cadence.days.length)
       errors.push(`"${s.name}" needs at least one playing day.`);
+    // Mirrors the server's own `assertValidTimeSlots` (config-validation.ts) so a bad
+    // slot is caught inline rather than as a round-trip 400.
+    for (const slot of s.schedule.slots ?? []) {
+      if (!slot.label.trim()) errors.push(`"${s.name}" has a time slot without a label.`);
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(slot.start))
+        errors.push(`"${s.name}" has a time slot without a valid HH:MM start.`);
+    }
     const note = s.entrants.kind === 'manual' ? s.entrants.derivedFrom : undefined;
     // Two different mistakes, two different messages. An unpicked source (the "Pick the
     // earlier stage…" placeholder, `fromStage: ''`) is not the same as pointing at a
@@ -1386,7 +1387,6 @@ function StructureEditor({
               index={i}
               total={draft.stages.length}
               calendar={calendar}
-              calendars={calendars}
               earlierStages={draft.stages.slice(0, i)}
               previewTeams={previewTeams}
               expanded={expanded === stage.id}
@@ -1415,7 +1415,6 @@ function StructureEditor({
         <PreviewRail
           structure={draft}
           calendar={calendar}
-          calendars={calendars}
           previewTeams={previewTeams}
           onPreviewTeams={setPreviewTeams}
         />

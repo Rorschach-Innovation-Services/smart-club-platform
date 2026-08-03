@@ -59,14 +59,14 @@ export const WEEKDAY_LABELS = [
    The cadence union is keyed by `kind`, but a Choice control speaks in labels, so these
    two map between them. Bi-weekly is the only parameterised option the UI exposes;
    `every-n-weeks` with other values stays reachable through the API for now. */
-export const CADENCE_LABELS = {
+export const CADENCE_LABELS: Record<Cadence['kind'], string> = {
   weekly: 'Weekly',
   'every-n-weeks': 'Every 2 weeks',
   weekdays: 'Set days only',
   spread: 'Spread across block',
 };
 
-export function cadenceFromLabel(label): Cadence {
+export function cadenceFromLabel(label: string): Cadence {
   switch (label) {
     case CADENCE_LABELS['every-n-weeks']:
       return { kind: 'every-n-weeks', n: 2 };

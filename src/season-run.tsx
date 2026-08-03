@@ -388,9 +388,7 @@ function StartSeasonForm({
  *  so a flat season's synthetic competition reads the same as the ad-hoc form's
  *  out-of-the-box series would, and stays coherent with whatever overs the admin actually
  *  sets. */
-const FLAT_DEFAULT_OVERS = DEFAULT_SERIES_OVERS;
-const FLAT_SERIES_TYPES = SERIES_TYPES;
-const FLAT_DEFAULT_SERIES_TYPE = FLAT_SERIES_TYPES[0];
+const FLAT_DEFAULT_SERIES_TYPE = SERIES_TYPES[0];
 
 /** Sentinel `competitionId` for a flat season — parallels `AD_HOC` below, but persisted
  *  (a real SeasonRun is stored under it), so `SeasonRunsPanel` and the duplicate guard
@@ -562,7 +560,7 @@ function StartFlatSeasonForm({
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [activateFrom, setActivateFrom] = useState('');
-  const [overs, setOvers] = useState(FLAT_DEFAULT_OVERS);
+  const [overs, setOvers] = useState(DEFAULT_SERIES_OVERS);
   const [seriesType, setSeriesType] = useState<string>(FLAT_DEFAULT_SERIES_TYPE);
   // Scheduling options — collapsed by default (see the toggle below). Defaults stay
   // exactly the previous behaviour when the section is never opened: weekly cadence, no
@@ -615,7 +613,11 @@ function StartFlatSeasonForm({
     // The SAME clamping logic `buildFlatSeasonRun` uses at submit — so the "Ready" preview
     // line reflects the anchored first-round date rather than a slightly different
     // approximation of it.
-    const previewCalendar = withClampedBlockStart(baseCalendar, blockIndex, firstRound);
+    const previewCalendar = withClampedBlockStart(
+      baseCalendar,
+      blockIndex,
+      calendar ? firstRound || undefined : undefined,
+    );
     const stage: StageSpec = {
       id: 'stage-1',
       name: trimmedLabel || seasonLabel,
@@ -682,7 +684,7 @@ function StartFlatSeasonForm({
       overs,
       cadence,
       slots,
-      firstRound: firstRound || undefined,
+      firstRound: calendar ? firstRound || undefined : undefined,
     });
     let created: SeasonRun;
     try {
@@ -789,6 +791,11 @@ function StartFlatSeasonForm({
               // an empty value here would show a control that looked unset while behaving
               // as if it wasn't.
               setBlockId(next?.blocks[0]?.id ?? '');
+              // Switching to custom dates leaves no block to anchor within — a stale
+              // firstRound from a previous calendar selection would otherwise clamp
+              // against the synthesized single-block calendar below instead of being
+              // dropped outright.
+              if (!next) setFirstRound('');
             }}
           >
             <option value="">Custom dates — pick start / end</option>
@@ -889,6 +896,7 @@ function StartFlatSeasonForm({
         type="button"
         className="cs-section"
         aria-label="Scheduling options"
+        aria-expanded={showScheduling}
         style={{
           cursor: 'pointer',
           display: 'flex',
@@ -978,6 +986,13 @@ function StartFlatSeasonForm({
                   max={currentBlock?.end}
                   onChange={(e) => setFirstRound(e.target.value)}
                 />
+                {firstRound &&
+                  currentBlock &&
+                  (firstRound < currentBlock.start || firstRound > currentBlock.end) && (
+                    <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
+                      outside {currentBlock.label} — ignored
+                    </div>
+                  )}
                 <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
                   Optional — leave blank to start on the first day of the block. Without it,
                   every-n-weeks cadences stride from the block&apos;s first day.
@@ -1026,7 +1041,7 @@ function StartFlatSeasonForm({
             onChange={(e) => setSeriesType(e.target.value)}
             style={{ width: 200 }}
           >
-            {FLAT_SERIES_TYPES.map((t) => (
+            {SERIES_TYPES.map((t) => (
               <option key={t}>{t}</option>
             ))}
           </select>

@@ -192,7 +192,13 @@ export function instantiateTemplate(
     templateId: template.id,
     stages: template.stages.map((stage, i) => ({
       ...stage,
-      schedule: { ...stage.schedule, blockIndex: templateBlockIndexForStage(i, calendar) },
+      schedule: {
+        ...stage.schedule,
+        blockIndex: templateBlockIndexForStage(i, calendar),
+        // Fresh copies, and only when the template has slots at all — never an explicit
+        // `slots: undefined` key (the whole branch omits the key to mean "no set times").
+        ...(stage.schedule.slots ? { slots: stage.schedule.slots.map((s) => ({ ...s })) } : {}),
+      },
     })),
   };
 }

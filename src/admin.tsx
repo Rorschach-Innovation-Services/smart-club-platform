@@ -575,10 +575,9 @@ export function AdminFixtures({
             onGenerateStageSeries ||
             (() => Promise.reject(new Error('stage generation is not wired for this host')))
           }
-          // No `initialLeagueKey`/`lockLeague` — every real league now starts a season
-          // (structured or flat) through the launcher's own forms above. This embedded
-          // form is reached ONLY via the ad-hoc option, where there is no league to
-          // prefill at all.
+          // No league prefill — every real league now starts a season (structured or
+          // flat) through the launcher's own forms above. This embedded form is reached
+          // ONLY via the ad-hoc option, where there is no league to prefill at all.
           renderSeriesForm={({ onBack }) => (
             <CreateSeriesForm
               clubs={clubs}
@@ -1427,19 +1426,9 @@ interface CreateSeriesFormProps {
   onClose: () => void;
   allLeagues?: League[];
   allCalendars?: SeasonCalendar[];
-  initialLeagueKey?: string;
   /** Present when embedded in the "Generate fixtures" launcher — Back returns to the
    *  league picker instead of closing the whole flow. */
   onBack?: () => void;
-  /**
-   * True locks the league select to static text instead of a free dropdown. Every real
-   * league now starts its season (structured or flat) through the launcher's own forms,
-   * so the "Generate fixtures" launcher no longer reaches this form with a league already
-   * chosen — it only ever renders it for the ad-hoc option, where the select stays free.
-   * Left in place because it's still exercised directly by tests; a candidate for removal
-   * once nothing else needs a locked league select.
-   */
-  lockLeague?: boolean;
 }
 
 export function CreateSeriesForm({
@@ -1448,9 +1437,7 @@ export function CreateSeriesForm({
   onClose,
   allLeagues = [],
   allCalendars = [] as SeasonCalendar[],
-  initialLeagueKey = undefined,
   onBack,
-  lockLeague = false,
 }: CreateSeriesFormProps) {
   const [d, setD] = useStateA({
     leagueKey: '', // dropdown: pick a league → auto-fills name + teams
@@ -1505,9 +1492,8 @@ export function CreateSeriesForm({
   });
   const [showAdvanced, setShowAdvanced] = useStateA(false);
   const [showScheduling, setShowScheduling] = useStateA(false);
-  // Set on the first user-driven edit — NOT by the initialLeagueKey prefill effect below,
-  // which is the launcher speaking, not the admin. Back only confirms once there is
-  // actual admin work to lose.
+  // Set on the first user-driven edit. Back only confirms once there is actual admin
+  // work to lose.
   const [dirty, setDirty] = useStateA(false);
   const [busy, setBusy] = useStateA(false);
 
@@ -1565,13 +1551,6 @@ export function CreateSeriesForm({
       tags: L ? `${L.group}, ${L.label}` : prev.tags,
     }));
   }
-
-  // Preselected by the "Generate fixtures" launcher — the same auto-fill a manual pick
-  // gets, run once on mount so a later league change from the select isn't fought back.
-  useEffectA(() => {
-    if (initialLeagueKey) pickLeague(initialLeagueKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // End date is optional. When set, the admin picks whether it drives the
   // schedule ('spread') or is reference-only; with no explicit pick we default
@@ -1683,36 +1662,30 @@ export function CreateSeriesForm({
           Series Name<span className="req">*</span>
         </div>
         <div className="cs-row-input">
-          {lockLeague ? (
-            // The launcher already answered this question — a select here would let the
-            // admin drift onto a different league than the one its hint box describes.
-            <strong>{findByKey(allLeagues, d.leagueKey)?.label ?? d.leagueKey} · 2026/27</strong>
-          ) : (
-            <select
-              className="field-select"
-              aria-label="League"
-              value={d.leagueKey}
-              onChange={(e) => {
-                setDirty(true);
-                pickLeague(e.target.value);
-              }}
-              style={{ minWidth: 280 }}
-            >
-              <option value="">Select a league / division…</option>
-              {(() => {
-                const groups = optionsGroupedByGroup(allLeagues);
-                return Object.entries(groups).map(([group, opts]) => (
-                  <optgroup key={group} label={group}>
-                    {opts.map((L) => (
-                      <option key={L.key} value={L.key}>
-                        {L.label} · 2026/27
-                      </option>
-                    ))}
-                  </optgroup>
-                ));
-              })()}
-            </select>
-          )}
+          <select
+            className="field-select"
+            aria-label="League"
+            value={d.leagueKey}
+            onChange={(e) => {
+              setDirty(true);
+              pickLeague(e.target.value);
+            }}
+            style={{ minWidth: 280 }}
+          >
+            <option value="">Select a league / division…</option>
+            {(() => {
+              const groups = optionsGroupedByGroup(allLeagues);
+              return Object.entries(groups).map(([group, opts]) => (
+                <optgroup key={group} label={group}>
+                  {opts.map((L) => (
+                    <option key={L.key} value={L.key}>
+                      {L.label} · 2026/27
+                    </option>
+                  ))}
+                </optgroup>
+              ));
+            })()}
+          </select>
         </div>
       </div>
       {/* ─── Dates ───
@@ -1914,6 +1887,7 @@ export function CreateSeriesForm({
         type="button"
         className="cs-section"
         aria-label="Scheduling options"
+        aria-expanded={showScheduling}
         style={{
           cursor: 'pointer',
           display: 'flex',
