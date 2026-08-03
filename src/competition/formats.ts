@@ -23,6 +23,21 @@
 import { roundRobinPairings, type Pairing } from './fixtures';
 import type { FormatSpec } from '../types';
 
+/**
+ * The Series Type options offered wherever an admin picks a match format — the ad-hoc
+ * CreateSeriesForm (admin.tsx) and a flat season's synthesized competition
+ * (StartFlatSeasonForm, season-run.tsx). One list so the two forms can't drift apart.
+ */
+export const SERIES_TYPES = [
+  'Twenty20 (16-25 overs)',
+  'One-Day (40-50 overs)',
+  'Multi-Day',
+  'The Hundred',
+] as const;
+
+/** The overs a new series/season defaults to before the admin touches the field. */
+export const DEFAULT_SERIES_OVERS = 20;
+
 /** Reserved prefix for "the winner of fixture X", used before results exist. */
 export const WINNER_PREFIX = 'win:';
 /** Reserved prefix for "the loser of fixture X" — third-place playoffs. */

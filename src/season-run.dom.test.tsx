@@ -17,7 +17,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { GenerateFixturesLauncher, SeasonRunsPanel } from './season-run';
+import { currentSeasonLabel } from './data';
+import {
+  buildFlatSeasonRun,
+  FLAT_COMPETITION_ID,
+  GenerateFixturesLauncher,
+  SeasonRunsPanel,
+} from './season-run';
 import type {
   Club,
   CompetitionStructure,
@@ -648,26 +654,40 @@ describe('two groups may share a name', () => {
    ───────────────────────────────────────────────────────────────────────────── */
 
 describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
+  // `renderSeriesForm` stands in for the real CreateSeriesForm here (that form's own
+  // behaviour is covered by admin-create-series.dom.test.tsx) — this boundary only cares
+  // that the launcher hands it the right args and mounts it in place. It is reached ONLY
+  // via the ad-hoc option now — every real league routes to a season form instead.
+  const stubRenderSeriesForm =
+    (spy: ReturnType<typeof vi.fn>) =>
+    ({ onBack }: { onBack: () => void }) => {
+      spy({ onBack });
+      return (
+        <div>
+          <span>stub series form</span>
+          <button onClick={onBack}>Back to picker</button>
+        </div>
+      );
+    };
+
+  const launcherProps = (over: Partial<Parameters<typeof GenerateFixturesLauncher>[0]> = {}) => ({
+    clubs,
+    allLeagues: [league(SPLIT_LEAGUE.id)],
+    config: { structures: [SPLIT_LEAGUE], calendars: [calendar] } as unknown as TenantConfig,
+    existingRuns: [],
+    onCreateRun: vi.fn().mockResolvedValue(undefined),
+    onGenerateStage: vi.fn().mockResolvedValue(undefined),
+    renderSeriesForm: stubRenderSeriesForm(vi.fn()),
+    onClose: vi.fn(),
+    toast: vi.fn(),
+    ...over,
+  });
+
   it('returns to the league picker rather than closing the launcher', async () => {
     const onClose = vi.fn();
     const user = userEvent.setup();
-    const config = {
-      structures: [SPLIT_LEAGUE],
-      calendars: [calendar],
-    } as unknown as TenantConfig;
 
-    render(
-      <GenerateFixturesLauncher
-        clubs={clubs}
-        allLeagues={[league(SPLIT_LEAGUE.id)]}
-        config={config}
-        existingRuns={[]}
-        onCreateRun={vi.fn().mockResolvedValue(undefined)}
-        onCreateSeries={vi.fn()}
-        onClose={onClose}
-        toast={vi.fn()}
-      />,
-    );
+    render(<GenerateFixturesLauncher {...launcherProps({ onClose })} />);
 
     // The one season-capable league routes straight into StartSeasonForm.
     await user.click(screen.getByRole('button', { name: /^continue$/i }));
@@ -680,5 +700,520 @@ describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
     expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^start season$/i })).toBeNull();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('routes a non-capable league to the flat-season dialog, and Back returns to the picker', async () => {
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    const spy = vi.fn();
+    // No competitions bound to this league at all (unlike `league()` above, which always
+    // sets one) — this is the every-tenant-admin-created-league case, always flat.
+    const flatLeague = {
+      key: 'friendlies',
+      label: 'Friendlies',
+      group: 'Senior',
+      district: 'All districts',
+    } as unknown as League;
+    const config = { structures: [], calendars: [] } as unknown as TenantConfig;
+
+    render(
+      <GenerateFixturesLauncher
+        {...launcherProps({
+          allLeagues: [flatLeague],
+          config,
+          onClose,
+          renderSeriesForm: stubRenderSeriesForm(spy),
+        })}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /^continue$/i }));
+
+    // The flat-season dialog, not the ad-hoc series form — and it names the league.
+    expect(screen.getByRole('dialog', { name: /start.*flat season/i })).toBeInTheDocument();
+    expect(screen.getByText(/Friendlies has no competition bound to it/)).toBeInTheDocument();
+    expect(screen.queryByText('stub series form')).toBeNull();
+    expect(spy).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: /^back$/i }));
+
+    // Back at the league picker, without the launcher having been told to close.
+    expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /start.*flat season/i })).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the league picker if the flat step’s league vanishes mid-flow', async () => {
+    const flatLeague = {
+      key: 'friendlies',
+      label: 'Friendlies',
+      group: 'Senior',
+      district: 'All districts',
+    } as unknown as League;
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+
+    const { rerender } = render(
+      <GenerateFixturesLauncher {...launcherProps({ allLeagues: [flatLeague], onClose })} />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /^continue$/i }));
+    expect(screen.getByRole('dialog', { name: /start.*flat season/i })).toBeInTheDocument();
+
+    // The league is gone from config — deleted in another tab, picked up by this
+    // console's own refetch — while the admin is still sitting on the flat-season step.
+    // `step` stays 'flat' in this component's own state; only `allLeagues` changed.
+    rerender(<GenerateFixturesLauncher {...launcherProps({ allLeagues: [], onClose })} />);
+
+    // Back at the picker — not a dead modal the admin can only abandon by refreshing.
+    expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /start.*flat season/i })).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('only reaches the embedded series form via the ad-hoc option', async () => {
+    const user = userEvent.setup();
+    const spy = vi.fn();
+
+    render(
+      <GenerateFixturesLauncher
+        {...launcherProps({ renderSeriesForm: stubRenderSeriesForm(spy) })}
+      />,
+    );
+
+    await user.selectOptions(
+      screen.getByRole('combobox'),
+      screen.getByRole('option', { name: /one-off series/i }),
+    );
+    await user.click(screen.getByRole('button', { name: /^continue$/i }));
+
+    expect(screen.getByText('stub series form')).toBeInTheDocument();
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ onBack: expect.any(Function) }));
+
+    await user.click(screen.getByRole('button', { name: /back to picker/i }));
+    expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
+    expect(screen.queryByText('stub series form')).toBeNull();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   SeasonRunsPanel — a flat run's persisted format survives a regenerate.
+
+   A flat run has no config competition to read a Series Type/overs from (there is no
+   `league.competitions` entry for the `__flat__` sentinel) — `flatFormat` on the run is
+   the only place that choice lives, so the panel must synthesize the Competition it hands
+   to `onGenerate` FROM `flatFormat`, not from a lookup that was always going to come back
+   empty.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('SeasonRunsPanel — a flat run regenerating preserves its persisted format', () => {
+  const flatLeague = {
+    key: 'flatty',
+    label: 'Flat League',
+    group: 'Senior',
+    district: 'All districts',
+  } as unknown as League;
+
+  // A separate roster registered for 'flatty' — the top-of-file `clubs` fixture is
+  // registered for 'premier'.
+  const flatClubs = clubs.map((c) => ({ ...c, leagues: ['flatty'] })) as Club[];
+
+  it('carries flatFormat’s seriesType/overs into the regenerate payload, not a re-derived default', async () => {
+    const teamIds = flatClubs.map((c) => c.id);
+    const flatStage: StageSpec = {
+      id: 'stage-1',
+      name: '2026/27',
+      format: { kind: 'round-robin', legs: 1 },
+      entrants: { kind: 'all-registered' },
+      schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+    } as unknown as StageSpec;
+    const flatRun = {
+      id: 'run-flat-1',
+      leagueKey: 'flatty',
+      competitionId: FLAT_COMPETITION_ID,
+      seasonLabel: '2026/27',
+      structureSnapshot: {
+        id: 'st-flat-default',
+        name: 'Flat season',
+        version: 1,
+        stages: [flatStage],
+      },
+      calendarSnapshot: calendar,
+      stages: [
+        {
+          specId: 'stage-1',
+          // 'ready' (not 'generated') with a `seriesId` already on its one group is what
+          // makes the stage STALE — entrants re-confirmed after an earlier generate — so
+          // the button reads "Regenerate", exactly the path the fix targets.
+          status: 'ready',
+          groups: [{ id: 'g1', label: 'Group A', entrants: teamIds, seriesId: 'existing-series' }],
+        },
+      ],
+      version: 1,
+      // NOT the defaults (Twenty20 / 20 overs) — chosen precisely so a coincidental
+      // default couldn't make this assertion pass by accident.
+      flatFormat: { seriesType: 'Multi-Day', overs: 35 },
+    } as unknown as SeasonRun;
+
+    const onGenerate = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <SeasonRunsPanel
+        clubs={flatClubs}
+        allLeagues={[flatLeague]}
+        allSeries={[]}
+        runs={[flatRun]}
+        onOpenLauncher={vi.fn()}
+        onPatchRun={vi.fn().mockResolvedValue(undefined)}
+        onGenerate={onGenerate}
+        onDeleteRun={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /^regenerate \d+ fixtures$/i }));
+
+    expect(onGenerate).toHaveBeenCalled();
+    const [payloads] = onGenerate.mock.calls[0];
+    expect(payloads[0].competition).toMatchObject({
+      id: FLAT_COMPETITION_ID,
+      label: 'Multi-Day',
+      matchFormat: { overs: 35 },
+    });
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   buildFlatSeasonRun — the pure synthesis a flat season starts from.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('buildFlatSeasonRun', () => {
+  const flatLeague = {
+    key: 'friendlies',
+    label: 'Friendlies',
+    group: 'Senior',
+    district: 'All districts',
+  } as unknown as League;
+
+  it('synthesizes a single-block calendar from custom dates', () => {
+    const run = buildFlatSeasonRun({
+      id: 'run-x',
+      league: flatLeague,
+      seasonLabel: '2026/27',
+      custom: { start: '2026-09-01', end: '2026-12-01' },
+      seriesType: 'Twenty20 (16-25 overs)',
+      overs: 20,
+    });
+
+    expect(run.calendarSnapshot.id).toBe('cal-flat-friendlies');
+    expect(run.calendarSnapshot.label).toBe('2026/27');
+    expect(run.calendarSnapshot.blocks).toEqual([
+      { id: 'b1', label: 'Season', start: '2026-09-01', end: '2026-12-01' },
+    ]);
+  });
+
+  it('passes an operator calendar through verbatim, with the given blockIndex', () => {
+    const run = buildFlatSeasonRun({
+      id: 'run-x',
+      league: flatLeague,
+      seasonLabel: '2026/27',
+      calendar,
+      blockIndex: 1,
+      seriesType: 'Twenty20 (16-25 overs)',
+      overs: 20,
+    });
+
+    expect(run.calendarSnapshot).toBe(calendar);
+    expect(run.structureSnapshot.stages[0].schedule.blockIndex).toBe(1);
+  });
+
+  it('defaults blockIndex to 0 when not given', () => {
+    const run = buildFlatSeasonRun({
+      id: 'run-x',
+      league: flatLeague,
+      seasonLabel: '2026/27',
+      calendar,
+      seriesType: 'Twenty20 (16-25 overs)',
+      overs: 20,
+    });
+    expect(run.structureSnapshot.stages[0].schedule.blockIndex).toBe(0);
+  });
+
+  it('places activateFrom on the stage schedule when given, and omits it otherwise', () => {
+    const withDate = buildFlatSeasonRun({
+      id: 'run-x',
+      league: flatLeague,
+      seasonLabel: '2026/27',
+      calendar,
+      activateFrom: '2026-08-01',
+      seriesType: 'Twenty20 (16-25 overs)',
+      overs: 20,
+    });
+    expect(withDate.structureSnapshot.stages[0].schedule.activateFrom).toBe('2026-08-01');
+
+    const without = buildFlatSeasonRun({
+      id: 'run-y',
+      league: flatLeague,
+      seasonLabel: '2026/27',
+      calendar,
+      seriesType: 'Twenty20 (16-25 overs)',
+      overs: 20,
+    });
+    expect(without.structureSnapshot.stages[0].schedule.activateFrom).toBeUndefined();
+  });
+
+  it('stamps the flat sentinel competitionId, version 1 and one awaiting stage', () => {
+    const run = buildFlatSeasonRun({
+      id: 'run-x',
+      league: flatLeague,
+      seasonLabel: '2026/27',
+      calendar,
+      seriesType: 'Twenty20 (16-25 overs)',
+      overs: 20,
+    });
+
+    expect(run.competitionId).toBe(FLAT_COMPETITION_ID);
+    expect(run.version).toBe(1);
+    expect(run.structureSnapshot.version).toBe(1);
+    expect(run.stages).toEqual([{ specId: 'stage-1', status: 'awaiting-entrants', groups: [] }]);
+    expect(run.structureSnapshot.stages).toHaveLength(1);
+    expect(run.structureSnapshot.stages[0].entrants).toEqual({ kind: 'all-registered' });
+    // The stage takes the SEASON's name, not the league's — parity with the old flat
+    // naming ("Promotion League · 2026/27") via generateStageSeriesInner's template.
+    expect(run.structureSnapshot.stages[0].name).toBe('2026/27');
+  });
+
+  it('persists the chosen series type and overs as flatFormat — the single source of truth a regenerate reads back', () => {
+    const run = buildFlatSeasonRun({
+      id: 'run-x',
+      league: flatLeague,
+      seasonLabel: '2026/27',
+      calendar,
+      seriesType: 'Multi-Day',
+      overs: 35,
+    });
+
+    expect(run.flatFormat).toEqual({ seriesType: 'Multi-Day', overs: 35 });
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   StartFlatSeasonForm — reached through the launcher for any non-capable league.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('StartFlatSeasonForm', () => {
+  const flatLeague = {
+    key: 'friendlies',
+    label: 'Friendlies',
+    group: 'Senior',
+    district: 'All districts',
+  } as unknown as League;
+
+  const config = {
+    structures: [],
+    calendars: [calendar],
+  } as unknown as TenantConfig;
+
+  // The top-of-file `clubs` fixture is registered for 'premier', not 'friendlies' — a
+  // separate roster so `leagueParticipants` actually finds sides for this league.
+  const friendliesClubs = clubs.map((c) => ({ ...c, leagues: ['friendlies'] })) as Club[];
+
+  const setup = (over: Record<string, unknown> = {}) => {
+    const onCreateRun = vi.fn().mockImplementation((run: SeasonRun) => Promise.resolve(run));
+    const onGenerateStage = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    const toast = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <GenerateFixturesLauncher
+        clubs={friendliesClubs}
+        allLeagues={[flatLeague]}
+        config={config}
+        existingRuns={[]}
+        onCreateRun={onCreateRun}
+        onGenerateStage={onGenerateStage}
+        renderSeriesForm={() => <div>stub series form</div>}
+        onClose={onClose}
+        toast={toast}
+        {...over}
+      />,
+    );
+    return { user, onCreateRun, onGenerateStage, onClose, toast };
+  };
+
+  const openFlatDialog = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.click(screen.getByRole('button', { name: /^continue$/i }));
+    return screen.getByRole('dialog', { name: /start.*flat season/i });
+  };
+
+  const fillCustomDates = async (
+    user: ReturnType<typeof userEvent.setup>,
+    dialog: HTMLElement,
+    start: string,
+    end: string,
+  ) => {
+    const startInput = within(dialog).getByLabelText(/start date/i);
+    const endInput = within(dialog).getByLabelText(/end date/i);
+    await user.clear(startInput);
+    await user.type(startInput, start);
+    await user.clear(endInput);
+    await user.type(endInput, end);
+  };
+
+  /** Picks the one operator calendar on offer — the form defaults to "Custom dates". */
+  const selectCalendar = async (user: ReturnType<typeof userEvent.setup>, dialog: HTMLElement) =>
+    user.selectOptions(within(dialog).getByLabelText(/dates/i), calendar.id);
+
+  it('blocks a duplicate label for the same league', async () => {
+    // The label field defaults to the real current season — match `existingRuns` to
+    // whatever that resolves to right now, rather than assuming a fixed value.
+    const existingRuns = [
+      buildFlatSeasonRun({
+        id: 'run-existing',
+        league: flatLeague,
+        seasonLabel: currentSeasonLabel(),
+        calendar,
+        seriesType: 'Twenty20 (16-25 overs)',
+        overs: 20,
+      }),
+    ];
+    const { user } = setup({ existingRuns });
+    const dialog = await openFlatDialog(user);
+
+    expect(within(dialog).getByDisplayValue(currentSeasonLabel())).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/flat season with that label is already running/i),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: /^start season$/i })).toBeDisabled();
+  });
+
+  it('blocks fewer than two registered sides', async () => {
+    const { user } = setup({ clubs: [] });
+    const dialog = await openFlatDialog(user);
+
+    expect(within(dialog).getByText(/at least two sides must be registered/i)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: /^start season$/i })).toBeDisabled();
+  });
+
+  it('blocks custom dates where the end is before the start', async () => {
+    const { user } = setup({
+      config: { structures: [], calendars: [] } as unknown as TenantConfig,
+    });
+    const dialog = await openFlatDialog(user);
+
+    await fillCustomDates(user, dialog, '2026-12-01', '2026-09-01');
+
+    expect(within(dialog).getByRole('button', { name: /^start season$/i })).toBeDisabled();
+  });
+
+  it('creates the run then generates its fixtures, in order, with the synthetic competition', async () => {
+    const { user, onCreateRun, onGenerateStage, onClose } = setup();
+    const dialog = await openFlatDialog(user);
+    await selectCalendar(user, dialog);
+
+    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
+
+    expect(onCreateRun).toHaveBeenCalled();
+    expect(onGenerateStage).toHaveBeenCalled();
+    const createOrder = onCreateRun.mock.invocationCallOrder[0];
+    const generateOrder = onGenerateStage.mock.invocationCallOrder[0];
+    expect(createOrder).toBeLessThan(generateOrder);
+
+    const [payloads] = onGenerateStage.mock.calls[0];
+    expect(payloads[0].competition).toMatchObject({
+      id: '__flat__',
+      label: 'Twenty20 (16-25 overs)',
+      matchFormat: { overs: 20 },
+    });
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('carries the chosen series type and overs into the synthetic competition, independently', async () => {
+    // Overs and Series Type are separate controls — nothing here should infer one from
+    // the other, so picking a One-Day type with 50 overs must produce exactly that label
+    // and overs count, not the Twenty20 default either field started at.
+    const { user, onGenerateStage } = setup();
+    const dialog = await openFlatDialog(user);
+    await selectCalendar(user, dialog);
+
+    await user.selectOptions(within(dialog).getByLabelText('Series Type'), 'One-Day (40-50 overs)');
+    const oversInput = within(dialog).getByLabelText('Overs');
+    await user.clear(oversInput);
+    await user.type(oversInput, '50');
+
+    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
+
+    const [payloads] = onGenerateStage.mock.calls[0];
+    expect(payloads[0].competition).toMatchObject({
+      label: 'One-Day (40-50 overs)',
+      matchFormat: { overs: 50 },
+    });
+  });
+
+  it('still closes and points at the Seasons panel when generation fails', async () => {
+    const onGenerateStage = vi.fn().mockRejectedValue(new Error('nope'));
+    const { user, onClose, toast } = setup({ onGenerateStage });
+    const dialog = await openFlatDialog(user);
+    await selectCalendar(user, dialog);
+
+    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
+
+    expect(onClose).toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith(
+      expect.stringMatching(/generate the fixtures from the seasons panel/i),
+    );
+  });
+
+  it('guards against a double-submit — a rapid second click creates nothing extra', async () => {
+    // Never resolves within this test — the button's own `busy` disable is what has to
+    // stop the second click from reaching `onCreate` at all, not a fast round trip.
+    const onCreateRun = vi.fn(() => new Promise<SeasonRun>(() => {}));
+    const { user } = setup({ onCreateRun });
+    const dialog = await openFlatDialog(user);
+    await selectCalendar(user, dialog);
+
+    const startBtn = within(dialog).getByRole('button', { name: /^start season$/i });
+    // Not awaited individually — this is the rapid double-click the busy guard exists
+    // for. A guard that only worked when the two clicks were serialised wouldn't be
+    // proving anything a disabled-button check couldn't.
+    await Promise.all([user.click(startBtn), user.click(startBtn)]);
+
+    expect(onCreateRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the modal open with an inline error when create fails outright', async () => {
+    const onCreateRun = vi.fn().mockRejectedValue(new Error('boom'));
+    const onGenerateStage = vi.fn();
+    const { user } = setup({ onCreateRun, onGenerateStage });
+    const dialog = await openFlatDialog(user);
+    await selectCalendar(user, dialog);
+
+    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
+
+    expect(
+      await within(dialog).findByText(/could not start the season — try again/i),
+    ).toBeInTheDocument();
+    expect(onGenerateStage).not.toHaveBeenCalled();
+    // Still open — a failed create must not discard the admin's half-filled form.
+    expect(screen.getByRole('dialog', { name: /start.*flat season/i })).toBeInTheDocument();
+  });
+
+  it('shows no inline error when the rejection was already toasted', async () => {
+    // withToast (main.tsx) flags a rethrown error `alreadyToasted` once it has surfaced
+    // its own toast — an inline message on top of that would tell the admin the same
+    // thing twice.
+    const toasted = Object.assign(new Error('surfaced elsewhere'), { alreadyToasted: true });
+    const onCreateRun = vi.fn().mockRejectedValue(toasted);
+    const onGenerateStage = vi.fn();
+    const { user } = setup({ onCreateRun, onGenerateStage });
+    const dialog = await openFlatDialog(user);
+    await selectCalendar(user, dialog);
+
+    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
+
+    // Wait for the busy state to settle back (the button reads "Start season" again)
+    // before asserting the error never appeared.
+    await within(dialog).findByRole('button', { name: /^start season$/i });
+    expect(within(dialog).queryByText(/could not start the season/i)).toBeNull();
+    expect(onGenerateStage).not.toHaveBeenCalled();
   });
 });

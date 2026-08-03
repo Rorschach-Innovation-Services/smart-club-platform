@@ -341,7 +341,7 @@ describe('a tenant with no series still gets the season machinery', () => {
       <AdminFixtures
         clubs={clubs}
         allSeries={[]}
-        onCreateSeries={vi.fn()}
+        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
         onUpdateSeries={vi.fn()}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -428,18 +428,19 @@ describe('the "Generate fixtures" launcher — one entry point, routed by league
     { id: 'c2', name: 'Club 2', affiliation: 'complete', leagues: ['premier', 'friendlies'] },
   ] as unknown as Club[];
 
-  // `onCreateSeries` is a callback AdminFixtures only forwards — the actual flat-form modal
-  // is hosted a level up, in main.tsx (see admin-create-series.dom.test.tsx for what that
-  // form does with the prefilled league once it opens). What belongs to THIS boundary is
-  // the routing decision: which league sends the admin to the season form, versus which
-  // ones — including ad-hoc — hand back a leagueKey (or `null`) for the flat form to open.
-  const renderPage = (onCreateSeries = vi.fn()) => ({
-    onCreateSeries,
+  // `onSubmitSeries` is the real POST handler — CreateSeriesForm now renders IN-MODAL via
+  // a render prop, not a level up in main.tsx, so what belongs to THIS boundary is the
+  // routing decision (which league gets the season form vs the embedded series form) and
+  // the wiring of that embedded form (prefilled + locked league, hint text). A full
+  // submit-through test would duplicate admin-create-series.dom.test.tsx, so it's skipped
+  // here.
+  const renderPage = (onSubmitSeries = vi.fn().mockResolvedValue(undefined)) => ({
+    onSubmitSeries,
     ...renderWithProviders(
       <AdminFixtures
         clubs={registeredClubs}
         allSeries={[]}
-        onCreateSeries={onCreateSeries}
+        onSubmitSeries={onSubmitSeries}
         onUpdateSeries={vi.fn()}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -471,7 +472,7 @@ describe('the "Generate fixtures" launcher — one entry point, routed by league
 
   it('routes a season-capable league straight to the season form, in the same modal', async () => {
     const user = userEvent.setup();
-    const { onCreateSeries } = renderPage();
+    const { onSubmitSeries } = renderPage();
     await openLauncher(user);
 
     await user.selectOptions(within(launcher()).getByRole('combobox'), 'premier');
@@ -479,34 +480,45 @@ describe('the "Generate fixtures" launcher — one entry point, routed by league
 
     expect(screen.getByRole('dialog', { name: /start.*season/i })).toBeTruthy();
     expect(screen.queryByRole('dialog', { name: /^generate fixtures$/i })).toBeNull();
-    expect(onCreateSeries).not.toHaveBeenCalled();
+    expect(onSubmitSeries).not.toHaveBeenCalled();
   });
 
-  it('hands a flat league to the create-series flow instead of the season form', async () => {
+  it('routes a flat league to the flat-season dialog, not the embedded series form', async () => {
     const user = userEvent.setup();
-    const { onCreateSeries } = renderPage();
+    renderPage();
     await openLauncher(user);
 
     await user.selectOptions(within(launcher()).getByRole('combobox'), 'friendlies');
     await user.click(continueBtn());
 
-    expect(onCreateSeries).toHaveBeenCalledWith('friendlies');
-    // The launcher itself is done — no season form appeared for a league with no
-    // competition bound to it.
-    expect(screen.queryByRole('dialog')).toBeNull();
+    // Same launcher, routed to the flat-season step — not the embedded series form, and
+    // the "Generate fixtures" picker is gone.
+    const flatDialog = screen.getByRole('dialog', { name: /start.*flat season/i });
+    expect(flatDialog).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: /^generate fixtures$/i })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: /create.*series/i })).toBeNull();
+
+    // The operator-hint box names the league and explains why it gets a flat season.
+    expect(within(flatDialog).getByText(/Friendlies has no competition bound to it/)).toBeTruthy();
+
+    // Back returns to the picker rather than closing the whole launcher.
+    await user.click(within(flatDialog).getByRole('button', { name: /^back$/i }));
+    expect(screen.getByRole('dialog', { name: /^generate fixtures$/i })).toBeTruthy();
   });
 
-  it('hands `null` — no league — for an ad-hoc series', async () => {
+  it('opens the embedded series form with no prefill and a free league select for ad-hoc', async () => {
     const user = userEvent.setup();
-    const { onCreateSeries } = renderPage();
+    renderPage();
     await openLauncher(user);
 
     await user.selectOptions(
       within(launcher()).getByRole('combobox'),
-      within(launcher()).getByRole('option', { name: /ad-hoc series/i }),
+      within(launcher()).getByRole('option', { name: /one-off series/i }),
     );
     await user.click(continueBtn());
 
-    expect(onCreateSeries).toHaveBeenCalledWith(null);
+    const seriesDialog = screen.getByRole('dialog', { name: /create.*series/i });
+    // Ad-hoc keeps the free select, unset — no league, no hint box.
+    expect(within(seriesDialog).getByLabelText('League')).toHaveValue('');
   });
 });

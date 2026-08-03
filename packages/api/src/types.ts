@@ -369,6 +369,12 @@ export interface SeasonRun {
   createdAt?: string;
   createdBy?: string;
   version: number;
+  /**
+   * Only set when `competitionId` is the flat sentinel: there is no config competition
+   * to read format from, so the admin's series-type/overs choice is persisted here and
+   * the panel synthesizes a Competition from it (regenerate must preserve the choice).
+   */
+  flatFormat?: { seriesType: string; overs: number };
 }
 
 /**

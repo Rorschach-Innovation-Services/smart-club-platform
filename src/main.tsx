@@ -70,7 +70,6 @@ import {
   AdminClearances,
   AdminRegistrationReviews,
   LeagueForm,
-  CreateSeriesForm,
 } from './admin';
 import { AdminInsightsPage, AdminLeagueDetailPage } from './insights';
 import { parseSupport } from './support';
@@ -418,9 +417,6 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   const location = useLocation();
   const [toastShow, toastNode] = useToast();
   const [showOnboarding, setShowOnboarding] = useStateApp(false);
-  // false = closed; true = open, no league prefilled; a league key = open, prefilled —
-  // set by the "Generate fixtures" launcher routing a flat/ad-hoc pick to this form.
-  const [showCreateSeries, setShowCreateSeries] = useStateApp<string | boolean>(false);
   // null = closed; {} = create; a league object = edit
   const [showLeagueForm, setShowLeagueForm] = useStateApp(null);
   const [showHelp, setShowHelp] = useStateApp(false);
@@ -1020,8 +1016,6 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   setOnboarded,
                   showOnboarding,
                   setShowOnboarding,
-                  showCreateSeries,
-                  setShowCreateSeries,
                   showLeagueForm,
                   setShowLeagueForm,
                   showHelp,
@@ -1090,8 +1084,6 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   setOnboarded,
                   showOnboarding,
                   setShowOnboarding,
-                  showCreateSeries,
-                  setShowCreateSeries,
                   showLeagueForm,
                   setShowLeagueForm,
                   showHelp,
@@ -1169,8 +1161,6 @@ function Shell({
   setOnboarded,
   showOnboarding,
   setShowOnboarding,
-  showCreateSeries,
-  setShowCreateSeries,
   showLeagueForm,
   setShowLeagueForm,
   showHelp,
@@ -2024,6 +2014,17 @@ function Shell({
   const orgName = branding?.name ?? 'Smart Club';
   const orgFooter = branding?.copy?.footer ?? 'Powered by Medicoach';
 
+  // The launcher's series step passes this straight through as `onSubmitSeries` — the
+  // busy idiom in CreateSeriesForm awaits it and stays open on rejection, so this must
+  // NOT swallow a failure the way the old TaskModal's `.catch(() => {})` did.
+  function createSeriesWithToast(s) {
+    return onCreateSeries(s).then(() => {
+      const clubN = distinctClubCount(s);
+      const tail = s.bulkSend ? ` · bulk-sent to ${clubN} club${clubN === 1 ? '' : 's'}` : '';
+      toastShow(`${s.name} created · ${s.fixtures.length} fixtures generated${tail}`);
+    });
+  }
+
   function renderMain() {
     if (role === 'admin') {
       const gotoList = () => gotoAdminView('clubs_list');
@@ -2187,7 +2188,7 @@ function Shell({
           <AdminFixtures
             clubs={clubs}
             allSeries={allSeries}
-            onCreateSeries={(leagueKey) => setShowCreateSeries(leagueKey ?? true)}
+            onSubmitSeries={createSeriesWithToast}
             onUpdateSeries={updateSeries}
             onDeleteSeries={deleteSeries}
             onDuplicateSeries={duplicateSeries}
@@ -2700,36 +2701,6 @@ function Shell({
             onUpdate={updateLeague}
             onClose={() => setShowLeagueForm(null)}
             toast={toastShow}
-          />
-        </TaskModal>
-      )}
-      {role === 'admin' && showCreateSeries && (
-        <TaskModal
-          eyebrow="Fixtures · Cricket Services"
-          title={
-            <>
-              Create a new <em>series</em>
-            </>
-          }
-          onClose={() => setShowCreateSeries(false)}
-        >
-          <CreateSeriesForm
-            clubs={clubs}
-            allLeagues={allLeagues}
-            allCalendars={allCalendars}
-            initialLeagueKey={typeof showCreateSeries === 'string' ? showCreateSeries : undefined}
-            onCreate={(s) => {
-              onCreateSeries(s)
-                .then(() => {
-                  const clubN = distinctClubCount(s);
-                  const tail = s.bulkSend
-                    ? ` · bulk-sent to ${clubN} club${clubN === 1 ? '' : 's'}`
-                    : '';
-                  toastShow(`${s.name} created · ${s.fixtures.length} fixtures generated${tail}`);
-                })
-                .catch(() => {});
-            }}
-            onClose={() => setShowCreateSeries(false)}
           />
         </TaskModal>
       )}
