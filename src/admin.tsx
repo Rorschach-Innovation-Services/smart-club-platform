@@ -62,7 +62,10 @@ import {
   OVERARCHING_DISTRICT,
 } from './leagues';
 import {
+  CADENCE_LABELS,
+  T20_SLOTS,
   WEEKDAY_LABELS,
+  cadenceFromLabel,
   calendarSpan,
   describeCadence,
   formatIsoDate,
@@ -1411,36 +1414,6 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
     </tr>
   );
 }
-
-/* ─── Season-calendar scheduling controls (ADR 0008) ───
-   The cadence union is keyed by `kind`, but a Choice control speaks in labels, so these
-   two map between them. Bi-weekly is the only parameterised option the UI exposes;
-   `every-n-weeks` with other values stays reachable through the API for now. */
-const CADENCE_LABELS = {
-  weekly: 'Weekly',
-  'every-n-weeks': 'Every 2 weeks',
-  weekdays: 'Set days only',
-  spread: 'Spread across block',
-};
-
-function cadenceFromLabel(label) {
-  switch (label) {
-    case CADENCE_LABELS['every-n-weeks']:
-      return { kind: 'every-n-weeks', n: 2 };
-    case CADENCE_LABELS.weekdays:
-      return { kind: 'weekdays', days: [6] }; // Saturday — the EMCU Division 5 default
-    case CADENCE_LABELS.spread:
-      return { kind: 'spread' };
-    default:
-      return { kind: 'weekly' };
-  }
-}
-
-/** The T20 morning/afternoon slots the union's structure document specifies. */
-const T20_SLOTS = [
-  { label: 'Morning', start: '08:00' },
-  { label: 'Afternoon', start: '13:30' },
-];
 
 /* ─── CreateSeriesForm — automated league flow + advanced overrides ─── */
 interface CreateSeriesFormProps {
