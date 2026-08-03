@@ -18,6 +18,14 @@
  * in one day across two competitions. So the ledger spans every series in the tenant,
  * not just the one being allocated.
  *
+ * ── THE LEDGER KEYS ON DATE *AND* SLOT ──
+ * A double-header (`StageSchedule.roundsPerDay === 2`) legitimately plays a side twice on
+ * the same date — once in the AM round, once in the PM round — so date alone is no longer
+ * enough to say a side or a ground is busy. Every booking is keyed by date plus the
+ * fixture's slot (its `time`), with an empty slot folded into the same date-only key a
+ * slot-less fixture always used. That is what keeps every non-double-header series
+ * behaving exactly as before: their fixtures carry no time, so their keys are unchanged.
+ *
  * ── NOTHING IS SILENTLY WRONG ──
  * An over-constrained fixture comes back `unresolved` with a reason. A confidently wrong
  * ground is worse than an admitted gap.
@@ -49,25 +57,33 @@ export const DEFAULT_FACTOR_ORDER: AllocationFactor[] = [
  */
 export const MIN_GEO_COVERAGE = 0.6;
 
-/** A ground booked on a date. Capacity is per venue per day (`Venue.surfaces`). */
+/** A ground booked on a date (and slot, for a double-header). Capacity is per venue per
+ * day per slot (`Venue.surfaces`). */
 export interface Booking {
   venueId: string;
   date: IsoDate;
+  slot?: string;
 }
 
 export interface Ledger {
-  /** Matches already booked at this venue on this date. */
-  venueLoad: (venueId: string, date: IsoDate) => number;
-  /** True when this side already has a match that day, in ANY competition. */
-  teamBusy: (teamId: string, date: IsoDate) => boolean;
+  /** Matches already booked at this venue on this date and slot. */
+  venueLoad: (venueId: string, date: IsoDate, slot?: string) => number;
+  /** True when this side already has a match that day and slot, in ANY competition. */
+  teamBusy: (teamId: string, date: IsoDate, slot?: string) => boolean;
   /** Record a placement so subsequent fixtures in the same run see it. */
-  add: (venueId: string | undefined, date: IsoDate, teamIds: string[]) => void;
+  add: (venueId: string | undefined, date: IsoDate, teamIds: string[], slot?: string) => void;
 }
 
 /** The minimal series shape the ledger reads — avoids importing the whole Series type. */
 export interface LedgerSeries {
   id: string;
-  fixtures?: Array<{ date?: string; home?: string; away?: string; venueId?: string }>;
+  fixtures?: Array<{
+    date?: string;
+    home?: string;
+    away?: string;
+    venueId?: string;
+    time?: string;
+  }>;
 }
 
 /**
@@ -84,8 +100,11 @@ export function buildLedger(
   const exclude = new Set(opts.excludeSeriesIds ?? []);
   const venueCounts = new Map<string, number>();
   const teamDays = new Set<string>();
-  const vKey = (v: string, d: string) => `${v}|${d}`;
-  const tKey = (t: string, d: string) => `${t}|${d}`;
+  // A slot-less fixture keys on date alone (the `?? ''` folds it into the same bucket a
+  // date-only key always produced), which is what keeps every non-double-header series
+  // reading identically to before this ledger learned about slots.
+  const vKey = (v: string, d: string, slot?: string) => `${v}|${d}|${slot ?? ''}`;
+  const tKey = (t: string, d: string, slot?: string) => `${t}|${d}|${slot ?? ''}`;
 
   for (const s of allSeries ?? []) {
     if (exclude.has(s.id)) continue;
@@ -93,26 +112,29 @@ export function buildLedger(
       if (!f?.date) continue;
       if (f.venueId)
         venueCounts.set(
-          vKey(f.venueId, f.date),
-          (venueCounts.get(vKey(f.venueId, f.date)) ?? 0) + 1,
+          vKey(f.venueId, f.date, f.time),
+          (venueCounts.get(vKey(f.venueId, f.date, f.time)) ?? 0) + 1,
         );
       // A knockout placeholder is NOT a side. `win:f1` is series-scoped — every bracket
       // numbers its fixtures from f1 — so two competitions' finals both contain `win:f1`
       // and `win:f2`. Booking those into the team ledger makes the second competition's
       // final collide with the first and come back "unresolved: one of these sides
       // already has a match that day", for two teams that don't exist yet.
-      if (f.home && !isSlotRef(f.home)) teamDays.add(tKey(f.home, f.date));
-      if (f.away && !isSlotRef(f.away)) teamDays.add(tKey(f.away, f.date));
+      if (f.home && !isSlotRef(f.home)) teamDays.add(tKey(f.home, f.date, f.time));
+      if (f.away && !isSlotRef(f.away)) teamDays.add(tKey(f.away, f.date, f.time));
     }
   }
 
   return {
-    venueLoad: (venueId, date) => venueCounts.get(vKey(venueId, date)) ?? 0,
-    teamBusy: (teamId, date) => !isSlotRef(teamId) && teamDays.has(tKey(teamId, date)),
-    add: (venueId, date, teamIds) => {
+    venueLoad: (venueId, date, slot) => venueCounts.get(vKey(venueId, date, slot)) ?? 0,
+    teamBusy: (teamId, date, slot) => !isSlotRef(teamId) && teamDays.has(tKey(teamId, date, slot)),
+    add: (venueId, date, teamIds, slot) => {
       if (venueId)
-        venueCounts.set(vKey(venueId, date), (venueCounts.get(vKey(venueId, date)) ?? 0) + 1);
-      for (const t of teamIds) if (t && !isSlotRef(t)) teamDays.add(tKey(t, date));
+        venueCounts.set(
+          vKey(venueId, date, slot),
+          (venueCounts.get(vKey(venueId, date, slot)) ?? 0) + 1,
+        );
+      for (const t of teamIds) if (t && !isSlotRef(t)) teamDays.add(tKey(t, date, slot));
     },
   };
 }
@@ -312,12 +334,26 @@ export function allocateVenues(args: AllocateArgs): AllocationReport {
       f.venueStatus = 'neutral';
       f.venueReason = 'Set by hand — not in the venue registry';
     }
-    // A team is booked that day whether or not its ground could be resolved: the match
-    // is happening somewhere, so the side is unavailable for a second one. An UNMATCHED
-    // override books no ground — the fixture is off-site, and holding a registry slot it
-    // isn't using would strand another fixture for nothing.
-    ledger.add(unmatchedOverride ? undefined : (chosen?.id ?? f.venueId), f.date, [f.home, f.away]);
+    // A team is booked that day and slot whether or not its ground could be resolved: the
+    // match is happening somewhere, so the side is unavailable for a second one at that
+    // slot. An UNMATCHED override books no ground — the fixture is off-site, and holding
+    // a registry slot it isn't using would strand another fixture for nothing.
+    ledger.add(
+      unmatchedOverride ? undefined : (chosen?.id ?? f.venueId),
+      f.date,
+      [f.home, f.away],
+      f.time,
+    );
   }
+
+  // Same-series AM/PM co-location: a side that plays a double-header ideally sits at ONE
+  // ground all day rather than travelling twice. Seeded from every fixture already placed
+  // (locked ones above), then grown as the greedy loop below places more — a pure priority
+  // nudge in `score`, not a constraint, so it only ever wins when the preferred ground is
+  // otherwise free.
+  const homeDayVenue = new Map<string, string>();
+  const homeDayKey = (homeTeamId: string, date: IsoDate) => `${homeTeamId}|${date}`;
+  for (const f of out) if (f.venueId) homeDayVenue.set(homeDayKey(f.home, f.date), f.venueId);
 
   const candidatesFor = (f: AllocatedFixture): Candidate[] => {
     const home = teamHome(f.home);
@@ -343,7 +379,7 @@ export function allocateVenues(args: AllocateArgs): AllocationReport {
   };
 
   const isFree = (c: Candidate, f: AllocatedFixture) =>
-    ledger.venueLoad(c.venue.id, f.date) < Math.max(1, c.venue.surfaces ?? 1);
+    ledger.venueLoad(c.venue.id, f.date, f.time) < Math.max(1, c.venue.surfaces ?? 1);
 
   // Most-constrained-first: fewest currently-free candidates goes first. Locked fixtures
   // are already placed and drop out.
@@ -362,8 +398,8 @@ export function allocateVenues(args: AllocateArgs): AllocationReport {
 
   let unresolved = 0;
   for (const f of ranked) {
-    // A side already committed that day — in ANY competition — can't play here.
-    const clash = [f.home, f.away].find((t) => ledger.teamBusy(t, f.date));
+    // A side already committed that day and slot — in ANY competition — can't play here.
+    const clash = [f.home, f.away].find((t) => ledger.teamBusy(t, f.date, f.time));
     if (clash) {
       f.venueId = undefined;
       f.venueName = undefined;
@@ -407,7 +443,12 @@ export function allocateVenues(args: AllocateArgs): AllocationReport {
       // the unpinned minority still has to be ranked, and "unknown" must rank worst.
       if (distanceUsed) s -= weightOf('distance') * (c.km !== null ? Math.min(c.km / 200, 1) : 1);
       // Prefer a quieter ground, all else equal.
-      s -= weightOf('availability') * ledger.venueLoad(c.venue.id, f.date);
+      s -= weightOf('availability') * ledger.venueLoad(c.venue.id, f.date, f.time);
+      // A double-header's second round for this home side: keep it at the same ground as
+      // the first if that ground is still free at this slot (it's only in `free` at all
+      // if it is) — outweighs every other factor so it always wins when available, and
+      // simply falls out of contention (like any other busy ground) when it isn't.
+      if (homeDayVenue.get(homeDayKey(f.home, f.date)) === c.venue.id) s += 1e9;
       return s;
     };
 
@@ -437,7 +478,8 @@ export function allocateVenues(args: AllocateArgs): AllocationReport {
     f.venueLon = Number.isFinite(best.venue.lon) ? best.venue.lon : undefined;
     f.venueStatus = status;
     f.venueReason = reason;
-    ledger.add(best.venue.id, f.date, [f.home, f.away]);
+    ledger.add(best.venue.id, f.date, [f.home, f.away], f.time);
+    homeDayVenue.set(homeDayKey(f.home, f.date), best.venue.id);
   }
 
   if (unresolved > 0) {

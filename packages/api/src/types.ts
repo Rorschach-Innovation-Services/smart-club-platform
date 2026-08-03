@@ -127,6 +127,9 @@ export interface SeriesSchedule {
   blockId: string;
   cadence: Cadence;
   slots?: TimeSlot[];
+  /** each planned day hosts roundsPerDay consecutive rounds; round r starts wholly at
+   * slot r % slots.length; DatePlan.dates carries repeated consecutive dates. */
+  roundsPerDay?: 1 | 2;
 }
 
 /* ─── COMPETITION STRUCTURE (ADR 0008) ───
@@ -220,6 +223,9 @@ export interface StageSchedule {
   blockIndex: number;
   cadence: Cadence;
   slots?: TimeSlot[];
+  /** each planned day hosts roundsPerDay consecutive rounds; round r starts wholly at
+   * slot r % slots.length; DatePlan.dates carries repeated consecutive dates. */
+  roundsPerDay?: 1 | 2;
   /** Generate now, surface to clubs from this date (junior leagues). */
   activateFrom?: IsoDate;
 }

@@ -97,7 +97,14 @@ export interface SkippedDate {
  * the whole point: a 12-team bi-weekly division needs 11 rounds and Block 1 fits 7.
  */
 export interface DatePlan {
-  /** One date per PLACED round, ascending. Shorter than `roundsRequested` if it overflows. */
+  /**
+   * One date per PLACED round, ascending. Shorter than `roundsRequested` if it overflows.
+   * With `roundsPerDay === 2` this is no longer one-date-per-day: each planned DAY
+   * contributes two consecutive entries (its AM round, then its PM round), so the same
+   * date appears twice in a row before the next date starts. Deliberate — callers that
+   * zip `dates` against rounds still get exactly one date per round, they just can't
+   * assume the dates are distinct any more.
+   */
   dates: IsoDate[];
   fits: boolean;
   roundsRequested: number;
@@ -115,6 +122,8 @@ export interface DatePlanRequest {
   rounds: number;
   /** Optional first-round date; clamped into the block. Absent ⇒ the block start. */
   startDate?: IsoDate;
+  /** 2 ⇒ plan half as many DAYS and run two rounds (AM + PM) on each. Absent/1 ⇒ unchanged. */
+  roundsPerDay?: number;
 }
 
 /**
@@ -265,8 +274,12 @@ function* candidateDates(block: SeasonBlock, from: IsoDate, cadence: Cadence): G
  * break-awareness added.
  *
  * Monotonic by construction: each nudged date is pushed to at least the day after the
- * previous one, so two rounds can never stack on a single date — the same one-day floor
- * the original generator enforced.
+ * previous one, so two DAYS this function plans can never stack on the same date — the
+ * same one-day floor the original generator enforced. (When `planRoundDates` is asked
+ * for two rounds per day, it expands each day this returns into two consecutive round
+ * dates itself, after this function has returned — that expansion is not a violation of
+ * the guarantee above, which is about the days `spreadDates` places, not the rounds a
+ * caller later maps onto them.)
  */
 function spreadDates(
   calendar: SeasonCalendar,
@@ -341,23 +354,34 @@ export function planRoundDates(req: DatePlanRequest): DatePlan {
     return empty(`That start date is after ${block.label} ends (${formatIsoDate(block.end)})`);
   const from = requestedStart < block.start ? block.start : requestedStart;
 
+  // A double-header plans DAYS, then fans each day out into its two rounds — the day
+  // machinery below (spreadDates / candidateDates) is untouched and still produces one
+  // entry per day; only the count it's asked for, and what's done with its output,
+  // changes. k === 1 makes daysNeeded === requested, so this is a no-op for every
+  // existing caller.
+  const k = req.roundsPerDay === 2 ? 2 : 1;
+  const daysNeeded = Math.ceil(requested / k);
+
   const skipped: SkippedDate[] = [];
-  let dates: IsoDate[];
+  let dayDates: IsoDate[];
   if (cadence.kind === 'spread') {
-    dates = spreadDates(calendar, block, from, requested, skipped);
+    dayDates = spreadDates(calendar, block, from, daysNeeded, skipped);
   } else {
-    dates = [];
+    dayDates = [];
     for (const candidate of candidateDates(block, from, cadence)) {
-      if (dates.length >= requested) break;
+      if (dayDates.length >= daysNeeded) break;
       const reason = blockedReason(calendar, candidate);
       if (reason) {
         skipped.push({ date: candidate, reason });
         continue;
       }
-      dates.push(candidate);
+      dayDates.push(candidate);
     }
   }
 
+  // Fan each planned day out into k consecutive round-dates, then cap at what was asked
+  // for — the odd-count case (5 rounds at k=2 → 3 days → 6 expanded → sliced to 5).
+  const dates = dayDates.flatMap((date) => Array(k).fill(date) as IsoDate[]).slice(0, requested);
   const placed = dates.length;
   const fits = placed >= requested;
   return {
@@ -366,7 +390,16 @@ export function planRoundDates(req: DatePlanRequest): DatePlan {
     roundsRequested: requested,
     roundsPlaced: placed,
     skipped,
-    summary: summarise({ block, cadence, dates, requested, placed, fits, skipped }),
+    summary: summarise({
+      block,
+      cadence,
+      dates,
+      requested,
+      placed,
+      fits,
+      skipped,
+      roundsPerDay: req.roundsPerDay,
+    }),
   };
 }
 
@@ -382,17 +415,22 @@ function summarise(a: {
   placed: number;
   fits: boolean;
   skipped: SkippedDate[];
+  roundsPerDay?: number;
 }): string {
-  const { block, cadence, dates, requested, placed, fits, skipped } = a;
+  const { block, cadence, dates, requested, placed, fits, skipped, roundsPerDay } = a;
   const rounds = `${requested} round${requested === 1 ? '' : 's'}`;
   const cad = describeCadence(cadence);
+  const doubleHeader = roundsPerDay === 2;
 
   if (!fits) {
     const short = requested - placed;
     const capacity = placed
       ? `${block.label} fits ${placed} at this cadence`
       : `${block.label} fits none at this cadence`;
-    return `${rounds} · ${cad} — ${capacity}; ${short} round${short === 1 ? " doesn't" : "s don't"} fit. Shorten the cadence, start earlier, or extend ${block.label}.`;
+    const advice = doubleHeader
+      ? `Shorten the cadence, start earlier, or extend ${block.label} — each extra day fits two more rounds.`
+      : `Shorten the cadence, start earlier, or extend ${block.label}.`;
+    return `${rounds} · ${cad} — ${capacity}; ${short} round${short === 1 ? " doesn't" : "s don't"} fit. ${advice}`;
   }
 
   const span = `${formatIsoDate(dates[0])} → ${formatIsoDate(dates[dates.length - 1])}`;
@@ -404,7 +442,8 @@ function summarise(a: {
   const moved = skipped.length
     ? ` · ${skipped.length} date${skipped.length === 1 ? '' : 's'} moved past ${uniqueReasons(skipped)}`
     : '';
-  return `${rounds} · ${cad} · ${span}${spare}${moved}`;
+  const doubled = doubleHeader ? ' · 2 rounds per day (AM + PM)' : '';
+  return `${rounds} · ${cad} · ${span}${spare}${moved}${doubled}`;
 }
 
 /** Distinct skip reasons, comma-joined — "the mid-season break, excluded date". */

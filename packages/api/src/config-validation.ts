@@ -210,6 +210,13 @@ export function validateStructures(
       if (stage.schedule.slots !== undefined)
         assertValidTimeSlots(stage.schedule.slots, `stage "${sName}"`);
       if (
+        stage.schedule.roundsPerDay !== undefined &&
+        ![1, 2].includes(stage.schedule.roundsPerDay)
+      )
+        throw new HttpError(400, `stage "${sName}" roundsPerDay must be 1 or 2`);
+      if (stage.schedule.roundsPerDay === 2 && (stage.schedule.slots ?? []).length !== 2)
+        throw new HttpError(400, `stage "${sName}" needs exactly two slots for two rounds per day`);
+      if (
         stage.format.kind === 'knockout' &&
         !['seeded', 'cross-pool'].includes(stage.format.pairing)
       )

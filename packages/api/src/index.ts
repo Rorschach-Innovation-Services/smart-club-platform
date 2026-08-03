@@ -2414,6 +2414,10 @@ function validateSeriesSchedule(
     );
   assertValidCadence(sched.cadence, 'series schedule');
   if (sched.slots !== undefined) assertValidTimeSlots(sched.slots, 'series schedule');
+  if (sched.roundsPerDay !== undefined && ![1, 2].includes(sched.roundsPerDay))
+    throw new HttpError(400, 'series schedule roundsPerDay must be 1 or 2');
+  if (sched.roundsPerDay === 2 && (sched.slots ?? []).length !== 2)
+    throw new HttpError(400, 'series schedule needs exactly two slots for two rounds per day');
 }
 
 app.get('/series', async (c) => {

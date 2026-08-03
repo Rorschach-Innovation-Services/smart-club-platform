@@ -134,12 +134,18 @@ export function fixturesFromDates(
   rounds: Pairing[][],
   dates: IsoDate[],
   slots?: TimeSlot[],
+  opts: { roundsPerDay?: number } = {},
 ): GeneratedFixture[] {
+  // A double-header round shares ONE slot across every fixture in it (the whole round is
+  // the AM or PM sitting), matching `dates` now carrying a date twice in a row for its
+  // AM/PM pair. Anything else keeps the original per-fixture-index cycling within a round.
+  const byRound = Array.isArray(slots) && slots.length > 0 && opts.roundsPerDay === 2;
   const out: GeneratedFixture[] = [];
   let fixtureId = 1;
   for (let r = 0; r < rounds.length && r < dates.length; r++) {
+    const roundSlot = byRound ? (slots as TimeSlot[])[r % (slots as TimeSlot[]).length] : undefined;
     rounds[r].forEach(([home, away], i) => {
-      const slot = slotForIndex(slots, i);
+      const slot = byRound ? roundSlot : slotForIndex(slots, i);
       out.push({
         id: 'f' + fixtureId++,
         round: r + 1,
@@ -161,6 +167,7 @@ export function fixturesFromPlan(
   teamIds: (string | null)[],
   dates: IsoDate[],
   slots?: TimeSlot[],
+  opts: { roundsPerDay?: number } = {},
 ): GeneratedFixture[] {
-  return fixturesFromDates(roundRobinPairings(teamIds), dates, slots);
+  return fixturesFromDates(roundRobinPairings(teamIds), dates, slots, opts);
 }

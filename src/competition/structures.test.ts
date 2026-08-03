@@ -686,7 +686,7 @@ describe('cross-pool wiring', () => {
   it('takes WHO from the knockout stage and WHICH POOL, in order, from the one before', () => {
     const q = crossPoolQualifiersFor(
       SEMIS,
-      POOLS,
+      [POOLS, SEMIS],
       run(
         [
           ['a1', 'a2', 'a3'],
@@ -707,7 +707,7 @@ describe('cross-pool wiring', () => {
     // drop it, so refuse and let the seeded bracket take the whole field.
     const q = crossPoolQualifiersFor(
       SEMIS,
-      POOLS,
+      [POOLS, SEMIS],
       run(
         [
           ['a1', 'a2'],
@@ -723,7 +723,7 @@ describe('cross-pool wiring', () => {
     expect(
       crossPoolQualifiersFor(
         SEMIS,
-        POOLS,
+        [POOLS, SEMIS],
         run(
           [
             ['a1', 'a2'],

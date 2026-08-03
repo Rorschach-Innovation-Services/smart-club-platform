@@ -106,13 +106,16 @@ export function materialiseStage(args: MaterialiseArgs): StageMaterialisation {
       blockId: resolvedBlockId,
       cadence: stage.schedule.cadence,
       rounds: rounds.length,
+      roundsPerDay: stage.schedule.roundsPerDay,
     });
     return {
       id: group.id,
       label: group.label,
       entrants: group.entrants,
       plan,
-      fixtures: fixturesFromDates(rounds, plan.dates, stage.schedule.slots),
+      fixtures: fixturesFromDates(rounds, plan.dates, stage.schedule.slots, {
+        roundsPerDay: stage.schedule.roundsPerDay,
+      }),
     };
   });
 
@@ -203,7 +206,8 @@ export function describeStage(stage: StageSpec, calendar?: SeasonCalendar): stri
   const where = block
     ? `${describeCadence(stage.schedule.cadence)}, ${block.label}`
     : describeCadence(stage.schedule.cadence);
-  return `${describeEntrants(stage.entrants)} · ${describeFormat(stage.format)} · ${where}`;
+  const doubleHeader = stage.schedule.roundsPerDay === 2 ? ', double-headers' : '';
+  return `${describeEntrants(stage.entrants)} · ${describeFormat(stage.format)} · ${where}${doubleHeader}`;
 }
 
 /**
@@ -229,6 +233,7 @@ export function previewFit(
     blockId: findBlock(calendar, stage.schedule.blockIndex)?.id ?? '',
     cadence: stage.schedule.cadence,
     rounds: previewRounds(stage, entrantsPerGroup),
+    roundsPerDay: stage.schedule.roundsPerDay,
   });
 }
 
@@ -239,18 +244,44 @@ export function previewFit(
    successive review rounds found real defects in exactly this logic, each of which a
    three-line test would have caught. */
 
-/** True when the stage immediately after this one draws a cross-pool bracket from it. */
+/**
+ * The stage a stage's entrants actually derive from: `entrants.derivedFrom.fromStage`
+ * when the stage names one AND it resolves to a real stage in `stages`, otherwise the
+ * stage immediately before it.
+ *
+ * The fallback is what keeps this backward-compatible: every structure saved before
+ * `derivedFrom.fromStage` existed (or one where it names a stage since deleted) still
+ * resolves exactly the way `feedsCrossPool`/`crossPoolQualifiersFor` always assumed —
+ * cross-pool draws from the adjacent earlier stage. A real KZNCU structure needs the
+ * named case: its knockout derives from a pool stage TWO stages back, past an
+ * intermediate stage adjacency alone would point at wrongly.
+ */
+export function crossPoolSourceStage(stage: StageSpec, stages: StageSpec[]): StageSpec | undefined {
+  const index = stages.findIndex((s) => s.id === stage.id);
+  const named =
+    stage.entrants.kind === 'manual' ? stage.entrants.derivedFrom?.fromStage : undefined;
+  const resolved = named ? stages.find((s) => s.id === named) : undefined;
+  if (resolved) return resolved;
+  return index > 0 ? stages[index - 1] : undefined;
+}
+
+/** True when some later stage draws a cross-pool bracket from this one. */
 export function feedsCrossPool(stage: StageSpec, stages: StageSpec[]): boolean {
-  const next = stages[stages.findIndex((s) => s.id === stage.id) + 1];
-  return next?.format.kind === 'knockout' && next.format.pairing === 'cross-pool';
+  return stages.some(
+    (later) =>
+      later.format.kind === 'knockout' &&
+      later.format.pairing === 'cross-pool' &&
+      crossPoolSourceStage(later, stages)?.id === stage.id,
+  );
 }
 
 /**
  * The qualifying pools a cross-pool knockout draws from: WHO qualified comes from this
- * stage's own confirmed entrants, WHICH POOL and in what order comes from the stage
- * before it.
+ * stage's own confirmed entrants, WHICH POOL and in what order comes from the stage it
+ * derives from (`crossPoolSourceStage` — named via `derivedFrom.fromStage`, or the
+ * adjacent earlier stage when that's absent or unresolvable).
  *
- * Both halves are load-bearing. Passing the prior stage's whole rosters instead produces
+ * Both halves are load-bearing. Passing the source stage's whole rosters instead produces
  * a bracket over `pools[i][0]` and `pools[i][1]` — the first two clubs in each pool —
  * which are sides the knockout series does not contain: the clubs that actually qualified
  * would see a series with no fixtures of theirs in it, and the drilldown would read
@@ -266,13 +297,14 @@ export function feedsCrossPool(stage: StageSpec, stages: StageSpec[]): boolean {
  */
 export function crossPoolQualifiersFor(
   stage: StageSpec,
-  priorStage: StageSpec | undefined,
+  stages: StageSpec[],
   run: SeasonRun,
 ): string[][] | undefined {
   if (stage.format.kind !== 'knockout' || stage.format.pairing !== 'cross-pool') return undefined;
-  if (!priorStage) return undefined;
+  const sourceStage = crossPoolSourceStage(stage, stages);
+  if (!sourceStage) return undefined;
 
-  const pools = run.stages.find((s) => s.specId === priorStage.id)?.groups ?? [];
+  const pools = run.stages.find((s) => s.specId === sourceStage.id)?.groups ?? [];
   if (pools.length < 2) return undefined;
 
   // Who went through — this stage's own confirmed entrants, nobody else.
