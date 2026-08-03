@@ -361,6 +361,84 @@ describe('StageRow — Time slots', () => {
   const timeSlotsChoice = () =>
     screen.getByText('Time slots').parentElement!.querySelector('.seg') as HTMLElement;
 
+  /** The Choice button currently marked selected — `Choice` in atoms.tsx renders it
+   * with the `on` class and a check icon. */
+  const selectedOption = () =>
+    (within(timeSlotsChoice()).getAllByRole('button') as HTMLButtonElement[]).find((b) =>
+      b.className.includes('on'),
+    )?.textContent;
+
+  it('round-trips all three time-slots options — each writes the right slots/roundsPerDay', async () => {
+    const { user, save } = setup([structure()]);
+    await openEditor(user);
+
+    // Off → on: "Morning & afternoon starts" writes slots, no roundsPerDay.
+    await user.click(
+      within(timeSlotsChoice()).getByRole('button', { name: 'Morning & afternoon starts' }),
+    );
+    expect(selectedOption()).toBe('Morning & afternoon starts');
+
+    // Timed → double-header: "AM + PM double-headers" writes slots AND roundsPerDay: 2.
+    await user.click(
+      within(timeSlotsChoice()).getByRole('button', { name: 'AM + PM double-headers' }),
+    );
+    expect(selectedOption()).toBe('AM + PM double-headers');
+
+    await user.click(saveBtn());
+    expect(save).toHaveBeenCalledTimes(1);
+    const doubled = save.mock.calls[0][0].structures[0].stages[0].schedule;
+    expect(doubled.slots).toEqual([
+      { label: 'Morning', start: '08:00' },
+      { label: 'Afternoon', start: '13:30' },
+    ]);
+    expect(doubled.roundsPerDay).toBe(2);
+  });
+
+  it('switching back to "Morning & afternoon starts" drops roundsPerDay but keeps the slots', async () => {
+    const { user, save } = setup([
+      structure({
+        stages: [
+          {
+            id: 's1',
+            name: 'League',
+            format: { kind: 'round-robin', legs: 1 },
+            entrants: { kind: 'all-registered' },
+            schedule: {
+              blockIndex: 0,
+              cadence: { kind: 'weekly' },
+              roundsPerDay: 2,
+              slots: [
+                { label: 'Morning', start: '08:00' },
+                { label: 'Afternoon', start: '13:30' },
+              ],
+            },
+          },
+        ],
+      } as Partial<CompetitionStructure>),
+    ]);
+    await openEditor(user);
+    expect(selectedOption()).toBe('AM + PM double-headers');
+
+    await user.click(
+      within(timeSlotsChoice()).getByRole('button', { name: 'Morning & afternoon starts' }),
+    );
+    expect(selectedOption()).toBe('Morning & afternoon starts');
+
+    await user.click(saveBtn());
+    const timed = save.mock.calls[0][0].structures[0].stages[0].schedule;
+    expect(timed.slots).toEqual([
+      { label: 'Morning', start: '08:00' },
+      { label: 'Afternoon', start: '13:30' },
+    ]);
+    expect('roundsPerDay' in timed).toBe(false);
+  });
+
+  it('"No set times" round-trips as the selected option on a stage with no slots at all', async () => {
+    const { user } = setup([structure()]);
+    await openEditor(user);
+    expect(selectedOption()).toBe('No set times');
+  });
+
   it('turning it ON populates two rows prefilled with the T20 defaults, and saves them', async () => {
     const { user, save } = setup([structure()]);
     await openEditor(user);
@@ -439,6 +517,85 @@ describe('StageRow — Time slots', () => {
 
     const saved = save.mock.calls[0][0].structures[0];
     expect('slots' in saved.stages[0].schedule).toBe(false);
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   StageRow — Leg order.
+
+   Only offered on a round robin playing 2+ legs — a single-leg stage has no return leg
+   to order. "Same opponents back-to-back" writes `legOrder: 'interleaved'`; the default
+   ("Full round, then return round") omits the key entirely, matching
+   `roundRobinRounds`'s own 'mirrored' default (formats.ts).
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('StageRow — Leg order', () => {
+  const twoLegStructure = (extra: Record<string, unknown> = {}): CompetitionStructure =>
+    structure({
+      stages: [
+        {
+          id: 's1',
+          name: 'Double round',
+          format: { kind: 'round-robin', legs: 2 },
+          entrants: { kind: 'all-registered' },
+          schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+          ...extra,
+        },
+      ],
+    } as Partial<CompetitionStructure>);
+
+  const legOrderChoice = () =>
+    screen.getByText('Leg order').parentElement!.querySelector('.seg') as HTMLElement;
+
+  it('is not offered on a single-leg stage', async () => {
+    const { user } = setup([structure()]); // default is legs: 1
+    await openEditor(user);
+    expect(screen.queryByText('Leg order')).toBeNull();
+  });
+
+  it('appears once a stage plays 2 or more legs', async () => {
+    const { user } = setup([twoLegStructure()]);
+    await openEditor(user);
+    expect(screen.getByText('Leg order')).toBeVisible();
+  });
+
+  it('selecting "Same opponents back-to-back" writes legOrder: interleaved', async () => {
+    const { user, save } = setup([twoLegStructure()]);
+    await openEditor(user);
+
+    await user.click(
+      within(legOrderChoice()).getByRole('button', { name: 'Same opponents back-to-back' }),
+    );
+    await user.click(saveBtn());
+
+    const saved = save.mock.calls[0][0].structures[0].stages[0].format;
+    expect(saved.legOrder).toBe('interleaved');
+  });
+
+  it('leaving the default "Full round, then return round" writes no legOrder key', async () => {
+    const { user, save } = setup([twoLegStructure()]);
+    await openEditor(user);
+
+    // Never touch the control — the default must still round-trip cleanly.
+    await user.click(saveBtn());
+
+    const saved = save.mock.calls[0][0].structures[0].stages[0].format;
+    expect('legOrder' in saved).toBe(false);
+  });
+
+  it('switching back to the default after picking interleaved removes the key again', async () => {
+    const { user, save } = setup([
+      twoLegStructure({ format: { kind: 'round-robin', legs: 2, legOrder: 'interleaved' } }),
+    ]);
+    await openEditor(user);
+
+    await user.click(
+      within(legOrderChoice()).getByRole('button', { name: 'Full round, then return round' }),
+    );
+    await user.click(saveBtn());
+
+    const saved = save.mock.calls[0][0].structures[0].stages[0].format;
+    expect('legOrder' in saved).toBe(false);
   });
 });
 

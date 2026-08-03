@@ -70,6 +70,128 @@ Competitions**.
   Scheduling options (used here for the Juniors divisions); a stage inside a structure has the
   same field per-stage, for competitions that need a stage to open late mid-structure.
 
+## Double-headers, non-adjacent cross-pool derivation, and multi-leg finals
+
+The KZNCU spreadsheet asks for three things the structures above don't cover yet:
+double-header playing days, a knockout that draws from a pool stage two stages back
+instead of the one immediately before it, and a return leg played the same day as the
+original. All three shipped on `feat/kzncu-full-expressibility` (`src/competition/calendar.ts`,
+`structure.ts`, `fixtures.ts`, `platform-structures.tsx`). This section is the
+sheet-by-sheet mapping, in the same style as the table above.
+
+| Sheet                   | Status                                                                                                                                                                                                                                                                                                               |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Premier Men             | ✓ Already supported — see the table above, no changes from this branch.                                                                                                                                                                                                                                              |
+| Promotion Men           | Kingsmead 3-stage concurrent shape — new, see below.                                                                                                                                                                                                                                                                 |
+| Premier Women           | Final stage plays 2 legs, mirrored (the existing default) — see below.                                                                                                                                                                                                                                               |
+| Promotion Women 20-Over | AM + PM double-headers, interleaved leg order — new, see below.                                                                                                                                                                                                                                                      |
+| Veterans                | Same patterns as the sheets above — no shape this sheet needs that isn't already covered by an existing template or the controls below. Follow whichever of Premier Men / Premier Women / Promotion Men fits its actual format once the union's Veterans fixture list is in hand; nothing here is Veterans-specific. |
+
+### Promotion Men — the Kingsmead 3-stage concurrent shape
+
+The `stream-and-cup` template (row 31 above) covers a straight streams-then-cup pipeline
+adjacent stage to adjacent stage. Kingsmead is the harder case the union's document
+actually describes: **Pools → an unrelated intermediate stage → the Kingsmead Cup**,
+where the Cup's entrants are drawn from Pools, not from the stage immediately before it.
+`crossPoolSourceStage` (`src/competition/structure.ts`) resolves this by reading
+`entrants.derivedFrom.fromStage` directly, so a stage can name any earlier stage in the
+structure, not just its neighbour.
+
+To author it in the Structures editor:
+
+1. Build three stages in order: **Pools** (seeded-split, the union's pool sizes),
+   **Streams** (whatever intermediate stage sits between them in the union's document —
+   it plays no part in the Cup's derivation), then **Kingsmead Cup** (knockout,
+   pairing = cross-pool).
+2. Open the Cup stage's **Teams** section and turn on **Teams come from an earlier
+   stage**. The **Draws from** picker lists every EARLIER stage in the structure, not
+   just the one directly before it — pick **Pools**, even though Streams sits between
+   them in the list.
+3. Write the rule sentence the admin will read at confirm time (e.g. "Top two from each
+   pool") in the **detail** box. This is prose only — nothing here executes the rule; it
+   documents it for the human confirming the pool stage.
+4. Save. The preview rail and `describeStage` don't change based on which stage is
+   named — the Cup stage still reads as a cross-pool knockout either way.
+
+What the admin sees at season time: because a later stage (the Cup) draws a cross-pool
+bracket from Pools, `feedsCrossPool` marks Pools as `ranked` — **Pools' own confirm
+step**, not Streams' and not the Cup's, gets the **Position** column asking for each
+side's finishing position within its pool. That position is what the Cup's bracket reads
+(pool winner against another pool's runner-up) once the admin confirms the Cup stage
+itself. If the Cup stage were instead left with no `derivedFrom.fromStage` set at all,
+`crossPoolSourceStage` falls back to the stage immediately before it (Streams) — the
+pre-existing adjacent behaviour, kept for structures saved before this field existed. Set
+`fromStage` explicitly for Kingsmead; don't rely on the fallback.
+
+### Premier Women — a two-leg final stage
+
+Premier Women's final round (row 33 above, `split-league-swap` with the format bumped to
+a double round robin) plays each pairing twice — that's `format.legs: 2` on the
+`round-robin` format. Leg order defaults to **mirrored**: the whole first leg plays out,
+then the whole thing repeats with home and away swapped, matching what both unions have
+always done. There is nothing to change here from this branch — mirrored is the default
+and needs no `legOrder` key at all (`roundRobinRounds` in `src/competition/formats.ts`
+treats an absent `legOrder` as mirrored). The **Leg order** control only appears once a
+stage's format plays 2 or more legs, so it won't show at all on a single-leg stage.
+
+### Promotion Women 20-Over — AM + PM double-headers
+
+This is the sheet that needs the new **Time slots** third option and the **Leg order**
+control together. Authoring it end to end:
+
+1. On the stage's **Schedule** section, set **Time slots** to **AM + PM
+   double-headers** (the third option, after "No set times" and "Morning & afternoon
+   starts"). This writes both `slots` (defaulting to the T20 pair, 08:00 / 13:30 — edit
+   the labels or times if the union's sheet states different starts) and
+   `roundsPerDay: 2` onto the stage's schedule. The calendar engine responds by planning
+   half as many playing DAYS and running two full rounds on each one.
+2. If the format plays 2 legs, a **Leg order** control appears under Format. Choose
+   **Same opponents back-to-back** to write `legOrder: 'interleaved'` — with
+   double-headers on, this plays a side's morning fixture and its PM return leg against
+   the _same_ opponent, rather than saving the return leg for a later day. Leaving the
+   default (**Full round, then return round**) still works with double-headers on; it
+   just means the return leg is a different day's double-header, not the same day's PM
+   slot. The union's document asks for the same-day return, so pick interleaved here.
+3. Save and generate. What comes out: each double-header day produces two consecutive
+   rounds sharing that date — round _N_ gets every fixture at the first slot (08:00),
+   round _N+1_ gets every fixture at the second slot (13:30), and — because leg order is
+   interleaved — the pairing in round _N+1_ is the same two sides as round _N_, home and
+   away swapped. The fixture table (admin and club portal) shows the slot label and start
+   time beside each row, with a time tiebreaker on same-date sorts, so the AM/PM pair
+   reads in the right order.
+4. Venue allocation already accounts for this: the ledger keys on date _and_ slot, so a
+   side playing both the AM and PM fixture on one date is not flagged as double-booked,
+   and a single-surface ground can legitimately host both fixtures on the same day.
+
+## Operational notes
+
+- **Prior-log seeding is a manual confirm, not automatic.** Nothing in the platform reads
+  a previous season's finishing positions on its own — there is no results/standings
+  model. A ranked stage (feeding a cross-pool draw, or a seeded knockout in its own
+  right) always starts from a suggestion the admin can accept or override, entered by
+  hand through the **Position** column on that stage's confirm step at the start of the
+  season. Treat "seed from the prior log" as a per-season admin task, every season, not a
+  one-time setup step.
+- **Deploy the API before the web app.** `src/admin.tsx`'s flat-series **Regenerate**
+  button is the belt-and-braces path here: it doesn't ask the structure what the schedule
+  should be, it reads `series.schedule.roundsPerDay` straight off whatever was actually
+  persisted on that series and rebuilds fixtures from it (`admin.tsx`'s `regenerate()`,
+  `~line 686`) — so a double-header series keeps double-heading through any later
+  regenerate, independent of which web bundle is running, PROVIDED the field made it into
+  storage in the first place. That's only guaranteed once the API validates and accepts
+  `roundsPerDay` (`packages/api/src/config-validation.ts`, `index.ts`). Deploy web first
+  and a schedule save can reach an API that doesn't recognise the field yet — silently
+  storing a series with no `roundsPerDay` even though the operator picked "AM + PM
+  double-headers" — and the belt-and-braces regenerate path then has nothing to read back.
+  Ship the API first, so every write of `roundsPerDay` lands on an API that keeps it.
+- **Running seasons keep their existing `structureSnapshot`.** A `SeasonRun` freezes the
+  structure it was started against (src/main.tsx) — editing a structure's schedule to add
+  `roundsPerDay`, a non-adjacent `derivedFrom.fromStage`, or a different `legOrder` only
+  applies to a season **started or a stage regenerated after the edit**. A season already
+  mid-way through its stages carries on exactly as it was generated; there is no
+  retroactive migration, and this is deliberate, existing behaviour — not a caveat this
+  branch introduces.
+
 ## See also
 
 - [`docs/runbooks/configurable-league-structures.md`](./configurable-league-structures.md) —

@@ -740,6 +740,92 @@ describe('POST /series schedule validation', () => {
     assert.equal((await repo.getSeries(T, s.id))?.schedule?.calendarId, 'cal-2627');
   });
 
+  // roundsPerDay (double-headers, ADR 0008): 1 is fine on its own, 2 needs exactly two
+  // slots — one round is the AM sitting, the other the PM sitting.
+  describe('roundsPerDay validation', () => {
+    const T20_SLOTS = [
+      { label: 'Morning', start: '08:00' },
+      { label: 'Afternoon', start: '13:30' },
+    ];
+
+    test('roundsPerDay: 1 is accepted', async () => {
+      const s = series({
+        schedule: {
+          calendarId: 'cal-2627',
+          blockId: 'b1',
+          cadence: { kind: 'weekly' },
+          roundsPerDay: 1,
+        },
+      });
+      const res = await post(s);
+      assert.equal(res.status, 201);
+    });
+
+    test('roundsPerDay: 2 with exactly two slots is accepted', async () => {
+      const s = series({
+        schedule: {
+          calendarId: 'cal-2627',
+          blockId: 'b1',
+          cadence: { kind: 'weekly' },
+          roundsPerDay: 2,
+          slots: T20_SLOTS,
+        },
+      });
+      const res = await post(s);
+      assert.equal(res.status, 201);
+    });
+
+    test('roundsPerDay: 2 with one slot is rejected', async () => {
+      const s = series({
+        schedule: {
+          calendarId: 'cal-2627',
+          blockId: 'b1',
+          cadence: { kind: 'weekly' },
+          roundsPerDay: 2,
+          slots: [T20_SLOTS[0]],
+        },
+      });
+      const res = await post(s);
+      assert.equal(res.status, 400);
+      const err = ((await res.json()) as { error: string }).error;
+      assert.match(err, /exactly two slots for two rounds per day/);
+      assert.equal(await repo.getSeries(T, s.id), null);
+    });
+
+    test('roundsPerDay: 2 with three slots is rejected', async () => {
+      const s = series({
+        schedule: {
+          calendarId: 'cal-2627',
+          blockId: 'b1',
+          cadence: { kind: 'weekly' },
+          roundsPerDay: 2,
+          slots: [...T20_SLOTS, { label: 'Evening', start: '18:00' }],
+        },
+      });
+      const res = await post(s);
+      assert.equal(res.status, 400);
+      const err = ((await res.json()) as { error: string }).error;
+      assert.match(err, /exactly two slots for two rounds per day/);
+      assert.equal(await repo.getSeries(T, s.id), null);
+    });
+
+    test('a roundsPerDay other than 1 or 2 is rejected', async () => {
+      const s = series({
+        schedule: {
+          calendarId: 'cal-2627',
+          blockId: 'b1',
+          cadence: { kind: 'weekly' },
+          roundsPerDay: 3,
+        },
+      });
+      const res = await post(s);
+      assert.equal(res.status, 400);
+      const err = ((await res.json()) as { error: string }).error;
+      assert.match(err, /roundsPerDay must be 1 or 2/);
+      assert.equal(await repo.getSeries(T, s.id), null);
+    });
+  });
+
   test('malformed slots are rejected', async () => {
     const s = series({
       schedule: {

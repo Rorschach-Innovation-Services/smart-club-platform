@@ -47,6 +47,15 @@ const alloc = (
     ...opts,
   });
 
+/** A double-header fixture: `fx` plus a slot (`time`), the way `fixturesFromDates` writes one. */
+const fxAt = (
+  id: string,
+  date: string,
+  home: string,
+  away: string,
+  time: string,
+): AllocatedFixture => ({ ...fx(id, date, home, away), time });
+
 describe('venueUnavailableReason', () => {
   it('closes a ground inside a maintenance window, inclusive of both ends', () => {
     const v: Venue = {
@@ -470,6 +479,57 @@ describe('allocateVenues — most-constrained-first', () => {
     });
     expect(r.unresolved).toBe(0);
     expect(new Set(r.fixtures.map((f) => f.venueId)).size).toBe(2);
+  });
+});
+
+describe('allocateVenues — double-headers key the ledger on date AND slot', () => {
+  it('allocates a side’s AM and PM fixtures fully — no false "already has a match" clash', () => {
+    // alpha plays bravo in the morning and charlie in the afternoon, same date — a real
+    // double-header, not a scheduling mistake. Slot-awareness must not read the PM
+    // fixture as alpha already being busy that day.
+    const r = alloc([
+      fxAt('am', '2026-09-13', 'alpha', 'bravo', '08:00'),
+      fxAt('pm', '2026-09-13', 'alpha', 'charlie', '13:30'),
+    ]);
+    expect(r.unresolved).toBe(0);
+    expect(r.fixtures.every((f) => f.venueId)).toBe(true);
+  });
+
+  it('hosts an AM and a PM fixture on one ground with a single surface, no over-capacity flag', () => {
+    const oneSurface = [KINGSMEAD]; // surfaces defaults to 1
+    const r = allocateVenues({
+      fixtures: [
+        fxAt('am', '2026-09-13', 'alpha', 'bravo', '08:00'),
+        fxAt('pm', '2026-09-13', 'charlie', 'bravo', '13:30'),
+      ],
+      venues: oneSurface,
+      teamHome,
+      ledger: buildLedger([]),
+    });
+    expect(r.unresolved).toBe(0);
+    expect(r.fixtures.every((f) => f.venueId === 'kingsmead')).toBe(true);
+  });
+
+  // Regression: slot-awareness must not accidentally loosen a REAL clash. Another
+  // competition already has Kingsmead booked at the exact same date and slot, so this
+  // fixture must still be refused that ground.
+  it('still clashes with a same-date, same-slot booking from a different competition', () => {
+    const other = [
+      {
+        id: 'other-series',
+        fixtures: [
+          { date: '2026-09-13', home: 'x', away: 'y', venueId: 'kingsmead', time: '08:00' },
+        ],
+      },
+    ];
+    const r = allocateVenues({
+      fixtures: [fxAt('f1', '2026-09-13', 'alpha', 'bravo', '08:00')],
+      venues: [KINGSMEAD, CHATSWORTH],
+      teamHome,
+      ledger: buildLedger(other),
+    });
+    expect(r.fixtures[0].venueId).not.toBe('kingsmead');
+    expect(r.fixtures[0].venueId).toBe('chatsworth');
   });
 });
 

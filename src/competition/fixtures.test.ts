@@ -8,6 +8,7 @@ import {
   type Pairing,
 } from './fixtures';
 import { planRoundDates } from './calendar';
+import { roundRobinRounds } from './formats';
 import type { SeasonCalendar } from '../types';
 
 /** The confirmed 2026/27 Top Six, in the order the union's spreadsheet lists them. */
@@ -232,5 +233,70 @@ describe('fixturesFromPlan — calendar-scheduled generation end to end', () => 
       { label: 'Afternoon', start: '13:30' },
     ]);
     expect(fx.map((f) => f.time)).toEqual(['09:00', '13:30', '09:00']);
+  });
+
+  describe('roundsPerDay: 2 — a whole round shares one slot (the AM or PM sitting)', () => {
+    const FOUR = ['a', 'b', 'c', 'd'];
+    const T20 = [
+      { label: 'Morning', start: '08:00' },
+      { label: 'Afternoon', start: '13:30' },
+    ];
+
+    it('gives round 1 the morning slot and round 2 the afternoon slot, same date', () => {
+      const plan = planRoundDates({
+        calendar: KZNCU,
+        blockId: 'b1',
+        cadence: { kind: 'weekly' },
+        rounds: 3,
+        roundsPerDay: 2,
+      });
+      expect(plan.fits).toBe(true);
+      expect(plan.dates).toEqual(['2026-09-13', '2026-09-13', '2026-09-20']);
+
+      const fx = fixturesFromPlan(FOUR, plan.dates, T20, { roundsPerDay: 2 });
+      const round1 = fx.filter((f) => f.round === 1);
+      const round2 = fx.filter((f) => f.round === 2);
+      expect(round1.every((f) => f.time === '08:00' && f.slot === 'Morning')).toBe(true);
+      expect(round2.every((f) => f.time === '13:30' && f.slot === 'Afternoon')).toBe(true);
+      expect(round1.every((f) => f.date === '2026-09-13')).toBe(true);
+      expect(round2.every((f) => f.date === '2026-09-13')).toBe(true);
+    });
+
+    it('leaves the default per-fixture-index cycling untouched when roundsPerDay is not 2', () => {
+      // Same request, no opts — byte-identical to the existing "applies T20" test above,
+      // confirming the double-header branch is opt-in only.
+      const rounds = roundRobinPairings(FOUR);
+      const fx = fixturesFromDates(rounds, ['2026-08-01', '2026-08-08', '2026-08-15'], T20);
+      expect(fx.map((f) => f.time)).toEqual(['08:00', '13:30', '08:00', '13:30', '08:00', '13:30']);
+    });
+  });
+
+  describe('interleaved legs + roundsPerDay: 2 — the return leg plays as the PM double-header', () => {
+    it('pairs the same two teams AM (home/away as drawn) and PM (return leg, swapped)', () => {
+      const FOUR = ['a', 'b', 'c', 'd'];
+      // roundRobinRounds('interleaved') plays each round immediately followed by its
+      // reverse, so base round 0 becomes output rounds [0]=leg0, [1]=leg1(reversed).
+      const rounds = roundRobinRounds(FOUR, 2, 'interleaved');
+      expect(rounds).toHaveLength(6); // 3 base rounds × 2 legs
+
+      const plan = planRoundDates({
+        calendar: KZNCU,
+        blockId: 'b1',
+        cadence: { kind: 'weekly' },
+        rounds: rounds.length,
+        roundsPerDay: 2,
+      });
+      expect(plan.fits).toBe(true);
+
+      const fx = fixturesFromDates(rounds, plan.dates, undefined, { roundsPerDay: 2 });
+      const round1 = fx.filter((f) => f.round === 1);
+      const round2 = fx.filter((f) => f.round === 2);
+      // The AM/PM pair shares a date (double-header) and reverses home/away for the same
+      // two teams — the "return leg" playing right after the original, same day.
+      expect(round1[0].date).toBe(round2[0].date);
+      const amPairing = [round1[0].home, round1[0].away];
+      const pmReturn = round2.find((f) => f.home === amPairing[1] && f.away === amPairing[0]);
+      expect(pmReturn).toBeDefined();
+    });
   });
 });

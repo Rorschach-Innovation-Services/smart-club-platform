@@ -232,7 +232,7 @@ describe('planRoundDates — spread cadence (pre-calendar behaviour, break-aware
     expect(plan.dates[4]).toBe('2027-03-28');
   });
 
-  it('never stacks two rounds on one date', () => {
+  it('never stacks two rounds on one date (roundsPerDay: 1 — dates are ALL distinct here, unlike the double-header case below)', () => {
     const plan = planRoundDates({
       calendar: KZNCU,
       blockId: 'b2',
@@ -253,6 +253,139 @@ describe('planRoundDates — spread cadence (pre-calendar behaviour, break-aware
       rounds: 3,
     });
     expect(plan.dates[0]).toBe('2027-01-19');
+  });
+});
+
+describe('planRoundDates — roundsPerDay: 2 (double-headers, AM + PM)', () => {
+  it('plans 3 Saturdays weekly for 6 rounds, each date repeated twice, consecutively, ascending', () => {
+    const plan = planRoundDates({
+      calendar: KZNCU,
+      blockId: 'b1',
+      cadence: { kind: 'weekly' },
+      rounds: 6,
+      roundsPerDay: 2,
+    });
+    expect(plan.fits).toBe(true);
+    expect(plan.roundsPlaced).toBe(6);
+    const distinctDates = [...new Set(plan.dates)];
+    expect(distinctDates).toEqual(['2026-09-13', '2026-09-20', '2026-09-27']);
+    // Each distinct date shows up exactly twice, back to back, ascending overall.
+    expect(plan.dates).toEqual([
+      '2026-09-13',
+      '2026-09-13',
+      '2026-09-20',
+      '2026-09-20',
+      '2026-09-27',
+      '2026-09-27',
+    ]);
+  });
+
+  it('plans 3 days for an odd round count, the last day only contributing its AM round', () => {
+    const plan = planRoundDates({
+      calendar: KZNCU,
+      blockId: 'b1',
+      cadence: { kind: 'weekly' },
+      rounds: 5,
+      roundsPerDay: 2,
+    });
+    // 3 days planned (ceil(5/2)), fanned to 6 and sliced back to 5 — the block has room
+    // for all 3 days at a weekly cadence, so this still fits.
+    expect(plan.fits).toBe(true);
+    expect(plan.roundsPlaced).toBe(5);
+    expect(plan.dates).toEqual([
+      '2026-09-13',
+      '2026-09-13',
+      '2026-09-20',
+      '2026-09-20',
+      '2026-09-27',
+    ]);
+  });
+
+  it("doesn't fit when a block has room for 2 days but a double-header plan needs 3", () => {
+    // A block trimmed so only two weekly candidates (13th, 20th) fall inside it — the
+    // third (27th) overflows, so daysNeeded=3 for 6 rounds only places 2 days (4 rounds).
+    const smallBlock: SeasonCalendar = {
+      ...KZNCU,
+      blocks: [{ id: 'small', label: 'Small', start: '2026-09-13', end: '2026-09-20' }],
+    };
+    const plan = planRoundDates({
+      calendar: smallBlock,
+      blockId: 'small',
+      cadence: { kind: 'weekly' },
+      rounds: 6,
+      roundsPerDay: 2,
+    });
+    expect(plan.fits).toBe(false);
+    expect(plan.roundsPlaced).toBe(4);
+    expect(plan.dates).toEqual(['2026-09-13', '2026-09-13', '2026-09-20', '2026-09-20']);
+  });
+
+  it('doubles the spread cadence the same way — plans days, then expands each into an AM/PM pair', () => {
+    const plan = planRoundDates({
+      calendar: KZNCU,
+      blockId: 'b2',
+      cadence: { kind: 'spread' },
+      rounds: 6,
+      roundsPerDay: 2,
+    });
+    expect(plan.fits).toBe(true);
+    expect(plan.roundsPlaced).toBe(6);
+    expect(plan.dates).toEqual([
+      '2027-01-18',
+      '2027-01-18',
+      '2027-02-22',
+      '2027-02-22',
+      '2027-03-28',
+      '2027-03-28',
+    ]);
+    // Consecutive-pairs, not distinct — the uniqueness guarantee above only holds for
+    // roundsPerDay: 1. Here every date appears exactly twice, back to back.
+    for (let i = 0; i < plan.dates.length; i += 2) {
+      expect(plan.dates[i]).toBe(plan.dates[i + 1]);
+    }
+    const distinctDates = [...new Set(plan.dates)];
+    expect(distinctDates.length).toBe(plan.dates.length / 2);
+  });
+
+  it('is identical to roundsPerDay: 1 output when roundsPerDay is omitted — regression gate', () => {
+    const omitted = planRoundDates({
+      calendar: KZNCU,
+      blockId: 'b1',
+      cadence: { kind: 'weekly' },
+      rounds: 10,
+    });
+    const explicit = planRoundDates({
+      calendar: KZNCU,
+      blockId: 'b1',
+      cadence: { kind: 'weekly' },
+      rounds: 10,
+      roundsPerDay: 1,
+    });
+    expect(omitted).toEqual(explicit);
+    // And matches the pre-change Premier Men 50 Over case asserted above.
+    expect(omitted.dates[0]).toBe('2026-09-13');
+    expect(omitted.dates[9]).toBe('2026-11-15');
+  });
+
+  it('appends the double-header note to the summary when it fits', () => {
+    const plan = planRoundDates({
+      calendar: KZNCU,
+      blockId: 'b1',
+      cadence: { kind: 'weekly' },
+      rounds: 6,
+      roundsPerDay: 2,
+    });
+    expect(plan.summary).toContain('2 rounds per day (AM + PM)');
+  });
+
+  it('omits the double-header note when roundsPerDay is absent', () => {
+    const plan = planRoundDates({
+      calendar: KZNCU,
+      blockId: 'b1',
+      cadence: { kind: 'weekly' },
+      rounds: 6,
+    });
+    expect(plan.summary).not.toContain('rounds per day');
   });
 });
 

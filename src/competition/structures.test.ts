@@ -9,7 +9,13 @@
  * as much as a regression net.
  */
 import { describe, it, expect } from 'vitest';
-import { crossPoolQualifiersFor, feedsCrossPool, materialiseStage, previewFit } from './structure';
+import {
+  crossPoolQualifiersFor,
+  crossPoolSourceStage,
+  feedsCrossPool,
+  materialiseStage,
+  previewFit,
+} from './structure';
 import {
   crossPoolRounds,
   knockoutShape,
@@ -796,6 +802,112 @@ describe('cross-pool wiring', () => {
     const m = ready(semisOver([['a1'], ['b1']], ['a1', 'b1']));
     expect(m.crossPoolFallback).toBeUndefined();
     expect(m.groups[0].fixtures.map((f) => [f.home, f.away])).toEqual([['a1', 'b1']]);
+  });
+});
+
+describe('cross-pool derivation reaches past an adjacent stage (the Kingsmead shape)', () => {
+  // Stage 1 pools, stage 2 an unrelated intermediate stage, stage 3 a cross-pool knockout
+  // that names stage 1 directly via `derivedFrom.fromStage` — the union's Kingsmead Cup
+  // draws from the pool stage two stages back, not the one immediately before it.
+  const POOLS: StageSpec = {
+    id: 'pools',
+    name: 'Pools',
+    format: { kind: 'round-robin', legs: 1 },
+    entrants: { kind: 'seeded-split', method: 'snake', groups: { kind: 'even', count: 2 } },
+    schedule: WEEKLY_B1,
+  };
+  const STREAMS: StageSpec = {
+    id: 'streams',
+    name: 'Streams',
+    format: { kind: 'round-robin', legs: 1 },
+    entrants: { kind: 'all-registered' },
+    schedule: WEEKLY_B1,
+  };
+  const KINGSMEAD: StageSpec = {
+    id: 'kingsmead',
+    name: 'Kingsmead Cup',
+    format: { kind: 'knockout', pairing: 'cross-pool' },
+    entrants: {
+      kind: 'manual',
+      derivedFrom: { rule: 'from-standings', fromStage: 'pools', detail: 'Top two per pool' },
+    },
+    schedule: WEEKLY_B2,
+  };
+  const stages = [POOLS, STREAMS, KINGSMEAD];
+
+  it('feeds the non-adjacent stage it names, not the one immediately before it', () => {
+    expect(feedsCrossPool(POOLS, stages)).toBe(true);
+    expect(feedsCrossPool(STREAMS, stages)).toBe(false);
+    expect(crossPoolSourceStage(KINGSMEAD, stages)?.id).toBe('pools');
+  });
+
+  it('resolves qualifiers via fromStage across the intervening stage', () => {
+    const run = {
+      id: 'r',
+      leagueKey: 'l',
+      competitionId: 'c',
+      seasonLabel: '2026/27',
+      structureSnapshot: { id: 's', name: 's', version: 1, stages },
+      calendarSnapshot: CAL,
+      version: 1,
+      stages: [
+        {
+          specId: 'pools',
+          status: 'generated' as const,
+          groups: [
+            { id: 'g1', label: 'P1', entrants: ['a1', 'a2', 'a3'] },
+            { id: 'g2', label: 'P2', entrants: ['b1', 'b2', 'b3'] },
+          ],
+        },
+        {
+          specId: 'streams',
+          status: 'generated' as const,
+          groups: [{ id: 'g3', label: 'Streams', entrants: ['a1', 'a2', 'a3', 'b1', 'b2', 'b3'] }],
+        },
+        {
+          specId: 'kingsmead',
+          status: 'ready' as const,
+          groups: [{ id: 'g4', label: 'Kingsmead', entrants: ['a1', 'a2', 'b1', 'b2'] }],
+        },
+      ],
+    } as never;
+    const q = crossPoolQualifiersFor(KINGSMEAD, stages, run);
+    expect(q).toEqual([
+      ['a1', 'a2'],
+      ['b1', 'b2'],
+    ]);
+  });
+
+  it('falls back to the adjacent earlier stage when derivedFrom.fromStage is absent (legacy)', () => {
+    const noDerivation: StageSpec = { ...KINGSMEAD, entrants: { kind: 'manual' } };
+    expect(crossPoolSourceStage(noDerivation, [POOLS, STREAMS, noDerivation])?.id).toBe('streams');
+  });
+
+  it('falls back to the adjacent earlier stage when fromStage names a stage that no longer exists', () => {
+    const dangling: StageSpec = {
+      ...KINGSMEAD,
+      entrants: {
+        kind: 'manual',
+        derivedFrom: { rule: 'from-standings', fromStage: 'deleted-stage', detail: 'x' },
+      },
+    };
+    expect(crossPoolSourceStage(dangling, [POOLS, STREAMS, dangling])?.id).toBe('streams');
+  });
+
+  it('previewFit needs half as many distinct playing days at roundsPerDay: 2', () => {
+    const stage: StageSpec = {
+      id: 'x',
+      name: 'x',
+      format: { kind: 'round-robin', legs: 2 },
+      entrants: { kind: 'all-registered' },
+      schedule: WEEKLY_B1,
+    };
+    const single = previewFit(stage, CAL, 6); // 10 rounds
+    const doubled = previewFit({ ...stage, schedule: { ...WEEKLY_B1, roundsPerDay: 2 } }, CAL, 6);
+    expect(single.fits).toBe(true);
+    expect(doubled.fits).toBe(true);
+    expect(new Set(single.dates).size).toBe(10);
+    expect(new Set(doubled.dates).size).toBe(5); // half the days for the same 10 rounds
   });
 });
 

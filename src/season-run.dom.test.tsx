@@ -154,19 +154,23 @@ const setup = (structure: CompetitionStructure, runs: SeasonRun[]) => {
   const onOpenLauncher = vi.fn();
   const onDeleteRun = vi.fn();
   const user = userEvent.setup();
-  render(
+  const panel = (r: SeasonRun[]) => (
     <SeasonRunsPanel
       clubs={clubs}
       allLeagues={[league(structure.id)]}
       allSeries={[]}
-      runs={runs}
+      runs={r}
       onOpenLauncher={onOpenLauncher}
       onPatchRun={onPatchRun}
       onGenerate={onGenerate}
       onDeleteRun={onDeleteRun}
-    />,
+    />
   );
-  return { user, onPatchRun, onGenerate, onOpenLauncher, onDeleteRun };
+  const { rerender } = render(panel(runs));
+  /** Re-render with a new `runs` array — same props otherwise — to see what the admin
+   *  sees after a PATCH actually lands, rather than only inspecting the call args. */
+  const rerenderRuns = (r: SeasonRun[]) => rerender(panel(r));
+  return { user, onPatchRun, onGenerate, onOpenLauncher, onDeleteRun, rerenderRuns };
 };
 
 /** The open modal. Every confirm-form query scopes to it — the stage card behind it
@@ -409,6 +413,262 @@ describe('cross-pool — the order inside a pool is load-bearing', () => {
     const pools = patch.stages.find((s: { specId: string }) => s.specId === 'pools');
     expect(pools.groups[0].entrants[0]).toBe('c6');
     expect(pools.groups[0].entrants[5]).toBe('c1');
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Seeded knockouts and non-adjacent cross-pool derivation (the Kingsmead shape) also
+   get the Position column and ranked ordering — `ranked` in season-run.tsx is set for
+   BOTH a stage that feeds a cross-pool draw AND a seeded knockout in its own right, and
+   `feedsCrossPool`/`crossPoolSourceStage` (structure.ts) resolve via
+   `derivedFrom.fromStage` past an intervening stage, not just the adjacent one.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('the Position column also appears on a seeded knockout and a non-adjacent feeder', () => {
+  const KNOCKOUT_SEEDED: CompetitionStructure = {
+    id: 'cup',
+    name: 'Seeded knockout',
+    version: 1,
+    stages: [
+      stage({
+        id: 'ko',
+        name: 'Cup',
+        format: { kind: 'knockout', pairing: 'seeded' },
+        entrants: { kind: 'manual' },
+      }),
+    ],
+  } as unknown as CompetitionStructure;
+
+  const generatedKnockoutRun = () =>
+    run(KNOCKOUT_SEEDED, {
+      stages: [
+        {
+          specId: 'ko',
+          status: 'generated',
+          groups: [{ id: 'g0', label: 'Group A', entrants: ['c1', 'c2', 'c3', 'c4'] }],
+          audit: [],
+        },
+      ],
+    });
+
+  it('asks a seeded knockout for the seed line, not just who is in the draw', async () => {
+    const { user } = setup(KNOCKOUT_SEEDED, [generatedKnockoutRun()]);
+    await openConfirm(user, /^Cup$/);
+
+    expect(within(dialog()).getByText(/seeded knockout/i)).toBeVisible();
+    expect(within(dialog()).getByRole('columnheader', { name: /position/i })).toBeVisible();
+  });
+
+  it('reordering a knockout’s positions before confirming reorders the resulting seed line', async () => {
+    const { user, onPatchRun } = setup(KNOCKOUT_SEEDED, [generatedKnockoutRun()]);
+    await openConfirm(user, /^Cup$/);
+
+    const positions = within(dialog()).getAllByRole('spinbutton');
+    // Swap seed 1 and seed 2 — c1 was first, c2 second.
+    await user.clear(positions[0]);
+    await user.type(positions[0], '2');
+    await user.clear(positions[1]);
+    await user.type(positions[1], '1');
+    await user.click(confirmBtn());
+
+    const ko = onPatchRun.mock.calls[0][1].stages.find(
+      (s: { specId: string }) => s.specId === 'ko',
+    );
+    expect(ko.groups[0].entrants[0]).toBe('c2');
+    expect(ko.groups[0].entrants[1]).toBe('c1');
+  });
+
+  /** The Kingsmead shape: Pools → an unrelated Streams stage → a cross-pool Cup that
+   *  names Pools directly via `derivedFrom.fromStage`, two stages back. */
+  const KINGSMEAD_SHAPE: CompetitionStructure = {
+    id: 'kingsmead',
+    name: 'Kingsmead shape',
+    version: 1,
+    stages: [
+      stage({
+        id: 'pools',
+        name: 'Pools',
+        entrants: { kind: 'seeded-split', method: 'snake', groups: { kind: 'even', count: 2 } },
+        groupLabels: ['Pool A', 'Pool B'],
+      }),
+      stage({
+        id: 'streams',
+        name: 'Streams',
+        entrants: { kind: 'all-registered' },
+      }),
+      stage({
+        id: 'cup',
+        name: 'Kingsmead Cup',
+        format: { kind: 'knockout', pairing: 'cross-pool' },
+        entrants: {
+          kind: 'manual',
+          derivedFrom: { rule: 'from-standings', fromStage: 'pools', detail: 'Top two per pool' },
+        },
+        schedule: { blockIndex: 1, cadence: { kind: 'weekly' } },
+      }),
+    ],
+  } as unknown as CompetitionStructure;
+
+  it('still asks Pools for finishing positions when the stage it feeds is two stages ahead', async () => {
+    const { user } = setup(KINGSMEAD_SHAPE, [
+      run(KINGSMEAD_SHAPE, {
+        stages: [
+          {
+            specId: 'pools',
+            status: 'generated',
+            groups: [
+              { id: 'g0', label: 'Pool A', entrants: ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'] },
+              { id: 'g1', label: 'Pool B', entrants: ['c7', 'c8', 'c9', 'c10', 'c11', 'c12'] },
+            ],
+            audit: [],
+          },
+        ],
+      }),
+    ]);
+    await openConfirm(user, /^Pools$/);
+
+    // Not adjacent — Streams sits between Pools and the Cup — but the derivation names
+    // Pools directly, so it still gets ranked ordering.
+    expect(within(dialog()).getByText(/order matters here/i)).toBeVisible();
+    expect(within(dialog()).getByRole('columnheader', { name: /position/i })).toBeVisible();
+  });
+
+  it('does not ask the intervening Streams stage for a ranking — nothing draws from it', async () => {
+    const { user } = setup(KINGSMEAD_SHAPE, [
+      run(KINGSMEAD_SHAPE, {
+        stages: [
+          { specId: 'pools', status: 'ready', groups: [], audit: [] },
+          {
+            specId: 'streams',
+            status: 'generated',
+            groups: [{ id: 'g0', label: 'Group A', entrants: ['c1', 'c2'] }],
+            audit: [],
+          },
+        ],
+      }),
+    ]);
+    await openConfirm(user, /^Streams$/);
+    expect(within(dialog()).queryByText(/order matters here/i)).toBeNull();
+    expect(within(dialog()).queryByRole('columnheader', { name: /position/i })).toBeNull();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Order-sensitive staleness (season-run.tsx `confirmEntrants`): a knockout stage's own
+   order IS the seed line, so a pure reorder must invalidate its already-generated
+   fixtures. A round-robin FEEDER stage is the opposite — its own fixtures don't depend
+   on the finishing-position order the admin is asked for (that order is only load-
+   bearing for the LATER cross-pool stage reading it), so a pure reorder there must not
+   flip a generated stage back to "needs regenerating".
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('order-sensitive staleness — a pure reorder on a knockout invalidates it, a pool it does not', () => {
+  const KNOCKOUT_SEEDED: CompetitionStructure = {
+    id: 'cup',
+    name: 'Seeded knockout',
+    version: 1,
+    stages: [
+      stage({
+        id: 'ko',
+        name: 'Cup',
+        format: { kind: 'knockout', pairing: 'seeded' },
+        entrants: { kind: 'manual' },
+      }),
+    ],
+  } as unknown as CompetitionStructure;
+
+  const generatedKnockoutRun = () =>
+    run(KNOCKOUT_SEEDED, {
+      stages: [
+        {
+          specId: 'ko',
+          status: 'generated',
+          // A `seriesId` on the group is what turns a 'ready' status back into the
+          // "Needs regenerating" signal (`staleEntrants` in season-run.tsx) — a
+          // generated stage's fixtures live in a series, so there is something to
+          // regenerate.
+          groups: [
+            { id: 'g0', label: 'Group A', entrants: ['c1', 'c2', 'c3', 'c4'], seriesId: 'ser-ko' },
+          ],
+          audit: [],
+        },
+      ],
+    });
+
+  it('reordering a knockout’s confirmed seed line marks it stale, and Regenerate reappears', async () => {
+    const { user, onPatchRun, rerenderRuns } = setup(KNOCKOUT_SEEDED, [generatedKnockoutRun()]);
+    // Starting state: generated, nothing to regenerate.
+    expect(screen.getByText('Generated')).toBeVisible();
+    expect(screen.queryByText(/needs regenerating/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /regenerate \d+ fixtures/i })).toBeNull();
+
+    await openConfirm(user, /^Cup$/);
+    const positions = within(dialog()).getAllByRole('spinbutton');
+    await user.clear(positions[0]);
+    await user.type(positions[0], '2');
+    await user.clear(positions[1]);
+    await user.type(positions[1], '1');
+    await user.click(confirmBtn());
+
+    const patch = onPatchRun.mock.calls[0][1];
+    const ko = patch.stages.find((s: { specId: string }) => s.specId === 'ko');
+    // Order changed for a KNOCKOUT — a real change, so it drops out of 'generated'.
+    expect(ko.status).toBe('ready');
+
+    // Apply the patch the way a successful PATCH would, and see what the admin sees.
+    rerenderRuns([run(KNOCKOUT_SEEDED, { stages: patch.stages })]);
+
+    expect(screen.getByText(/needs regenerating/i)).toBeVisible();
+    expect(screen.getByRole('button', { name: /regenerate \d+ fixtures/i })).toBeVisible();
+  });
+
+  const generatedPoolsRun = () =>
+    run(POOLS_THEN_CROSS, {
+      stages: [
+        {
+          specId: 'pools',
+          status: 'generated',
+          groups: [
+            {
+              id: 'g0',
+              label: 'Pool A',
+              entrants: ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'],
+              seriesId: 'ser-a',
+            },
+            {
+              id: 'g1',
+              label: 'Pool B',
+              entrants: ['c7', 'c8', 'c9', 'c10', 'c11', 'c12'],
+              seriesId: 'ser-b',
+            },
+          ],
+          audit: [],
+        },
+      ],
+    });
+
+  it('reordering a feeder pool’s finishing positions leaves it generated — set-compare preserved', async () => {
+    const { user, onPatchRun, rerenderRuns } = setup(POOLS_THEN_CROSS, [generatedPoolsRun()]);
+    expect(screen.queryByText(/needs regenerating/i)).toBeNull();
+
+    await openConfirm(user, /^Pools$/);
+    // Reverse the finishing order within Pool A — same six sides, different positions.
+    const positions = within(dialog()).getAllByRole('spinbutton');
+    await user.clear(positions[0]);
+    await user.type(positions[0], '6');
+    await user.clear(positions[5]);
+    await user.type(positions[5], '1');
+    await user.click(confirmBtn());
+
+    const patch = onPatchRun.mock.calls[0][1];
+    const pools = patch.stages.find((s: { specId: string }) => s.specId === 'pools');
+    // MEMBERSHIP is unchanged — only the position within the group — so a round-robin
+    // feeder's own generated fixtures are not considered stale by this.
+    expect(pools.status).toBe('generated');
+
+    rerenderRuns([run(POOLS_THEN_CROSS, { stages: patch.stages })]);
+    expect(screen.queryByText(/needs regenerating/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /regenerate \d+ fixtures/i })).toBeNull();
   });
 });
 

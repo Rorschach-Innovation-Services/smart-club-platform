@@ -1946,6 +1946,113 @@ describe('competition structures (ADR 0008)', () => {
     assert.match(await errorOf(badCadence), /unknown cadence/);
   });
 
+  // roundsPerDay (double-headers, ADR 0008): 1 is fine on its own, 2 needs exactly two
+  // slots — one round is the AM sitting, the other the PM sitting.
+  describe('rejects a stage schedule with a bad roundsPerDay', () => {
+    const T20_SLOTS = [
+      { label: 'Morning', start: '08:00' },
+      { label: 'Afternoon', start: '13:30' },
+    ];
+
+    test('roundsPerDay: 1 is accepted', async () => {
+      const res = await put({
+        structures: [
+          structure({
+            stages: [
+              stage('double-round', {
+                schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, roundsPerDay: 1 },
+              }),
+              stage('final-round'),
+            ],
+          }),
+        ],
+      });
+      assert.equal(res.status, 200);
+    });
+
+    test('roundsPerDay: 2 with exactly two slots is accepted', async () => {
+      const res = await put({
+        structures: [
+          structure({
+            stages: [
+              stage('double-round', {
+                schedule: {
+                  blockIndex: 0,
+                  cadence: { kind: 'weekly' },
+                  roundsPerDay: 2,
+                  slots: T20_SLOTS,
+                },
+              }),
+              stage('final-round'),
+            ],
+          }),
+        ],
+      });
+      assert.equal(res.status, 200);
+    });
+
+    test('roundsPerDay: 2 with one slot is rejected', async () => {
+      const res = await put({
+        structures: [
+          structure({
+            stages: [
+              stage('double-round', {
+                schedule: {
+                  blockIndex: 0,
+                  cadence: { kind: 'weekly' },
+                  roundsPerDay: 2,
+                  slots: [T20_SLOTS[0]],
+                },
+              }),
+              stage('final-round'),
+            ],
+          }),
+        ],
+      });
+      assert.equal(res.status, 400);
+      assert.match(await errorOf(res), /exactly two slots for two rounds per day/);
+    });
+
+    test('roundsPerDay: 2 with three slots is rejected', async () => {
+      const res = await put({
+        structures: [
+          structure({
+            stages: [
+              stage('double-round', {
+                schedule: {
+                  blockIndex: 0,
+                  cadence: { kind: 'weekly' },
+                  roundsPerDay: 2,
+                  slots: [...T20_SLOTS, { label: 'Evening', start: '18:00' }],
+                },
+              }),
+              stage('final-round'),
+            ],
+          }),
+        ],
+      });
+      assert.equal(res.status, 400);
+      assert.match(await errorOf(res), /exactly two slots for two rounds per day/);
+    });
+
+    test('a roundsPerDay other than 1 or 2 is rejected', async () => {
+      const res = await put({
+        structures: [
+          structure({
+            stages: [
+              stage('double-round', {
+                schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, roundsPerDay: 3 },
+              }),
+              stage('final-round'),
+            ],
+          }),
+        ],
+      });
+      assert.equal(res.status, 400);
+      assert.match(await errorOf(res), /roundsPerDay must be 1 or 2/);
+    });
+  });
+
   test('rejects a stage that plays an impossible number of legs', async () => {
     const res = await put({
       structures: [
