@@ -1309,6 +1309,7 @@ function EntrantConfirmForm({
   materialisation,
   participants,
   ranked,
+  rankedReason,
   onConfirm,
   onCancel,
 }: {
@@ -1324,8 +1325,14 @@ function EntrantConfirmForm({
    * group is load-bearing rather than incidental. Without it the order is however the
    * clubs happen to be registered, which is not a ranking of anything — and the bracket
    * would be confidently wrong while the console said "cross-pool".
+   *
+   * Also set for a seeded knockout: there `ranks` supplies the seed line straight into
+   * the bracket, so the same Position column and ordering machinery applies even though
+   * nothing downstream draws a cross-pool bracket from it.
    */
   ranked?: boolean;
+  /** Why `ranked` is set — decides which banner copy explains the Position column. */
+  rankedReason?: 'cross-pool' | 'seeding';
   onConfirm: (groups: string[][], carriedPoints: Record<string, number>) => Promise<void>;
   onCancel: () => void;
 }) {
@@ -1482,9 +1489,18 @@ function EntrantConfirmForm({
             lineHeight: 1.55,
           }}
         >
-          <strong>Order matters here.</strong> A later stage pairs these groups across each other —
-          the pool winner against another pool&apos;s runner-up — so set each side&apos;s finishing
-          position, not just which group it was in.
+          {rankedReason === 'seeding' ? (
+            <>
+              <strong>Seeded knockout.</strong> Position 1 is the top seed — set each side&apos;s
+              finishing position, not just which group it was in.
+            </>
+          ) : (
+            <>
+              <strong>Order matters here.</strong> A later stage pairs these groups across each
+              other — the pool winner against another pool&apos;s runner-up — so set each
+              side&apos;s finishing position, not just which group it was in.
+            </>
+          )}
         </div>
       )}
 
@@ -1947,7 +1963,7 @@ export function SeasonRunsPanel({
     const participants = leagueParticipants(clubs, active.leagueKey, competition?.excludeTeamIds);
     const structure: CompetitionStructure = active.structureSnapshot;
     const calendar: SeasonCalendar = active.calendarSnapshot;
-    const materialisations = structure.stages.map((stage, i) => {
+    const materialisations = structure.stages.map((stage) => {
       const stageRun = active.stages.find((s) => s.specId === stage.id);
       return materialiseStage({
         stage,
@@ -1965,7 +1981,7 @@ export function SeasonRunsPanel({
            */
           priorGroups: derivedFromGroups(stage, active),
         },
-        crossPoolQualifiers: crossPoolQualifiersFor(stage, structure.stages[i - 1], active),
+        crossPoolQualifiers: crossPoolQualifiersFor(stage, structure.stages, active),
       });
     });
     return { league, competition, participants, structure, calendar, materialisations };
@@ -1983,14 +1999,20 @@ export function SeasonRunsPanel({
       const existing = run.stages.find((x) => x.specId === s.id);
       if (s.id !== stage.id)
         return existing ?? { specId: s.id, status: 'awaiting-entrants', groups: [] };
-      // MEMBERSHIP changed, not order. Who plays whom is what makes generated fixtures
-      // stale; a pure reorder is the admin supplying finishing positions for the
-      // cross-pool draw, which the console explicitly asks them to do. Comparing the
-      // ordered arrays turned that request into a coral "Needs regenerating" pill and
-      // routed them into the "there is no undo" prompt for a released schedule that
-      // hadn't changed at all.
+      // MEMBERSHIP changed, not order — for a feeder stage. Who plays whom is what makes
+      // generated fixtures stale; a pure reorder there is the admin supplying finishing
+      // positions for the cross-pool draw, which the console explicitly asks them to do.
+      // Comparing the ordered arrays turned that request into a coral "Needs regenerating"
+      // pill and routed them into the "there is no undo" prompt for a released schedule
+      // that hadn't changed at all.
+      //
+      // A knockout stage is the opposite: its OWN order IS the seed line the bracket is
+      // built from (or the cross-pool position), so reordering it is a real change and
+      // must fall back to the ordered comparison.
       const asSets = (gs: string[][]) => JSON.stringify(gs.map((g) => [...g].sort()));
-      const changed = asSets(existing?.groups?.map((g) => g.entrants) ?? []) !== asSets(groups);
+      const asOrdered = (gs: string[][]) => JSON.stringify(gs);
+      const compare = stage.format.kind === 'knockout' ? asOrdered : asSets;
+      const changed = compare(existing?.groups?.map((g) => g.entrants) ?? []) !== compare(groups);
       return {
         specId: s.id,
         // Re-confirming DIFFERENT entrants makes the generated fixtures stale, so the
@@ -2232,9 +2254,18 @@ export function SeasonRunsPanel({
             }
             participants={runContext.participants}
             // Ask for finishing positions when the stage AFTER this one draws a
-            // cross-pool bracket from it — then, and only then, the order inside each
-            // group decides who plays whom.
-            ranked={feedsCrossPool(confirming.stage, runContext.structure.stages)}
+            // cross-pool bracket from it, OR when this stage is itself a seeded
+            // knockout — there the position IS the seed line, not a downstream draw.
+            ranked={
+              feedsCrossPool(confirming.stage, runContext.structure.stages) ||
+              (confirming.stage.format.kind === 'knockout' &&
+                confirming.stage.format.pairing === 'seeded')
+            }
+            rankedReason={
+              feedsCrossPool(confirming.stage, runContext.structure.stages)
+                ? 'cross-pool'
+                : 'seeding'
+            }
             onCancel={() => setConfirming(null)}
             onConfirm={(groups, carriedPoints) => {
               const m =

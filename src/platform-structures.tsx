@@ -540,6 +540,37 @@ function StageRow({
               </label>
             )}
           </div>
+          {stage.format.kind === 'round-robin' && stage.format.legs >= 2 && (
+            <div style={{ marginTop: 10 }}>
+              <label style={{ fontSize: 12.5, display: 'block', marginBottom: 4 }}>Leg order</label>
+              <Choice
+                value={
+                  stage.format.legOrder === 'interleaved'
+                    ? 'Same opponents back-to-back'
+                    : 'Full round, then return round'
+                }
+                onChange={(v) => {
+                  const format = stage.format;
+                  if (format.kind !== 'round-robin') return;
+                  if (v === 'Same opponents back-to-back') {
+                    onChange({ format: { ...format, legOrder: 'interleaved' } as FormatSpec });
+                  } else {
+                    // 'mirrored' is `roundRobinRounds`'s own default when `legOrder` is
+                    // absent — omit the key rather than writing a value it already implies.
+                    const { legOrder: _legOrder, ...restFormat } = format;
+                    onChange({ format: restFormat as FormatSpec });
+                  }
+                }}
+                options={['Full round, then return round', 'Same opponents back-to-back']}
+              />
+              {stage.schedule.roundsPerDay === 2 && (
+                <p style={HINT}>
+                  With double-headers on, interleaved plays a side&apos;s morning leg and its PM
+                  return against the same opponent, rather than saving the return for a later day.
+                </p>
+              )}
+            </div>
+          )}
 
           <div style={SECTION}>Teams</div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -715,19 +746,34 @@ function StageRow({
           <div style={{ marginTop: 10 }}>
             <label style={{ fontSize: 12.5, display: 'block', marginBottom: 4 }}>Time slots</label>
             <Choice
-              value={stage.schedule.slots ? 'On' : 'Off'}
+              value={
+                !stage.schedule.slots
+                  ? 'No set times'
+                  : stage.schedule.roundsPerDay === 2
+                    ? 'AM + PM double-headers'
+                    : 'Morning & afternoon starts'
+              }
               onChange={(v) => {
-                if (v === 'On') {
-                  onChange({ schedule: { ...stage.schedule, slots: pendingSlots } });
-                } else {
-                  // Remove the key entirely — the server (and the planner) treat an
-                  // absent `slots` as "no slots"; persisting `slots: []` is a different,
-                  // invalid state, not merely an empty one.
-                  const { slots: _slots, ...rest } = stage.schedule;
+                if (v === 'No set times') {
+                  // Remove both keys entirely — the server (and the planner) treat
+                  // absent `slots`/`roundsPerDay` as "no slots"; persisting empty/zero
+                  // values is a different, invalid state, not merely an empty one.
+                  const { slots: _slots, roundsPerDay: _rpd, ...rest } = stage.schedule;
                   onChange({ schedule: rest });
+                } else if (v === 'Morning & afternoon starts') {
+                  const { roundsPerDay: _rpd, ...rest } = stage.schedule;
+                  onChange({ schedule: { ...rest, slots: stage.schedule.slots ?? pendingSlots } });
+                } else {
+                  onChange({
+                    schedule: {
+                      ...stage.schedule,
+                      slots: stage.schedule.slots ?? pendingSlots,
+                      roundsPerDay: 2,
+                    },
+                  });
                 }
               }}
-              options={['Off', 'On']}
+              options={['No set times', 'Morning & afternoon starts', 'AM + PM double-headers']}
             />
             {stage.schedule.slots && (
               <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
@@ -755,6 +801,12 @@ function StageRow({
               Two starts per playing day, cycled across the stage's matches — e.g. 08:00 morning /
               13:30 afternoon for T20 Pink Ball.
             </p>
+            {stage.schedule.roundsPerDay === 2 && (
+              <p style={HINT}>
+                Each playing day hosts two full rounds — every side plays a morning and an afternoon
+                match.
+              </p>
+            )}
           </div>
           <div style={{ marginTop: 10 }}>
             <label style={{ fontSize: 12.5, display: 'block', marginBottom: 4 }}>

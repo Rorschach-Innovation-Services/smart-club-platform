@@ -649,6 +649,7 @@ export function FixtureTable({
             blockId: series.schedule.blockId,
             cadence: series.schedule.cadence,
             rounds: nextRound,
+            roundsPerDay: series.schedule.roundsPerDay,
           }).dates[nextRound - 1]
         : undefined;
     // Default to two distinct teams so a fresh row isn't a team-vs-itself fixture
@@ -715,6 +716,7 @@ export function FixtureTable({
         cadence: sched.cadence,
         rounds,
         startDate: series.startDate,
+        roundsPerDay: sched.roundsPerDay,
       });
       // `fits` is trivially true for zero rounds, and `plan.dates[0]` would then be
       // undefined — which `removeUndefinedValues` strips, dropping the gsi1sk and making
@@ -727,7 +729,9 @@ export function FixtureTable({
       onUpdateSeries(series.id, (s) => ({
         ...s,
         startDate: plan.dates[0],
-        fixtures: fixturesFromPlan(s.teams, plan.dates, sched.slots),
+        fixtures: fixturesFromPlan(s.teams, plan.dates, sched.slots, {
+          roundsPerDay: sched.roundsPerDay,
+        }),
       }));
     } else {
       onUpdateSeries(series.id, (s) => ({
@@ -948,6 +952,14 @@ export function FixtureTable({
                   </td>
                   <td>
                     <span className="fix-row-date">{formatWeekdayDay(f.date)}</span>
+                    {/* Shown only when the schedule set a start time (double-headers,
+                        morning/afternoon slots) — most series have neither. */}
+                    {f.time && (
+                      <div className="fix-row-time">
+                        {f.time}
+                        {f.slot ? ` · ${f.slot}` : ''}
+                      </div>
+                    )}
                   </td>
                   <td>
                     <div className="fix-row-team">

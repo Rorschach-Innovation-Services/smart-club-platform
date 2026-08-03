@@ -4465,9 +4465,15 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
           {grp.heading && <div className="club-fix-run-head">{grp.heading}</div>}
           {grp.seriesList.map((s) => {
             const myTeamIds = new Set(teamIdsForClub(s, club.id));
+            // `time` is the tiebreaker: a double-header plays two rounds on the same
+            // date, and without it the AM/PM pair would sort in whatever order the
+            // series happened to store them, flipping on every re-render.
             const mine = s.fixtures
               .filter((f) => myTeamIds.has(f.home) || myTeamIds.has(f.away))
-              .sort((a, b) => a.date.localeCompare(b.date));
+              .sort(
+                (a, b) =>
+                  a.date.localeCompare(b.date) || (a.time || '').localeCompare(b.time || ''),
+              );
 
             return (
               <div key={s.id} className="club-fix-series">
@@ -4581,6 +4587,21 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                               >
                                 {formatWeekdayName(f.date)}
                               </div>
+                              {/* Only set when the schedule defines a start time
+                                  (double-headers, morning/afternoon slots). */}
+                              {f.time && (
+                                <div
+                                  style={{
+                                    fontSize: 10.5,
+                                    color: 'var(--muted)',
+                                    fontWeight: 500,
+                                    fontFamily: "'Montserrat',sans-serif",
+                                  }}
+                                >
+                                  {f.time}
+                                  {f.slot ? ` · ${f.slot}` : ''}
+                                </div>
+                              )}
                             </td>
                             <td>
                               {/* Show the opponent's team name with its club's avatar/short. */}

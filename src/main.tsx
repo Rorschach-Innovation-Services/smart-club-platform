@@ -746,6 +746,11 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
           blockId: resolvedBlock.id,
           cadence: stage.schedule.cadence,
           ...(stage.schedule.slots?.length ? { slots: stage.schedule.slots } : {}),
+          // Persisted for addFixture + validation parity on THIS stored series — a stage
+          // regenerate reads roundsPerDay off the structureSnapshot instead, so a season
+          // run started before a structure edit deliberately keeps its own snapshot
+          // rather than picking up the edit (runbook-documented, not a bug).
+          ...(stage.schedule.roundsPerDay === 2 ? { roundsPerDay: 2 } : {}),
         },
         ...(stage.schedule.activateFrom ? { activateFrom: stage.schedule.activateFrom } : {}),
         seasonRunId: run.id,

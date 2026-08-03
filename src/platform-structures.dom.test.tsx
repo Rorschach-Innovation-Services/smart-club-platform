@@ -365,7 +365,9 @@ describe('StageRow — Time slots', () => {
     const { user, save } = setup([structure()]);
     await openEditor(user);
 
-    await user.click(within(timeSlotsChoice()).getByRole('button', { name: 'On' }));
+    await user.click(
+      within(timeSlotsChoice()).getByRole('button', { name: 'Morning & afternoon starts' }),
+    );
 
     const labels = screen.getAllByPlaceholderText('Morning') as HTMLInputElement[];
     expect(labels).toHaveLength(2);
@@ -383,13 +385,16 @@ describe('StageRow — Time slots', () => {
       { label: 'Morning', start: '08:00' },
       { label: 'Afternoon', start: '13:30' },
     ]);
+    expect('roundsPerDay' in saved.stages[0].schedule).toBe(false);
   });
 
   it('editing a row’s label and time round-trips into the saved structure', async () => {
     const { user, save } = setup([structure()]);
     await openEditor(user);
 
-    await user.click(within(timeSlotsChoice()).getByRole('button', { name: 'On' }));
+    await user.click(
+      within(timeSlotsChoice()).getByRole('button', { name: 'Morning & afternoon starts' }),
+    );
 
     const labels = screen.getAllByPlaceholderText('Morning') as HTMLInputElement[];
     await user.clear(labels[0]);
@@ -429,7 +434,7 @@ describe('StageRow — Time slots', () => {
     ]);
     await openEditor(user);
 
-    await user.click(within(timeSlotsChoice()).getByRole('button', { name: 'Off' }));
+    await user.click(within(timeSlotsChoice()).getByRole('button', { name: 'No set times' }));
     await user.click(screen.getByRole('button', { name: /save structure/i }));
 
     const saved = save.mock.calls[0][0].structures[0];
