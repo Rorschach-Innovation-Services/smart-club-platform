@@ -1813,7 +1813,7 @@ export function StructuresCard({
       {confirm &&
         createPortal(
           <div
-            className="fix-confirm-backdrop"
+            className="fix-confirm"
             onClick={(e) => e.target === e.currentTarget && setConfirm(null)}
           >
             <div className="fix-confirm-box">
