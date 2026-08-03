@@ -13,7 +13,7 @@
  * Each has a test below. They assert on the rendered sentence an operator actually reads.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StructuresCard } from './platform-structures';
 import type { CompetitionStructure, League, SeasonCalendar, TenantConfig } from './types';
@@ -345,6 +345,95 @@ describe('structure editor — validation', () => {
     expect(screen.getByText(/draws from a stage that doesn't come before it/i)).toBeVisible();
     await user.click(screen.getByRole('button', { name: /save structure/i }));
     expect(save).not.toHaveBeenCalled();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   StageRow — Time slots control.
+
+   Turning it on writes the T20 morning/afternoon defaults onto the stage's schedule;
+   turning it off removes the `slots` key entirely (not `[]`) — the planner and server
+   both treat an absent key as "no slots", so an empty array would be a different,
+   invalid state, not merely an empty one.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('StageRow — Time slots', () => {
+  const timeSlotsChoice = () =>
+    screen.getByText('Time slots').parentElement!.querySelector('.seg') as HTMLElement;
+
+  it('turning it ON populates two rows prefilled with the T20 defaults, and saves them', async () => {
+    const { user, save } = setup([structure()]);
+    await openEditor(user);
+
+    await user.click(within(timeSlotsChoice()).getByRole('button', { name: 'On' }));
+
+    const labels = screen.getAllByPlaceholderText('Morning') as HTMLInputElement[];
+    expect(labels).toHaveLength(2);
+    expect(labels[0]).toHaveValue('Morning');
+    expect(labels[1]).toHaveValue('Afternoon');
+    const times = screen.getAllByDisplayValue('08:00');
+    expect(times).toHaveLength(1);
+    expect(screen.getAllByDisplayValue('13:30')).toHaveLength(1);
+
+    await user.click(screen.getByRole('button', { name: /save structure/i }));
+
+    expect(save).toHaveBeenCalledTimes(1);
+    const saved = save.mock.calls[0][0].structures[0];
+    expect(saved.stages[0].schedule.slots).toEqual([
+      { label: 'Morning', start: '08:00' },
+      { label: 'Afternoon', start: '13:30' },
+    ]);
+  });
+
+  it('editing a row’s label and time round-trips into the saved structure', async () => {
+    const { user, save } = setup([structure()]);
+    await openEditor(user);
+
+    await user.click(within(timeSlotsChoice()).getByRole('button', { name: 'On' }));
+
+    const labels = screen.getAllByPlaceholderText('Morning') as HTMLInputElement[];
+    await user.clear(labels[0]);
+    await user.type(labels[0], 'Early');
+    const morningTime = screen.getByDisplayValue('08:00') as HTMLInputElement;
+    fireEvent.change(morningTime, { target: { value: '09:00' } });
+
+    await user.click(screen.getByRole('button', { name: /save structure/i }));
+
+    const saved = save.mock.calls[0][0].structures[0];
+    expect(saved.stages[0].schedule.slots).toEqual([
+      { label: 'Early', start: '09:00' },
+      { label: 'Afternoon', start: '13:30' },
+    ]);
+  });
+
+  it('turning it OFF removes the slots key entirely, not an empty array', async () => {
+    const { user, save } = setup([
+      structure({
+        stages: [
+          {
+            id: 's1',
+            name: 'League',
+            format: { kind: 'round-robin', legs: 1 },
+            entrants: { kind: 'all-registered' },
+            schedule: {
+              blockIndex: 0,
+              cadence: { kind: 'weekly' },
+              slots: [
+                { label: 'Morning', start: '08:00' },
+                { label: 'Afternoon', start: '13:30' },
+              ],
+            },
+          },
+        ],
+      } as Partial<CompetitionStructure>),
+    ]);
+    await openEditor(user);
+
+    await user.click(within(timeSlotsChoice()).getByRole('button', { name: 'Off' }));
+    await user.click(screen.getByRole('button', { name: /save structure/i }));
+
+    const saved = save.mock.calls[0][0].structures[0];
+    expect('slots' in saved.stages[0].schedule).toBe(false);
   });
 });
 

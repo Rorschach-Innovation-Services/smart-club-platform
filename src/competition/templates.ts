@@ -13,6 +13,7 @@
  */
 
 import type { CompetitionStructure, SeasonCalendar, StageSpec } from '../types';
+import { T20_SLOTS } from './calendar';
 
 export interface StructureTemplate {
   id: string;
@@ -98,7 +99,8 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
         name: 'Pool stage',
         format: { kind: 'round-robin', legs: 1 },
         entrants: { kind: 'seeded-split', groups: { kind: 'even', count: 2 }, method: 'snake' },
-        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+        // Every T20 Pink Ball competition plays a morning and an afternoon match per day.
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, slots: T20_SLOTS },
       },
       {
         id: 'finals',
@@ -112,7 +114,7 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
             detail: 'Top two from each pool, paired across pools',
           },
         },
-        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, slots: T20_SLOTS },
         outcome: { champion: [1] },
       },
     ],

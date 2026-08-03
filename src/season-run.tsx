@@ -18,9 +18,17 @@
  */
 import { useMemo, useState, useId, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { BoundedNumber, Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
+import { BoundedNumber, Btn, Card, Choice, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
 import { ApiError } from './api';
-import { findBlock, formatIsoDate, todayIso } from './competition/calendar';
+import {
+  CADENCE_LABELS,
+  T20_SLOTS,
+  WEEKDAY_LABELS,
+  cadenceFromLabel,
+  findBlock,
+  formatIsoDate,
+  todayIso,
+} from './competition/calendar';
 import { describeEntrants, groupSizes, labelFor } from './competition/entrants';
 import { formatStampDay } from './dates';
 import {
@@ -33,6 +41,7 @@ import { DEFAULT_SERIES_OVERS, SERIES_TYPES } from './competition/formats';
 import { findByKey, leagueParticipants } from './leagues';
 import { currentSeasonLabel } from './data';
 import type {
+  Cadence,
   Club,
   Competition,
   CompetitionStructure,
@@ -43,6 +52,8 @@ import type {
   StageRun,
   StageSpec,
   TenantConfig,
+  TimeSlot,
+  Weekday,
 } from './types';
 
 type Toast = (m: string, t?: string) => void;
@@ -386,6 +397,38 @@ const FLAT_DEFAULT_SERIES_TYPE = FLAT_SERIES_TYPES[0];
  *  need a stable value to recognise it by. */
 export const FLAT_COMPETITION_ID = '__flat__';
 
+/** `YYYY-MM-DD` — the shape a `<input type="date">` produces, and the only shape the
+ *  synthesized calendar can honestly turn into a block. A half-typed date must never
+ *  reach `materialiseStage`, which has no concept of "still being typed". */
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Clamp `firstRound` into a COPY of `calendar`'s block at `blockIndex`; return `calendar`
+ * unchanged when `firstRound` is absent, malformed, or outside that block's date range.
+ *
+ * This needs no model change: the calendar this is called with is already a per-run (or
+ * per-preview) frozen copy — never the shared operator calendar `config.calendars` holds
+ * — so overwriting the COPY's block `start` is exactly as safe as an admin choosing a
+ * different start date would have been. The planner's `every-n-weeks`/`weekdays` cadence
+ * strides are computed from the block's `start`, so clamping it here is all that's needed
+ * for every downstream date calculation to anchor from the new first round. Shared by
+ * `buildFlatSeasonRun` and `StartFlatSeasonForm`'s live preview so both agree on the same
+ * anchored calendar before submit.
+ */
+function withClampedBlockStart(
+  calendar: SeasonCalendar,
+  blockIndex: number,
+  firstRound: string | undefined,
+): SeasonCalendar {
+  if (!firstRound || !ISO_DATE_RE.test(firstRound)) return calendar;
+  const block = calendar.blocks[blockIndex];
+  if (!block || firstRound < block.start || firstRound > block.end) return calendar;
+  return {
+    ...calendar,
+    blocks: calendar.blocks.map((b, i) => (i === blockIndex ? { ...b, start: firstRound } : b)),
+  };
+}
+
 /**
  * Synthesize the smallest CompetitionStructure + SeasonCalendar that's true of a league
  * with no bound competition: one stage, everyone registered, one flat round robin. Pure
@@ -410,16 +453,47 @@ export function buildFlatSeasonRun(args: {
   seriesType: string;
   /** The admin's chosen overs — persisted alongside `seriesType` for the same reason. */
   overs: number;
+  /** Cadence for the synthesized stage's schedule. Defaults to weekly when omitted. */
+  cadence?: Cadence;
+  /** Time slots for the synthesized stage's schedule. Omitted entirely (not an empty
+   *  array) when empty/undefined — mirrors main.tsx's `...(stage.schedule.slots?.length
+   *  ? { slots } : {})` idiom, so the server never receives an empty `slots` array. */
+  slots?: TimeSlot[];
+  /** A full ISO date anchoring the first round. Clamped into the chosen block's `start`
+   *  inside the per-run calendar snapshot copy — see `withClampedBlockStart`. Ignored,
+   *  never thrown, when malformed or outside the block's range. */
+  firstRound?: string;
 }): SeasonRun {
-  const { id, league, seasonLabel, calendar, custom, blockIndex, activateFrom, seriesType, overs } =
-    args;
-  const calendarSnapshot: SeasonCalendar = calendar ?? {
+  const {
+    id,
+    league,
+    seasonLabel,
+    calendar,
+    custom,
+    blockIndex,
+    activateFrom,
+    seriesType,
+    overs,
+    cadence,
+    slots,
+    firstRound,
+  } = args;
+  const resolvedBlockIndex = blockIndex ?? 0;
+  const baseCalendarSnapshot: SeasonCalendar = calendar ?? {
     id: 'cal-flat-' + league.key,
     label: seasonLabel,
     // `custom` is guaranteed by the caller whenever `calendar` is absent — the form
     // never lets dates through to here otherwise (see `datesValid` below).
     blocks: [{ id: 'b1', label: 'Season', start: custom!.start, end: custom!.end }],
   };
+  // A fresh copy per run — `withClampedBlockStart` never mutates `calendar`/
+  // `baseCalendarSnapshot` in place, so a shared operator calendar is untouched even
+  // when this run clamps its own snapshot's block start.
+  const calendarSnapshot = withClampedBlockStart(
+    baseCalendarSnapshot,
+    resolvedBlockIndex,
+    firstRound,
+  );
   const structureSnapshot: CompetitionStructure = {
     id: 'st-flat-default',
     name: 'Flat season',
@@ -435,8 +509,9 @@ export function buildFlatSeasonRun(args: {
         format: { kind: 'round-robin', legs: 1 },
         entrants: { kind: 'all-registered' },
         schedule: {
-          blockIndex: blockIndex ?? 0,
-          cadence: { kind: 'weekly' },
+          blockIndex: resolvedBlockIndex,
+          cadence: cadence ?? { kind: 'weekly' },
+          ...(slots?.length ? { slots } : {}),
           ...(activateFrom ? { activateFrom } : {}),
         },
       },
@@ -454,11 +529,6 @@ export function buildFlatSeasonRun(args: {
     flatFormat: { seriesType, overs },
   };
 }
-
-/** `YYYY-MM-DD` — the shape a `<input type="date">` produces, and the only shape the
- *  synthesized calendar can honestly turn into a block. A half-typed date must never
- *  reach `materialiseStage`, which has no concept of "still being typed". */
-const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function StartFlatSeasonForm({
   clubs,
@@ -494,6 +564,13 @@ function StartFlatSeasonForm({
   const [activateFrom, setActivateFrom] = useState('');
   const [overs, setOvers] = useState(FLAT_DEFAULT_OVERS);
   const [seriesType, setSeriesType] = useState<string>(FLAT_DEFAULT_SERIES_TYPE);
+  // Scheduling options — collapsed by default (see the toggle below). Defaults stay
+  // exactly the previous behaviour when the section is never opened: weekly cadence, no
+  // first-round anchor, no slots.
+  const [showScheduling, setShowScheduling] = useState(false);
+  const [cadence, setCadence] = useState<Cadence>({ kind: 'weekly' });
+  const [firstRound, setFirstRound] = useState('');
+  const [slots, setSlots] = useState<TimeSlot[]>([]);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -519,15 +596,26 @@ function StartFlatSeasonForm({
       r.seasonLabel === trimmedLabel,
   );
 
+  // Same idiom as admin.tsx's own Scheduling options: narrow the weekday list once here
+  // rather than inline in the JSX.
+  const selectedDays: Weekday[] = cadence.kind === 'weekdays' ? cadence.days : [];
+  // The chosen block, for bounding the "First round" date input — only meaningful once a
+  // calendar (not custom dates) is picked.
+  const currentBlock = calendar?.blocks[blockIndex];
+
   // Recomputed on every keystroke, same idiom as CreateSeriesForm's own preview rail —
   // this is what catches an overrunning block before anyone clicks Start.
   const materialisation = useMemo(() => {
     if (!datesValid) return undefined;
-    const previewCalendar: SeasonCalendar = calendar ?? {
+    const baseCalendar: SeasonCalendar = calendar ?? {
       id: 'cal-flat-preview',
       label: trimmedLabel || seasonLabel,
       blocks: [{ id: 'b1', label: 'Season', start: startDate, end: endDate }],
     };
+    // The SAME clamping logic `buildFlatSeasonRun` uses at submit — so the "Ready" preview
+    // line reflects the anchored first-round date rather than a slightly different
+    // approximation of it.
+    const previewCalendar = withClampedBlockStart(baseCalendar, blockIndex, firstRound);
     const stage: StageSpec = {
       id: 'stage-1',
       name: trimmedLabel || seasonLabel,
@@ -535,7 +623,8 @@ function StartFlatSeasonForm({
       entrants: { kind: 'all-registered' },
       schedule: {
         blockIndex,
-        cadence: { kind: 'weekly' },
+        cadence,
+        ...(slots.length ? { slots } : {}),
         ...(activateFrom ? { activateFrom } : {}),
       },
     };
@@ -556,6 +645,9 @@ function StartFlatSeasonForm({
     endDate,
     blockIndex,
     activateFrom,
+    cadence,
+    firstRound,
+    slots,
     teams,
   ]);
 
@@ -588,6 +680,9 @@ function StartFlatSeasonForm({
       activateFrom: activateFrom || undefined,
       seriesType,
       overs,
+      cadence,
+      slots,
+      firstRound: firstRound || undefined,
     });
     let created: SeasonRun;
     try {
@@ -659,7 +754,8 @@ function StartFlatSeasonForm({
         <strong>Flat season.</strong> {league.label} has no competition bound to it, so this season
         runs as a single flat round-robin — every registered side, one group. You can drop a side
         after creating via Edit entrants on the season. For stages, groups or promotion/relegation,
-        ask your platform operator to bind a competition.
+        ask your platform operator to bind a competition (operator console → Season setup, or the
+        Structures card).
       </div>
 
       <div className="field">
@@ -782,6 +878,129 @@ function StartFlatSeasonForm({
             />
           </div>
         </div>
+      )}
+
+      {/* ─── Scheduling options (collapsed by default) ───
+          Cadence, first round and time slots are engine knobs with sane defaults — weekly,
+          no anchor, no set times — so they live behind a toggle rather than sprouting
+          inline the moment dates are picked. Same idiom as admin.tsx's own Scheduling
+          options toggle (CreateSeriesForm). */}
+      <button
+        type="button"
+        className="cs-section"
+        aria-label="Scheduling options"
+        style={{
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          width: '100%',
+          textAlign: 'left',
+          background: 'none',
+          border: 'none',
+          borderTop: '1px solid var(--line)',
+          padding: 0,
+          paddingTop: 14,
+          font: 'inherit',
+          color: 'inherit',
+        }}
+        onClick={() => setShowScheduling((v) => !v)}
+      >
+        <span className="cs-section-title">— Scheduling options</span>
+        <span
+          style={{
+            fontSize: 11,
+            color: 'var(--muted)',
+            letterSpacing: '0.08em',
+            textTransform: 'uppercase',
+            fontWeight: 700,
+          }}
+        >
+          {showScheduling ? 'Hide' : 'Defaults applied · click to edit'}
+        </span>
+      </button>
+      {showScheduling && (
+        <>
+          <div className="cs-row">
+            <div className="cs-row-label">Cadence</div>
+            <div className="cs-row-input">
+              <Choice
+                value={CADENCE_LABELS[cadence.kind] || CADENCE_LABELS.weekly}
+                onChange={(v) => setCadence(cadenceFromLabel(v))}
+                options={Object.values(CADENCE_LABELS)}
+              />
+              {cadence.kind === 'weekdays' && (
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+                  {WEEKDAY_LABELS.map((label, day) => {
+                    const on = selectedDays.includes(day as Weekday);
+                    return (
+                      <button
+                        key={label}
+                        type="button"
+                        onClick={() =>
+                          setCadence({
+                            kind: 'weekdays',
+                            days: on
+                              ? selectedDays.filter((x) => x !== day)
+                              : [...selectedDays, day as Weekday].sort((a, b) => a - b),
+                          })
+                        }
+                        style={{
+                          padding: '4px 10px',
+                          borderRadius: 999,
+                          fontSize: 11.5,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          border: '1px solid var(--line)',
+                          background: on ? 'var(--green-pale)' : 'var(--paper)',
+                          color: on ? 'var(--green)' : 'var(--muted-2)',
+                        }}
+                      >
+                        {label.slice(0, 3)}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+          {/* Only meaningful against a calendar's real block — a custom start/end pair
+              IS the first round, so there is nothing to anchor within it. */}
+          {calendar && (
+            <div className="cs-row">
+              <div className="cs-row-label">First round</div>
+              <div className="cs-row-input">
+                <input
+                  type="date"
+                  aria-label="First round"
+                  value={firstRound}
+                  min={currentBlock?.start}
+                  max={currentBlock?.end}
+                  onChange={(e) => setFirstRound(e.target.value)}
+                />
+                <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
+                  Optional — leave blank to start on the first day of the block. Without it,
+                  every-n-weeks cadences stride from the block&apos;s first day.
+                </div>
+              </div>
+            </div>
+          )}
+          <div className="cs-row">
+            <div className="cs-row-label">Time slots</div>
+            <div className="cs-row-input">
+              <Choice
+                value={slots.length ? 'Morning & afternoon' : 'No set times'}
+                onChange={(v) => setSlots(v === 'No set times' ? [] : T20_SLOTS)}
+                options={['No set times', 'Morning & afternoon']}
+              />
+              <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
+                {slots.length
+                  ? 'Fixtures in a round alternate between 08:00 and 13:30 starts.'
+                  : 'Fixtures carry a date only; start times are set later.'}
+              </div>
+            </div>
+          </div>
+        </>
       )}
 
       <div className="field">
@@ -1012,17 +1231,37 @@ export function GenerateFixturesLauncher({
             value={leagueKey}
             onChange={(e) => setLeagueKey(e.target.value)}
           >
-            {allLeagues.map((l) => (
-              <option key={l.key} value={l.key}>
-                {l.label}
-                {isCapable(l.key) ? ' · structured season' : ' · flat season'}
-              </option>
-            ))}
+            {/* Existing tests select by `value`, not by label text or position, so
+                grouping into optgroups and dropping the "· flat/structured season" suffix
+                is safe — nothing here relied on either. */}
+            {allLeagues.some((l) => isCapable(l.key)) && (
+              <optgroup label="Structured seasons — set up by your platform operator">
+                {allLeagues
+                  .filter((l) => isCapable(l.key))
+                  .map((l) => (
+                    <option key={l.key} value={l.key}>
+                      {l.label}
+                    </option>
+                  ))}
+              </optgroup>
+            )}
+            {allLeagues.some((l) => !isCapable(l.key)) && (
+              <optgroup label="Flat seasons — one flat round robin until a competition is bound">
+                {allLeagues
+                  .filter((l) => !isCapable(l.key))
+                  .map((l) => (
+                    <option key={l.key} value={l.key}>
+                      {l.label}
+                    </option>
+                  ))}
+              </optgroup>
+            )}
             <option value={AD_HOC}>One-off series or tournament — pick the sides by hand</option>
           </select>
           <p style={HINT}>
-            Every league runs a season — structured when your operator has bound a competition, flat
-            otherwise. One-offs go through the ad-hoc option.
+            A league runs flat — one round robin — until your platform operator binds a competition
+            to it in the operator console (Season setup). Structured leagues follow their
+            competition&apos;s stages.
           </p>
         </div>
 

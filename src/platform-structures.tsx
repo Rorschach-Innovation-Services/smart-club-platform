@@ -18,10 +18,11 @@
  */
 import { useState, useId, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { BoundedNumber, Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
+import { BoundedNumber, Btn, Card, Choice, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
 import * as api from './api';
 import { ApiError } from './api';
 import {
+  T20_SLOTS,
   WEEKDAY_LABELS,
   calendarSpan,
   describeCadence,
@@ -51,6 +52,7 @@ import type {
   SeasonCalendar,
   StageSpec,
   TenantConfig,
+  TimeSlot,
   Weekday,
 } from './types';
 
@@ -369,6 +371,13 @@ function StageRow({
   // worked example — mangles into "Top SixBottom Six".
   const [labelText, setLabelText] = useState(() => (stage.groupLabels ?? []).join(', '));
 
+  // Remembers the slots to restore when the control is switched back on — either the
+  // T20 default, or whatever was there before (including a saved structure's own values,
+  // so re-toggling never resets an operator's edits back to the default).
+  const [pendingSlots, setPendingSlots] = useState<TimeSlot[]>(
+    () => stage.schedule.slots ?? T20_SLOTS,
+  );
+
   const sizes = groupSizes(
     stage.entrants.kind === 'all-registered' ? undefined : stage.entrants.groups,
     previewTeams,
@@ -429,6 +438,12 @@ function StageRow({
             ? { kind: 'spread' }
             : { kind: 'weekly' };
     onChange({ schedule: { ...stage.schedule, cadence: next } });
+  };
+  const setSlot = (i: number, patch: Partial<TimeSlot>) => {
+    const current = stage.schedule.slots ?? pendingSlots;
+    const next = current.map((s, idx) => (idx === i ? { ...s, ...patch } : s)) as TimeSlot[];
+    setPendingSlots(next);
+    onChange({ schedule: { ...stage.schedule, slots: next } });
   };
 
   return (
@@ -700,6 +715,51 @@ function StageRow({
               })}
             </div>
           )}
+          <div style={{ marginTop: 10 }}>
+            <label style={{ fontSize: 12.5, display: 'block', marginBottom: 4 }}>Time slots</label>
+            <Choice
+              value={stage.schedule.slots ? 'On' : 'Off'}
+              onChange={(v) => {
+                if (v === 'On') {
+                  onChange({ schedule: { ...stage.schedule, slots: pendingSlots } });
+                } else {
+                  // Remove the key entirely — the server (and the planner) treat an
+                  // absent `slots` as "no slots"; persisting `slots: []` is a different,
+                  // invalid state, not merely an empty one.
+                  const { slots: _slots, ...rest } = stage.schedule;
+                  void _slots;
+                  onChange({ schedule: rest });
+                }
+              }}
+              options={['Off', 'On']}
+            />
+            {stage.schedule.slots && (
+              <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                {stage.schedule.slots.map((slot, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <input
+                      className="field-input"
+                      style={{ width: 120 }}
+                      value={slot.label}
+                      placeholder="Morning"
+                      onChange={(e) => setSlot(i, { label: e.target.value })}
+                    />
+                    <input
+                      className="field-input"
+                      type="time"
+                      style={{ width: 110 }}
+                      value={slot.start}
+                      onChange={(e) => setSlot(i, { start: e.target.value })}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+            <p style={HINT}>
+              Two starts per playing day, cycled across the stage's matches — e.g. 08:00 morning /
+              13:30 afternoon for T20 Pink Ball.
+            </p>
+          </div>
           <div style={{ marginTop: 10 }}>
             <label style={{ fontSize: 12.5, display: 'block', marginBottom: 4 }}>
               Activate from (optional)

@@ -304,10 +304,11 @@ export function AdminFixtures({
             Fixtures &amp; <em>Venues</em>
           </h1>
           <p className="ph-desc">
-            Every league runs a season — structured stage by stage where your operator has bound a
-            competition, a flat round robin otherwise — plus ad-hoc series for one-off fixtures.
-            Home venues flow from the affiliation form. Travel distance and fuel cost are calculated
-            for every away fixture.
+            Every league runs a season — structured stage by stage once your platform operator has
+            bound a competition (operator console → Season setup, or the Structures card), a flat
+            round robin otherwise — plus ad-hoc series for one-off fixtures. Home venues flow from
+            the affiliation form. Travel distance and fuel cost are calculated for every away
+            fixture.
           </p>
         </div>
         <div className="ph-actions">
@@ -394,7 +395,7 @@ export function AdminFixtures({
           <EmptyState
             icon={Icon.Field}
             title="No series yet"
-            sub="Generate fixtures to work through a structured competition stage by stage, run a flat season for any other league, or create an ad-hoc series for a one-off."
+            sub="Generate fixtures to work through a structured competition stage by stage (bound by your platform operator via operator console → Season setup, or the Structures card), run a flat season for any other league, or create an ad-hoc series for a one-off."
             action={
               <Btn tone="teal" icon={Icon.Plus} onClick={() => setLauncherOpen(true)}>
                 Generate fixtures

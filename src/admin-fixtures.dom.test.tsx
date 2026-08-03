@@ -521,4 +521,21 @@ describe('the "Generate fixtures" launcher — one entry point, routed by league
     // Ad-hoc keeps the free select, unset — no league, no hint box.
     expect(within(seriesDialog).getByLabelText('League')).toHaveValue('');
   });
+
+  it('groups the league select into structured and flat optgroups', async () => {
+    // `leagues` above has one season-capable league ('premier') and one flat league
+    // ('friendlies'), so both optgroups should render.
+    const user = userEvent.setup();
+    renderPage();
+    await openLauncher(user);
+
+    const select = within(launcher()).getByRole('combobox');
+    const groups = Array.from(select.querySelectorAll('optgroup')).map((g) =>
+      g.getAttribute('label'),
+    );
+    expect(groups).toEqual([
+      'Structured seasons — set up by your platform operator',
+      'Flat seasons — one flat round robin until a competition is bound',
+    ]);
+  });
 });

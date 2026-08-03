@@ -8,6 +8,7 @@ import {
   structureToJson,
 } from './templates';
 import { materialiseStage, describeStage } from './structure';
+import { T20_SLOTS } from './calendar';
 import type { SeasonCalendar } from '../types';
 
 const CAL: SeasonCalendar = {
@@ -105,6 +106,14 @@ describe('instantiateTemplate', () => {
     );
     expect(describeStage(st.stages[1], CAL)).toContain('swaps with first in the bottom group');
     expect(describeStage(st.stages[1], CAL)).toContain('Block 2');
+  });
+
+  // Every T20 Pink Ball competition plays a morning and an afternoon match per day, so
+  // the starter template carries T20_SLOTS on both its stages out of the box.
+  it('carries the T20 morning/afternoon slots on both stages of pools-to-knockout', () => {
+    const st = instantiateTemplate(findTemplate('pools-to-knockout')!, CAL);
+    expect(st.stages[0].schedule.slots).toEqual(T20_SLOTS);
+    expect(st.stages[1].schedule.slots).toEqual(T20_SLOTS);
   });
 });
 

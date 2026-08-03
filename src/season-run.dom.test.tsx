@@ -18,6 +18,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { currentSeasonLabel } from './data';
+import { T20_SLOTS } from './competition/calendar';
 import {
   buildFlatSeasonRun,
   FLAT_COMPETITION_ID,
@@ -994,6 +995,91 @@ describe('buildFlatSeasonRun', () => {
 
     expect(run.flatFormat).toEqual({ seriesType: 'Multi-Day', overs: 35 });
   });
+
+  it('passes cadence and slots through onto the synthesized stage schedule', () => {
+    const run = buildFlatSeasonRun({
+      id: 'run-x',
+      league: flatLeague,
+      seasonLabel: '2026/27',
+      calendar,
+      seriesType: 'Twenty20 (16-25 overs)',
+      overs: 20,
+      cadence: { kind: 'weekdays', days: [6] },
+      slots: T20_SLOTS,
+    });
+
+    expect(run.structureSnapshot.stages[0].schedule.cadence).toEqual({
+      kind: 'weekdays',
+      days: [6],
+    });
+    expect(run.structureSnapshot.stages[0].schedule.slots).toEqual(T20_SLOTS);
+  });
+
+  it('clamps the chosen block’s start to firstRound when it falls inside the block', () => {
+    const run = buildFlatSeasonRun({
+      id: 'run-x',
+      league: flatLeague,
+      seasonLabel: '2026/27',
+      calendar,
+      blockIndex: 1,
+      seriesType: 'Twenty20 (16-25 overs)',
+      overs: 20,
+      firstRound: '2027-02-01',
+    });
+
+    expect(run.calendarSnapshot.blocks[1].start).toBe('2027-02-01');
+    // The other block is untouched.
+    expect(run.calendarSnapshot.blocks[0].start).toBe(calendar.blocks[0].start);
+  });
+
+  it('defaults cadence to weekly and omits the slots key entirely when both are omitted', () => {
+    const run = buildFlatSeasonRun({
+      id: 'run-x',
+      league: flatLeague,
+      seasonLabel: '2026/27',
+      calendar,
+      blockIndex: 1,
+      seriesType: 'Twenty20 (16-25 overs)',
+      overs: 20,
+    });
+
+    const schedule = run.structureSnapshot.stages[0].schedule;
+    expect(schedule.cadence).toEqual({ kind: 'weekly' });
+    expect('slots' in schedule).toBe(false);
+    // Block start is left exactly as the operator calendar had it — no firstRound given.
+    expect(run.calendarSnapshot.blocks[1].start).toBe(calendar.blocks[1].start);
+  });
+
+  it('ignores a firstRound before the block starts, leaving the block unchanged', () => {
+    const run = buildFlatSeasonRun({
+      id: 'run-x',
+      league: flatLeague,
+      seasonLabel: '2026/27',
+      calendar,
+      blockIndex: 1,
+      seriesType: 'Twenty20 (16-25 overs)',
+      overs: 20,
+      // Before block 2's start (2027-01-16) — outside its range.
+      firstRound: '2026-12-01',
+    });
+
+    expect(run.calendarSnapshot.blocks[1].start).toBe(calendar.blocks[1].start);
+  });
+
+  it('ignores a malformed, non-ISO firstRound string, leaving the block unchanged', () => {
+    const run = buildFlatSeasonRun({
+      id: 'run-x',
+      league: flatLeague,
+      seasonLabel: '2026/27',
+      calendar,
+      blockIndex: 1,
+      seriesType: 'Twenty20 (16-25 overs)',
+      overs: 20,
+      firstRound: '16 January 2027',
+    });
+
+    expect(run.calendarSnapshot.blocks[1].start).toBe(calendar.blocks[1].start);
+  });
 });
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -1215,5 +1301,33 @@ describe('StartFlatSeasonForm', () => {
     await within(dialog).findByRole('button', { name: /^start season$/i });
     expect(within(dialog).queryByText(/could not start the season/i)).toBeNull();
     expect(onGenerateStage).not.toHaveBeenCalled();
+  });
+
+  describe('Scheduling options', () => {
+    it('carries a chosen cadence, first round and time slots through to the created run', async () => {
+      // A small roster — every-n-weeks over 11 rounds wouldn't fit block 1's ~13 weeks,
+      // and a "does not fit" state disables Start season, which isn't what this test is
+      // checking. Four sides need only three rounds either way.
+      const { user, onCreateRun } = setup({ clubs: friendliesClubs.slice(0, 4) });
+      const dialog = await openFlatDialog(user);
+      await selectCalendar(user, dialog);
+
+      await user.click(within(dialog).getByRole('button', { name: 'Scheduling options' }));
+      await user.click(within(dialog).getByRole('button', { name: 'Every 2 weeks' }));
+      await user.click(within(dialog).getByRole('button', { name: 'Morning & afternoon' }));
+
+      const firstRoundInput = within(dialog).getByLabelText(/first round/i);
+      // Well inside block 1's range (2026-09-12 → 2026-12-12).
+      await user.type(firstRoundInput, '2026-10-01');
+
+      await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
+
+      expect(onCreateRun).toHaveBeenCalled();
+      const [run] = onCreateRun.mock.calls[0];
+      const schedule = run.structureSnapshot.stages[0].schedule;
+      expect(schedule.cadence).toEqual({ kind: 'every-n-weeks', n: 2 });
+      expect(schedule.slots).toEqual(T20_SLOTS);
+      expect(run.calendarSnapshot.blocks[0].start).toBe('2026-10-01');
+    });
   });
 });
