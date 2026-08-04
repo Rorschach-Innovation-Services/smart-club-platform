@@ -245,9 +245,14 @@ export function AdminFixtures({
         home && away
           ? fixtureCost(home, away, active.costPerKm, active.carsPerAwayTrip, fixtureVenue(f))
           : null;
+      // The slot label ('Morning'/'Afternoon') alongside the raw kickoff time when the
+      // series' schedule carries named slots — trivially available off `schedule.slots`,
+      // so worth including, but the time itself is what matters and stands alone without it.
+      const slotLabel = active.schedule?.slots?.find((sl) => sl.start === f.time)?.label;
       return {
         Round: f.round,
         Date: formatWeekdayDayYear(f.date),
+        Time: f.time ? (slotLabel ? `${f.time} (${slotLabel})` : f.time) : '',
         Home: home?.name || 'TBD',
         Venue: f.venueOverride || f.venueName || home?.ground?.venue || '—',
         Suburb: home?.ground?.suburb || '',
@@ -662,6 +667,16 @@ export function FixtureTable({
     const legacy = last?.date
       ? legacyRoundDates(2, last.date).at(-1)
       : legacyRoundDates(1, series.startDate).at(-1);
+    // A double-header round shares ONE slot across the whole round — same rule
+    // `fixturesFromDates` applies (`slots[round % slots.length]`, round 0-based there,
+    // `nextRound` here is 1-based, hence the `- 1`) — so a fixture added by hand into a
+    // round-per-day series still lands in the right AM/PM slot instead of carrying no
+    // time at all.
+    const slots = series.schedule?.slots;
+    const roundSlot =
+      series.schedule?.roundsPerDay === 2 && slots?.length
+        ? slots[(nextRound - 1) % slots.length]
+        : undefined;
     const newFix = {
       id: newId,
       round: nextRound,
@@ -669,6 +684,7 @@ export function FixtureTable({
       home: t[0],
       away: t.find((x) => x !== t[0]) || t[1] || t[0],
       status: 'scheduled',
+      ...(roundSlot ? { time: roundSlot.start, slot: roundSlot.label } : {}),
     };
     onUpdateSeries(series.id, (s) => ({ ...s, fixtures: [...s.fixtures, newFix] }));
     setEditingId(newId);
@@ -1205,6 +1221,10 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
   const [draft, setDraft] = useStateA({
     round: fixture.round,
     date: fixture.date,
+    // Optional HH:MM kickoff — blank means no set time, the same convention every
+    // other slot-aware fixture uses (`fixturesFromDates` folds an empty slot into the
+    // same date-only ledger key a slot-less fixture always used).
+    time: fixture.time || '',
     home: fixture.home,
     away: fixture.away,
     venueOverride: fixture.venueOverride || '',
@@ -1296,6 +1316,15 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
               type="date"
               value={draft.date}
               onChange={(e) => u('date', e.target.value)}
+            />
+          </div>
+          <div className="fix-edit-field">
+            <label htmlFor={`${uid}-time`}>Time (optional)</label>
+            <input
+              id={`${uid}-time`}
+              type="time"
+              value={draft.time}
+              onChange={(e) => u('time', e.target.value)}
             />
           </div>
           {/* A knockout side that is still a forward reference (`win:f3`) has no entry in

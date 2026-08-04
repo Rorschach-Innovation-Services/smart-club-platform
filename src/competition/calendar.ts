@@ -123,7 +123,7 @@ export interface DatePlanRequest {
   /** Optional first-round date; clamped into the block. Absent ⇒ the block start. */
   startDate?: IsoDate;
   /** 2 ⇒ plan half as many DAYS and run two rounds (AM + PM) on each. Absent/1 ⇒ unchanged. */
-  roundsPerDay?: number;
+  roundsPerDay?: 1 | 2;
 }
 
 /**

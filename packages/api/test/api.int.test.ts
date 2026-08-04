@@ -48,6 +48,7 @@ const headers = (auth: string) => ({
 // Resolved in before().
 let ddbServer: Server;
 let app: (typeof import('../src/index.js'))['app'];
+let buildClubSchedule: (typeof import('../src/index.js'))['buildClubSchedule'];
 let repo: typeof import('../src/repo.js');
 
 before(async () => {
@@ -90,7 +91,7 @@ before(async () => {
 
   const seed = await import('../src/seed-core.js');
   await seed.seedTenantConfig('dolphins');
-  ({ app } = await import('../src/index.js'));
+  ({ app, buildClubSchedule } = await import('../src/index.js'));
   repo = await import('../src/repo.js');
 });
 
@@ -888,6 +889,63 @@ describe('POST /clubs/:id/send-fixtures', () => {
         ADMIN,
       );
       assert.equal(res.status, 201);
+    });
+  });
+
+  describe('buildClubSchedule includes the round-per-day time on a fixture line', () => {
+    // Player broadcast used to omit the AM/PM kickoff time entirely — a double-header
+    // fixture read identically to a single-round one, leaving the player to guess which
+    // leg they were reading. `buildClubSchedule` is the pure text-builder behind
+    // send-fixtures, so it's asserted directly rather than through a dry-run send (dry
+    // run never surfaces the composed message body).
+    test('a fixture with a time prints it between the date and Home/Away', () => {
+      const timedClub = club('timedclub');
+      const series = {
+        id: 'timed-series',
+        name: 'Double-Header League · 2026/27',
+        startDate: '2026-06-01',
+        teams: ['timedclub', 'rivals'],
+        fixtures: [
+          { home: 'timedclub', away: 'rivals', date: '2026-06-06', round: 1, time: '08:00' },
+        ],
+        released: true,
+        releasedAt: '2026-06-01T00:00:00.000Z',
+        version: 1,
+      };
+      const clubsById = new Map([
+        [timedClub.id, timedClub],
+        ['rivals', club('rivals')],
+      ]);
+      const { text } = buildClubSchedule(
+        timedClub,
+        [series as unknown as Parameters<typeof buildClubSchedule>[1][number]],
+        clubsById as unknown as Parameters<typeof buildClubSchedule>[2],
+      );
+      assert.match(text, /R1 · .* · 08:00 · Home vs/);
+    });
+
+    test('an untimed fixture prints no time segment at all', () => {
+      const timedClub = club('timedclub');
+      const series = {
+        id: 'untimed-series',
+        name: 'League · 2026/27',
+        startDate: '2026-06-01',
+        teams: ['timedclub', 'rivals'],
+        fixtures: [{ home: 'timedclub', away: 'rivals', date: '2026-06-06', round: 1 }],
+        released: true,
+        releasedAt: '2026-06-01T00:00:00.000Z',
+        version: 1,
+      };
+      const clubsById = new Map([
+        [timedClub.id, timedClub],
+        ['rivals', club('rivals')],
+      ]);
+      const { text } = buildClubSchedule(
+        timedClub,
+        [series as unknown as Parameters<typeof buildClubSchedule>[1][number]],
+        clubsById as unknown as Parameters<typeof buildClubSchedule>[2],
+      );
+      assert.doesNotMatch(text, /\d\d:\d\d/);
     });
   });
 });

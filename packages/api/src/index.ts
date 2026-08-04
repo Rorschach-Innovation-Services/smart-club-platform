@@ -4417,6 +4417,7 @@ interface FixtureLite {
   away?: string;
   date?: string;
   round?: number;
+  time?: string;
 }
 
 type LatLon = { lat?: number; lon?: number } | undefined;
@@ -4480,7 +4481,7 @@ function fmtFixtureDate(iso?: string): string {
  * frontend's ClubFixturesView (round, date, H/A, opponent, venue, away round-trip km).
  * Returns the dynamic season alongside.
  */
-function buildClubSchedule(
+export function buildClubSchedule(
   club: Club,
   releasedSeries: Series[],
   clubsById: Map<string, Club>,
@@ -4516,7 +4517,7 @@ function buildClubSchedule(
         (isHome
           ? me.venue || club.ground?.venue || 'Home ground TBA'
           : opp.venue || 'Opponent ground TBA');
-      let line = `  R${f.round ?? '?'} · ${fmtFixtureDate(f.date)} · ${isHome ? 'Home' : 'Away'} vs ${opp.name} · ${venue}`;
+      let line = `  R${f.round ?? '?'} · ${fmtFixtureDate(f.date)}${f.time ? ` · ${f.time}` : ''} · ${isHome ? 'Home' : 'Away'} vs ${opp.name} · ${venue}`;
       // Distance to where the match is actually played; falls back to the opponent's
       // ground for a series that has never been through allocation.
       const vLat = (f as { venueLat?: number }).venueLat;

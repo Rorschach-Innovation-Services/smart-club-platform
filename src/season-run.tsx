@@ -2081,6 +2081,12 @@ export function SeasonRunsPanel({
     );
   }
 
+  // Computed once rather than twice (`ranked` and `rankedReason` below both needed it) —
+  // the two calls always agreed since they share the exact same arguments, so the second
+  // was pure waste, not a second opinion.
+  const confirmingFeedsCrossPool =
+    confirming && feedsCrossPool(confirming.stage, runContext?.structure.stages ?? []);
+
   return (
     <>
       <Card
@@ -2257,15 +2263,11 @@ export function SeasonRunsPanel({
             // cross-pool bracket from it, OR when this stage is itself a seeded
             // knockout — there the position IS the seed line, not a downstream draw.
             ranked={
-              feedsCrossPool(confirming.stage, runContext.structure.stages) ||
+              confirmingFeedsCrossPool ||
               (confirming.stage.format.kind === 'knockout' &&
                 confirming.stage.format.pairing === 'seeded')
             }
-            rankedReason={
-              feedsCrossPool(confirming.stage, runContext.structure.stages)
-                ? 'cross-pool'
-                : 'seeding'
-            }
+            rankedReason={confirmingFeedsCrossPool ? 'cross-pool' : 'seeding'}
             onCancel={() => setConfirming(null)}
             onConfirm={(groups, carriedPoints) => {
               const m =

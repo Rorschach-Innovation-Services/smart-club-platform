@@ -531,6 +531,106 @@ describe('allocateVenues — double-headers key the ledger on date AND slot', ()
     expect(r.fixtures[0].venueId).not.toBe('kingsmead');
     expect(r.fixtures[0].venueId).toBe('chatsworth');
   });
+
+  // An UNTIMED booking owns the whole day: a timed fixture for the same side must still
+  // read as a clash, not slide past it because the stored booking has no slot key.
+  it('clashes a timed allocation against an already-stored UNTIMED booking for the same side', () => {
+    const other = [
+      {
+        id: 'other-series',
+        // No `time` at all — the normal shape for a non-double-header series.
+        fixtures: [{ date: '2026-09-13', home: 'alpha', away: 'zulu' }],
+      },
+    ];
+    const r = allocateVenues({
+      fixtures: [fxAt('f1', '2026-09-13', 'alpha', 'bravo', '08:00')],
+      venues: VENUES,
+      teamHome,
+      ledger: buildLedger(other),
+    });
+    expect(r.unresolved).toBe(1);
+    expect(r.fixtures[0].venueReason).toContain('already has a match that day');
+  });
+
+  // Symmetrically: a TIMED booking already on the books must be seen by an UNTIMED
+  // allocation asking "is this side playing at all today" — not just by another timed
+  // lookup at the exact same slot.
+  it('clashes an untimed allocation against an already-stored TIMED booking for the same side', () => {
+    const other = [
+      {
+        id: 'other-series',
+        fixtures: [{ date: '2026-09-13', home: 'alpha', away: 'zulu', time: '08:00' }],
+      },
+    ];
+    const r = allocateVenues({
+      // No `time` — an ordinary, non-double-header fixture for the same side.
+      fixtures: [fx('f1', '2026-09-13', 'alpha', 'bravo')],
+      venues: VENUES,
+      teamHome,
+      ledger: buildLedger(other),
+    });
+    expect(r.unresolved).toBe(1);
+    expect(r.fixtures[0].venueReason).toContain('already has a match that day');
+  });
+
+  // A single-surface ground already holding an UNTIMED booking must refuse BOTH an AM and
+  // a PM slot that day — the untimed booking occupies the whole day, not just "no slot".
+  it('refuses both AM and PM at a one-surface ground already holding an untimed booking', () => {
+    const other = [
+      {
+        id: 'other-series',
+        fixtures: [{ date: '2026-09-13', home: 'x', away: 'y', venueId: 'kingsmead' }],
+      },
+    ];
+    const r = allocateVenues({
+      fixtures: [
+        fxAt('am', '2026-09-13', 'alpha', 'bravo', '08:00'),
+        fxAt('pm', '2026-09-13', 'charlie', 'delta', '13:30'),
+      ],
+      venues: [KINGSMEAD], // surfaces defaults to 1
+      teamHome,
+      ledger: buildLedger(other),
+    });
+    expect(r.unresolved).toBe(2);
+    expect(r.fixtures.every((f) => f.venueStatus === 'unresolved')).toBe(true);
+  });
+});
+
+describe('allocateVenues — same-day co-location nudge', () => {
+  // The interleaved case: the same pair swaps home/away between legs. This is what a
+  // pair-keyed map already handled — must stay green under the participant-keyed rewrite.
+  it('keeps an interleaved same-pair double-header at one ground across legs', () => {
+    const r = alloc([
+      fxAt('am', '2026-09-13', 'alpha', 'bravo', '08:00'), // alpha home → naturally Kingsmead
+      fxAt('pm', '2026-09-13', 'bravo', 'alpha', '13:30'), // swapped: bravo home, alpha away
+    ]);
+    const am = r.fixtures.find((f) => f.id === 'am')!;
+    const pm = r.fixtures.find((f) => f.id === 'pm')!;
+    expect(am.venueId).toBe('kingsmead');
+    // Without the nudge, home preference alone would send the PM leg to bravo's own
+    // ground (Chatsworth). The nudge keeps the return leg at the AM ground instead.
+    expect(pm.venueId).toBe('kingsmead');
+  });
+
+  // The mirrored case a pair-keyed map MISSED: the shared side plays a different opponent
+  // each leg, so the unordered pair ("alpha|bravo" vs "alpha|charlie") never matches
+  // between legs. Re-keying per participant fixes it — the nudge follows alpha, not the
+  // pairing.
+  it('nudges a mirrored double-header toward the shared side’s already-assigned ground', () => {
+    const r = alloc([
+      // bravo home vs alpha away — home preference alone sends this to Chatsworth.
+      fxAt('am', '2026-09-13', 'bravo', 'alpha', '08:00'),
+      // charlie home vs alpha away — a DIFFERENT pairing. Home preference alone would
+      // send this to Pinetown (charlie's ground) instead.
+      fxAt('pm', '2026-09-13', 'charlie', 'alpha', '13:30'),
+    ]);
+    const am = r.fixtures.find((f) => f.id === 'am')!;
+    const pm = r.fixtures.find((f) => f.id === 'pm')!;
+    expect(am.venueId).toBe('chatsworth');
+    // alpha already has Chatsworth booked from the AM leg, and it's still free at 13:30 —
+    // the nudge should follow alpha there rather than defaulting to charlie's home ground.
+    expect(pm.venueId).toBe('chatsworth');
+  });
 });
 
 describe('reports', () => {

@@ -18,13 +18,18 @@
  * in one day across two competitions. So the ledger spans every series in the tenant,
  * not just the one being allocated.
  *
- * ── THE LEDGER KEYS ON DATE *AND* SLOT ──
+ * ── THE LEDGER KEYS ON DATE *AND* SLOT — BUT AN UNTIMED BOOKING OWNS THE WHOLE DAY ──
  * A double-header (`StageSchedule.roundsPerDay === 2`) legitimately plays a side twice on
- * the same date — once in the AM round, once in the PM round — so date alone is no longer
- * enough to say a side or a ground is busy. Every booking is keyed by date plus the
- * fixture's slot (its `time`), with an empty slot folded into the same date-only key a
- * slot-less fixture always used. That is what keeps every non-double-header series
- * behaving exactly as before: their fixtures carry no time, so their keys are unchanged.
+ * the same date — once in the AM round, once in the PM round — so a per-slot booking is
+ * tracked alongside the date-only view. But a fixture with NO time is not "one more slot
+ * called none" — it's a fixture whose kickoff isn't split into rounds at all, so it
+ * occupies the whole day: it conflicts with every timed slot on that date, and a ground
+ * with one surface can't ALSO host an AM and a PM fixture around it. Symmetrically, once a
+ * side or ground has a TIMED booking, a later untimed lookup for that date must see it —
+ * checking "is anything booked that day" has to mean anything, not just other untimed
+ * bookings. Every non-double-header series still carries no time on any fixture, so its
+ * bookings are all untimed-vs-untimed and read exactly as a plain date-only ledger always
+ * did.
  *
  * ── NOTHING IS SILENTLY WRONG ──
  * An over-constrained fixture comes back `unresolved` with a reason. A confidently wrong
@@ -98,43 +103,66 @@ export function buildLedger(
   opts: { excludeSeriesIds?: string[] } = {},
 ): Ledger {
   const exclude = new Set(opts.excludeSeriesIds ?? []);
-  const venueCounts = new Map<string, number>();
-  const teamDays = new Set<string>();
-  // A slot-less fixture keys on date alone (the `?? ''` folds it into the same bucket a
-  // date-only key always produced), which is what keeps every non-double-header series
-  // reading identically to before this ledger learned about slots.
-  const vKey = (v: string, d: string, slot?: string) => `${v}|${d}|${slot ?? ''}`;
-  const tKey = (t: string, d: string, slot?: string) => `${t}|${d}|${slot ?? ''}`;
+  // Per venue-and-date, how many bookings fall in each slot — with the untimed slot
+  // stored under the empty string, same as a real slot, so it can be added to whichever
+  // timed slot is being asked about.
+  const venueCounts = new Map<string, Map<string, number>>();
+  // Per team-and-date, the set of slots (untimed as '') that side already has a match in.
+  const teamSlots = new Map<string, Set<string>>();
+  const dayKey = (id: string, d: string) => `${id}|${d}`;
+
+  const bumpVenue = (venueId: string, date: string, slot?: string) => {
+    const key = dayKey(venueId, date);
+    const bySlot = venueCounts.get(key) ?? new Map<string, number>();
+    const s = slot ?? '';
+    bySlot.set(s, (bySlot.get(s) ?? 0) + 1);
+    venueCounts.set(key, bySlot);
+  };
+  const bookTeam = (teamId: string, date: string, slot?: string) => {
+    const key = dayKey(teamId, date);
+    const slots = teamSlots.get(key) ?? new Set<string>();
+    slots.add(slot ?? '');
+    teamSlots.set(key, slots);
+  };
 
   for (const s of allSeries ?? []) {
     if (exclude.has(s.id)) continue;
     for (const f of s.fixtures ?? []) {
       if (!f?.date) continue;
-      if (f.venueId)
-        venueCounts.set(
-          vKey(f.venueId, f.date, f.time),
-          (venueCounts.get(vKey(f.venueId, f.date, f.time)) ?? 0) + 1,
-        );
+      if (f.venueId) bumpVenue(f.venueId, f.date, f.time);
       // A knockout placeholder is NOT a side. `win:f1` is series-scoped — every bracket
       // numbers its fixtures from f1 — so two competitions' finals both contain `win:f1`
       // and `win:f2`. Booking those into the team ledger makes the second competition's
       // final collide with the first and come back "unresolved: one of these sides
       // already has a match that day", for two teams that don't exist yet.
-      if (f.home && !isSlotRef(f.home)) teamDays.add(tKey(f.home, f.date, f.time));
-      if (f.away && !isSlotRef(f.away)) teamDays.add(tKey(f.away, f.date, f.time));
+      if (f.home && !isSlotRef(f.home)) bookTeam(f.home, f.date, f.time);
+      if (f.away && !isSlotRef(f.away)) bookTeam(f.away, f.date, f.time);
     }
   }
 
   return {
-    venueLoad: (venueId, date, slot) => venueCounts.get(vKey(venueId, date, slot)) ?? 0,
-    teamBusy: (teamId, date, slot) => !isSlotRef(teamId) && teamDays.has(tKey(teamId, date, slot)),
+    // A timed slot is occupied by a booking in that exact slot OR by an untimed booking,
+    // which owns the whole day. Asking date-only (no slot) means "how full is this ground
+    // today", so every slot's count is summed.
+    venueLoad: (venueId, date, slot) => {
+      const bySlot = venueCounts.get(dayKey(venueId, date));
+      if (!bySlot) return 0;
+      if (!slot) return [...bySlot.values()].reduce((a, b) => a + b, 0);
+      return (bySlot.get(slot) ?? 0) + (bySlot.get('') ?? 0);
+    },
+    // Same rule for sides: a timed slot clashes with that exact slot or with an untimed
+    // booking; a date-only ("is this side playing at all today") check is true the moment
+    // ANY slot — timed or untimed — is booked.
+    teamBusy: (teamId, date, slot) => {
+      if (isSlotRef(teamId)) return false;
+      const slots = teamSlots.get(dayKey(teamId, date));
+      if (!slots) return false;
+      if (!slot) return slots.size > 0;
+      return slots.has(slot) || slots.has('');
+    },
     add: (venueId, date, teamIds, slot) => {
-      if (venueId)
-        venueCounts.set(
-          vKey(venueId, date, slot),
-          (venueCounts.get(vKey(venueId, date, slot)) ?? 0) + 1,
-        );
-      for (const t of teamIds) if (t && !isSlotRef(t)) teamDays.add(tKey(t, date, slot));
+      if (venueId) bumpVenue(venueId, date, slot);
+      for (const t of teamIds) if (t && !isSlotRef(t)) bookTeam(t, date, slot);
     },
   };
 }
@@ -346,18 +374,30 @@ export function allocateVenues(args: AllocateArgs): AllocationReport {
     );
   }
 
-  // Same-series AM/PM co-location: a side that plays a double-header ideally sits at ONE
-  // ground all day rather than travelling twice. Seeded from every fixture already placed
-  // (locked ones above), then grown as the greedy loop below places more — a pure priority
-  // nudge in `score`, not a constraint, so it only ever wins when the preferred ground is
-  // otherwise free.
-  const pairDayVenue = new Map<string, string>();
-  // Keyed on the UNORDERED pair, not the home side: an interleaved double-header swaps
-  // home/away between the AM leg and the PM return, so a home-keyed map never matches
-  // the second leg — the exact fixture the nudge exists for.
-  const pairDayKey = (f: Pick<AllocatedFixture, 'home' | 'away' | 'date'>) =>
-    `${[f.home, f.away].sort().join('|')}|${f.date}`;
-  for (const f of out) if (f.venueId) pairDayVenue.set(pairDayKey(f), f.venueId);
+  // Same-day co-location: a side that plays twice in one day (a double-header, or simply
+  // two different fixtures that land on the same date) ideally sits at ONE ground all day
+  // rather than travelling twice. Seeded from every fixture already placed (locked ones
+  // above), then grown as the greedy loop below places more — a pure priority nudge in
+  // `score`, not a constraint, so it only ever wins when the preferred ground is otherwise
+  // free.
+  //
+  // Keyed per PARTICIPANT, not per pair: a pair-keyed map only matched an INTERLEAVED
+  // double-header, where the same two sides swap home/away between legs. It missed both a
+  // MIRRORED double-header (A v B in the morning, A v C in the afternoon — no shared pair)
+  // and any case where the sides don't reappear together at all. Recording both the home
+  // and away side's ground against each placed fixture means the nudge fires whenever
+  // EITHER side of a new fixture already has a ground booked that day — whichever one it
+  // is. If the two sides' already-assigned grounds disagree, checking each independently
+  // and bumping on any match means the higher-scoring (i.e. matching) candidate wins; it
+  // is a nudge, not a rule about whose preference takes priority.
+  const teamDayVenue = new Map<string, string>();
+  const teamDayKey = (team: string, date: string) => `${team}|${date}`;
+  const seedTeamDayVenue = (f: Pick<AllocatedFixture, 'home' | 'away' | 'date' | 'venueId'>) => {
+    if (!f.venueId) return;
+    if (f.home) teamDayVenue.set(teamDayKey(f.home, f.date), f.venueId);
+    if (f.away) teamDayVenue.set(teamDayKey(f.away, f.date), f.venueId);
+  };
+  for (const f of out) seedTeamDayVenue(f);
 
   const candidatesFor = (f: AllocatedFixture): Candidate[] => {
     const home = teamHome(f.home);
@@ -448,11 +488,15 @@ export function allocateVenues(args: AllocateArgs): AllocationReport {
       if (distanceUsed) s -= weightOf('distance') * (c.km !== null ? Math.min(c.km / 200, 1) : 1);
       // Prefer a quieter ground, all else equal.
       s -= weightOf('availability') * ledger.venueLoad(c.venue.id, f.date, f.time);
-      // A double-header's second round for this home side: keep it at the same ground as
-      // the first if that ground is still free at this slot (it's only in `free` at all
-      // if it is) — outweighs every other factor so it always wins when available, and
-      // simply falls out of contention (like any other busy ground) when it isn't.
-      if (pairDayVenue.get(pairDayKey(f)) === c.venue.id) s += 1e9;
+      // Either side already has a ground booked today: keep this fixture at that ground if
+      // it's still free at this slot (it's only in `free` at all if it is) — outweighs
+      // every other factor so it always wins when available, and simply falls out of
+      // contention (like any other busy ground) when it isn't.
+      if (
+        teamDayVenue.get(teamDayKey(f.home, f.date)) === c.venue.id ||
+        teamDayVenue.get(teamDayKey(f.away, f.date)) === c.venue.id
+      )
+        s += 1e9;
       return s;
     };
 
@@ -483,7 +527,7 @@ export function allocateVenues(args: AllocateArgs): AllocationReport {
     f.venueStatus = status;
     f.venueReason = reason;
     ledger.add(best.venue.id, f.date, [f.home, f.away], f.time);
-    pairDayVenue.set(pairDayKey(f), best.venue.id);
+    seedTeamDayVenue(f);
   }
 
   if (unresolved > 0) {
