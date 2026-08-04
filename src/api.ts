@@ -28,6 +28,7 @@ import type {
   Venue,
   SendResult,
   LogoUploadPost,
+  TutorialUploadGrant,
   DnsSheet,
   TenantOverview,
   DemographicsResponse,
@@ -505,6 +506,41 @@ export const platformLogoUploadUrl = (slug: string, contentType: string, kind?: 
     method: 'POST',
     body: { contentType, kind },
   });
+// Upload grant for an operator-managed tutorial video/poster (300s expiry, same shape
+// family as the branding logo grant, but discriminated on `mode`: a presigned POST for
+// a poster or a video ≤ 100 MiB, or a multipart grant for anything larger. Submit via
+// uploadPostToS3 / uploadMultipartToS3, then save the resulting publicUrl through
+// platformUpdateTenant's `tutorials` array (never persisted here — an unsaved upload
+// orphans the S3 object, same rule the logo flow follows).
+export const platformTutorialUploadUrl = (
+  slug: string,
+  body: { kind: 'video' | 'poster'; contentType: string; sizeBytes: number; fileName?: string },
+) =>
+  request<TutorialUploadGrant>(`/platform/tenants/${encodeURIComponent(slug)}/tutorial-upload`, {
+    method: 'POST',
+    body,
+  });
+// Finishes a multipart tutorial-video upload — CompleteMultipartUpload on the S3 side.
+// `parts` must be sorted by partNumber; the backend passes each etag through verbatim
+// (quoted or not), so uploadMultipartToS3's raw ETag header value is fine as-is.
+export const platformTutorialUploadComplete = (
+  slug: string,
+  body: { objectKey: string; uploadId: string; parts: { partNumber: number; etag: string }[] },
+) =>
+  request<{ publicUrl: string }>(
+    `/platform/tenants/${encodeURIComponent(slug)}/tutorial-upload/complete`,
+    { method: 'POST', body },
+  );
+// Aborts an in-progress multipart tutorial-video upload (operator cancelled, or the
+// upload failed partway) — releases the uploaded parts on S3. No-op to call twice.
+export const platformTutorialUploadAbort = (
+  slug: string,
+  body: { objectKey: string; uploadId: string },
+) =>
+  request<{ ok: boolean }>(`/platform/tenants/${encodeURIComponent(slug)}/tutorial-upload/abort`, {
+    method: 'POST',
+    body,
+  });
 export const platformDnsSheet = (slug: string) =>
   request<DnsSheet>(`/platform/tenants/${encodeURIComponent(slug)}/dns`);
 // Operator "setup complete" milestone (D6) — informational, reversible. Returns the
@@ -561,4 +597,186 @@ export async function uploadToPresigned(
     body: file,
   });
   if (!res.ok) throw new ApiError(res.status, 'upload failed');
+}
+
+/**
+ * Submit a presigned-POST grant (tutorial video/poster, same policy shape as the
+ * branding logo grant) to S3 via XHR rather than fetch — fetch has no upload-progress
+ * event, and a 2 GiB video needs one. Fields ride first, the file part LAST (S3 ignores
+ * form fields after the file). `onProgress` receives a 0–1 fraction of bytes sent.
+ * `signal` aborts the in-flight request and rejects with UploadAbortedError — same
+ * cancel contract as uploadMultipartToS3, though there's nothing to abort server-side
+ * for a single POST (at worst the object lands in S3 and stays unreferenced until the
+ * caller doesn't save it, same as any other unsaved upload).
+ */
+export function uploadPostToS3(
+  post: { url: string; fields: Record<string, string> },
+  file: Blob,
+  { onProgress, signal }: { onProgress?: (fraction: number) => void; signal?: AbortSignal } = {},
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new UploadAbortedError());
+    const form = new FormData();
+    for (const [k, v] of Object.entries(post.fields)) form.append(k, v);
+    form.append('file', file);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', post.url);
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(e.loaded / e.total);
+      };
+    }
+    const onAbort = () => xhr.abort();
+    signal?.addEventListener('abort', onAbort);
+    const cleanup = () => signal?.removeEventListener('abort', onAbort);
+    xhr.onload = () => {
+      cleanup();
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress?.(1);
+        resolve();
+      } else {
+        // S3 POST errors are XML, not JSON — log the raw body for debugging
+        // (best-effort) and surface a stable message with the status.
+        console.error('tutorial upload failed', xhr.status, xhr.responseText);
+        reject(new ApiError(xhr.status, `upload failed (${xhr.statusText || xhr.status})`));
+      }
+    };
+    xhr.onerror = () => {
+      cleanup();
+      reject(new ApiError(0, 'upload failed — network error'));
+    };
+    // xhr.abort() (from the AbortSignal listener above) fires `abort`, not `load` or
+    // `error` — without this the promise would never settle on cancel.
+    xhr.onabort = () => {
+      cleanup();
+      reject(new UploadAbortedError());
+    };
+    xhr.send(form);
+  });
+}
+
+/** Distinguishes an operator-cancelled multipart upload from a genuine failure. */
+export class UploadAbortedError extends Error {
+  constructor() {
+    super('upload aborted');
+    this.name = 'UploadAborted';
+  }
+}
+
+/**
+ * Uploads a large tutorial video via S3 multipart: slices `file` into
+ * `grant.partSizeBytes` blobs and PUTs each to its presigned part URL (XHR, not
+ * fetch — same upload-progress requirement as uploadPostToS3), reading the ETag
+ * response header S3 requires back for CompleteMultipartUpload. Up to 3 concurrent
+ * parts, up to 3 attempts each with a short backoff. `signal` aborts the whole
+ * upload and rejects with UploadAbortedError so the caller can call the abort route;
+ * the caller is responsible for actually invoking it (this helper only stops sending).
+ * Resolves to the completed parts, sorted by partNumber as platformTutorialUploadComplete expects.
+ */
+export async function uploadMultipartToS3(
+  grant: Extract<TutorialUploadGrant, { mode: 'multipart' }>,
+  file: Blob,
+  { onProgress, signal }: { onProgress?: (fraction: number) => void; signal?: AbortSignal } = {},
+): Promise<{ partNumber: number; etag: string }[]> {
+  if (signal?.aborted) throw new UploadAbortedError();
+  const total = file.size || 1;
+  const loadedByPart = new Map<number, number>();
+  const report = () => {
+    if (!onProgress) return;
+    let loaded = 0;
+    for (const v of loadedByPart.values()) loaded += v;
+    onProgress(Math.min(1, loaded / total));
+  };
+  // A part that exhausts its retries is a genuine failure, not a cancel — but the
+  // other parts are still in flight and would otherwise keep uploading (and retrying)
+  // for a part set that's already doomed. This internal controller stops them; it's
+  // wired into the same xhr.abort() path as the caller's `signal`, so onabort still
+  // fires for them, but the ORIGINAL ApiError (rejected first, below) is what
+  // Promise.all settles on — the aborted siblings' UploadAbortedError rejections lose
+  // the race because they're queued after it.
+  const internalAbort = new AbortController();
+
+  function uploadPart(
+    partNumber: number,
+    url: string,
+  ): Promise<{ partNumber: number; etag: string }> {
+    const start = (partNumber - 1) * grant.partSizeBytes;
+    const blob = file.slice(start, Math.min(start + grant.partSizeBytes, file.size));
+    const attempt = (n: number): Promise<{ partNumber: number; etag: string }> =>
+      new Promise((resolve, reject) => {
+        if (signal?.aborted || internalAbort.signal.aborted)
+          return reject(new UploadAbortedError());
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', url);
+        const onAbort = () => xhr.abort();
+        signal?.addEventListener('abort', onAbort);
+        internalAbort.signal.addEventListener('abort', onAbort);
+        const cleanup = () => {
+          signal?.removeEventListener('abort', onAbort);
+          internalAbort.signal.removeEventListener('abort', onAbort);
+        };
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            loadedByPart.set(partNumber, e.loaded);
+            report();
+          }
+        };
+        xhr.onload = () => {
+          cleanup();
+          if (xhr.status >= 200 && xhr.status < 300) {
+            const etag = xhr.getResponseHeader('ETag');
+            if (etag == null) {
+              reject(
+                new ApiError(
+                  0,
+                  `part ${partNumber} returned no ETag — check the bucket CORS exposeHeaders deployment`,
+                ),
+              );
+              internalAbort.abort();
+              return;
+            }
+            loadedByPart.set(partNumber, blob.size);
+            report();
+            resolve({ partNumber, etag });
+          } else if (n < 3) {
+            setTimeout(() => attempt(n + 1).then(resolve, reject), 300 * n);
+          } else {
+            reject(new ApiError(xhr.status, `part ${partNumber} upload failed`));
+            internalAbort.abort();
+          }
+        };
+        xhr.onerror = () => {
+          cleanup();
+          if (signal?.aborted) return reject(new UploadAbortedError());
+          if (n < 3) setTimeout(() => attempt(n + 1).then(resolve, reject), 300 * n);
+          else {
+            reject(new ApiError(0, `part ${partNumber} upload failed — network error`));
+            internalAbort.abort();
+          }
+        };
+        // xhr.abort() (from the AbortSignal listeners above) fires `abort`, not `load`
+        // or `error` — without this the in-flight part's promise would never settle
+        // and a cancelled/aborted-sibling upload would hang instead of rejecting.
+        xhr.onabort = () => {
+          cleanup();
+          reject(new UploadAbortedError());
+        };
+        xhr.send(blob);
+      });
+    return attempt(1);
+  }
+
+  const queue = [...grant.partUrls];
+  const results: { partNumber: number; etag: string }[] = [];
+  async function worker() {
+    for (;;) {
+      if (signal?.aborted) throw new UploadAbortedError();
+      const next = queue.shift();
+      if (!next) return;
+      results.push(await uploadPart(next.partNumber, next.url));
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(3, grant.partUrls.length) }, () => worker()));
+  results.sort((a, b) => a.partNumber - b.partNumber);
+  return results;
 }

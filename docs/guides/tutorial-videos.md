@@ -1,9 +1,16 @@
 # Tutorial videos runbook
 
 How the "How to use the app" videos on the public `/tutorials` page get hosted and
-updated. The page (`src/TutorialsPage.jsx`) renders whatever the public `/tenant`
+updated. The page (`src/TutorialsPage.tsx`) renders whatever the public `/tenant`
 payload returns in `tutorials[]`; that list comes from `DEFAULT_TUTORIALS` in
 `packages/api/src/index.ts` (or a per-tenant `config.tutorials` override).
+
+**The operator portal is the primary way to manage per-tenant videos.** An operator
+uploads a client's own clips (and optionally opts them out of the shared default set)
+from the tenant's settings screen — see "Per-tenant overrides" below. `scripts/
+upload-tutorials.sh` still exists, but only for maintaining the SHARED default set
+(the `tutorials/01-creating-account.mp4`-style files every tenant without an override
+falls back to) — it is never the right tool for a single client's own videos.
 
 ## Where the files live
 
@@ -15,8 +22,14 @@ still serves byte-range requests, so the `<video>` player can seek; a cross-orig
 `<video>` needs no CORS. The MP4s are **not** part of the web build — they're uploaded
 out-of-band, so a `sst deploy` never re-uploads or purges them, and they never bloat git.
 
-- Object keys live under the `tutorials/` prefix, e.g. `tutorials/01-creating-account.mp4`.
+- Object keys live under the `tutorials/` prefix, e.g. `tutorials/01-creating-account.mp4`
+  for the shared default set, or `tutorials/<slug>/<kind>-<uuid8>[-name].<ext>` for a
+  tenant's own operator-uploaded clips (see "Per-tenant overrides" below).
 - Served at `https://<bucket>.s3.af-south-1.amazonaws.com/tutorials/<file>`.
+- The bucket's CORS policy allows `GET/HEAD/PUT/POST` from any origin (`sst.config.ts`)
+  — presigned URLs are the auth, so the operator portal's origin doesn't need
+  allowlisting, and `exposeHeaders: ['ETag']` lets the browser read each multipart
+  part's ETag to assemble the completion request.
 - `DEFAULT_TUTORIALS` builds those absolute URLs from the `TUTORIALS_BASE_URL` env var
   (= the bucket's HTTPS endpoint, `tutorialBaseUrl` output), wired in `sst.config.ts`.
 - **Future**: if a CloudFront cache-policy slot frees up (or the quota is raised), this
@@ -76,5 +89,32 @@ distribution to invalidate; to force-refresh immediately, change the key (e.g.
 
 ## Per-tenant overrides
 
-To give one union a different set, write a `tutorials: TutorialVideo[]` array onto
-that tenant's `CONFIG` item (absolute URLs work as-is). Absent ⇒ `DEFAULT_TUTORIALS`.
+To give one union a different set, an operator uploads clips through the platform
+portal and saves them onto that tenant's `tutorials: TutorialVideo[]` — no manual S3
+work or deploy needed. Under the hood:
+
+- **Upload**: `POST /platform/tenants/:slug/tutorial-upload` presigns the upload —
+  either a single presigned POST (posters, and videos ≤ 100 MB) or a multipart upload
+  (larger videos; the browser PUTs each part straight to S3, then calls
+  `.../tutorial-upload/complete`). Object keys land under `tutorials/<slug>/` — a
+  **separate, per-tenant prefix** one level below the shared default clips
+  (`tutorials/<file>.mp4`), so a tenant's own uploads can never collide with, shadow,
+  or (via the cleanup below) get confused with the shared set.
+- **Save**: `PUT /platform/tenants/:slug` with a `tutorials` array of `{title, url,
+  poster?}` (https URLs only — normally the `publicUrl` the upload step returned).
+  Optionally set `tutorialsNoFallback: true` so an empty/absent override serves **no**
+  videos instead of quietly falling back to `DEFAULT_TUTORIALS` — for a client whose
+  own onboarding flow has diverged enough that the shared clips would mislead.
+- **Cleanup**: saving a new `tutorials` array deletes the S3 objects for any dropped
+  entry, but ONLY when its URL sits under that tenant's own `tutorials/<slug>/`
+  prefix — the shared default clips and every other tenant's assets are hard-excluded
+  from deletion, so a slug mix-up can't take out shared media. Deletion is
+  best-effort: a failure is logged, never blocks the config save.
+- **Abandoned uploads**: a multipart upload that's never completed or aborted (a
+  browser tab closed mid-upload) is cleaned up automatically — `sst.config.ts` adds an
+  S3 lifecycle rule (`abortIncompleteMultipartUpload`, scoped to the `tutorials/`
+  prefix) that aborts it after 3 days, freeing the part storage.
+
+Tenant admins cannot write `tutorials` or `tutorialsNoFallback` themselves — both are
+operator-only, stripped from `PUT /tenant/config` the same way `features`/`districts`
+are (ADR 0006).

@@ -678,6 +678,33 @@ describe('GET /tenant — public tutorials', () => {
     assert.ok(Array.isArray(body.tutorials) && body.tutorials.length > 0);
     assert.ok(body.tutorials.every((t) => t.title && t.url.includes('/tutorials/')));
   });
+
+  test('a tenant with its own tutorials override returns those, not the default set', async (t) => {
+    const before = await repo.getTenantConfig('dolphins');
+    assert.ok(before);
+    t.after(() => repo.putTenantConfig(before));
+
+    const own = [{ title: 'Our own walkthrough', url: 'https://cdn.dolphins.test/walkthrough.mp4' }];
+    await repo.putTenantConfig({ ...before, tutorials: own });
+
+    const res = await app.request('/tenant', { headers: { 'x-tenant': 'dolphins' } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { tutorials?: unknown };
+    assert.deepEqual(body.tutorials, own);
+  });
+
+  test('tutorialsNoFallback: true with no tutorials override → empty array, not the default set', async (t) => {
+    const before = await repo.getTenantConfig('dolphins');
+    assert.ok(before);
+    t.after(() => repo.putTenantConfig(before));
+
+    await repo.putTenantConfig({ ...before, tutorials: undefined, tutorialsNoFallback: true });
+
+    const res = await app.request('/tenant', { headers: { 'x-tenant': 'dolphins' } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { tutorials?: unknown[] };
+    assert.deepEqual(body.tutorials, []);
+  });
 });
 
 describe('POST /clubs/:id/send-fixtures', () => {

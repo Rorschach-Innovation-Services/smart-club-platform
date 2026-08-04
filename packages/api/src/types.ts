@@ -525,6 +525,13 @@ export interface TenantConfig {
    */
   tutorials?: TutorialVideo[];
   /**
+   * When true, an empty/absent `tutorials` serves NO videos instead of the shared
+   * DEFAULT_TUTORIALS set (e.g. a client whose own onboarding flow diverges enough
+   * that the shared clips would mislead). Absent ⇒ legacy fallback behaviour
+   * unchanged. Operator-only, same as `tutorials`.
+   */
+  tutorialsNoFallback?: boolean;
+  /**
    * Per-tenant feature flags, read via hasFeature() (features.ts) so each flag
    * carries its own default. Known flags: 'whatsappInvites' (default TRUE —
    * shared WABA templates are dolphins-flavored, so new clients launch

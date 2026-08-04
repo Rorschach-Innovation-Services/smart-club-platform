@@ -5,6 +5,12 @@
 # the `Cdn` Router (sst.config.ts) expect. Run AFTER `sst deploy` has created the
 # bucket. See docs/guides/tutorial-videos.md for the full runbook.
 #
+# This script ONLY maintains the SHARED default set (the `tutorials/<file>.mp4` root
+# keys every tenant without an override falls back to). A single client's OWN videos
+# are per-tenant (`tutorials/<slug>/…`) and portal-managed — an operator uploads and
+# saves them from the tenant's settings screen (POST .../tutorial-upload, PUT
+# /platform/tenants/:slug), never through this script.
+#
 # Usage:
 #   scripts/upload-tutorials.sh <bucket-name> [source-dir]
 #

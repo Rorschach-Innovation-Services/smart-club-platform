@@ -14,6 +14,14 @@
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
+import { mockClient } from 'aws-sdk-client-mock';
+import {
+  S3Client,
+  CreateMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
+  DeleteObjectsCommand,
+} from '@aws-sdk/client-s3';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load,
 // index.ts reads TUTORIALS_BASE_URL / TUTORIALS_BUCKET at module load.
@@ -870,7 +878,7 @@ describe('tenant-admin PUT /tenant/config hardening', () => {
     );
   });
 
-  test('features/tutorials/adminCount/districts are stripped from tenant-admin patches', async () => {
+  test('features/tutorials/tutorialsNoFallback/adminCount/districts are stripped from tenant-admin patches', async () => {
     const before = await repo.getTenantConfig('dolphins');
     const res = await app.request('/tenant/config', {
       method: 'PUT',
@@ -878,6 +886,7 @@ describe('tenant-admin PUT /tenant/config hardening', () => {
       body: JSON.stringify({
         features: { selfServeBranding: true, whatsappInvites: false },
         tutorials: [{ key: 'evil', title: 'Evil', src: 'https://evil.example/x.mp4' }],
+        tutorialsNoFallback: true,
         adminCount: 99,
         districts: ['Evil District'],
       }),
@@ -886,6 +895,11 @@ describe('tenant-admin PUT /tenant/config hardening', () => {
     const after = await repo.getTenantConfig('dolphins');
     assert.deepEqual(after?.features, before?.features, 'flags unchanged');
     assert.deepEqual(after?.tutorials, before?.tutorials);
+    assert.equal(
+      after?.tutorialsNoFallback,
+      before?.tutorialsNoFallback,
+      'tutorialsNoFallback unchanged (operator-only)',
+    );
     assert.equal(after?.adminCount, before?.adminCount);
     assert.deepEqual(
       after?.districts,
@@ -1334,6 +1348,447 @@ describe('POST /platform/tenants/:slug/logo-upload', () => {
     assert.equal(typo.status, 400);
     const body = (await typo.json()) as { error: string };
     assert.match(body.error, /kind/);
+  });
+});
+
+describe('PUT /platform/tenants/:slug — tutorials / tutorialsNoFallback', () => {
+  test('persists tutorials + tutorialsNoFallback and returns them', async () => {
+    const tutorials = [
+      { title: 'Getting started', url: 'https://tutorials.test/tutorials/sharks/video-abc.mp4' },
+      {
+        title: 'Advanced setup',
+        url: 'https://tutorials.test/tutorials/sharks/video-def.mp4',
+        poster: 'https://tutorials.test/tutorials/sharks/poster-abc.jpg',
+      },
+    ];
+    const res = await app.request('/platform/tenants/sharks', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ tutorials, tutorialsNoFallback: true }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { tutorials: unknown; tutorialsNoFallback: boolean };
+    assert.deepEqual(body.tutorials, tutorials);
+    assert.equal(body.tutorialsNoFallback, true);
+    const stored = await repo.getTenantConfig('sharks');
+    assert.deepEqual(stored?.tutorials, tutorials);
+    assert.equal(stored?.tutorialsNoFallback, true);
+  });
+
+  test('invalid shapes 400: not an array, too many entries, empty title, non-https url', async () => {
+    const put = (tutorials: unknown) =>
+      app.request('/platform/tenants/sharks', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ tutorials }),
+      });
+
+    assert.equal((await put('nope')).status, 400);
+
+    const tooMany = Array.from({ length: 51 }, (_, i) => ({
+      title: `Video ${i}`,
+      url: `https://tutorials.test/tutorials/sharks/video-${i}.mp4`,
+    }));
+    assert.equal((await put(tooMany)).status, 400);
+
+    assert.equal(
+      (await put([{ title: '  ', url: 'https://tutorials.test/x.mp4' }])).status,
+      400,
+    );
+
+    assert.equal((await put([{ title: 'x', url: 'not-a-url' }])).status, 400);
+    assert.equal((await put([{ title: 'x', url: 'http://insecure.test/x.mp4' }])).status, 400);
+    assert.equal(
+      (
+        await put([
+          { title: 'x', url: 'https://tutorials.test/x.mp4', poster: 'http://insecure.test/p.jpg' },
+        ])
+      ).status,
+      400,
+    );
+  });
+
+  test('orphan cleanup: a dropped tenant-scoped url triggers DeleteObjects with exactly that key; a default-set url is never deleted', async () => {
+    const s3Mock = mockClient(S3Client);
+    s3Mock.reset();
+    s3Mock.on(DeleteObjectsCommand).resolves({});
+    try {
+      const kept = {
+        title: 'Kept',
+        url: 'https://tutorials.test/tutorials/sharks/video-kept.mp4',
+      };
+      const dropped = {
+        title: 'Dropped',
+        url: 'https://tutorials.test/tutorials/sharks/video-dropped.mp4',
+      };
+      const defaultSet = {
+        title: 'Shared default',
+        url: 'https://tutorials.test/tutorials/01-creating-account.mp4',
+      };
+
+      // Seed the tenant with all three, then save down to just `kept`.
+      let res = await app.request('/platform/tenants/sharks', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ tutorials: [kept, dropped, defaultSet] }),
+      });
+      assert.equal(res.status, 200);
+      s3Mock.resetHistory();
+
+      res = await app.request('/platform/tenants/sharks', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ tutorials: [kept] }),
+      });
+      assert.equal(res.status, 200);
+
+      const calls = s3Mock.commandCalls(DeleteObjectsCommand);
+      assert.equal(calls.length, 1, 'exactly one DeleteObjects batch call');
+      const keys = calls[0].args[0].input.Delete?.Objects?.map((o) => o.Key);
+      assert.deepEqual(keys, ['tutorials/sharks/video-dropped.mp4']);
+    } finally {
+      s3Mock.restore();
+    }
+  });
+
+  test('orphan cleanup: DeleteObjects failure is swallowed — the save still succeeds and persists', async () => {
+    const s3Mock = mockClient(S3Client);
+    s3Mock.reset();
+    s3Mock.on(DeleteObjectsCommand).resolves({});
+    try {
+      const dropped = {
+        title: 'Dropped',
+        url: 'https://tutorials.test/tutorials/sharks/video-dropped.mp4',
+      };
+      let res = await app.request('/platform/tenants/sharks', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ tutorials: [dropped] }),
+      });
+      assert.equal(res.status, 200);
+
+      s3Mock.reset();
+      s3Mock.on(DeleteObjectsCommand).rejects(new Error('S3 unavailable'));
+
+      const newTutorials = [
+        { title: 'Replacement', url: 'https://tutorials.test/tutorials/sharks/video-new.mp4' },
+      ];
+      res = await app.request('/platform/tenants/sharks', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ tutorials: newTutorials }),
+      });
+      assert.equal(res.status, 200, 'save succeeds even though the cleanup delete failed');
+      const body = (await res.json()) as { tutorials: unknown };
+      assert.deepEqual(body.tutorials, newTutorials);
+      const stored = await repo.getTenantConfig('sharks');
+      assert.deepEqual(stored?.tutorials, newTutorials);
+    } finally {
+      s3Mock.restore();
+    }
+  });
+
+  test('orphan cleanup: dropping only a poster (url kept) triggers DeleteObjects for the poster key', async () => {
+    const s3Mock = mockClient(S3Client);
+    s3Mock.reset();
+    s3Mock.on(DeleteObjectsCommand).resolves({});
+    try {
+      const withPoster = {
+        title: 'Has poster',
+        url: 'https://tutorials.test/tutorials/sharks/video-kept.mp4',
+        poster: 'https://tutorials.test/tutorials/sharks/poster-old.jpg',
+      };
+      let res = await app.request('/platform/tenants/sharks', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ tutorials: [withPoster] }),
+      });
+      assert.equal(res.status, 200);
+      s3Mock.resetHistory();
+
+      const withoutPoster = { title: 'Has poster', url: withPoster.url };
+      res = await app.request('/platform/tenants/sharks', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ tutorials: [withoutPoster] }),
+      });
+      assert.equal(res.status, 200);
+
+      const calls = s3Mock.commandCalls(DeleteObjectsCommand);
+      assert.equal(calls.length, 1, 'exactly one DeleteObjects batch call');
+      const keys = calls[0].args[0].input.Delete?.Objects?.map((o) => o.Key);
+      assert.deepEqual(keys, ['tutorials/sharks/poster-old.jpg']);
+    } finally {
+      s3Mock.restore();
+    }
+  });
+});
+
+describe('POST /platform/tenants/:slug/tutorial-upload', () => {
+  test('poster → mode "post" with a tutorials/<slug>/ key and matching policy conditions', async () => {
+    const res = await app.request('/platform/tenants/sharks/tutorial-upload', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ kind: 'poster', contentType: 'image/jpeg', sizeBytes: 1024 }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      mode: string;
+      url: string;
+      fields: Record<string, string>;
+      objectKey: string;
+      publicUrl: string;
+    };
+    assert.equal(body.mode, 'post');
+    assert.match(body.objectKey, /^tutorials\/sharks\/poster-[0-9a-f]{8}\.jpg$/);
+    assert.equal(body.publicUrl, `https://tutorials.test/${body.objectKey}`);
+    const policy = JSON.parse(Buffer.from(body.fields.Policy, 'base64').toString('utf8')) as {
+      conditions: unknown[];
+    };
+    assert.ok(
+      policy.conditions.some(
+        (cond) =>
+          Array.isArray(cond) &&
+          cond[0] === 'content-length-range' &&
+          cond[1] === 0 &&
+          cond[2] === 4 * 1024 * 1024,
+      ),
+    );
+  });
+
+  test('small video (under the multipart threshold) → mode "post"', async () => {
+    const res = await app.request('/platform/tenants/sharks/tutorial-upload', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        kind: 'video',
+        contentType: 'video/mp4',
+        sizeBytes: 10 * 1024 * 1024,
+        fileName: 'My Drill Video.MP4',
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { mode: string; objectKey: string };
+    assert.equal(body.mode, 'post');
+    assert.match(body.objectKey, /^tutorials\/sharks\/video-[0-9a-f]{8}-mydrillvideomp4\.mp4$/);
+  });
+
+  test('small video (post mode) → content-length-range caps at MULTIPART_THRESHOLD, not the 2 GiB video max', async () => {
+    const res = await app.request('/platform/tenants/sharks/tutorial-upload', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ kind: 'video', contentType: 'video/mp4', sizeBytes: 10 * 1024 * 1024 }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { mode: string; fields: Record<string, string> };
+    assert.equal(body.mode, 'post');
+    const policy = JSON.parse(Buffer.from(body.fields.Policy, 'base64').toString('utf8')) as {
+      conditions: unknown[];
+    };
+    assert.ok(
+      policy.conditions.some(
+        (cond) =>
+          Array.isArray(cond) &&
+          cond[0] === 'content-length-range' &&
+          cond[1] === 0 &&
+          cond[2] === 100 * 1024 * 1024, // MULTIPART_THRESHOLD, not the 2 GiB video maxBytes
+      ),
+    );
+  });
+
+  test('video sizeBytes over the multipart threshold → mode "multipart" with ceil(size/partSize) partUrls', async () => {
+    const s3Mock = mockClient(S3Client);
+    s3Mock.reset();
+    s3Mock.on(CreateMultipartUploadCommand).resolves({ UploadId: 'upload-xyz' });
+    try {
+      const sizeBytes = 101 * 1024 * 1024; // just over the 100 MiB threshold
+      const res = await app.request('/platform/tenants/sharks/tutorial-upload', {
+        method: 'POST',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ kind: 'video', contentType: 'video/mp4', sizeBytes }),
+      });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as {
+        mode: string;
+        uploadId: string;
+        partSizeBytes: number;
+        partUrls: { partNumber: number; url: string }[];
+      };
+      assert.equal(body.mode, 'multipart');
+      assert.equal(body.uploadId, 'upload-xyz');
+      assert.equal(body.partSizeBytes, 32 * 1024 * 1024);
+      assert.equal(body.partUrls.length, Math.ceil(sizeBytes / (32 * 1024 * 1024)));
+      assert.deepEqual(
+        body.partUrls.map((p) => p.partNumber),
+        Array.from({ length: body.partUrls.length }, (_, i) => i + 1),
+      );
+    } finally {
+      s3Mock.restore();
+    }
+  });
+
+  test('bad kind, bad contentType, bad sizeBytes → 400', async () => {
+    const post = (body: unknown) =>
+      app.request('/platform/tenants/sharks/tutorial-upload', {
+        method: 'POST',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify(body),
+      });
+    assert.equal((await post({ kind: 'poster', contentType: 'video/mp4' })).status, 400);
+    assert.equal(
+      (await post({ kind: 'poster', contentType: 'image/jpeg', sizeBytes: -1 })).status,
+      400,
+    );
+    assert.equal(
+      (await post({ kind: 'video', contentType: 'video/mp4', sizeBytes: 999_999_999_999 }))
+        .status,
+      400,
+    );
+    assert.equal(
+      (await post({ kind: 'bogus', contentType: 'video/mp4', sizeBytes: 1 })).status,
+      400,
+    );
+  });
+
+  test('unknown tenant → 404', async () => {
+    const res = await app.request('/platform/tenants/ghost/tutorial-upload', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ kind: 'poster', contentType: 'image/jpeg', sizeBytes: 1024 }),
+    });
+    assert.equal(res.status, 404);
+  });
+});
+
+describe('POST /platform/tenants/:slug/tutorial-upload/complete and /abort', () => {
+  test('complete: objectKey outside tutorials/<slug>/ → 400', async () => {
+    const res = await app.request('/platform/tenants/sharks/tutorial-upload/complete', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        objectKey: 'tutorials/otherclient/video-abc.mp4',
+        uploadId: 'up-1',
+        parts: [{ partNumber: 1, etag: '"abc"' }],
+      }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test('complete: objectKey containing ".." → 400', async () => {
+    const res = await app.request('/platform/tenants/sharks/tutorial-upload/complete', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        objectKey: 'tutorials/sharks/../01-creating-account.mp4',
+        uploadId: 'up-1',
+        parts: [{ partNumber: 1, etag: '"abc"' }],
+      }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test('complete: empty parts → 400', async () => {
+    const res = await app.request('/platform/tenants/sharks/tutorial-upload/complete', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        objectKey: 'tutorials/sharks/video-abc.mp4',
+        uploadId: 'up-1',
+        parts: [],
+      }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test('complete: missing parts → 400', async () => {
+    const res = await app.request('/platform/tenants/sharks/tutorial-upload/complete', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        objectKey: 'tutorials/sharks/video-abc.mp4',
+        uploadId: 'up-1',
+      }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test('complete: succeeds with parts sorted by partNumber → returns publicUrl', async () => {
+    const s3Mock = mockClient(S3Client);
+    s3Mock.reset();
+    s3Mock.on(CompleteMultipartUploadCommand).resolves({});
+    try {
+      const res = await app.request('/platform/tenants/sharks/tutorial-upload/complete', {
+        method: 'POST',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({
+          objectKey: 'tutorials/sharks/video-abc.mp4',
+          uploadId: 'up-1',
+          parts: [
+            { partNumber: 2, etag: '"two"' },
+            { partNumber: 1, etag: '"one"' },
+          ],
+        }),
+      });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { publicUrl: string };
+      assert.equal(body.publicUrl, 'https://tutorials.test/tutorials/sharks/video-abc.mp4');
+      const call = s3Mock.commandCalls(CompleteMultipartUploadCommand)[0];
+      assert.deepEqual(call.args[0].input.MultipartUpload?.Parts, [
+        { ETag: '"one"', PartNumber: 1 },
+        { ETag: '"two"', PartNumber: 2 },
+      ]);
+    } finally {
+      s3Mock.restore();
+    }
+  });
+
+  test('abort: objectKey outside tutorials/<slug>/ → 400', async () => {
+    const res = await app.request('/platform/tenants/sharks/tutorial-upload/abort', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ objectKey: 'tutorials/otherclient/video-abc.mp4', uploadId: 'up-1' }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test('abort: objectKey containing ".." → 400', async () => {
+    const res = await app.request('/platform/tenants/sharks/tutorial-upload/abort', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        objectKey: 'tutorials/sharks/../01-creating-account.mp4',
+        uploadId: 'up-1',
+      }),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test('abort: succeeds (and swallows NoSuchUpload) → { ok: true }', async () => {
+    const s3Mock = mockClient(S3Client);
+    s3Mock.reset();
+    s3Mock.on(AbortMultipartUploadCommand).resolves({});
+    try {
+      const res = await app.request('/platform/tenants/sharks/tutorial-upload/abort', {
+        method: 'POST',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ objectKey: 'tutorials/sharks/video-abc.mp4', uploadId: 'up-1' }),
+      });
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { ok: true });
+
+      s3Mock.reset();
+      const err = Object.assign(new Error('no such upload'), { name: 'NoSuchUpload' });
+      s3Mock.on(AbortMultipartUploadCommand).rejects(err);
+      const res2 = await app.request('/platform/tenants/sharks/tutorial-upload/abort', {
+        method: 'POST',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ objectKey: 'tutorials/sharks/video-abc.mp4', uploadId: 'gone' }),
+      });
+      assert.equal(res2.status, 200);
+      assert.deepEqual(await res2.json(), { ok: true });
+    } finally {
+      s3Mock.restore();
+    }
   });
 });
 

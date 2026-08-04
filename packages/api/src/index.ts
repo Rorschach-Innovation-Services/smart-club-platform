@@ -25,6 +25,11 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
@@ -140,9 +145,13 @@ const DEFAULT_TUTORIALS: TutorialVideo[] = [
   { title: 'Full walkthrough (all six steps)', url: tutorialUrl('00-full-walkthrough.mp4') },
 ];
 
-/** A tenant's tutorial videos, falling back to the shared default set. */
+/**
+ * A tenant's tutorial videos. Falls back to the shared default set UNLESS the
+ * tenant opted out via `tutorialsNoFallback` (see TenantConfig), in which case an
+ * empty/absent override serves NO videos instead.
+ */
 const tutorialsFor = (config: TenantConfig | null): TutorialVideo[] =>
-  config?.tutorials?.length ? config.tutorials : DEFAULT_TUTORIALS;
+  config?.tutorials?.length ? config.tutorials : config?.tutorialsNoFallback ? [] : DEFAULT_TUTORIALS;
 const cognito = new CognitoIdentityProviderClient({});
 const UPLOADS_BUCKET = process.env.UPLOADS_BUCKET!;
 // Public TutorialAssets bucket (also hosts tenant logos under branding/<slug>/ —
@@ -2876,6 +2885,82 @@ function validateKnownClubs(entries: unknown): asserts entries is Array<{ name: 
   if (new Set(ids).size !== ids.length) throw new HttpError(409, 'duplicate directory club');
 }
 
+/** True for a syntactically-valid absolute https:// URL. */
+function isHttpsUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || !value) return false;
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Per-tenant tutorial-video shape guard: bounded array, each entry a non-blank
+ * title (≤200 chars) and an https `url`; `poster`, if present, must also be
+ * https. TutorialVideo's `url`/`poster` doc comments allow relative paths for
+ * the DEFAULT_TUTORIALS set — an operator-authored override is stricter (only
+ * ever S3/CDN links from tutorial-upload), so this rejects anything else.
+ */
+function validateTutorials(tutorials: unknown): asserts tutorials is TutorialVideo[] {
+  if (!Array.isArray(tutorials)) throw new HttpError(400, 'tutorials must be an array');
+  if (tutorials.length > 50) throw new HttpError(400, 'no more than 50 tutorial videos');
+  for (const t of tutorials as Array<Partial<TutorialVideo> | null | undefined>) {
+    if (!t || typeof t !== 'object') throw new HttpError(400, 'every tutorial needs a title and url');
+    if (typeof t.title !== 'string' || !t.title.trim())
+      throw new HttpError(400, 'every tutorial needs a title');
+    if (t.title.trim().length > 200)
+      throw new HttpError(400, 'tutorial titles must be 200 characters or fewer');
+    if (!isHttpsUrl(t.url)) throw new HttpError(400, `"${t.title}" needs a valid https url`);
+    if (t.poster !== undefined && !isHttpsUrl(t.poster))
+      throw new HttpError(400, `"${t.title}" poster must be a valid https url`);
+  }
+}
+
+/**
+ * Delete S3 objects for tutorial video/poster URLs dropped from an operator's tutorials
+ * patch. Only touches objects whose URL sits under THIS tenant's own tutorials/<slug>/
+ * prefix — shared-default clips (tutorials/<file>.mp4) and every other tenant's assets
+ * are hard-excluded, so a slug mix-up or a leftover default entry can never delete
+ * platform-shared media. Best-effort: one DeleteObjectsCommand batch (S3's cap is 1000
+ * keys, comfortably above the 50-entry tutorials cap × 2 url/poster fields), and a
+ * failure here must never fail the config save the tutorials patch already committed —
+ * logged and swallowed. No-op when TUTORIALS_BUCKET is unset (offline dev). Same
+ * accepted non-atomic window as the operator route header already documents for
+ * leagues/branding: two concurrent operator PUTs can interleave such that this delete
+ * removes an object the second save's patch has just re-referenced.
+ */
+async function cleanupOrphanTutorialAssets(
+  slug: string,
+  oldTutorials: TutorialVideo[],
+  newTutorials: TutorialVideo[],
+): Promise<void> {
+  if (!TUTORIALS_BUCKET) return;
+  const prefix = `${TUTORIALS_BASE_URL}/tutorials/${slug}/`;
+  const kept = new Set(
+    newTutorials.flatMap((t) => [t.url, t.poster].filter((v): v is string => !!v)),
+  );
+  const droppedKeys = [
+    ...new Set(
+      oldTutorials
+        .flatMap((t) => [t.url, t.poster])
+        .filter((v): v is string => !!v && v.startsWith(prefix) && !kept.has(v))
+        .map((url) => url.slice(TUTORIALS_BASE_URL.length + 1)),
+    ),
+  ];
+  if (droppedKeys.length === 0) return;
+  try {
+    await s3.send(
+      new DeleteObjectsCommand({
+        Bucket: TUTORIALS_BUCKET,
+        Delete: { Objects: droppedKeys.map((Key) => ({ Key })) },
+      }),
+    );
+  } catch (err) {
+    console.error(`tutorial-asset cleanup failed for tenant ${slug}:`, err);
+  }
+}
+
 /**
  * League-catalogue shape guard: keys are the matching token stored on clubs, so they
  * must be unique, present and strings. Rejects a malformed payload with a 400 rather
@@ -2946,6 +3031,7 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   // the shared applyTenantConfigPatch) because the operator route whitelists separately.
   delete (patch as { features?: unknown }).features;
   delete (patch as { tutorials?: unknown }).tutorials;
+  delete (patch as { tutorialsNoFallback?: unknown }).tutorialsNoFallback;
   delete (patch as { adminCount?: unknown }).adminCount;
   delete (patch as { districts?: unknown }).districts;
   delete (patch as { knownClubs?: unknown }).knownClubs;
@@ -3003,6 +3089,27 @@ const BRANDING_UPLOAD_KINDS: Record<
 };
 /** Branding object keys are UUID-suffixed (never rewritten), so cache forever. */
 const BRANDING_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+
+/** Per-kind tutorial-upload rules, same allowlist-doubles-as-gate shape as branding. */
+const TUTORIAL_UPLOAD_KINDS: Record<
+  'video' | 'poster',
+  { types: Record<string, string>; maxBytes: number }
+> = {
+  video: {
+    types: { 'video/mp4': 'mp4', 'video/webm': 'webm' },
+    maxBytes: 2 * 1024 * 1024 * 1024, // 2 GiB
+  },
+  poster: {
+    types: { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' },
+    maxBytes: 4 * 1024 * 1024, // 4 MB
+  },
+};
+/** Above this, a video upload goes multipart instead of a single presigned POST. */
+const MULTIPART_THRESHOLD = 100 * 1024 * 1024; // 100 MiB
+/** Part size for a multipart upload (S3's minimum is 5 MiB; this comfortably clears it). */
+const MULTIPART_PART_SIZE = 32 * 1024 * 1024; // 32 MiB
+/** Tutorial object keys are UUID-suffixed (never rewritten), so cache forever. */
+const TUTORIAL_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 
 /** Sides a club fields in one league — absent map/key counts as 1 (legacy clubs). */
 function clubTeamCount(club: Club): number {
@@ -3441,6 +3548,16 @@ app.put('/platform/tenants/:slug', async (c) => {
       return { id: clubIdFromName(name), name };
     });
   }
+  if (body.tutorials !== undefined) {
+    validateTutorials(body.tutorials);
+    patch.tutorials = body.tutorials;
+    // Fetch the OLD config now (not after the save) so the orphan-cleanup diff below
+    // compares against what was actually replaced, not the just-written row.
+    await getCurrent();
+  }
+  if (body.tutorialsNoFallback !== undefined) {
+    patch.tutorialsNoFallback = !!body.tutorialsNoFallback;
+  }
   // Competitions bind leagues to structures and calendars, so they can only be checked
   // once all three are known — against the POST-patch view, so one PUT may legitimately
   // add a structure and the competition that uses it together.
@@ -3453,6 +3570,9 @@ app.put('/platform/tenants/:slug', async (c) => {
     );
   }
   const next = await applyTenantConfigPatch(slug, patch);
+  if (body.tutorials !== undefined) {
+    await cleanupOrphanTutorialAssets(slug, currentCfg?.tutorials ?? [], body.tutorials);
+  }
   // `warnings` is informational-only and additive — only present when non-empty, so an
   // unaffected save's response shape is byte-for-byte what it was before this existed.
   return c.json(warnings.length > 0 ? { ...next, warnings } : next);
@@ -3531,6 +3651,213 @@ app.post('/platform/tenants/:slug/logo-upload', async (c) => {
     objectKey,
     publicUrl: `${TUTORIALS_BASE_URL}/${objectKey}`,
   });
+});
+
+/**
+ * Build a tutorial-asset object key: `tutorials/<slug>/<kind>-<uuid8>[-<sanitized
+ * fileName>].<ext>`. The optional filename fragment is purely cosmetic (a human
+ * skimming the bucket can tell "video-a1b2c3d4-nets-drill.mp4" from a bare uuid) — the
+ * uuid8 segment alone already guarantees uniqueness, so a missing/unsafe fileName just
+ * degrades to omitting the fragment rather than failing the upload.
+ */
+function tutorialObjectKey(
+  slug: string,
+  kind: 'video' | 'poster',
+  ext: string,
+  fileName?: string,
+): string {
+  const basename = (fileName ?? '').split(/[/\\]/).pop() ?? '';
+  const sanitized = basename.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 40);
+  const parts = [kind, randomUUID().slice(0, 8), sanitized].filter(Boolean);
+  return `tutorials/${slug}/${parts.join('-')}.${ext}`;
+}
+
+/**
+ * POST /platform/tenants/:slug/tutorial-upload — presign an upload of a per-tenant
+ * tutorial video or poster into the PUBLIC TutorialAssets bucket, under
+ * `tutorials/<slug>/` (the shared default clips live directly under `tutorials/`, one
+ * level up — see cleanupOrphanTutorialAssets' hard-safety prefix check). Body
+ * {kind: 'video'|'poster', contentType, sizeBytes, fileName?}. A poster, or a video at
+ * or under MULTIPART_THRESHOLD, gets a single presigned POST (mode 'post') like the
+ * branding logo route; a larger video gets a multipart upload instead (mode
+ * 'multipart') — Lambda/API Gateway can't proxy a multi-GB body, so the browser PUTs
+ * each part straight to S3 against its own presigned URL, then calls .../complete.
+ */
+app.post('/platform/tenants/:slug/tutorial-upload', async (c) => {
+  const slug = c.req.param('slug');
+  const config = await repo.getTenantConfig(slug);
+  if (!config) throw new HttpError(404, 'tenant not found');
+  const body = await c.req
+    .json<{ kind?: string; contentType?: string; sizeBytes?: number; fileName?: string }>()
+    .catch(
+      () => ({}) as { kind?: string; contentType?: string; sizeBytes?: number; fileName?: string },
+    );
+  const kind = body.kind;
+  if (kind !== 'video' && kind !== 'poster')
+    throw new HttpError(400, 'kind must be "video" or "poster"');
+  const rules = TUTORIAL_UPLOAD_KINDS[kind];
+  const contentType = body.contentType;
+  const ext = contentType ? rules.types[contentType] : undefined;
+  if (!contentType || !ext)
+    throw new HttpError(400, `contentType must be ${Object.keys(rules.types).join(', ')}`);
+  const sizeBytes = body.sizeBytes;
+  if (typeof sizeBytes !== 'number' || !Number.isFinite(sizeBytes) || sizeBytes <= 0)
+    throw new HttpError(400, 'sizeBytes must be a positive number');
+  if (sizeBytes > rules.maxBytes)
+    throw new HttpError(400, `${kind} exceeds the ${Math.round(rules.maxBytes / (1024 * 1024))} MB limit`);
+  if (!TUTORIALS_BUCKET)
+    throw new HttpError(
+      501,
+      'asset upload requires the cloud assets bucket (unavailable in offline dev)',
+    );
+  const objectKey = tutorialObjectKey(slug, kind, ext, body.fileName);
+  const publicUrl = `${TUTORIALS_BASE_URL}/${objectKey}`;
+
+  if (kind === 'poster' || sizeBytes <= MULTIPART_THRESHOLD) {
+    // A single-POST video only ever gets here at or under MULTIPART_THRESHOLD (the
+    // branch above routes anything bigger to multipart), so cap the grant there rather
+    // than at rules.maxBytes (2 GiB) — poster's maxBytes is already well under the
+    // threshold, so it's unaffected.
+    const maxPostBytes =
+      kind === 'video' ? Math.min(rules.maxBytes, MULTIPART_THRESHOLD) : rules.maxBytes;
+    const post = await createPresignedPost(s3, {
+      Bucket: TUTORIALS_BUCKET,
+      Key: objectKey,
+      Conditions: [
+        ['content-length-range', 0, maxPostBytes],
+        ['eq', '$Content-Type', contentType],
+        ['eq', '$Cache-Control', TUTORIAL_CACHE_CONTROL],
+      ],
+      Fields: { 'Content-Type': contentType, 'Cache-Control': TUTORIAL_CACHE_CONTROL },
+      Expires: 300,
+    });
+    return c.json({ mode: 'post', url: post.url, fields: post.fields, objectKey, publicUrl });
+  }
+
+  // Each presigned UploadPart URL below accepts up to S3's own 5 GiB per-part cap — S3
+  // has no equivalent of content-length-range for multipart, so nothing server-side
+  // enforces the 2 GiB video total across parts. That's the browser's job (it slices
+  // the file into MULTIPART_PART_SIZE chunks itself); a client that ignored it and PUT
+  // an oversized part would sail through. Acceptable here because this route is
+  // operator-only, unlike public-facing presigned-POST uploads.
+  const { UploadId } = await s3.send(
+    new CreateMultipartUploadCommand({
+      Bucket: TUTORIALS_BUCKET,
+      Key: objectKey,
+      ContentType: contentType,
+      CacheControl: TUTORIAL_CACHE_CONTROL,
+    }),
+  );
+  const partCount = Math.ceil(sizeBytes / MULTIPART_PART_SIZE);
+  const partUrls = await Promise.all(
+    Array.from({ length: partCount }, (_, i) => {
+      const partNumber = i + 1;
+      return getSignedUrl(
+        s3,
+        new UploadPartCommand({
+          Bucket: TUTORIALS_BUCKET,
+          Key: objectKey,
+          UploadId,
+          PartNumber: partNumber,
+        }),
+        { expiresIn: 6 * 3600 },
+      ).then((url) => ({ partNumber, url }));
+    }),
+  );
+  return c.json({
+    mode: 'multipart',
+    uploadId: UploadId,
+    objectKey,
+    publicUrl,
+    partSizeBytes: MULTIPART_PART_SIZE,
+    partUrls,
+  });
+});
+
+/**
+ * POST /platform/tenants/:slug/tutorial-upload/complete — finish a multipart tutorial
+ * upload once every part has been PUT (the browser collects each part's ETag response
+ * header — hence the bucket CORS exposeHeaders: ['ETag']). objectKey must sit under
+ * THIS tenant's tutorials/<slug>/ prefix — the same hard safety line as
+ * cleanupOrphanTutorialAssets, here guarding against completing an upload into
+ * another tenant's (or the shared default's) key space.
+ */
+app.post('/platform/tenants/:slug/tutorial-upload/complete', async (c) => {
+  const slug = c.req.param('slug');
+  const body = await c.req
+    .json<{ objectKey?: string; uploadId?: string; parts?: { partNumber?: number; etag?: string }[] }>()
+    .catch(
+      () =>
+        ({}) as {
+          objectKey?: string;
+          uploadId?: string;
+          parts?: { partNumber?: number; etag?: string }[];
+        },
+    );
+  const objectKey = body.objectKey ?? '';
+  if (!objectKey.startsWith(`tutorials/${slug}/`))
+    throw new HttpError(400, 'objectKey does not belong to this tenant');
+  // S3 keys are literal (a real ".." segment), but the derived publicUrl is a browser
+  // URL that WOULD normalize "tutorials/<slug>/../<file>" up into the shared-default
+  // namespace one level above — reject before that can happen.
+  if (objectKey.includes('..'))
+    throw new HttpError(400, 'objectKey does not belong to this tenant');
+  if (!body.uploadId) throw new HttpError(400, 'uploadId required');
+  if (!TUTORIALS_BUCKET)
+    throw new HttpError(
+      501,
+      'asset upload requires the cloud assets bucket (unavailable in offline dev)',
+    );
+  const parts = [...(body.parts ?? [])].sort(
+    (a, b) => (a.partNumber ?? 0) - (b.partNumber ?? 0),
+  );
+  if (parts.length === 0) throw new HttpError(400, 'parts required');
+  await s3.send(
+    new CompleteMultipartUploadCommand({
+      Bucket: TUTORIALS_BUCKET,
+      Key: objectKey,
+      UploadId: body.uploadId,
+      MultipartUpload: { Parts: parts.map((p) => ({ ETag: p.etag, PartNumber: p.partNumber })) },
+    }),
+  );
+  return c.json({ publicUrl: `${TUTORIALS_BASE_URL}/${objectKey}` });
+});
+
+/**
+ * POST /platform/tenants/:slug/tutorial-upload/abort — cancel a multipart tutorial
+ * upload (the operator navigated away, or a part failed). Same prefix guard as
+ * .../complete. Idempotent: an already-gone upload (NoSuchUpload — e.g. the 3-day
+ * lifecycle rule beat this call to it) is swallowed, not surfaced as an error.
+ */
+app.post('/platform/tenants/:slug/tutorial-upload/abort', async (c) => {
+  const slug = c.req.param('slug');
+  const body = await c.req
+    .json<{ objectKey?: string; uploadId?: string }>()
+    .catch(() => ({}) as { objectKey?: string; uploadId?: string });
+  const objectKey = body.objectKey ?? '';
+  if (!objectKey.startsWith(`tutorials/${slug}/`))
+    throw new HttpError(400, 'objectKey does not belong to this tenant');
+  // Same ".." guard as .../complete — see the comment there.
+  if (objectKey.includes('..'))
+    throw new HttpError(400, 'objectKey does not belong to this tenant');
+  if (!body.uploadId) throw new HttpError(400, 'uploadId required');
+  if (!TUTORIALS_BUCKET)
+    throw new HttpError(
+      501,
+      'asset upload requires the cloud assets bucket (unavailable in offline dev)',
+    );
+  try {
+    await s3.send(
+      new AbortMultipartUploadCommand({
+        Bucket: TUTORIALS_BUCKET,
+        Key: objectKey,
+        UploadId: body.uploadId,
+      }),
+    );
+  } catch (err) {
+    if ((err as { name?: string }).name !== 'NoSuchUpload') throw err;
+  }
+  return c.json({ ok: true });
 });
 
 /**
