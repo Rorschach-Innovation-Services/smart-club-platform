@@ -114,7 +114,35 @@ export default $config({
     // can seek, and a cross-origin <video> needs no CORS. Files are uploaded out-of-band
     // (see the runbook), NOT synced from the repo, so a deploy never purges them. Object
     // keys live under the `tutorials/` prefix, e.g. tutorials/01-creating-account.mp4.
-    const tutorialAssets = new sst.aws.Bucket('TutorialAssets', { access: 'public' });
+    // CORS: presigned URLs (POST policy or PUT part uploads) are the auth, so tenant
+    // web origins vary and '*' is safe here. exposeHeaders carries ETag — the browser
+    // needs to read each part-PUT's ETag to assemble the CompleteMultipartUpload body.
+    const tutorialAssets = new sst.aws.Bucket('TutorialAssets', {
+      access: 'public',
+      cors: {
+        allowMethods: ['GET', 'HEAD', 'PUT', 'POST'],
+        allowOrigins: ['*'],
+        allowHeaders: ['*'],
+        exposeHeaders: ['ETag'],
+        maxAge: '1 hour',
+      },
+    });
+    // sst.aws.Bucket has no lifecycle arg, so this rides alongside it directly. Aborts
+    // (and refunds the storage for) any tutorials/ multipart upload left incomplete for
+    // 3+ days — an abandoned browser tab or a failed complete-call shouldn't accumulate
+    // orphaned parts forever. Scoped to tutorials/ only; branding/ uploads are always
+    // single-POST and never go multipart.
+    new aws.s3.BucketLifecycleConfigurationV2('TutorialAssetsLifecycle', {
+      bucket: tutorialAssets.name,
+      rules: [
+        {
+          id: 'abort-incomplete-multipart',
+          status: 'Enabled',
+          filter: { prefix: 'tutorials/' },
+          abortIncompleteMultipartUpload: { daysAfterInitiation: 3 },
+        },
+      ],
+    });
     // Virtual-hosted-style HTTPS endpoint (af-south-1). DEFAULT_TUTORIALS builds
     // `${TUTORIALS_BASE_URL}/tutorials/<file>` from this.
     const tutorialsBaseUrl = $interpolate`https://${tutorialAssets.name}.s3.af-south-1.amazonaws.com`;

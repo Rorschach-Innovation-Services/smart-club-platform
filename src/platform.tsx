@@ -27,6 +27,7 @@ import { CalendarsCard } from './platform-calendars';
 import { formatDayYear, formatStampDay } from './dates';
 import { StructuresCard, CompetitionsModal } from './platform-structures';
 import { SeasonSetupWizard } from './platform-season-wizard';
+import { TutorialsCard } from './platform-tutorials';
 import type {
   TenantConfig,
   TenantSummary,
@@ -749,6 +750,13 @@ function TenantEditPage({ toast }: { toast: Toast }) {
             toast={toast}
           />
         </div>
+        <TutorialsCard
+          key={`tut-${config.tenant}`}
+          slug={slug}
+          config={config}
+          save={save}
+          toast={toast}
+        />
         <SetupCard key={`setup-${config.tenant}`} slug={slug} config={config} toast={toast} />
         <DnsPanel slug={slug} />
       </div>

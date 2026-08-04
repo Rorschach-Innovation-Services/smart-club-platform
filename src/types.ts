@@ -452,6 +452,12 @@ export interface TenantConfig {
   adminCount?: number;
   tutorials?: TutorialVideo[];
   /**
+   * true ⇒ an empty `tutorials` list shows the public page's "coming soon" empty
+   * state instead of falling back to the backend's shared default set. Absent/false
+   * ⇒ the existing fallback behaviour (DEFAULT_TUTORIALS) is unchanged.
+   */
+  tutorialsNoFallback?: boolean;
+  /**
    * Operator-managed season calendars — the playing blocks, mid-season breaks and
    * excluded dates fixture generation schedules against (ADR 0008). Absent/[] ⇒ the
    * create-series form falls back to its legacy single start/end window, so a tenant
@@ -568,6 +574,30 @@ export interface LogoUploadPost {
   objectKey: string;
   publicUrl: string;
 }
+
+/**
+ * Upload grant from POST /platform/tenants/:slug/tutorial-upload. `mode: 'post'` is a
+ * standard presigned-POST (poster, or a video ≤ 100 MiB) — submit via uploadPostToS3,
+ * same shape as LogoUploadPost. `mode: 'multipart'` is a video over the single-POST
+ * cap — PUT each `partUrls[].url` slice, then finish with
+ * platformTutorialUploadComplete. Discriminated on `mode` so callers must branch.
+ */
+export type TutorialUploadGrant =
+  | {
+      mode: 'post';
+      url: string;
+      fields: Record<string, string>;
+      objectKey: string;
+      publicUrl: string;
+    }
+  | {
+      mode: 'multipart';
+      uploadId: string;
+      objectKey: string;
+      publicUrl: string;
+      partSizeBytes: number;
+      partUrls: { partNumber: number; url: string }[];
+    };
 
 /** GET /platform/tenants/:slug/dns — the vanity-domain go-live instruction sheet. */
 export interface DnsRecord {
