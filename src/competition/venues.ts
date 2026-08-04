@@ -351,9 +351,13 @@ export function allocateVenues(args: AllocateArgs): AllocationReport {
   // (locked ones above), then grown as the greedy loop below places more — a pure priority
   // nudge in `score`, not a constraint, so it only ever wins when the preferred ground is
   // otherwise free.
-  const homeDayVenue = new Map<string, string>();
-  const homeDayKey = (homeTeamId: string, date: IsoDate) => `${homeTeamId}|${date}`;
-  for (const f of out) if (f.venueId) homeDayVenue.set(homeDayKey(f.home, f.date), f.venueId);
+  const pairDayVenue = new Map<string, string>();
+  // Keyed on the UNORDERED pair, not the home side: an interleaved double-header swaps
+  // home/away between the AM leg and the PM return, so a home-keyed map never matches
+  // the second leg — the exact fixture the nudge exists for.
+  const pairDayKey = (f: Pick<AllocatedFixture, 'home' | 'away' | 'date'>) =>
+    `${[f.home, f.away].sort().join('|')}|${f.date}`;
+  for (const f of out) if (f.venueId) pairDayVenue.set(pairDayKey(f), f.venueId);
 
   const candidatesFor = (f: AllocatedFixture): Candidate[] => {
     const home = teamHome(f.home);
@@ -448,7 +452,7 @@ export function allocateVenues(args: AllocateArgs): AllocationReport {
       // the first if that ground is still free at this slot (it's only in `free` at all
       // if it is) — outweighs every other factor so it always wins when available, and
       // simply falls out of contention (like any other busy ground) when it isn't.
-      if (homeDayVenue.get(homeDayKey(f.home, f.date)) === c.venue.id) s += 1e9;
+      if (pairDayVenue.get(pairDayKey(f)) === c.venue.id) s += 1e9;
       return s;
     };
 
@@ -479,7 +483,7 @@ export function allocateVenues(args: AllocateArgs): AllocationReport {
     f.venueStatus = status;
     f.venueReason = reason;
     ledger.add(best.venue.id, f.date, [f.home, f.away], f.time);
-    homeDayVenue.set(homeDayKey(f.home, f.date), best.venue.id);
+    pairDayVenue.set(pairDayKey(f), best.venue.id);
   }
 
   if (unresolved > 0) {
