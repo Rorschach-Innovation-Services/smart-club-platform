@@ -1221,9 +1221,9 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
   const [draft, setDraft] = useStateA({
     round: fixture.round,
     date: fixture.date,
-    // Optional HH:MM kickoff — blank means no set time, the same convention every
-    // other slot-aware fixture uses (`fixturesFromDates` folds an empty slot into the
-    // same date-only ledger key a slot-less fixture always used).
+    // Optional HH:MM kickoff — blank means no set time. In the venue ledger an untimed
+    // fixture owns its whole day (it clashes with every timed slot on that date), so
+    // clearing this widens the booking rather than removing it.
     time: fixture.time || '',
     home: fixture.home,
     away: fixture.away,
