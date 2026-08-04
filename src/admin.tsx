@@ -4509,10 +4509,16 @@ function ClubLeaguesEditor({ club, allLeagues, onSave }) {
   const initial = Array.isArray(club.leagues) ? club.leagues : [];
   const [sel, setSel] = useStateA(initial);
   const [busy, setBusy] = useStateA(false);
-  // Re-sync local selection when the club's leagues change (e.g. after a save refetch).
+  // Re-sync local selection when the club's SAVED leagues actually change — keyed on
+  // content, not array identity. The club record refetches constantly on this page
+  // (phase status, comms log, sibling saves), and every refetch mints a new array with
+  // the same keys; identity-keyed, that wiped in-progress chip toggles mid-edit and
+  // made Save intermittently no-op (`dirty` flipped false under the click).
+  const savedKey = initial.join('|');
   useEffectA(() => {
     setSel(Array.isArray(club.leagues) ? club.leagues : []);
-  }, [club.leagues]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedKey]);
 
   const orphans = sel.filter((k) => !opts.some((o) => o.key === k));
   const dirty = sel.length !== initial.length || sel.some((k) => !initial.includes(k));
@@ -4545,7 +4551,11 @@ function ClubLeaguesEditor({ club, allLeagues, onSave }) {
   function save() {
     if (!dirty || busy) return;
     setBusy(true);
-    Promise.resolve(onSave?.(sel)).finally(() => setBusy(false));
+    // The rejection is already surfaced by the caller's toast — the catch here only
+    // stops it becoming an unhandled rejection; busy must clear either way.
+    Promise.resolve(onSave?.(sel))
+      .catch(() => {})
+      .finally(() => setBusy(false));
   }
 
   return (

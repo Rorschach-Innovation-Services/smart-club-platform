@@ -2080,7 +2080,10 @@ function Shell({
               const prior = activeClub.leagueTeams || {};
               const leagueTeams: Record<string, number> = {};
               for (const k of keys) if (prior[k]) leagueTeams[k] = prior[k];
-              updateClub({ leagues: keys, leagueTeams }).catch(() => {});
+              // RETURN the promise — the editor's Save button holds its busy state on
+              // it, so swallowing it here made "Saving…" clear before the PATCH landed
+              // (and buried version-conflict failures entirely).
+              return updateClub({ leagues: keys, leagueTeams });
             }}
             onUpdateChair={({ name, email, cell }) =>
               updateClub({
