@@ -222,6 +222,14 @@ export default $config({
     // notify/whatsapp.ts (WHATSAPP_REGLINK_TEMPLATE) — create + approve this Utility template
     // (body vars {{1}} chair, {{2}} club, {{3}} reg link, {{4}} tutorials URL) before real sends.
     const whatsappReglinkTemplate = new sst.Secret('WhatsappReglinkTemplate', 'club_reglink_ready');
+    // Clearance-pending chairman heads-up, sent when a clearance opens against a club. Read
+    // by notify/whatsapp.ts (WHATSAPP_CLEARANCE_TEMPLATE) — create + approve this Utility
+    // template (body vars {{1}} chair, {{2}} from-club, {{3}} player, {{4}} to-club) before
+    // real sends.
+    const whatsappClearanceTemplate = new sst.Secret(
+      'WhatsappClearanceTemplate',
+      'club_clearance_pending',
+    );
 
     // ── Error monitoring (Sentry, EU region — medicoach-ap on de.sentry.io) ──
     // DSNs are non-secret but kept out of the repo so they're set per-account without
@@ -313,6 +321,7 @@ export default $config({
         whatsappInviteTemplate,
         whatsappStaffTemplate,
         whatsappReglinkTemplate,
+        whatsappClearanceTemplate,
       ],
       // SES isn't covered by `link` (it's not an SST resource), so grant it directly.
       // SES authorizes by verified identity, not resource ARN, hence resources: ['*'].
@@ -372,6 +381,7 @@ export default $config({
         WHATSAPP_INVITE_TEMPLATE: whatsappInviteTemplate.value,
         WHATSAPP_STAFF_TEMPLATE: whatsappStaffTemplate.value,
         WHATSAPP_REGLINK_TEMPLATE: whatsappReglinkTemplate.value,
+        WHATSAPP_CLEARANCE_TEMPLATE: whatsappClearanceTemplate.value,
         // Force dry-run regardless of secrets (set NOTIFY_DRY_RUN=1 in the deploy env)
         // — the verified-only/dry-run gate while awaiting SES production access.
         NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',

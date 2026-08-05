@@ -6,12 +6,18 @@
  * toast reflects reality instead of optimism.
  */
 import type { Club, Channel, SendResult, PlayerRegistration } from '../types.js';
-import { sendStaffInviteEmail, sendFixturesEmail, sendRegLinkEmail } from './email.js';
+import {
+  sendStaffInviteEmail,
+  sendFixturesEmail,
+  sendRegLinkEmail,
+  sendClearanceEmail,
+} from './email.js';
 import type { TutorialLink, RegLinkOrgCopy } from './email.js';
 import {
   sendStaffInviteWhatsApp,
   sendFixturesWhatsApp,
   sendRegLinkWhatsApp,
+  sendClearanceWhatsApp,
   toE164,
 } from './whatsapp.js';
 
@@ -223,6 +229,93 @@ export async function sendChairOnboarding(args: {
       channel === 'email'
         ? sendOnboardingEmail(contact, clubName, season, regLink, tutorials, org)
         : sendOnboardingWhatsApp(contact, clubName, regLink, tutorials.pageUrl),
+    ),
+  );
+  return { results };
+}
+
+// ───────────────────────── Clearance pending (chairman heads-up) ─────────────────────────
+
+interface ClearanceCopy {
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+}
+
+async function sendClearanceEmailChannel(
+  chair: ChairContact,
+  copy: ClearanceCopy,
+): Promise<SendResult> {
+  if (!EMAIL_RE.test(chair.email)) {
+    return {
+      channel: 'email',
+      status: 'skipped',
+      ...(chair.email ? { to: chair.email } : {}),
+      error: 'no valid chair email on file',
+    };
+  }
+  try {
+    const { messageId } = await sendClearanceEmail({
+      to: chair.email,
+      chairName: chair.name,
+      ...copy,
+    });
+    return { channel: 'email', status: 'sent', to: chair.email, messageId };
+  } catch (err) {
+    return { channel: 'email', status: 'failed', to: chair.email, error: errMessage(err) };
+  }
+}
+
+async function sendClearanceWhatsAppChannel(
+  chair: ChairContact,
+  copy: ClearanceCopy,
+): Promise<SendResult> {
+  const e164 = toE164(chair.cell);
+  if (!e164) {
+    return {
+      channel: 'whatsapp',
+      status: 'skipped',
+      ...(chair.cell ? { to: chair.cell } : {}),
+      error: 'no valid chair cell on file',
+    };
+  }
+  try {
+    const { messageId } = await sendClearanceWhatsApp({
+      to: e164,
+      chairName: chair.name,
+      ...copy,
+    });
+    return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
+  } catch (err) {
+    return { channel: 'whatsapp', status: 'failed', to: e164, error: errMessage(err) };
+  }
+}
+
+/**
+ * Tell the FROM-club chairman a clearance now awaits the club's decision, over email
+ * and/or WhatsApp. Non-throwing per channel (a bad/blank chair contact becomes a
+ * `skipped`/`failed` result, never sinking the other channel). The caller owns the
+ * daily cap and the comm-log append — this only fans out the channels.
+ */
+export async function sendClearanceNotice(args: {
+  chair: { name?: string; email?: string; cell?: string };
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+  channels: Channel[];
+}): Promise<{ results: SendResult[] }> {
+  const { chair, fromClubName, playerName, toClubName, channels } = args;
+  const contact: ChairContact = {
+    name: (chair.name ?? '').trim(),
+    email: (chair.email ?? '').trim(),
+    cell: (chair.cell ?? '').trim(),
+  };
+  const copy: ClearanceCopy = { fromClubName, playerName, toClubName };
+  const results = await Promise.all(
+    channels.map((channel) =>
+      channel === 'email'
+        ? sendClearanceEmailChannel(contact, copy)
+        : sendClearanceWhatsAppChannel(contact, copy),
     ),
   );
   return { results };

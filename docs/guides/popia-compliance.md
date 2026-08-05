@@ -52,6 +52,17 @@ Basis and controls:
   fit for the s72 "necessity for the contract" ground — confirm its basis with counsel alongside
   the invite flow. If in doubt, the tutorials link can be dropped from the outbound messages
   (it also lives on the in-app Help panel) without affecting the reg-link delivery.
+- **Clearance-pending chairman notice:** when a player clearance opens against a club (a
+  destination club requests a player, a self-registration declares a previous club, or the
+  union office reallocates a clearance), the from-club chair's **email and cell** leave the
+  region via the same processors, and — unlike the flows above — the message body carries the
+  **player's name**, which for a self-registered minor is a **child's name** crossing to Meta
+  and SES (recorded in `commLog` as `kind: 'clearance'`). Basis: operational communication
+  necessary to run the transfer/clearance process the union is contracted to provide; the
+  child-name element rides the same necessity ground but is the weaker fit — confirm with
+  counsel alongside the invite flow. Controls: no ID number, contact detail, or other player
+  field is included (name only); sends are capped per club per day (anti-abuse of the public
+  registration route); and the same dry-run gate applies.
 - **Auditability:** sends are recorded (channel, recipient, status, timestamp, actor) so
   transfers are traceable. The per-send idempotency markers (`INVITE#<key>` items, still used
   by the fixtures broadcast) hold the recipient; both the `commLog` and the markers are
