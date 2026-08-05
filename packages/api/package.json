@@ -9,6 +9,7 @@
     "test": "tsx --test test/*.test.ts",
     "seed": "tsx src/seed.ts",
     "seed-cohort": "tsx src/seed-cohort.ts",
+    "import-planb": "tsx src/import-planb-fixtures.ts",
     "bootstrap-admin": "tsx src/bootstrap-admin.ts",
     "bootstrap-operator": "tsx src/bootstrap-operator.ts",
     "request-cert": "tsx src/request-cert.ts",
