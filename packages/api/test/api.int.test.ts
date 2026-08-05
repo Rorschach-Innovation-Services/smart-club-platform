@@ -684,7 +684,9 @@ describe('GET /tenant — public tutorials', () => {
     assert.ok(before);
     t.after(() => repo.putTenantConfig(before));
 
-    const own = [{ title: 'Our own walkthrough', url: 'https://cdn.dolphins.test/walkthrough.mp4' }];
+    const own = [
+      { title: 'Our own walkthrough', url: 'https://cdn.dolphins.test/walkthrough.mp4' },
+    ];
     await repo.putTenantConfig({ ...before, tutorials: own });
 
     const res = await app.request('/tenant', { headers: { 'x-tenant': 'dolphins' } });
@@ -6035,5 +6037,303 @@ describe('club directory (operator-entered previous clubs → real pending clear
       1,
       'no count drift for a row the clearance never held',
     );
+  });
+});
+
+describe('Clearance chairman notice (comm log + channels)', () => {
+  // The notify module runs in dry-run here (no FROM_EMAIL / WhatsApp secrets), so every
+  // channel "sends" without network and the comm-log rows record the would-be outcome.
+  const mkClub = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    name,
+    district: 'Test District',
+    sub: `sub-${id}`,
+    chair: 'Chair',
+    affiliation: 'not_started' as const,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#445566',
+    ground: {},
+    leagues: [],
+    version: 1,
+    ...extra,
+  });
+  const mkPlayer = (clubId: string, nk: string) => ({
+    naturalKey: nk,
+    clubId,
+    firstName: 'Notice',
+    lastName: 'Me',
+    dob: '1994-02-02',
+    isMinor: false,
+    status: 'active' as const,
+    consentAt: '2026-05-01T00:00:00.000Z',
+    createdAt: '2026-05-01T00:00:00.000Z',
+  });
+  const REP_NTC_DST = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['ntc-dst'] }]);
+
+  before(async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('ntc-src', 'Notice Source CC', {
+        exco: { chair: { name: 'Ntombi', email: 'chair@ntc.test', cell: '083 555 6666' } },
+      }),
+    );
+    await repo.createClub('dolphins', mkClub('ntc-dst', 'Notice Dest CC'));
+    await repo.createPlayer('dolphins', mkPlayer('ntc-src', 'notice-mover'));
+  });
+
+  test('creating a clearance notifies the FROM-club chairman on both channels', async () => {
+    const res = await app.request('/clubs/ntc-dst/clearances', {
+      method: 'POST',
+      headers: headers(REP_NTC_DST),
+      body: JSON.stringify({ fromClubId: 'ntc-src', playerNaturalKey: 'notice-mover' }),
+    });
+    assert.equal(res.status, 201);
+    const clearance = (await res.json()) as { id: string };
+    const stored = await repo.getClub('dolphins', 'ntc-src');
+    const events = (stored?.commLog ?? []).filter((e) => e.kind === 'clearance');
+    assert.equal(events.length, 2, 'one comm event per channel');
+    const email = events.find((e) => e.channel === 'email');
+    const wa = events.find((e) => e.channel === 'whatsapp');
+    assert.equal(email?.status, 'sent');
+    assert.equal(email?.to, 'chair@ntc.test');
+    assert.equal(email?.by, 'admin@test', 'attributed to the requesting rep');
+    assert.equal(email?.idempotencyKey, `clearance-${clearance.id}-email`);
+    assert.equal(wa?.status, 'sent');
+    assert.equal(wa?.to, '27835556666', 'cell normalized to E.164');
+  });
+
+  test('a duplicate request 409s before any second notice exists', async () => {
+    const res = await app.request('/clubs/ntc-dst/clearances', {
+      method: 'POST',
+      headers: headers(REP_NTC_DST),
+      body: JSON.stringify({ fromClubId: 'ntc-src', playerNaturalKey: 'notice-mover' }),
+    });
+    assert.equal(res.status, 409);
+    const stored = await repo.getClub('dolphins', 'ntc-src');
+    const events = (stored?.commLog ?? []).filter((e) => e.kind === 'clearance');
+    assert.equal(events.length, 2, 'no comm rows beyond the first notice');
+  });
+
+  test('whatsapp is skipped (not failed) when the chair has no cell; email still sends', async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('ntc-nocell', 'Notice NoCell CC', {
+        exco: { chair: { name: 'No Cell', email: 'chair@nocell.test' } },
+      }),
+    );
+    await repo.createPlayer('dolphins', mkPlayer('ntc-nocell', 'nocell-mover'));
+    const res = await app.request('/clubs/ntc-dst/clearances', {
+      method: 'POST',
+      headers: headers(REP_NTC_DST),
+      body: JSON.stringify({ fromClubId: 'ntc-nocell', playerNaturalKey: 'nocell-mover' }),
+    });
+    assert.equal(res.status, 201);
+    const stored = await repo.getClub('dolphins', 'ntc-nocell');
+    const events = (stored?.commLog ?? []).filter((e) => e.kind === 'clearance');
+    assert.equal(events.find((e) => e.channel === 'whatsapp')?.status, 'skipped');
+    assert.equal(events.find((e) => e.channel === 'email')?.status, 'sent');
+  });
+
+  test('the 4th notice in a day is capped: both channels skipped, still logged', async () => {
+    // Seed today's quota as already spent (3 prior notices = 3 email rows dated today).
+    await repo.createClub(
+      'dolphins',
+      mkClub('ntc-capped', 'Notice Capped CC', {
+        exco: { chair: { name: 'Cap', email: 'chair@cap.test', cell: '0835557777' } },
+      }),
+    );
+    const today = new Date().toISOString();
+    await repo.appendClubCommEvents(
+      'dolphins',
+      'ntc-capped',
+      [1, 2, 3].map((n) => ({
+        id: `seed-cap-${n}`,
+        channel: 'email' as const,
+        to: 'chair@cap.test',
+        status: 'sent' as const,
+        at: today,
+        by: 'registration',
+        idempotencyKey: `clearance-seed-${n}-email`,
+        kind: 'clearance' as const,
+      })),
+    );
+    await repo.createPlayer('dolphins', mkPlayer('ntc-capped', 'capped-mover'));
+    const res = await app.request('/clubs/ntc-dst/clearances', {
+      method: 'POST',
+      headers: headers(REP_NTC_DST),
+      body: JSON.stringify({ fromClubId: 'ntc-capped', playerNaturalKey: 'capped-mover' }),
+    });
+    assert.equal(res.status, 201, 'the cap never fails the clearance itself');
+    const stored = await repo.getClub('dolphins', 'ntc-capped');
+    const events = (stored?.commLog ?? []).filter(
+      (e) => e.kind === 'clearance' && !e.id.startsWith('seed-cap-'),
+    );
+    assert.equal(events.length, 2, 'capped channels are still logged');
+    assert.ok(events.every((e) => e.status === 'skipped'));
+    assert.ok(events.every((e) => e.error === 'daily clearance-notice cap reached'));
+  });
+
+  test('a self-registration declaring an on-system previous club notifies its chairman', async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('ntc-declared', 'Notice Declared CC', {
+        exco: { chair: { name: 'Decla', email: 'chair@declared.test', cell: '0835558888' } },
+      }),
+    );
+    await repo.putToken('ntc-reg-token', 'dolphins', 'ntc-dst', '2026-06-01T00:00:00.000Z');
+    const teamKey = ((await repo.getTenantConfig('dolphins'))?.leagues ?? [])[0]?.key ?? '';
+    const up = await app.request('/register/ntc-dst/id-doc/upload-url?t=ntc-reg-token', {
+      method: 'POST',
+      body: JSON.stringify({ contentType: 'image/png' }),
+    });
+    const { objectKey } = (await up.json()) as { objectKey: string };
+    const res = await app.request('/register/ntc-dst?t=ntc-reg-token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        // Whitespace-heavy name: the public form is free text and the value rides into
+        // outbound messages — the route must collapse it before anything downstream.
+        firstName: '  Zola   \n ',
+        lastName: 'Kunene',
+        idType: 'passport',
+        idNumber: 'NTC0001',
+        dob: '1996-03-03',
+        nationality: 'South African',
+        race: 'African',
+        gender: 'Male',
+        cell: '0821119999',
+        team: teamKey,
+        district: 'Ethekwini',
+        idDocMeta: { objectKey, size: 100, contentType: 'image/png' },
+        lastClubId: 'ntc-declared',
+      }),
+    });
+    assert.equal(res.status, 201);
+    const stored = await repo.getClub('dolphins', 'ntc-declared');
+    const events = (stored?.commLog ?? []).filter((e) => e.kind === 'clearance');
+    assert.equal(events.length, 2, 'declared-club chairman notified on both channels');
+    assert.ok(
+      events.every((e) => e.by === 'registration'),
+      'attributed to the public path',
+    );
+    assert.equal(events.find((e) => e.channel === 'email')?.status, 'sent');
+    // The stored player name was whitespace-collapsed on the way in.
+    const players = await repo.listPlayers('dolphins', 'ntc-dst');
+    assert.equal(players.find((p) => p.lastName === 'Kunene')?.firstName, 'Zola');
+  });
+
+  test('reassigning a directory clearance to a real club notifies that club', async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('ntc-reassigned', 'Notice Reassigned CC', {
+        exco: { chair: { name: 'Rea', email: 'chair@rea.test', cell: '0835550000' } },
+      }),
+    );
+    // A sourceless directory clearance, as the register route would have opened it.
+    const clearance = {
+      id: 'ntc-dir-clearance',
+      playerNaturalKey: 'dir-mover',
+      playerName: 'Dir Mover',
+      team: undefined,
+      fromClubId: 'dir-old-club',
+      toClubId: 'ntc-dst',
+      fromClubName: 'Old Directory CC',
+      toClubName: 'Notice Dest CC',
+      requestedAt: new Date().toISOString(),
+      origin: 'registration' as const,
+      fromClubDirectory: true,
+      feesCleared: false,
+      misconductCleared: false,
+      status: 'pending' as const,
+      clubApprovedAt: null,
+      adminOverrideAt: null,
+      version: 0,
+    };
+    await repo.createPlayerWithSourcelessClearance(
+      'dolphins',
+      { ...mkPlayer('ntc-dst', 'dir-mover'), status: 'clearance-pending' as const },
+      clearance,
+    );
+    const res = await app.request(`/admin/clearances/${clearance.id}/reassign`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'dir-old-club', newFromClubId: 'ntc-reassigned' }),
+    });
+    assert.equal(res.status, 200);
+    const stored = await repo.getClub('dolphins', 'ntc-reassigned');
+    const events = (stored?.commLog ?? []).filter((e) => e.kind === 'clearance');
+    assert.equal(events.length, 2, 'new source club chairman notified');
+    assert.equal(events.find((e) => e.channel === 'email')?.status, 'sent');
+    assert.ok(
+      events.every((e) => e.by === 'admin@test'),
+      'attributed to the admin',
+    );
+  });
+
+  test('a hostile exco shape degrades to skipped channels — the clearance itself still 201s', async () => {
+    // exco is Record<string, unknown> and rows can be hand-edited; the notice path must
+    // shrug off a junk chair value, not throw it back into the route.
+    await repo.createClub(
+      'dolphins',
+      mkClub('ntc-junk', 'Notice Junk CC', { exco: { chair: 42 } }),
+    );
+    await repo.createPlayer('dolphins', mkPlayer('ntc-junk', 'junk-mover'));
+    const res = await app.request('/clubs/ntc-dst/clearances', {
+      method: 'POST',
+      headers: headers(REP_NTC_DST),
+      body: JSON.stringify({ fromClubId: 'ntc-junk', playerNaturalKey: 'junk-mover' }),
+    });
+    assert.equal(res.status, 201, 'a broken chair contact never fails the clearance');
+    const stored = await repo.getClub('dolphins', 'ntc-junk');
+    const events = (stored?.commLog ?? []).filter((e) => e.kind === 'clearance');
+    assert.equal(events.length, 2, 'the outcome is still logged');
+    assert.ok(events.every((e) => e.status === 'skipped'));
+  });
+
+  test('declaring a DIRECTORY previous club opens the clearance with no notice (no chairman on file)', async () => {
+    const cfg = await repo.getTenantConfig('dolphins');
+    assert.ok(cfg, 'precondition: tenant config exists');
+    await repo.putTenantConfig({
+      ...cfg,
+      knownClubs: [...(cfg.knownClubs ?? []), { id: 'ntc-dir-prev', name: 'Offline Prev CC' }],
+    });
+    const teamKey = (cfg.leagues ?? [])[0]?.key ?? '';
+    const up = await app.request('/register/ntc-dst/id-doc/upload-url?t=ntc-reg-token', {
+      method: 'POST',
+      body: JSON.stringify({ contentType: 'image/png' }),
+    });
+    const { objectKey } = (await up.json()) as { objectKey: string };
+    const res = await app.request('/register/ntc-dst?t=ntc-reg-token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        firstName: 'Dumi',
+        lastName: 'Zwane',
+        idType: 'passport',
+        idNumber: 'NTC0002',
+        dob: '1997-07-07',
+        nationality: 'South African',
+        race: 'African',
+        gender: 'Male',
+        cell: '0821118888',
+        team: teamKey,
+        district: 'Ethekwini',
+        idDocMeta: { objectKey, size: 100, contentType: 'image/png' },
+        lastClubId: 'ntc-dir-prev',
+      }),
+    });
+    assert.equal(res.status, 201, 'directory clearance opens without a notify fault');
+    const opened = (await repo.listClearancesForSource('dolphins', 'ntc-dir-prev')).find(
+      (x) => x.playerName === 'Dumi Zwane',
+    );
+    assert.ok(opened?.fromClubDirectory, 'the clearance is flagged as directory-sourced');
+    // No Club record exists for a directory entry, so there is nowhere a notice could have
+    // landed — the skip branch is exactly "no on-system source club".
+    assert.equal(await repo.getClub('dolphins', 'ntc-dir-prev'), null);
   });
 });

@@ -217,6 +217,72 @@ export async function sendRegLinkEmail(input: RegLinkEmailInput): Promise<{ mess
   return { messageId: res.MessageId ?? '' };
 }
 
+export interface ClearanceEmailInput {
+  to: string;
+  chairName: string;
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+}
+
+/**
+ * Clearance-pending heads-up to the FROM-club chairman, mirroring the WhatsApp
+ * template's copy. Deliberately no sign-in link or "log in" instruction — the chair
+ * may hold no portal login (chair invites were removed with admin onboarding), so the
+ * body asks for the review to happen in the club portal / via the union office.
+ */
+export async function sendClearanceEmail(
+  input: ClearanceEmailInput,
+): Promise<{ messageId: string }> {
+  const { to, chairName, fromClubName, playerName, toClubName } = input;
+  // Public-route names are collapsed at validation, but portal-entered roster names are
+  // not — never let a newline reach an email header.
+  const subject = `Clearance pending — ${playerName.replace(/\s+/g, ' ').trim()}`;
+  const greetName = chairName || 'there';
+
+  const text =
+    `Hello ${greetName},\n\n` +
+    `A player clearance is awaiting ${fromClubName}'s review: ${playerName} has applied to join ` +
+    `${toClubName} and needs a clearance from your club.\n\n` +
+    `Please have this reviewed and approved or rejected in your club portal, or contact your ` +
+    `union office if you have any questions.\n\n` +
+    `Thank you,\nThe union office`;
+
+  const safeName = escapeHtml(greetName);
+  const safeFrom = escapeHtml(fromClubName);
+  const safePlayer = escapeHtml(playerName);
+  const safeTo = escapeHtml(toClubName);
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hello ${safeName},</p>` +
+    `<p>A player clearance is awaiting <strong>${safeFrom}</strong>'s review: <strong>${safePlayer}</strong> ` +
+    `has applied to join <strong>${safeTo}</strong> and needs a clearance from your club.</p>` +
+    `<p>Please have this reviewed and approved or rejected in your club portal, or contact your ` +
+    `union office if you have any questions.</p>` +
+    `<p>Thank you,<br/>The union office</p>` +
+    `</div>`;
+
+  if (EMAIL_DRY_RUN) {
+    console.log(`[notify:email dry-run] would send clearance notice to ${to} for ${fromClubName}`);
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [to] },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}
+
 export interface FixturesEmailInput {
   to: string;
   playerName: string;

@@ -42,6 +42,12 @@ const STAFF_TEMPLATE_LANG = process.env.WHATSAPP_STAFF_TEMPLATE_LANG ?? TEMPLATE
 // rely on the email + portal for tutorials (the email already carries every link).
 const REGLINK_TEMPLATE = process.env.WHATSAPP_REGLINK_TEMPLATE ?? 'club_reglink_ready';
 const REGLINK_TEMPLATE_LANG = process.env.WHATSAPP_REGLINK_TEMPLATE_LANG ?? 'en';
+// Clearance-pending heads-up to the from-club chairman — {{1}} chair name, {{2}} from-club
+// name, {{3}} player name, {{4}} to-club name. Body-only Utility template, no buttons/links
+// (the chair may have no portal login — see the softened copy in the plan). Create + approve
+// this template before real sends; see the runbook.
+const CLEARANCE_TEMPLATE = process.env.WHATSAPP_CLEARANCE_TEMPLATE ?? 'club_clearance_pending';
+const CLEARANCE_TEMPLATE_LANG = process.env.WHATSAPP_CLEARANCE_TEMPLATE_LANG ?? 'en';
 const GRAPH_VERSION = 'v22.0';
 export const WHATSAPP_DRY_RUN = process.env.NOTIFY_DRY_RUN === '1' || !TOKEN || !PHONE_NUMBER_ID;
 
@@ -73,6 +79,17 @@ export function toE164(cell: string | undefined | null): string | null {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Meta rejects template parameters containing newlines, tabs, or 4+ consecutive
+ * spaces. Clearance params include a player name typed as free text on the PUBLIC
+ * register form, so collapse every whitespace run to a single space and bound the
+ * length — a hostile value must not be able to break (or bloat) the send.
+ */
+function cleanParam(value: string, max = 100): string {
+  const collapsed = value.replace(/\s+/g, ' ').trim();
+  return collapsed.length > max ? `${collapsed.slice(0, max - 1).trimEnd()}…` : collapsed;
+}
 
 /** A WhatsApp template body parameter (positional `{{n}}`). */
 type TemplateParam = { type: 'text'; text: string };
@@ -222,5 +239,38 @@ export async function sendFixturesWhatsApp(
       { type: 'text', text: season },
     ],
     `fixtures for ${clubName}`,
+  );
+}
+
+export interface ClearanceWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  chairName: string;
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+}
+
+/**
+ * Clearance-pending heads-up to the FROM-club chairman: a player wants to leave and
+ * the club must approve or reject. No link in the body — the chair may hold no portal
+ * login (chair invites were removed with admin onboarding), so the copy points at the
+ * club portal / union office rather than telling the recipient to sign in. The player
+ * name arrives from the public register form, so every param rides through cleanParam.
+ */
+export async function sendClearanceWhatsApp(
+  input: ClearanceWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const { to, chairName, fromClubName, playerName, toClubName } = input;
+  return sendTemplate(
+    to,
+    CLEARANCE_TEMPLATE,
+    CLEARANCE_TEMPLATE_LANG,
+    [
+      { type: 'text', text: cleanParam(chairName || 'there') },
+      { type: 'text', text: cleanParam(fromClubName) },
+      { type: 'text', text: cleanParam(playerName) },
+      { type: 'text', text: cleanParam(toClubName) },
+    ],
+    `clearance notice for ${fromClubName}`,
   );
 }

@@ -673,8 +673,9 @@ export interface ClubCommEvent {
   /**
    * What was sent. Absent ⇒ 'invite' (back-compat with pre-existing rows). A 'fixtures'
    * broadcast is recorded as one PII-free summary event per channel, not one row per player.
+   * A 'clearance' row is the chairman heads-up recorded when a clearance opens against the club.
    */
-  kind?: 'invite' | 'fixtures' | 'reglink';
+  kind?: 'invite' | 'fixtures' | 'reglink' | 'clearance';
   /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
   summary?: string;
 }

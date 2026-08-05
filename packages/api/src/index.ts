@@ -76,6 +76,7 @@ import {
   sendClubFixtures,
   sendStaffInvite,
   sendChairOnboarding,
+  sendClearanceNotice,
   type Channel,
   type SendResult,
 } from './notify/index.js';
@@ -151,7 +152,11 @@ const DEFAULT_TUTORIALS: TutorialVideo[] = [
  * empty/absent override serves NO videos instead.
  */
 const tutorialsFor = (config: TenantConfig | null): TutorialVideo[] =>
-  config?.tutorials?.length ? config.tutorials : config?.tutorialsNoFallback ? [] : DEFAULT_TUTORIALS;
+  config?.tutorials?.length
+    ? config.tutorials
+    : config?.tutorialsNoFallback
+      ? []
+      : DEFAULT_TUTORIALS;
 const cognito = new CognitoIdentityProviderClient({});
 const UPLOADS_BUCKET = process.env.UPLOADS_BUCKET!;
 // Public TutorialAssets bucket (also hosts tenant logos under branding/<slug>/ —
@@ -520,12 +525,17 @@ app.post('/register/:clubId', async (c) => {
     destClubId = currentClubId;
     destClub = picked;
   }
+  // Names are unauthenticated free text that later rides into outbound messages (the
+  // clearance chairman notice) — collapse whitespace runs and bound the length so a
+  // hostile value can't carry payloads or break a WhatsApp template parameter.
+  body.firstName = body.firstName!.replace(/\s+/g, ' ').trim().slice(0, 60);
+  body.lastName = body.lastName!.replace(/\s+/g, ' ').trim().slice(0, 60);
   const naturalKey = playerNaturalKey({ ...body, dob });
   const player: PlayerRegistration = {
     naturalKey,
     clubId: destClubId,
-    firstName: body.firstName!,
-    lastName: body.lastName!,
+    firstName: body.firstName,
+    lastName: body.lastName,
     dob,
     cell: body.cell,
     email: body.email,
@@ -643,6 +653,7 @@ app.post('/register/:clubId', async (c) => {
       destClub,
       lastClubId,
       directoryClubs(cfg),
+      cfg,
     );
     if (clearanceFromName) {
       // CHARGE the source club's quota only now, having actually put a clearance in its queue.
@@ -1083,6 +1094,82 @@ async function findPlayerByIdNumber(
   return roster.find((p) => normalizeId(p.idNumber) === wanted) ?? null;
 }
 
+const CLEARANCE_NOTICES_PER_DAY = 3;
+/**
+ * Best-effort heads-up to the FROM-club chairman that a clearance now awaits the club's
+ * decision. Never throws — a notify fault must not fail the clearance write that already
+ * committed. Capped per source club per (UTC) day because the public register route can
+ * open clearances anonymously: past the cap both channels are recorded as `skipped`, so
+ * the comm log still shows the clearance arrived silently (authenticated admin reassigns
+ * bypass the cap — they are deliberate union action, not the abuse the cap exists for).
+ * There is deliberately no claim/idempotency machinery here — every creation site 409s a
+ * duplicate pending clearance before a second notice could exist, and the clearance id is
+ * minted fresh per request so it could never key a retry dedupe anyway.
+ */
+async function notifyClearanceOpened(
+  tenant: string,
+  tenantConfig: TenantConfig | null,
+  fromClub: Club,
+  clearance: PlayerClearance,
+  by: string,
+  opts: { bypassCap?: boolean } = {},
+): Promise<void> {
+  try {
+    const chair = (
+      fromClub.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
+    )?.chair;
+    const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
+      ? ['email', 'whatsapp']
+      : ['email'];
+    // Email is attempted on every notice, so counting today's email rows counts notices —
+    // including capped ones, which keeps the gate shut for the rest of the day. Read-then-
+    // append with no transaction: parallel creates can briefly overshoot the cap. Fine for
+    // an anti-abuse bound; this is not a hard quota.
+    const today = now().slice(0, 10);
+    const noticesToday = (fromClub.commLog ?? []).filter(
+      (e) => e.kind === 'clearance' && e.channel === 'email' && e.at.slice(0, 10) === today,
+    ).length;
+    const results: SendResult[] =
+      !opts.bypassCap && noticesToday >= CLEARANCE_NOTICES_PER_DAY
+        ? channels.map((channel) => ({
+            channel,
+            status: 'skipped' as const,
+            error: 'daily clearance-notice cap reached',
+          }))
+        : (
+            await sendClearanceNotice({
+              chair: {
+                name: chair?.name || fromClub.chair || '',
+                email: chair?.email,
+                cell: chair?.cell,
+              },
+              fromClubName: fromClub.name,
+              playerName: clearance.playerName,
+              toClubName: clearance.toClubName,
+              channels,
+            })
+          ).results;
+    await repo.appendClubCommEvents(
+      tenant,
+      fromClub.id,
+      results.map((r) => ({
+        id: randomUUID(),
+        channel: r.channel,
+        ...(r.to ? { to: r.to } : {}),
+        status: r.status,
+        ...(r.messageId ? { messageId: r.messageId } : {}),
+        ...(r.error ? { error: r.error } : {}),
+        at: now(),
+        by,
+        idempotencyKey: `clearance-${clearance.id}-${r.channel}`,
+        kind: 'clearance' as const,
+      })),
+    );
+  } catch (err) {
+    console.error('clearance notice failed', err);
+  }
+}
+
 /**
  * Materialize a self-registration onto the destination roster (`player.clubId` must already be
  * the destination). Before creating anything it looks up where this exact person is ALREADY
@@ -1115,6 +1202,7 @@ async function createSelfRegistration(
   destClub: Club,
   lastClubId: string,
   directory: DirectoryClub[],
+  tenantConfig: TenantConfig | null,
 ): Promise<{ clearanceFromName?: string }> {
   // Re-registration at the SAME club (previous == the club being joined): record the history name;
   // there is nothing to transfer. Falls through to a plain active row (or the guards below).
@@ -1182,6 +1270,13 @@ async function createSelfRegistration(
       version: 0,
     };
     await repo.createPlayerWithClearance(tenant, player, clearance);
+    // Best-effort chairman heads-up (never throws). The source club record isn't loaded on
+    // this branch — findPlayerAcrossClubs returns roster rows — so fetch it just for the
+    // notice; a read fault only costs the notice, never the committed registration.
+    const sourceClub = await repo.getClub(tenant, source.clubId).catch(() => null);
+    if (sourceClub) {
+      await notifyClearanceOpened(tenant, tenantConfig, sourceClub, clearance, 'registration');
+    }
     return { clearanceFromName: source.clubName };
   }
 
@@ -1231,6 +1326,11 @@ async function createSelfRegistration(
       version: 0,
     };
     await repo.createPlayerWithSourcelessClearance(tenant, player, clearance);
+    // Chairman heads-up only for an ON-SYSTEM source: a directory entry has no club
+    // record and no chairman on file — the union office resolves those.
+    if (sourceClub) {
+      await notifyClearanceOpened(tenant, tenantConfig, sourceClub, clearance, 'registration');
+    }
     return { clearanceFromName: fromClubName };
   }
   player.status = 'active';
@@ -1959,6 +2059,11 @@ app.post('/clubs/:id/clearances', async (c) => {
     if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
     throw err;
   }
+  // Best-effort chairman heads-up (never throws). This route doesn't otherwise need the
+  // tenant config — it's read only for the whatsappInvites gate, and a read fault just
+  // degrades to the flag's default inside notifyClearanceOpened.
+  const tenantConfig = await repo.getTenantConfig(ra.tenant).catch(() => null);
+  await notifyClearanceOpened(ra.tenant, tenantConfig, fromClub, clearance, ra.email);
   return c.json(clearance, 201);
 });
 
@@ -2906,7 +3011,8 @@ function validateTutorials(tutorials: unknown): asserts tutorials is TutorialVid
   if (!Array.isArray(tutorials)) throw new HttpError(400, 'tutorials must be an array');
   if (tutorials.length > 50) throw new HttpError(400, 'no more than 50 tutorial videos');
   for (const t of tutorials as Array<Partial<TutorialVideo> | null | undefined>) {
-    if (!t || typeof t !== 'object') throw new HttpError(400, 'every tutorial needs a title and url');
+    if (!t || typeof t !== 'object')
+      throw new HttpError(400, 'every tutorial needs a title and url');
     if (typeof t.title !== 'string' || !t.title.trim())
       throw new HttpError(400, 'every tutorial needs a title');
     if (t.title.trim().length > 200)
@@ -3667,7 +3773,10 @@ function tutorialObjectKey(
   fileName?: string,
 ): string {
   const basename = (fileName ?? '').split(/[/\\]/).pop() ?? '';
-  const sanitized = basename.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 40);
+  const sanitized = basename
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '')
+    .slice(0, 40);
   const parts = [kind, randomUUID().slice(0, 8), sanitized].filter(Boolean);
   return `tutorials/${slug}/${parts.join('-')}.${ext}`;
 }
@@ -3704,7 +3813,10 @@ app.post('/platform/tenants/:slug/tutorial-upload', async (c) => {
   if (typeof sizeBytes !== 'number' || !Number.isFinite(sizeBytes) || sizeBytes <= 0)
     throw new HttpError(400, 'sizeBytes must be a positive number');
   if (sizeBytes > rules.maxBytes)
-    throw new HttpError(400, `${kind} exceeds the ${Math.round(rules.maxBytes / (1024 * 1024))} MB limit`);
+    throw new HttpError(
+      400,
+      `${kind} exceeds the ${Math.round(rules.maxBytes / (1024 * 1024))} MB limit`,
+    );
   if (!TUTORIALS_BUCKET)
     throw new HttpError(
       501,
@@ -3785,7 +3897,11 @@ app.post('/platform/tenants/:slug/tutorial-upload', async (c) => {
 app.post('/platform/tenants/:slug/tutorial-upload/complete', async (c) => {
   const slug = c.req.param('slug');
   const body = await c.req
-    .json<{ objectKey?: string; uploadId?: string; parts?: { partNumber?: number; etag?: string }[] }>()
+    .json<{
+      objectKey?: string;
+      uploadId?: string;
+      parts?: { partNumber?: number; etag?: string }[];
+    }>()
     .catch(
       () =>
         ({}) as {
@@ -3808,9 +3924,7 @@ app.post('/platform/tenants/:slug/tutorial-upload/complete', async (c) => {
       501,
       'asset upload requires the cloud assets bucket (unavailable in offline dev)',
     );
-  const parts = [...(body.parts ?? [])].sort(
-    (a, b) => (a.partNumber ?? 0) - (b.partNumber ?? 0),
-  );
+  const parts = [...(body.parts ?? [])].sort((a, b) => (a.partNumber ?? 0) - (b.partNumber ?? 0));
   if (parts.length === 0) throw new HttpError(400, 'parts required');
   await s3.send(
     new CompleteMultipartUploadCommand({
@@ -4500,6 +4614,13 @@ app.post('/admin/clearances/:cid/reassign', async (c) => {
         expectedVersion: body.version,
       },
     );
+    // The clearance just landed in a NEW club's queue — often a directory clearance
+    // finally reaching a real club — so its chairman gets the same heads-up a freshly
+    // created clearance would have produced. Best-effort; never fails the reassign.
+    const tenantConfig = await repo.getTenantConfig(ra.tenant).catch(() => null);
+    await notifyClearanceOpened(ra.tenant, tenantConfig, newFromClub, reassigned, ra.email, {
+      bypassCap: true,
+    });
     return c.json(reassigned);
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
