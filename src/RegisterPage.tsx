@@ -25,6 +25,8 @@ import {
   HANDS,
   DISTRICTS,
   dobFromSaId,
+  composeDob,
+  type DobError,
 } from './data';
 import { leagueOptionsForDistrict } from './leagues';
 
@@ -444,23 +446,7 @@ export function RegisterPage() {
               </div>
             )}
           </div>
-          {isPassport && (
-            <label style={{ display: 'block' }}>
-              <Label label="Date of birth" required />
-              <input
-                className="field-input"
-                type="date"
-                required
-                max={new Date().toISOString().slice(0, 10)}
-                value={d.dob}
-                onChange={(e) => setVal('dob', e.target.value)}
-                style={{ width: '100%', fontSize: 16 }}
-              />
-              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', marginTop: 4 }}>
-                Enter your date of birth as it appears on your passport/visa.
-              </span>
-            </label>
-          )}
+          {isPassport && <DobFields value={d.dob} onChange={(v) => setVal('dob', v)} />}
           <Select label="Race" required value={d.race} onChange={set('race')} placeholder="Select">
             {RACES.map((r) => (
               <option key={r}>{r}</option>
@@ -794,6 +780,139 @@ function Field({
         style={{ width: '100%', fontSize: 16 }}
       />
     </label>
+  );
+}
+
+const DOB_MONTHS = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
+
+const DOB_ERROR_TEXT: Record<Exclude<DobError, '' | 'incomplete'>, string> = {
+  'year-format': 'Enter the year as 4 digits, e.g. 1958.',
+  'not-real': 'That date doesn’t exist — check the day and month.',
+  future: 'Date of birth can’t be in the future.',
+  'too-old': 'Check the year — it can’t be before 1920.',
+};
+
+/**
+ * Day / Month / Year entry for the passport-holder date of birth (GOV.UK pattern) —
+ * a native date picker makes older players page back through decades of calendar.
+ * The three parts are canonical local state, initialised from `value` once; the parent
+ * only ever sees a complete valid ISO date or ''. External reset works because the
+ * whole component unmounts when the ID type switches back to SA ID. Errors show only
+ * while focus is outside the group, so typing "1…9…5…8" never flashes "before 1920".
+ */
+function DobFields({ value, onChange }: { value: string; onChange: (dob: string) => void }) {
+  const [parts, setParts] = useState(() => {
+    const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m
+      ? { day: String(Number(m[3])), month: String(Number(m[2])), year: m[1] }
+      : { day: '', month: '', year: '' };
+  });
+  const [away, setAway] = useState(false);
+
+  function setPart(key: 'day' | 'month' | 'year', raw: string) {
+    const next = { ...parts, [key]: raw };
+    setParts(next);
+    onChange(composeDob(next.day, next.month, next.year).dob);
+  }
+
+  const { error } = composeDob(parts.day, parts.month, parts.year);
+  // Incomplete entry stays silent — the submit blocker ("Enter the date of birth.")
+  // already covers it, and doubling up would scold someone mid-entry.
+  const showError = away && error !== '' && error !== 'incomplete';
+  const describedBy = showError ? 'dob-error dob-hint' : 'dob-hint';
+
+  return (
+    <fieldset
+      className="dob-group reg-span"
+      onFocus={() => setAway(false)}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setAway(true);
+      }}
+    >
+      {/* Mirrors <Label>'s markup — reusing it inside <legend> would double-nest .reg-label. */}
+      <legend className="reg-label">
+        Date of birth<span className="req">*</span>
+      </legend>
+      <div className="dob-row">
+        <label className="dob-day">
+          <span className="dob-sub">Day</span>
+          <input
+            className="field-input"
+            inputMode="numeric"
+            autoComplete="bday-day"
+            maxLength={2}
+            placeholder="DD"
+            value={parts.day}
+            aria-invalid={showError || undefined}
+            aria-describedby={describedBy}
+            onChange={(e) => setPart('day', e.target.value.replace(/\D/g, ''))}
+            style={{ width: '100%', fontSize: 16 }}
+          />
+        </label>
+        <label className="dob-month">
+          <span className="dob-sub">Month</span>
+          <select
+            className="field-select"
+            autoComplete="bday-month"
+            value={parts.month}
+            aria-invalid={showError || undefined}
+            aria-describedby={describedBy}
+            onChange={(e) => setPart('month', e.target.value)}
+            style={{ width: '100%', fontSize: 16 }}
+          >
+            <option value="">Month</option>
+            {DOB_MONTHS.map((m, i) => (
+              <option key={m} value={String(i + 1)}>
+                {m}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="dob-year">
+          <span className="dob-sub">Year</span>
+          <input
+            className="field-input"
+            inputMode="numeric"
+            autoComplete="bday-year"
+            maxLength={4}
+            placeholder="YYYY"
+            value={parts.year}
+            aria-invalid={showError || undefined}
+            aria-describedby={describedBy}
+            onChange={(e) => setPart('year', e.target.value.replace(/\D/g, ''))}
+            style={{ width: '100%', fontSize: 16 }}
+          />
+        </label>
+      </div>
+      {showError && (
+        <div
+          id="dob-error"
+          role="alert"
+          style={{ color: 'var(--danger-on-dark)', fontSize: 12, marginTop: 4 }}
+        >
+          {DOB_ERROR_TEXT[error as Exclude<DobError, '' | 'incomplete'>]}
+        </div>
+      )}
+      <span
+        id="dob-hint"
+        style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', marginTop: 4, display: 'block' }}
+      >
+        Enter your date of birth as it appears on your passport/visa.
+      </span>
+    </fieldset>
   );
 }
 

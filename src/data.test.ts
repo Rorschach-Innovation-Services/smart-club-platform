@@ -12,6 +12,7 @@ import {
   relTimeAgo,
   buildRecentActivity,
   fixtureCost,
+  composeDob,
 } from './data';
 
 // 6 teams → 5 single round-robin rounds (each round = one match-day).
@@ -429,5 +430,53 @@ describe('fixtureCost — per-side legs', () => {
     const c = fixtureCost(home, away, 2, 3, home.ground);
     expect(c.home.roundTripKm).toBeCloseTo(0, 6);
     expect(c.away.roundTripKm).toBeCloseTo(c.roundTripKm, 6);
+  });
+});
+
+describe('composeDob', () => {
+  it('composes and zero-pads single-digit day and month', () => {
+    expect(composeDob('5', '3', '1990')).toEqual({ dob: '1990-03-05', error: '' });
+  });
+
+  it('trims stray whitespace from pasted/autofilled parts', () => {
+    expect(composeDob(' 5 ', '3 ', ' 1990')).toEqual({ dob: '1990-03-05', error: '' });
+  });
+
+  it('accepts 29 Feb in a leap year, rejects it otherwise', () => {
+    expect(composeDob('29', '2', '2000').dob).toBe('2000-02-29');
+    expect(composeDob('29', '2', '1999')).toEqual({ dob: '', error: 'not-real' });
+  });
+
+  it('rejects impossible dates', () => {
+    expect(composeDob('31', '2', '1990').error).toBe('not-real');
+    expect(composeDob('31', '4', '1990').error).toBe('not-real');
+    expect(composeDob('00', '3', '1990').error).toBe('not-real');
+  });
+
+  it('asks for a 4-digit year instead of calling "58" too old', () => {
+    expect(composeDob('15', '3', '58')).toEqual({ dob: '', error: 'year-format' });
+  });
+
+  it('treats a 4-digit ancient year as too-old, bounded at 1920', () => {
+    expect(composeDob('5', '3', '0019').error).toBe('too-old');
+    expect(composeDob('31', '12', '1919').error).toBe('too-old');
+    expect(composeDob('1', '1', '1920')).toEqual({ dob: '1920-01-01', error: '' });
+  });
+
+  it('rejects future dates but allows today', () => {
+    const now = new Date();
+    const today = composeDob(
+      String(now.getDate()),
+      String(now.getMonth() + 1),
+      String(now.getFullYear()),
+    );
+    expect(today.error).toBe('');
+    expect(composeDob('1', '1', String(now.getFullYear() + 1)).error).toBe('future');
+  });
+
+  it('is silently incomplete until all three parts are present', () => {
+    expect(composeDob('', '', '')).toEqual({ dob: '', error: 'incomplete' });
+    expect(composeDob('15', '', '1958')).toEqual({ dob: '', error: 'incomplete' });
+    expect(composeDob('15', '3', '')).toEqual({ dob: '', error: 'incomplete' });
   });
 });

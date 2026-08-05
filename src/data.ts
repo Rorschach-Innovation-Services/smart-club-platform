@@ -414,6 +414,37 @@ export function dobFromSaId(idNumber) {
   return iso;
 }
 
+// Oldest date of birth the server accepts (packages/api/src/index.ts MIN_DOB).
+export const MIN_DOB = '1920-01-01';
+
+export type DobError = '' | 'incomplete' | 'year-format' | 'not-real' | 'future' | 'too-old';
+
+/**
+ * Compose a manual day/month/year entry (register page, passport holders) into an ISO
+ * date of birth. Returns `dob: ''` with a reason whenever the parts don't make a date
+ * the server would accept — the same bounds as `resolvePlayerDob` server-side. The
+ * `year-format` case is separate from `too-old` so a two-digit year ("58") gets asked
+ * for four digits rather than being scolded about 1920.
+ */
+export function composeDob(
+  day: string,
+  month: string,
+  year: string,
+): { dob: string; error: DobError } {
+  const d = day.trim();
+  const m = month.trim();
+  const y = year.trim();
+  if (!d || !m || !y) return { dob: '', error: 'incomplete' };
+  if (!/^\d{4}$/.test(y)) return { dob: '', error: 'year-format' };
+  // Year bound checked numerically before composing — dayjs's strict parser rejects
+  // far-out years like 0019 as unparseable, which would surface as "doesn't exist".
+  if (Number(y) < Number(MIN_DOB.slice(0, 4))) return { dob: '', error: 'too-old' };
+  const iso = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  if (!isRealDate(iso)) return { dob: '', error: 'not-real' };
+  if (iso > todayDate()) return { dob: '', error: 'future' };
+  return { dob: iso, error: '' };
+}
+
 /** Whole-year age derived from a 13-digit RSA ID. Returns null if the ID isn't valid. */
 export function ageFromSaId(idNumber) {
   const dob = dobFromSaId(String(idNumber || ''));

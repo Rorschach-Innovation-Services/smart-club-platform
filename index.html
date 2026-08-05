@@ -1291,6 +1291,18 @@
     gap:15px 18px;align-items:start;
   }
   .reg-grid .reg-span{grid-column:1 / -1}
+  /* Passport DOB: Day / Month / Year on one row (fits at 360px; month flexes). */
+  fieldset.dob-group{border:0;padding:0;margin:0;min-width:0}
+  .dob-group legend{padding:0}
+  .dob-row{display:flex;gap:8px;align-items:flex-end}
+  .dob-row .dob-day{flex:0 0 64px}
+  .dob-row .dob-month{flex:1;min-width:0}
+  .dob-row .dob-year{flex:0 0 84px}
+  .dob-row label{display:block}
+  .dob-sub{
+    display:block;font-size:10px;letter-spacing:0.06em;text-transform:uppercase;
+    color:rgba(255,255,255,0.45);margin-bottom:4px;
+  }
   .reg-checks{display:flex;gap:12px;flex-wrap:wrap}
   /* The reg card is dark, so the shared light-background checkbox/label colours are
      invisible here — force legible light text for the playing-profile + consent checks. */
