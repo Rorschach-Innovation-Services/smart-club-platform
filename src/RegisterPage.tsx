@@ -6,7 +6,7 @@
  * derived server-side from the 13-digit RSA ID; minors (under 18) require a guardian
  * name. A successful submit increments the club's derived player count.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import type { ReactNode, ChangeEventHandler, InputHTMLAttributes } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import {
@@ -192,7 +192,7 @@ export function RegisterPage() {
       : !isPassport && !dob
         ? 'That South African ID number isn’t valid — please double-check it (the date of birth is read from it).'
         : isPassport && !dob
-          ? 'Enter the date of birth.'
+          ? 'Enter a valid date of birth.'
           : !idValid
             ? 'Check the ID number.'
             : !idFile
@@ -816,11 +816,16 @@ const DOB_ERROR_TEXT: Record<Exclude<DobError, '' | 'incomplete'>, string> = {
 function DobFields({ value, onChange }: { value: string; onChange: (dob: string) => void }) {
   const [parts, setParts] = useState(() => {
     const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    // Month keeps its zero-padded ISO form — the select's option values are padded so
+    // browser autofill (which supplies "03"-style values) matches them directly.
     return m
-      ? { day: String(Number(m[3])), month: String(Number(m[2])), year: m[1] }
+      ? { day: String(Number(m[3])), month: m[2], year: m[1] }
       : { day: '', month: '', year: '' };
   });
   const [away, setAway] = useState(false);
+  const uid = useId();
+  const hintId = `${uid}-hint`;
+  const errorId = `${uid}-error`;
 
   function setPart(key: 'day' | 'month' | 'year', raw: string) {
     const next = { ...parts, [key]: raw };
@@ -829,10 +834,12 @@ function DobFields({ value, onChange }: { value: string; onChange: (dob: string)
   }
 
   const { error } = composeDob(parts.day, parts.month, parts.year);
-  // Incomplete entry stays silent — the submit blocker ("Enter the date of birth.")
-  // already covers it, and doubling up would scold someone mid-entry.
-  const showError = away && error !== '' && error !== 'incomplete';
-  const describedBy = showError ? 'dob-error dob-hint' : 'dob-hint';
+  // Incomplete entry stays silent — the submit blocker ("Enter a valid date of birth.")
+  // already covers it, and doubling up would scold someone mid-entry. `visibleError`
+  // narrows to the display taxonomy, so the DOB_ERROR_TEXT lookup stays cast-free.
+  const visibleError = away && error !== '' && error !== 'incomplete' ? error : null;
+  const showError = visibleError !== null;
+  const describedBy = showError ? `${errorId} ${hintId}` : hintId;
 
   return (
     <fieldset
@@ -856,6 +863,7 @@ function DobFields({ value, onChange }: { value: string; onChange: (dob: string)
             maxLength={2}
             placeholder="DD"
             value={parts.day}
+            aria-required="true"
             aria-invalid={showError || undefined}
             aria-describedby={describedBy}
             onChange={(e) => setPart('day', e.target.value.replace(/\D/g, ''))}
@@ -868,6 +876,7 @@ function DobFields({ value, onChange }: { value: string; onChange: (dob: string)
             className="field-select"
             autoComplete="bday-month"
             value={parts.month}
+            aria-required="true"
             aria-invalid={showError || undefined}
             aria-describedby={describedBy}
             onChange={(e) => setPart('month', e.target.value)}
@@ -875,7 +884,7 @@ function DobFields({ value, onChange }: { value: string; onChange: (dob: string)
           >
             <option value="">Month</option>
             {DOB_MONTHS.map((m, i) => (
-              <option key={m} value={String(i + 1)}>
+              <option key={m} value={String(i + 1).padStart(2, '0')}>
                 {m}
               </option>
             ))}
@@ -890,6 +899,7 @@ function DobFields({ value, onChange }: { value: string; onChange: (dob: string)
             maxLength={4}
             placeholder="YYYY"
             value={parts.year}
+            aria-required="true"
             aria-invalid={showError || undefined}
             aria-describedby={describedBy}
             onChange={(e) => setPart('year', e.target.value.replace(/\D/g, ''))}
@@ -897,17 +907,17 @@ function DobFields({ value, onChange }: { value: string; onChange: (dob: string)
           />
         </label>
       </div>
-      {showError && (
+      {visibleError && (
         <div
-          id="dob-error"
+          id={errorId}
           role="alert"
           style={{ color: 'var(--danger-on-dark)', fontSize: 12, marginTop: 4 }}
         >
-          {DOB_ERROR_TEXT[error as Exclude<DobError, '' | 'incomplete'>]}
+          {DOB_ERROR_TEXT[visibleError]}
         </div>
       )}
       <span
-        id="dob-hint"
+        id={hintId}
         style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', marginTop: 4, display: 'block' }}
       >
         Enter your date of birth as it appears on your passport/visa.

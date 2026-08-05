@@ -453,6 +453,10 @@ describe('composeDob', () => {
     expect(composeDob('00', '3', '1990').error).toBe('not-real');
   });
 
+  it('rejects an over-long day like "005" (the UI maxLength must not be the only guard)', () => {
+    expect(composeDob('005', '3', '1990')).toEqual({ dob: '', error: 'not-real' });
+  });
+
   it('asks for a 4-digit year instead of calling "58" too old', () => {
     expect(composeDob('15', '3', '58')).toEqual({ dob: '', error: 'year-format' });
   });
