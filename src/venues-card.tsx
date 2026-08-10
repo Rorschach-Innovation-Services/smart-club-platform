@@ -12,7 +12,17 @@
  */
 import { useState, useId, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { BoundedNumber, Btn, Card, EmptyState, Field, Icon, Pill, useEscapeClose } from './atoms';
+import {
+  BoundedNumber,
+  Btn,
+  Card,
+  EmptyState,
+  Field,
+  Icon,
+  InfoDot,
+  Pill,
+  useEscapeClose,
+} from './atoms';
 import { ApiError } from './api';
 import { WEEKDAY_LABELS, isValidIsoDate } from './competition/calendar';
 import { MIN_GEO_COVERAGE, geoCoverage } from './competition/venues';
@@ -272,7 +282,16 @@ function VenueForm({
         })}
       </div>
 
-      <div style={SECTION}>Never available on</div>
+      <div style={{ ...SECTION, display: 'flex', alignItems: 'center', gap: 2 }}>
+        Never available on
+        <InfoDot title="Never available on">
+          <p>
+            A <strong>recurring</strong> weekday blackout — pick the days this ground is never free
+            (e.g. a school ground used on Fridays). No fixture will land on those weekdays.
+          </p>
+          <p>For a one-off date range instead, use Unavailable windows below.</p>
+        </InfoDot>
+      </div>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         {WEEKDAY_LABELS.map((label, day) => {
           const on = (draft.unavailableWeekdays ?? []).includes(day as Weekday);
@@ -304,7 +323,15 @@ function VenueForm({
         })}
       </div>
 
-      <div style={SECTION}>Unavailable windows</div>
+      <div style={{ ...SECTION, display: 'flex', alignItems: 'center', gap: 2 }}>
+        Unavailable windows
+        <InfoDot title="Unavailable windows">
+          <p>
+            <strong>One-off</strong> date ranges the ground is closed — a re-lay, a festival, exam
+            weeks. Give each a reason and a start/end date. Fixtures skip these dates.
+          </p>
+        </InfoDot>
+      </div>
       {(draft.unavailable ?? []).map((w, i) => (
         <div
           key={i}
@@ -579,10 +606,45 @@ export function VenuesCard({
               <thead>
                 <tr>
                   <th>Ground</th>
-                  <th>Home to</th>
-                  <th>Per day</th>
-                  <th>Pinned</th>
-                  <th>Closures</th>
+                  <th title="The club(s) this is a home ground for. 'Neutral' means no home club.">
+                    Home to
+                  </th>
+                  <th title="Matches this ground can host in a single day.">
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                      Per day
+                      <InfoDot title="Per day">
+                        <p>
+                          How many matches this ground can host in one day. A ground with two
+                          pitches can host <strong>two</strong>. Drives how tightly the allocator
+                          can pack a round.
+                        </p>
+                      </InfoDot>
+                    </span>
+                  </th>
+                  <th title="Whether the ground has hand-entered map coordinates.">
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                      Pinned
+                      <InfoDot title="Pinned">
+                        <p>
+                          Whether the ground has hand-entered map coordinates. Only pinned grounds
+                          can be ranked by <strong>travel distance</strong> — unpinned ones fall
+                          back to home-ground preference alone.
+                        </p>
+                      </InfoDot>
+                    </span>
+                  </th>
+                  <th title="Dates and weekdays the ground is unavailable.">
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                      Closures
+                      <InfoDot title="Closures">
+                        <p>
+                          How many unavailability windows (plus a weekday blackout, if set) block
+                          this ground. A fixture will never be placed on a closed date. Not related
+                          to player clearances.
+                        </p>
+                      </InfoDot>
+                    </span>
+                  </th>
                   <th style={{ width: 130 }}></th>
                 </tr>
               </thead>

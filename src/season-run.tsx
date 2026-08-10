@@ -18,7 +18,17 @@
  */
 import { useMemo, useState, useId, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { BoundedNumber, Btn, Card, Choice, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
+import {
+  BoundedNumber,
+  Btn,
+  Card,
+  Choice,
+  EmptyState,
+  Icon,
+  InfoDot,
+  Pill,
+  useEscapeClose,
+} from './atoms';
 import { ApiError } from './api';
 import {
   CADENCE_LABELS,
@@ -776,8 +786,21 @@ function StartFlatSeasonForm({
 
       {calendars.length > 0 ? (
         <div className="field">
-          <div className="field-label">
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             Dates <span className="req">*</span>
+            <InfoDot
+              title="Dates — where the season's timeline comes from"
+              options={[
+                {
+                  label: 'A season calendar',
+                  desc: 'Use one the operator set up, so this season shares its playing blocks, breaks and excluded dates. Pick the block to play in.',
+                },
+                {
+                  label: 'Custom dates',
+                  desc: 'Set a plain start and end date yourself, with no shared breaks. Best for a one-off or a league with no calendar.',
+                },
+              ]}
+            />
           </div>
           <select
             className="field-select"
@@ -930,7 +953,24 @@ function StartFlatSeasonForm({
       {showScheduling && (
         <>
           <div className="cs-row">
-            <div className="cs-row-label">Cadence</div>
+            <div className="cs-row-label" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              Cadence
+              <InfoDot
+                title="Cadence — how often rounds are played"
+                options={[
+                  { label: 'Weekly', desc: 'One round every week.' },
+                  { label: 'Every N weeks', desc: 'One round every few weeks — set the gap.' },
+                  {
+                    label: 'Set days only',
+                    desc: 'Only on the weekdays you pick (e.g. Sat & Sun).',
+                  },
+                  {
+                    label: 'Spread across block',
+                    desc: 'Rounds spaced evenly across the whole block.',
+                  },
+                ]}
+              />
+            </div>
             <div className="cs-row-input">
               <Choice
                 value={CADENCE_LABELS[cadence.kind] || CADENCE_LABELS.weekly}
@@ -1019,7 +1059,18 @@ function StartFlatSeasonForm({
       )}
 
       <div className="field">
-        <div className="field-label">Match format</div>
+        <div className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          Match format
+          <InfoDot title="Match format">
+            <p>
+              <strong>Overs</strong> — overs per side for these matches.
+            </p>
+            <p>
+              <strong>Series type</strong> — the format’s name (e.g. One-Day, T20). It labels the
+              series; it isn’t inferred from the overs, so set it to match.
+            </p>
+          </InfoDot>
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <BoundedNumber
             ariaLabel="Overs"
@@ -1509,9 +1560,44 @@ function EntrantConfirmForm({
           <thead>
             <tr>
               <th>Side</th>
-              <th style={{ width: 200 }}>Group</th>
-              {ranked && <th style={{ width: 90 }}>Position</th>}
-              {wantsPoints && <th style={{ width: 130 }}>Carried points</th>}
+              <th style={{ width: 200 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                  Group
+                  <InfoDot title="Group">
+                    <p>
+                      Which pool each side plays in this stage. Choose <strong>Not playing</strong>{' '}
+                      to leave a side out. The group names come from the structure (e.g. Top Six,
+                      Bottom Six).
+                    </p>
+                  </InfoDot>
+                </span>
+              </th>
+              {ranked && (
+                <th style={{ width: 90 }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                    Position
+                    <InfoDot title="Position">
+                      <p>
+                        Where each side finished in the earlier stage — it sets the seeding for a
+                        knockout or the order for a cross-pool draw.
+                      </p>
+                    </InfoDot>
+                  </span>
+                </th>
+              )}
+              {wantsPoints && (
+                <th style={{ width: 130 }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                    Carried points
+                    <InfoDot title="Carried points">
+                      <p>
+                        Points this side brings into the new stage from the last one — used when the
+                        structure carries points forward with the position.
+                      </p>
+                    </InfoDot>
+                  </span>
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -1734,6 +1820,31 @@ function StageCard({
         ) : (
           <Pill tone="muted">Awaiting entrants</Pill>
         )}
+        <InfoDot
+          title="Stage status"
+          options={[
+            {
+              label: 'Awaiting entrants',
+              desc: 'This stage’s teams depend on an earlier stage’s results — confirm who plays before it can generate.',
+            },
+            {
+              label: 'Ready to generate',
+              desc: 'Teams and groups are set and fit the calendar block. Generate its fixtures.',
+            },
+            {
+              label: 'Doesn’t fit',
+              desc: 'The rounds need more time than the calendar block allows — shorten the format or widen the block.',
+            },
+            {
+              label: 'Generated',
+              desc: 'Fixtures exist as one or more series. Approve and release them from the list above.',
+            },
+            {
+              label: 'Needs regenerating',
+              desc: 'Entrants or pairings changed since the fixtures were built — regenerate to catch up.',
+            },
+          ]}
+        />
       </div>
 
       {materialisation.status === 'awaiting-entrants' ? (

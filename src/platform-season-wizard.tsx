@@ -16,7 +16,7 @@
  */
 import { useId, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Btn, EmptyState, Icon, useEscapeClose } from './atoms';
+import { Btn, EmptyState, Icon, InfoDot, useEscapeClose } from './atoms';
 import * as api from './api';
 import { ApiError } from './api';
 import { CalendarForm } from './platform-calendars';
@@ -187,6 +187,19 @@ function LeagueSetupRow({
           />
           Use an existing structure
         </label>
+        <InfoDot
+          title="Where this league's structure comes from"
+          options={[
+            {
+              label: 'Start from a template',
+              desc: 'Begin from a ready-made shape (flat league, split league, pools + knockout) and it becomes a new structure for this client.',
+            },
+            {
+              label: 'Use an existing structure',
+              desc: 'Reuse a structure this client already has — no new version is created.',
+            },
+          ]}
+        />
       </div>
 
       {choice.mode === 'template' && (
@@ -242,7 +255,21 @@ function LeagueSetupRow({
       )}
 
       {choice.mode !== 'skip' && choice.structure && (
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <InfoDot
+            title="Competition details"
+            options={[
+              {
+                label: 'Competition label',
+                desc: 'What this format stream is called, e.g. "50 Over (Red Ball)". A league can run more than one.',
+              },
+              { label: 'Overs', desc: 'Overs per side — used on scorecards and match defaults.' },
+              {
+                label: 'Ball type',
+                desc: 'The ball used (e.g. Red, Pink, White) — shown on fixtures for clarity.',
+              },
+            ]}
+          />
           <input
             className="field-input"
             style={{ flex: 1, minWidth: 180 }}
@@ -275,10 +302,20 @@ function LeagueSetupRow({
           style={{
             fontSize: 12,
             marginTop: 8,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 2,
             color: verdict.ok ? 'var(--muted)' : 'var(--gold, #B7791F)',
           }}
         >
           {verdict.text}
+          <InfoDot title="Does it fit?">
+            <p>
+              Checks whether every round this structure produces can be scheduled inside the season
+              calendar’s blocks. A <strong>⚠</strong> means the stages need more weeks than the
+              blocks provide — shorten the competition or widen the blocks.
+            </p>
+          </InfoDot>
         </div>
       )}
     </div>
@@ -537,8 +574,35 @@ export function SeasonSetupWizard({
             }}
           />
         ))}
-        <span style={{ fontSize: 11.5, color: 'var(--muted-2)', marginLeft: 6 }}>
+        <span
+          style={{
+            fontSize: 11.5,
+            color: 'var(--muted-2)',
+            marginLeft: 6,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 2,
+          }}
+        >
           Step {step + 1} of {STEPS.length} · {STEPS[step]}
+          <InfoDot title="What this wizard does">
+            <p>
+              This sets up a whole season in one go — the same as filling in the{' '}
+              <strong>Season calendars</strong> and <strong>Competition structures</strong> cards
+              yourself, then binding each league.
+            </p>
+            <p>
+              <strong>1. Season dates</strong> — the calendar: playing blocks, breaks, excluded
+              dates.
+            </p>
+            <p>
+              <strong>2. League structures</strong> — pick which leagues run a structured
+              competition and how.
+            </p>
+            <p>
+              <strong>3. Review &amp; create</strong> — check it and save it all at once.
+            </p>
+          </InfoDot>
         </span>
       </div>
 
@@ -574,6 +638,19 @@ export function SeasonSetupWizard({
                 />
                 Use an existing calendar
               </label>
+              <InfoDot
+                title="Season calendar"
+                options={[
+                  {
+                    label: 'Start a new season calendar',
+                    desc: 'Build a fresh calendar below — blocks, breaks and excluded dates for this season.',
+                  },
+                  {
+                    label: 'Use an existing calendar',
+                    desc: 'Reuse a calendar this client already has, so every league on it shares the same dates and breaks.',
+                  },
+                ]}
+              />
             </div>
           )}
           {calMode === 'existing' && calendars.length > 0 && (

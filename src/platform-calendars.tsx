@@ -11,7 +11,7 @@
  */
 import { useState, useEffect, useId, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
+import { Btn, Card, EmptyState, Icon, InfoDot, Pill, useEscapeClose } from './atoms';
 import * as api from './api';
 import { ApiError } from './api';
 import {
@@ -399,8 +399,14 @@ export function CalendarForm({
       </p>
 
       <div className="field" style={{ marginTop: 14 }}>
-        <div className="field-label">
+        <div className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
           Season label <span className="req">*</span>
+          <InfoDot title="Season label">
+            <p>
+              What this season is called across the platform — on the seasons list and when a league
+              binds to it. Use the playing year, e.g. <strong>2026/27</strong>.
+            </p>
+          </InfoDot>
         </div>
         <input
           className="field-input"
@@ -412,7 +418,20 @@ export function CalendarForm({
         {dupLabel && <div style={ERR}>A calendar with this label already exists.</div>}
       </div>
 
-      <div style={sectionHead}>Playing blocks</div>
+      <div style={{ ...sectionHead, display: 'flex', alignItems: 'center', gap: 2 }}>
+        Playing blocks
+        <InfoDot title="Playing blocks">
+          <p>
+            A block is a labelled stretch of the season when matches are played (e.g.{' '}
+            <strong>First half</strong>, <strong>Second half</strong>). Its label shows on the
+            seasons list.
+          </p>
+          <p>
+            A competition’s stages bind to blocks <strong>by order</strong> — stage 1 to the first
+            block, stage 2 to the second — so the sequence here matters.
+          </p>
+        </InfoDot>
+      </div>
       {draft.blocks.map((b, i) => (
         <RangeRow
           key={b.id}
@@ -451,7 +470,15 @@ export function CalendarForm({
         </Btn>
       </div>
 
-      <div style={sectionHead}>Breaks</div>
+      <div style={{ ...sectionHead, display: 'flex', alignItems: 'center', gap: 2 }}>
+        Breaks
+        <InfoDot title="Breaks">
+          <p>
+            Stretches inside the season when <strong>no matches</strong> are played — a mid-season
+            gap, a holiday period. Fixture generation steps over them, so nothing lands here.
+          </p>
+        </InfoDot>
+      </div>
       {(draft.breaks ?? []).length === 0 && (
         <p style={{ ...HINT, marginTop: 0 }}>
           No breaks yet. Most unions need one between the two halves of the season.
@@ -487,7 +514,15 @@ export function CalendarForm({
         </Btn>
       </div>
 
-      <div style={sectionHead}>Excluded dates</div>
+      <div style={{ ...sectionHead, display: 'flex', alignItems: 'center', gap: 2 }}>
+        Excluded dates
+        <InfoDot title="Excluded dates">
+          <p>
+            Single days, rather than a whole range, that no match may fall on — public holidays,
+            union events, exam days. Generation skips them like it skips a break.
+          </p>
+        </InfoDot>
+      </div>
       <p style={{ ...HINT, marginTop: 0 }}>
         One-off days no match may be played — public holidays, union events, exam days.
       </p>

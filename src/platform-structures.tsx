@@ -18,7 +18,17 @@
  */
 import { useState, useId, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { BoundedNumber, Btn, Card, Choice, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
+import {
+  BoundedNumber,
+  Btn,
+  Card,
+  Choice,
+  EmptyState,
+  Icon,
+  InfoDot,
+  Pill,
+  useEscapeClose,
+} from './atoms';
 import * as api from './api';
 import { ApiError } from './api';
 import {
@@ -136,6 +146,16 @@ const SECTION: CSSProperties = {
   margin: '14px 0 6px',
 };
 
+/** A stage-editor section label with an optional "(i)" explainer beside it. */
+function SectionHead({ children, info }: { children: ReactNode; info?: ReactNode }) {
+  return (
+    <div style={{ ...SECTION, display: 'flex', alignItems: 'center', gap: 2 }}>
+      {children}
+      {info}
+    </div>
+  );
+}
+
 /** The team count the preview reasons about while a structure has no teams in it. */
 const DEFAULT_PREVIEW_TEAMS = 12;
 
@@ -184,19 +204,50 @@ function Modal({
 
 /* ─── Stage editor ─── */
 
-const FORMAT_OPTIONS: Array<{ label: string; value: FormatSpec }> = [
-  { label: 'Single round robin', value: { kind: 'round-robin', legs: 1 } },
-  { label: 'Double round robin', value: { kind: 'round-robin', legs: 2 } },
+// `help` is a full sentence (not a fragment) so it reads on its own — used both in
+// the Format info-popover and as the live hint under the select. `describeFormat`
+// stays as-is for the collapsed-row subtitle it was written for.
+const FORMAT_OPTIONS: Array<{ label: string; value: FormatSpec; help: string }> = [
+  {
+    label: 'Single round robin',
+    value: { kind: 'round-robin', legs: 1 },
+    help: 'Every side plays every other side once. Standings decide the winner — no knockout.',
+  },
+  {
+    label: 'Double round robin',
+    value: { kind: 'round-robin', legs: 2 },
+    help: 'Every side plays every other side twice, once home and once away.',
+  },
   // The server accepts legs 1–3 and the generator implements 3; leaving it off the list
   // rendered a three-leg stage as "Single round robin" and retyped it on any touch.
-  { label: 'Triple round robin', value: { kind: 'round-robin', legs: 3 } },
-  { label: 'Knockout — seeded', value: { kind: 'knockout', pairing: 'seeded' } },
-  { label: 'Knockout — cross-pool', value: { kind: 'knockout', pairing: 'cross-pool' } },
-  { label: 'Single match', value: { kind: 'single-match' } },
+  {
+    label: 'Triple round robin',
+    value: { kind: 'round-robin', legs: 3 },
+    help: 'Every side plays every other side three times.',
+  },
+  {
+    label: 'Knockout — seeded',
+    value: { kind: 'knockout', pairing: 'seeded' },
+    help: 'A single-elimination bracket seeded by rank — top seed meets bottom seed, and losers are out.',
+  },
+  {
+    label: 'Knockout — cross-pool',
+    value: { kind: 'knockout', pairing: 'cross-pool' },
+    help: 'A bracket that crosses groups — the winner of one pool meets the runner-up of another.',
+  },
+  {
+    label: 'Single match',
+    value: { kind: 'single-match' },
+    help: 'One fixture between two sides — a final or any other one-off.',
+  },
   // The ADR's escape hatch. Reachable through JSON import and accepted by the server's
   // FORMAT_KINDS, so leaving it off the list rendered a blank Format select on a stage
   // that was perfectly valid — and any touch of the control would silently retype it.
-  { label: 'Entered by hand', value: { kind: 'manual' } },
+  {
+    label: 'Entered by hand',
+    value: { kind: 'manual' },
+    help: 'No fixtures are generated. An administrator types in each match themselves.',
+  },
 ];
 
 function formatLabel(f: FormatSpec): string {
@@ -217,16 +268,40 @@ function formatLabel(f: FormatSpec): string {
 // screens later, mid-season, in a modal that offers "Group A" and nothing else. The
 // constraint belongs in the name of the choice.
 const ENTRANT_OPTIONS = [
-  { key: 'all-registered', label: 'Every registered side, in one group' },
-  { key: 'seeded-split', label: 'Seeded into groups' },
-  { key: 'manual', label: 'Entered by an administrator' },
+  {
+    key: 'all-registered',
+    label: 'Every registered side, in one group',
+    help: 'Every side entered in the league plays in a single group. This kind cannot be split into pools.',
+  },
+  {
+    key: 'seeded-split',
+    label: 'Seeded into groups',
+    help: 'Sides are divided into pools by seeding order — set how many groups and how below.',
+  },
+  {
+    key: 'manual',
+    label: 'Entered by an administrator',
+    help: "An administrator chooses who plays. Use this when a stage's teams come from an earlier stage's results.",
+  },
 ] as const;
 
 const CADENCE_OPTIONS = [
-  { key: 'weekly', label: 'Weekly' },
-  { key: 'every-n-weeks', label: 'Every N weeks' },
-  { key: 'weekdays', label: 'Set days only' },
-  { key: 'spread', label: 'Spread across block' },
+  { key: 'weekly', label: 'Weekly', help: 'One round is played every week.' },
+  {
+    key: 'every-n-weeks',
+    label: 'Every N weeks',
+    help: 'One round every few weeks — set the gap. For leagues that skip some weekends.',
+  },
+  {
+    key: 'weekdays',
+    label: 'Set days only',
+    help: 'Matches only on the weekdays you pick (e.g. Saturday and Sunday). Rounds fill those days.',
+  },
+  {
+    key: 'spread',
+    label: 'Spread across block',
+    help: 'Rounds are spaced evenly across the whole playing block, however long it runs.',
+  },
 ] as const;
 
 function Select({
@@ -304,6 +379,19 @@ function GroupPlanEditor({
         <option value="even">Even groups</option>
         <option value="sizes">Exact sizes</option>
       </Select>
+      <InfoDot
+        title="Group plan — how sides divide into pools"
+        options={[
+          {
+            label: 'Even groups',
+            desc: 'Pick a number of equal groups. If sides don’t divide evenly, the earlier groups take the extra one.',
+          },
+          {
+            label: 'Exact sizes',
+            desc: 'Type each group’s size, e.g. "5, 5, 5, 4" — the only way to make groups of different sizes.',
+          },
+        ]}
+      />
       {/* Branch on `kind`, not `plan?.kind` — `groups` is optional on a manual stage, so
           an absent plan makes the Select read "Even groups" while the comma-sizes box
           renders underneath it, and typing there writes a `sizes` plan the dropdown says
@@ -509,7 +597,16 @@ function StageRow({
             placeholder="e.g. Double round"
           />
 
-          <div style={SECTION}>Format</div>
+          <SectionHead
+            info={
+              <InfoDot
+                title="Format — how a group's matches are decided"
+                options={FORMAT_OPTIONS.map((o) => ({ label: o.label, desc: o.help }))}
+              />
+            }
+          >
+            Format
+          </SectionHead>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <Select
               value={formatLabel(stage.format)}
@@ -540,9 +637,36 @@ function StageRow({
               </label>
             )}
           </div>
+          {/* Live hint: the selected format's own sentence, so it always matches the pick. */}
+          <p style={HINT}>
+            {FORMAT_OPTIONS.find((o) => o.label === formatLabel(stage.format))?.help}
+          </p>
           {stage.format.kind === 'round-robin' && stage.format.legs >= 2 && (
             <div style={{ marginTop: 10 }}>
-              <label style={{ fontSize: 12.5, display: 'block', marginBottom: 4 }}>Leg order</label>
+              <label
+                style={{
+                  fontSize: 12.5,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 2,
+                  marginBottom: 4,
+                }}
+              >
+                Leg order
+                <InfoDot
+                  title="Leg order"
+                  options={[
+                    {
+                      label: 'Full round, then return round',
+                      desc: 'Everyone plays the whole first round before any return match — the standard home-and-away shape.',
+                    },
+                    {
+                      label: 'Same opponents back-to-back',
+                      desc: 'A pair plays both their matches close together before moving on to new opponents.',
+                    },
+                  ]}
+                />
+              </label>
               <Choice
                 value={
                   stage.format.legOrder === 'interleaved'
@@ -572,7 +696,16 @@ function StageRow({
             </div>
           )}
 
-          <div style={SECTION}>Teams</div>
+          <SectionHead
+            info={
+              <InfoDot
+                title="Teams — who plays in this stage"
+                options={ENTRANT_OPTIONS.map((o) => ({ label: o.label, desc: o.help }))}
+              />
+            }
+          >
+            Teams
+          </SectionHead>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             {/* 280, not 220: "Every registered side, in one group" truncates below that,
                 and the clause that truncates is the one carrying the constraint. */}
@@ -584,20 +717,36 @@ function StageRow({
               ))}
             </Select>
             {stage.entrants.kind === 'seeded-split' && (
-              <Select
-                value={stage.entrants.method}
-                onChange={(v) =>
-                  onChange({
-                    entrants: {
-                      ...(stage.entrants as EntrantSpec & { kind: 'seeded-split' }),
-                      method: v as 'blocks' | 'snake',
+              <>
+                <Select
+                  value={stage.entrants.method}
+                  onChange={(v) =>
+                    onChange({
+                      entrants: {
+                        ...(stage.entrants as EntrantSpec & { kind: 'seeded-split' }),
+                        method: v as 'blocks' | 'snake',
+                      },
+                    })
+                  }
+                  label="Seeding method"
+                >
+                  <option value="blocks">Top-down blocks</option>
+                  <option value="snake">Snake</option>
+                </Select>
+                <InfoDot
+                  title="Seeding method — how seeds fill the groups"
+                  options={[
+                    {
+                      label: 'Top-down blocks',
+                      desc: 'Seeds fill one group at a time: 1–6 into the first group, 7–12 into the next.',
                     },
-                  })
-                }
-              >
-                <option value="blocks">Top-down blocks</option>
-                <option value="snake">Snake</option>
-              </Select>
+                    {
+                      label: 'Snake',
+                      desc: 'A serpentine draft — 1→A, 2→B, 3→C, then back — so no group gets all the top seeds.',
+                    },
+                  ]}
+                />
+              </>
             )}
           </div>
           {stage.entrants.kind !== 'all-registered' && (
@@ -636,7 +785,19 @@ function StageRow({
             <DerivationEditor stage={stage} earlierStages={earlierStages} onChange={onChange} />
           )}
 
-          <div style={SECTION}>Group names</div>
+          <SectionHead
+            info={
+              <InfoDot title="Group names">
+                <p>
+                  What each pool is called — these labels show on the admin’s “confirm entrants”
+                  screen and on fixtures (e.g. <strong>Top Six</strong>, <strong>Bottom Six</strong>
+                  ). Leave blank to fall back to Group A, Group B…
+                </p>
+              </InfoDot>
+            }
+          >
+            Group names
+          </SectionHead>
           <input
             className="field-input"
             value={labelText}
@@ -653,7 +814,21 @@ function StageRow({
           />
           <p style={HINT}>Comma-separated. Blank falls back to Group A, Group B…</p>
 
-          <div style={SECTION}>Schedule</div>
+          <SectionHead
+            info={
+              <InfoDot title="Schedule — when this stage is played">
+                <p>
+                  The first dropdown is the <strong>playing block</strong> — which block of the
+                  season calendar this stage runs in. A structure binds to blocks{' '}
+                  <strong>by position</strong> (first block, second block…), so the calendar it’s
+                  later paired with decides the actual dates.
+                </p>
+                <p>The second is the cadence — how often rounds are played inside that block.</p>
+              </InfoDot>
+            }
+          >
+            Schedule
+          </SectionHead>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <Select
               value={String(stage.schedule.blockIndex)}
@@ -703,7 +878,14 @@ function StageRow({
                 }
               />
             )}
+            <InfoDot
+              title="Cadence — how often rounds are played"
+              options={CADENCE_OPTIONS.map((o) => ({ label: o.label, desc: o.help }))}
+            />
           </div>
+          <p style={HINT}>
+            {CADENCE_OPTIONS.find((o) => o.key === stage.schedule.cadence.kind)?.help}
+          </p>
           {stage.schedule.cadence.kind === 'weekdays' && (
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
               {WEEKDAY_LABELS.map((label, day) => {
@@ -744,7 +926,34 @@ function StageRow({
             </div>
           )}
           <div style={{ marginTop: 10 }}>
-            <label style={{ fontSize: 12.5, display: 'block', marginBottom: 4 }}>Time slots</label>
+            <label
+              style={{
+                fontSize: 12.5,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 2,
+                marginBottom: 4,
+              }}
+            >
+              Time slots
+              <InfoDot
+                title="Time slots — start times on a playing day"
+                options={[
+                  {
+                    label: 'No set times',
+                    desc: 'Fixtures carry a date but no fixed start time — clubs sort it out.',
+                  },
+                  {
+                    label: 'Morning & afternoon starts',
+                    desc: 'Matches are stamped with alternating start times (e.g. 08:00 / 13:30), cycled across the day’s fixtures.',
+                  },
+                  {
+                    label: 'AM + PM double-headers',
+                    desc: 'Each playing day hosts two full rounds — every side plays a morning and an afternoon match.',
+                  },
+                ]}
+              />
+            </label>
             <Choice
               value={
                 !stage.schedule.slots
@@ -809,8 +1018,23 @@ function StageRow({
             )}
           </div>
           <div style={{ marginTop: 10 }}>
-            <label style={{ fontSize: 12.5, display: 'block', marginBottom: 4 }}>
+            <label
+              style={{
+                fontSize: 12.5,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 2,
+                marginBottom: 4,
+              }}
+            >
               Activate from (optional)
+              <InfoDot title="Activate from">
+                <p>
+                  Fixtures are generated now but stay <strong>hidden from clubs</strong> until this
+                  date. Leave it blank to show them straight away. Handy for a junior league that
+                  only starts after the mid-season break.
+                </p>
+              </InfoDot>
             </label>
             <input
               className="field-input"
@@ -900,6 +1124,12 @@ function DerivationEditor({
           onChange={(e) => update(e.target.checked ? {} : undefined)}
         />
         Teams come from an earlier stage
+        <InfoDot title="Derived entrants">
+          <p>
+            Instead of drawing from the full registration list, this stage takes its teams from an
+            earlier stage’s results — set which earlier stage and the rule for carrying them over.
+          </p>
+        </InfoDot>
       </label>
       {note && (
         <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
@@ -915,6 +1145,27 @@ function DerivationEditor({
               <option value="winners-of">Winners of</option>
               <option value="carry-forward">Carried forward</option>
             </Select>
+            <InfoDot
+              title="Rule — how teams carry over"
+              options={[
+                {
+                  label: 'Top finishers',
+                  desc: 'The highest-placed sides in the earlier stage’s standings advance.',
+                },
+                {
+                  label: 'Swap between groups',
+                  desc: 'Groups exchange sides by position — e.g. the bottom of the top group swaps with the top of the bottom group.',
+                },
+                {
+                  label: 'Winners of',
+                  desc: 'The winners of earlier fixtures (e.g. semi-finals) come through — a knockout bracket.',
+                },
+                {
+                  label: 'Carried forward',
+                  desc: 'A whole group continues into this stage unchanged.',
+                },
+              ]}
+            />
             <Select
               value={note.fromStage}
               onChange={(v) => update({ fromStage: v })}
@@ -1344,7 +1595,16 @@ function StructureEditor({
           />
         </div>
         <div>
-          <div className="field-label">Show dates from</div>
+          <div className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            Show dates from
+            <InfoDot title="Show dates from">
+              <p>
+                A <strong>preview only</strong>. Structures don’t belong to a calendar — a stage
+                binds to a block by position, and the real calendar is chosen when a league binds
+                this structure. Pick one here just to see real dates and check the stages fit.
+              </p>
+            </InfoDot>
+          </div>
           <Select value={calendarId} onChange={pickCalendar} width={260} label="Show dates from">
             <option value="">No calendar</option>
             {calendars.map((c) => (
@@ -1479,7 +1739,12 @@ function StructureEditor({
       ))}
       {saveErr && <div style={ERR}>{saveErr}</div>}
 
-      <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
+      <div className="insights-callout" style={{ marginTop: 16 }}>
+        Saving creates a <strong>new version</strong> of this structure. Any season already running
+        keeps the version it started with, so your changes only affect seasons started from now on.
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
         <Btn tone="teal" onClick={submit} disabled={!!errors.length || busy}>
           {busy ? 'Saving…' : 'Save structure'}
         </Btn>

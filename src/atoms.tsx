@@ -1,6 +1,7 @@
 /* ─── Shared atom components ─── */
 
 import { useState, useEffect, useRef, useId } from 'react';
+import { createPortal } from 'react-dom';
 import type { ReactNode, CSSProperties, ComponentType, ButtonHTMLAttributes } from 'react';
 import { CQI_STRUCTURE } from './data';
 import type { Club } from './types';
@@ -42,6 +43,13 @@ export const Icon = {
         strokeWidth="1.4"
         strokeLinecap="round"
       />
+    </svg>
+  ),
+  Info: () => (
+    <svg viewBox="0 0 16 16" fill="none">
+      <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M8 7.1v4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <circle cx="8" cy="4.8" r="0.6" fill="currentColor" />
     </svg>
   ),
   Upload: () => (
@@ -983,6 +991,142 @@ export function Field({
   );
 }
 
+/**
+ * A small "(i)" help affordance. Click to open a popover that explains a field
+ * and — when `options` is passed — every value it offers, one line each.
+ *
+ * Portaled to <body>, not absolutely positioned. Every place it's used sits
+ * inside an overflow-clipping ancestor (the stage-row card, the task-modal body,
+ * the grounds table), and an absolute child would be cut off — z-index does
+ * nothing against overflow clipping. So we anchor to the trigger's
+ * getBoundingClientRect() and render position:fixed, flipping above when there's
+ * no room below.
+ *
+ * Escape closes the popover without closing a parent modal: `useEscapeClose`
+ * listens on window in the bubble phase, so a capture-phase listener here fires
+ * first and calls stopImmediatePropagation — the modal never sees the key.
+ */
+// Module-level single-open latch: opening one dot closes any other. A stale
+// closer just no-ops on an already-closed dot, so we never need to clear it.
+let closeActiveInfoDot: (() => void) | null = null;
+
+export function InfoDot({
+  title,
+  options,
+  children,
+  align = 'start',
+}: {
+  title?: string;
+  options?: Array<{ label: string; desc: ReactNode }>;
+  children?: ReactNode;
+  align?: 'start' | 'end';
+}) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number; flipY: boolean } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+
+  const place = () => {
+    const b = btnRef.current?.getBoundingClientRect();
+    if (!b) return;
+    const W = 280;
+    const margin = 8;
+    let left = align === 'end' ? b.right - W : b.left;
+    left = Math.max(margin, Math.min(left, window.innerWidth - W - margin));
+    const spaceBelow = window.innerHeight - b.bottom;
+    const flipY = spaceBelow < 200 && b.top > spaceBelow;
+    setPos({ top: flipY ? b.top - 6 : b.bottom + 6, left, flipY });
+  };
+
+  // Listeners live only while open — closed dots hold none, so a screen full of
+  // them doesn't each keep a window listener alive.
+  useEffect(() => {
+    if (!open) return;
+    place();
+    const onDown = (e: MouseEvent) => {
+      if (btnRef.current?.contains(e.target as Node)) return;
+      if (popRef.current?.contains(e.target as Node)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopImmediatePropagation();
+        setOpen(false);
+      }
+    };
+    const onReflow = () => place();
+    document.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('resize', onReflow);
+    window.addEventListener('scroll', onReflow, true);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('resize', onReflow);
+      window.removeEventListener('scroll', onReflow, true);
+    };
+    // place() reads live layout each open; deps intentionally just [open].
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const toggle = (e: React.MouseEvent) => {
+    // The dot often sits inside a <label>; stop the click reaching it, or opening
+    // help would also toggle the label's checkbox/radio.
+    e.preventDefault();
+    e.stopPropagation();
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    if (closeActiveInfoDot) closeActiveInfoDot();
+    closeActiveInfoDot = () => setOpen(false);
+    setOpen(true);
+  };
+
+  return (
+    <span className="info-wrap">
+      <button
+        ref={btnRef}
+        type="button"
+        className="info-dot"
+        aria-label={title ?? 'What this means'}
+        aria-expanded={open}
+        onClick={toggle}
+      >
+        <Icon.Info />
+      </button>
+      {open &&
+        pos &&
+        createPortal(
+          <div
+            ref={popRef}
+            className="info-pop"
+            role="tooltip"
+            style={{
+              top: pos.top,
+              left: pos.left,
+              transform: pos.flipY ? 'translateY(-100%)' : undefined,
+            }}
+          >
+            {title && <div className="info-pop-t">{title}</div>}
+            {children}
+            {options && (
+              <dl>
+                {options.map((o) => (
+                  <div key={o.label}>
+                    <dt>{o.label}</dt>
+                    <dd>{o.desc}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+          </div>,
+          document.body,
+        )}
+    </span>
+  );
+}
+
 if (typeof window !== 'undefined')
   Object.assign(window, {
     Icon,
@@ -999,6 +1143,7 @@ if (typeof window !== 'undefined')
     NumSlider,
     BoundedNumber,
     Field,
+    InfoDot,
     Choice,
     MoneyInput,
     CountUp,

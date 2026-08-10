@@ -131,6 +131,7 @@ import {
   scoreCQI,
   useEscapeClose,
   playerStatusPill,
+  InfoDot,
 } from './atoms';
 
 /* ─── AdminFixtures — series cards + drilldown fixture table with distance + travel-cost ─── */
@@ -317,6 +318,27 @@ export function AdminFixtures({
           </p>
         </div>
         <div className="ph-actions">
+          <InfoDot title="Fixture actions" align="end">
+            <p>
+              <strong>Generate fixtures</strong> — build a season’s schedule stage by stage, or a
+              flat/ad-hoc series.
+            </p>
+            <p>
+              <strong>Approve</strong> — sign the active series off internally. Nothing is published
+              yet; this just unlocks Release.
+            </p>
+            <p>
+              <strong>Release to clubs</strong> — publish it to every club’s portal and notify them
+              by email and WhatsApp.
+            </p>
+            <p>
+              <strong>Recall / Withdraw</strong> — pull a released or approved series back.
+            </p>
+            <p>
+              <strong>Export schedule</strong> — download the active series as a spreadsheet
+              (rounds, dates, venues, travel).
+            </p>
+          </InfoDot>
           <Btn tone="outline" icon={Icon.Download} size="sm" onClick={exportSchedule}>
             Export schedule
           </Btn>
@@ -851,6 +873,24 @@ export function FixtureTable({
           ))}
         </div>
         <div className="fix-toolbar-right">
+          <InfoDot title="Series tools" align="end">
+            <p>
+              <strong>Add fixture</strong> — insert a single match into this series by hand.
+            </p>
+            <p>
+              <strong>Regenerate</strong> — rebuild the whole series as a fresh round-robin.
+              Replaces every fixture and loses manual edits.
+            </p>
+            <p>
+              <strong>Allocate venues</strong> — assign a ground to every fixture. Ranks by travel
+              distance where grounds are pinned, keeps home-ground preference, and respects per-day
+              limits and closures. Hand-set venues marked 🔒 stay put.
+            </p>
+            <p>
+              <strong>Duplicate</strong> — copy the series (e.g. to trial a change).{' '}
+              <strong>Delete series</strong> — remove it and all its fixtures.
+            </p>
+          </InfoDot>
           <Btn tone="outline" size="sm" icon={Icon.Plus} onClick={addFixture}>
             Add fixture
           </Btn>
@@ -1387,7 +1427,30 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
             return (
               <>
                 <div className="fix-edit-field">
-                  <label htmlFor={`${uid}-venue`}>Venue</label>
+                  <label htmlFor={`${uid}-venue`}>
+                    Venue
+                    <InfoDot
+                      title="Venue"
+                      options={[
+                        {
+                          label: 'Allocated',
+                          desc: 'Keep the ground the allocator chose for this fixture.',
+                        },
+                        {
+                          label: 'Primary',
+                          desc: 'The home club’s main ground.',
+                        },
+                        {
+                          label: 'Secondary',
+                          desc: 'The home club’s backup ground, if they recorded one.',
+                        },
+                        {
+                          label: 'Other',
+                          desc: 'Type an off-site venue by hand. A hand-set venue is locked — the allocator won’t move it.',
+                        },
+                      ]}
+                    />
+                  </label>
                   <select
                     id={`${uid}-venue`}
                     value={venueMode}
