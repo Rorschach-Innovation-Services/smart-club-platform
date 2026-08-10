@@ -2388,7 +2388,7 @@ function Shell({
           {branding?.logoUrl && <img className="h-logo-img" src={branding.logoUrl} alt={orgName} />}
         </div>
         <div className="h-divider" />
-        <span className="h-sub">Smart Club Integration · Cricket Services</span>
+        <span className="h-sub">{branding?.copy?.tagline ?? 'Smart Club Integration'}</span>
 
         <div className="h-spacer" />
 

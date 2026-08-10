@@ -15,6 +15,8 @@ describe('resolveCopy', () => {
     expect(c.welcome).toBe('Sign in');
     expect(c.footer).toBe('Powered by Medicoach');
     expect(c.support).toBe('');
+    // Sport-neutral default: never the sport-specific "· Cricket Services".
+    expect(c.tagline).toBe('Smart Club Integration');
   });
 
   it('derives everything from branding.name when copy is empty', () => {
@@ -58,6 +60,7 @@ describe('resolveCopy', () => {
         crumbRoot: 'Lions Cricket',
         welcome: 'Welcome back',
         eyebrow: 'Lions · DP World',
+        tagline: 'Smart Club Integration · Cricket Services',
         footer: 'Powered by Lions',
         support: 'Lions Office · office@lions.co.za',
       },
@@ -70,6 +73,7 @@ describe('resolveCopy', () => {
     expect(c.crumbRoot).toBe('Lions Cricket');
     expect(c.welcome).toBe('Welcome back');
     expect(c.eyebrow).toBe('Lions · DP World');
+    expect(c.tagline).toBe('Smart Club Integration · Cricket Services');
     expect(c.footer).toBe('Powered by Lions');
     expect(c.support).toBe('Lions Office · office@lions.co.za');
   });

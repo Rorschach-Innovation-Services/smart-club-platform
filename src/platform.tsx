@@ -109,9 +109,10 @@ async function downscaleHero(file: File): Promise<Blob> {
 }
 
 /** The org-copy slots resolveCopy (src/branding.ts) falls back over. */
-// Order matters for the Copy card's 2-column grid: heroBlurb (the only full-width
-// textarea) is LAST so the ten single-line fields fill complete rows above it with
-// no orphaned cell. The save loop is order-independent, so this is display-only.
+// heroBlurb (the only full-width textarea) is LAST in the Copy card's 2-column grid.
+// There are 11 single-line fields, so one row above heroBlurb has a single orphaned
+// cell — acceptable in this operator-only console. The save loop is order-independent,
+// so ordering here is display-only.
 const COPY_SLOTS: { key: keyof BrandingCopy & string; label: string; hint?: string }[] = [
   {
     key: 'orgShort',
@@ -120,6 +121,11 @@ const COPY_SLOTS: { key: keyof BrandingCopy & string; label: string; hint?: stri
   },
   { key: 'welcome', label: 'Sign-in welcome' },
   { key: 'eyebrow', label: 'Sign-in eyebrow' },
+  {
+    key: 'tagline',
+    label: 'Brand strip',
+    hint: 'Top line above the logo on login & signup, and in the app header (hidden on mobile). Use “A · B”.',
+  },
   { key: 'office', label: 'Office label' },
   { key: 'admin', label: 'Administrators label' },
   {
@@ -1918,6 +1924,9 @@ function CopyCard({
                 className="field-input"
                 value={draft[key]}
                 onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+                // The brand strip is letter-spaced + uppercased in the header; cap it
+                // so a long value can't overflow that flex row.
+                maxLength={key === 'tagline' ? 48 : undefined}
                 placeholder={
                   (derived as unknown as Record<string, string>)[key] ||
                   (key === 'support' ? 'Nomsa Dlamini · office@union.co.za' : '')

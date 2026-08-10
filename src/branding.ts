@@ -24,6 +24,7 @@ export interface ResolvedCopy {
   crumbRoot: string;
   welcome: string;
   eyebrow: string;
+  tagline: string;
   support: string;
   footer: string;
 }
@@ -50,6 +51,10 @@ export function resolveCopy(branding?: Partial<TenantBranding> | null): Resolved
     crumbRoot: copy.crumbRoot || orgShort,
     welcome: copy.welcome || 'Sign in',
     eyebrow: copy.eyebrow || orgName,
+    // Sport-neutral default: the platform half only. The sport half ("· Cricket
+    // Services") is a per-tenant override — never a global default, or football
+    // tenants would show the wrong sport. Cricket tenants seed the full string.
+    tagline: copy.tagline || 'Smart Club Integration',
     support: copy.support || '',
     footer: copy.footer || 'Powered by Medicoach',
   };

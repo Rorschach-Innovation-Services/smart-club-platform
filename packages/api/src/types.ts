@@ -430,6 +430,8 @@ export interface TutorialVideo {
 export interface BrandingCopy {
   welcome?: string;
   eyebrow?: string;
+  /** Small-caps brand strip above the logo (login, signup) and in the app header. */
+  tagline?: string;
   office?: string;
   admin?: string;
   support?: string;

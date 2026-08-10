@@ -45,6 +45,7 @@ export const BRANDING: Record<string, TenantConfig['branding']> = {
     copy: {
       welcome: 'Welcome to Dolphins Pipeline',
       eyebrow: 'Dolphins Cricket Services · 2026 / 27 Season',
+      tagline: 'Smart Club Integration · Cricket Services',
       office: 'Dolphins office',
       admin: 'Administrator · Dolphins',
       support: 'Cricket Services · support@dolphinscricket.co.za',
@@ -66,6 +67,7 @@ export const BRANDING: Record<string, TenantConfig['branding']> = {
     copy: {
       welcome: 'Welcome — choose your profile',
       eyebrow: 'KZNCU & EMCU · 2026 / 27 Season',
+      tagline: 'Smart Club Integration · Cricket Services',
       office: 'Lions office',
       admin: 'Administrator · Lions',
       support: 'Cricket Services · support@lionscricket.co.za',
