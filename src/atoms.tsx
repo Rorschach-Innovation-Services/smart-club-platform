@@ -1022,7 +1022,12 @@ export function InfoDot({
   align?: 'start' | 'end';
 }) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left: number; flipY: boolean } | null>(null);
+  const [pos, setPos] = useState<{
+    top: number;
+    left: number;
+    flipY: boolean;
+    maxHeight: number;
+  } | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
 
@@ -1033,9 +1038,13 @@ export function InfoDot({
     const margin = 8;
     let left = align === 'end' ? b.right - W : b.left;
     left = Math.max(margin, Math.min(left, window.innerWidth - W - margin));
-    const spaceBelow = window.innerHeight - b.bottom;
-    const flipY = spaceBelow < 200 && b.top > spaceBelow;
-    setPos({ top: flipY ? b.top - 6 : b.bottom + 6, left, flipY });
+    // Open on whichever side has more room; a tall option list then caps to the
+    // available height and scrolls inside itself rather than running off-screen.
+    const spaceBelow = window.innerHeight - b.bottom - margin;
+    const spaceAbove = b.top - margin;
+    const flipY = spaceBelow < 240 && spaceAbove > spaceBelow;
+    const maxHeight = Math.max(140, (flipY ? spaceAbove : spaceBelow) - 6);
+    setPos({ top: flipY ? b.top - 6 : b.bottom + 6, left, flipY, maxHeight });
   };
 
   // Listeners live only while open — closed dots hold none, so a screen full of
@@ -1105,6 +1114,7 @@ export function InfoDot({
             style={{
               top: pos.top,
               left: pos.left,
+              maxHeight: pos.maxHeight,
               transform: pos.flipY ? 'translateY(-100%)' : undefined,
             }}
           >
