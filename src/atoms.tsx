@@ -1017,7 +1017,7 @@ export function InfoDot({
   align = 'start',
 }: {
   title?: string;
-  options?: Array<{ label: string; desc: ReactNode }>;
+  options?: Array<{ label: string; desc: ReactNode; eg?: ReactNode }>;
   children?: ReactNode;
   align?: 'start' | 'end';
 }) {
@@ -1125,7 +1125,10 @@ export function InfoDot({
                 {options.map((o) => (
                   <div key={o.label}>
                     <dt>{o.label}</dt>
-                    <dd>{o.desc}</dd>
+                    <dd>
+                      {o.desc}
+                      {o.eg && <span className="info-pop-eg">e.g. {o.eg}</span>}
+                    </dd>
                   </div>
                 ))}
               </dl>

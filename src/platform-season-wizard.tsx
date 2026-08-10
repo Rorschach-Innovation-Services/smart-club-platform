@@ -193,10 +193,12 @@ function LeagueSetupRow({
             {
               label: 'Start from a template',
               desc: 'Begin from a ready-made shape (flat league, split league, pools + knockout) and it becomes a new structure for this client.',
+              eg: 'a new club using the "Split league with mid-season swap" template',
             },
             {
               label: 'Use an existing structure',
               desc: 'Reuse a structure this client already has — no new version is created.',
+              eg: 'last season’s Premier Men structure, run again',
             },
           ]}
         />
@@ -261,12 +263,18 @@ function LeagueSetupRow({
             options={[
               {
                 label: 'Competition label',
-                desc: 'What this format stream is called, e.g. "50 Over (Red Ball)". A league can run more than one.',
+                desc: 'What this format stream is called. A league can run more than one.',
+                eg: '50 Over (Red Ball)',
               },
-              { label: 'Overs', desc: 'Overs per side — used on scorecards and match defaults.' },
+              {
+                label: 'Overs',
+                desc: 'Overs per side — used on scorecards and match defaults.',
+                eg: '50 for a one-day league, 20 for a T20',
+              },
               {
                 label: 'Ball type',
-                desc: 'The ball used (e.g. Red, Pink, White) — shown on fixtures for clarity.',
+                desc: 'The ball used — shown on fixtures for clarity.',
+                eg: 'Red, Pink or White',
               },
             ]}
           />

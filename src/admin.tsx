@@ -1443,10 +1443,12 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
                         {
                           label: 'Secondary',
                           desc: 'The home club’s backup ground, if they recorded one.',
+                          eg: 'a second pitch used when the main ground is booked',
                         },
                         {
                           label: 'Other',
                           desc: 'Type an off-site venue by hand. A hand-set venue is locked — the allocator won’t move it.',
+                          eg: 'a neutral final venue',
                         },
                       ]}
                     />

@@ -794,10 +794,12 @@ function StartFlatSeasonForm({
                 {
                   label: 'A season calendar',
                   desc: 'Use one the operator set up, so this season shares its playing blocks, breaks and excluded dates. Pick the block to play in.',
+                  eg: 'the 2026/27 season calendar, First half block',
                 },
                 {
                   label: 'Custom dates',
                   desc: 'Set a plain start and end date yourself, with no shared breaks. Best for a one-off or a league with no calendar.',
+                  eg: 'a knockout cup run over one weekend',
                 },
               ]}
             />
@@ -958,15 +960,21 @@ function StartFlatSeasonForm({
               <InfoDot
                 title="Cadence — how often rounds are played"
                 options={[
-                  { label: 'Weekly', desc: 'One round every week.' },
-                  { label: 'Every N weeks', desc: 'One round every few weeks — set the gap.' },
+                  { label: 'Weekly', desc: 'One round every week.', eg: 'a Saturday league' },
+                  {
+                    label: 'Every N weeks',
+                    desc: 'One round every few weeks — set the gap.',
+                    eg: 'a fortnightly midweek league',
+                  },
                   {
                     label: 'Set days only',
-                    desc: 'Only on the weekdays you pick (e.g. Sat & Sun).',
+                    desc: 'Only on the weekdays you pick.',
+                    eg: 'a weekend festival on Sat & Sun',
                   },
                   {
                     label: 'Spread across block',
                     desc: 'Rounds spaced evenly across the whole block.',
+                    eg: 'six rounds over a 12-week block',
                   },
                 ]}
               />
@@ -1826,6 +1834,7 @@ function StageCard({
             {
               label: 'Awaiting entrants',
               desc: 'This stage’s teams depend on an earlier stage’s results — confirm who plays before it can generate.',
+              eg: 'a finals stage waiting on the group standings',
             },
             {
               label: 'Ready to generate',
@@ -1834,6 +1843,7 @@ function StageCard({
             {
               label: 'Doesn’t fit',
               desc: 'The rounds need more time than the calendar block allows — shorten the format or widen the block.',
+              eg: '11 rounds needed but the block is only 8 weeks',
             },
             {
               label: 'Generated',
@@ -1842,6 +1852,7 @@ function StageCard({
             {
               label: 'Needs regenerating',
               desc: 'Entrants or pairings changed since the fixtures were built — regenerate to catch up.',
+              eg: 'a side withdrew after the fixtures were made',
             },
           ]}
         />

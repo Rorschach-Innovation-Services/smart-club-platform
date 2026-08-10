@@ -207,16 +207,23 @@ function Modal({
 // `help` is a full sentence (not a fragment) so it reads on its own — used both in
 // the Format info-popover and as the live hint under the select. `describeFormat`
 // stays as-is for the collapsed-row subtitle it was written for.
-const FORMAT_OPTIONS: Array<{ label: string; value: FormatSpec; help: string }> = [
+const FORMAT_OPTIONS: Array<{
+  label: string;
+  value: FormatSpec;
+  help: string;
+  eg: string;
+}> = [
   {
     label: 'Single round robin',
     value: { kind: 'round-robin', legs: 1 },
     help: 'Every side plays every other side once. Standings decide the winner — no knockout.',
+    eg: 'a short league where 12 sides each play 11 matches',
   },
   {
     label: 'Double round robin',
     value: { kind: 'round-robin', legs: 2 },
     help: 'Every side plays every other side twice, once home and once away.',
+    eg: 'a full home-and-away league season',
   },
   // The server accepts legs 1–3 and the generator implements 3; leaving it off the list
   // rendered a three-leg stage as "Single round robin" and retyped it on any touch.
@@ -224,21 +231,25 @@ const FORMAT_OPTIONS: Array<{ label: string; value: FormatSpec; help: string }> 
     label: 'Triple round robin',
     value: { kind: 'round-robin', legs: 3 },
     help: 'Every side plays every other side three times.',
+    eg: 'a small 4-team pool that needs more matches to separate sides',
   },
   {
     label: 'Knockout — seeded',
     value: { kind: 'knockout', pairing: 'seeded' },
     help: 'A single-elimination bracket seeded by rank — top seed meets bottom seed, and losers are out.',
+    eg: 'an end-of-season playoff: 1st v 4th, 2nd v 3rd, then the final',
   },
   {
     label: 'Knockout — cross-pool',
     value: { kind: 'knockout', pairing: 'cross-pool' },
     help: 'A bracket that crosses groups — the winner of one pool meets the runner-up of another.',
+    eg: 'Pool A winner v Pool B runner-up in the semi-finals',
   },
   {
     label: 'Single match',
     value: { kind: 'single-match' },
     help: 'One fixture between two sides — a final or any other one-off.',
+    eg: 'a grand final',
   },
   // The ADR's escape hatch. Reachable through JSON import and accepted by the server's
   // FORMAT_KINDS, so leaving it off the list rendered a blank Format select on a stage
@@ -247,6 +258,7 @@ const FORMAT_OPTIONS: Array<{ label: string; value: FormatSpec; help: string }> 
     label: 'Entered by hand',
     value: { kind: 'manual' },
     help: 'No fixtures are generated. An administrator types in each match themselves.',
+    eg: 'an invitational with no fixed pattern',
   },
 ];
 
@@ -272,35 +284,46 @@ const ENTRANT_OPTIONS = [
     key: 'all-registered',
     label: 'Every registered side, in one group',
     help: 'Every side entered in the league plays in a single group. This kind cannot be split into pools.',
+    eg: 'a 12-team league that all plays each other',
   },
   {
     key: 'seeded-split',
     label: 'Seeded into groups',
     help: 'Sides are divided into pools by seeding order — set how many groups and how below.',
+    eg: '12 sides split into a Top Six and a Bottom Six',
   },
   {
     key: 'manual',
     label: 'Entered by an administrator',
     help: "An administrator chooses who plays. Use this when a stage's teams come from an earlier stage's results.",
+    eg: 'the four semi-finalists carried through to a knockout',
   },
 ] as const;
 
 const CADENCE_OPTIONS = [
-  { key: 'weekly', label: 'Weekly', help: 'One round is played every week.' },
+  {
+    key: 'weekly',
+    label: 'Weekly',
+    help: 'One round is played every week.',
+    eg: 'a Saturday league',
+  },
   {
     key: 'every-n-weeks',
     label: 'Every N weeks',
     help: 'One round every few weeks — set the gap. For leagues that skip some weekends.',
+    eg: 'a fortnightly midweek league (every 2 weeks)',
   },
   {
     key: 'weekdays',
     label: 'Set days only',
     help: 'Matches only on the weekdays you pick (e.g. Saturday and Sunday). Rounds fill those days.',
+    eg: 'a weekend festival playing both Sat and Sun',
   },
   {
     key: 'spread',
     label: 'Spread across block',
     help: 'Rounds are spaced evenly across the whole playing block, however long it runs.',
+    eg: 'six rounds spread evenly over a 12-week block',
   },
 ] as const;
 
@@ -385,10 +408,12 @@ function GroupPlanEditor({
           {
             label: 'Even groups',
             desc: 'Pick a number of equal groups. If sides don’t divide evenly, the earlier groups take the extra one.',
+            eg: '12 sides into 2 groups of 6',
           },
           {
             label: 'Exact sizes',
-            desc: 'Type each group’s size, e.g. "5, 5, 5, 4" — the only way to make groups of different sizes.',
+            desc: 'Type each group’s size — the only way to make groups of different sizes.',
+            eg: '19 sides as "5, 5, 5, 4"',
           },
         ]}
       />
@@ -601,7 +626,7 @@ function StageRow({
             info={
               <InfoDot
                 title="Format — how a group's matches are decided"
-                options={FORMAT_OPTIONS.map((o) => ({ label: o.label, desc: o.help }))}
+                options={FORMAT_OPTIONS.map((o) => ({ label: o.label, desc: o.help, eg: o.eg }))}
               />
             }
           >
@@ -659,10 +684,12 @@ function StageRow({
                     {
                       label: 'Full round, then return round',
                       desc: 'Everyone plays the whole first round before any return match — the standard home-and-away shape.',
+                      eg: 'first-half fixtures, then the reverse fixtures after the break',
                     },
                     {
                       label: 'Same opponents back-to-back',
                       desc: 'A pair plays both their matches close together before moving on to new opponents.',
+                      eg: 'a two-match weekend against the same side',
                     },
                   ]}
                 />
@@ -700,7 +727,7 @@ function StageRow({
             info={
               <InfoDot
                 title="Teams — who plays in this stage"
-                options={ENTRANT_OPTIONS.map((o) => ({ label: o.label, desc: o.help }))}
+                options={ENTRANT_OPTIONS.map((o) => ({ label: o.label, desc: o.help, eg: o.eg }))}
               />
             }
           >
@@ -739,10 +766,12 @@ function StageRow({
                     {
                       label: 'Top-down blocks',
                       desc: 'Seeds fill one group at a time: 1–6 into the first group, 7–12 into the next.',
+                      eg: 'a Premier pool (seeds 1–6) and a Reserve pool (seeds 7–12)',
                     },
                     {
                       label: 'Snake',
                       desc: 'A serpentine draft — 1→A, 2→B, 3→C, then back — so no group gets all the top seeds.',
+                      eg: 'two balanced pools, each with a mix of strong and weak sides',
                     },
                   ]}
                 />
@@ -880,7 +909,7 @@ function StageRow({
             )}
             <InfoDot
               title="Cadence — how often rounds are played"
-              options={CADENCE_OPTIONS.map((o) => ({ label: o.label, desc: o.help }))}
+              options={CADENCE_OPTIONS.map((o) => ({ label: o.label, desc: o.help, eg: o.eg }))}
             />
           </div>
           <p style={HINT}>
@@ -945,11 +974,13 @@ function StageRow({
                   },
                   {
                     label: 'Morning & afternoon starts',
-                    desc: 'Matches are stamped with alternating start times (e.g. 08:00 / 13:30), cycled across the day’s fixtures.',
+                    desc: 'Matches are stamped with alternating start times, cycled across the day’s fixtures.',
+                    eg: '08:00 morning / 13:30 afternoon for a T20 Pink Ball day',
                   },
                   {
                     label: 'AM + PM double-headers',
                     desc: 'Each playing day hosts two full rounds — every side plays a morning and an afternoon match.',
+                    eg: 'a festival day where each team plays twice',
                   },
                 ]}
               />
@@ -1151,18 +1182,22 @@ function DerivationEditor({
                 {
                   label: 'Top finishers',
                   desc: 'The highest-placed sides in the earlier stage’s standings advance.',
+                  eg: 'the top 4 of a group go through to the finals',
                 },
                 {
                   label: 'Swap between groups',
-                  desc: 'Groups exchange sides by position — e.g. the bottom of the top group swaps with the top of the bottom group.',
+                  desc: 'Groups exchange sides by position — the bottom of the top group swaps with the top of the bottom group.',
+                  eg: '11th–12th of the Top Six swap with 1st–2nd of the Bottom Six',
                 },
                 {
                   label: 'Winners of',
-                  desc: 'The winners of earlier fixtures (e.g. semi-finals) come through — a knockout bracket.',
+                  desc: 'The winners of earlier fixtures come through — a knockout bracket.',
+                  eg: 'the two semi-final winners meet in the final',
                 },
                 {
                   label: 'Carried forward',
                   desc: 'A whole group continues into this stage unchanged.',
+                  eg: 'the same Top Six plays a second round',
                 },
               ]}
             />
