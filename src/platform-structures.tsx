@@ -1860,11 +1860,11 @@ function StartPicker({
   return (
     <div>
       <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
-        Start from a shape that already matches how the league runs, then tune it. A template is a
-        starting point — everything stays editable afterwards.
+        Build a structure yourself, or start from a template that already matches how the league
+        runs. Either way, everything stays editable afterwards.
       </p>
       {calendars.length > 1 && (
-        <div style={{ marginBottom: 12 }}>
+        <div style={{ marginBottom: 14 }}>
           <div className="field-label">Season calendar</div>
           <Select value={calendarId} onChange={setCalendarId} width={240} label="Season calendar">
             {calendars.map((c) => (
@@ -1873,11 +1873,70 @@ function StartPicker({
               </option>
             ))}
           </Select>
-          <p style={HINT}>
-            The template&apos;s stages are scheduled against this calendar&apos;s blocks.
-          </p>
+          <p style={HINT}>New stages are scheduled against this calendar&apos;s blocks.</p>
         </div>
       )}
+
+      {/* Primary path: build your own. Templates are the alternative, below. */}
+      <div style={{ display: 'grid', gap: 10 }}>
+        <button
+          type="button"
+          onClick={() => onPick(blankStructure(calendar))}
+          style={{
+            textAlign: 'left',
+            display: 'flex',
+            gap: 12,
+            alignItems: 'center',
+            border: '2px solid var(--brand-primary, #16332B)',
+            borderRadius: 10,
+            padding: '14px 16px',
+            background: 'var(--green-pale, #EAF3EE)',
+            cursor: 'pointer',
+          }}
+        >
+          <span
+            style={{
+              flex: '0 0 auto',
+              width: 30,
+              height: 30,
+              borderRadius: 8,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: 'var(--brand-primary, #16332B)',
+              color: '#fff',
+            }}
+          >
+            <Icon.Plus />
+          </span>
+          <span>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>Build from scratch</div>
+            <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5, marginTop: 2 }}>
+              Start with one empty stage and shape every detail yourself. Best when no template
+              quite fits.
+            </div>
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setImporting(true)}
+          style={{
+            textAlign: 'left',
+            border: '1px solid var(--line)',
+            borderRadius: 10,
+            padding: '12px 14px',
+            background: 'var(--white, #fff)',
+            cursor: 'pointer',
+          }}
+        >
+          <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 3 }}>Import JSON</div>
+          <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5 }}>
+            Paste a structure exported from another client, or one prepared offline.
+          </div>
+        </button>
+      </div>
+
+      <div style={{ ...SECTION, marginTop: 18 }}>Or start from a template</div>
       <div style={{ display: 'grid', gap: 10 }}>
         {STRUCTURE_TEMPLATES.map((t) => (
           <button
@@ -1903,13 +1962,8 @@ function StartPicker({
           </button>
         ))}
       </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
-        <Btn tone="outline" onClick={() => onPick(blankStructure(calendar))}>
-          Build from scratch
-        </Btn>
-        <Btn tone="outline" onClick={() => setImporting(true)}>
-          Import JSON
-        </Btn>
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
         <Btn tone="ghost" onClick={onClose}>
           Cancel
         </Btn>
