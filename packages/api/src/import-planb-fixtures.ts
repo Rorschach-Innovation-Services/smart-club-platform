@@ -1081,23 +1081,47 @@ interface LedgerBooking {
   time?: string;
 }
 
-/** Minimal in-script mirror of src/competition/venues.ts:21-32,147-161's clash
- * semantics — deliberately NOT imported (frontend code, authored under a looser
- * tsconfig): an untimed fixture owns its whole ground-day; a timed fixture clashes on
- * the same ground + date + exact time, OR against an untimed booking that day. */
+/** How a ground name maps into the ledger: the identity bookings share, and how many
+ * parallel fixtures it hosts per slot. Registry-resolved grounds use the venue id (so
+ * a sheet's "Chatsworth Oval" and a club record's "Chatsworth Cricket Oval" share one
+ * ledger row once aliased to the same venue) and the venue's real surface count —
+ * exactly the capacity the app's own allocator books against
+ * (src/competition/venues.ts:426, `Math.max(1, surfaces ?? 1)`). */
+interface GroundSlot {
+  key: string;
+  capacity: number;
+}
+
+/** Minimal in-script mirror of src/competition/venues.ts buildLedger clash semantics —
+ * deliberately NOT imported (frontend code, authored under a looser tsconfig). Per
+ * ground-and-date, bookings count per slot with untimed stored as its own slot that
+ * also occupies every timed slot; a slot is full when its load reaches the ground's
+ * surface capacity. The default resolver (single surface, name-keyed) preserves the
+ * strict semantics the unit tests pin down. */
 export class GroundLedger {
   private byGroundDate = new Map<string, LedgerBooking[]>();
-  private key(ground: string, date: string) {
-    return `${normaliseGround(ground)}|${date}`;
+  constructor(
+    private resolve: (ground: string) => GroundSlot = (g) => ({
+      key: normaliseGround(g),
+      capacity: 1,
+    }),
+  ) {}
+  private slotKey(ground: string, date: string): { k: string; capacity: number } {
+    const { key, capacity } = this.resolve(ground);
+    return { k: `${key}|${date}`, capacity };
   }
   check(ground: string, date: string, time: string | undefined): LedgerBooking | undefined {
-    const entries = this.byGroundDate.get(this.key(ground, date));
+    const { k, capacity } = this.slotKey(ground, date);
+    const entries = this.byGroundDate.get(k);
     if (!entries || entries.length === 0) return undefined;
-    if (!time) return entries[0];
-    return entries.find((e) => !e.time || e.time === time);
+    // Mirror venueLoad: a timed slot is loaded by same-time bookings plus untimed ones
+    // (which own the whole day); an untimed fixture is loaded by everything that day.
+    const relevant = time ? entries.filter((e) => !e.time || e.time === time) : entries;
+    if (relevant.length < capacity) return undefined;
+    return relevant[0];
   }
   book(ground: string, date: string, time: string | undefined, booking: LedgerBooking) {
-    const k = this.key(ground, date);
+    const { k } = this.slotKey(ground, date);
     const list = this.byGroundDate.get(k) ?? [];
     list.push({ ...booking, time });
     this.byGroundDate.set(k, list);
@@ -1170,7 +1194,14 @@ function runClashPass(
   registryMiss: Set<string>,
   barredGrounds: Set<string>,
 ): { unresolved: string[]; autoMoves: string[]; skippedUndeterminable: number } {
-  const ledger = new GroundLedger();
+  // Registry-resolved grounds share a ledger row by venue id and book against the
+  // venue's real surface count; unresolved names stay strict at one surface.
+  const ledger = new GroundLedger((ground) => {
+    const venue = resolveVenue(ground, byNormVenue);
+    return venue
+      ? { key: `v:${venue.id}`, capacity: Math.max(1, Number(venue.surfaces) || 1) }
+      : { key: `g:${normaliseGround(ground)}`, capacity: 1 };
+  });
   let skippedUndeterminable = 0;
 
   // Seed with every fixture NOT part of this run's writes (kept + non-planb series) —
@@ -1860,6 +1891,16 @@ async function runImport(args: Args) {
       `\n── Venue registry misses (${registryMiss.size}) — written as venueOverride, not locked:`,
     );
     for (const g of registryMiss) console.log(`  "${g}"`);
+    // The full registry, so VENUE_ALIASES can be authored straight from this report —
+    // a miss is usually the sheet's short name for a ground the registry stores under
+    // the club record's fuller spelling.
+    console.log(`\n── Venue registry (${venues.length} ground(s)) — alias misses onto these:`);
+    for (const v of [...venues].sort((a, b) => a.name.localeCompare(b.name))) {
+      const pinned = Number.isFinite(v.lat) && Number.isFinite(v.lon) ? 'pinned' : 'no pin';
+      console.log(
+        `  ${v.name}  (${v.id} · ${Math.max(1, Number(v.surfaces) || 1)} surface(s) · ${pinned})`,
+      );
+    }
   }
 
   const suffixNotes = reportSuffixMixing(usage);

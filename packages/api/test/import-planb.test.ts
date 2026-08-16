@@ -173,3 +173,46 @@ describe('normalise / redirectedNormalise / pairKey — cross-file name matching
     assert.notEqual(pairKey('UKZN', 'Delta'), pairKey('UKZN', 'Umzinto'));
   });
 });
+
+describe('GroundLedger — multi-surface capacity (registry-resolved grounds)', () => {
+  const twoSurfaces = () => new GroundLedger(() => ({ key: 'v:chatsworth-oval', capacity: 2 }));
+
+  test('a 2-surface ground hosts two same-slot fixtures and blocks the third', () => {
+    const ledger = twoSurfaces();
+    ledger.book('Chatsworth Oval', '2026-09-01', '13:00', {
+      seriesId: 's1',
+      fixtureId: 'f1',
+      date: '2026-09-01',
+      time: '13:00',
+    });
+    assert.equal(ledger.check('Chatsworth Oval', '2026-09-01', '13:00'), undefined);
+    ledger.book('Chatsworth Oval', '2026-09-01', '13:00', {
+      seriesId: 's2',
+      fixtureId: 'f1',
+      date: '2026-09-01',
+      time: '13:00',
+    });
+    assert.ok(ledger.check('Chatsworth Oval', '2026-09-01', '13:00'));
+  });
+
+  test('resolver key unifies spelling variants onto one ledger row', () => {
+    const ledger = new GroundLedger(() => ({ key: 'v:chatsworth-oval', capacity: 1 }));
+    ledger.book('Chatsworth Cricket Oval', '2026-09-01', '13:00', {
+      seriesId: 's1',
+      fixtureId: 'f1',
+      date: '2026-09-01',
+      time: '13:00',
+    });
+    assert.ok(ledger.check('CHATSWORTH OVAL', '2026-09-01', '13:00'));
+  });
+
+  test('an untimed booking consumes one of two surfaces, not the whole ground', () => {
+    const ledger = twoSurfaces();
+    ledger.book('Chatsworth Oval', '2026-09-01', undefined, {
+      seriesId: 's1',
+      fixtureId: 'f1',
+      date: '2026-09-01',
+    });
+    assert.equal(ledger.check('Chatsworth Oval', '2026-09-01', '13:00'), undefined);
+  });
+});
