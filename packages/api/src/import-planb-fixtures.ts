@@ -1228,63 +1228,87 @@ function runClashPass(
 
   const unresolved: string[] = [];
   const autoMoves: string[] = [];
-  for (const { series, fixtures } of built) {
-    const teamToClub = new Map((series.participants ?? []).map((p) => [p.teamId, p.clubId]));
-    for (const f of fixtures) {
-      const ground = effectiveGroundIncoming(series, f, clubsById, reBaseMap);
-      if (!ground) {
-        skippedUndeterminable++;
-        continue;
-      }
-      const clash = ledger.check(ground, f.date, f.time);
-      if (!clash) {
-        ledger.book(ground, f.date, f.time, {
-          seriesId: String(series.id),
-          fixtureId: f.id,
-          date: f.date,
-          time: f.time,
-        });
-        continue;
-      }
-      // One-shot auto-move (union Rule 4): try the OTHER participant's allocated ground —
-      // registry-first via setVenue, and refused if that ground is itself barred (a
-      // barred ground is never a legitimate move target, even as a one-shot escape).
-      const awayClubId = teamToClub.get(f.away);
-      const altGround = awayClubId
-        ? allocatedGroundName(awayClubId, clubsById, reBaseMap)
-        : undefined;
-      const altBarred = altGround ? barredGrounds.has(normaliseGround(altGround)) : false;
-      const altClash =
-        altGround && !altBarred ? ledger.check(altGround, f.date, f.time) : undefined;
-      if (altGround && !altBarred && !altClash) {
-        setVenue(
-          f,
-          altGround,
-          'alternative',
-          'Moved to avoid ground clash',
-          byNormVenue,
-          registryMiss,
-        );
-        ledger.book(altGround, f.date, f.time, {
-          seriesId: String(series.id),
-          fixtureId: f.id,
-          date: f.date,
-          time: f.time,
-        });
-        autoMoves.push(
-          `${series.id} ${f.id}: ${ground} → ${altGround} on ${f.date}${f.time ? ' ' + f.time : ''} (clashed with ${clash.seriesId}/${clash.fixtureId})`,
-        );
-      } else {
-        unresolved.push(
-          `${series.id} ${f.id}: ${ground} on ${f.date}${f.time ? ' ' + f.time : ''} clashes with ${clash.seriesId}/${clash.fixtureId}${altBarred ? ` (alt ground "${altGround}" is barred)` : ''}`,
-        );
-        if (allowClashes) {
+  // Two phases: union-authored venues (explicit venue fields from the REVISED sheet /
+  // pair-map / re-bases) book FIRST, then venue-less fixtures fill around them. Dry run
+  // #3 showed why order matters: a women's fixture auto-moved onto Lahee Park before
+  // the Promotion T20 fixture whose union-fixed venue IS Lahee Park had booked it.
+  // Explicit-vs-explicit clashes are never auto-moved — both venues are union-authored,
+  // so a human picks which one moves in the console after import.
+  for (const explicitPhase of [true, false]) {
+    for (const { series, fixtures } of built) {
+      const teamToClub = new Map((series.participants ?? []).map((p) => [p.teamId, p.clubId]));
+      for (const f of fixtures) {
+        const isExplicit = Boolean(f.venueOverride || f.venueName);
+        if (isExplicit !== explicitPhase) continue;
+        const ground = effectiveGroundIncoming(series, f, clubsById, reBaseMap);
+        if (!ground) {
+          skippedUndeterminable++;
+          continue;
+        }
+        const clash = ledger.check(ground, f.date, f.time);
+        if (!clash) {
           ledger.book(ground, f.date, f.time, {
             seriesId: String(series.id),
             fixtureId: f.id,
             date: f.date,
             time: f.time,
           });
+          continue;
+        }
+        if (explicitPhase) {
+          unresolved.push(
+            `${series.id} ${f.id}: ${ground} on ${f.date}${f.time ? ' ' + f.time : ''} clashes with ${clash.seriesId}/${clash.fixtureId} (both union-authored venues — move one in the console)`,
+          );
+          if (allowClashes) {
+            ledger.book(ground, f.date, f.time, {
+              seriesId: String(series.id),
+              fixtureId: f.id,
+              date: f.date,
+              time: f.time,
+            });
+          }
+          continue;
+        }
+        // One-shot auto-move (union Rule 4): try the OTHER participant's allocated
+        // ground — registry-first via setVenue, and refused if that ground is itself
+        // barred (a barred ground is never a legitimate move target).
+        const awayClubId = teamToClub.get(f.away);
+        const altGround = awayClubId
+          ? allocatedGroundName(awayClubId, clubsById, reBaseMap)
+          : undefined;
+        const altBarred = altGround ? barredGrounds.has(normaliseGround(altGround)) : false;
+        const altClash =
+          altGround && !altBarred ? ledger.check(altGround, f.date, f.time) : undefined;
+        if (altGround && !altBarred && !altClash) {
+          setVenue(
+            f,
+            altGround,
+            'alternative',
+            'Moved to avoid ground clash',
+            byNormVenue,
+            registryMiss,
+          );
+          ledger.book(altGround, f.date, f.time, {
+            seriesId: String(series.id),
+            fixtureId: f.id,
+            date: f.date,
+            time: f.time,
+          });
+          autoMoves.push(
+            `${series.id} ${f.id}: ${ground} → ${altGround} on ${f.date}${f.time ? ' ' + f.time : ''} (clashed with ${clash.seriesId}/${clash.fixtureId})`,
+          );
+        } else {
+          unresolved.push(
+            `${series.id} ${f.id}: ${ground} on ${f.date}${f.time ? ' ' + f.time : ''} clashes with ${clash.seriesId}/${clash.fixtureId}${altBarred ? ` (alt ground "${altGround}" is barred)` : ''}`,
+          );
+          if (allowClashes) {
+            ledger.book(ground, f.date, f.time, {
+              seriesId: String(series.id),
+              fixtureId: f.id,
+              date: f.date,
+              time: f.time,
+            });
+          }
         }
       }
     }
