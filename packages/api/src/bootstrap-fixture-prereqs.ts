@@ -19,7 +19,7 @@
 import * as repo from './repo.js';
 import { clubIdFromName } from './club-id.js';
 import { normalise } from './import-planb-fixtures.js';
-import type { Club, League } from './types.js';
+import type { Club, League, Venue } from './types.js';
 
 const TENANT = 'dolphins';
 
@@ -101,7 +101,57 @@ async function main() {
     );
   }
 
-  if (!leaguesToAdd.length && !clubsToAdd.length) {
+  // ── Venue registry sync (the prod registry was empty on the 16 Aug dry runs) ──
+  // Mirrors the console's "Sync from club records" (venuesFromClubGrounds,
+  // src/venues-card.tsx:441): one venue per distinct ground NAME, primary grounds with
+  // the affiliation pin, secondaries without coordinates, ground-sharing clubs merged
+  // into homeClubIds, surfaces 1. Existing registry names are never touched, so this
+  // composes with a console sync run before or after it.
+  const existingVenues = await repo.listVenues(TENANT);
+  const byName = new Map(existingVenues.map((v) => [v.name.trim().toLowerCase(), v]));
+  const venuesToAdd = new Map<string, Venue>();
+  const addGround = (name: string | undefined, clubId: string, extras: Partial<Venue>) => {
+    const trimmed = name?.trim();
+    if (!trimmed) return;
+    const key = trimmed.toLowerCase();
+    if (byName.has(key)) return; // registry already knows it — console owns it
+    const pending = venuesToAdd.get(key);
+    if (pending) {
+      if (!pending.homeClubIds?.includes(clubId))
+        pending.homeClubIds = [...(pending.homeClubIds ?? []), clubId];
+      return;
+    }
+    venuesToAdd.set(key, {
+      id: `v-${trimmed
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')}`,
+      name: trimmed,
+      homeClubIds: [clubId],
+      surfaces: 1,
+      ...extras,
+    } as Venue);
+  };
+  for (const c of clubs) {
+    const g = c.ground ?? {};
+    addGround(g.venue, c.id, {
+      address: g.address,
+      suburb: g.suburb,
+      ...(Number.isFinite(g.lat) && Number.isFinite(g.lon) ? { lat: g.lat, lon: g.lon } : {}),
+    });
+    addGround(g.secondaryVenue, c.id, { address: g.secondaryAddress });
+  }
+  console.log(
+    `\nVenue registry: ${existingVenues.length} existing · ${venuesToAdd.size} to create from club grounds`,
+  );
+  for (const v of venuesToAdd.values()) {
+    const pinned = Number.isFinite(v.lat) && Number.isFinite(v.lon) ? 'pinned' : 'no pin';
+    console.log(
+      `${confirm ? 'create' : '[dry-run] would create'} venue "${v.name}" (${v.id} · ${pinned} · home of ${v.homeClubIds?.join(', ')})`,
+    );
+  }
+
+  if (!leaguesToAdd.length && !clubsToAdd.length && !venuesToAdd.size) {
     console.log('Nothing to do — all prerequisites already in place.');
     return;
   }
