@@ -69,6 +69,7 @@ import {
   formatDay,
   formatDayYear,
   formatStampDay,
+  formatTime,
   formatWeekdayLong,
   formatWeekdayName,
 } from './dates';
@@ -4207,6 +4208,27 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
   // so the two screens can never quote different travel for the same fixture.
   const fixtureVenue = fixtureVenueCoords;
 
+  /**
+   * The venue name to display for a fixture. The allocated ground wins (ADR 0008
+   * phase 2) — deriving from the home side would tell the two clubs to go to different
+   * grounds whenever allocation has moved a fixture, which is routine. Shared by the
+   * next-match hero and the fixtures table so the two can never disagree about where a
+   * match is actually played.
+   *
+   * `mySide` is the fixture's HOME team (resolved from `f.home`, regardless of which
+   * side this club is on) and `opp` is this club's opponent — the same resolution the
+   * table already did, just named for reuse.
+   */
+  function venueNameFor(f, isHome, mySide, opp) {
+    return (
+      f.venueOverride ||
+      f.venueName ||
+      (isHome
+        ? mySide.ground?.venue || club.ground?.venue || 'Home ground TBA'
+        : opp.ground?.venue || 'Opponent ground TBA')
+    );
+  }
+
   const today = todayIso();
   const myReleased = (allSeries || []).filter(
     (s) =>
@@ -4335,7 +4357,15 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
         totalKm += mineLeg.roundTripKm;
         totalCost += mineLeg.fuelR;
       }
-      if (f.date >= todayISO && (!nextFixture || f.date < nextFixture.date)) {
+      // Same tiebreak as the table sort below (~4471): untimed sorts before timed on
+      // the same date, so a double-header's earlier-in-the-list fixture is the one
+      // shown as "next" too — the hero and the table can never disagree.
+      if (
+        f.date >= todayISO &&
+        (!nextFixture ||
+          f.date < nextFixture.date ||
+          (f.date === nextFixture.date && (f.time || '').localeCompare(nextFixture.time || '') < 0))
+      ) {
         nextFixture = { ...f, seriesName: s.name, _series: s };
       }
     });
@@ -4352,9 +4382,18 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
   const nextMine = nextFixture ? new Set(teamIdsForClub(nextFixture._series, club.id)) : null;
   const nextIsHome = nextFixture ? nextMine.has(nextFixture.home) : false;
   const nextOppId = nextFixture ? (nextIsHome ? nextFixture.away : nextFixture.home) : null;
-  const nextOppName = nextFixture
-    ? resolveTeam(nextFixture._series, nextOppId, clubBy).name
-    : 'TBA';
+  const nextMySide = nextFixture
+    ? resolveTeam(nextFixture._series, nextFixture.home, clubBy)
+    : null;
+  const nextOpp = nextFixture ? resolveTeam(nextFixture._series, nextOppId, clubBy) : null;
+  const nextOppName = nextOpp?.name || 'TBA';
+  const nextVenue = nextFixture ? venueNameFor(nextFixture, nextIsHome, nextMySide, nextOpp) : null;
+  const nextTime = nextFixture ? formatTime(nextFixture.time) : null;
+  // Same "Time TBC only where meaningful" rule as the table (~1013 in admin.tsx) —
+  // shown only once this club's next series has at least one OTHER timed fixture.
+  const nextSeriesHasTimes = nextFixture
+    ? nextFixture._series.fixtures.some((f) => !!formatTime(f.time))
+    : false;
 
   return (
     <div>
@@ -4440,6 +4479,16 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                 {formatWeekdayLong(nextFixture.date)} · {nextFixture.seriesName} · Round{' '}
                 {nextFixture.round}
               </div>
+              {/* Time is shown only when set; "Time TBC" only once the series uses
+                  times elsewhere (same rule as the fixtures table below). Venue always
+                  shows — it always resolves to something, even if just "TBA". */}
+              {(nextTime || nextSeriesHasTimes || nextVenue) && (
+                <div className="club-fix-next-sub" style={{ marginTop: 2 }}>
+                  {nextTime ? nextTime : nextSeriesHasTimes ? 'Time TBC' : null}
+                  {(nextTime || nextSeriesHasTimes) && nextVenue ? ' · ' : ''}
+                  {nextVenue}
+                </div>
+              )}
             </div>
             <div className="club-fix-next-tag">
               {nextIsHome ? (
@@ -4474,6 +4523,10 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                 (a, b) =>
                   a.date.localeCompare(b.date) || (a.time || '').localeCompare(b.time || ''),
               );
+            // "Time TBC" is only meaningful once this series has at least one timed
+            // fixture — computed once per series, not per row, so series that never
+            // use times (most of them) stay silent rather than noisy.
+            const seriesHasTimes = s.fixtures.some((f) => !!formatTime(f.time));
 
             return (
               <div key={s.id} className="club-fix-series">
@@ -4518,15 +4571,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                         // roster edit, and an intra-club derby names the other side correctly.
                         const opp = resolveTeam(s, oppId, clubBy);
                         const mySide = resolveTeam(s, f.home, clubBy);
-                        // The allocated ground wins (ADR 0008 phase 2). Deriving from the
-                        // home side would tell the two clubs to go to different grounds
-                        // whenever allocation has moved a fixture — which is routine.
-                        const venueName =
-                          f.venueOverride ||
-                          f.venueName ||
-                          (isHome
-                            ? mySide.ground?.venue || club.ground?.venue || 'Home ground TBA'
-                            : opp.ground?.venue || 'Opponent ground TBA');
+                        const venueName = venueNameFor(f, isHome, mySide, opp);
                         // THIS club's journey, not the fixture's total. `fixtureCost`
                         // sums both sides' legs when the ground is pinned — right for a
                         // union's series total, wrong on a screen a club budgets fuel
@@ -4588,20 +4633,32 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                                 {formatWeekdayName(f.date)}
                               </div>
                               {/* Only set when the schedule defines a start time
-                                  (double-headers, morning/afternoon slots). */}
-                              {f.time && (
-                                <div
-                                  style={{
-                                    fontSize: 10.5,
-                                    color: 'var(--muted)',
-                                    fontWeight: 500,
-                                    fontFamily: "'Montserrat',sans-serif",
-                                  }}
-                                >
-                                  {f.time}
-                                  {f.slot ? ` · ${f.slot}` : ''}
-                                </div>
-                              )}
+                                  (double-headers, morning/afternoon slots). "Time TBC"
+                                  only when this series uses times elsewhere — otherwise
+                                  an untimed fixture renders nothing, as before. */}
+                              {(() => {
+                                const time = formatTime(f.time);
+                                if (!time && !seriesHasTimes) return null;
+                                return (
+                                  <div
+                                    style={{
+                                      fontSize: 10.5,
+                                      color: 'var(--muted)',
+                                      fontWeight: 500,
+                                      fontFamily: "'Montserrat',sans-serif",
+                                    }}
+                                  >
+                                    {time ? (
+                                      <>
+                                        {time}
+                                        {f.slot ? ` · ${f.slot}` : ''}
+                                      </>
+                                    ) : (
+                                      'Time TBC'
+                                    )}
+                                  </div>
+                                );
+                              })()}
                             </td>
                             <td>
                               {/* Show the opponent's team name with its club's avatar/short. */}

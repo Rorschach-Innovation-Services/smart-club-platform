@@ -106,6 +106,17 @@ export function formatWeekdayName(iso?: string): string {
   return d.isValid() ? d.format('dddd') : '';
 }
 
+/**
+ * A fixture start time — `HH:MM` (24h), no date and no zone — validated and normalised.
+ * `null` when absent or not a real wall-clock time, so call sites can distinguish "no
+ * time set" from a value worth rendering without re-deriving the check themselves.
+ */
+export function formatTime(time?: string): string | null {
+  if (!time) return null;
+  const t = dayjs(time, 'HH:mm', true);
+  return t.isValid() ? t.format('HH:mm') : null;
+}
+
 /* ─── Instant display (local time, deliberately) ─── */
 
 /** A timestamp as a local calendar day: `4 Jun 2026`. */

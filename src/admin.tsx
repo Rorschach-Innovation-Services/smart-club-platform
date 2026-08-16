@@ -95,6 +95,7 @@ import {
   formatDayYear,
   formatStamp,
   formatStampDay,
+  formatTime,
   formatWeekdayDay,
   formatWeekdayDayYear,
 } from './dates';
@@ -234,6 +235,10 @@ export function AdminFixtures({
   // than a misleading 0.
   function exportSchedule() {
     if (!active) return toast?.('No series to export');
+    // "Time TBC" is only meaningful once the series has at least one timed fixture —
+    // otherwise every series that never uses times (most of them) would export a
+    // column full of noise instead of a clean blank.
+    const seriesHasTimes = active.fixtures.some((f) => !!formatTime(f.time));
     const rows = active.fixtures.map((f) => {
       const home = teamBy(active, f.home),
         away = teamBy(active, f.away);
@@ -249,11 +254,18 @@ export function AdminFixtures({
       // The slot label ('Morning'/'Afternoon') alongside the raw kickoff time when the
       // series' schedule carries named slots — trivially available off `schedule.slots`,
       // so worth including, but the time itself is what matters and stands alone without it.
+      const time = formatTime(f.time);
       const slotLabel = active.schedule?.slots?.find((sl) => sl.start === f.time)?.label;
       return {
         Round: f.round,
         Date: formatWeekdayDayYear(f.date),
-        Time: f.time ? (slotLabel ? `${f.time} (${slotLabel})` : f.time) : '',
+        Time: time
+          ? slotLabel
+            ? `${time} (${slotLabel})`
+            : time
+          : seriesHasTimes
+            ? 'Time TBC'
+            : '',
         Home: home?.name || 'TBD',
         Venue: f.venueOverride || f.venueName || home?.ground?.venue || '—',
         Suburb: home?.ground?.suburb || '',
@@ -784,6 +796,11 @@ export function FixtureTable({
     toast?.(`${series.name} · fixtures regenerated`);
   }
 
+  // "Time TBC" is only meaningful once the series has at least one timed fixture —
+  // computed once here rather than per row, and only shown on untimed rows when true,
+  // so series that never use times (most of them) stay silent rather than noisy.
+  const seriesHasTimes = series.fixtures.some((f) => !!formatTime(f.time));
+
   // Build rows with computed cost
   const allRows = series.fixtures.map((f) => {
     const home = teamBy(f.home),
@@ -1009,13 +1026,21 @@ export function FixtureTable({
                   <td>
                     <span className="fix-row-date">{formatWeekdayDay(f.date)}</span>
                     {/* Shown only when the schedule set a start time (double-headers,
-                        morning/afternoon slots) — most series have neither. */}
-                    {f.time && (
-                      <div className="fix-row-time">
-                        {f.time}
-                        {f.slot ? ` · ${f.slot}` : ''}
-                      </div>
-                    )}
+                        morning/afternoon slots) — most series have neither. "Time TBC"
+                        below only appears when the series itself uses times elsewhere;
+                        otherwise an untimed fixture renders nothing here, as before. */}
+                    {(() => {
+                      const time = formatTime(f.time);
+                      if (time) {
+                        return (
+                          <div className="fix-row-time">
+                            {time}
+                            {f.slot ? ` · ${f.slot}` : ''}
+                          </div>
+                        );
+                      }
+                      return seriesHasTimes ? <div className="fix-row-time">Time TBC</div> : null;
+                    })()}
                   </td>
                   <td>
                     <div className="fix-row-team">

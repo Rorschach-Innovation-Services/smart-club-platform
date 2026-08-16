@@ -8,6 +8,7 @@ import {
   formatDayYear,
   formatStamp,
   formatStampDay,
+  formatTime,
   formatWeekdayDay,
   formatWeekdayDayYear,
   formatWeekdayLong,
@@ -78,6 +79,22 @@ describe('instant display', () => {
   it('is blank for missing input', () => {
     expect(formatStamp(undefined)).toBe('');
     expect(formatStampDay('')).toBe('');
+  });
+});
+
+describe('formatTime', () => {
+  it('normalises a valid HH:MM time', () => {
+    expect(formatTime('09:00')).toBe('09:00');
+    expect(formatTime('13:30')).toBe('13:30');
+  });
+
+  it('is null for missing or malformed input', () => {
+    expect(formatTime(undefined)).toBeNull();
+    expect(formatTime('')).toBeNull();
+    expect(formatTime('not a time')).toBeNull();
+    expect(formatTime('9:00')).toBeNull(); // not zero-padded — reject rather than guess
+    expect(formatTime('25:00')).toBeNull();
+    expect(formatTime('2026-09-13')).toBeNull();
   });
 });
 
