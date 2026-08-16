@@ -16,20 +16,26 @@ removes it again when the season machinery takes over.
 
 ## Prerequisites (before the first dry run)
 
-- **Create the 3 new leagues in the prod admin console**, typing the labels **exactly**
-  as below — the console derives a kebab-case key from the label
+- **Create the 2 veterans leagues in the prod admin console**, typing the labels
+  **exactly** as below — the console derives a kebab-case key from the label
   (`slugifyLeagueKey`, `src/leagues.ts:117-123`), so a different label produces a
   different key and the import will refuse to write (fails closed on an unconfigured
   league key):
-  - `Promotion Women` → `promotion-women`
   - `Veterans Premier` → `veterans-premier`
   - `Veterans Promotion` → `veterans-promotion`
-  - (`premier`, `promotion`, `premierWomen` already exist and are reused as-is.)
-- **Confirm the "Saints" cluster with the union before running anything.** The sheets use
-  "Saints" (30-over), "Silver Saints"/"Silver saints" (T20), and "Saints B" (veterans) —
-  genuinely ambiguous whether these are the same club or different ones. The script
-  deliberately has **no alias** for this cluster, so it will show up as unmatched names
-  in the dry run until the union confirms and an alias (or separate clubs) is added.
+  - (`premier`, `promotion`, `premierWomen` and `promotion-women-s-league` already exist
+    on prod and are reused as-is. The pre-existing single `veterans` league is
+    deliberately NOT used: hosting both divisions under one key would put plain
+    "Chatsworth Sporting" and "Chatsworth Sporting B" in the same league namespace and
+    trip the suffixed/unsuffixed ambiguity guard.)
+- **Create club records for `Parkgate` and `FAM`** (Promotion Women Group B) — the
+  16 Aug 2026 dry run confirmed neither exists on the dolphins tenant, and the import
+  fails closed on them. Get the full club names from the union first.
+- **Confirm "Silver Saints" with the union.** The 16 Aug 2026 dry run showed prod has
+  exactly one saints-like club — Saints Cricket Club (`saints-cricket-club`), which
+  "Saints" (30-over) and "Saints B" (veterans) already resolve to — so the script now
+  redirects "Silver Saints"/"Silver saints" (T20 sheets) onto it. Get the union's
+  one-line confirmation that these are the same club before `--confirm`.
 - **Check the venue registry covers the REVISED file's ground names** (ACC 1, Chatsworth
   Oval, Chatsworth 217, Crawford NC, Kingsmead Oval, Tills, Hammond, Kloof CC, Penguin
   Street, Phoenix Stonebridge, Northcroft, Siripat 1/2, Lahee Park, Forest Hills CC,

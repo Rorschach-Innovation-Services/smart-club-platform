@@ -90,6 +90,11 @@ const NAME_REDIRECTS: Record<string, string> = {
   harlequinsdbn: 'harlequins', // "Harlequins CC DBN 1st XI"
   hollywoodbetscrusaders: 'crusaders', // "Hollywoodbets Crusaders 1st XI"
   rhythmdhsob: 'rhythmdhs', // "RHYTHM DHSOB 1st XI"
+  // Prod has exactly one saints-like club (Saints Cricket Club); the T20/veterans
+  // sheets call it "Silver Saints". Confirmed against the prod club list on the
+  // 16 Aug 2026 dry run — union to give the final nod before --confirm.
+  silversaints: 'saints',
+  simplexrhcc: 'simplex', // "Simplex RHCC" (REVISED) = Simplex Reservoir Hills CC
 };
 
 /** Sheet ground-name variants that don't normalise onto the venue registry's own name.
@@ -415,7 +420,7 @@ const SECTIONS: Record<string, SectionSpec[]> = {
       match: /group\s+a$/i,
       slug: 'promotion-women-t20-ga',
       label: 'T20 · Group A',
-      leagueKey: 'promotion-women',
+      leagueKey: 'promotion-women-s-league',
       seriesType: 'Twenty20 (16-25 overs)',
       maxOvers: 20,
       expected: 12,
@@ -424,7 +429,7 @@ const SECTIONS: Record<string, SectionSpec[]> = {
       match: /group\s+b$/i,
       slug: 'promotion-women-t20-gb',
       label: 'T20 · Group B',
-      leagueKey: 'promotion-women',
+      leagueKey: 'promotion-women-s-league',
       seriesType: 'Twenty20 (16-25 overs)',
       maxOvers: 20,
       expected: 12,
@@ -433,7 +438,7 @@ const SECTIONS: Record<string, SectionSpec[]> = {
       match: /group\s+c$/i,
       slug: 'promotion-women-t20-gc',
       label: 'T20 · Group C',
-      leagueKey: 'promotion-women',
+      leagueKey: 'promotion-women-s-league',
       seriesType: 'Twenty20 (16-25 overs)',
       maxOvers: 20,
       expected: 12,
