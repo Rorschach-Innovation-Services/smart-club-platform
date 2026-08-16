@@ -174,6 +174,10 @@ async function main() {
     await repo.putClub(TENANT, club);
     console.log(`wrote club ${club.id}`);
   }
+  for (const v of venuesToAdd.values()) {
+    await repo.putVenue(TENANT, v);
+    console.log(`wrote venue ${v.id}`);
+  }
   console.log('Done.');
 }
 
