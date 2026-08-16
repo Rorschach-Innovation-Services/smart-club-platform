@@ -5,10 +5,12 @@
  *   npx sst shell --stage prod -- npm --prefix packages/api run bootstrap-fixture-prereqs            # dry-run
  *   npx sst shell --stage prod -- npm --prefix packages/api run bootstrap-fixture-prereqs -- --confirm
  *
- * Adds the two veterans league entries the import fails closed on, and creates club
- * records for the two Promotion Women Group B clubs the 16 Aug 2026 dry run showed do
- * not exist on the dolphins tenant. Idempotent: existing leagues/clubs are left
- * untouched and reported, so re-running after a partial write is safe.
+ * Adds the two veterans league entries the import fails closed on, creates the
+ * Parkgate club record (Promotion Women Group B), syncs the venue registry from club
+ * grounds (it was empty on prod), creates the two REVISED-designated grounds no club
+ * record carries, and erases the duplicate fam-cricket-club. Idempotent: existing
+ * leagues/clubs/venues are left untouched and reported, so re-running after a partial
+ * write is safe.
  *
  * The club records are deliberately skeletal — the names satisfy the import's
  * normalise() matching ("Parkgate" → parkgate, "FAM" → fam), while district, chair and
@@ -28,10 +30,29 @@ const NEW_LEAGUES: Array<Pick<League, 'key' | 'label'>> = [
   { key: 'veterans-promotion', label: 'Veterans Promotion' },
 ];
 
-/** Names chosen so the fixture sheets' "Parkgate" and "FAM" resolve via normalise();
- * rename freely in the console — resolution also matches on the club id. */
-const NEW_CLUBS = ['Parkgate Cricket Club', 'FAM Cricket Club'];
+/** Name chosen so the fixture sheets' "Parkgate" resolves via normalise(); rename
+ * freely in the console — resolution also matches on the club id. ("FAM" turned out to
+ * exist all along as fam-kwamakhutha — the registry sync surfaced it — so the import
+ * redirects onto that and the skeletal fam-cricket-club an earlier run created is
+ * erased below.) */
+const NEW_CLUBS = ['Parkgate Cricket Club'];
 const NEW_CLUB_LEAGUES = ['promotion-women-s-league'];
+const DUPLICATE_CLUB_ID = 'fam-cricket-club';
+
+/** Grounds the REVISED T20 schedule allocates that no club record carries — created
+ * unpinned so the import can registry-link (and lock) the fixtures placed there; the
+ * admin adds pins in the console. */
+const CUSTOM_VENUES: Array<Pick<Venue, 'name' | 'homeClubIds'>> = [
+  { name: 'Kloof CC', homeClubIds: ['hillary-malvern-cricket-club'] },
+  {
+    name: 'Chatsworth 217',
+    homeClubIds: ['umlazi-cricket-club', 'meadowridge-sporting-cricket-club'],
+  },
+];
+
+/** Club-record ground values that mean "no ground recorded" — creating a venue named
+ * "None" shared by every such club would be pure noise. */
+const JUNK_GROUND = /^(none|n\/?a|-|tbd|tbc)$/i;
 
 function modalDistrict(clubs: Club[]): string {
   const counts = new Map<string, number>();
@@ -112,7 +133,7 @@ async function main() {
   const venuesToAdd = new Map<string, Venue>();
   const addGround = (name: string | undefined, clubId: string, extras: Partial<Venue>) => {
     const trimmed = name?.trim();
-    if (!trimmed) return;
+    if (!trimmed || JUNK_GROUND.test(trimmed)) return;
     const key = trimmed.toLowerCase();
     if (byName.has(key)) return; // registry already knows it — console owns it
     const pending = venuesToAdd.get(key);
@@ -141,6 +162,9 @@ async function main() {
     });
     addGround(g.secondaryVenue, c.id, { address: g.secondaryAddress });
   }
+  for (const cv of CUSTOM_VENUES) {
+    for (const clubId of cv.homeClubIds ?? []) addGround(cv.name, clubId, {});
+  }
   console.log(
     `\nVenue registry: ${existingVenues.length} existing · ${venuesToAdd.size} to create from club grounds`,
   );
@@ -151,7 +175,23 @@ async function main() {
     );
   }
 
-  if (!leaguesToAdd.length && !clubsToAdd.length && !venuesToAdd.size) {
+  // ── Duplicate-club cleanup ──
+  // An earlier bootstrap created fam-cricket-club before the registry sync revealed
+  // the sheets' "FAM" is prod's fam-kwamakhutha (the import now redirects onto it).
+  // Erase the duplicate ONLY while it is still exactly the skeletal record we wrote —
+  // any sign of real use (affiliation started, players, a ground) and it is left alone.
+  const dup = clubs.find((c) => c.id === DUPLICATE_CLUB_ID);
+  const dupErasable =
+    dup && dup.affiliation === 'not_started' && !(Number(dup.players) > 0) && !dup.ground?.venue;
+  if (dup) {
+    console.log(
+      dupErasable
+        ? `${confirm ? 'erase' : '[dry-run] would erase'} duplicate club ${DUPLICATE_CLUB_ID} (skeletal — "FAM" now redirects to fam-kwamakhutha)`
+        : `⚠ duplicate club ${DUPLICATE_CLUB_ID} exists but shows signs of use — NOT erasing; resolve manually`,
+    );
+  }
+
+  if (!leaguesToAdd.length && !clubsToAdd.length && !venuesToAdd.size && !dupErasable) {
     console.log('Nothing to do — all prerequisites already in place.');
     return;
   }
@@ -177,6 +217,10 @@ async function main() {
   for (const v of venuesToAdd.values()) {
     await repo.putVenue(TENANT, v);
     console.log(`wrote venue ${v.id}`);
+  }
+  if (dup && dupErasable) {
+    await repo.eraseClubData(TENANT, dup);
+    console.log(`erased duplicate club ${DUPLICATE_CLUB_ID}`);
   }
   console.log('Done.');
 }

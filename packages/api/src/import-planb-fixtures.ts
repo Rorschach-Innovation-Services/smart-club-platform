@@ -95,14 +95,41 @@ const NAME_REDIRECTS: Record<string, string> = {
   // 16 Aug 2026 dry run — union to give the final nod before --confirm.
   silversaints: 'saints',
   simplexrhcc: 'simplex', // "Simplex RHCC" (REVISED) = Simplex Reservoir Hills CC
+  // The sheets' "FAM" is prod's fam-kwamakhutha (ground "Harlequins", Cato Manor 1) —
+  // surfaced by the 16 Aug venue-registry sync, after an earlier run had already
+  // created a skeletal fam-cricket-club; the bootstrap script erases that duplicate.
+  fam: 'famkwamakhutha',
 };
 
 /** Sheet ground-name variants that don't normalise onto the venue registry's own name.
- * Empty today — the dry run's "no registry match" report is how misses get discovered;
- * extend this rather than guessing. Deliberately a SEPARATE namespace from club
- * resolution: "Ilembe" is both a club (Promotion Women Group A, men's "iLembe") and a
- * barred GROUND name, and the two must never be looked up in the same map. */
-const VENUE_ALIASES: Record<string, string> = {};
+ * Authored from the 16 Aug 2026 prod registry sync (bootstrap-fixture-prereqs) — each
+ * value is the normalised form of a real registry venue name. Deliberately a SEPARATE
+ * namespace from club resolution: "Ilembe" is both a club (Promotion Women Group A,
+ * men's "iLembe") and a barred GROUND name, and the two must never be looked up in the
+ * same map. */
+const VENUE_ALIASES: Record<string, string> = {
+  acc1: 'toti1', // "ACC 1" (REVISED) = Amanzimtoti's Toti 1
+  // Siripat 1 and 2 are two fields at one complex, recorded as two registry rows —
+  // Simplex's "Siripat Road Grounds" and DUT's "Siripat Grounds" — matching exactly how
+  // the REVISED file allocates them (Simplex/Spartan → Siripat 1, DUT → Siripat 2).
+  siripat1: 'siripatroadgrounds',
+  siripat2: 'siripatgrounds',
+  crawfordnc: 'crawfordnorthcoast', // Railways
+  laheepark: 'laheeparkoval', // PTCC's pinned "Lahee park cricket oval"
+  tills: 'tillscrescentground', // Delta
+  hammond: 'hammondoval', // UKZN's "Hammond Cricket Oval"
+  danville1: 'danville', // Rhythm DHSOB
+  harlequins1: 'vanriebekparkharlequins1', // "Van Riebek Park (Harlequins 1)"
+  crusaders1: 'crusaderssports', // "Crusaders Sports Club"
+  foresthills: 'foresthillssports', // "Forest Hills CC" → "Forest Hills Sports Club"
+  phoenixstonebridge: 'stonebridge', // East Coast / Phoenix
+  penguinstreet: 'penguinstreetground', // Meadowridge's "PENGUIN STREET GROUND"
+};
+
+/** Club-record ground values that mean "no ground recorded", not a ground named that —
+ * umgababa and ilembe literally carry "None". Booking a shared phantom "None" ground
+ * would clash every such club against each other. */
+const JUNK_GROUND = /^(none|n\/?a|-|tbd|tbc)$/i;
 
 /** Lowercase, strip punctuation, drop generic suffix/roster words. Keeps distinguishing
  * words ("sporting", "united") — Chatsworth Sporting must not collide with Chatsworth
@@ -976,7 +1003,10 @@ function allocatedGroundName(
   clubsById: Map<string, Club>,
   reBaseMap: Map<string, string>,
 ): string | undefined {
-  return reBaseMap.get(clubId) ?? clubsById.get(clubId)?.ground?.venue;
+  const rebased = reBaseMap.get(clubId);
+  if (rebased) return rebased;
+  const own = clubsById.get(clubId)?.ground?.venue?.trim();
+  return own && !JUNK_GROUND.test(own) ? own : undefined;
 }
 
 function deriveVenueStatus(
