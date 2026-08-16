@@ -1299,37 +1299,52 @@ function runClashPass(
           }
           continue;
         }
-        // One-shot auto-move (union Rule 4): try the OTHER participant's allocated
-        // ground — registry-first via setVenue, and refused if that ground is itself
-        // barred (a barred ground is never a legitimate move target).
+        // Auto-move, tried in the order a scheduler would: the OTHER participant's
+        // allocated ground (union Rule 4), then the home club's secondary ground, then
+        // the away club's secondary ground — all registry-first via setVenue, never a
+        // barred ground, never the ground we are already clashing on.
+        const homeClubId = teamToClub.get(f.home);
         const awayClubId = teamToClub.get(f.away);
-        const altGround = awayClubId
-          ? allocatedGroundName(awayClubId, clubsById, reBaseMap)
-          : undefined;
-        const altBarred = altGround ? barredGrounds.has(normaliseGround(altGround)) : false;
-        const altClash =
-          altGround && !altBarred ? ledger.check(altGround, f.date, f.time) : undefined;
-        if (altGround && !altBarred && !altClash) {
+        const secondary = (clubId: string | undefined) => {
+          const s = clubId ? clubsById.get(clubId)?.ground?.secondaryVenue?.trim() : undefined;
+          return s && !JUNK_GROUND.test(s) ? s : undefined;
+        };
+        const candidates: Array<{ ground: string; label: string }> = [];
+        const addCandidate = (g: string | undefined, label: string) => {
+          if (!g) return;
+          if (normaliseGround(g) === normaliseGround(ground)) return;
+          if (candidates.some((c) => normaliseGround(c.ground) === normaliseGround(g))) return;
+          if (barredGrounds.has(normaliseGround(g))) return;
+          candidates.push({ ground: g, label });
+        };
+        addCandidate(
+          awayClubId ? allocatedGroundName(awayClubId, clubsById, reBaseMap) : undefined,
+          "away side's allocated ground",
+        );
+        addCandidate(secondary(homeClubId), "home club's secondary ground");
+        addCandidate(secondary(awayClubId), "away club's secondary ground");
+        const target = candidates.find((c) => !ledger.check(c.ground, f.date, f.time));
+        if (target) {
           setVenue(
             f,
-            altGround,
+            target.ground,
             'alternative',
-            'Moved to avoid ground clash',
+            `Moved to avoid ground clash — ${target.label}`,
             byNormVenue,
             registryMiss,
           );
-          ledger.book(altGround, f.date, f.time, {
+          ledger.book(target.ground, f.date, f.time, {
             seriesId: String(series.id),
             fixtureId: f.id,
             date: f.date,
             time: f.time,
           });
           autoMoves.push(
-            `${series.id} ${f.id}: ${ground} → ${altGround} on ${f.date}${f.time ? ' ' + f.time : ''} (clashed with ${clash.seriesId}/${clash.fixtureId})`,
+            `${series.id} ${f.id}: ${ground} → ${target.ground} [${target.label}] on ${f.date}${f.time ? ' ' + f.time : ''} (clashed with ${clash.seriesId}/${clash.fixtureId})`,
           );
         } else {
           unresolved.push(
-            `${series.id} ${f.id}: ${ground} on ${f.date}${f.time ? ' ' + f.time : ''} clashes with ${clash.seriesId}/${clash.fixtureId}${altBarred ? ` (alt ground "${altGround}" is barred)` : ''}`,
+            `${series.id} ${f.id}: ${ground} on ${f.date}${f.time ? ' ' + f.time : ''} clashes with ${clash.seriesId}/${clash.fixtureId}${candidates.length ? ` (tried: ${candidates.map((c) => c.ground).join(', ')})` : ' (no alternative ground available)'}`,
           );
           if (allowClashes) {
             ledger.book(ground, f.date, f.time, {
