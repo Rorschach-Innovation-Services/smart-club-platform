@@ -15,3 +15,6 @@ sst-env.d.ts
 # Playwright MCP test artifacts
 .playwright-mcp/
 dash.md
+
+# Prod data snapshots written by import-planb-fixtures --confirm — never commit
+planb-backup-*.json
