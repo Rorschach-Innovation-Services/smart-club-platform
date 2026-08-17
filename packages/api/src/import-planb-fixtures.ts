@@ -7,7 +7,7 @@
  *   … --file "<Dolphins xlsx>" --t20 "<REVISED xlsx>"                     # dry-run (resolves clubs, allocates venues)
  *   … --file "<Dolphins xlsx>" --t20 "<REVISED xlsx>" --confirm           # write
  *   … --prune                                                             # dry-run: list superseded series to delete
- *   … --prune --confirm                                                   # delete them (run AFTER replacements are released)
+ *   … --prune --confirm                                                   # delete them (run BEFORE releasing while all drafts — see runbook "Ordering")
  *   … --revert                                                            # dry-run revert (keep-list excluded)
  *   … --revert --confirm                                                  # delete every imported series except the keep-list
  *   … --revert --all --confirm                                            # delete EVERYTHING including the keep-list
@@ -1576,6 +1576,10 @@ async function runPrune(repo: RepoModule, confirm: boolean) {
     console.log('Nothing to prune — none of the superseded series exist.');
     return;
   }
+  // Same restorability rule as the import write: deletes never run without a fresh
+  // snapshot on disk. A standalone prune weeks after the import must not depend on
+  // that run's (stale) backup file.
+  if (confirm) await backupExistingSeries(repo);
   for (const s of stale) {
     const status = s.released ? 'RELEASED' : s.approved ? 'approved' : 'draft';
     console.log(
@@ -1959,7 +1963,7 @@ async function runImport(args: Args) {
     return;
   }
   console.log(
-    `\n── DELETE set (run --prune after releasing): ${deleteSet.map((s) => `${ID_PREFIX}${s}`).join(', ')}`,
+    `\n── DELETE set (prune BEFORE releasing while the replacements are drafts — the release gate counts these): ${deleteSet.map((s) => `${ID_PREFIX}${s}`).join(', ')}`,
   );
 
   const editNotes: string[] = [];
@@ -2044,7 +2048,7 @@ async function runImport(args: Args) {
     );
   }
   console.log(
-    `Done. Backup: ${backupPath}. New series are DRAFTS — approve and release from the admin console. Run --prune --confirm AFTER releasing to remove the superseded series.`,
+    `Done. Backup: ${backupPath}. New series are DRAFTS — approve and release from the admin console. Run --prune --confirm BEFORE releasing — the release gate counts the superseded series' fixtures until they are gone (see the runbook's Ordering section).`,
   );
 }
 

@@ -416,13 +416,18 @@ describe('release clash gate', () => {
     assert.match(msg, /Shared Community Oval/i);
   });
 
-  test('a club whose ground is JUNK ("None") produces no booking — its series releases clean', async () => {
+  test('JUNK ("None") grounds produce no booking — two such clubs in the same slot do not clash', async () => {
+    // Discriminating shape: TWO clubs whose recorded ground is the literal string
+    // "None", home in the SAME date+time. If the JUNK_GROUND filter broke, both
+    // fixtures would book the shared ledger key for the phantom "None" ground and the
+    // second release would 409 — so the 200 below pins the filter, not just an
+    // uncontested slot.
     await repo.putClub('dolphins', club('junk-ground-home', 'None'));
-    await repo.putSeries(
-      'dolphins',
-      series('s-gate-junk', {
+    await repo.putClub('dolphins', club('junk-ground-two', 'None'));
+    const junkSeries = (id: string, homeId: string) =>
+      series(id, {
         participants: [
-          { teamId: 'junk-ground-home', clubId: 'junk-ground-home', name: 'Junk Ground Home' },
+          { teamId: homeId, clubId: homeId, name: `Junk ${homeId}` },
           { teamId: 'junk-ground-away', clubId: 'junk-ground-away', name: 'Junk Ground Away' },
         ],
         fixtures: [
@@ -431,14 +436,15 @@ describe('release clash gate', () => {
             round: 1,
             date: '2026-11-08',
             time: '09:00',
-            home: 'junk-ground-home',
+            home: homeId,
             away: 'junk-ground-away',
           },
         ],
-      }),
-    );
+      });
+    await repo.putSeries('dolphins', junkSeries('s-gate-junk', 'junk-ground-home'));
+    await repo.putSeries('dolphins', junkSeries('s-gate-junk2', 'junk-ground-two'));
 
-    const res = await patchRelease('s-gate-junk', 1);
-    assert.equal(res.status, 200);
+    assert.equal((await patchRelease('s-gate-junk', 1)).status, 200);
+    assert.equal((await patchRelease('s-gate-junk2', 1)).status, 200);
   });
 });
