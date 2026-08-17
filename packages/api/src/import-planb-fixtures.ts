@@ -101,69 +101,20 @@ const NAME_REDIRECTS: Record<string, string> = {
   fam: 'famkwamakhutha',
 };
 
-/** Sheet ground-name variants that don't normalise onto the venue registry's own name.
- * Authored from the 16 Aug 2026 prod registry sync (bootstrap-fixture-prereqs) — each
- * value is the normalised form of a real registry venue name. Deliberately a SEPARATE
- * namespace from club resolution: "Ilembe" is both a club (Promotion Women Group A,
- * men's "iLembe") and a barred GROUND name, and the two must never be looked up in the
- * same map. */
-const VENUE_ALIASES: Record<string, string> = {
-  acc1: 'toti1', // "ACC 1" (REVISED) = Amanzimtoti's Toti 1
-  // Siripat 1 and 2 are two fields at one complex, recorded as two registry rows —
-  // Simplex's "Siripat Road Grounds" and DUT's "Siripat Grounds" — matching exactly how
-  // the REVISED file allocates them (Simplex/Spartan → Siripat 1, DUT → Siripat 2).
-  siripat1: 'siripatroadgrounds',
-  siripat2: 'siripatgrounds',
-  crawfordnc: 'crawfordnorthcoast', // Railways
-  laheepark: 'laheeparkoval', // PTCC's pinned "Lahee park cricket oval"
-  tills: 'tillscrescentground', // Delta
-  hammond: 'hammondoval', // UKZN's "Hammond Cricket Oval"
-  danville1: 'danville', // Rhythm DHSOB
-  harlequins1: 'vanriebekparkharlequins1', // "Van Riebek Park (Harlequins 1)"
-  crusaders1: 'crusaderssports', // "Crusaders Sports Club"
-  foresthills: 'foresthillssports', // "Forest Hills CC" → "Forest Hills Sports Club"
-  phoenixstonebridge: 'stonebridge', // East Coast / Phoenix
-  penguinstreet: 'penguinstreetground', // Meadowridge's "PENGUIN STREET GROUND"
-  // From the union's "facility updated" permitted-fields sheet (17 Aug 2026) — its
-  // spellings for grounds the registry already stores under other names.
-  crusaders2: 'crusaders2field',
-  dhubriroad: 'dhubriroadgrounds',
-  hammondukzn: 'hammondoval', // "Hammond (UKZN)"
-  harlequins2: 'vanriebekparkharlequins2',
-  laheepark1: 'laheeparkoval',
-  penguinstreetchatsworth: 'penguinstreetground', // "Penguin Street (Chatsworth)"
-  phoenixsydmore: 'sidmore', // East Coast's "Sidmore" = the facility list's "Phoenix Sydmore"
-  totioval: 'toti1', // "Toti Oval"
-};
-
-/** A ground name's ledger/registry lookup key: alias applied over the normal form.
- * Exported for bootstrap-fixture-prereqs, so its facility-list merge finds the same
- * registry rows the import will resolve. */
-export function groundKey(name: string): string {
-  const n = normalise(name);
-  return VENUE_ALIASES[n] ?? n;
-}
-
-/** Club-record ground values that mean "no ground recorded", not a ground named that —
- * umgababa and ilembe literally carry "None". Booking a shared phantom "None" ground
- * would clash every such club against each other. */
-const JUNK_GROUND = /^(none|n\/?a|-|tbd|tbc)$/i;
+/** Ground naming (aliases, normal forms, ledger) is shared with the API's release
+ * gate — one source of truth in venue-clash.ts. Re-exported here because the tests
+ * and bootstrap-fixture-prereqs import them from this module. Ground aliasing is
+ * deliberately a SEPARATE namespace from club resolution: "Ilembe" is both a club
+ * and a barred GROUND name, and the two must never be looked up in the same map. */
+import { normaliseName, groundKey, GroundLedger, JUNK_GROUND } from './venue-clash.js';
+export { groundKey, GroundLedger };
 
 /** Lowercase, strip punctuation, drop generic suffix/roster words. Keeps distinguishing
  * words ("sporting", "united") — Chatsworth Sporting must not collide with Chatsworth
  * United, and Spartan Sporting must stay distinct. '1st'/'2nd'/'xi' let the REVISED
- * file's "Amanzimtoti CC 1st XI" collapse onto the Dolphins file's "Amanzimtoti". */
-export function normalise(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9 ]+/g, ' ')
-    .split(/\s+/)
-    .filter(
-      (w) =>
-        w && !['cricket', 'club', 'clube', 'cc', 'association', '1st', '2nd', 'xi'].includes(w),
-    )
-    .join('');
-}
+ * file's "Amanzimtoti CC 1st XI" collapse onto the Dolphins file's "Amanzimtoti".
+ * (The shared implementation — identical rules apply to clubs and grounds.) */
+export const normalise = normaliseName;
 
 /** Ground names don't carry club-only stopwords, so reusing `normalise` verbatim is
  * safe — kept as a separate name so the two namespaces (clubs vs. grounds) are never
@@ -1009,9 +960,9 @@ function buildVenueIndex(venues: Venue[]): Map<string, Venue> {
 }
 
 function resolveVenue(name: string, byNormVenue: Map<string, Venue>): Venue | undefined {
-  const n0 = normaliseGround(name);
-  const n = VENUE_ALIASES[n0] ?? n0;
-  return byNormVenue.get(n);
+  // groundKey applies the shared alias table over the normal form; an unaliased name
+  // falls through to its own normal form, matching buildVenueIndex's keys.
+  return byNormVenue.get(groundKey(name));
 }
 
 /** A club's ground for allocation purposes: the Venue Allocations re-base if it has
@@ -1121,60 +1072,8 @@ function buildBarredGrounds(rows: VenueAllocationRow[]): Set<string> {
 }
 
 // ───────────────────────── Season-wide clash ledger (1f) ─────────────────────────
-
-interface LedgerBooking {
-  seriesId: string;
-  fixtureId: string;
-  date: string;
-  time?: string;
-}
-
-/** How a ground name maps into the ledger: the identity bookings share, and how many
- * parallel fixtures it hosts per slot. Registry-resolved grounds use the venue id (so
- * a sheet's "Chatsworth Oval" and a club record's "Chatsworth Cricket Oval" share one
- * ledger row once aliased to the same venue) and the venue's real surface count —
- * exactly the capacity the app's own allocator books against
- * (src/competition/venues.ts:426, `Math.max(1, surfaces ?? 1)`). */
-interface GroundSlot {
-  key: string;
-  capacity: number;
-}
-
-/** Minimal in-script mirror of src/competition/venues.ts buildLedger clash semantics —
- * deliberately NOT imported (frontend code, authored under a looser tsconfig). Per
- * ground-and-date, bookings count per slot with untimed stored as its own slot that
- * also occupies every timed slot; a slot is full when its load reaches the ground's
- * surface capacity. The default resolver (single surface, name-keyed) preserves the
- * strict semantics the unit tests pin down. */
-export class GroundLedger {
-  private byGroundDate = new Map<string, LedgerBooking[]>();
-  constructor(
-    private resolve: (ground: string) => GroundSlot = (g) => ({
-      key: normaliseGround(g),
-      capacity: 1,
-    }),
-  ) {}
-  private slotKey(ground: string, date: string): { k: string; capacity: number } {
-    const { key, capacity } = this.resolve(ground);
-    return { k: `${key}|${date}`, capacity };
-  }
-  check(ground: string, date: string, time: string | undefined): LedgerBooking | undefined {
-    const { k, capacity } = this.slotKey(ground, date);
-    const entries = this.byGroundDate.get(k);
-    if (!entries || entries.length === 0) return undefined;
-    // Mirror venueLoad: a timed slot is loaded by same-time bookings plus untimed ones
-    // (which own the whole day); an untimed fixture is loaded by everything that day.
-    const relevant = time ? entries.filter((e) => !e.time || e.time === time) : entries;
-    if (relevant.length < capacity) return undefined;
-    return relevant[0];
-  }
-  book(ground: string, date: string, time: string | undefined, booking: LedgerBooking) {
-    const { k } = this.slotKey(ground, date);
-    const list = this.byGroundDate.get(k) ?? [];
-    list.push({ ...booking, time });
-    this.byGroundDate.set(k, list);
-  }
-}
+// GroundLedger + slot semantics live in venue-clash.ts, shared with the API's
+// release gate — one implementation, one set of unit tests.
 
 interface StoredFixture {
   id?: string;

@@ -55,6 +55,7 @@ import {
 import * as repo from './repo.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
 import { clubIdFromName } from './club-id.js';
+import { findReleaseClashes } from './venue-clash.js';
 import {
   validateCalendars,
   validateStructures,
@@ -2616,6 +2617,27 @@ app.patch('/series/:id', requireAdmin, async (c) => {
   if (patch.released === true) {
     const approved = patch.approved ?? current.approved ?? false;
     if (!approved) throw new HttpError(400, 'fixtures must be approved before release');
+  }
+  // Releasing publishes the schedule to clubs — a series carrying a known
+  // ground/date/time double-booking must not go out. Checked against EVERY series in
+  // the tenant (drafts included: a clash with a draft is still a double-booking the
+  // season carries). 409 with the clash list so the console can show exactly what to
+  // fix; recalls (released:false) are never blocked.
+  if (patch.released === true && !current.released) {
+    const [allSeries, clubs, venues] = await Promise.all([
+      repo.listSeries(ra.tenant),
+      repo.listClubs(ra.tenant),
+      repo.listVenues(ra.tenant),
+    ]);
+    const subject = { ...current, ...patch, id } as Series;
+    const clashes = findReleaseClashes(subject, allSeries, clubs, venues);
+    if (clashes.length) {
+      const shown = clashes.slice(0, 3).join('; ');
+      throw new HttpError(
+        409,
+        `Release blocked — ${clashes.length} venue clash(es): ${shown}${clashes.length > 3 ? ` … +${clashes.length - 3} more` : ''}. Fix the venues (or times), then release.`,
+      );
+    }
   }
   // Release/recall stamps releasedAt server-side for trustworthy timestamps.
   if (typeof patch.released === 'boolean') {

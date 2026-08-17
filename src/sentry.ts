@@ -19,6 +19,10 @@ if (import.meta.env.VITE_SENTRY_DSN) {
     sendDefaultPii: true,
     tracesSampleRate: 0, // errors only
     integrations: [], // no tracing / no replay integrations
+    // AbortError is the browser cancelling in-flight work — a fetch abandoned on
+    // navigation/unmount, or a media load interrupted (seen on /tutorials in prod).
+    // Deliberate cancellation, not a defect; never worth an alert.
+    ignoreErrors: [/^AbortError\b/, /The operation was aborted/i],
   });
 }
 

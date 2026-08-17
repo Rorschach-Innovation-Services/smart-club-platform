@@ -887,11 +887,14 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
 
   function setReleased(seriesId, value) {
     // Send the cached version so release/recall is race-safe (409 on conflict),
-    // not silent last-write-wins.
+    // not silent last-write-wins. rawConflict: the server's 409s here carry copy the
+    // admin must read — "Release blocked — N venue clash(es): …" from the clash gate,
+    // or "series changed; refetch" on a genuine version race.
     const cur = allSeries.find((s) => s.id === seriesId);
     withToast(
       () => api.patchSeries(seriesId, { released: value, version: cur?.version }),
       'Could not update release',
+      { rawConflict: true },
     )
       .then(() => invalidate(qk.series()))
       .catch(() => {});
