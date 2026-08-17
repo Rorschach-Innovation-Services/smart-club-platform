@@ -11,7 +11,7 @@
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
-import type { Series, Venue } from '../src/types.js';
+import type { Series, Venue, Club } from '../src/types.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
 const DDB_PORT = 4611; // distinct from api.int (4599), platform.int (4601), logo-offline (4603), tutorial-offline (4604), backfill-team (4605), season-venues (4607), migrate-block-index (4609)
@@ -56,6 +56,28 @@ const series = (id: string, over: Partial<Series> = {}): Series =>
     version: 1,
     ...over,
   }) as Series;
+
+// Minimal Club shape — required fields copied from bootstrap-fixture-prereqs.ts's
+// clubsToAdd literal, since Club has no optional-everything convenience constructor.
+const club = (id: string, groundVenue: string): Club =>
+  ({
+    id,
+    name: id,
+    district: 'Test',
+    sub: '',
+    chair: '',
+    affiliation: 'not_started',
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 1,
+    women: 1,
+    juniors: 0,
+    color: '#0E7C6B',
+    ground: { venue: groundVenue },
+    leagues: [],
+    version: 1,
+  }) as Club;
 
 let ddbServer: Server;
 let app: (typeof import('../src/index.js'))['app'];
@@ -340,6 +362,83 @@ describe('release clash gate', () => {
       }),
     );
     const res = await patchRelease('s-gate-i', 1);
+    assert.equal(res.status, 200);
+  });
+
+  test('implicit venue: two clubs sharing the same registered ground clash via the home club, with no venue field on either fixture', async () => {
+    // Clubs go in via repo.putClub before the PATCH — same harness pattern as the
+    // venue/series setup above, just for the Club side of effectiveGround().
+    await repo.putClub('dolphins', club('implicit-home-1', 'Shared Community Oval'));
+    await repo.putClub('dolphins', club('implicit-home-2', 'Shared Community Oval'));
+    await repo.putSeries(
+      'dolphins',
+      series('s-gate-implicit-a', {
+        participants: [
+          { teamId: 'implicit-home-1', clubId: 'implicit-home-1', name: 'Implicit Home 1' },
+          { teamId: 'implicit-away-1', clubId: 'implicit-away-1', name: 'Implicit Away 1' },
+        ],
+        fixtures: [
+          {
+            id: 'f1',
+            round: 1,
+            date: '2026-11-01',
+            time: '09:00',
+            home: 'implicit-home-1',
+            away: 'implicit-away-1',
+          },
+        ],
+      }),
+    );
+    await repo.putSeries(
+      'dolphins',
+      series('s-gate-implicit-b', {
+        participants: [
+          { teamId: 'implicit-home-2', clubId: 'implicit-home-2', name: 'Implicit Home 2' },
+          { teamId: 'implicit-away-2', clubId: 'implicit-away-2', name: 'Implicit Away 2' },
+        ],
+        fixtures: [
+          {
+            id: 'f1',
+            round: 1,
+            date: '2026-11-01',
+            time: '09:00',
+            home: 'implicit-home-2',
+            away: 'implicit-away-2',
+          },
+        ],
+      }),
+    );
+
+    const res = await patchRelease('s-gate-implicit-b', 1);
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as { error?: string; message?: string };
+    const msg = String(body.error ?? body.message ?? JSON.stringify(body));
+    assert.match(msg, /Shared Community Oval/i);
+  });
+
+  test('a club whose ground is JUNK ("None") produces no booking — its series releases clean', async () => {
+    await repo.putClub('dolphins', club('junk-ground-home', 'None'));
+    await repo.putSeries(
+      'dolphins',
+      series('s-gate-junk', {
+        participants: [
+          { teamId: 'junk-ground-home', clubId: 'junk-ground-home', name: 'Junk Ground Home' },
+          { teamId: 'junk-ground-away', clubId: 'junk-ground-away', name: 'Junk Ground Away' },
+        ],
+        fixtures: [
+          {
+            id: 'f1',
+            round: 1,
+            date: '2026-11-08',
+            time: '09:00',
+            home: 'junk-ground-home',
+            away: 'junk-ground-away',
+          },
+        ],
+      }),
+    );
+
+    const res = await patchRelease('s-gate-junk', 1);
     assert.equal(res.status, 200);
   });
 });

@@ -327,7 +327,7 @@ async function main() {
       }
     } else {
       addGround(field.name, clubIds[0], {});
-      const created = venuesToAdd.get(field.name.toLowerCase());
+      const created = venuesToAdd.get(field.name.trim().toLowerCase());
       if (created) {
         created.homeClubIds = clubIds;
         byKey.set(groundKey(field.name), created);
@@ -422,6 +422,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
+  console.error(e);
   process.exitCode = 1;
 });

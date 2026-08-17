@@ -295,17 +295,20 @@ export function AdminFixtures({
   // file can go straight to them (or to clubs) for review and sign-off.
   function exportSeason() {
     if (!allSeries.length) return toast?.('No series to export');
-    // Excel: sheet names max 31 chars, no []:*?/\ — sanitise and dedupe.
-    const used = new Set<string>();
+    // Excel: sheet names max 31 chars, no []:*?/\ — sanitise and dedupe. Seeded with the
+    // cover sheet's own name so a competition literally called "Season summary" can't
+    // collide with it.
+    const used = new Set<string>(['Season summary']);
     const sheetName = (name: string) => {
       const base = name
         .replace(/[[\]:*?/\\]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim()
         .slice(0, 31);
-      let candidate = base || 'Series';
+      const stem = base || 'Series';
+      let candidate = stem;
       let n = 2;
-      while (used.has(candidate)) candidate = `${base.slice(0, 28)} ${n++}`;
+      while (used.has(candidate)) candidate = `${stem.slice(0, 28)} ${n++}`;
       used.add(candidate);
       return candidate;
     };
@@ -324,9 +327,10 @@ export function AdminFixtures({
       { name: 'Season summary', rows: summary },
       ...allSeries.map((s) => ({ name: sheetName(s.name), rows: scheduleRows(s) })),
     ];
-    exportSheetsToXlsx('season-fixtures.xlsx', sheets).catch(() =>
-      toast?.('Export failed — please retry'),
-    );
+    exportSheetsToXlsx(
+      `season-fixtures-${new Date().toISOString().slice(0, 10)}.xlsx`,
+      sheets,
+    ).catch(() => toast?.('Export failed — please retry'));
   }
 
   // Shared release/recall confirmation builders — used by header, card, and bottom bar

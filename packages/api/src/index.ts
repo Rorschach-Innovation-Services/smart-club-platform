@@ -2623,6 +2623,17 @@ app.patch('/series/:id', requireAdmin, async (c) => {
   // the tenant (drafts included: a clash with a draft is still a double-booking the
   // season carries). 409 with the clash list so the console can show exactly what to
   // fix; recalls (released:false) are never blocked.
+  //
+  // Deliberately NO override flag. Product decision: a known double-booking must never
+  // be released, full stop — there is no "release anyway" escape hatch here (contrast
+  // the import script's --allow-clashes, which is a build-time authoring aid, not a
+  // publish-time gate). This includes series that are themselves about to be
+  // superseded: while the 4 old `s-planb-premier-*-t20-top6/-bottom6/top4/bottom4`
+  // series still exist as unreleased drafts, their untimed fixtures still occupy whole
+  // ground-days and will 409 a release of their replacements. That is correct — they
+  // really do clash while both exist. The fix is operational (prune the superseded
+  // series, or fix the clashing venues), never to bypass the gate; see the "Ordering
+  // consequence" section of docs/runbooks/planb-fixtures-import.md.
   if (patch.released === true && !current.released) {
     const [allSeries, clubs, venues] = await Promise.all([
       repo.listSeries(ra.tenant),

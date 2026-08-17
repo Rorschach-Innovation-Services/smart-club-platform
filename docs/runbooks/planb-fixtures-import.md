@@ -16,32 +16,60 @@ removes it again when the season machinery takes over.
 
 ## Prerequisites (before the first dry run)
 
-- **Create the 2 veterans leagues in the prod admin console**, typing the labels
-  **exactly** as below — the console derives a kebab-case key from the label
-  (`slugifyLeagueKey`, `src/leagues.ts:117-123`), so a different label produces a
-  different key and the import will refuse to write (fails closed on an unconfigured
-  league key):
-  - `Veterans Premier` → `veterans-premier`
-  - `Veterans Promotion` → `veterans-promotion`
-  - (`premier`, `promotion`, `premierWomen` and `promotion-women-s-league` already exist
-    on prod and are reused as-is. The pre-existing single `veterans` league is
-    deliberately NOT used: hosting both divisions under one key would put plain
-    "Chatsworth Sporting" and "Chatsworth Sporting B" in the same league namespace and
-    trip the suffixed/unsuffixed ambiguity guard.)
-- **Create club records for `Parkgate` and `FAM`** (Promotion Women Group B) — the
-  16 Aug 2026 dry run confirmed neither exists on the dolphins tenant, and the import
-  fails closed on them. Get the full club names from the union first.
-- **Confirm "Silver Saints" with the union.** The 16 Aug 2026 dry run showed prod has
-  exactly one saints-like club — Saints Cricket Club (`saints-cricket-club`), which
-  "Saints" (30-over) and "Saints B" (veterans) already resolve to — so the script now
-  redirects "Silver Saints"/"Silver saints" (T20 sheets) onto it. Get the union's
-  one-line confirmation that these are the same club before `--confirm`.
-- **Check the venue registry covers the REVISED file's ground names** (ACC 1, Chatsworth
-  Oval, Chatsworth 217, Crawford NC, Kingsmead Oval, Tills, Hammond, Kloof CC, Penguin
-  Street, Phoenix Stonebridge, Northcroft, Siripat 1/2, Lahee Park, Forest Hills CC,
-  Danville 1, Harlequins 1, Crusaders 1, …). A registry miss isn't fatal — the fixture
-  still gets a venue via `venueOverride` — but it isn't locked or geocoded, so the dry
-  run's "venue registry misses" report is worth clearing first.
+**One step: run `bootstrap-fixture-prereqs`.**
+
+```bash
+npx sst shell --stage prod -- npm --prefix packages/api run bootstrap-fixture-prereqs            # dry-run
+npx sst shell --stage prod -- npm --prefix packages/api run bootstrap-fixture-prereqs -- --confirm
+```
+
+This is now the ONLY way to set up prod for the import. **Manually creating leagues or
+clubs in the admin console is explicitly WRONG** — an earlier manual club creation is
+exactly what produced a duplicate, skeletal `fam-cricket-club` (the sheets' "FAM" turned
+out to already exist as `fam-kwamakhutha`; see below). The script is idempotent — existing
+leagues/clubs/venues are left untouched and reported, so re-running after a partial write,
+or after a console change, is always safe. In one confirmed run it:
+
+- **Creates the 2 veterans leagues** (`Veterans Premier` → `veterans-premier`,
+  `Veterans Promotion` → `veterans-promotion`) the import fails closed on. (The
+  pre-existing single `veterans` league is deliberately NOT reused: hosting both
+  divisions under one key would put plain "Chatsworth Sporting" and "Chatsworth
+  Sporting B" in the same league namespace and trip the suffixed/unsuffixed ambiguity
+  guard.)
+- **Creates the Parkgate club record** (Promotion Women Group B) — deliberately skeletal
+  (district/chair are placeholders the admin corrects in the console once the union
+  supplies details), but with its ground pre-set to `Phoenix Stonebridge` per the union's
+  facility list, so its home fixtures have an effective ground from the first run instead
+  of "undeterminable".
+- **Syncs the venue registry from club grounds** (mirrors the console's "Sync from club
+  records"): one venue per distinct ground name, junk names (`None`/`N/A`/`-`/`TBD`/`TBC`)
+  skipped, and alias-aware — a club record saying "Phoenix Stonebridge" won't spawn a
+  duplicate row beside a registry row that already resolves to the same ground through
+  the shared alias table (`groundKey`, `venue-clash.ts`). Existing registry rows are never
+  touched.
+- **Merges the union's permitted-fields list** (`FACILITY_FIELDS` — "which clubs may play
+  at which field when there's a conflict") into the registry as `homeClubIds`, unioned
+  onto whatever a field's row already carries; a field with no registry row yet gets one
+  created unpinned.
+  - **"FAM" resolves to `fam-kwamakhutha`**, not a new club — the registry sync is what
+    surfaced that prod already has it (ground "Harlequins", Cato Manor 1). The import's
+    `NAME_REDIRECTS` sends "FAM" there.
+  - **Erases the duplicate `fam-cricket-club`** an earlier manual/script run created,
+    but ONLY while it is still exactly the skeletal record that run wrote (no
+    affiliation progress, no players, no ground) — any sign of real use and it's left
+    alone with a warning to resolve manually.
+- **Confirm "Silver Saints" with the union.** Prod has exactly one saints-like club —
+  Saints Cricket Club (`saints-cricket-club`), which "Saints" (30-over) and "Saints B"
+  (veterans) already resolve to — so the import redirects "Silver Saints"/"Silver saints"
+  (T20 sheets) onto it. This redirect is already live in `NAME_REDIRECTS`; get the
+  union's one-line confirmation that these are the same club before `--confirm`-ing the
+  import itself (the redirect ships regardless — it's a code change, not a prereq step —
+  but don't import silently over an unconfirmed identity).
+- **Venue registry coverage is now mostly automatic** via the sync + facility merge
+  above. A registry miss still isn't fatal — the fixture still gets a venue via
+  `venueOverride` — but it isn't locked or geocoded, so it's worth skimming the dry run's
+  "venue registry misses" report for anything neither a club ground nor a facility-list
+  field covers before `--confirm`.
 
 ## Commands (run from the repo root)
 
@@ -69,8 +97,10 @@ npx sst shell --stage prod -- npm --prefix packages/api run import-planb -- \
 …  --allow-count-mismatch # write even though a section/group's parsed count != its expected
                            #   count — the escape hatch for a deliberate future sheet revision
 
-# Prune — after the replacement drafts are approved AND released, remove the 4
-# superseded series (old Premier/Premier Women T20 top6/bottom6/top4/bottom4):
+# Prune — remove the 4 superseded series (old Premier/Premier Women T20 top6/bottom6/
+# top4/bottom4). Read "Ordering — prune before release" below: with the server-side
+# release gate live, this now normally runs BEFORE releasing the replacement drafts,
+# not after.
 npx sst shell --stage prod -- npm --prefix packages/api run import-planb -- --prune
 npx sst shell --stage prod -- npm --prefix packages/api run import-planb -- --prune --confirm
 
@@ -101,20 +131,42 @@ parsing itself before worrying about prod club/venue data.
     **unless** the home club is re-based per the Venue Allocations sheet, in which case
     the fixture carries an explicit venue with status `alternative` and a reason
     explaining the barred/unlisted original ground.
-  - A season-wide clash pass then checks every fixture in the tenant (not just this
-    import) for a ground/date/time conflict, using each fixture's EFFECTIVE ground —
-    its explicit venue if set, else the home side's allocated ground — so implicit-venue
-    fixtures and legacy prod fixtures (which carry no venue fields at all) are covered,
-    not just fixtures with an explicit venue written. A fixture whose effective ground
-    still can't be determined is skipped and counted, never silently dropped — the
-    report prints a `skipped, ground undeterminable: N` line. The 4 superseded
-    `DELETE_SLUGS` series are excluded from the ledger seed (they're about to be pruned;
-    counting their grounds would phantom-clash with the replacements). An untimed
-    fixture owns its whole ground-day; timed fixtures clash on the same ground + date +
-    exact time. One resolvable clash per fixture is auto-moved to the OTHER
-    participating club's allocated ground (the union's Rule 4, refused if that ground is
-    itself barred); anything else aborts the run (`--allow-clashes` writes anyway and
-    prints the clash table for manual fixing in the console).
+  - **The clash pass runs in two phases.** Phase 1 books every fixture with a
+    UNION-AUTHORED explicit venue (REVISED-file venues, Premier T20 pair-map matches,
+    Venue Allocations re-bases) FIRST; phase 2 then fills in every venue-LESS fixture
+    around what phase 1 already booked. Order matters here — an earlier dry run showed a
+    venue-less women's fixture auto-move onto Lahee Park before the Promotion T20
+    fixture whose union-fixed venue IS Lahee Park had a chance to book it, bumping the
+    union's own placement.
+  - **Auto-move candidate chain** when a fixture's ground is already booked, tried in
+    order and always registry-first (never a barred ground, never the ground already
+    clashed on): away side's allocated ground (union Rule 4) → home club's registered
+    secondary ground → away club's registered secondary ground → home club's
+    facility-list permitted fields → away club's facility-list permitted fields. A
+    fixture from phase 1 (an explicit, union-authored venue) may move ONLY within the
+    facility list — that sheet is the union's own stated answer to "where do clubs play
+    when there's a conflict", so it's the sole sanctioned escape for a venue the union
+    itself fixed; a phase-1 fixture the facility list can't place stays a human decision.
+  - Capacity is **surfaces-aware via the venue registry**: a registry-resolved ground
+    books against its real `surfaces` count (multiple fixtures can share a multi-surface
+    ground at the same slot); an unresolved name stays strict at one surface. The ledger
+    keys a booking by the registry venue's id, resolved through the shared alias table
+    (`groundKey` in `venue-clash.ts`) — so "Toti Oval" and "Toti 1" (or any other
+    alias/variant spelling) are recognised as the same ground and share one ledger row,
+    on both the import side and the server-side release gate below.
+  - The clash pass checks every fixture in the tenant (not just this import) for a
+    ground/date/time conflict, using each fixture's EFFECTIVE ground — its explicit venue
+    if set, else the home side's allocated ground — so implicit-venue fixtures and legacy
+    prod fixtures (which carry no venue fields at all) are covered, not just fixtures with
+    an explicit venue written. A fixture whose effective ground still can't be determined
+    is skipped and counted, never silently dropped — the report prints a `skipped, ground
+undeterminable: N` line. The 4 superseded `DELETE_SLUGS` series are excluded from the
+    ledger seed (they're expected to be pruned; counting their grounds would
+    phantom-clash with the replacements). An untimed fixture owns its whole ground-day;
+    timed fixtures clash on the same ground + date + exact time. One resolvable clash per
+    fixture is auto-moved per the candidate chain above; anything else aborts the run
+    (`--allow-clashes` writes anyway and prints the clash table for manual fixing in the
+    console).
   - Before every abort gate, the dry run prints a deduplicated **name-resolution sign-off
     table** per league — every raw sheet name, the club it resolved to, and the
     synthesised teamId when one was created — so every alias/redirect outcome can be
@@ -135,15 +187,69 @@ parsing itself before worrying about prod club/venue data.
 | OVERWRITE (lifecycle preserved)        | `premier-men-50ov-top6`, `-bottom6`; `promotion-men-30ov-top10`, `-bottom10`; `premier-women-30ov-top4`, `-bottom4`                                        |
 | OVERWRITE (from REVISED, exact venues) | `promotion-men-t20-g1..g4`                                                                                                                                 |
 | CREATE (new, land as drafts)           | `premier-men-t20-1/-2`; `premier-women-t20-g1/-g2`; `promotion-women-t20-ga/gb/gc`; `veterans-premier-t20-1/-2/-30ov`; `veterans-promotion-t20-1/-2/-30ov` |
-| DELETE (via `--prune`, not this run)   | `premier-men-t20-top6`, `-bottom6`; `premier-women-t20-top4`, `-bottom4`                                                                                   |
+| DELETE (via `--prune`)                 | `premier-men-t20-top6`, `-bottom6`; `premier-women-t20-top4`, `-bottom4`                                                                                   |
 | KEEP (untouched by either workbook)    | `promotion-men-50ov-g1`, `-g2`                                                                                                                             |
 
-**`--prune` is a separate, later pass by design.** Deletes are never part of the
-`--confirm` import write — the 4 superseded series (old Premier/Premier Women T20) stay
-live on prod, including in club portals, until an admin has approved and released the
-replacement drafts. Only then run `--prune --confirm`. Pruning a still-released series
-prints a loud warning; it is still deleted (an admin who prunes early is explicitly
-choosing to pull it from club portals).
+Pruning a still-released series prints a loud warning; it is still deleted (an admin who
+prunes early is explicitly choosing to pull it from club portals).
+
+## The server-side release gate (PATCH /series)
+
+`PATCH /series/:id` with `released: true` refuses to release a series while any
+ground/date/time clash exists against **any other series in the tenant, released or
+draft** (the same effective-ground logic as the import's own clash pass, sharing
+`venue-clash.ts`). On a clash it responds `409` with the clash list (up to 3 shown, a
+count of the rest), so the console can show exactly what to fix. Recalls
+(`released: false`) are **never** blocked — pulling a series back to draft can't make a
+double-booking worse.
+
+**This is a deliberate hard block with no override flag.** A known double-booking must
+never reach clubs; there is no "release anyway" escape hatch at the API layer (unlike the
+import script's `--allow-clashes`, which is a build-time authoring aid for a dry
+run/import, not a publish-time gate). If a release 409s, the fix is always one of: prune
+the series that's really superseded, or fix the clashing venue/time — never bypass.
+
+### Ordering consequence — prune before release
+
+The 4 superseded series (`premier-men-t20-top6`/`-bottom6`,
+`premier-women-t20-top4`/`-bottom4`) have untimed fixtures, so each one owns its whole
+ground-day. As long as they still exist on the tenant — released OR draft — they occupy
+those ground-days, and releasing their replacements 409s against them.
+
+Practically: once the replacement drafts are imported and approved, they normally sit as
+unreleased drafts pending review (that's the state `recall-release` restores them to if
+they were accidentally released early — see below). **While the replacements are still
+unreleased drafts, run `--prune --confirm` on the 4 superseded series FIRST**, then
+approve/release the replacements from the console. Releasing before pruning will 409
+against the superseded series' ground-days every time.
+
+This reverses the pre-gate order. The old runbook told operators to release the
+replacements first and prune only after — that was safe when the superseded series were
+still live to clubs and there was no gate stopping a release next to them; it minimised
+the gap where clubs would see neither schedule. With the gate in place that order no
+longer works: prune first, release second.
+
+## `recall-release` — recover from an accidental early release
+
+```bash
+npx sst shell --stage prod -- npm --prefix packages/api run recall-release              # dry-run
+npx sst shell --stage prod -- npm --prefix packages/api run recall-release -- --confirm
+npx sst shell --stage prod -- npm --prefix packages/api run recall-release -- --since 2026-08-17T00:00:00Z [--confirm]
+```
+
+If an admin releases the freshly-imported `s-planb-*` drafts before the review pass
+happens, this pulls them back to draft so they can be re-reviewed and re-released
+deliberately. It lists every released `s-planb-*` series and recalls only those whose
+server-stamped `releasedAt` is AFTER a cutoff (default: the timestamp the 16 Aug 2026
+import finished, from its backup filename; override with `--since` for a different
+import run) — writing `released: false, releasedAt: null`, the same single-field recall
+the console's "Recall draft" button performs. `approved` is deliberately left as-is, so
+re-releasing after review is one click. Series released BEFORE the cutoff (the long-live
+50-over/30-over schedules clubs already use) are listed but never touched.
+
+**Recalling hides the fixtures from club portals immediately, but it cannot un-send any
+release notifications (email/WhatsApp) the accidental release already triggered** — those
+went out the moment the series was released the first time.
 
 ## Safety rails (the dry run reports each)
 

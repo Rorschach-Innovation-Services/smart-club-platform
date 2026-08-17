@@ -955,7 +955,10 @@ function buildSeries(
 
 function buildVenueIndex(venues: Venue[]): Map<string, Venue> {
   const byNorm = new Map<string, Venue>();
-  for (const v of venues) byNorm.set(normaliseGround(v.name), v);
+  // Keyed by groundKey (not the bare normalised name) so this index matches
+  // venue-clash.ts's registryResolver — an aliased venue name must resolve to the same
+  // registry row here as it does in the clash-pass ledger.
+  for (const v of venues) byNorm.set(groundKey(v.name), v);
   return byNorm;
 }
 
