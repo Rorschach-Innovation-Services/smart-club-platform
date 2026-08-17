@@ -99,7 +99,7 @@ import {
   formatWeekdayDay,
   formatWeekdayDayYear,
 } from './dates';
-import { exportRowsToXlsx, clubExportRow, playerExportRow } from './exportXlsx';
+import { exportRowsToXlsx, exportSheetsToXlsx, clubExportRow, playerExportRow } from './exportXlsx';
 import { Sentry } from './sentry';
 import { openBccReminder } from './mailto';
 import { EMAIL_RE } from './api';
@@ -230,18 +230,19 @@ export function AdminFixtures({
     return { totalKm, totalCost };
   };
 
-  // Export the active series' fixtures to .xlsx. Clubs without geocoded grounds
-  // can't have distance/travel computed (haversine returns 0) — emit '—' rather
-  // than a misleading 0.
-  function exportSchedule() {
-    if (!active) return toast?.('No series to export');
+  // Export row shape shared by the per-series and whole-season exports — the same
+  // columns the union's own fixture workbooks use, plus the venue note so relocated
+  // fixtures carry their "why" (allocator reason / clash move) into the spreadsheet.
+  // Clubs without geocoded grounds can't have distance/travel computed (haversine
+  // returns 0) — emit '—' rather than a misleading 0.
+  const scheduleRows = (s) => {
     // "Time TBC" is only meaningful once the series has at least one timed fixture —
     // otherwise every series that never uses times (most of them) would export a
     // column full of noise instead of a clean blank.
-    const seriesHasTimes = active.fixtures.some((f) => !!formatTime(f.time));
-    const rows = active.fixtures.map((f) => {
-      const home = teamBy(active, f.home),
-        away = teamBy(active, f.away);
+    const seriesHasTimes = s.fixtures.some((f) => !!formatTime(f.time));
+    return s.fixtures.map((f) => {
+      const home = teamBy(s, f.home),
+        away = teamBy(s, f.away);
       const hasGeo =
         home?.ground?.lat != null &&
         home?.ground?.lon != null &&
@@ -249,13 +250,13 @@ export function AdminFixtures({
         away?.ground?.lon != null;
       const cost =
         home && away
-          ? fixtureCost(home, away, active.costPerKm, active.carsPerAwayTrip, fixtureVenue(f))
+          ? fixtureCost(home, away, s.costPerKm, s.carsPerAwayTrip, fixtureVenue(f))
           : null;
       // The slot label ('Morning'/'Afternoon') alongside the raw kickoff time when the
       // series' schedule carries named slots — trivially available off `schedule.slots`,
       // so worth including, but the time itself is what matters and stands alone without it.
       const time = formatTime(f.time);
-      const slotLabel = active.schedule?.slots?.find((sl) => sl.start === f.time)?.label;
+      const slotLabel = s.schedule?.slots?.find((sl) => sl.start === f.time)?.label;
       return {
         Round: f.round,
         Date: formatWeekdayDayYear(f.date),
@@ -268,6 +269,7 @@ export function AdminFixtures({
             : '',
         Home: home?.name || 'TBD',
         Venue: f.venueOverride || f.venueName || home?.ground?.venue || '—',
+        'Venue note': f.venueStatus && f.venueStatus !== 'home' ? f.venueReason || '' : '',
         Suburb: home?.ground?.suburb || '',
         Away: away?.name || 'TBD',
         'Distance (km)': hasGeo && cost ? Number(cost.distanceKm.toFixed(1)) : '—',
@@ -275,11 +277,56 @@ export function AdminFixtures({
         Status: f.status || 'scheduled',
       };
     });
+  };
+
+  function exportSchedule() {
+    if (!active) return toast?.('No series to export');
     const fname = `${active.name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '')}-schedule.xlsx`;
-    exportRowsToXlsx(fname, 'Schedule', rows).catch(() => toast?.('Export failed — please retry'));
+    exportRowsToXlsx(fname, 'Schedule', scheduleRows(active)).catch(() =>
+      toast?.('Export failed — please retry'),
+    );
+  }
+
+  // Whole-season export: one workbook, a summary cover sheet plus one sheet per
+  // competition — the same structure the union's own fixture workbooks use, so the
+  // file can go straight to them (or to clubs) for review and sign-off.
+  function exportSeason() {
+    if (!allSeries.length) return toast?.('No series to export');
+    // Excel: sheet names max 31 chars, no []:*?/\ — sanitise and dedupe.
+    const used = new Set<string>();
+    const sheetName = (name: string) => {
+      const base = name
+        .replace(/[[\]:*?/\\]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 31);
+      let candidate = base || 'Series';
+      let n = 2;
+      while (used.has(candidate)) candidate = `${base.slice(0, 28)} ${n++}`;
+      used.add(candidate);
+      return candidate;
+    };
+    const summary = allSeries.map((s) => {
+      const dates = s.fixtures.map((f) => f.date).sort();
+      return {
+        Competition: s.name,
+        Fixtures: s.fixtures.length,
+        Sides: s.teams?.length ?? '',
+        From: dates.length ? formatWeekdayDayYear(dates[0]) : '',
+        To: dates.length ? formatWeekdayDayYear(dates[dates.length - 1]) : '',
+        Status: s.released ? 'Released' : s.approved ? 'Approved (draft)' : 'Draft',
+      };
+    });
+    const sheets = [
+      { name: 'Season summary', rows: summary },
+      ...allSeries.map((s) => ({ name: sheetName(s.name), rows: scheduleRows(s) })),
+    ];
+    exportSheetsToXlsx('season-fixtures.xlsx', sheets).catch(() =>
+      toast?.('Export failed — please retry'),
+    );
   }
 
   // Shared release/recall confirmation builders — used by header, card, and bottom bar
@@ -353,6 +400,9 @@ export function AdminFixtures({
           </InfoDot>
           <Btn tone="outline" icon={Icon.Download} size="sm" onClick={exportSchedule}>
             Export schedule
+          </Btn>
+          <Btn tone="outline" icon={Icon.Download} size="sm" onClick={exportSeason}>
+            Export season
           </Btn>
           <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={() => setLauncherOpen(true)}>
             Generate fixtures
