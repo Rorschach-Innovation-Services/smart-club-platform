@@ -35,7 +35,11 @@ const NEW_LEAGUES: Array<Pick<League, 'key' | 'label'>> = [
  * exist all along as fam-kwamakhutha — the registry sync surfaced it — so the import
  * redirects onto that and the skeletal fam-cricket-club an earlier run created is
  * erased below.) */
-const NEW_CLUBS = ['Parkgate Cricket Club'];
+/** Ground per the union facility list ("Parkgate Hambanathi" → Phoenix Stonebridge) —
+ * set at creation so its home fixtures have an effective ground immediately. The prod
+ * record this script created on 16 Aug was deleted from the console on 17 Aug; this
+ * recreates it whole. */
+const NEW_CLUBS = [{ name: 'Parkgate Cricket Club', groundVenue: 'Phoenix Stonebridge' }];
 const NEW_CLUB_LEAGUES = ['promotion-women-s-league'];
 const DUPLICATE_CLUB_ID = 'fam-cricket-club';
 
@@ -201,18 +205,18 @@ async function main() {
   const byNorm = new Map(clubs.map((c) => [normalise(c.name), c]));
   const district = modalDistrict(clubs);
   const clubsToAdd: Club[] = [];
-  for (const name of NEW_CLUBS) {
-    const existing = byNorm.get(normalise(name));
+  for (const spec of NEW_CLUBS) {
+    const existing = byNorm.get(normalise(spec.name));
     if (existing) {
       console.log(
-        `club "${name}" — already resolves to ${existing.name} (${existing.id}), untouched`,
+        `club "${spec.name}" — already resolves to ${existing.name} (${existing.id}), untouched`,
       );
       continue;
     }
-    const id = clubIdFromName(name);
+    const id = clubIdFromName(spec.name);
     clubsToAdd.push({
       id,
-      name,
+      name: spec.name,
       district,
       sub: '',
       chair: '',
@@ -224,12 +228,12 @@ async function main() {
       women: 1,
       juniors: 0,
       color: '#0E7C6B',
-      ground: {},
+      ground: spec.groundVenue ? { venue: spec.groundVenue } : {},
       leagues: NEW_CLUB_LEAGUES,
       version: 1,
     } as Club);
     console.log(
-      `${confirm ? 'create' : '[dry-run] would create'} club "${name}" (${id}) — district "${district}" is a PLACEHOLDER; fix district/chair/ground in the console once the union confirms details`,
+      `${confirm ? 'create' : '[dry-run] would create'} club "${spec.name}" (${id})${spec.groundVenue ? ` — ground "${spec.groundVenue}" per the union facility list` : ''} — district "${district}" is a PLACEHOLDER; fix district/chair in the console once the union confirms details`,
     );
   }
 
@@ -247,6 +251,9 @@ async function main() {
     if (!trimmed || JUNK_GROUND.test(trimmed)) return;
     const key = trimmed.toLowerCase();
     if (byName.has(key)) return; // registry already knows it — console owns it
+    // Alias-aware duplicate guard: a club record saying "Phoenix Stonebridge" must not
+    // spawn a second row beside the registry's "Stonebridge".
+    if (existingVenues.some((v) => groundKey(v.name) === groundKey(trimmed))) return;
     const pending = venuesToAdd.get(key);
     if (pending) {
       if (!pending.homeClubIds?.includes(clubId))
@@ -296,7 +303,9 @@ async function main() {
   for (const v of venuesToAdd.values()) byKey.set(groundKey(v.name), v);
   const pendingNew = new Set(venuesToAdd.values());
   const venueUpdates = new Map<string, Venue>();
-  const knownClubIds = new Set(clubs.map((c) => c.id));
+  // Includes clubs being created THIS run (e.g. a recreated Parkgate), so their
+  // facility permissions land in the same pass.
+  const knownClubIds = new Set([...clubs.map((c) => c.id), ...clubsToAdd.map((c) => c.id)]);
   const unknownClubRefs = new Set<string>();
   for (const field of FACILITY_FIELDS) {
     const clubIds = field.clubs.filter((id) => {
