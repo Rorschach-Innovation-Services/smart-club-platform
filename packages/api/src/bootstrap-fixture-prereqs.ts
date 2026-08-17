@@ -20,7 +20,7 @@
  */
 import * as repo from './repo.js';
 import { clubIdFromName } from './club-id.js';
-import { normalise } from './import-planb-fixtures.js';
+import { normalise, groundKey } from './import-planb-fixtures.js';
 import type { Club, League, Venue } from './types.js';
 
 const TENANT = 'dolphins';
@@ -53,6 +53,117 @@ const CUSTOM_VENUES: Array<Pick<Venue, 'name' | 'homeClubIds'>> = [
 /** Club-record ground values that mean "no ground recorded" — creating a venue named
  * "None" shared by every such club would be pure noise. */
 const JUNK_GROUND = /^(none|n\/?a|-|tbd|tbc)$/i;
+
+/**
+ * The union's permitted-fields list ("facility updated.xlsx", 17 Aug 2026) — which
+ * clubs may play at which field when there is a conflict. Merged into the registry as
+ * `homeClubIds` (unioned, never removed); fields with no registry row are created
+ * unpinned. Club ids are the canonical prod ids (verified against the 16 Aug dry-run
+ * sign-off table); association names for clubs NOT on the tenant (Asande CC,
+ * Kwadebeka CC) are deliberately omitted. "Mpumalanga CC" is mapped to west-cc — West
+ * CC's registered ground is "Mpumalanga Township Cricket Stadium".
+ */
+const FACILITY_FIELDS: Array<{ name: string; clubs: string[] }> = [
+  { name: 'Bayview (Bluff)', clubs: ['harlequins-cricket-club'] },
+  { name: 'Cato Manor 1', clubs: ['fam-kwamakhutha', 'chesterville-cricket-clube'] },
+  { name: 'Cato Manor 2', clubs: ['fam-kwamakhutha', 'chesterville-cricket-clube'] },
+  { name: 'Cato Manor 4', clubs: ['fam-kwamakhutha', 'chesterville-cricket-clube'] },
+  { name: 'Cato Manor 5', clubs: ['fam-kwamakhutha', 'chesterville-cricket-clube'] },
+  { name: 'Crawford NC', clubs: ['railways-cricket-club'] },
+  {
+    name: 'Chatsworth 114',
+    clubs: ['hollywoodbets-chatsworth-sporting', 'chatsworth-united-cricket-club'],
+  },
+  { name: 'Chatsworth 121 (Junior)', clubs: ['hollywoodbets-chatsworth-sporting'] },
+  {
+    name: 'Chatsworth 217',
+    clubs: ['hollywoodbets-chatsworth-sporting', 'chatsworth-united-cricket-club'],
+  },
+  { name: 'Chatsworth 306', clubs: ['chatsworth-united-cricket-club'] },
+  { name: 'Chatsworth 3B', clubs: ['chatsworth-united-cricket-club'] },
+  {
+    name: 'Chatsworth Oval',
+    clubs: [
+      'hollywoodbets-chatsworth-sporting',
+      'chatsworth-united-cricket-club',
+      'saints-cricket-club',
+      'ptcc',
+    ],
+  },
+  { name: 'Crusaders 1', clubs: ['crusaders'] },
+  { name: 'Crusaders 2', clubs: ['crusaders'] },
+  { name: 'DHS High School', clubs: ['rhythm-dhsob-cricket-club'] },
+  { name: 'Danville 1', clubs: ['rhythm-dhsob-cricket-club'] },
+  { name: 'Danville 2', clubs: ['rhythm-dhsob-cricket-club'] },
+  { name: 'Dhubri Road', clubs: ['merebank-cricket-club'] },
+  { name: 'Fairfield Park', clubs: ['hillary-malvern-cricket-club'] },
+  { name: 'Glenwood High', clubs: ['east-coast-cc'] },
+  { name: 'Hammond (UKZN)', clubs: ['ukzn-cricket-club'] },
+  { name: 'Varsity 4', clubs: ['ukzn-cricket-club'] },
+  {
+    name: 'Harlequins 1',
+    clubs: ['fam-kwamakhutha', 'harlequins-cricket-club', 'umlazi-cricket-club'],
+  },
+  {
+    name: 'Harlequins 2',
+    clubs: ['fam-kwamakhutha', 'harlequins-cricket-club', 'umlazi-cricket-club'],
+  },
+  { name: 'Highbury 1', clubs: ['umlazi-cricket-club'] },
+  { name: 'Highbury 2', clubs: ['umlazi-cricket-club'] },
+  { name: 'Highbury 3', clubs: ['umlazi-cricket-club'] },
+  { name: 'Kloof High School', clubs: ['east-coast-cc'] },
+  { name: 'Kingsmead Oval', clubs: ['african-warriors-cc', 'lindelani-cricket-club'] },
+  { name: 'Lahee Park 1', clubs: ['lindelani-cricket-club', 'west-cc'] },
+  { name: 'Lt King Park', clubs: ['harlequins-cricket-club'] },
+  { name: 'Malvern Park', clubs: ['hillary-malvern-cricket-club'] },
+  { name: 'Newlands Oval', clubs: ['lindelani-cricket-club', 'newlands-cricket-club'] },
+  { name: 'Penguin Street (Chatsworth)', clubs: ['saints-cricket-club'] },
+  { name: 'Phoenix Northcroft', clubs: ['phoenix-cricket-club'] },
+  {
+    name: 'Phoenix Stonebridge',
+    clubs: ['parkgate-cricket-club', 'phoenix-cricket-club'],
+  },
+  { name: 'Phoenix Sydmore', clubs: ['phoenix-cricket-club'] },
+  {
+    name: 'Siripat 1',
+    clubs: [
+      'fam-kwamakhutha',
+      'lindelani-cricket-club',
+      'west-cc',
+      'newlands-cricket-club',
+      'ntuzuma-cricket-club',
+      'simplex-reservoir-hills-crimson',
+    ],
+  },
+  {
+    name: 'Siripat 2',
+    clubs: [
+      'fam-kwamakhutha',
+      'lindelani-cricket-club',
+      'west-cc',
+      'newlands-cricket-club',
+      'ntuzuma-cricket-club',
+      'simplex-reservoir-hills-crimson',
+    ],
+  },
+  {
+    name: 'Siripat 3',
+    clubs: [
+      'fam-kwamakhutha',
+      'lindelani-cricket-club',
+      'west-cc',
+      'newlands-cricket-club',
+      'ntuzuma-cricket-club',
+      'simplex-reservoir-hills-crimson',
+    ],
+  },
+  { name: 'SL Singh 1', clubs: ['west-cc', 'newlands-cricket-club', 'ntuzuma-cricket-club'] },
+  { name: 'SL Singh 2', clubs: ['west-cc', 'newlands-cricket-club', 'ntuzuma-cricket-club'] },
+  { name: 'SL Singh 3', clubs: ['west-cc', 'newlands-cricket-club', 'ntuzuma-cricket-club'] },
+  { name: 'Tills', clubs: ['delta-cricket-club', 'chesterville-cricket-clube'] },
+  { name: 'Toti Oval', clubs: ['amanzimtoti-cricket-club'] },
+  { name: 'Toti 2', clubs: ['amanzimtoti-cricket-club', 'fam-kwamakhutha'] },
+];
 
 function modalDistrict(clubs: Club[]): string {
   const counts = new Map<string, number>();
@@ -175,6 +286,64 @@ async function main() {
     );
   }
 
+  // ── Facility permitted-fields merge (FACILITY_FIELDS) ──
+  // Match each facility field onto the registry through the import's own alias layer
+  // (groundKey), so "Toti Oval"/"Hammond (UKZN)"/"Lahee Park 1" land on the rows the
+  // import resolves; union the permitted clubs into homeClubIds; create unpinned rows
+  // for fields the registry has never seen (Danville 2, Siripat 3, Highbury 1–3, …).
+  const byKey = new Map<string, Venue>();
+  for (const v of existingVenues) byKey.set(groundKey(v.name), v);
+  for (const v of venuesToAdd.values()) byKey.set(groundKey(v.name), v);
+  const pendingNew = new Set(venuesToAdd.values());
+  const venueUpdates = new Map<string, Venue>();
+  const knownClubIds = new Set(clubs.map((c) => c.id));
+  const unknownClubRefs = new Set<string>();
+  for (const field of FACILITY_FIELDS) {
+    const clubIds = field.clubs.filter((id) => {
+      if (knownClubIds.has(id)) return true;
+      unknownClubRefs.add(id);
+      return false;
+    });
+    if (!clubIds.length) continue;
+    const existing = byKey.get(groundKey(field.name));
+    if (existing) {
+      const have = new Set(existing.homeClubIds ?? []);
+      const missing = clubIds.filter((id) => !have.has(id));
+      if (missing.length) {
+        existing.homeClubIds = [...(existing.homeClubIds ?? []), ...missing];
+        if (!pendingNew.has(existing)) venueUpdates.set(String(existing.id), existing);
+        console.log(
+          `${confirm ? 'permit' : '[dry-run] would permit'} ${missing.join(', ')} at "${existing.name}"`,
+        );
+      }
+    } else {
+      addGround(field.name, clubIds[0], {});
+      const created = venuesToAdd.get(field.name.toLowerCase());
+      if (created) {
+        created.homeClubIds = clubIds;
+        byKey.set(groundKey(field.name), created);
+        pendingNew.add(created);
+        console.log(
+          `${confirm ? 'create' : '[dry-run] would create'} facility venue "${field.name}" (permitted: ${clubIds.join(', ')})`,
+        );
+      }
+    }
+  }
+  if (unknownClubRefs.size)
+    console.log(
+      `  (facility associations skipped — clubs not on this tenant: ${[...unknownClubRefs].join(', ')})`,
+    );
+
+  // Parkgate has no ground on record; the facility list names Phoenix Stonebridge as
+  // its field. Setting it gives Parkgate's home fixtures an effective ground instead
+  // of "undeterminable".
+  const parkgate = clubs.find((c) => c.id === 'parkgate-cricket-club');
+  const parkgateNeedsGround = parkgate && !parkgate.ground?.venue;
+  if (parkgateNeedsGround)
+    console.log(
+      `${confirm ? 'set' : '[dry-run] would set'} parkgate-cricket-club ground → "Phoenix Stonebridge" (union facility list)`,
+    );
+
   // ── Duplicate-club cleanup ──
   // An earlier bootstrap created fam-cricket-club before the registry sync revealed
   // the sheets' "FAM" is prod's fam-kwamakhutha (the import now redirects onto it).
@@ -191,7 +360,14 @@ async function main() {
     );
   }
 
-  if (!leaguesToAdd.length && !clubsToAdd.length && !venuesToAdd.size && !dupErasable) {
+  if (
+    !leaguesToAdd.length &&
+    !clubsToAdd.length &&
+    !venuesToAdd.size &&
+    !venueUpdates.size &&
+    !parkgateNeedsGround &&
+    !dupErasable
+  ) {
     console.log('Nothing to do — all prerequisites already in place.');
     return;
   }
@@ -217,6 +393,17 @@ async function main() {
   for (const v of venuesToAdd.values()) {
     await repo.putVenue(TENANT, v);
     console.log(`wrote venue ${v.id}`);
+  }
+  for (const v of venueUpdates.values()) {
+    await repo.putVenue(TENANT, v);
+    console.log(`updated venue ${v.id} (permitted clubs merged)`);
+  }
+  if (parkgate && parkgateNeedsGround) {
+    await repo.putClub(TENANT, {
+      ...parkgate,
+      ground: { ...parkgate.ground, venue: 'Phoenix Stonebridge' },
+    });
+    console.log('updated club parkgate-cricket-club (ground → Phoenix Stonebridge)');
   }
   if (dup && dupErasable) {
     await repo.eraseClubData(TENANT, dup);

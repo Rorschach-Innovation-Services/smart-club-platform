@@ -124,7 +124,25 @@ const VENUE_ALIASES: Record<string, string> = {
   foresthills: 'foresthillssports', // "Forest Hills CC" → "Forest Hills Sports Club"
   phoenixstonebridge: 'stonebridge', // East Coast / Phoenix
   penguinstreet: 'penguinstreetground', // Meadowridge's "PENGUIN STREET GROUND"
+  // From the union's "facility updated" permitted-fields sheet (17 Aug 2026) — its
+  // spellings for grounds the registry already stores under other names.
+  crusaders2: 'crusaders2field',
+  dhubriroad: 'dhubriroadgrounds',
+  hammondukzn: 'hammondoval', // "Hammond (UKZN)"
+  harlequins2: 'vanriebekparkharlequins2',
+  laheepark1: 'laheeparkoval',
+  penguinstreetchatsworth: 'penguinstreetground', // "Penguin Street (Chatsworth)"
+  phoenixsydmore: 'sidmore', // East Coast's "Sidmore" = the facility list's "Phoenix Sydmore"
+  totioval: 'toti1', // "Toti Oval"
 };
+
+/** A ground name's ledger/registry lookup key: alias applied over the normal form.
+ * Exported for bootstrap-fixture-prereqs, so its facility-list merge finds the same
+ * registry rows the import will resolve. */
+export function groundKey(name: string): string {
+  const n = normalise(name);
+  return VENUE_ALIASES[n] ?? n;
+}
 
 /** Club-record ground values that mean "no ground recorded", not a ground named that —
  * umgababa and ilembe literally carry "None". Booking a shared phantom "None" ground
@@ -1258,12 +1276,28 @@ function runClashPass(
 
   const unresolved: string[] = [];
   const autoMoves: string[] = [];
+
+  // The union's permitted-fields list ("facility updated" sheet, 17 Aug 2026) lives on
+  // the registry as homeClubIds — every venue a club may use when its first choice is
+  // taken. Loaded here so clash resolution can walk a club's own permitted pool.
+  const permittedByClub = new Map<string, Venue[]>();
+  for (const v of new Set(byNormVenue.values())) {
+    for (const cid of v.homeClubIds ?? []) {
+      const list = permittedByClub.get(cid) ?? [];
+      list.push(v);
+      permittedByClub.set(cid, list);
+    }
+  }
+  for (const list of permittedByClub.values()) list.sort((a, b) => a.name.localeCompare(b.name));
+
   // Two phases: union-authored venues (explicit venue fields from the REVISED sheet /
   // pair-map / re-bases) book FIRST, then venue-less fixtures fill around them. Dry run
   // #3 showed why order matters: a women's fixture auto-moved onto Lahee Park before
   // the Promotion T20 fixture whose union-fixed venue IS Lahee Park had booked it.
-  // Explicit-vs-explicit clashes are never auto-moved — both venues are union-authored,
-  // so a human picks which one moves in the console after import.
+  // Explicit-vs-explicit clashes move ONLY within the union's own permitted-fields
+  // list — that sheet is the union's stated answer to "where do clubs play when there
+  // is a conflict", so it outranks even a sheet-fixed venue; anything it can't place
+  // stays a human decision.
   for (const explicitPhase of [true, false]) {
     for (const { series, fixtures } of built) {
       const teamToClub = new Map((series.participants ?? []).map((p) => [p.teamId, p.clubId]));
@@ -1285,24 +1319,9 @@ function runClashPass(
           });
           continue;
         }
-        if (explicitPhase) {
-          unresolved.push(
-            `${series.id} ${f.id}: ${ground} on ${f.date}${f.time ? ' ' + f.time : ''} clashes with ${clash.seriesId}/${clash.fixtureId} (both union-authored venues — move one in the console)`,
-          );
-          if (allowClashes) {
-            ledger.book(ground, f.date, f.time, {
-              seriesId: String(series.id),
-              fixtureId: f.id,
-              date: f.date,
-              time: f.time,
-            });
-          }
-          continue;
-        }
-        // Auto-move, tried in the order a scheduler would: the OTHER participant's
-        // allocated ground (union Rule 4), then the home club's secondary ground, then
-        // the away club's secondary ground — all registry-first via setVenue, never a
-        // barred ground, never the ground we are already clashing on.
+        // Auto-move candidates, tried in the order a scheduler would. All registry-first
+        // via setVenue, never a barred ground, never the ground we are already clashing
+        // on, deduped by ledger key (so "Toti Oval" and "Toti 1" count as one option).
         const homeClubId = teamToClub.get(f.home);
         const awayClubId = teamToClub.get(f.away);
         const secondary = (clubId: string | undefined) => {
@@ -1312,17 +1331,28 @@ function runClashPass(
         const candidates: Array<{ ground: string; label: string }> = [];
         const addCandidate = (g: string | undefined, label: string) => {
           if (!g) return;
-          if (normaliseGround(g) === normaliseGround(ground)) return;
-          if (candidates.some((c) => normaliseGround(c.ground) === normaliseGround(g))) return;
+          if (groundKey(g) === groundKey(ground)) return;
+          if (candidates.some((c) => groundKey(c.ground) === groundKey(g))) return;
           if (barredGrounds.has(normaliseGround(g))) return;
           candidates.push({ ground: g, label });
         };
-        addCandidate(
-          awayClubId ? allocatedGroundName(awayClubId, clubsById, reBaseMap) : undefined,
-          "away side's allocated ground",
-        );
-        addCandidate(secondary(homeClubId), "home club's secondary ground");
-        addCandidate(secondary(awayClubId), "away club's secondary ground");
+        const addPermitted = (clubId: string | undefined, label: string) => {
+          for (const v of clubId ? (permittedByClub.get(clubId) ?? []) : [])
+            addCandidate(v.name, label);
+        };
+        if (!explicitPhase) {
+          // Union Rule 4 first, then the clubs' registered secondaries.
+          addCandidate(
+            awayClubId ? allocatedGroundName(awayClubId, clubsById, reBaseMap) : undefined,
+            "away side's allocated ground",
+          );
+          addCandidate(secondary(homeClubId), "home club's secondary ground");
+          addCandidate(secondary(awayClubId), "away club's secondary ground");
+        }
+        // The union's permitted-fields list applies in BOTH phases — for a
+        // union-authored venue it is the only sanctioned escape.
+        addPermitted(homeClubId, "home club's permitted field (union facility list)");
+        addPermitted(awayClubId, "away club's permitted field (union facility list)");
         const target = candidates.find((c) => !ledger.check(c.ground, f.date, f.time));
         if (target) {
           setVenue(
@@ -1344,7 +1374,7 @@ function runClashPass(
           );
         } else {
           unresolved.push(
-            `${series.id} ${f.id}: ${ground} on ${f.date}${f.time ? ' ' + f.time : ''} clashes with ${clash.seriesId}/${clash.fixtureId}${candidates.length ? ` (tried: ${candidates.map((c) => c.ground).join(', ')})` : ' (no alternative ground available)'}`,
+            `${series.id} ${f.id}: ${ground} on ${f.date}${f.time ? ' ' + f.time : ''} clashes with ${clash.seriesId}/${clash.fixtureId}${candidates.length ? ` (tried: ${candidates.map((c) => c.ground).join(', ')})` : ' (no alternative ground available)'}${explicitPhase ? ' [union-authored venue — decide in the console]' : ''}`,
           );
           if (allowClashes) {
             ledger.book(ground, f.date, f.time, {
