@@ -4526,6 +4526,13 @@ app.post('/platform/tenants/:slug/roster-intake/parse', async (c) => {
     if (juniorLeagueKeys.has(key)) ageGroupMap[raw] = key;
   }
   const runNow = now();
+  // dobOnlyCount and ageGroupRaws are TOP-LEVEL aggregates (RosterIntakeParseResponse,
+  // src/types.ts) — the junior confirm table and the "N dob-only rows" summary work
+  // across the whole club, not sheet-by-sheet. ageGroupRaws is deduped by raw band
+  // text across every sheet: a raw seen on more than one sheet keeps its MAPPED value
+  // if any sheet resolved one, never regresses a resolved band back to null.
+  let dobOnlyCount = 0;
+  const ageGroupRawsByRaw = new Map<string, string | null>();
   const sheets = wb.worksheets.map((ws) => {
     const result = parseRosterSheet(ws, clubId, runNow, {
       allowMissingId: !!body.allowMissingId,
@@ -4542,9 +4549,14 @@ app.post('/platform/tenants/:slug/roster-intake/parse', async (c) => {
         exceptions: [],
         unknownGenderRaw: [],
         unknownRaceRaw: [],
-        dobOnlyCount: 0,
-        ageGroupRaws: [],
       };
+    }
+    dobOnlyCount += result.rows.filter((r) => r.missingId).length;
+    for (const { raw, leagueKey } of result.ageGroupRaws) {
+      const existing = ageGroupRawsByRaw.get(raw);
+      if (existing === undefined || (existing === null && leagueKey !== null)) {
+        ageGroupRawsByRaw.set(raw, leagueKey);
+      }
     }
     return {
       name: ws.name,
@@ -4565,12 +4577,16 @@ app.post('/platform/tenants/:slug/roster-intake/parse', async (c) => {
       exceptions: result.exceptions,
       unknownGenderRaw: [...new Set(result.unknownGenderRaw)],
       unknownRaceRaw: [...new Set(result.unknownRaceRaw)],
-      dobOnlyCount: result.rows.filter((r) => r.missingId).length,
-      ageGroupRaws: result.ageGroupRaws,
     };
   });
 
-  return noStore({ sheets, juniorLeagueKeys: [...juniorLeagueKeys] });
+  return noStore({
+    parseable: true,
+    sheets,
+    dobOnlyCount,
+    juniorLeagueKeys: [...juniorLeagueKeys],
+    ageGroupRaws: [...ageGroupRawsByRaw].map(([raw, leagueKey]) => ({ raw, leagueKey })),
+  });
 });
 
 /** Max rows accepted per roster-intake commit call — the review wizard batches per club
@@ -4579,6 +4595,7 @@ const ROSTER_INTAKE_MAX_ITEMS = 500;
 
 interface RosterIntakeCommitItem {
   clubId?: string;
+  rowNumber?: number;
   firstName?: string;
   lastName?: string;
   dob?: string;
@@ -4586,6 +4603,19 @@ interface RosterIntakeCommitItem {
   gender?: string;
   race?: string;
   team?: string;
+}
+
+/** One cross-club identity conflict a roster-intake commit excluded rather than
+ *  failing the batch over — mirrors RosterIntakeCrossClubConflict (src/types.ts):
+ *  `claimedBy` names the other club holding this identity (in-batch or elsewhere);
+ *  `alreadyRegisteredAt` is present ONLY for the elsewhere-registered variant — the
+ *  discriminant between the two conflict kinds. */
+interface RosterIntakeCrossClubConflict {
+  rowNumber: number;
+  clubId: string;
+  playerNaturalKey: string;
+  claimedBy: string;
+  alreadyRegisteredAt?: string;
 }
 
 /**
@@ -4602,6 +4632,7 @@ function validateRosterIntakeItem(
   index: number,
 ): string | null {
   const at = `item ${index}`;
+  if (typeof item.rowNumber !== 'number') return `${at}: rowNumber is required`;
   if (!item.clubId || !clubIds.has(item.clubId)) return `${at}: unknown club`;
   const firstName = (item.firstName ?? '').trim();
   const lastName = (item.lastName ?? '').trim();
@@ -4701,7 +4732,7 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
       ...(race ? { race } : {}),
       ...(item.team ? { team: item.team } : {}),
     };
-    return { clubId, clubName: clubsById.get(clubId)!.name, player };
+    return { clubId, clubName: clubsById.get(clubId)!.name, rowNumber: item.rowNumber!, player };
   });
 
   // In-batch cross-club conflicts: the SAME detector the CLI and the frontend's
@@ -4710,30 +4741,31 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
     built.map((b) => ({
       clubId: b.clubId,
       clubName: b.clubName,
-      row: { player: b.player, hadRealId: !!b.player.idNumber, missingId: false, rowNumber: 0 },
+      row: {
+        player: b.player,
+        hadRealId: !!b.player.idNumber,
+        missingId: false,
+        rowNumber: b.rowNumber,
+      },
     })),
   );
 
-  const crossClubConflicts: Array<{
-    clubId: string;
-    firstName: string;
-    lastName: string;
-    reason: 'in-batch' | 'already-registered';
-    claimedBy?: string[];
-    alreadyRegisteredAt?: string;
-  }> = [];
+  const crossClubConflicts: RosterIntakeCrossClubConflict[] = [];
   const toWrite: typeof built = [];
   for (const b of built) {
     if (duplicateNaturalKeys.has(`${b.clubId}::${b.player.naturalKey}`)) {
-      const otherClubs = built
-        .filter((x) => x.player.naturalKey === b.player.naturalKey && x.clubId !== b.clubId)
-        .map((x) => x.clubName);
+      const otherClubNames = [
+        ...new Set(
+          built
+            .filter((x) => x.player.naturalKey === b.player.naturalKey && x.clubId !== b.clubId)
+            .map((x) => x.clubName),
+        ),
+      ];
       crossClubConflicts.push({
+        rowNumber: b.rowNumber,
         clubId: b.clubId,
-        firstName: b.player.firstName,
-        lastName: b.player.lastName,
-        reason: 'in-batch',
-        claimedBy: [...new Set(otherClubs)],
+        playerNaturalKey: b.player.naturalKey,
+        claimedBy: otherClubNames.join(', '),
       });
       continue;
     }
@@ -4741,10 +4773,10 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
     const elsewhere = await repo.findPlayerAcrossClubs(slug, b.player.naturalKey, b.clubId);
     if (elsewhere.length > 0) {
       crossClubConflicts.push({
+        rowNumber: b.rowNumber,
         clubId: b.clubId,
-        firstName: b.player.firstName,
-        lastName: b.player.lastName,
-        reason: 'already-registered',
+        playerNaturalKey: b.player.naturalKey,
+        claimedBy: elsewhere[0].clubName,
         alreadyRegisteredAt: elsewhere[0].clubName,
       });
       continue;
@@ -4759,46 +4791,44 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
     else byClub.set(b.clubId, [b]);
   }
 
-  const clubResults = await Promise.all(
-    [...byClub.entries()].map(async ([clubId, rows]) => {
-      let written = 0;
-      let alreadyPresent = 0;
+  // Flat totals (RosterIntakeCommitResponse, src/types.ts) — ALL-before-ANY-write means
+  // there is no per-club ok/error to report; an unexpected (non-conditional) repo error
+  // propagates to the global error handler rather than being swallowed into a per-club
+  // result that no longer exists in this response shape.
+  let created = 0;
+  let alreadyPresent = 0;
+  const playerCount: Record<string, number> = {};
+  for (const [clubId, rows] of byClub) {
+    for (const { player } of rows) {
       try {
-        for (const { player } of rows) {
-          try {
-            // eslint-disable-next-line no-await-in-loop -- one club's rows must land as a
-            // deterministic sequence (idempotent re-commit checks each row independently)
-            await repo.createPlayer(slug, player);
-            written++;
-          } catch (err) {
-            if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
-              alreadyPresent++;
-              continue;
-            }
-            throw err;
-          }
-        }
-        const { actual } = await repo.reconcilePlayerCount(slug, clubId);
-        console.log(
-          `roster-intake commit: club=${clubId} written=${written} alreadyPresent=${alreadyPresent} batch=${registeredBy}`,
-        );
-        return { clubId, ok: true as const, written, alreadyPresent, playerCount: actual };
+        // eslint-disable-next-line no-await-in-loop -- one club's rows must land as a
+        // deterministic sequence (idempotent re-commit checks each row independently)
+        await repo.createPlayer(slug, player);
+        created++;
       } catch (err) {
-        console.error(`roster-intake commit: club ${clubId} failed`, err);
-        return {
-          clubId,
-          ok: false as const,
-          error: 'failed to commit this club’s roster',
-          written,
-          alreadyPresent,
-        };
+        if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+          alreadyPresent++;
+          continue;
+        }
+        throw err;
       }
-    }),
+    }
+    // eslint-disable-next-line no-await-in-loop -- one reconcile per touched club, bounded
+    // by ROSTER_INTAKE_MAX_ITEMS/byClub.size
+    const { actual } = await repo.reconcilePlayerCount(slug, clubId);
+    playerCount[clubId] = actual;
+  }
+  console.log(
+    `roster-intake commit: batch=${registeredBy} created=${created} alreadyPresent=${alreadyPresent} clubs=${byClub.size}`,
   );
 
-  return c.json({ batchId: registeredBy, clubs: clubResults, crossClubConflicts }, 200, {
-    'Cache-Control': 'no-store',
-  });
+  return c.json(
+    { batchId: registeredBy, created, alreadyPresent, crossClubConflicts, playerCount },
+    200,
+    {
+      'Cache-Control': 'no-store',
+    },
+  );
 });
 
 // ───────────────────────── Structure intake (ADR 0009 self-serve onboarding) ─────────────────────────

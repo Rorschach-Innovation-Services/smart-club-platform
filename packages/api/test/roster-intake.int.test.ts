@@ -362,6 +362,7 @@ describe('POST /platform/tenants/:slug/roster-intake/parse', () => {
     assert.equal(res.status, 200);
     assert.equal(res.headers.get('cache-control'), 'no-store');
     const body = (await res.json()) as {
+      parseable: boolean;
       sheets: Array<{
         name: string;
         hasIdColumn: boolean;
@@ -370,8 +371,12 @@ describe('POST /platform/tenants/:slug/roster-intake/parse', () => {
         exceptions: Array<{ reason: string; maskedId?: string }>;
       }>;
       juniorLeagueKeys: string[];
+      dobOnlyCount: number;
+      ageGroupRaws: Array<{ raw: string; leagueKey: string | null }>;
     };
+    assert.equal(body.parseable, true, 'parseable:true discriminant present on a real parse');
     assert.deepEqual(body.juniorLeagueKeys.sort(), ['u11', 'u9']);
+    assert.equal(body.dobOnlyCount, 0, 'top-level total — this club has no dob-only rows');
     const sheet = body.sheets[0];
     assert.equal(sheet.hasIdColumn, true);
     assert.equal(sheet.totalDataRows, 3);
@@ -395,15 +400,15 @@ describe('POST /platform/tenants/:slug/roster-intake/parse', () => {
         hasIdColumn: boolean;
         rows: unknown[];
         exceptions: Array<{ reason: string }>;
-        dobOnlyCount: number;
       }>;
+      dobOnlyCount: number;
     };
     const sheet = body.sheets[0];
     assert.equal(sheet.hasIdColumn, false, 'DOB-variant template pill signal');
     assert.equal(sheet.rows.length, 0);
     assert.equal(sheet.exceptions.length, 2);
     assert.ok(sheet.exceptions.every((e) => e.reason === 'bad-id'));
-    assert.equal(sheet.dobOnlyCount, 0);
+    assert.equal(body.dobOnlyCount, 0, 'top-level total — excluded rows never count as dob-only');
   });
 
   test('DOB-variant club: allowMissingId=true includes the same rows as missingId dob-only', async () => {
@@ -417,14 +422,14 @@ describe('POST /platform/tenants/:slug/roster-intake/parse', () => {
       sheets: Array<{
         rows: Array<{ missingId: boolean; idNumber?: string }>;
         exceptions: unknown[];
-        dobOnlyCount: number;
       }>;
+      dobOnlyCount: number;
     };
     const sheet = body.sheets[0];
     assert.equal(sheet.rows.length, 2);
     assert.ok(sheet.rows.every((r) => r.missingId === true && r.idNumber === undefined));
     assert.equal(sheet.exceptions.length, 0);
-    assert.equal(sheet.dobOnlyCount, 2);
+    assert.equal(body.dobOnlyCount, 2, 'top-level total across sheets');
   });
 
   test('junior club: an unmapped age band becomes an exception, a mapped one carries through as team', async () => {
@@ -438,15 +443,15 @@ describe('POST /platform/tenants/:slug/roster-intake/parse', () => {
       sheets: Array<{
         rows: Array<{ team?: string; firstName: string }>;
         exceptions: Array<{ reason: string }>;
-        ageGroupRaws: Array<{ raw: string; leagueKey: string | null }>;
       }>;
+      ageGroupRaws: Array<{ raw: string; leagueKey: string | null }>;
     };
     const sheet = body.sheets[0];
     assert.equal(sheet.rows.length, 1);
     assert.equal(sheet.rows[0].team, 'u9');
     assert.equal(sheet.exceptions.length, 1);
     assert.equal(sheet.exceptions[0].reason, 'unmapped-age-group');
-    const raws = Object.fromEntries(sheet.ageGroupRaws.map((a) => [a.raw, a.leagueKey]));
+    const raws = Object.fromEntries(body.ageGroupRaws.map((a) => [a.raw, a.leagueKey]));
     assert.equal(raws['U9'], 'u9');
     assert.equal(raws['U17'], null);
   });
@@ -461,6 +466,7 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
         items: [
           {
             clubId: 'clubcommit',
+            rowNumber: 1,
             firstName: 'Wrong',
             lastName: 'Dob',
             dob: '2001-01-01',
@@ -482,6 +488,7 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
         items: [
           {
             clubId: 'clubcommit',
+            rowNumber: 1,
             firstName: 'A',
             lastName: 'B',
             dob: '2000-01-01',
@@ -497,7 +504,14 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
       headers: platformHeaders(OPERATOR),
       body: JSON.stringify({
         items: [
-          { clubId: 'clubcommit', firstName: 'A', lastName: 'B', dob: '2000-01-01', team: 'u99' },
+          {
+            clubId: 'clubcommit',
+            rowNumber: 1,
+            firstName: 'A',
+            lastName: 'B',
+            dob: '2000-01-01',
+            team: 'u99',
+          },
         ],
       }),
     });
@@ -507,6 +521,7 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
   test('more than 500 items → 400', async () => {
     const items = Array.from({ length: 501 }, (_, i) => ({
       clubId: 'clubcommit',
+      rowNumber: i + 1,
       firstName: `P${i}`,
       lastName: 'Test',
       dob: '2000-01-01',
@@ -527,6 +542,7 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
         items: [
           {
             clubId: 'clubcommit',
+            rowNumber: 1,
             firstName: 'Alice',
             lastName: 'Alpha',
             dob: '1998-03-14',
@@ -536,6 +552,7 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
           },
           {
             clubId: 'clubcommit',
+            rowNumber: 2,
             firstName: 'Bob',
             lastName: 'Beta',
             dob: '2000-05-20',
@@ -549,22 +566,15 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
     assert.equal(res.headers.get('cache-control'), 'no-store');
     const body = (await res.json()) as {
       batchId: string;
-      clubs: Array<{
-        clubId: string;
-        ok: boolean;
-        written: number;
-        alreadyPresent: number;
-        playerCount: number;
-      }>;
+      created: number;
+      alreadyPresent: number;
       crossClubConflicts: unknown[];
+      playerCount: Record<string, number>;
     };
     assert.match(body.batchId, new RegExp(`^intake:roster:${TENANT}:\\d{8}:operator@platform$`));
-    assert.equal(body.clubs.length, 1);
-    const club = body.clubs[0];
-    assert.equal(club.ok, true);
-    assert.equal(club.written, 2);
-    assert.equal(club.alreadyPresent, 0);
-    assert.equal(club.playerCount, 2);
+    assert.equal(body.created, 2);
+    assert.equal(body.alreadyPresent, 0);
+    assert.equal(body.playerCount.clubcommit, 2);
     assert.equal(body.crossClubConflicts.length, 0);
 
     const players = await repo.listPlayers(TENANT, 'clubcommit');
@@ -583,6 +593,7 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
         items: [
           {
             clubId: 'clubcommit',
+            rowNumber: 1,
             firstName: 'Alice',
             lastName: 'Alpha',
             dob: '1998-03-14',
@@ -595,11 +606,13 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
     });
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
-      clubs: Array<{ written: number; alreadyPresent: number; playerCount: number }>;
+      created: number;
+      alreadyPresent: number;
+      playerCount: Record<string, number>;
     };
-    assert.equal(body.clubs[0].written, 0);
-    assert.equal(body.clubs[0].alreadyPresent, 1);
-    assert.equal(body.clubs[0].playerCount, 2, 'count unchanged — no double count on re-commit');
+    assert.equal(body.created, 0);
+    assert.equal(body.alreadyPresent, 1);
+    assert.equal(body.playerCount.clubcommit, 2, 'count unchanged — no double count on re-commit');
   });
 
   test('cross-club conflict, in-batch: same identity in two clubs in one call — excluded both sides', async () => {
@@ -611,6 +624,7 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
         items: [
           {
             clubId: 'clubcommit',
+            rowNumber: 1,
             firstName: 'Carl',
             lastName: 'Conflict',
             dob: '2003-02-02',
@@ -618,6 +632,7 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
           },
           {
             clubId: 'clubcommitb',
+            rowNumber: 1,
             firstName: 'Carl',
             lastName: 'Conflict',
             dob: '2003-02-02',
@@ -628,14 +643,25 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
     });
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
-      clubs: Array<{ clubId: string; written: number }>;
-      crossClubConflicts: Array<{ clubId: string; reason: string }>;
+      created: number;
+      playerCount: Record<string, number>;
+      crossClubConflicts: Array<{
+        rowNumber: number;
+        clubId: string;
+        playerNaturalKey: string;
+        claimedBy: string;
+        alreadyRegisteredAt?: string;
+      }>;
     };
-    assert.equal(body.clubs.length, 0, 'both rows excluded — no club has anything left to write');
+    assert.equal(body.created, 0, 'both rows excluded — nothing written');
+    assert.deepEqual(body.playerCount, {}, 'no club was touched');
     assert.equal(body.crossClubConflicts.length, 2);
-    assert.ok(body.crossClubConflicts.every((cc) => cc.reason === 'in-batch'));
+    assert.ok(body.crossClubConflicts.every((cc) => cc.alreadyRegisteredAt === undefined));
     const conflictClubs = body.crossClubConflicts.map((cc) => cc.clubId).sort();
     assert.deepEqual(conflictClubs, ['clubcommit', 'clubcommitb']);
+    const carlEntry = body.crossClubConflicts.find((cc) => cc.clubId === 'clubcommit')!;
+    assert.equal(carlEntry.claimedBy, 'clubcommitb');
+    assert.equal(carlEntry.rowNumber, 1);
 
     const inA = await repo.listPlayers(TENANT, 'clubcommit');
     const inB = await repo.listPlayers(TENANT, 'clubcommitb');
@@ -672,6 +698,7 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
         items: [
           {
             clubId: 'clubcommitb',
+            rowNumber: 1,
             firstName: 'Dee',
             lastName: 'Existing',
             dob: '1999-09-09',
@@ -679,6 +706,7 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
           },
           {
             clubId: 'clubcommitb',
+            rowNumber: 2,
             firstName: 'Frank',
             lastName: 'Fresh',
             dob: '2004-04-04',
@@ -689,15 +717,22 @@ describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
     });
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
-      clubs: Array<{ clubId: string; written: number }>;
-      crossClubConflicts: Array<{ clubId: string; reason: string; alreadyRegisteredAt?: string }>;
+      created: number;
+      playerCount: Record<string, number>;
+      crossClubConflicts: Array<{
+        rowNumber: number;
+        clubId: string;
+        claimedBy: string;
+        alreadyRegisteredAt?: string;
+      }>;
     };
     assert.equal(body.crossClubConflicts.length, 1);
-    assert.equal(body.crossClubConflicts[0].reason, 'already-registered');
     assert.equal(body.crossClubConflicts[0].alreadyRegisteredAt, 'clubcommit');
+    assert.equal(body.crossClubConflicts[0].claimedBy, 'clubcommit');
+    assert.equal(body.crossClubConflicts[0].rowNumber, 1);
     // The rest of the batch (Frank) still commits — a conflict never aborts the request.
-    const clubcommitb = body.clubs.find((cl) => cl.clubId === 'clubcommitb')!;
-    assert.equal(clubcommitb.written, 1);
+    assert.equal(body.created, 1);
+    assert.equal(body.playerCount.clubcommitb, 1);
   });
 
   test('404 for an unknown tenant', async () => {
