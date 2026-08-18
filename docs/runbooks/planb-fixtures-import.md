@@ -179,6 +179,24 @@ undeterminable: N` line. The 4 superseded `DELETE_SLUGS` series are excluded fro
   multi-team sides ("Simplex A/B/C", "Rhythm DHS B/C", "Umlazi A/B", "Meadowridge A/B")
   synthesise a `tm_<clubId>_<leagueKey>_<index>` id per side, matching the console's own
   convention for a club that later gets a real multi-team roster.
+- **Bad-condition grounds** (`BAD_CONDITION_GROUNDS`): the RED rows of the union's
+  "facility updated.xlsx" (Asherville, Bayview, Chatsworth 306/3B/1111, Lt King Park,
+  Verulam Recreation Ground, the Phoenix Blackhaven/Rainham/Sterngrove/Tynebridge
+  fields, …) plus grounds the union's follow-up directives ruled out (Kloof CC,
+  Lindelani's "129 dukuza street" tennis court). Never offered as candidates; any
+  fixture assigned or defaulting onto one is force-relocated even when no clash exists.
+  The bootstrap scrubs their registry rows too (permissions cleared, warning note), so
+  the console allocator matches. Orange rows (Chatsworth 515A/B, Himalaya Road,
+  SL Singh 1–3) are treated as USABLE until the union says otherwise.
+- **Union venue directives** (`VENUE_DIRECTIVES`, 17 Aug 2026): four fixture-level
+  moves with RESTRICTED candidate lists — Hillary Malvern's Premier T20 games off
+  Kloof CC (→ Peace Park / Fairfield Park / Malvern Park), anything at dukuza street in
+  Premier Women's T20 G2 or the 30-over Top 10 (→ Kingsmead Oval / Newlands Oval /
+  Siripat 1–3), and FAM's Promotion Women G B home games (→ Harlequins 1/2). First free
+  slot in the listed order wins; a matched fixture with no free candidate is an
+  unresolved clash (fail-closed as usual). West's "Mpumalanga Township Cricket Stadium"
+  is currently unused by any fixture (West is re-based to Lahee Park) — nothing to do
+  until the union confirms its availability.
 
 ## Reconciliation — what changes on prod
 

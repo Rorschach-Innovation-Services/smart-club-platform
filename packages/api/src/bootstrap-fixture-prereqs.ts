@@ -68,7 +68,9 @@ const JUNK_GROUND = /^(none|n\/?a|-|tbd|tbc)$/i;
  * CC's registered ground is "Mpumalanga Township Cricket Stadium".
  */
 const FACILITY_FIELDS: Array<{ name: string; clubs: string[] }> = [
-  { name: 'Bayview (Bluff)', clubs: ['harlequins-cricket-club'] },
+  // RED rows of the facility sheet (bad condition) carry NO permissions here and are
+  // additionally scrubbed below — Bayview (Bluff), Chatsworth 306, Chatsworth 3B and
+  // Lt King Park were permitted by an earlier revision of this table and must lose it.
   { name: 'Cato Manor 1', clubs: ['fam-kwamakhutha', 'chesterville-cricket-clube'] },
   { name: 'Cato Manor 2', clubs: ['fam-kwamakhutha', 'chesterville-cricket-clube'] },
   { name: 'Cato Manor 4', clubs: ['fam-kwamakhutha', 'chesterville-cricket-clube'] },
@@ -83,8 +85,6 @@ const FACILITY_FIELDS: Array<{ name: string; clubs: string[] }> = [
     name: 'Chatsworth 217',
     clubs: ['hollywoodbets-chatsworth-sporting', 'chatsworth-united-cricket-club'],
   },
-  { name: 'Chatsworth 306', clubs: ['chatsworth-united-cricket-club'] },
-  { name: 'Chatsworth 3B', clubs: ['chatsworth-united-cricket-club'] },
   {
     name: 'Chatsworth Oval',
     clubs: [
@@ -118,7 +118,6 @@ const FACILITY_FIELDS: Array<{ name: string; clubs: string[] }> = [
   { name: 'Kloof High School', clubs: ['east-coast-cc'] },
   { name: 'Kingsmead Oval', clubs: ['african-warriors-cc', 'lindelani-cricket-club'] },
   { name: 'Lahee Park 1', clubs: ['lindelani-cricket-club', 'west-cc'] },
-  { name: 'Lt King Park', clubs: ['harlequins-cricket-club'] },
   { name: 'Malvern Park', clubs: ['hillary-malvern-cricket-club'] },
   { name: 'Newlands Oval', clubs: ['lindelani-cricket-club', 'newlands-cricket-club'] },
   { name: 'Penguin Street (Chatsworth)', clubs: ['saints-cricket-club'] },
@@ -342,6 +341,44 @@ async function main() {
     console.log(
       `  (facility associations skipped — clubs not on this tenant: ${[...unknownClubRefs].join(', ')})`,
     );
+
+  // ── Bad-condition (RED) field scrub ──
+  // The facility sheet's red rows are unusable grounds. Any registry row matching one
+  // loses its permissions (homeClubIds cleared) and gains an explanatory note, so
+  // neither the import's candidate pools nor the console allocator will offer it.
+  // Mirrors BAD_CONDITION_GROUNDS in import-planb-fixtures.ts.
+  const BAD_FIELDS = [
+    'Asherville',
+    'Badulla Drive',
+    'Bayview (Bluff)',
+    'Chatsworth 1111',
+    'Chatsworth 306',
+    'Chatsworth 3B',
+    'Highbury Field',
+    'John Dory',
+    'Lt King Park',
+    'Phoenix Blackhaven',
+    'Phoenix Rainham',
+    'Phoenix Sterngrove',
+    'Phoenix Tynebridge',
+    'Verulam Recreation Ground',
+    'Kloof CC', // union directive: Hillary Malvern moved off it
+    '129 dukuza street Lindelani/ Tennis court', // union directive: tennis court, unusable
+  ];
+  const BAD_NOTE = 'Bad condition — union facility list (red). Do not allocate fixtures here.';
+  const badKeys = new Set(BAD_FIELDS.map((n) => groundKey(n)));
+  for (const v of [...existingVenues, ...venuesToAdd.values()]) {
+    if (!badKeys.has(groundKey(v.name))) continue;
+    const hasPermissions = (v.homeClubIds ?? []).length > 0;
+    const hasNote = v.note === BAD_NOTE;
+    if (!hasPermissions && hasNote) continue;
+    v.homeClubIds = [];
+    v.note = BAD_NOTE;
+    if (!pendingNew.has(v)) venueUpdates.set(String(v.id), v);
+    console.log(
+      `${confirm ? 'scrub' : '[dry-run] would scrub'} bad-condition field "${v.name}" (permissions cleared, note set)`,
+    );
+  }
 
   // Parkgate has no ground on record; the facility list names Phoenix Stonebridge as
   // its field. Setting it gives Parkgate's home fixtures an effective ground instead

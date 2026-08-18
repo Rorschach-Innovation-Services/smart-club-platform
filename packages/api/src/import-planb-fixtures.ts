@@ -64,6 +64,72 @@ const DELETE_SLUGS = [
   'premier-women-t20-bottom4',
 ];
 
+/** Grounds in bad condition per the union's facility sheet (the RED rows of
+ * "facility updated.xlsx", 17 Aug 2026) plus grounds the union's follow-up directives
+ * ruled out (Kloof CC; Lindelani's "129 dukuza street" tennis court). Never used:
+ * excluded as auto-move candidates, and any fixture assigned or defaulting onto one is
+ * force-relocated (directive candidates first, then the clubs' permitted fields).
+ * Stored as groundKey() normal forms. */
+const BAD_CONDITION_GROUNDS = new Set(
+  [
+    'Asherville',
+    'Badulla Drive',
+    'Bayview (Bluff)',
+    'Chatsworth 1111',
+    'Chatsworth 306',
+    'Chatsworth 3B',
+    'Highbury Field',
+    'John Dory',
+    'Lt King Park',
+    'Phoenix Blackhaven',
+    'Phoenix Rainham',
+    'Phoenix Sterngrove',
+    'Phoenix Tynebridge',
+    'Verulam Recreation Ground',
+    // Ruled out by the union's 17 Aug follow-up directives, not the red list:
+    'Kloof CC',
+    '129 dukuza street Lindelani/ Tennis court',
+  ].map((n) => groundKey(n)),
+);
+
+/** The union's follow-up venue directives (17 Aug 2026): specific fixtures move to a
+ * RESTRICTED candidate list, first free slot wins. Matched inside the clash pass —
+ * `fromGroundKey` matches the fixture's assigned/effective ground; `homeClubId`
+ * matches the home side's club. A matched fixture always moves (its current ground is
+ * unusable), even when no clash exists. */
+const VENUE_DIRECTIVES: Array<{
+  slug: string;
+  fromGroundKey?: string;
+  homeClubId?: string;
+  candidates: string[];
+  why: string;
+}> = [
+  {
+    slug: 'premier-men-t20-1',
+    fromGroundKey: groundKey('Kloof CC'),
+    candidates: ['Peace Park', 'Fairfield Park', 'Malvern Park'],
+    why: 'Union directive — Kloof CC unavailable',
+  },
+  {
+    slug: 'premier-women-t20-g2',
+    fromGroundKey: groundKey('129 dukuza street Lindelani/ Tennis court'),
+    candidates: ['Kingsmead Oval', 'Newlands Oval', 'Siripat 1', 'Siripat 2', 'Siripat 3'],
+    why: 'Union directive — dukuza street unusable',
+  },
+  {
+    slug: 'promotion-women-t20-gb',
+    homeClubId: 'fam-kwamakhutha',
+    candidates: ['Harlequins 1', 'Harlequins 2'],
+    why: 'Union directive — FAM home games at Harlequins 1/2',
+  },
+  {
+    slug: 'promotion-men-30ov-top10',
+    fromGroundKey: groundKey('129 dukuza street Lindelani/ Tennis court'),
+    candidates: ['Kingsmead Oval', 'Newlands Oval', 'Siripat 1', 'Siripat 2', 'Siripat 3'],
+    why: 'Union directive — dukuza street unusable',
+  },
+];
+
 // ───────────────────────── Name resolution ─────────────────────────
 
 /** Sheet names that collapse to different clubs than plain normalisation reaches. */
@@ -1211,8 +1277,19 @@ function runClashPass(
           skippedUndeterminable++;
           continue;
         }
-        const clash = ledger.check(ground, f.date, f.time);
-        if (!clash) {
+        // A fixture on an unusable ground moves even with no clash: matched union
+        // directive first (its RESTRICTED candidate list wins), else the red-list
+        // relocation via the normal candidate chain.
+        const directive = VENUE_DIRECTIVES.find(
+          (d) =>
+            `${ID_PREFIX}${d.slug}` === String(series.id) &&
+            (d.fromGroundKey ? groundKey(ground) === d.fromGroundKey : true) &&
+            (d.homeClubId ? teamToClub.get(f.home) === d.homeClubId : true),
+        );
+        const badGround = BAD_CONDITION_GROUNDS.has(groundKey(ground));
+        const mustMove = Boolean(directive) || badGround;
+        const clash = mustMove ? undefined : ledger.check(ground, f.date, f.time);
+        if (!clash && !mustMove) {
           ledger.book(ground, f.date, f.time, {
             seriesId: String(series.id),
             fixtureId: f.id,
@@ -1236,32 +1313,44 @@ function runClashPass(
           if (groundKey(g) === groundKey(ground)) return;
           if (candidates.some((c) => groundKey(c.ground) === groundKey(g))) return;
           if (barredGrounds.has(normaliseGround(g))) return;
+          if (BAD_CONDITION_GROUNDS.has(groundKey(g))) return;
           candidates.push({ ground: g, label });
         };
         const addPermitted = (clubId: string | undefined, label: string) => {
           for (const v of clubId ? (permittedByClub.get(clubId) ?? []) : [])
             addCandidate(v.name, label);
         };
-        if (!explicitPhase) {
-          // Union Rule 4 first, then the clubs' registered secondaries.
-          addCandidate(
-            awayClubId ? allocatedGroundName(awayClubId, clubsById, reBaseMap) : undefined,
-            "away side's allocated ground",
-          );
-          addCandidate(secondary(homeClubId), "home club's secondary ground");
-          addCandidate(secondary(awayClubId), "away club's secondary ground");
+        if (directive) {
+          // A directive's candidate list is the union's word — nothing else is tried.
+          for (const g of directive.candidates)
+            addCandidate(g, `union directive: ${directive.why}`);
+        } else {
+          if (!explicitPhase) {
+            // Union Rule 4 first, then the clubs' registered secondaries.
+            addCandidate(
+              awayClubId ? allocatedGroundName(awayClubId, clubsById, reBaseMap) : undefined,
+              "away side's allocated ground",
+            );
+            addCandidate(secondary(homeClubId), "home club's secondary ground");
+            addCandidate(secondary(awayClubId), "away club's secondary ground");
+          }
+          // The union's permitted-fields list applies in BOTH phases — for a
+          // union-authored venue it is the only sanctioned escape.
+          addPermitted(homeClubId, "home club's permitted field (union facility list)");
+          addPermitted(awayClubId, "away club's permitted field (union facility list)");
         }
-        // The union's permitted-fields list applies in BOTH phases — for a
-        // union-authored venue it is the only sanctioned escape.
-        addPermitted(homeClubId, "home club's permitted field (union facility list)");
-        addPermitted(awayClubId, "away club's permitted field (union facility list)");
+        const because = clash
+          ? `clashed with ${clash.seriesId}/${clash.fixtureId}`
+          : directive
+            ? directive.why
+            : 'ground in bad condition (union facility red list)';
         const target = candidates.find((c) => !ledger.check(c.ground, f.date, f.time));
         if (target) {
           setVenue(
             f,
             target.ground,
             'alternative',
-            `Moved to avoid ground clash — ${target.label}`,
+            clash ? `Moved to avoid ground clash — ${target.label}` : because,
             byNormVenue,
             registryMiss,
           );
@@ -1272,11 +1361,11 @@ function runClashPass(
             time: f.time,
           });
           autoMoves.push(
-            `${series.id} ${f.id}: ${ground} → ${target.ground} [${target.label}] on ${f.date}${f.time ? ' ' + f.time : ''} (clashed with ${clash.seriesId}/${clash.fixtureId})`,
+            `${series.id} ${f.id}: ${ground} → ${target.ground} [${target.label}] on ${f.date}${f.time ? ' ' + f.time : ''} (${because})`,
           );
         } else {
           unresolved.push(
-            `${series.id} ${f.id}: ${ground} on ${f.date}${f.time ? ' ' + f.time : ''} clashes with ${clash.seriesId}/${clash.fixtureId}${candidates.length ? ` (tried: ${candidates.map((c) => c.ground).join(', ')})` : ' (no alternative ground available)'}${explicitPhase ? ' [union-authored venue — decide in the console]' : ''}`,
+            `${series.id} ${f.id}: ${ground} on ${f.date}${f.time ? ' ' + f.time : ''} — ${because}, no free candidate${candidates.length ? ` (tried: ${candidates.map((c) => c.ground).join(', ')})` : ' (no alternative ground available)'}${explicitPhase && !mustMove ? ' [union-authored venue — decide in the console]' : ''}`,
           );
           if (allowClashes) {
             ledger.book(ground, f.date, f.time, {
