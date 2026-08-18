@@ -246,9 +246,13 @@ describe('leagueKeyForSection / isKnownStructureAnomaly', () => {
     assert.equal(leagueKeyForSection('U/15 PLATINUM  A'), 'u15'); // double-space variant
   });
 
-  test("women's and veterans sections are recognised but unmapped (null, not undefined)", () => {
-    assert.equal(leagueKeyForSection("WOMEN'S PREMIER LEAGUE"), null);
-    assert.equal(leagueKeyForSection('VETERANS LEAGUE'), null);
+  test("women's and veterans sections map to their (later-configured) league keys", () => {
+    // These were null (parsed, reported, never written) until the tenant gained the
+    // keys — see EXTRA_LEAGUES and the import's ensureLeaguesConfigured gate, which
+    // still refuses to write a team plan referencing a key the config doesn't hold.
+    assert.equal(leagueKeyForSection("WOMEN'S PREMIER LEAGUE"), 'womens-premier-league');
+    assert.equal(leagueKeyForSection("WOMEN'S PROMOTION LEAGUE"), 'womens-promotion-league');
+    assert.equal(leagueKeyForSection('VETERANS LEAGUE'), 'veterans-league');
   });
 
   test('a header the manifest has never seen is undefined (fails the run closed)', () => {

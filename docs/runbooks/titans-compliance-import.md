@@ -150,6 +150,10 @@ npx sst shell --stage <stage> -- npm --prefix packages/api run import-titans-com
 # Add team rosters (leagues[]/leagueTeams/teamRosters) on top of the above:
 … --confirm --with-teams
 
+# …and append the Women's/Veterans league entries (EXTRA_LEAGUES) to the tenant config
+# if they're missing — without this, a plan referencing an unconfigured key aborts:
+… --confirm --with-teams --add-missing-leagues
+
 # Clubs only, skip the S3/doc upload phase (e.g. to unblock roster import sooner):
 … --confirm --skip-docs
 
@@ -448,14 +452,33 @@ re-uploads or duplicates a file whose content hash is already on record.
   parsed date is usable **only** as a dob-only identity — which strict mode (the
   default) drops into the per-club exception report. Re-run with `--allow-missing-id`
   to write these rows using name+dob identity instead of an ID.
-- **Women's and Veterans teams need league keys configured before `--with-teams` can
-  write them.** The structure workbook's `WOMEN'S PREMIER LEAGUE`, `WOMEN'S PROMOTION
-LEAGUE` and `VETERANS LEAGUE` sections are fully parsed and reported (team counts,
-  home venues, per-club rollups) but resolve to `leagueKey: null` — the tenant has no
-  configured league key for them yet. Once the operator adds those leagues, extend
-  `SECTION_LEAGUE_MAP` in `titans-import-map.ts` to map the section headers onto the
-  new keys; until then, `--with-teams` only ever writes the 9 men's senior + 4 junior
-  league keys.
+- **Women's and Veterans leagues** (`womens-premier-league`, `womens-promotion-league`,
+  `veterans-league`) were not part of the tenant's original 13 keys. They now map in
+  `SECTION_LEAGUE_MAP`, and the import gates on them: `ensureLeaguesConfigured` aborts a
+  `--with-teams` write whose plan references a key `TenantConfig.leagues` doesn't hold.
+  Pass `--add-missing-leagues` to have `--confirm` append the `EXTRA_LEAGUES` entries
+  (idempotent; anything missing that is NOT in `EXTRA_LEAGUES` still aborts — a new
+  competition is configured deliberately, never minted as an import side effect).
+  Executed against prod on 18 Aug 2026: the three leagues appended, all 21 clubs'
+  team plans re-written, every league total verified equal to the sheet's.
+- **Team-plan ownership on re-runs.** The merge path fills only absent fields — which
+  would freeze the first `--with-teams` output forever. So for a club the manifest
+  proves THIS import created, whose `affiliation` is still `not_started` (nobody has
+  touched it), a `--with-teams` re-run replaces `leagues`/`leagueTeams`/`teamRosters`
+  (and the derived `teams`/`women`/`juniors` counters) wholesale. Rosters carry the
+  sheet's own side labels ("TUKS 2", "PHSOB VETERANS 1") and per-side venues. A
+  pre-existing club, or one whose affiliation has moved, keeps fill-absent.
+- **Division placement (A/B, Platinum/Gold/Silver) is deliberately NOT on club
+  records.** A club record says "TUKS fields 2 premier sides"; _which division_ each
+  side plays in is season-run state (stage groups, ADR 0008) and belongs to the season
+  wizard when fixtures are set up. The parse report prints the full per-division
+  breakdown for the operator to use then.
+- **Venue registry rows are deliberately NOT seeded from the sheet.** The venue strings
+  carry union-side typos ("HOFEMYER PARK B", "MAMEMLODI OVAL", "UITISG"); baking them
+  into `VENUE#` registry rows now would poison fixture allocation and clash detection
+  later. The sheet's venue data is preserved verbatim on `ground.venue` and each roster
+  entry's `venue`; build the registry (with alias cleanup, the planb precedent) when
+  fixtures are actually being set up.
 - **Compliance spreadsheet documents download rather than preview inline.** The admin
   console's doc viewer renders PDFs in-browser but xls/xlsx/ods documents (the majority
   of this pack — league entry forms, assets registers, health trackers, member

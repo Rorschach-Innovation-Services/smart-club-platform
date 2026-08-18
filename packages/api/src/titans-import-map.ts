@@ -227,8 +227,11 @@ export const SKIP_ROSTER: SkipRosterEntry[] = [
  * matched the same way). Men's senior sections collapse Division A/B pairs onto one
  * league key (the sheet splits a league into venue-balanced divisions, not separate
  * competitions); junior sections collapse every Platinum/Gold/Silver × A/B pool onto its
- * age-group key. Women's and Veterans sections resolve to `null` — parsed and reported,
- * never written, because the tenant has no configured league key for them yet.
+ * age-group key. Women's and Veterans sections originally resolved to `null` (parsed and
+ * reported, never written) because the tenant had no league keys for them; those keys now
+ * exist on the tenant (see EXTRA_LEAGUES + docs/runbooks/titans-compliance-import.md), so
+ * they map like everything else. The dry-run still asserts every referenced key exists in
+ * TenantConfig.leagues before any write.
  */
 const SECTION_LEAGUE_MAP: Array<[RegExp, string | null]> = [
   [/^PREMIER LEAGUE DIVISION [AB]$/, 'premier-league'],
@@ -238,13 +241,29 @@ const SECTION_LEAGUE_MAP: Array<[RegExp, string | null]> = [
   [/^FOURTH LEAGUE$/, 'fourth-league'],
   [/^FIFTH LEAGUE$/, 'fifth-league'],
   [/^SIXTH LEAGUE$/, 'sixth-league'],
-  [/^WOMEN'S PREMIER LEAGUE$/, null],
-  [/^WOMEN'S PROMOTION LEAGUE$/, null],
-  [/^VETERANS LEAGUE$/, null],
+  [/^WOMEN'S PREMIER LEAGUE$/, 'womens-premier-league'],
+  [/^WOMEN'S PROMOTION LEAGUE$/, 'womens-promotion-league'],
+  [/^VETERANS LEAGUE$/, 'veterans-league'],
   [/^U\/9 (PLATINUM|GOLD|SILVER) [AB]$/, 'u9'],
   [/^U\/11 (PLATINUM|GOLD|SILVER) [AB]$/, 'u11'],
   [/^U\/13 (PLATINUM|GOLD|SILVER) [AB]$/, 'u13'],
   [/^U\/15 (PLATINUM|GOLD|SILVER) [AB]$/, 'u15'],
+];
+
+/**
+ * League entries the structure sheet needs beyond the 13 originally configured on the
+ * tenant — the Women's and Veterans competitions. Shape mirrors the existing entries
+ * (overarching, no district split). Consumed by the import's `--add-missing-leagues`
+ * config step, which appends only the ones absent (idempotent) before any team write.
+ */
+export const EXTRA_LEAGUES = [
+  { key: 'womens-premier-league', label: "Women's Premier League", group: 'Overarching Leagues' },
+  {
+    key: 'womens-promotion-league',
+    label: "Women's Promotion League",
+    group: 'Overarching Leagues',
+  },
+  { key: 'veterans-league', label: 'Veterans League', group: 'Overarching Leagues' },
 ];
 
 export interface KnownStructureAnomaly {
@@ -405,6 +424,13 @@ export interface ClubStructureSummary {
   club: ClubMapEntry;
   /** leagueKey -> team count (mapped sections only). */
   leagueTeamCounts: Map<string, number>;
+  /**
+   * leagueKey -> the club's sides in that league, in sheet order: the raw side label
+   * exactly as the union writes it ("TUKS 2", "PHSOB VETERANS 1", "ADELAAR B") and its
+   * venue cell. This is what makes the sheet's per-side venue data land on teamRosters
+   * instead of being flattened away into a single count.
+   */
+  leagueSides: Map<string, Array<{ label: string; venue: string }>>;
   firstTeamVenue: string | undefined;
 }
 
@@ -413,13 +439,18 @@ export function summarizeByClub(sections: StructureSection[]): Map<string, ClubS
   const get = (c: ClubMapEntry) => {
     let s = out.get(c.id);
     if (!s) {
-      s = { club: c, leagueTeamCounts: new Map(), firstTeamVenue: undefined };
+      s = {
+        club: c,
+        leagueTeamCounts: new Map(),
+        leagueSides: new Map(),
+        firstTeamVenue: undefined,
+      };
       out.set(c.id, s);
     }
     return s;
   };
   for (const section of sections) {
-    if (!section.leagueKey) continue; // unmapped (women's/veterans) — reported separately
+    if (!section.leagueKey) continue; // unmapped section — reported separately, never written
     for (const row of section.rows) {
       if (!row.club) continue; // unresolved token — reported separately, never silently dropped
       const summary = get(row.club);
@@ -427,6 +458,9 @@ export function summarizeByClub(sections: StructureSection[]): Map<string, ClubS
         section.leagueKey,
         (summary.leagueTeamCounts.get(section.leagueKey) ?? 0) + 1,
       );
+      const sides = summary.leagueSides.get(section.leagueKey) ?? [];
+      sides.push({ label: row.raw.trim().replace(/\s+/g, ' '), venue: row.venue });
+      summary.leagueSides.set(section.leagueKey, sides);
       const suffix = row.raw.trim().match(/(\d+)$/);
       const isFirstSide = !suffix || suffix[1] === '1';
       if (isFirstSide && !summary.firstTeamVenue && row.venue) summary.firstTeamVenue = row.venue;

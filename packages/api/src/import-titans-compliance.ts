@@ -37,6 +37,7 @@ import {
   multiFileLimits,
   normalizeDocMeta,
   docMetaValue,
+  OVERARCHING_DISTRICT,
   type DocFileEntry,
   type NormalizedDocMeta,
 } from './catalogue.js';
@@ -50,6 +51,7 @@ import {
   summarizeByClub,
   isKnownStructureAnomaly,
   KNOWN_STRUCTURE_ANOMALIES,
+  EXTRA_LEAGUES,
   type StructureSection,
 } from './titans-import-map.js';
 
@@ -366,6 +368,10 @@ interface Args {
    * into (i.e. one that pre-existed the import) — see runRevert's comment. `--all`
    * alone never touches a pre-existing club's real data. */
   erasePreexisting: boolean;
+  /** With --with-teams: append any EXTRA_LEAGUES entries (Women's/Veterans) missing
+   * from TenantConfig.leagues before writing teams. Without it, a team plan that
+   * references an unconfigured league key aborts — never writes a dangling key. */
+  addMissingLeagues: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -379,6 +385,7 @@ function parseArgs(argv: string[]): Args {
     revert: false,
     all: false,
     erasePreexisting: false,
+    addMissingLeagues: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -392,6 +399,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--revert') args.revert = true;
     else if (a === '--all') args.all = true;
     else if (a === '--erase-preexisting') args.erasePreexisting = true;
+    else if (a === '--add-missing-leagues') args.addMissingLeagues = true;
     else throw new Error(`unknown flag ${a}`);
   }
   if (args.erasePreexisting && !(args.revert && args.all)) {
@@ -432,12 +440,22 @@ function buildTeamPlan(
     leagues.push(key);
     leagueTeams[key] = count;
     // teamRosters ONLY when a league's count >= 2 — mirrors seed-cohort.ts's rule so a
-    // club later edited in the admin console converges onto the same tm_ ids.
+    // club later edited in the admin console converges onto the same tm_ ids. Team NAMES
+    // and per-side VENUES come from the sheet itself ("TUKS 2" at "GROENKLOOF OVAL"),
+    // not a generated A/B/C label — the sheet's side labels are what the union and the
+    // clubs actually call these teams, and the venue is the half of the sheet's data
+    // that a bare count silently discarded. tm_ ids stay index-based (never derived
+    // from the label) so re-runs and later admin edits converge on the same ids.
     if (count >= 2) {
-      teamRosters[key] = Array.from({ length: count }, (_, n) => ({
-        id: `tm_${club.id}_${key}_${n}`,
-        name: `${club.name} ${String.fromCharCode(65 + n)}`,
-      }));
+      const sides = summary.leagueSides.get(key) ?? [];
+      teamRosters[key] = Array.from({ length: count }, (_, n) => {
+        const side = sides[n];
+        return {
+          id: `tm_${club.id}_${key}_${n}`,
+          name: side?.label || `${club.name} ${String.fromCharCode(65 + n)}`,
+          ...(side?.venue ? { venue: side.venue } : {}),
+        };
+      });
     }
   }
   return { leagues, leagueTeams, teamRosters };
@@ -456,6 +474,16 @@ function buildClub(
   // another is teams:3, not the hardcoded 1), else the sane single-team default for a
   // clubs-only run.
   const teams = plan ? Object.values(plan.leagueTeams).reduce((sum, n) => sum + n, 0) || 1 : 1;
+  // The Club record carries denormalized women's/junior side counts (dashboard KPIs).
+  // Derived from the same plan so they can never disagree with leagueTeams.
+  const sideCount = (keys: (k: string) => boolean) =>
+    plan
+      ? Object.entries(plan.leagueTeams)
+          .filter(([k]) => keys(k))
+          .reduce((sum, [, n]) => sum + n, 0)
+      : 0;
+  const women = sideCount((k) => k.startsWith('womens-'));
+  const juniors = sideCount((k) => /^u\d+$/.test(k));
   return {
     id: club.id,
     name: club.name,
@@ -467,8 +495,8 @@ function buildClub(
     docs: buildClubDocsSeed(activeDocs),
     players: 0,
     teams,
-    women: 0,
-    juniors: 0,
+    women,
+    juniors,
     color: CLUB_COLORS[index % CLUB_COLORS.length],
     ground: summary?.firstTeamVenue ? { venue: summary.firstTeamVenue } : {},
     leagues: plan?.leagues ?? [],
@@ -617,6 +645,59 @@ function catalogueCoverageProblems(
   return problems;
 }
 
+/**
+ * Every league key the team plan references must exist in TenantConfig.leagues before a
+ * club record may point at it — a dangling key silently hides those teams from every
+ * picker and breaks player registration for that league. Keys in EXTRA_LEAGUES
+ * (Women's/Veterans, which the tenant wasn't originally configured with) are appended on
+ * `--add-missing-leagues` in confirm mode, mirroring the operator LeaguesCard's entry
+ * shape; anything else missing is a hard abort — a genuinely new competition must be
+ * configured deliberately, never minted as a side effect of an import.
+ */
+async function ensureLeaguesConfigured(
+  repo: RepoModule,
+  args: Args,
+  referencedKeys: Set<string>,
+): Promise<void> {
+  const config = await repo.getTenantConfig(TENANT);
+  if (!config) throw new Error(`tenant "${TENANT}" has no config — has it been created?`);
+  const configured = new Set((config.leagues ?? []).map((l) => l.key));
+  const missing = [...referencedKeys].filter((k) => !configured.has(k));
+  if (missing.length === 0) {
+    console.log(`✓ All ${referencedKeys.size} referenced league keys are configured.`);
+    return;
+  }
+  const addable = EXTRA_LEAGUES.filter((l) => missing.includes(l.key));
+  const unknown = missing.filter((k) => !EXTRA_LEAGUES.some((l) => l.key === k));
+  if (unknown.length) {
+    throw new Error(
+      `team plan references league key(s) not configured on "${TENANT}" and not in ` +
+        `EXTRA_LEAGUES: ${unknown.join(', ')}. Configure them in the operator console first.`,
+    );
+  }
+  if (!args.confirm) {
+    console.log(
+      `· leagues: ${addable.map((l) => l.key).join(', ')} missing from the tenant config — ` +
+        (args.addMissingLeagues
+          ? 'will be appended on --confirm.'
+          : 'pass --add-missing-leagues (or add them in the operator console) before --confirm.'),
+    );
+    return;
+  }
+  if (!args.addMissingLeagues) {
+    throw new Error(
+      `TenantConfig.leagues is missing ${addable.map((l) => l.key).join(', ')} — re-run with ` +
+        '--add-missing-leagues to append them, or add them in the operator console first.',
+    );
+  }
+  const next = [
+    ...(config.leagues ?? []),
+    ...addable.map((l) => ({ ...l, district: OVERARCHING_DISTRICT })),
+  ];
+  await repo.putTenantConfig({ ...config, leagues: next });
+  console.log(`✓ appended league(s) to ${TENANT}: ${addable.map((l) => l.key).join(', ')}`);
+}
+
 async function assertCatalogueCoverage(
   repo: RepoModule,
   neededPerMultiKey: Map<string, number>,
@@ -728,11 +809,31 @@ async function runConfirm(
       // admin or club rep has already entered.
       const patch: Partial<Club> = {};
       if (!current.ground?.venue && built.ground.venue) patch.ground = built.ground;
-      if ((!current.leagues || current.leagues.length === 0) && built.leagues.length)
+      // Team plan (--with-teams): for a club THIS import created (manifest-proven) that
+      // no one has touched since (affiliation still 'not_started' — reps don't exist
+      // until they're invited, and an admin edit or affiliation submit moves the state),
+      // the import OWNS the plan and replaces it wholesale. That is what lets a re-run
+      // deliver corrections and enrichments — new league keys (Women's/Veterans), sheet
+      // side names, per-side venues — to clubs the first pass already wrote with the
+      // fill-absent rule alone, which would otherwise freeze the first pass's output
+      // forever. A pre-existing club, or one whose affiliation has moved, keeps the
+      // conservative fill-absent behaviour: someone else's data may be in there.
+      const ownsTeamPlan =
+        args.withTeams && manifest.has(club.id) && current.affiliation === 'not_started';
+      if (ownsTeamPlan && built.leagues.length) {
         patch.leagues = built.leagues;
-      if (args.withTeams) {
-        if (!current.leagueTeams && built.leagueTeams) patch.leagueTeams = built.leagueTeams;
-        if (!current.teamRosters && built.teamRosters) patch.teamRosters = built.teamRosters;
+        patch.leagueTeams = built.leagueTeams;
+        patch.teamRosters = built.teamRosters;
+        patch.teams = built.teams;
+        patch.women = built.women;
+        patch.juniors = built.juniors;
+      } else {
+        if ((!current.leagues || current.leagues.length === 0) && built.leagues.length)
+          patch.leagues = built.leagues;
+        if (args.withTeams) {
+          if (!current.leagueTeams && built.leagueTeams) patch.leagueTeams = built.leagueTeams;
+          if (!current.teamRosters && built.teamRosters) patch.teamRosters = built.teamRosters;
+        }
       }
       const missingDocs = Object.keys(built.docs).filter((k) => current.docs?.[k] === undefined);
       if (missingDocs.length) {
@@ -1234,6 +1335,13 @@ async function main(): Promise<void> {
   const neededPerMultiKey = await maxFilesNeededPerMultiKey(parsed.classified);
   const activeDocs = await assertCatalogueCoverage(repo, neededPerMultiKey);
   console.log(`\n✓ Tenant catalogue covers all ${TITANS_DOC_KEYS.length} required doc keys.`);
+
+  if (args.withTeams) {
+    const referencedKeys = new Set<string>();
+    for (const summary of parsed.summary.values())
+      for (const key of summary.leagueTeamCounts.keys()) referencedKeys.add(key);
+    await ensureLeaguesConfigured(repo, args, referencedKeys);
+  }
 
   const targets = args.club ? CLUB_MAP.filter((c) => c.id === args.club) : CLUB_MAP;
   if (args.club && targets.length === 0) throw new Error(`--club "${args.club}" not in CLUB_MAP`);
