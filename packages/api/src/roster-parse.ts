@@ -45,6 +45,11 @@ export interface RosterRow {
   hadRealId: boolean;
   /** True when written only because of allowMissingId (a resolvable dob, no usable id). */
   missingId: boolean;
+  /** Real sheet row number (ExcelJS's own numbering, matching RosterException.rowNumber) —
+   * carried through so a caller building a review table (the operator roster wizard) can
+   * reference the exact source row without re-deriving it from array position, which would
+   * desync the moment an earlier row is filtered into exceptions. */
+  rowNumber: number;
 }
 
 export interface ParseSheetResult {
@@ -278,7 +283,7 @@ export function parseRosterSheet(
       ...(race ? { race } : {}),
       ...(team ? { team } : {}),
     };
-    result.rows.push({ player, hadRealId, missingId });
+    result.rows.push({ player, hadRealId, missingId, rowNumber });
   });
 
   result.ageGroupRaws = [...ageGroupRawsSeen].map(([raw, leagueKey]) => ({ raw, leagueKey }));
