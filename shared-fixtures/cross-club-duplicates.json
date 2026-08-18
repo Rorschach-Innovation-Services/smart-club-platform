@@ -1,0 +1,29 @@
+{
+  "description": "Parity fixture for cross-club duplicate detection. The server suite (packages/api, findCrossClubDuplicates in roster-parse.ts) and the client suite (src, detectCrossClubDuplicates in roster-review.ts) MUST both consume this file, map `rows` into their own row shapes, and assert exactly `expectedConflictGroups` (groups of row indices that conflict across clubs). Any behavioral divergence between the two implementations fails one of the suites.",
+  "rows": [
+    { "clubId": "club-a", "clubName": "Alpha CC", "firstName": "Sipho", "lastName": "Dlamini", "dob": "1998-03-14", "idNumber": "9803145012083" },
+    { "clubId": "club-b", "clubName": "Bravo CC", "firstName": "Sipho", "lastName": "Dlamini", "dob": "1998-03-14", "idNumber": "9803145012083" },
+    { "clubId": "club-a", "clubName": "Alpha CC", "firstName": "Lerato", "lastName": "Mokoena", "dob": "2011-07-02" },
+    { "clubId": "club-c", "clubName": "Charlie CC", "firstName": "Lerato", "lastName": "Mokoena", "dob": "2011-07-02" },
+    { "clubId": "club-a", "clubName": "Alpha CC", "firstName": "Thabo", "lastName": "Nkosi", "dob": "2001-11-23", "idNumber": "0111235398086" },
+    { "clubId": "club-a", "clubName": "Alpha CC", "firstName": "Thabo", "lastName": "Nkosi", "dob": "2001-11-23", "idNumber": "0111235398086" },
+    { "clubId": "club-b", "clubName": "Bravo CC", "firstName": "Anele", "lastName": "Khumalo", "dob": "1995-01-30", "idNumber": "9501305122081" },
+    { "clubId": "club-a", "clubName": "Alpha CC", "firstName": "Naledi", "lastName": "Sithole", "dob": "2009-05-18", "idNumber": "0905180634082" },
+    { "clubId": "club-b", "clubName": "Bravo CC", "firstName": "Naledi", "lastName": "Sithole", "dob": "2009-05-18" },
+    { "clubId": "club-a", "clubName": "Alpha CC", "firstName": "Kagiso", "lastName": "Molefe", "dob": "2000-09-09", "idNumber": "0009095231087" },
+    { "clubId": "club-b", "clubName": "Bravo CC", "firstName": "Kagiso", "lastName": "Molefe", "dob": "2002-04-21", "idNumber": "0204215231085" },
+    { "clubId": "club-a", "clubName": "Alpha CC", "firstName": "Zanele", "lastName": "Mahlangu", "dob": "1997-12-05", "idNumber": "9712050487088" },
+    { "clubId": "club-b", "clubName": "Bravo CC", "firstName": "Zanele", "lastName": "Mahlangu", "dob": "1997-12-05", "idNumber": "9712050487088" },
+    { "clubId": "club-c", "clubName": "Charlie CC", "firstName": "Zanele", "lastName": "Mahlangu", "dob": "1997-12-05", "idNumber": "9712050487088" }
+  ],
+  "expectedConflictGroups": [
+    [0, 1],
+    [2, 3],
+    [11, 12, 13]
+  ],
+  "notes": [
+    "Rows 4/5: same identity twice WITHIN one club — not a cross-club conflict (within-club dedupe is a separate concern).",
+    "Rows 7/8: same name+dob but one row carries an id and the other does not — NOT a conflict: an id-based identity (sa-id-<id>) never pairs with a dob-only identity (name+dob hash). This is the divergence-prone case this fixture exists to pin.",
+    "Rows 9/10: same name, different dob and id — distinct players."
+  ]
+}
