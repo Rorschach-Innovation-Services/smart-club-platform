@@ -90,6 +90,7 @@ import { luhnValid, normalizeGender, normalizeRace } from './roster-normalize.js
 import { parseStructureWorkbookAllSheets } from './structure-parse.js';
 import { deriveTeamPlanCounts } from './team-plan.js';
 import { readUploadObject } from './uploads.js';
+import { parseCommitteeWorkbookAllSheets } from './committee-parse.js';
 import {
   sendClubFixtures,
   sendStaffInvite,
@@ -3298,16 +3299,40 @@ function clubTeamCount(club: Club): number {
 }
 
 /**
+ * One doc role's checklist classification — pinned derivation rules (plan 1.4):
+ *   - role unassigned (docKeyForRole returns null), OR the resolved docMeta is a bare
+ *     `{markedCompliant}` sentinel with no stored file (normalizeDocMeta's `files` empty)
+ *     ⇒ 'absent'
+ *   - contentType missing on the stored file ⇒ classify by the objectKey's extension
+ *   - else classify by contentType
+ * Reuses `looksLikeSpreadsheet` (roster-intake parse's own gate) as the parseable test —
+ * both this checklist and the roster/committee parsers care about the exact same thing:
+ * can the stored file actually be read as a workbook.
+ */
+function classifyIntakeDoc(
+  club: Club,
+  requiredDocs: RequiredDoc[],
+  role: NonNullable<RequiredDoc['role']>,
+): 'absent' | 'parseable' | 'unparseable' {
+  const docKey = docKeyForRole(requiredDocs, role);
+  if (!docKey) return 'absent';
+  const stored = normalizeDocMeta(club.docMeta?.[docKey]).files[0];
+  if (!stored?.objectKey) return 'absent';
+  return looksLikeSpreadsheet(stored.contentType, stored.objectKey) ? 'parseable' : 'unparseable';
+}
+
+/**
  * Cross-tenant-safe club projection for the operator overview. A deliberate ALLOWLIST.
  * The operator league drill-down needs the chair's name/email/cell (team contact) and
  * the named-side ids/names, so those DO cross now — but `chairContact` is picked
  * field-by-field (NEVER spread: `exco.chair` also carries `idNumber` and governance
  * term dates) and rosters are stripped to {id,name} (no venue/address/coords).
  * Everything else stays out: exco ID numbers, coaches, notes, commLog, docMeta
- * (S3 keys), cqiAnswers, ground addresses and the LIVE playerRegLink token must never
- * cross the operator surface. Add fields here only after checking what they carry.
+ * (S3 keys — `intake` is a CLASSIFICATION of docMeta, never the objectKeys themselves),
+ * cqiAnswers, ground addresses and the LIVE playerRegLink token must never cross the
+ * operator surface. Add fields here only after checking what they carry.
  */
-function toInsightsClub(club: Club) {
+function toInsightsClub(club: Club, requiredDocs: RequiredDoc[]) {
   const excoChair = (club.exco?.chair ?? {}) as { name?: string; email?: string; cell?: string };
   return {
     id: club.id,
@@ -3327,6 +3352,10 @@ function toInsightsClub(club: Club) {
         roster.map((t) => ({ id: t.id, name: t.name })),
       ]),
     ),
+    intake: {
+      memberDatabase: classifyIntakeDoc(club, requiredDocs, 'memberDatabase'),
+      committee: classifyIntakeDoc(club, requiredDocs, 'committee'),
+    },
   };
 }
 
@@ -3509,7 +3538,7 @@ app.get('/platform/tenants/:slug/overview', async (c) => {
     name: config.branding?.name ?? slug,
     leagues: config.leagues ?? [],
     districts: resolveDistricts(config),
-    clubs: clubs.map(toInsightsClub),
+    clubs: clubs.map((cl) => toInsightsClub(cl, resolveRequiredDocs(config))),
     clearances: clearances.map((r) => ({ status: r.status })),
     demographics: { ...summarizeDemographics(players), perLeague, unattributed },
   });
@@ -5073,6 +5102,240 @@ app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
   );
 
   return c.json({ batchId, leaguesAppended, clubs });
+});
+
+// ───────────────────────── Rep invites (ADR 0009 self-serve onboarding, plan 1.3) ─────────────────────────
+
+/**
+ * GET /platform/tenants/:slug/reps — the coverage table's data: every REP in the tenant
+ * (admins EXCLUDED — Team & Access is where those live) enriched from repo.getUser same
+ * as GET /admin/users, plus per-club rep counts INCLUDING zero-rep clubs (the coverage
+ * table's whole point is surfacing the gaps).
+ */
+app.get('/platform/tenants/:slug/reps', async (c) => {
+  const slug = c.req.param('slug');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const [clubs, roster] = await Promise.all([repo.listClubs(slug), repo.listTenantUsers(slug)]);
+  const enriched = await Promise.all(
+    roster.map(async (entry) => {
+      const profile = await repo.getUser(entry.sub);
+      const membership = profile?.memberships.find((m) => m.tenantId === slug);
+      const role = membership?.role ?? (entry.role as 'admin' | 'rep');
+      if (role !== 'rep') return null;
+      return {
+        sub: entry.sub,
+        email: profile?.email ?? entry.email,
+        clubIds: membership?.clubIds ?? [],
+        invitedAt: membership?.invitedAt,
+        invitedBy: membership?.invitedBy,
+        status: (profile?.lastLoginAt ? 'active' : 'pending') as 'active' | 'pending',
+      };
+    }),
+  );
+  const reps = enriched.filter((r): r is NonNullable<typeof r> => r !== null);
+  const repCounts = new Map<string, number>();
+  for (const rep of reps) {
+    for (const clubId of rep.clubIds) repCounts.set(clubId, (repCounts.get(clubId) ?? 0) + 1);
+  }
+  const coverage = clubs.map((cl) => ({ clubId: cl.id, repCount: repCounts.get(cl.id) ?? 0 }));
+  return c.json({ reps, coverage });
+});
+
+interface InviteRepBody {
+  email?: string;
+  clubIds?: string[];
+  channels?: Channel[];
+  link?: string;
+}
+
+/**
+ * POST /platform/tenants/:slug/reps — mirror of POST /admin/users pinned to role:'rep',
+ * tenant resolved from the slug rather than requestAuth. Tightenings vs the admin route:
+ * every clubId is validated against listClubs (an operator can't scope a rep to a club
+ * that doesn't exist); a user who already holds an ADMIN membership on this tenant is a
+ * 409 ("manage them in Team & Access") rather than a silent demote — adminCount delta is
+ * always 0, since this route can never touch the admin tier either way. loginUrl prefers
+ * the tenant-canonical origin; a dormant tenant (no canonical origin yet, no explicit
+ * `link`) falls back to the request Origin same as resolveLoginUrl always has, but that
+ * fallback is now surfaced via a `warning` field instead of shipping silently.
+ */
+app.post('/platform/tenants/:slug/reps', async (c) => {
+  const auth = c.get('auth')!;
+  const slug = c.req.param('slug');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const body = await c.req.json<InviteRepBody>().catch(() => ({}) as InviteRepBody);
+  const email = (body.email ?? '').trim().toLowerCase();
+  if (!email) throw new HttpError(400, 'email required');
+  if (!EMAIL_RE.test(email)) throw new HttpError(400, 'valid email required');
+  const clubIds = Array.isArray(body.clubIds) ? body.clubIds : [];
+  if (clubIds.length === 0) throw new HttpError(400, 'a rep must be scoped to at least one club');
+  const validClubIds = new Set((await repo.listClubs(slug)).map((cl) => cl.id));
+  const badClub = clubIds.find((id) => !validClubIds.has(id));
+  if (badClub) throw new HttpError(400, `unknown club: ${badClub}`);
+
+  if (body.channels !== undefined) validateChannels(body.channels);
+  const loginUrl = resolveLoginUrl(c, slug, body.link);
+  // Only the SILENT-fallback case (no explicit link, no canonical origin yet) is
+  // surfaced — an operator-supplied link is trusted as-is, and a tenant with a real
+  // canonical origin never hits this branch.
+  const warning =
+    !body.link && !canonicalWebOrigin(slug)
+      ? 'This tenant has no canonical domain yet — the invite link uses the request origin and may need correcting.'
+      : undefined;
+
+  const sub = await provisionInviteUser(email);
+  const existing = await repo.getUser(sub);
+  const others = (existing?.memberships ?? []).filter((m) => m.tenantId !== slug);
+  const prior = (existing?.memberships ?? []).find((m) => m.tenantId === slug);
+  if (prior?.role === 'admin') {
+    throw new HttpError(409, 'this user is a tenant admin — manage them in Team & Access');
+  }
+  if (prior && existing?.lastLoginAt) {
+    throw new HttpError(409, 'user already active — use resend or edit role');
+  }
+
+  const membership: Membership = {
+    tenantId: slug,
+    role: 'rep',
+    clubIds,
+    invitedAt: prior?.invitedAt ?? now(),
+    invitedBy: prior?.invitedBy ?? auth.email,
+  };
+  const next: UserProfile = {
+    sub,
+    email,
+    memberships: [...others, membership],
+    onboardingSeen: existing?.onboardingSeen ?? {},
+    ...(existing?.lastLoginAt ? { lastLoginAt: existing.lastLoginAt } : {}),
+  };
+  // adminCount delta is always 0 — a rep invite never touches the admin tier (the
+  // admin-membership 409 above is what stops a silent demote, not a delta of -1 here).
+  await writeUserGuarded(slug, next, 0);
+
+  let results: SendResult[] | undefined;
+  if (body.channels && body.channels.length > 0) {
+    const orgName = await tenantOrgName(slug);
+    ({ results } = await sendStaffInvite({
+      email,
+      orgName,
+      channels: body.channels,
+      link: loginUrl,
+    }));
+  }
+  return c.json(
+    { sub, email, loginUrl, ...(results ? { results } : {}), ...(warning ? { warning } : {}) },
+    201,
+  );
+});
+
+/**
+ * POST /platform/tenants/:slug/clubs/:clubId/committee-extract — NEVER invites; produces
+ * CANDIDATES for the reps page's prefilled invite form. Same gate order as roster-intake
+ * parse: club → role-resolved doc key (409 with guidance) → stored file (409) → size
+ * (before any read) → content type (PDF/doc/image/scan → 200 `{status:'unparseable'}`,
+ * a designed path, never an error the caller has to branch around). Carries PII (names,
+ * emails, cells) — always `Cache-Control: no-store`.
+ */
+app.post('/platform/tenants/:slug/clubs/:clubId/committee-extract', async (c) => {
+  const slug = c.req.param('slug');
+  const clubId = c.req.param('clubId');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const club = await repo.getClub(slug, clubId);
+  if (!club) throw new HttpError(404, `club not found: ${clubId}`);
+
+  const catalogue = activeRequiredDocs(cfg);
+  const docKey = docKeyForRole(catalogue, 'committee');
+  if (!docKey) {
+    throw new HttpError(
+      409,
+      'No document in the catalogue is marked as the committee list — assign the role in Required documents.',
+    );
+  }
+  const stored = normalizeDocMeta(club.docMeta?.[docKey]).files[0];
+  if (!stored?.objectKey) {
+    throw new HttpError(
+      409,
+      'This club has no stored committee list — upload it via document intake first.',
+    );
+  }
+  if (typeof stored.size !== 'number' || stored.size <= 0 || stored.size > MAX_INTAKE_BYTES) {
+    throw new HttpError(
+      400,
+      `stored file exceeds the ${MAX_INTAKE_BYTES / (1024 * 1024)}MB parse limit — replace it via document intake`,
+    );
+  }
+  const noStore = (payload: unknown) => c.json(payload, 200, { 'Cache-Control': 'no-store' });
+  if (!looksLikeSpreadsheet(stored.contentType, stored.objectKey)) {
+    return noStore({
+      status: 'unparseable',
+      reason: 'not a spreadsheet (xlsx/xls/csv) — this looks like a scan, PDF, or Word doc',
+    });
+  }
+
+  let bytes: Buffer;
+  try {
+    bytes = await readUploadObject(stored.objectKey);
+  } catch (err) {
+    console.error(`committee-extract: failed to read ${stored.objectKey}`, err);
+    return noStore({ status: 'unparseable', reason: 'unable to read the stored file' });
+  }
+  const wb = new ExcelJS.Workbook();
+  try {
+    // See the roster-intake parse route for why this cast is needed.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wb.xlsx.load(bytes as any);
+  } catch {
+    return noStore({
+      status: 'unparseable',
+      reason: 'unable to read the workbook — the file may be corrupted',
+    });
+  }
+  const candidates = parseCommitteeWorkbookAllSheets(wb);
+  return noStore({ status: 'ok', candidates });
+});
+
+/**
+ * POST /platform/tenants/:slug/clubs/:clubId/docs/:key/view-url — thin operator twin of
+ * POST /clubs/:id/docs/:key/view-url (same on-record objectKey gate: the requested key
+ * must already be on the club's docMeta, never an arbitrary bucket key), so the reps page
+ * can show a committee PDF beside the manual invite form.
+ */
+app.post('/platform/tenants/:slug/clubs/:clubId/docs/:key/view-url', async (c) => {
+  const slug = c.req.param('slug');
+  const clubId = c.req.param('clubId');
+  const key = c.req.param('key');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const club = await repo.getClub(slug, clubId);
+  if (!club) throw new HttpError(404, 'club not found');
+  const { objectKey: requested } = await c.req
+    .json<{ objectKey?: string }>()
+    .catch(() => ({}) as { objectKey?: string });
+  const docMeta = club.docMeta ?? {};
+  const docDef = requireStoredOrCatalogueDoc(cfg, key, club);
+  let entry: { objectKey?: string; contentType?: string } | undefined;
+  if (isMultiFileDoc(docDef, docMeta[key])) {
+    const norm = safeguardingMeta(docMeta[key]);
+    entry = requested ? norm.files.find((f) => f.objectKey === requested) : norm.files[0];
+  } else {
+    const meta = docMeta[key] as { objectKey?: string; contentType?: string } | undefined;
+    entry = meta?.objectKey && (!requested || requested === meta.objectKey) ? meta : undefined;
+  }
+  if (!entry?.objectKey) throw new HttpError(404, 'no file on record for this document');
+  const url = await getSignedUrl(
+    s3,
+    new GetObjectCommand({
+      Bucket: UPLOADS_BUCKET,
+      Key: entry.objectKey,
+      ResponseContentType: entry.contentType ?? 'application/pdf',
+      ResponseContentDisposition: 'inline',
+    }),
+    { expiresIn: 900 },
+  );
+  return c.json({ viewUrl: url });
 });
 
 /**

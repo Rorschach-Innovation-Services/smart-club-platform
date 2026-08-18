@@ -351,12 +351,20 @@ describe('tenant create → list → get → patch', () => {
         'district',
         'docs',
         'id',
+        'intake',
         'leagueTeams',
         'leagues',
         'name',
         'players',
         'teamRosters',
       ]);
+      // Self-serve onboarding checklist data (plan 1.4): sharks' catalogue has no
+      // role-assigned docs at all, so both roles resolve 'absent' regardless of the
+      // real docMeta this club carries (an unassigned role never leaks the file).
+      assert.deepEqual((club as unknown as { intake: unknown }).intake, {
+        memberDatabase: 'absent',
+        committee: 'absent',
+      });
       assert.equal(club.players, 8); // denormalized playerCount (7 seeded + 1 real row)
       // Chair contact crosses picked field-by-field — the idNumber must not.
       assert.deepEqual(club.chairContact, {
