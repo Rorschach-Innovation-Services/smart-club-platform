@@ -1273,22 +1273,23 @@ function runClashPass(
         const isExplicit = Boolean(f.venueOverride || f.venueName);
         if (isExplicit !== explicitPhase) continue;
         const ground = effectiveGroundIncoming(series, f, clubsById, reBaseMap);
-        if (!ground) {
-          skippedUndeterminable++;
-          continue;
-        }
+        // A home club with no usable ground (e.g. Umgababa, ground "None") hosts at
+        // the OPPONENT's venue — union call, 18 Aug 2026. Placed through the normal
+        // candidate chain (home-side options are empty by definition), clash-checked
+        // like everything else; no free candidate ⇒ unresolved, never silently TBA.
+        const homeless = !ground;
         // A fixture on an unusable ground moves even with no clash: matched union
         // directive first (its RESTRICTED candidate list wins), else the red-list
         // relocation via the normal candidate chain.
         const directive = VENUE_DIRECTIVES.find(
           (d) =>
             `${ID_PREFIX}${d.slug}` === String(series.id) &&
-            (d.fromGroundKey ? groundKey(ground) === d.fromGroundKey : true) &&
+            (d.fromGroundKey ? Boolean(ground) && groundKey(ground!) === d.fromGroundKey : true) &&
             (d.homeClubId ? teamToClub.get(f.home) === d.homeClubId : true),
         );
-        const badGround = BAD_CONDITION_GROUNDS.has(groundKey(ground));
-        const mustMove = Boolean(directive) || badGround;
-        const clash = mustMove ? undefined : ledger.check(ground, f.date, f.time);
+        const badGround = Boolean(ground) && BAD_CONDITION_GROUNDS.has(groundKey(ground!));
+        const mustMove = Boolean(directive) || badGround || homeless;
+        const clash = mustMove ? undefined : ledger.check(ground!, f.date, f.time);
         if (!clash && !mustMove) {
           ledger.book(ground, f.date, f.time, {
             seriesId: String(series.id),
@@ -1310,7 +1311,7 @@ function runClashPass(
         const candidates: Array<{ ground: string; label: string }> = [];
         const addCandidate = (g: string | undefined, label: string) => {
           if (!g) return;
-          if (groundKey(g) === groundKey(ground)) return;
+          if (ground && groundKey(g) === groundKey(ground)) return;
           if (candidates.some((c) => groundKey(c.ground) === groundKey(g))) return;
           if (barredGrounds.has(normaliseGround(g))) return;
           if (BAD_CONDITION_GROUNDS.has(groundKey(g))) return;
@@ -1343,7 +1344,9 @@ function runClashPass(
           ? `clashed with ${clash.seriesId}/${clash.fixtureId}`
           : directive
             ? directive.why
-            : 'ground in bad condition (union facility red list)';
+            : homeless
+              ? "home club has no ground — played at opponent's venue"
+              : 'ground in bad condition (union facility red list)';
         const target = candidates.find((c) => !ledger.check(c.ground, f.date, f.time));
         if (target) {
           setVenue(
@@ -1361,13 +1364,13 @@ function runClashPass(
             time: f.time,
           });
           autoMoves.push(
-            `${series.id} ${f.id}: ${ground} → ${target.ground} [${target.label}] on ${f.date}${f.time ? ' ' + f.time : ''} (${because})`,
+            `${series.id} ${f.id}: ${ground ?? '(no home ground)'} → ${target.ground} [${target.label}] on ${f.date}${f.time ? ' ' + f.time : ''} (${because})`,
           );
         } else {
           unresolved.push(
-            `${series.id} ${f.id}: ${ground} on ${f.date}${f.time ? ' ' + f.time : ''} — ${because}, no free candidate${candidates.length ? ` (tried: ${candidates.map((c) => c.ground).join(', ')})` : ' (no alternative ground available)'}${explicitPhase && !mustMove ? ' [union-authored venue — decide in the console]' : ''}`,
+            `${series.id} ${f.id}: ${ground ?? '(no home ground)'} on ${f.date}${f.time ? ' ' + f.time : ''} — ${because}, no free candidate${candidates.length ? ` (tried: ${candidates.map((c) => c.ground).join(', ')})` : ' (no alternative ground available)'}${explicitPhase && !mustMove ? ' [union-authored venue — decide in the console]' : ''}`,
           );
-          if (allowClashes) {
+          if (allowClashes && ground) {
             ledger.book(ground, f.date, f.time, {
               seriesId: String(series.id),
               fixtureId: f.id,
