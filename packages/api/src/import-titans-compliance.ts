@@ -54,6 +54,7 @@ import {
   EXTRA_LEAGUES,
   type StructureSection,
 } from './titans-import-map.js';
+import { deriveTeamPlanCounts } from './team-plan.js';
 
 type RepoModule = typeof import('./repo.js');
 
@@ -469,21 +470,11 @@ function buildClub(
   index: number,
 ): Club {
   const plan = withTeams ? buildTeamPlan(club, summary) : null;
-  // Total team count across every league this club fields — derived from leagueTeams
-  // when --with-teams computed one (a club fielding 2 sides in one league and 1 in
-  // another is teams:3, not the hardcoded 1), else the sane single-team default for a
-  // clubs-only run.
-  const teams = plan ? Object.values(plan.leagueTeams).reduce((sum, n) => sum + n, 0) || 1 : 1;
-  // The Club record carries denormalized women's/junior side counts (dashboard KPIs).
-  // Derived from the same plan so they can never disagree with leagueTeams.
-  const sideCount = (keys: (k: string) => boolean) =>
-    plan
-      ? Object.entries(plan.leagueTeams)
-          .filter(([k]) => keys(k))
-          .reduce((sum, [, n]) => sum + n, 0)
-      : 0;
-  const women = sideCount((k) => k.startsWith('womens-'));
-  const juniors = sideCount((k) => /^u\d+$/.test(k));
+  // Total team count across every league this club fields, plus the denormalized
+  // women's/junior side counts (dashboard KPIs) — derived from the same plan so they can
+  // never disagree with leagueTeams. A clubs-only run (no plan) is teams:1, women/
+  // juniors:0.
+  const { teams, women, juniors } = deriveTeamPlanCounts(plan?.leagueTeams ?? {});
   return {
     id: club.id,
     name: club.name,
