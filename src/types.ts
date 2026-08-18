@@ -468,6 +468,14 @@ export interface RequiredDoc {
   matchHints?: string[];
   /** Excluded from completion counts; stored files stay viewable. */
   archived?: boolean;
+  /**
+   * Which structural role this document satisfies for self-serve onboarding
+   * (ADR 0010). The roster/committee-extract wizards gate on THIS, never a literal
+   * doc key — a self-serve tenant's operator-authored catalogue (slugified doc
+   * names) can never produce the Titans-only literal keys `memberDatabase`/
+   * `committee`. At most one active doc per role.
+   */
+  role?: 'memberDatabase' | 'committee';
 }
 
 export interface TenantConfig {
@@ -572,6 +580,16 @@ export interface InsightsClub {
   chairContact?: ChairContact;
   /** Admin-side office bearers; `exco.chair` carries the chair contact fields. */
   exco?: Record<string, unknown>;
+  /**
+   * Self-serve onboarding (ADR 0010): per-role classification of this club's stored
+   * documents, resolved through `RequiredDoc.role` (not literal doc keys) — drives
+   * the roster wizard's per-club gating and the onboarding checklist's progress
+   * bars. Absent on an older backend that hasn't shipped the field yet.
+   */
+  intake?: {
+    memberDatabase: 'absent' | 'parseable' | 'unparseable';
+    committee: 'absent' | 'parseable' | 'unparseable';
+  };
 }
 
 /** One anonymised demographic bucket — counts only, no player rows. */
@@ -1009,4 +1027,270 @@ export interface RegistrationReview {
   resolvedAt?: string;
   resolvedBy?: string;
   version: number;
+}
+
+// ── Self-serve onboarding suite (ADR 0010, /platform/tenants/:slug/*) ──
+// Backend routes land alongside the frontend wizards (a later wave); these shapes
+// ARE the contract, taken verbatim from the plan's wire-shape sections.
+
+// ── Roster intake (1.1) ──
+
+/** POST /platform/tenants/:slug/roster-intake/parse body — one club per call, the UI
+ *  fans out with bounded concurrency. Both fields are PARSE inputs, per-club: an
+ *  exception carries no identity, so re-parsing (not client-side promotion) is how a
+ *  flipped `allowMissingId` or an edited `ageGroupMap` entry takes effect. */
+export interface RosterIntakeParseRequest {
+  clubId: string;
+  allowMissingId?: boolean;
+  ageGroupMap?: Record<string, string>;
+}
+
+/** One committable draft row — no identity fields beyond what a historical register
+ *  structurally has (see the DECISION note on the commit shape below). */
+export interface RosterDraftRow {
+  rowNumber: number;
+  firstName: string;
+  lastName: string;
+  dob: string;
+  idNumber?: string;
+  missingId: boolean;
+  gender?: string;
+  race?: string;
+  team?: string;
+}
+
+/** An unparseable/rejected row. Carries NO identity (never a name/id) — flipping
+ *  `allowMissingId` or remapping an age band re-parses the club instead of promoting
+ *  an exception row client-side. `reason` is a stable machine key (e.g.
+ *  'missing-id', 'bad-checksum', 'unmapped-age-group'), not display prose. */
+export interface RosterIntakeException {
+  rowNumber: number;
+  sheet: string;
+  reason: string;
+  maskedId?: string;
+}
+
+export interface RosterSheetParseResult {
+  name: string;
+  skipped: boolean;
+  hasIdColumn: boolean;
+  totalDataRows: number;
+  rows: RosterDraftRow[];
+  exceptions: RosterIntakeException[];
+  unknownGenderRaw: string[];
+  unknownRaceRaw: string[];
+}
+
+/** One distinct raw age-band string found in the workbook, and the league key it
+ *  maps to — `null` is the junior-confirm table's attention-flagged row (a band
+ *  `ageGroupToLeagueKey` doesn't know, which would otherwise commit team-less). */
+export interface AgeGroupRaw {
+  raw: string;
+  leagueKey: string | null;
+}
+
+/** `parseable:false` covers a PDF/scan or any non-workbook contentType — a designed
+ *  200, never an error the wizard has to special-case as a failure. */
+export type RosterIntakeParseResponse =
+  | {
+      parseable: true;
+      sheets: RosterSheetParseResult[];
+      dobOnlyCount: number;
+      juniorLeagueKeys: string[];
+      ageGroupRaws: AgeGroupRaw[];
+    }
+  | { parseable: false; reason: string };
+
+export const ROSTER_INTAKE_MAX_ITEMS = 500;
+
+/** One flat commit row (server groups by clubId). Deliberately the IMPORT shape —
+ *  no cell/nationality/district/guardian, which historical registers structurally
+ *  lack — plus explicit status/version so these rows read identically to portal
+ *  registrations for later edits/clearances. Client-supplied identity is
+ *  authoritative for the review table; the server still recomputes the natural key
+ *  and re-validates the checksum/dob pairing rather than trusting it blindly. */
+export interface RosterIntakeCommitItem {
+  clubId: string;
+  rowNumber: number;
+  firstName: string;
+  lastName: string;
+  dob: string;
+  idNumber?: string;
+  gender?: string;
+  race?: string;
+  team?: string;
+}
+
+export interface RosterIntakeCommitRequest {
+  items: RosterIntakeCommitItem[];
+}
+
+/** A cross-club duplicate the commit excluded rather than failing outright — either
+ *  another row in THIS batch (in-batch, via the shared duplicate detector) or an
+ *  already-registered player elsewhere (`alreadyRegisteredAt` present). */
+export interface RosterIntakeCrossClubConflict {
+  rowNumber: number;
+  clubId: string;
+  playerNaturalKey: string;
+  claimedBy: string;
+  alreadyRegisteredAt?: string;
+}
+
+export interface RosterIntakeCommitResponse {
+  batchId: string;
+  created: number;
+  /** Idempotent re-commit of an already-created row (ConditionalCheckFailed) —
+   *  counted, never an error. */
+  alreadyPresent: number;
+  crossClubConflicts: RosterIntakeCrossClubConflict[];
+  /** Authoritative post-write count per touched club (one `reconcilePlayerCount`
+   *  per club, not per row). */
+  playerCount: Record<string, number>;
+}
+
+// ── Structure intake (1.2) ──
+
+/** POST /platform/tenants/:slug/structure-intake/parse body — base64 JSON, no S3
+ *  round-trip (workbooks are small: 30–500KB, capped at 2MB base64-string length
+ *  before decoding). */
+export interface StructureIntakeParseRequest {
+  filename: string;
+  dataBase64: string;
+}
+
+export interface StructureSectionRow {
+  raw: string;
+  venue?: string;
+}
+
+/** One header-shaped block of rows from one sheet. NO league mapping, NO club
+ *  resolution — both are operator UI choices made client-side (`matchClub` in
+ *  intake-match.ts; league picks happen in the sections screen). */
+export interface StructureSection {
+  sheet: string;
+  header: string;
+  rows: StructureSectionRow[];
+}
+
+export interface StructureIntakeParseResponse {
+  sections: StructureSection[];
+  sheetsScanned: number;
+  sheetsWithSections: number;
+}
+
+export const STRUCTURE_MAX_WORKBOOK_BYTES = 2 * 1024 * 1024;
+export const STRUCTURE_COMMIT_MAX_CLUBS = 100;
+
+export interface StructureClubTeamPlanRow {
+  name: string;
+  venue?: string;
+}
+
+/** A club's team plan for commit. Team ids are NOT sent — the server mints the
+ *  `tm_${clubId}_${key}_${n}` ids so that convention stays enforceable in one place. */
+export interface StructureClubPlan {
+  leagues: string[];
+  leagueTeams: Record<string, number>;
+  teamRosters: Record<string, StructureClubTeamPlanRow[]>;
+  firstTeamVenue?: string;
+}
+
+/** `overwrite` must be explicit `true` to replace an existing plan wholesale (the
+ *  operator-confirmed mirror of the CLI's manifest-ownership rule) — omitted/false
+ *  against a club with an existing plan comes back as a per-club 409, not a write. */
+export interface StructureIntakeCommitClub {
+  clubId: string;
+  overwrite?: boolean;
+  plan: StructureClubPlan;
+}
+
+/** `newLeagues` are client-side DRAFT leagues (from "Create league…" in the sections
+ *  step) — nothing writes tenant config until commit; validated + appended
+ *  fail-fast, before any club write. */
+export interface StructureIntakeCommitRequest {
+  newLeagues?: League[];
+  clubs: StructureIntakeCommitClub[];
+}
+
+export interface StructureIntakeCommitClubResult {
+  clubId: string;
+  ok: boolean;
+  error?: string;
+  teams?: number;
+  women?: number;
+  juniors?: number;
+}
+
+export interface StructureIntakeCommitResponse {
+  batchId: string;
+  leaguesAppended: string[];
+  clubs: StructureIntakeCommitClubResult[];
+}
+
+// ── Rep invites (1.3) ──
+
+export interface TenantRepSummary {
+  sub: string;
+  email: string;
+  clubIds: string[];
+  invitedAt?: string;
+  invitedBy?: string;
+  status: 'pending' | 'active';
+}
+
+/** Included even for a club with zero reps — the coverage table's whole point is
+ *  surfacing the gaps, not just what exists. */
+export interface TenantRepCoverage {
+  clubId: string;
+  repCount: number;
+}
+
+export interface TenantRepsResponse {
+  reps: TenantRepSummary[];
+  coverage: TenantRepCoverage[];
+}
+
+/** POST /platform/tenants/:slug/reps body. `channels` absent/empty ⇒ link-only (no
+ *  send attempted); `link` overrides the resolved tenant-canonical login URL. */
+export interface InviteRepRequest {
+  email: string;
+  clubIds: string[];
+  channels?: Channel[];
+  link?: string;
+}
+
+export interface InviteRepResponse {
+  sub: string;
+  email: string;
+  loginUrl: string;
+  results?: SendResult[];
+  /** Present only when the login URL fell back to the request Origin (a dormant
+   *  tenant with no canonical web origin yet) instead of failing silently. */
+  warning?: string;
+}
+
+/** One committee-extract candidate. `confidence` follows the extractor's scoring
+ *  tiers (chair ⇒ high, vice/deputy ⇒ medium, any officer with an email ⇒ low). */
+export interface CommitteeExtractCandidate {
+  name: string;
+  role: string;
+  email?: string;
+  cell?: string;
+  confidence: 'high' | 'medium' | 'low';
+  sheet: string;
+  rowNumber: number;
+}
+
+/** `unparseable` covers a PDF/doc/image committee file — a designed 200 (the reps
+ *  page's manual-form-plus-view-document path is a first-class equal, not an error
+ *  state), never a failure the caller has to branch around specially. */
+export type CommitteeExtractResponse =
+  | { status: 'ok'; candidates: CommitteeExtractCandidate[] }
+  | { status: 'unparseable'; reason: string };
+
+/** POST /platform/tenants/:slug/clubs/:clubId/docs/:key/view-url — the operator twin
+ *  of the tenant-side `getDocViewUrl` (same on-record objectKey gate), so the reps
+ *  page can show a committee PDF beside the manual invite form. */
+export interface PlatformDocViewUrlResponse {
+  viewUrl: string;
 }

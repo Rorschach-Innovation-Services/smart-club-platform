@@ -36,6 +36,18 @@ import type {
   DocIntakePresignResult,
   DocIntakeCommitItem,
   DocIntakeCommitClubResult,
+  RosterIntakeParseRequest,
+  RosterIntakeParseResponse,
+  RosterIntakeCommitItem,
+  RosterIntakeCommitResponse,
+  StructureIntakeParseResponse,
+  StructureIntakeCommitRequest,
+  StructureIntakeCommitResponse,
+  TenantRepsResponse,
+  InviteRepRequest,
+  InviteRepResponse,
+  CommitteeExtractResponse,
+  PlatformDocViewUrlResponse,
 } from './types';
 
 /**
@@ -588,6 +600,71 @@ export const platformDocIntakeCommit = (slug: string, items: DocIntakeCommitItem
 // club-signup link or an admin invite.
 export const platformCreateClub = (slug: string, body: { name: string; district: string }) =>
   request<Club>(`/platform/tenants/${encodeURIComponent(slug)}/clubs`, { method: 'POST', body });
+
+// ── Self-serve onboarding suite (ADR 0010) ──
+
+// Roster intake: parse one club's stored member database (server-side, from S3 — no
+// re-upload) into review rows, then commit a flat, operator-reviewed batch.
+export const platformRosterIntakeParse = (slug: string, body: RosterIntakeParseRequest) =>
+  request<RosterIntakeParseResponse>(
+    `/platform/tenants/${encodeURIComponent(slug)}/roster-intake/parse`,
+    { method: 'POST', body },
+  );
+export const platformRosterIntakeCommit = (slug: string, items: RosterIntakeCommitItem[]) =>
+  request<RosterIntakeCommitResponse>(
+    `/platform/tenants/${encodeURIComponent(slug)}/roster-intake/commit`,
+    { method: 'POST', body: { items } },
+  );
+
+/**
+ * File → base64 for the structure-intake parse body. Workbooks in scope are small
+ * (30–500KB, capped at 2MB) so this stays a plain in-memory conversion — no
+ * presigned upload, no S3 round-trip. `String.fromCharCode(...bytes)` on the WHOLE
+ * buffer would blow the engine's max-arguments ceiling on anything but a tiny file,
+ * so this chunks the conversion instead.
+ */
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const CHUNK = 8192;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+export const platformStructureIntakeParse = async (slug: string, file: File) =>
+  request<StructureIntakeParseResponse>(
+    `/platform/tenants/${encodeURIComponent(slug)}/structure-intake/parse`,
+    { method: 'POST', body: { filename: file.name, dataBase64: await fileToBase64(file) } },
+  );
+export const platformStructureIntakeCommit = (slug: string, body: StructureIntakeCommitRequest) =>
+  request<StructureIntakeCommitResponse>(
+    `/platform/tenants/${encodeURIComponent(slug)}/structure-intake/commit`,
+    { method: 'POST', body },
+  );
+
+// Rep invites: coverage read + a tightened mirror of /admin/users pinned to role:'rep'.
+export const platformTenantReps = (slug: string) =>
+  request<TenantRepsResponse>(`/platform/tenants/${encodeURIComponent(slug)}/reps`);
+export const platformInviteRep = (slug: string, body: InviteRepRequest) =>
+  request<InviteRepResponse>(`/platform/tenants/${encodeURIComponent(slug)}/reps`, {
+    method: 'POST',
+    body,
+  });
+// Best-effort committee-doc → candidate exco rows for the reps page's prefill. Never
+// invites on its own — the operator still confirms/edits before sending.
+export const platformCommitteeExtract = (slug: string, clubId: string) =>
+  request<CommitteeExtractResponse>(
+    `/platform/tenants/${encodeURIComponent(slug)}/clubs/${encodeURIComponent(clubId)}/committee-extract`,
+    { method: 'POST' },
+  );
+// Operator twin of getDocViewUrl (same on-record objectKey gate) — lets the reps page
+// show a committee PDF beside the manual invite form.
+export const platformDocViewUrl = (slug: string, clubId: string, key: string) =>
+  request<PlatformDocViewUrlResponse>(
+    `/platform/tenants/${encodeURIComponent(slug)}/clubs/${encodeURIComponent(clubId)}/docs/${encodeURIComponent(key)}/view-url`,
+    { method: 'POST' },
+  );
 
 /**
  * Submit a branding asset (logo or hero image) to S3 via the presigned POST grant
