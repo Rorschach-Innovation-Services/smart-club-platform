@@ -99,6 +99,19 @@ export function activeRequiredDocs(cfg?: { requiredDocs?: RequiredDoc[] } | null
 }
 
 /**
+ * The key of the ACTIVE doc marked with this role, or null when no doc carries it
+ * (an unassigned role — the self-serve wizards 409 with role-assignment guidance
+ * rather than falling back to a literal key). Archived docs never resolve — the
+ * role is retired along with the key.
+ */
+export function docKeyForRole(
+  requiredDocs: RequiredDoc[],
+  role: NonNullable<RequiredDoc['role']>,
+): string | null {
+  return requiredDocs.find((d) => !d.archived && d.role === role)?.key ?? null;
+}
+
+/**
  * Every uploadable format → its exact MIME type (mirror of DOC_FORMAT_MIME in the
  * frontend's data.ts). Word covers Google Docs (exports .docx/.pdf); the spreadsheet
  * trio exists for catalogues whose docs are filled-in workbooks (league entry forms,

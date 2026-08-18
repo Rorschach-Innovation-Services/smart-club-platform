@@ -350,11 +350,14 @@ const MAX_REQUIRED_DOCS = 30;
  */
 const MAX_DOC_FILES = MAX_DOC_FILES_HARD_CAP;
 
+const DOC_ROLES = new Set(['memberDatabase', 'committee']);
+
 export function validateRequiredDocs(docs: unknown): asserts docs is RequiredDoc[] {
   if (!Array.isArray(docs)) throw new HttpError(400, 'requiredDocs must be an array');
   if (docs.length > MAX_REQUIRED_DOCS)
     throw new HttpError(400, `no more than ${MAX_REQUIRED_DOCS} required documents`);
   const seen = new Set<string>();
+  const seenRoles = new Set<string>();
   for (const d of docs as Record<string, unknown>[]) {
     if (!d || typeof d !== 'object' || Array.isArray(d))
       throw new HttpError(400, 'each required document must be an object');
@@ -383,6 +386,19 @@ export function validateRequiredDocs(docs: unknown): asserts docs is RequiredDoc
     ]) {
       if (d[flag] !== undefined && typeof d[flag] !== 'boolean')
         throw new HttpError(400, `document "${key}": ${flag} must be a boolean`);
+    }
+    if (d.role !== undefined) {
+      if (!DOC_ROLES.has(String(d.role)))
+        throw new HttpError(400, `document "${key}": unknown role "${String(d.role)}"`);
+      // At most one ACTIVE doc per role — the self-serve wizards resolve a role to
+      // exactly one key (docKeyForRole); two active docs claiming the same role would
+      // make that resolution ambiguous. An archived doc never trips this.
+      if (!d.archived) {
+        const role = String(d.role);
+        if (seenRoles.has(role))
+          throw new HttpError(400, `more than one active document is marked as the "${role}" role`);
+        seenRoles.add(role);
+      }
     }
     if (d.kind === 'form') {
       // v1: a form doc is satisfiable only by the exco affiliation-form path — any other

@@ -60,6 +60,7 @@ const CATALOGUES: Record<string, RequiredDoc[]> = {
       desc: 'Full player/member register for the season',
       accepts: [...SHEET],
       matchHints: ['database', 'databse', 'player list', 'members database'],
+      role: 'memberDatabase',
     },
     {
       key: 'committee',
@@ -70,6 +71,7 @@ const CATALOGUES: Record<string, RequiredDoc[]> = {
       desc: 'Committee list for 2026-27',
       accepts: [...SHEET],
       matchHints: ['committee'],
+      role: 'committee',
     },
     {
       key: 'constitution',
