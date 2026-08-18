@@ -27,34 +27,22 @@ import { readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ExcelJS from 'exceljs';
-import type { PlayerRegistration } from './types.js';
 import { CLUB_MAP, classifyFile, SKIP_ROSTER, type ClubMapEntry } from './titans-import-map.js';
+import { DEFAULT_JUNIOR_LEAGUE_KEYS } from './roster-normalize.js';
 import {
-  findHeaderRow,
-  cellString,
-  cellDobIso,
-  cleanIdCell,
-  normalizeGender,
-  normalizeRace,
-  ageGroupToLeagueKey,
-  splitFullName,
-  collapseWhitespace,
-  type HeaderMap,
-} from './roster-normalize.js';
-import { playerNaturalKey, dobFromSaId, computeIsMinor } from './player-identity.js';
+  maskId,
+  findCrossClubDuplicates,
+  parseRosterSheet,
+  type ParseSheetResult,
+  type RosterRow,
+} from './roster-parse.js';
 
 type RepoModule = typeof import('./repo.js');
 
 const TENANT = 'titans';
 const REGISTERED_BY = 'import:titans-compliance-2026';
 
-/** Mask an RSA ID for any printed output — never the full number (PII), and never even
- * a partial prefix: the first 6 digits of an RSA ID ARE a full date of birth, and every
- * exception report already carries "<sheet> row <n>", which locates the source row
- * precisely — the DOB adds nothing operationally and is PII on its own. */
-export function maskId(id: string): string {
-  return '*'.repeat(id.length);
-}
+export { maskId, findCrossClubDuplicates };
 
 // ───────────────────────── Find each club's memberDatabase file ─────────────────────────
 
@@ -109,210 +97,6 @@ async function findMemberDatabaseFiles(
 
 // ───────────────────────── Row → PlayerRegistration ─────────────────────────
 
-export interface RosterException {
-  rowNumber: number;
-  sheet: string;
-  reason: 'bad-id' | 'no-usable-identity' | 'bad-id-checksum';
-  maskedId?: string;
-}
-
-export interface RosterRow {
-  player: PlayerRegistration;
-  hadRealId: boolean;
-  /** True when written only because of --allow-missing-id (a resolvable dob, no usable id). */
-  missingId: boolean;
-}
-
-interface ParseSheetResult {
-  rows: RosterRow[];
-  exceptions: RosterException[];
-  totalDataRows: number;
-  /**
-   * Whether this sheet's header carried an ID-number column at all. Several clubs
-   * submitted the "Date of Birth" variant of the union template instead (Adelaar,
-   * Eersterust, Hammanskraal), where EVERY row is legitimately dob-only. Without this
-   * flag those clubs report as hundreds of identical `bad-id` exceptions in strict
-   * mode, which reads like corrupt data rather than "this club used the other form".
-   */
-  hasIdColumn: boolean;
-  /** As-typed cell text for every gender value NormalizeResult couldn't recognise —
-   * rolled into the per-club unknown-demographics report, never silently dropped. */
-  unknownGenderRaw: string[];
-  /** Same, for race. */
-  unknownRaceRaw: string[];
-}
-
-function isJuniorHeader(columns: HeaderMap): boolean {
-  return columns.ageGroup !== undefined;
-}
-
-/** Parse one worksheet's data rows into candidate PlayerRegistration rows + exceptions.
- * `allowMissingId` decides whether a resolvable-dob-but-no-ID row is INCLUDED here as a
- * dob-only row, or routed to the exception list — the caller still applies strict-mode
- * filtering identically either way via this single flag, so dry-run and confirm report
- * the exact same set. */
-function parseSheet(
-  ws: ExcelJS.Worksheet,
-  clubId: string,
-  runNow: string,
-  allowMissingId: boolean,
-): ParseSheetResult | null {
-  // eachRow SKIPS EMPTY ROWS, so the array index here is NOT the real sheet row number —
-  // rowNumbers[] tracks ExcelJS's real (rowNumber) per collected row in parallel, so the
-  // header row's TRUE sheet row number can be recovered below regardless of any blank
-  // rows above/among the data (common in these hand-assembled workbooks).
-  const rows: string[][] = [];
-  const rowNumbers: number[] = [];
-  ws.eachRow((row, rowNumber) => {
-    const vals: string[] = [];
-    for (let c = 1; c <= ws.columnCount; c++) vals.push(cellString(row.getCell(c).value));
-    rows.push(vals);
-    rowNumbers.push(rowNumber);
-  });
-  const header = findHeaderRow(rows);
-  if (!header) return null;
-  const headerRealRowNumber = rowNumbers[header.rowIndex];
-
-  const result: ParseSheetResult = {
-    rows: [],
-    exceptions: [],
-    totalDataRows: 0,
-    hasIdColumn: header.columns.idNumber !== undefined,
-    unknownGenderRaw: [],
-    unknownRaceRaw: [],
-  };
-  const junior = isJuniorHeader(header.columns);
-
-  ws.eachRow((row, rowNumber) => {
-    if (rowNumber <= headerRealRowNumber) return; // header row and anything at/above it
-
-    let firstName: string;
-    let lastName: string;
-    if (header.columns.fullName !== undefined) {
-      const split = splitFullName(cellString(row.getCell(header.columns.fullName + 1).value));
-      firstName = split.firstName;
-      lastName = split.lastName;
-    } else {
-      firstName = collapseWhitespace(
-        cellString(row.getCell((header.columns.firstName ?? -1) + 1).value),
-      );
-      lastName = collapseWhitespace(
-        cellString(row.getCell((header.columns.lastName ?? -1) + 1).value),
-      );
-    }
-    if (!firstName && !lastName) return; // blank row — not counted, not an exception
-
-    result.totalDataRows++;
-
-    let idNumber: string | undefined;
-    let dob: string | null = null;
-    let hadRealId = false;
-    let missingId = false;
-
-    if (header.columns.idNumber !== undefined) {
-      const raw = row.getCell(header.columns.idNumber + 1).value;
-      const cleaned = cleanIdCell(raw, dobFromSaId);
-      if (cleaned.kind === 'valid' || cleaned.kind === 'padded') {
-        idNumber = cleaned.idNumber;
-        dob = dobFromSaId(idNumber);
-        hadRealId = true;
-      } else if (cleaned.kind === 'date-mangled') {
-        // The "ID" column is actually carrying a DOB (DACC's junior sheet, Sinoville's
-        // senior sheet) — usable as dob-only identity, never as an idNumber.
-        dob = cleaned.isoDate;
-      } else if (cleaned.kind === 'bad-checksum') {
-        // Date-plausible but the Luhn check digit doesn't match — the dominant error
-        // mode in hand-typed member databases (transposed digits). Never promoted to a
-        // usable id/naturalKey (a wrong checksum silently breaks future dedup) and never
-        // auto-included as dob-only either — routed to the exception report under its
-        // own reason so an operator can see the count and decide, regardless of
-        // --allow-missing-id.
-        result.exceptions.push({
-          rowNumber,
-          sheet: ws.name,
-          reason: 'bad-id-checksum',
-          maskedId: maskId(cleaned.idNumber),
-        });
-        return;
-      }
-      // cleaned.kind === 'invalid' → dob stays null unless a separate dob column below resolves it.
-    }
-    if (!dob && header.columns.dob !== undefined) {
-      dob = cellDobIso(row.getCell(header.columns.dob + 1).value);
-    }
-
-    if (!hadRealId) {
-      if (!dob) {
-        // No valid ID AND no resolvable dob from any column — no identity to build a
-        // player from at all (name alone is never enough for playerNaturalKey).
-        result.exceptions.push({
-          rowNumber,
-          sheet: ws.name,
-          reason: 'no-usable-identity',
-        });
-        return;
-      }
-      missingId = true;
-      if (!allowMissingId) {
-        result.exceptions.push({
-          rowNumber,
-          sheet: ws.name,
-          reason: 'bad-id',
-          maskedId: idNumber ? maskId(idNumber) : undefined,
-        });
-        return;
-      }
-    }
-
-    const genderResult =
-      header.columns.gender !== undefined
-        ? normalizeGender(cellString(row.getCell(header.columns.gender + 1).value))
-        : undefined;
-    if (genderResult?.unknownRaw) result.unknownGenderRaw.push(genderResult.unknownRaw);
-    const gender = genderResult?.value;
-    const raceResult =
-      header.columns.race !== undefined
-        ? normalizeRace(cellString(row.getCell(header.columns.race + 1).value))
-        : undefined;
-    if (raceResult?.unknownRaw) result.unknownRaceRaw.push(raceResult.unknownRaw);
-    const race = raceResult?.value;
-    // team (league key) only for junior sheets — senior sheets carry no age-group column
-    // and the platform has no per-team senior league key from this pack.
-    const team =
-      junior && header.columns.ageGroup !== undefined
-        ? ageGroupToLeagueKey(cellString(row.getCell(header.columns.ageGroup + 1).value)).value
-        : undefined;
-
-    const base: Partial<PlayerRegistration> = {
-      clubId,
-      firstName,
-      lastName,
-      dob: dob!,
-      idType: 'sa-id',
-      ...(idNumber ? { idNumber } : {}),
-    };
-    const player: PlayerRegistration = {
-      naturalKey: playerNaturalKey(base),
-      clubId,
-      firstName,
-      lastName,
-      dob: dob!,
-      isMinor: computeIsMinor(dob!),
-      consentAt: runNow,
-      createdAt: runNow,
-      registeredVia: 'portal',
-      registeredBy: REGISTERED_BY,
-      ...(idNumber ? { idNumber, idType: 'sa-id' } : {}),
-      ...(gender ? { gender } : {}),
-      ...(race ? { race } : {}),
-      ...(team ? { team } : {}),
-    };
-    result.rows.push({ player, hadRealId, missingId });
-  });
-
-  return result;
-}
-
 async function parseClubRoster(
   file: FileEntry,
   clubId: string,
@@ -321,51 +105,17 @@ async function parseClubRoster(
 ): Promise<{ sheets: Array<{ name: string; result: ParseSheetResult | null }> }> {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.readFile(file.abs);
-  const sheets = wb.worksheets.map((ws) => ({
-    name: ws.name,
-    result: parseSheet(ws, clubId, runNow, allowMissingId),
-  }));
+  const sheets = wb.worksheets.map((ws) => {
+    const result = parseRosterSheet(ws, clubId, runNow, {
+      allowMissingId,
+      juniorLeagueKeys: DEFAULT_JUNIOR_LEAGUE_KEYS,
+    });
+    // parseRosterSheet is tenant-neutral and never stamps provenance — this CLI's fixed
+    // registeredBy is applied here, once, right after parsing.
+    if (result) for (const r of result.rows) r.player.registeredBy = REGISTERED_BY;
+    return { name: ws.name, result };
+  });
   return { sheets };
-}
-
-// ───────────────────────── Cross-club duplicate ID detection ─────────────────────────
-
-/**
- * Fail-closed: any player identity — id-based OR dob-only — claimed by more than one
- * club is reported and ALL claimants are excluded from writing, never a guess at which
- * club is authoritative.
- *
- * Matched on the resolved `naturalKey`, not the raw idNumber: under --allow-missing-id
- * (the documented CORRECT mode for this pack — see the runbook) a dob-only row has no
- * idNumber at all, so keying on idNumber alone would silently exempt every dob-only
- * duplicate from this check, letting the same person land in two clubs' rosters.
- * naturalKey already encodes id-based identity as `sa-id-<id>` and dob-only identity as
- * a hash of name+dob, so this one map catches both without special-casing either.
- */
-export function findCrossClubDuplicates(
-  allRows: Array<{ clubId: string; clubName: string; row: RosterRow }>,
-): { duplicateNaturalKeys: Set<string>; report: string[] } {
-  const byKey = new Map<string, Array<{ clubId: string; clubName: string; row: RosterRow }>>();
-  for (const entry of allRows) {
-    const key = entry.row.player.naturalKey;
-    if (!byKey.has(key)) byKey.set(key, []);
-    byKey.get(key)!.push(entry);
-  }
-  const duplicateNaturalKeys = new Set<string>();
-  const report: string[] = [];
-  for (const [key, claimants] of byKey) {
-    const distinctClubs = new Set(claimants.map((c) => c.clubId));
-    if (distinctClubs.size <= 1) continue;
-    const id = claimants[0].row.player.idNumber;
-    // Never print a raw dob (PII) here — an id-based match is reported masked; a
-    // dob-only match is reported without any identifying value at all.
-    const identityLabel = id ? maskId(id) : 'dob-only match';
-    report.push(
-      `${identityLabel}: claimed by ${[...distinctClubs].map((cid) => claimants.find((c) => c.clubId === cid)!.clubName).join(', ')}`,
-    );
-    for (const { clubId } of claimants) duplicateNaturalKeys.add(`${clubId}::${key}`);
-  }
-  return { duplicateNaturalKeys, report };
 }
 
 // ───────────────────────── CLI ─────────────────────────
@@ -601,4 +351,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   });
 }
 
-export { findMemberDatabaseFiles, parseSheet, parseClubRoster };
+export { findMemberDatabaseFiles, parseClubRoster };
