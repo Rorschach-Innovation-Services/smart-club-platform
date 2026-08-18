@@ -84,6 +84,7 @@ import type {
   League,
   SeasonCalendar,
   SeasonRun,
+  Series,
   TimeSlot,
   Venue,
   Weekday,
@@ -134,6 +135,7 @@ import {
   useEscapeClose,
   playerStatusPill,
   InfoDot,
+  ScrollX,
 } from './atoms';
 
 /* ─── AdminFixtures — series cards + drilldown fixture table with distance + travel-cost ─── */
@@ -176,6 +178,83 @@ interface AdminFixturesProps {
   onGenerateStageSeries?;
 }
 
+// Export row shape shared by the per-series and whole-season exports — the same
+// columns the union's own fixture workbooks use, plus the venue note so relocated
+// fixtures carry their "why" (allocator reason / clash move) into the spreadsheet.
+// Clubs without geocoded grounds can't have distance/travel computed (haversine
+// returns 0) — emit '—' rather than a misleading 0. Hoisted to module level so the
+// on-platform SeasonViewer renders exactly the rows the xlsx export writes.
+export function seriesScheduleRows(s: Series, clubs: Club[]) {
+  const clubBy = (id) => clubs.find((c) => c.id === id);
+  const fixtures = s.fixtures as any[];
+  // "Time TBC" is only meaningful once the series has at least one timed fixture —
+  // otherwise every series that never uses times (most of them) would export a
+  // column full of noise instead of a clean blank.
+  const seriesHasTimes = fixtures.some((f) => !!formatTime(f.time));
+  return fixtures.map((f) => {
+    const home = resolveTeam(s, f.home, clubBy),
+      away = resolveTeam(s, f.away, clubBy);
+    const hasGeo =
+      home?.ground?.lat != null &&
+      home?.ground?.lon != null &&
+      away?.ground?.lat != null &&
+      away?.ground?.lon != null;
+    const cost =
+      home && away
+        ? fixtureCost(home, away, (s as any).costPerKm, (s as any).carsPerAwayTrip, fixtureVenue(f))
+        : null;
+    // The slot label ('Morning'/'Afternoon') alongside the raw kickoff time when the
+    // series' schedule carries named slots — trivially available off `schedule.slots`,
+    // so worth including, but the time itself is what matters and stands alone without it.
+    const time = formatTime(f.time);
+    const slotLabel = s.schedule?.slots?.find((sl) => sl.start === f.time)?.label;
+    return {
+      Round: f.round,
+      Date: formatWeekdayDayYear(f.date),
+      Time: time ? (slotLabel ? `${time} (${slotLabel})` : time) : seriesHasTimes ? 'Time TBC' : '',
+      Home: home?.name || 'TBD',
+      Venue: f.venueOverride || f.venueName || home?.ground?.venue || '—',
+      'Venue note': f.venueStatus && f.venueStatus !== 'home' ? f.venueReason || '' : '',
+      Suburb: home?.ground?.suburb || '',
+      Away: away?.name || 'TBD',
+      'Distance (km)': hasGeo && cost ? Number(cost.distanceKm.toFixed(1)) : '—',
+      'Travel (R)': hasGeo && cost ? Math.round(cost.fuelR) : '—',
+      Status: f.status || 'scheduled',
+    };
+  });
+}
+
+export const SCHEDULE_COLS = [
+  'Round',
+  'Date',
+  'Time',
+  'Home',
+  'Venue',
+  'Venue note',
+  'Suburb',
+  'Away',
+  'Distance (km)',
+  'Travel (R)',
+  'Status',
+] as const;
+
+// Whole-season summary: one row per competition — the cover sheet of the season export
+// and the summary table of the on-platform viewer. Row objects carry no series id, so
+// callers that need to key rows zip them with `allSeries` by index.
+export function seasonSummaryRows(allSeries: Series[]) {
+  return allSeries.map((s) => {
+    const dates = (s.fixtures as any[]).map((f) => f.date).sort();
+    return {
+      Competition: s.name,
+      Fixtures: s.fixtures.length,
+      Sides: s.teams?.length ?? '',
+      From: dates.length ? formatWeekdayDayYear(dates[0]) : '',
+      To: dates.length ? formatWeekdayDayYear(dates[dates.length - 1]) : '',
+      Status: s.released ? 'Released' : s.approved ? 'Approved (draft)' : 'Draft',
+    };
+  });
+}
+
 export function AdminFixtures({
   clubs,
   allSeries,
@@ -208,6 +287,7 @@ export function AdminFixtures({
   // the admin lands in StartSeasonForm or the flat CreateSeriesForm. Owned here, not in
   // SeasonRunsPanel, so its own "Start a season" button and the header button can share it.
   const [launcherOpen, setLauncherOpen] = useStateA(false);
+  const [viewerOpen, setViewerOpen] = useStateA(false);
   const [activeId, setActiveId] = useStateA(allSeries[0]?.id);
   const active = allSeries.find((s) => s.id === activeId) || allSeries[0];
   const [confirm, setConfirm] = useStateA(null); // shared confirmation modal state
@@ -231,62 +311,13 @@ export function AdminFixtures({
     return { totalKm, totalCost };
   };
 
-  // Export row shape shared by the per-series and whole-season exports — the same
-  // columns the union's own fixture workbooks use, plus the venue note so relocated
-  // fixtures carry their "why" (allocator reason / clash move) into the spreadsheet.
-  // Clubs without geocoded grounds can't have distance/travel computed (haversine
-  // returns 0) — emit '—' rather than a misleading 0.
-  const scheduleRows = (s) => {
-    // "Time TBC" is only meaningful once the series has at least one timed fixture —
-    // otherwise every series that never uses times (most of them) would export a
-    // column full of noise instead of a clean blank.
-    const seriesHasTimes = s.fixtures.some((f) => !!formatTime(f.time));
-    return s.fixtures.map((f) => {
-      const home = teamBy(s, f.home),
-        away = teamBy(s, f.away);
-      const hasGeo =
-        home?.ground?.lat != null &&
-        home?.ground?.lon != null &&
-        away?.ground?.lat != null &&
-        away?.ground?.lon != null;
-      const cost =
-        home && away
-          ? fixtureCost(home, away, s.costPerKm, s.carsPerAwayTrip, fixtureVenue(f))
-          : null;
-      // The slot label ('Morning'/'Afternoon') alongside the raw kickoff time when the
-      // series' schedule carries named slots — trivially available off `schedule.slots`,
-      // so worth including, but the time itself is what matters and stands alone without it.
-      const time = formatTime(f.time);
-      const slotLabel = s.schedule?.slots?.find((sl) => sl.start === f.time)?.label;
-      return {
-        Round: f.round,
-        Date: formatWeekdayDayYear(f.date),
-        Time: time
-          ? slotLabel
-            ? `${time} (${slotLabel})`
-            : time
-          : seriesHasTimes
-            ? 'Time TBC'
-            : '',
-        Home: home?.name || 'TBD',
-        Venue: f.venueOverride || f.venueName || home?.ground?.venue || '—',
-        'Venue note': f.venueStatus && f.venueStatus !== 'home' ? f.venueReason || '' : '',
-        Suburb: home?.ground?.suburb || '',
-        Away: away?.name || 'TBD',
-        'Distance (km)': hasGeo && cost ? Number(cost.distanceKm.toFixed(1)) : '—',
-        'Travel (R)': hasGeo && cost ? Math.round(cost.fuelR) : '—',
-        Status: f.status || 'scheduled',
-      };
-    });
-  };
-
-  function exportSchedule() {
-    if (!active) return toast?.('No series to export');
-    const fname = `${active.name
+  function exportSchedule(s: Series) {
+    if (!s) return toast?.('No series to export');
+    const fname = `${s.name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '')}-schedule.xlsx`;
-    exportRowsToXlsx(fname, 'Schedule', scheduleRows(active)).catch(() =>
+    exportRowsToXlsx(fname, 'Schedule', seriesScheduleRows(s, clubs)).catch(() =>
       toast?.('Export failed — please retry'),
     );
   }
@@ -313,20 +344,10 @@ export function AdminFixtures({
       used.add(candidate);
       return candidate;
     };
-    const summary = allSeries.map((s) => {
-      const dates = s.fixtures.map((f) => f.date).sort();
-      return {
-        Competition: s.name,
-        Fixtures: s.fixtures.length,
-        Sides: s.teams?.length ?? '',
-        From: dates.length ? formatWeekdayDayYear(dates[0]) : '',
-        To: dates.length ? formatWeekdayDayYear(dates[dates.length - 1]) : '',
-        Status: s.released ? 'Released' : s.approved ? 'Approved (draft)' : 'Draft',
-      };
-    });
+    const summary = seasonSummaryRows(allSeries);
     const sheets = [
       { name: 'Season summary', rows: summary },
-      ...allSeries.map((s) => ({ name: sheetName(s.name), rows: scheduleRows(s) })),
+      ...allSeries.map((s) => ({ name: sheetName(s.name), rows: seriesScheduleRows(s, clubs) })),
     ];
     exportSheetsToXlsx(
       `season-fixtures-${new Date().toISOString().slice(0, 10)}.xlsx`,
@@ -399,15 +420,12 @@ export function AdminFixtures({
               <strong>Recall / Withdraw</strong> — pull a released or approved series back.
             </p>
             <p>
-              <strong>Export schedule</strong> — download the active series as a spreadsheet
-              (rounds, dates, venues, travel).
+              <strong>View season</strong> — open every competition’s schedule on screen, with
+              spreadsheet downloads inside the viewer.
             </p>
           </InfoDot>
-          <Btn tone="outline" icon={Icon.Download} size="sm" onClick={exportSchedule}>
-            Export schedule
-          </Btn>
-          <Btn tone="outline" icon={Icon.Download} size="sm" onClick={exportSeason}>
-            Export season
+          <Btn tone="outline" icon={Icon.Eye} size="sm" onClick={() => setViewerOpen(true)}>
+            View season
           </Btn>
           <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={() => setLauncherOpen(true)}>
             Generate fixtures
@@ -686,7 +704,207 @@ export function AdminFixtures({
           toast={toast}
         />
       )}
+
+      {viewerOpen && (
+        <SeasonViewer
+          allSeries={allSeries}
+          clubs={clubs}
+          initialSeriesId={active?.id}
+          onClose={() => setViewerOpen(false)}
+          onDownloadSeason={exportSeason}
+          onDownloadSchedule={exportSchedule}
+        />
+      )}
     </div>
+  );
+}
+
+/* ─── SeasonViewer — read-only, on-platform view of the whole season: a summary table
+   plus one tab per competition. The spreadsheet exports live inside it now, so the
+   admin can see the same data before deciding to download it. ─── */
+function SeasonViewer({
+  allSeries,
+  clubs,
+  initialSeriesId,
+  onClose,
+  onDownloadSeason,
+  onDownloadSchedule,
+}: {
+  allSeries: Series[];
+  clubs: Club[];
+  initialSeriesId?: string;
+  onClose: () => void;
+  onDownloadSeason: () => void;
+  onDownloadSchedule: (s: Series) => void;
+}) {
+  useEscapeClose(onClose);
+  const titleId = useId();
+  const [tabId, setTabId] = useStateA(initialSeriesId ?? allSeries[0]?.id);
+  const tab = allSeries.find((s) => s.id === tabId) || allSeries[0];
+  const summary = seasonSummaryRows(allSeries);
+  const scheduleRows = tab ? seriesScheduleRows(tab, clubs) : [];
+  const statusTone = (label: string) =>
+    label === 'Released' ? 'teal' : label === 'Approved (draft)' ? 'gold' : 'muted';
+
+  return createPortal(
+    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div
+        className="task-modal season-viewer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
+        <div className="task-modal-head">
+          <div className="task-modal-head-text">
+            <div className="task-modal-head-eyebrow">Fixtures · Venues</div>
+            <div className="task-modal-head-title" id={titleId}>
+              Season summary &amp; schedules
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Btn
+              tone="outline"
+              icon={Icon.Download}
+              size="sm"
+              onClick={onDownloadSeason}
+              disabled={allSeries.length === 0}
+            >
+              Download season
+            </Btn>
+            <button className="task-modal-close" onClick={onClose} title="Close">
+              <Icon.X />
+            </button>
+          </div>
+        </div>
+        <div className="task-modal-body">
+          {allSeries.length === 0 ? (
+            <EmptyState
+              icon={Icon.Field}
+              title="No series yet"
+              sub="Generate fixtures first — a season summary and schedules appear here once you do."
+            />
+          ) : (
+            <>
+              <div className="tbl-w">
+                <table className="tbl">
+                  <thead>
+                    <tr>
+                      <th>Competition</th>
+                      <th>Fixtures</th>
+                      <th>Sides</th>
+                      <th>From</th>
+                      <th>To</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {summary.map((row, i) => (
+                      <tr key={allSeries[i].id}>
+                        <td>{row.Competition}</td>
+                        <td>{row.Fixtures}</td>
+                        <td>{row.Sides}</td>
+                        <td>{row.From}</td>
+                        <td>{row.To}</td>
+                        <td>
+                          <Pill tone={statusTone(row.Status)} dot>
+                            {row.Status}
+                          </Pill>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="sv-tabs">
+                {allSeries.map((s) => (
+                  <button
+                    key={s.id}
+                    className={`filter-pill ${s.id === tab?.id ? 'active' : ''}`}
+                    aria-pressed={s.id === tab?.id}
+                    onClick={() => setTabId(s.id)}
+                  >
+                    {s.name}
+                    <span className="count">{s.fixtures.length}</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="sv-toolbar">
+                <Btn
+                  tone="outline"
+                  icon={Icon.Download}
+                  size="sm"
+                  onClick={() => tab && onDownloadSchedule(tab)}
+                  disabled={scheduleRows.length === 0}
+                >
+                  Download schedule
+                </Btn>
+              </div>
+
+              <div className="tbl-w">
+                <ScrollX label="Schedule table">
+                  <table className="tbl">
+                    <thead>
+                      <tr>
+                        {SCHEDULE_COLS.map((col) => (
+                          <th
+                            key={col}
+                            style={
+                              col === 'Distance (km)' || col === 'Travel (R)'
+                                ? { textAlign: 'right' }
+                                : undefined
+                            }
+                          >
+                            {col}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tab && scheduleRows.length > 0 ? (
+                        scheduleRows.map((row, i) => (
+                          <tr key={(tab.fixtures as any[])[i].id}>
+                            <td>{row.Round}</td>
+                            <td>{row.Date}</td>
+                            <td>{row.Time}</td>
+                            <td>{row.Home}</td>
+                            <td>{row.Venue}</td>
+                            <td>{row['Venue note']}</td>
+                            <td>{row.Suburb}</td>
+                            <td>{row.Away}</td>
+                            <td style={{ textAlign: 'right' }}>{row['Distance (km)']}</td>
+                            <td style={{ textAlign: 'right' }}>{row['Travel (R)']}</td>
+                            <td>
+                              <span className={`fix-status ${row.Status}`}>{row.Status}</span>
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td
+                            colSpan={SCHEDULE_COLS.length}
+                            style={{
+                              padding: '28px',
+                              textAlign: 'center',
+                              color: 'var(--muted)',
+                              fontSize: 13,
+                            }}
+                          >
+                            No fixtures in this series yet.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </ScrollX>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

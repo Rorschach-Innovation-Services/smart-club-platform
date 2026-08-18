@@ -59,6 +59,7 @@ import {
   cqiBand,
   useToast,
   useEscapeClose,
+  ScrollX,
 } from './atoms';
 import {
   AdminDashboard,
@@ -2870,143 +2871,145 @@ function AdminFiltered({
         />
       ) : (
         <div className="tbl-w">
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th>Club</th>
-                <th>Chair</th>
-                {kind === 'affiliation' && (
-                  <>
-                    <th>Status</th>
-                    <th>Submitted</th>
-                  </>
-                )}
-                {kind === 'docs' && (
-                  <>
-                    {docsCols.map((d) => (
-                      <th key={d.key}>{d.name}</th>
-                    ))}
-                    <th>Progress</th>
-                  </>
-                )}
-                {kind === 'cqi' && (
-                  <>
-                    <th>Score</th>
-                    <th>Band</th>
-                    <th>Submitted</th>
-                    <th>Players</th>
-                  </>
-                )}
-                <th style={{ width: 60 }}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {clubs.map((c) => (
-                <tr key={c.id} className="clickable" onClick={() => gotoClub(c.id)}>
-                  <td>
-                    <ClubNameCell club={c} />
-                  </td>
-                  <td>
-                    <span style={{ fontSize: 12.5 }}>{c.chair}</span>
-                  </td>
-
+          <ScrollX hint="Scroll for more documents" label="Documents table">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Club</th>
+                  <th>Chair</th>
                   {kind === 'affiliation' && (
                     <>
-                      <td>{affPill(c.affiliation)}</td>
-                      <td>
-                        {affiliationSubmitted(c) ? (
-                          <Pill tone="teal" dot>
-                            Submitted
-                          </Pill>
-                        ) : (
-                          <Pill tone="coral" dot>
-                            Outstanding
-                          </Pill>
-                        )}
-                      </td>
+                      <th>Status</th>
+                      <th>Submitted</th>
                     </>
                   )}
-
                   {kind === 'docs' && (
                     <>
                       {docsCols.map((d) => (
-                        <td key={d.key}>
-                          {c.docs[d.key] ? (
+                        <th key={d.key}>{d.name}</th>
+                      ))}
+                      <th>Progress</th>
+                    </>
+                  )}
+                  {kind === 'cqi' && (
+                    <>
+                      <th>Score</th>
+                      <th>Band</th>
+                      <th>Submitted</th>
+                      <th>Players</th>
+                    </>
+                  )}
+                  <th style={{ width: 60 }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {clubs.map((c) => (
+                  <tr key={c.id} className="clickable" onClick={() => gotoClub(c.id)}>
+                    <td>
+                      <ClubNameCell club={c} />
+                    </td>
+                    <td>
+                      <span style={{ fontSize: 12.5 }}>{c.chair}</span>
+                    </td>
+
+                    {kind === 'affiliation' && (
+                      <>
+                        <td>{affPill(c.affiliation)}</td>
+                        <td>
+                          {affiliationSubmitted(c) ? (
                             <Pill tone="teal" dot>
-                              Uploaded
+                              Submitted
                             </Pill>
                           ) : (
                             <Pill tone="coral" dot>
-                              Missing
+                              Outstanding
                             </Pill>
                           )}
                         </td>
-                      ))}
-                      <td>
-                        <ProgChip
-                          value={docCompletion(c, requiredDocs)}
-                          tone={
-                            docCompletion(c, requiredDocs) === 100
-                              ? 'teal'
-                              : docCompletion(c, requiredDocs) > 0
-                                ? 'gold'
-                                : 'coral'
-                          }
-                        />
-                      </td>
-                    </>
-                  )}
+                      </>
+                    )}
 
-                  {kind === 'cqi' && (
-                    <>
-                      <td>
-                        <span
-                          style={{
-                            fontFamily: "'Montserrat',sans-serif",
-                            fontSize: 15,
-                            fontWeight: 800,
-                            color:
-                              c.cqi >= 80
-                                ? 'var(--teal-deep)'
-                                : c.cqi >= 65
-                                  ? 'var(--ink)'
-                                  : c.cqi > 0
-                                    ? '#076B36'
-                                    : 'var(--muted-2)',
-                          }}
-                        >
-                          {c.cqi > 0 ? c.cqi.toFixed(1) : '—'}
-                        </span>
-                      </td>
-                      <td>
-                        <Pill tone={cqiBand(c.cqi).tone}>{cqiBand(c.cqi).label}</Pill>
-                      </td>
-                      <td>
-                        <span
-                          style={{
-                            fontSize: 11.5,
-                            color: 'var(--muted)',
-                            fontFamily: "'Montserrat',sans-serif",
-                          }}
-                        >
-                          {c.cqi > 0 ? 'Submitted' : '—'}
-                        </span>
-                      </td>
-                      <td>
-                        <span style={{ fontFamily: "'Montserrat',sans-serif", fontSize: 12 }}>
-                          {c.players || '—'}
-                        </span>
-                      </td>
-                    </>
-                  )}
+                    {kind === 'docs' && (
+                      <>
+                        {docsCols.map((d) => (
+                          <td key={d.key}>
+                            {c.docs[d.key] ? (
+                              <Pill tone="teal" dot>
+                                Uploaded
+                              </Pill>
+                            ) : (
+                              <Pill tone="coral" dot>
+                                Missing
+                              </Pill>
+                            )}
+                          </td>
+                        ))}
+                        <td>
+                          <ProgChip
+                            value={docCompletion(c, requiredDocs)}
+                            tone={
+                              docCompletion(c, requiredDocs) === 100
+                                ? 'teal'
+                                : docCompletion(c, requiredDocs) > 0
+                                  ? 'gold'
+                                  : 'coral'
+                            }
+                          />
+                        </td>
+                      </>
+                    )}
 
-                  <td style={{ textAlign: 'right', paddingRight: 18 }}>
-                    <Icon.Arrow />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    {kind === 'cqi' && (
+                      <>
+                        <td>
+                          <span
+                            style={{
+                              fontFamily: "'Montserrat',sans-serif",
+                              fontSize: 15,
+                              fontWeight: 800,
+                              color:
+                                c.cqi >= 80
+                                  ? 'var(--teal-deep)'
+                                  : c.cqi >= 65
+                                    ? 'var(--ink)'
+                                    : c.cqi > 0
+                                      ? '#076B36'
+                                      : 'var(--muted-2)',
+                            }}
+                          >
+                            {c.cqi > 0 ? c.cqi.toFixed(1) : '—'}
+                          </span>
+                        </td>
+                        <td>
+                          <Pill tone={cqiBand(c.cqi).tone}>{cqiBand(c.cqi).label}</Pill>
+                        </td>
+                        <td>
+                          <span
+                            style={{
+                              fontSize: 11.5,
+                              color: 'var(--muted)',
+                              fontFamily: "'Montserrat',sans-serif",
+                            }}
+                          >
+                            {c.cqi > 0 ? 'Submitted' : '—'}
+                          </span>
+                        </td>
+                        <td>
+                          <span style={{ fontFamily: "'Montserrat',sans-serif", fontSize: 12 }}>
+                            {c.players || '—'}
+                          </span>
+                        </td>
+                      </>
+                    )}
+
+                    <td style={{ textAlign: 'right', paddingRight: 18 }}>
+                      <Icon.Arrow />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </ScrollX>
         </div>
       )}
     </div>

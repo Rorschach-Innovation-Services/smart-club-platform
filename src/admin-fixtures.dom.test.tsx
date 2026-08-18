@@ -17,7 +17,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { AdminFixtures, FixtureTable } from './admin';
+import { AdminFixtures, FixtureTable, SCHEDULE_COLS } from './admin';
 import { renderWithProviders } from './test-utils';
 import type { Club, SeasonCalendar, Series, TenantConfig } from './types';
 
@@ -537,5 +537,146 @@ describe('the "Generate fixtures" launcher — one entry point, routed by league
       'Structured seasons — set up by your platform operator',
       'Flat seasons — one flat round robin until a competition is bound',
     ]);
+  });
+});
+
+describe('the season viewer — every schedule on screen, downloads inside it', () => {
+  // Two competitions with distinct statuses (Draft vs Released) and distinct rows, so the
+  // summary, the tab swap and the status badges all have something to assert on.
+  const div2 = () => series();
+  const premier = () =>
+    series({
+      id: 's2',
+      name: 'EMCU Premier · 2026/27',
+      released: true,
+      approved: true,
+      fixtures: [{ id: 'g1', round: 1, date: '2026-09-05', home: 'ilembe', away: 'tongaat' }],
+    } as Partial<Series>);
+
+  const renderPage = (allSeries = [div2(), premier()]) =>
+    renderWithProviders(
+      <AdminFixtures
+        clubs={clubs}
+        allSeries={allSeries}
+        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
+        onUpdateSeries={vi.fn()}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onSetReleased={vi.fn()}
+        onSetApproved={vi.fn()}
+        toast={vi.fn()}
+        allVenues={[]}
+        allSeasonRuns={[]}
+        allLeagues={[]}
+        tenantConfig={{ structures: [], calendars: [] } as unknown as TenantConfig}
+        onSaveVenue={vi.fn()}
+        onDeleteVenue={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCreateSeasonRun={vi.fn()}
+        onPatchSeasonRun={vi.fn()}
+        onDeleteSeasonRun={vi.fn()}
+        onGenerateStageSeries={vi.fn()}
+      />,
+    );
+
+  const openViewer = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.click(screen.getByRole('button', { name: /view season/i }));
+    return screen.getByRole('dialog', { name: /season summary/i });
+  };
+
+  it('swaps the export buttons for a single "View season" entry point', () => {
+    renderPage();
+    expect(screen.getByRole('button', { name: /view season/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /export schedule/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /export season/i })).toBeNull();
+  });
+
+  it('opens a summary listing every competition with its fixture count and status', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const dialog = await openViewer(user);
+    // Scope to the summary table — the competition names also appear in the tab pills.
+    const summary = within(dialog).getAllByRole('table')[0];
+
+    expect(within(summary).getByText('EMCU Division 2 · 2026/27')).toBeTruthy();
+    expect(within(summary).getByText('EMCU Premier · 2026/27')).toBeTruthy();
+    expect(within(summary).getByText('Draft')).toBeTruthy();
+    expect(within(summary).getByText('Released')).toBeTruthy();
+    // The active series' three fixtures show in the summary (Fixtures column).
+    expect(within(summary).getAllByText('3').length).toBeGreaterThan(0);
+    expect(within(summary).getByText('1')).toBeTruthy();
+  });
+
+  it('defaults to the active series and swaps rows when another tab is picked', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const dialog = await openViewer(user);
+
+    // Default tab = active series (Division 2): its first fixture is Spartan v Tongaat at
+    // Spartan Park, with '—' for distance/travel (the test clubs have no geo).
+    const schedule = () => within(dialog).getAllByRole('table')[1];
+    SCHEDULE_COLS.forEach((col) => {
+      expect(within(schedule()).getAllByText(col).length).toBeGreaterThan(0);
+    });
+    const homeRow = within(schedule())
+      .getAllByRole('row')
+      .find((r) => /spartan sporting cc/i.test(r.textContent ?? ''))!;
+    expect(homeRow).toBeTruthy();
+    expect(within(homeRow).getByText('Spartan Park')).toBeTruthy();
+    expect(within(homeRow).getByText('Tongaat CC')).toBeTruthy();
+    expect(within(homeRow).getAllByText('—').length).toBe(2);
+
+    // Switch to the Premier tab — Ilembe v Tongaat replaces the Division 2 rows.
+    await user.click(within(dialog).getByRole('button', { name: /emcu premier/i }));
+    expect(
+      within(schedule())
+        .getAllByRole('row')
+        .some((r) => /ilembe cc/i.test(r.textContent ?? '')),
+    ).toBe(true);
+    expect(
+      within(schedule())
+        .getAllByRole('row')
+        .some((r) => /spartan sporting cc/i.test(r.textContent ?? '')),
+    ).toBe(false);
+  });
+
+  it('keeps both spreadsheet downloads inside the viewer', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const dialog = await openViewer(user);
+    expect(within(dialog).getByRole('button', { name: /download season/i })).toBeTruthy();
+    expect(within(dialog).getByRole('button', { name: /download schedule/i })).toBeTruthy();
+  });
+
+  it('closes on Escape, backdrop click and the close button', async () => {
+    const user = userEvent.setup();
+
+    renderPage();
+    await openViewer(user);
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog', { name: /season summary/i })).toBeNull();
+
+    const closeVia = await openViewer(user);
+    await user.click(within(closeVia).getByRole('button', { name: /^close$/i }));
+    expect(screen.queryByRole('dialog', { name: /season summary/i })).toBeNull();
+
+    const dialog = await openViewer(user);
+    // The backdrop is the dialog's parent; clicking it (not the panel) closes.
+    await user.click(dialog.parentElement as HTMLElement);
+    expect(screen.queryByRole('dialog', { name: /season summary/i })).toBeNull();
+  });
+
+  it('shows an empty state when there are no series at all', async () => {
+    const user = userEvent.setup();
+    renderPage([]);
+    const dialog = await openViewer(user);
+    expect(within(dialog).getByText(/no series yet/i)).toBeTruthy();
+  });
+
+  it('tells the admin when the picked series has no fixtures', async () => {
+    const user = userEvent.setup();
+    renderPage([series({ fixtures: [] } as Partial<Series>)]);
+    const dialog = await openViewer(user);
+    expect(within(dialog).getByText(/no fixtures in this series yet/i)).toBeTruthy();
   });
 });

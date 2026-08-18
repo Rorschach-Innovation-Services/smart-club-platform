@@ -869,6 +869,69 @@ export function useEscapeClose(onClose: () => void) {
   }, [onClose]);
 }
 
+/**
+ * Horizontal-scroll wrapper with an edge fade + "scroll for more" affordance, shown only
+ * while columns are off-screen. Wrap a `<table>` INSIDE its `.tbl-w` so wide tables — the
+ * compliance docs tracker, the season viewer's 11-column schedule — scroll with a visible
+ * hint instead of squashing or clipping silently. The fade is a mask on the scroller
+ * content (uniform over the dark thead); the hint is tied to `has-right`, so it only
+ * appears while there is more to the right and vanishes at the end.
+ */
+export function ScrollX({
+  children,
+  hint = 'Scroll for more',
+  label,
+}: {
+  children: ReactNode;
+  hint?: string;
+  label?: string;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [canLeft, setCanLeft] = useState(false);
+  const [canRight, setCanRight] = useState(false);
+  const update = () => {
+    const el = ref.current;
+    if (!el) return;
+    setCanLeft(el.scrollLeft > 0);
+    setCanRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+  };
+  useEffect(() => {
+    update();
+    // jsdom has no ResizeObserver (vitest.setup stubs only matchMedia/scrollIntoView) and
+    // the SeasonViewer tests mount this transitively — construct it only when it exists,
+    // degrading to scroll-events-only rather than crashing on mount.
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(update);
+    if (ref.current) ro.observe(ref.current);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Re-measure on every render: content width can change without a scroll event or a
+  // resize of the scroller box (e.g. a different table rendered inside), which would
+  // otherwise leave has-left/has-right stale. The plain-boolean setState calls bail
+  // when the value is unchanged, so this cannot loop.
+  useEffect(update);
+  return (
+    <div className={`scroll-x${canLeft ? ' has-left' : ''}${canRight ? ' has-right' : ''}`}>
+      {canRight && (
+        <span className="scroll-x-hint" aria-hidden="true">
+          {hint} →
+        </span>
+      )}
+      <div
+        className="scroll-x-inner"
+        ref={ref}
+        onScroll={update}
+        tabIndex={0}
+        role="region"
+        aria-label={label ?? hint}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
 interface ToastAction {
   label: ReactNode;
   onClick?: () => void;
