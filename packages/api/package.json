@@ -10,6 +10,7 @@
     "seed": "tsx src/seed.ts",
     "seed-cohort": "tsx src/seed-cohort.ts",
     "import-planb": "tsx src/import-planb-fixtures.ts",
+    "configure-tenant-docs": "tsx src/configure-tenant-docs.ts",
     "import-titans-compliance": "tsx src/import-titans-compliance.ts",
     "import-titans-roster": "tsx src/import-titans-roster.ts",
     "bootstrap-fixture-prereqs": "tsx src/bootstrap-fixture-prereqs.ts",
