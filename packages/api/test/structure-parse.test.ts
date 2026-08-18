@@ -8,9 +8,8 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
 
-const { parseStructureSheet, parseStructureWorkbookAllSheets } = await import(
-  '../src/structure-parse.js'
-);
+const { parseStructureSheet, parseStructureWorkbookAllSheets } =
+  await import('../src/structure-parse.js');
 
 /** Build a worksheet shaped like the Titans SENIORS sheet: a real section header, an
  * "overs" sub-header directly below it (same shape — a name cell + "VENUE" next to it —

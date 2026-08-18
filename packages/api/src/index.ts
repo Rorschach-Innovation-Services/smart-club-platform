@@ -4280,48 +4280,32 @@ function buildDocIntakePatch(
 }
 
 /**
- * Commit one club's batch: read → build patch → ONE version-pinned applyClubPatch,
- * retrying exactly once on a version conflict (re-read + rebuild the patch off the
- * fresh row) before giving up and reporting this club as failed. Never partial —
- * either the whole club's batch lands in one write, or none of it does.
+ * Read → build patch → ONE version-pinned applyClubPatch, retrying exactly once on a
+ * version conflict (re-read + rebuild the patch off the fresh row) before giving up.
+ * Shared by every operator batch-commit route (doc-intake here; roster/structure
+ * intake in later waves) so the read-build-write-retry shape lives in exactly one
+ * place. `buildPatch` runs once per attempt against the freshly-read club and returns
+ * the raw patch (no `version` field — this attaches the current one itself); a caller
+ * that needs data out of the winning attempt (doc-intake's supersededKeys) captures it
+ * via closure, same as `buildPatch` itself captures its own inputs.
  */
-async function commitClubDocIntake(
+async function commitClubWithRetry(
   tenant: string,
   clubId: string,
-  items: DocIntakeCommitItem[],
-  catalogue: RequiredDoc[],
   operatorEmail: string,
+  buildPatch: (current: Club) => Partial<Club>,
 ): Promise<Club> {
   let current = await repo.getClub(tenant, clubId);
   if (!current) throw new HttpError(404, `club not found: ${clubId}`);
   for (let attempt = 0; attempt < 2; attempt++) {
-    const { supersededKeys, ...patch } = buildDocIntakePatch(
-      tenant,
-      clubId,
-      current,
-      items,
-      catalogue,
-      operatorEmail,
-    );
+    const patch = buildPatch(current);
     try {
-      const updated = await applyClubPatch(
+      return await applyClubPatch(
         tenant,
         clubId,
         { ...patch, version: current.version },
         operatorEmail,
       );
-      // Only now that the record is durable: drop the objects this commit replaced.
-      // Deleting earlier would orphan a live docMeta pointer if the write then failed
-      // (a retry that also fails leaves the club with an unviewable document). A failed
-      // delete is recoverable bucket residue, so it must never fail the commit.
-      for (const key of supersededKeys) {
-        try {
-          await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: key }));
-        } catch (err) {
-          console.warn(`doc-intake commit: failed to delete superseded object ${key}`, err);
-        }
-      }
-      return updated;
     } catch (err) {
       if (err instanceof HttpError && err.status === 409 && attempt === 0) {
         current = await repo.getClub(tenant, clubId);
@@ -4334,6 +4318,40 @@ async function commitClubDocIntake(
   // Unreachable (the loop always returns or throws), but keeps the function's
   // return type honest for TypeScript.
   throw new HttpError(409, 'club changed; refetch');
+}
+
+/**
+ * Commit one club's doc-intake batch via commitClubWithRetry. Never partial — either
+ * the whole club's batch lands in one write, or none of it does.
+ */
+async function commitClubDocIntake(
+  tenant: string,
+  clubId: string,
+  items: DocIntakeCommitItem[],
+  catalogue: RequiredDoc[],
+  operatorEmail: string,
+): Promise<Club> {
+  // buildDocIntakePatch's supersededKeys aren't part of the applyClubPatch payload —
+  // captured here so the winning attempt's value survives past commitClubWithRetry's
+  // return, for the delete pass below.
+  let supersededKeys: string[] = [];
+  const updated = await commitClubWithRetry(tenant, clubId, operatorEmail, (current) => {
+    const built = buildDocIntakePatch(tenant, clubId, current, items, catalogue, operatorEmail);
+    supersededKeys = built.supersededKeys;
+    return { docs: built.docs, docMeta: built.docMeta };
+  });
+  // Only now that the record is durable: drop the objects this commit replaced.
+  // Deleting earlier would orphan a live docMeta pointer if the write then failed
+  // (a retry that also fails leaves the club with an unviewable document). A failed
+  // delete is recoverable bucket residue, so it must never fail the commit.
+  for (const key of supersededKeys) {
+    try {
+      await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: key }));
+    } catch (err) {
+      console.warn(`doc-intake commit: failed to delete superseded object ${key}`, err);
+    }
+  }
+  return updated;
 }
 
 /**
@@ -4381,30 +4399,28 @@ app.post('/platform/tenants/:slug/doc-intake/commit', async (c) => {
 });
 
 /**
- * POST /platform/tenants/:slug/clubs — operator-created shell club, seeded exactly
- * like a self-signup (buildClubFromSpec + the tenant's ACTIVE catalogue) but with
- * NO chair/membership/Cognito provisioning: the bulk doc-intake flow needs a club
- * to attach uploads to before its chair has ever signed up, and the chair attaches
- * later through the normal club-signup link (or an admin invite). Collision
- * pre-check mirrors POST /club-signup's (id AND name, case-insensitive) so the
- * same "name taken" story applies whether the club arrives via self-signup or the
- * operator console.
+ * Operator-created shell club, seeded exactly like a self-signup (buildClubFromSpec +
+ * the tenant's ACTIVE catalogue) but with NO chair/membership/Cognito provisioning:
+ * the bulk doc-intake flow (and, in a later wave, the structure-intake wizard's inline
+ * club creation) needs a club to attach uploads/teams to before its chair has ever
+ * signed up, and the chair attaches later through the normal club-signup link (or an
+ * admin invite). Collision pre-check mirrors POST /club-signup's (id AND name,
+ * case-insensitive) so the same "name taken" story applies whether the club arrives
+ * via self-signup or the operator console.
  */
-app.post('/platform/tenants/:slug/clubs', async (c) => {
-  const slug = c.req.param('slug');
-  const cfg = await repo.getTenantConfig(slug);
-  if (!cfg) throw new HttpError(404, 'tenant not found');
-  const body = await c.req
-    .json<{ name?: string; district?: string }>()
-    .catch(() => ({}) as { name?: string; district?: string });
-  const name = (body.name ?? '').trim();
+async function createOperatorClub(
+  slug: string,
+  cfg: TenantConfig,
+  spec: { name?: string; district?: string },
+): Promise<Club> {
+  const name = (spec.name ?? '').trim();
   if (!name) throw new HttpError(400, 'name is required');
   if (name.length > 80) throw new HttpError(400, 'name must be 80 characters or fewer');
   // clubIdFromName's output alphabet can collapse an all-punctuation name to ''
   // (see /club-signup) — operator input gets the same guard.
   const id = clubIdFromName(name);
   if (!id) throw new HttpError(400, 'club name must contain letters or numbers');
-  const district = body.district ?? '';
+  const district = spec.district ?? '';
   if (!resolveDistricts(cfg).includes(district))
     throw new HttpError(400, `unknown district: ${district}`);
   const existing = await repo.listClubs(slug);
@@ -4423,6 +4439,18 @@ app.post('/platform/tenants/:slug/clubs', async (c) => {
     }
     throw err;
   }
+  return club;
+}
+
+/** POST /platform/tenants/:slug/clubs — see createOperatorClub. */
+app.post('/platform/tenants/:slug/clubs', async (c) => {
+  const slug = c.req.param('slug');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const body = await c.req
+    .json<{ name?: string; district?: string }>()
+    .catch(() => ({}) as { name?: string; district?: string });
+  const club = await createOperatorClub(slug, cfg, body);
   return c.json(club, 201);
 });
 
