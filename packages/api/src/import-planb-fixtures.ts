@@ -1414,6 +1414,12 @@ const IMPORT_AUTHORED_REASON_PREFIXES = [
   'Union T20 schedule',
   'Allocated ground —',
   'Moved to avoid',
+  // 17-18 Aug additions — every reason the directive/bad-ground/opponent-venue rules
+  // write. Keep in sync with the clash pass's `because` strings, or the NEXT re-import
+  // misreads its own output as hand-set admin edits and demands --discard-edits.
+  'Union directive',
+  'home club has no ground',
+  'ground in bad condition',
 ];
 
 function isImportAuthoredReason(reason: string | undefined): boolean {
