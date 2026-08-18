@@ -22,6 +22,8 @@ import {
   AbortMultipartUploadCommand,
   DeleteObjectsCommand,
 } from '@aws-sdk/client-s3';
+// Pure module (no env reads at load) — safe to import before the env block below.
+import { DEFAULT_REQUIRED_DOCS } from '../src/catalogue.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load,
 // index.ts reads TUTORIALS_BASE_URL / TUTORIALS_BUCKET at module load.
@@ -47,6 +49,9 @@ const OPERATOR = devAuthAs('op-1', 'operator@platform', [
 ]);
 const DOLPHINS_ADMIN = devAuthAs('adm-1', 'admin@test', [
   { tenantId: 'dolphins', role: 'admin', clubIds: [] },
+]);
+const DOCOPS_ADMIN = devAuthAs('adm-docops', 'admin@docops', [
+  { tenantId: 'docops', role: 'admin', clubIds: [] },
 ]);
 
 const platformHeaders = (auth: string) => ({
@@ -1021,6 +1026,308 @@ describe('tenant-admin PUT /tenant/config hardening', () => {
   });
 });
 
+describe('required-docs catalogue (ADR 0009)', () => {
+  // Dedicated tenant (not 'sharks') so this suite carries no order dependency on
+  // the leagues/districts describes above.
+  test('setup: create the docops tenant', async () => {
+    const res = await app.request('/platform/tenants', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        slug: 'docops',
+        branding: { name: 'Docs Operator Test' },
+        submissionDeadline: '2026-12-31',
+      }),
+    });
+    assert.equal(res.status, 201);
+    // A freshly operator-created tenant carries no requiredDocs field — legacy
+    // fallback to DEFAULT_REQUIRED_DOCS at read time, same as leagues/districts.
+    assert.equal((await repo.getTenantConfig('docops'))?.requiredDocs, undefined);
+  });
+
+  const OPS_DOCS: import('../src/types.js').RequiredDoc[] = [
+    { key: 'constitution', name: 'Club constitution', matchHints: ['const', 'constitution'] },
+    { key: 'exco', name: 'Executive committee', kind: 'form' },
+    { key: 'unusedDoc', name: 'Unused Doc' },
+    { key: 'markCompliantOnly', name: 'Mark Compliant Only' },
+  ];
+
+  test('PUT /platform/tenants/:slug requiredDocs round-trips and persists', async () => {
+    const res = await app.request('/platform/tenants/docops', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ requiredDocs: OPS_DOCS }),
+    });
+    assert.equal(res.status, 200);
+    const cfg = (await res.json()) as import('../src/types.js').TenantConfig;
+    assert.deepEqual(cfg.requiredDocs, OPS_DOCS);
+    assert.deepEqual((await repo.getTenantConfig('docops'))?.requiredDocs, OPS_DOCS);
+  });
+
+  // Error bodies are asserted so the shape 400s can't regress into the referrer
+  // guard's 409 (validation must run before the guard) — mirrors the leagues/
+  // districts loops above.
+  for (const [name, requiredDocs, status, message] of [
+    [
+      'a duplicate key',
+      [...OPS_DOCS, { key: 'constitution', name: 'Dup' }],
+      400,
+      /duplicate document key/,
+    ],
+    ['a key starting with a digit', [{ key: '9bad', name: 'X' }], 400, /must start with a letter/],
+    ['a key with a space', [{ key: 'has space', name: 'X' }], 400, /must start with a letter/],
+    [
+      "kind:'form' on a non-exco key",
+      [{ key: 'notexco', name: 'X', kind: 'form' }],
+      400,
+      /only supported for the "exco" key/,
+    ],
+    [
+      "kind:'form' with accepts/multiFile",
+      [{ key: 'exco', name: 'X', kind: 'form', multiFile: true, accepts: ['pdf'] }],
+      400,
+      /does not apply to a form document/,
+    ],
+    [
+      'minFiles > maxFiles',
+      [{ key: 'm1', name: 'M', multiFile: true, minFiles: 5, maxFiles: 3 }],
+      400,
+      /needs 1 <= minFiles <= maxFiles/,
+    ],
+    [
+      'maxFiles > 20',
+      [{ key: 'm2', name: 'M', multiFile: true, minFiles: 1, maxFiles: 21 }],
+      400,
+      /needs 1 <= minFiles <= maxFiles/,
+    ],
+    [
+      'an unknown accepted format',
+      [{ key: 'a1', name: 'A', accepts: ['bogus'] }],
+      400,
+      /accepts must be a non-empty list/,
+    ],
+    [
+      'matchHints over 10 entries',
+      [{ key: 'a2', name: 'A', matchHints: Array.from({ length: 11 }, (_, i) => `h${i}`) }],
+      400,
+      /matchHints must be up to 10/,
+    ],
+    ['a non-array payload', { constitution: true }, 400, /must be an array/],
+  ] as const) {
+    test(`PUT /platform/tenants/:slug requiredDocs with ${name} → ${status}`, async () => {
+      const res = await app.request('/platform/tenants/docops', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ requiredDocs }),
+      });
+      assert.equal(res.status, status);
+      assert.match(((await res.json()) as { error: string }).error, message);
+      assert.deepEqual((await repo.getTenantConfig('docops'))?.requiredDocs, OPS_DOCS); // untouched
+    });
+  }
+
+  test('referrer guard: a club holding real doc data blocks removal; archiving instead succeeds', async (t) => {
+    await repo.createClub('docops', {
+      id: 'docopscc',
+      name: 'Docs Ops CC',
+      district: 'Test District',
+      sub: '',
+      chair: 'Chair',
+      affiliation: 'not_started',
+      cqi: 0,
+      docs: {},
+      players: 0,
+      teams: 0,
+      women: 0,
+      juniors: 0,
+      color: '#123456',
+      ground: {},
+      leagues: [],
+      version: 1,
+    } as unknown as import('../src/types.js').Club);
+    await repo.updateClub(
+      'docops',
+      'docopscc',
+      {
+        docs: { constitution: true },
+        docMeta: { constitution: { objectKey: 'local/docops-const.pdf', size: 10 } },
+      },
+      'test-seed',
+      new Date().toISOString(),
+    );
+    // Restore the baseline catalogue no matter which assertion below fails, so
+    // later tests in this describe see OPS_DOCS as expected.
+    t.after(async () => {
+      await app.request('/platform/tenants/docops', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ requiredDocs: OPS_DOCS }),
+      });
+    });
+
+    const blocked = await app.request('/platform/tenants/docops', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ requiredDocs: OPS_DOCS.filter((d) => d.key !== 'constitution') }),
+    });
+    assert.equal(blocked.status, 409);
+    assert.match(
+      ((await blocked.json()) as { error: string }).error,
+      /1 club still holds data for "Club constitution"/,
+    );
+    assert.deepEqual((await repo.getTenantConfig('docops'))?.requiredDocs, OPS_DOCS); // untouched
+
+    // Archiving (keeping the key) is the sanctioned retire path — it never trips the guard.
+    const archived = OPS_DOCS.map((d) => (d.key === 'constitution' ? { ...d, archived: true } : d));
+    const ok = await app.request('/platform/tenants/docops', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ requiredDocs: archived }),
+    });
+    assert.equal(ok.status, 200);
+    assert.deepEqual((await repo.getTenantConfig('docops'))?.requiredDocs, archived);
+  });
+
+  test('referrer guard: dropping a key no club references → 200', async (t) => {
+    t.after(async () => {
+      await app.request('/platform/tenants/docops', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ requiredDocs: OPS_DOCS }),
+      });
+    });
+    const res = await app.request('/platform/tenants/docops', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ requiredDocs: OPS_DOCS.filter((d) => d.key !== 'unusedDoc') }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(
+      (await repo.getTenantConfig('docops'))?.requiredDocs,
+      OPS_DOCS.filter((d) => d.key !== 'unusedDoc'),
+    );
+  });
+
+  test('mark-compliant-only referrer block: docs flag true with no docMeta entry still blocks removal', async () => {
+    const club = await repo.getClub('docops', 'docopscc');
+    assert.ok(club);
+    await repo.updateClub(
+      'docops',
+      'docopscc',
+      // 'markCompliantOnly' rides ONLY the docs flag — no docMeta key at all — so
+      // this isolates the guard's `cl.docs?.[doc.key] === true` half from its
+      // `doc.key in cl.docMeta` half.
+      { docs: { ...club!.docs, markCompliantOnly: true } },
+      'test-seed',
+      new Date().toISOString(),
+    );
+    const blocked = await app.request('/platform/tenants/docops', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ requiredDocs: OPS_DOCS.filter((d) => d.key !== 'markCompliantOnly') }),
+    });
+    assert.equal(blocked.status, 409);
+    assert.match(
+      ((await blocked.json()) as { error: string }).error,
+      /1 club still holds data for "Mark Compliant Only"/,
+    );
+    assert.deepEqual((await repo.getTenantConfig('docops'))?.requiredDocs, OPS_DOCS); // untouched
+  });
+
+  test('removal computed against DEFAULTS for a legacy tenant with no requiredDocs field', async () => {
+    const create = await app.request('/platform/tenants', {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        slug: 'doclegacy',
+        branding: { name: 'Doc Legacy Test' },
+        submissionDeadline: '2026-12-31',
+      }),
+    });
+    assert.equal(create.status, 201);
+    assert.equal((await repo.getTenantConfig('doclegacy'))?.requiredDocs, undefined);
+
+    await repo.createClub('doclegacy', {
+      id: 'legacycc',
+      name: 'Legacy CC',
+      district: 'Test District',
+      sub: '',
+      chair: 'Chair',
+      affiliation: 'not_started',
+      cqi: 0,
+      docs: {},
+      players: 0,
+      teams: 0,
+      women: 0,
+      juniors: 0,
+      color: '#123456',
+      ground: {},
+      leagues: [],
+      version: 1,
+    } as unknown as import('../src/types.js').Club);
+    await repo.updateClub(
+      'doclegacy',
+      'legacycc',
+      {
+        docs: { constitution: true },
+        docMeta: { constitution: { objectKey: 'local/legacy-const.pdf', size: 10 } },
+      },
+      'test-seed',
+      new Date().toISOString(),
+    );
+
+    // First explicit save drops 'constitution' — a DEFAULT_REQUIRED_DOCS key this
+    // club references — computed against the fallback since the tenant has no
+    // stored requiredDocs field yet.
+    const blocked = await app.request('/platform/tenants/doclegacy', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        requiredDocs: DEFAULT_REQUIRED_DOCS.filter((d) => d.key !== 'constitution'),
+      }),
+    });
+    assert.equal(blocked.status, 409);
+    assert.match(
+      ((await blocked.json()) as { error: string }).error,
+      /1 club still holds data for "Club constitution"/,
+    );
+    assert.equal((await repo.getTenantConfig('doclegacy'))?.requiredDocs, undefined); // untouched
+  });
+
+  test('tenant-admin PUT /tenant/config: requiredDocs is silently stripped', async () => {
+    const before = await repo.getTenantConfig('docops');
+    const res = await app.request('/tenant/config', {
+      method: 'PUT',
+      headers: tenantHeaders(DOCOPS_ADMIN, 'docops'),
+      body: JSON.stringify({ requiredDocs: [{ key: 'evil', name: 'Evil' }] }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual((await repo.getTenantConfig('docops'))?.requiredDocs, before?.requiredDocs);
+  });
+
+  test('GET /tenant: custom catalogue minus matchHints; legacy tenant gets the defaults', async () => {
+    const custom = await app.request('/tenant', { headers: { 'x-tenant': 'docops' } });
+    assert.equal(custom.status, 200);
+    const customBody = (await custom.json()) as { requiredDocs: Array<Record<string, unknown>> };
+    assert.deepEqual(
+      customBody.requiredDocs,
+      OPS_DOCS.map(({ matchHints: _hints, ...rest }) => rest),
+    );
+    assert.ok(
+      customBody.requiredDocs.every((d) => !('matchHints' in d)),
+      'matchHints stripped',
+    );
+
+    const legacy = await app.request('/tenant', { headers: { 'x-tenant': 'doclegacy' } });
+    assert.equal(legacy.status, 200);
+    const legacyBody = (await legacy.json()) as { requiredDocs: Array<Record<string, unknown>> };
+    assert.deepEqual(
+      legacyBody.requiredDocs,
+      DEFAULT_REQUIRED_DOCS.map(({ matchHints: _hints, ...rest }) => rest),
+    );
+  });
+});
+
 describe('reconcileUserMarkers PLATFORM_TENANT skip', () => {
   test('putUser with a * membership writes no TENANT#* marker', async () => {
     await repo.putUser({
@@ -1391,10 +1698,7 @@ describe('PUT /platform/tenants/:slug — tutorials / tutorialsNoFallback', () =
     }));
     assert.equal((await put(tooMany)).status, 400);
 
-    assert.equal(
-      (await put([{ title: '  ', url: 'https://tutorials.test/x.mp4' }])).status,
-      400,
-    );
+    assert.equal((await put([{ title: '  ', url: 'https://tutorials.test/x.mp4' }])).status, 400);
 
     assert.equal((await put([{ title: 'x', url: 'not-a-url' }])).status, 400);
     assert.equal((await put([{ title: 'x', url: 'http://insecure.test/x.mp4' }])).status, 400);
@@ -1577,7 +1881,11 @@ describe('POST /platform/tenants/:slug/tutorial-upload', () => {
     const res = await app.request('/platform/tenants/sharks/tutorial-upload', {
       method: 'POST',
       headers: platformHeaders(OPERATOR),
-      body: JSON.stringify({ kind: 'video', contentType: 'video/mp4', sizeBytes: 10 * 1024 * 1024 }),
+      body: JSON.stringify({
+        kind: 'video',
+        contentType: 'video/mp4',
+        sizeBytes: 10 * 1024 * 1024,
+      }),
     });
     assert.equal(res.status, 200);
     const body = (await res.json()) as { mode: string; fields: Record<string, string> };
@@ -1640,8 +1948,7 @@ describe('POST /platform/tenants/:slug/tutorial-upload', () => {
       400,
     );
     assert.equal(
-      (await post({ kind: 'video', contentType: 'video/mp4', sizeBytes: 999_999_999_999 }))
-        .status,
+      (await post({ kind: 'video', contentType: 'video/mp4', sizeBytes: 999_999_999_999 })).status,
       400,
     );
     assert.equal(
@@ -2002,7 +2309,16 @@ describe('season calendars (ADR 0008)', () => {
     assert.equal(body.structures, undefined, 'structures must not ride the anonymous payload');
     // …and still no operator-only or sensitive config.
     assert.equal(body.knownClubs, undefined);
-    assert.equal(body.requiredDocs, undefined);
+    // requiredDocs DOES ride the public payload since ADR 0009 (doc names/flags are as
+    // public as league names — the rep portal reads only this payload). A tenant with
+    // no explicit catalogue resolves to the shared defaults, minus operator matchHints.
+    assert.ok(Array.isArray(body.requiredDocs), 'requiredDocs present');
+    const docs = body.requiredDocs as Record<string, unknown>[];
+    assert.ok(docs.some((d) => d.key === 'safeguarding' && d.multiFile === true));
+    assert.ok(
+      docs.every((d) => d.matchHints === undefined),
+      'matchHints stay operator-side',
+    );
   });
 
   // The other half of that move: whatever leaves GET /tenant must arrive somewhere the
@@ -2038,15 +2354,12 @@ describe('season calendars (ADR 0008)', () => {
     // An explicit allowlist, not "the row minus clubSignupLink" — any tenant member can
     // call this, reps included, and a denylist leaks every field added to TenantConfig
     // from then on.
-    for (const held of [
-      'clubSignupLink',
-      'knownClubs',
-      'requiredDocs',
-      'adminCount',
-      'setupCompletedBy',
-    ]) {
+    for (const held of ['clubSignupLink', 'knownClubs', 'adminCount', 'setupCompletedBy']) {
       assert.equal(body[held], undefined, `${held} must not ride /tenant/config`);
     }
+    // requiredDocs moved OFF the held-back list with ADR 0009 — served here (and on
+    // GET /tenant) so the admin console needs no second source, minus matchHints.
+    assert.ok(Array.isArray(body.requiredDocs), 'requiredDocs present for an authed admin');
   });
 
   test('GET /tenant/config is not anonymous', async () => {

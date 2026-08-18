@@ -2,10 +2,17 @@
 
 import { useState as useStateOb } from 'react';
 import { Icon, Btn, useEscapeClose } from './atoms';
-import { formatDeadlineLong, formatDeadlineMid } from './data';
+import { DEFAULT_REQUIRED_DOCS, activeDocs, formatDeadlineLong, formatDeadlineMid } from './data';
 import { useCopy } from './branding';
 
-export function Onboarding({ club, onClose, onComplete, onStart, submissionDeadline }) {
+export function Onboarding({
+  club,
+  onClose,
+  onComplete,
+  onStart,
+  submissionDeadline,
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
+}) {
   useEscapeClose(onClose);
   const deadlineLong = formatDeadlineLong(submissionDeadline);
   const deadlineMid = formatDeadlineMid(submissionDeadline);
@@ -63,7 +70,9 @@ export function Onboarding({ club, onClose, onComplete, onStart, submissionDeadl
         <div className="ob-stage">
           <div className="ob-step-content" key={step}>
             {step === 1 && <StepWelcome club={club} deadlineLong={deadlineLong} />}
-            {step === 2 && <StepSubmissions deadlineLong={deadlineLong} />}
+            {step === 2 && (
+              <StepSubmissions deadlineLong={deadlineLong} requiredDocs={requiredDocs} />
+            )}
             {step === 3 && (
               <StepContact
                 contact={contact}
@@ -135,7 +144,12 @@ function StepWelcome({ club, deadlineLong }) {
 }
 
 /* ─── Step 2 — Three submissions ─── */
-function StepSubmissions({ deadlineLong }) {
+function StepSubmissions({ deadlineLong, requiredDocs = DEFAULT_REQUIRED_DOCS }) {
+  // The doc list is driven by the tenant's catalogue (ADR 0009) — a legacy tenant (no
+  // custom requiredDocs) reproduces the same six names in the same order as before.
+  const docNames = activeDocs(requiredDocs)
+    .map((d) => d.name)
+    .join(' · ');
   const items = [
     {
       i: <Icon.Form />,
@@ -146,7 +160,7 @@ function StepSubmissions({ deadlineLong }) {
     {
       i: <Icon.Upload />,
       t: 'Compliance documents',
-      d: 'Constitution · AGM Minutes · Financial Statements · Exco Reps Listed · Code of Conduct · Safeguarding Certificate (PDF up to 10 MB each).',
+      d: `${docNames} (max 10 MB each).`,
       tag: '~ 3 min',
     },
     {

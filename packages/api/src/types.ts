@@ -446,6 +446,53 @@ export interface BrandingCopy {
   crumbRoot?: string;
 }
 
+/** File formats a compliance doc can accept (see DOC_FORMAT_MIME in catalogue.ts). */
+export type DocFormat = 'pdf' | 'doc' | 'docx' | 'xls' | 'xlsx' | 'ods';
+
+/**
+ * One required compliance document in a tenant's catalogue (TenantConfig.requiredDocs).
+ * `key` is the immutable identifier stored on Club.docs / Club.docMeta and embedded in
+ * S3 object keys — never edited after first save, only added, archived, or (when no club
+ * references it) removed. Behavior is declared as flags so the shared upload/escape-hatch
+ * mechanics stay generic; the docMeta sentinel shapes are unchanged from the legacy
+ * hardcoded catalogue (see safeguardingMeta / agmMeta normalizers).
+ */
+export interface RequiredDoc {
+  key: string;
+  name: string;
+  desc?: string;
+  /**
+   * 'form' = satisfied by an on-platform form instead of a file upload. v1 restricts
+   * this to the exco key (the only form-satisfiable path in the code) — see ADR 0009.
+   */
+  kind?: 'file' | 'form';
+  /** Multi-file doc (safeguarding pattern): docMeta[key] = { files: [...] }. */
+  multiFile?: boolean;
+  /** multiFile only: files needed before the doc counts complete (default 2). */
+  minFiles?: number;
+  /** multiFile only: stored-file cap (default 10, hard cap 20). */
+  maxFiles?: number;
+  /** "We don't have these" escape hatch (financials pattern). Valid on single- and multiFile. */
+  allowUnavailable?: boolean;
+  /** "Meeting booked for <date>" escape hatch (AGM pattern). Single-file docs only. */
+  allowMeetingBooked?: boolean;
+  /** "Course booked for <date>" escape hatch (safeguarding pattern). multiFile docs only. */
+  allowCourseBooked?: boolean;
+  /** Accepted upload formats; absent ⇒ ['pdf','doc','docx'] (the legacy set). */
+  accepts?: DocFormat[];
+  /**
+   * Filename keywords for the operator bulk-intake auto-classifier. Operator tooling:
+   * stripped from the public GET /tenant payload, served only on /platform routes.
+   */
+  matchHints?: string[];
+  /**
+   * No longer required: excluded from completion counts and hidden from upload flows,
+   * but stored files stay viewable/deletable. The sanctioned retire path — deleting a
+   * key outright is blocked while any club still holds data under it.
+   */
+  archived?: boolean;
+}
+
 /** An entry in the operator-managed club directory (TenantConfig.knownClubs). */
 export interface DirectoryClub {
   /** Stable slug (clubIdFromName) — doubles as a clearance source partition. */
@@ -511,8 +558,13 @@ export interface TenantConfig {
    * (ADR 0006), only PUT /platform/tenants/:slug writes it.
    */
   districts?: string[];
-  /** Optional per-tenant required-docs override; falls back to shared default. */
-  requiredDocs?: unknown[];
+  /**
+   * Per-tenant compliance-doc catalogue. Absent ⇒ DEFAULT_REQUIRED_DOCS fallback at
+   * read time (legacy tenants, no backfill — see resolveRequiredDocs); an explicit []
+   * means "no compliance docs". Operator-only: PUT /tenant/config strips it, only
+   * PUT /platform/tenants/:slug writes it (validated + referrer delete guard, ADR 0009).
+   */
+  requiredDocs?: RequiredDoc[];
   /**
    * Authoritative count of admins for this tenant, maintained transactionally on
    * the CONFIG item so the last-admin lockout guard is race-free (no TOCTOU on a

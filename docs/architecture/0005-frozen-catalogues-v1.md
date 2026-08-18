@@ -4,8 +4,12 @@
 per-tenant config (`TenantConfig.leagues`, admin+operator editable; `TenantConfig.districts`,
 operator-only, with a read-time fallback to the shared defaults for legacy rows). Neither
 required the scorer refactor this ADR anticipated — leagues helpers take the catalogue as a
-parameter, and districts are a pure validation-whitelist/dropdown concern. **CQI remains
-frozen** exactly as decided below; the `cqiVersion` concern still applies before it can vary.
+parameter, and districts are a pure validation-whitelist/dropdown concern. Superseded again
+(August 2026) for **required documents**: the doc-key freeze below is lifted by
+[ADR 0009](0009-per-tenant-required-docs.md) — `TenantConfig.requiredDocs` is now the
+tenant's catalogue, resolved with the same read-time fallback, and the doc helpers took the
+catalogue-as-a-parameter treatment. **CQI remains frozen** exactly as decided below; the
+`cqiVersion` concern still applies before it can vary.
 
 ## Context
 

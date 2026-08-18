@@ -1,6 +1,6 @@
 /* ─── Sample data ─── */
 
-import type { Club } from './types';
+import type { Club, RequiredDoc } from './types';
 import { fixturesFromDates, legacyRoundDates, roundRobinPairings } from './competition/fixtures';
 import { slotRefLabel } from './competition/formats';
 import {
@@ -472,23 +472,39 @@ export function termRemaining(termEnd) {
   return { years, months, expired: false, label: `${parts.join(' ')} left` };
 }
 
-// Required compliance documents (from Cricket Services Club Requirements 26-27)
-export const REQUIRED_DOCS = [
+// ── Compliance documents (per-tenant catalogue, ADR 0009) ──
+// The shared DEFAULT catalogue — the read-time fallback for tenants with no explicit
+// `requiredDocs` on their config (mirror of DEFAULT_REQUIRED_DOCS in
+// packages/api/src/catalogue.ts; keep in sync). The legacy hardcoded behaviors are now
+// declarative flags on each entry: `kind:'form'` (satisfied on-platform, not a file),
+// `multiFile`+`minFiles`/`maxFiles` (append, complete at the minimum),
+// `allowMeetingBooked` / `allowCourseBooked` / `allowUnavailable` (the escape hatches),
+// `accepts` (upload formats; absent ⇒ pdf/doc/docx), `archived` (excluded from counts,
+// files still viewable). The tenant's live list arrives on GET /tenant; every helper
+// below takes it as a parameter with this default so legacy call sites are unchanged.
+export const DEFAULT_REQUIRED_DOCS: RequiredDoc[] = [
   {
     key: 'constitution',
     name: 'Club Constitution',
     desc: 'Current signed club constitution document',
   },
-  { key: 'agm', name: 'AGM Minutes', desc: 'Minutes of the most recent AGM, signed off' },
+  {
+    key: 'agm',
+    name: 'AGM Minutes',
+    desc: 'Minutes of the most recent AGM, signed off',
+    allowMeetingBooked: true,
+  },
   {
     key: 'financials',
     name: 'Financial Statements',
     desc: 'Annual financial statements for the prior season',
+    allowUnavailable: true,
   },
   {
     key: 'exco',
     name: 'Exco Reps Listed',
     desc: 'Full list of executive committee representatives with contact details',
+    kind: 'form',
   },
   {
     key: 'codeOfConduct',
@@ -499,17 +515,61 @@ export const REQUIRED_DOCS = [
     key: 'safeguarding',
     name: 'Safeguarding Certificate',
     desc: 'Valid safeguarding / child-protection certificates — one per person, at least two people',
+    multiFile: true,
+    minFiles: 2,
+    maxFiles: 10,
+    allowCourseBooked: true,
   },
 ];
 
+/** @deprecated transitional alias — call sites should take the tenant's list instead. */
+export const REQUIRED_DOCS = DEFAULT_REQUIRED_DOCS;
+
+/**
+ * The catalogue minus archived entries — what counts, gates and upload flows see.
+ *
+ * Coerces a non-array argument to the defaults rather than throwing. The doc helpers
+ * below read like array predicates (`clubs.filter(docsAllComplete)`), and `filter`/`map`
+ * pass the INDEX as the second argument — which lands in their catalogue parameter. A
+ * bare default only covers `undefined`, so index 0 would otherwise reach `.filter` on a
+ * number and white-screen the page. Callers that mean a specific catalogue still pass one.
+ */
+export const activeDocs = (docs) =>
+  (Array.isArray(docs) ? docs : DEFAULT_REQUIRED_DOCS).filter((d) => !d.archived);
+
 // ── Compliance document file types ──
-// Accepted upload formats. Word covers Google Docs (which exports .docx/.pdf).
-// Mirrored server-side in packages/api/src/catalogue.ts DOC_CONTENT_TYPES.
-export const DOC_MIME_TYPES = {
+// Every uploadable format → its exact MIME type. Word covers Google Docs (which exports
+// .docx/.pdf); the spreadsheet trio serves catalogues whose docs are filled-in workbooks.
+// Mirrored server-side in packages/api/src/catalogue.ts DOC_FORMAT_MIME.
+export const DOC_FORMAT_MIME = {
   pdf: 'application/pdf',
   doc: 'application/msword',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ods: 'application/vnd.oasis.opendocument.spreadsheet',
 };
+// The legacy accepted set — the default when a doc definition declares no `accepts`.
+export const DEFAULT_DOC_FORMATS = ['pdf', 'doc', 'docx'];
+
+/** The formats one doc definition accepts (a RequiredDoc or undefined for legacy). */
+export const docFormats = (doc) => doc?.accepts ?? DEFAULT_DOC_FORMATS;
+/** `accept=` attribute string for one doc's file input, e.g. ".pdf,.doc,.docx". */
+export const docAccept = (doc) =>
+  docFormats(doc)
+    .map((f) => `.${f}`)
+    .join(',');
+/** Whether a resolved MIME type is accepted for this doc. */
+export const docMimeAllowed = (doc, mime) =>
+  docFormats(doc).some((f) => DOC_FORMAT_MIME[f] === mime);
+
+/** @deprecated per-doc now — use DOC_FORMAT_MIME / docAccept(doc). */
+export const DOC_MIME_TYPES = {
+  pdf: DOC_FORMAT_MIME.pdf,
+  doc: DOC_FORMAT_MIME.doc,
+  docx: DOC_FORMAT_MIME.docx,
+};
+/** @deprecated use docAccept(doc). */
 export const DOC_ACCEPT = '.pdf,.doc,.docx';
 
 // Browsers (notably on Windows) often report an empty `file.type` for .doc/.docx —
@@ -521,19 +581,23 @@ export function resolveDocMime(file) {
     .split('.')
     .pop()
     .toLowerCase();
-  return DOC_MIME_TYPES[ext] || '';
+  return DOC_FORMAT_MIME[ext] || '';
 }
+/** @deprecated use docMimeAllowed(doc, mime) — this checks the legacy pdf/doc/docx set. */
 export const isAllowedDocMime = (mime) => Object.values(DOC_MIME_TYPES).includes(mime);
 export function extFromMime(mime) {
-  const hit = Object.entries(DOC_MIME_TYPES).find(([, m]) => m === mime);
+  const hit = Object.entries(DOC_FORMAT_MIME).find(([, m]) => m === mime);
   return hit ? hit[0] : 'pdf';
 }
 
 // Doc-completion helpers — the single source of truth for every count/gate so the
-// definition can't drift across call sites. Both are driven by REQUIRED_DOCS and
-// tolerate clubs whose `docs` object predates a newly-added key (treated as missing).
-export const docsUploadedCount = (club) => REQUIRED_DOCS.filter((d) => club.docs?.[d.key]).length;
-export const docsAllComplete = (club) => REQUIRED_DOCS.every((d) => !!club.docs?.[d.key]);
+// definition can't drift across call sites. Driven by the tenant's catalogue (default:
+// the shared list), skip archived entries, and tolerate clubs whose `docs` object
+// predates a newly-added key (treated as missing).
+export const docsUploadedCount = (club, docs = DEFAULT_REQUIRED_DOCS) =>
+  activeDocs(docs).filter((d) => club.docs?.[d.key]).length;
+export const docsAllComplete = (club, docs = DEFAULT_REQUIRED_DOCS) =>
+  activeDocs(docs).every((d) => !!club.docs?.[d.key]);
 
 // ── Safeguarding: multi-file document (one certificate per person, min 2 people) ──
 // Canonical docMeta.safeguarding shape: { files: [{objectKey, size, contentType?,
@@ -585,13 +649,18 @@ export function safeguardingMeta(meta) {
 }
 
 /**
- * Whether safeguarding is satisfied: admin override, a booked safeguarding course
- * (the club has none yet but has scheduled training), or the 2-person minimum met.
+ * Whether a multi-file doc is satisfied: admin override, a booked course (the club has
+ * no certificates yet but has scheduled training), or the file minimum met. The minimum
+ * comes from the doc definition (`minFiles`); the legacy 2-person default applies when
+ * no definition is at hand.
  */
-export function safeguardingSatisfied(meta) {
+export function safeguardingSatisfied(meta, minFiles = MIN_SAFEGUARDING_FILES) {
   const m = safeguardingMeta(meta);
-  return m.markedCompliant || m.courseBooked || m.files.length >= MIN_SAFEGUARDING_FILES;
+  return m.markedCompliant || m.courseBooked || m.files.length >= minFiles;
 }
+
+/** Effective file minimum for a multi-file doc definition (legacy default: 2). */
+export const docMinFiles = (doc) => doc?.minFiles ?? MIN_SAFEGUARDING_FILES;
 
 // ── AGM Minutes: "we haven't held our AGM yet" → record a future meeting date ──
 // A club with no minutes to upload declares the date the AGM will be held. Mirrors the
@@ -915,18 +984,23 @@ export function governanceOverrides(
 }
 
 // Aggregate stats helpers
-export function cohortStats(clubs) {
+export function cohortStats(clubs, requiredDocs = DEFAULT_REQUIRED_DOCS) {
   const total = clubs.length;
   const affComplete = clubs.filter((c) => c.affiliation === 'complete').length;
   const cqiSubmitted = clubs.filter((c) => c.cqi > 0).length;
   const avgCqi =
     clubs.filter((c) => c.cqi > 0).reduce((s, c) => s + c.cqi, 0) / Math.max(1, cqiSubmitted);
-  const docsComplete = clubs.filter(docsAllComplete).length;
+  // Wrapped, never passed as a bare predicate: filter would hand docsAllComplete the
+  // array index as its catalogue argument. Threading the tenant's own catalogue also
+  // keeps this count honest for a client whose doc set isn't the shared default.
+  const docsComplete = clubs.filter((c) => docsAllComplete(c, requiredDocs)).length;
   return { total, affComplete, cqiSubmitted, avgCqi, docsComplete };
 }
 
-export function docCompletion(club) {
-  return Math.round((docsUploadedCount(club) / REQUIRED_DOCS.length) * 100);
+export function docCompletion(club, docs = DEFAULT_REQUIRED_DOCS) {
+  const active = activeDocs(docs);
+  if (!active.length) return 100; // a tenant with no required docs is trivially complete
+  return Math.round((docsUploadedCount(club, docs) / active.length) * 100);
 }
 
 // ── Reversible "Mark as compliant" — pure doc/meta computation ──
@@ -938,17 +1012,22 @@ export function docCompletion(club) {
 // which are left untouched so an upload is never overwritten. `flipped` lists
 // the docs that were previously Missing — exactly the set a matching Undo
 // should revert (already-Override docs are excluded so Undo can't over-revert).
-export function computeMarkCompliance(club, keys, at) {
+export function computeMarkCompliance(club, keys, at, requiredDocs = DEFAULT_REQUIRED_DOCS) {
   const docs = { ...club.docs };
   const docMeta = { ...(club.docMeta ?? {}) };
   const flipped = [];
   for (const k of keys) {
-    if (k === 'safeguarding') {
-      // Multi-file doc: "has a real upload" means the 2-person minimum is met.
+    const def = requiredDocs.find((d) => d.key === k);
+    // Multi-file behavior comes from the definition, or — for a key retired from the
+    // catalogue — from the stored meta shape (a files[] array only ever comes from the
+    // multi-file path).
+    const multi = def ? !!def.multiFile : Array.isArray(club.docMeta?.[k]?.files);
+    if (multi) {
+      // Multi-file doc: "has a real upload" means the file minimum is met.
       // The sentinel must PRESERVE the files array — uploads are never erased.
-      const m = safeguardingMeta(club.docMeta?.safeguarding);
-      if (m.files.length >= MIN_SAFEGUARDING_FILES) continue; // satisfied → leave as-is
-      if (m.courseBooked) continue; // club booked a safeguarding course → its own declaration, leave as-is
+      const m = safeguardingMeta(club.docMeta?.[k]);
+      if (m.files.length >= docMinFiles(def)) continue; // satisfied → leave as-is
+      if (m.courseBooked) continue; // club booked a course → its own declaration, leave as-is
       if (!club.docs?.[k]) flipped.push(k);
       docs[k] = true;
       docMeta[k] = { files: m.files, markedCompliant: true, at };
@@ -962,24 +1041,71 @@ export function computeMarkCompliance(club, keys, at) {
   return { docs, docMeta, flipped };
 }
 
+/**
+ * Compute the docs/docMeta for marking a doc "Unavailable" (the `allowUnavailable`
+ * escape hatch) or undoing it. `at` is passed in, not generated, to keep this
+ * deterministic — same contract as computeMarkCompliance.
+ *
+ * The sentinel rides ALONGSIDE whatever is stored (same slot as markedCompliant), never
+ * replacing it: a flat `docMeta[key] = { unavailable }` would erase a multi-file doc's
+ * files[] array and drop a single-file doc's objectKey, orphaning that object in a bucket
+ * with no lifecycle rule. The UI only offers the affordance when nothing is on file, but
+ * this must not depend on that gate.
+ */
+export function computeDocUnavailable(
+  club,
+  key,
+  makeUnavailable,
+  at,
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
+) {
+  const def = requiredDocs.find((d) => d.key === key);
+  const stored = club.docMeta?.[key];
+  // Multi-file behaviour from the definition, or — for a key retired from the catalogue
+  // — from the stored shape, since a files[] array only ever comes from that path.
+  const multi = def ? !!def.multiFile : Array.isArray(stored?.files);
+  const norm = safeguardingMeta(stored);
+  const docMeta = { ...(club.docMeta || {}) };
+  let nextFlag = makeUnavailable;
+  if (makeUnavailable) {
+    docMeta[key] = multi
+      ? { ...(stored ?? {}), files: norm.files, unavailable: true, at }
+      : { ...(stored ?? {}), unavailable: true, at };
+  } else if (multi && norm.files.length) {
+    // Undo on a multi-file doc keeps the uploads and re-derives the flag from them.
+    docMeta[key] = { files: norm.files };
+    nextFlag = norm.files.length >= docMinFiles(def);
+  } else if (!multi && stored?.objectKey) {
+    // Undo on a single-file doc that still has its upload: drop only the sentinel.
+    const { unavailable: _unavailable, at: _at, ...rest } = stored;
+    docMeta[key] = rest;
+    nextFlag = true;
+  } else {
+    delete docMeta[key];
+  }
+  return { docs: { ...(club.docs || {}), [key]: nextFlag }, docMeta };
+}
+
 // Revert ONLY override-only docs (markedCompliant && no uploaded file). Real
 // uploads are structurally untouchable. `reverted` lists the docs actually
 // flipped back to Missing (empty when nothing qualifies → caller can no-op).
-export function computeRevertCompliance(club, keys) {
+export function computeRevertCompliance(club, keys, requiredDocs = DEFAULT_REQUIRED_DOCS) {
   const docs = { ...club.docs };
   const docMeta = { ...(club.docMeta ?? {}) };
   const reverted = [];
   for (const k of keys) {
     const m = docMeta[k];
-    if (k === 'safeguarding') {
+    const def = requiredDocs.find((d) => d.key === k);
+    const multi = def ? !!def.multiFile : Array.isArray(m?.files);
+    if (multi) {
       const norm = safeguardingMeta(m);
-      // A booked safeguarding course is a club self-declaration, not an admin override —
+      // A booked course is a club self-declaration, not an admin override —
       // "Revert" (which undoes admin mark-compliant) must never strip it.
       if (norm.courseBooked) continue;
-      const satisfied = norm.files.length >= MIN_SAFEGUARDING_FILES;
+      const satisfied = norm.files.length >= docMinFiles(def);
       // Revertable: an explicit sentinel, OR a compliant flag the uploads don't
       // justify — legacy flag-only records (no docMeta at all) and grandfathered
-      // single-file records predate the 2-person minimum and carry no sentinel.
+      // single-file records predate the file minimum and carry no sentinel.
       if (!norm.markedCompliant && !(club.docs?.[k] && !satisfied)) continue;
       // Strip the override but keep every uploaded file; the flag then derives
       // purely from the uploads (a lingering sentinel stays removable even when
@@ -990,9 +1116,10 @@ export function computeRevertCompliance(club, keys) {
       reverted.push(k);
       continue;
     }
-    // A booked AGM meeting is a club self-declaration (a future meeting date), not an admin
-    // override — "Revert" must never strip it. Mirrors the safeguarding courseBooked guard.
-    if (k === 'agm' && agmMeta(m).meetingBooked) continue;
+    // A booked meeting is a club self-declaration (a future meeting date), not an admin
+    // override — "Revert" must never strip it. Shape-driven (not key-driven) so a
+    // retired meeting-booked key keeps its declaration too.
+    if (agmMeta(m).meetingBooked) continue;
     if (m && m.markedCompliant && !m.objectKey) {
       docs[k] = false;
       delete docMeta[k];
@@ -1007,13 +1134,13 @@ export function affiliationSubmitted(club) {
   return club.affiliation === 'complete';
 }
 
-export function overallProgress(club) {
+export function overallProgress(club, requiredDocs = DEFAULT_REQUIRED_DOCS) {
   // 5 weighted phases: 20% each
   const p1 = affiliationSubmitted(club) ? 100 : club.affiliation === 'in_progress' ? 40 : 0;
   const p2 = affiliationSubmitted(club) ? 100 : 0; // fixtures phase clears once affiliation is in
   const p3 = Math.min(100, ((club.players || 0) / 60) * 100);
   const p4 = club.cqi > 60 ? 100 : club.cqi > 0 ? 50 : 0;
-  const p5 = docCompletion(club);
+  const p5 = docCompletion(club, requiredDocs);
   return Math.round((p1 + p2 + p3 + p4 + p5) / 5);
 }
 

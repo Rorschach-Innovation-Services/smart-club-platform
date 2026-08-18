@@ -1412,7 +1412,7 @@ describe('safeguarding multi-file certificates', () => {
     assert.equal(club.docs.safeguarding, false, 'one remaining file is below the minimum');
   });
 
-  test('DELETE 404s an objectKey not on record and 400s non-safeguarding keys', async () => {
+  test('DELETE 404s an objectKey not on record, for either doc shape', async () => {
     const missing = await app.request('/clubs/sgclub/docs/safeguarding/file', {
       method: 'DELETE',
       headers: headers(ADMIN),
@@ -1420,12 +1420,42 @@ describe('safeguarding multi-file certificates', () => {
     });
     assert.equal(missing.status, 404);
 
+    // A single-file doc now accepts this route (it is the only way to CLEAR one — upload
+    // can replace but never remove, which left archived single-file docs undeletable).
+    // The objectKey must still be the one on record: passing a multi-file doc's key is a
+    // 404, not a licence to S3-delete something the club never stored under this doc.
     const wrongKey = await app.request('/clubs/sgclub/docs/constitution/file', {
       method: 'DELETE',
       headers: headers(ADMIN),
       body: JSON.stringify({ objectKey: KEY_A }),
     });
-    assert.equal(wrongKey.status, 400);
+    assert.equal(wrongKey.status, 404);
+  });
+
+  test('DELETE clears a single-file doc entirely (the archived-doc cleanup path)', async () => {
+    const objectKey = 'dolphins/sgclub/constitution-single.pdf';
+    await repo.updateClub(
+      'dolphins',
+      'sgclub',
+      {
+        docMeta: { constitution: { objectKey, size: 10, uploadedAt: '2026-01-01' } },
+        docs: { constitution: true },
+      },
+      'test-seed',
+      new Date().toISOString(),
+    );
+    const res = await app.request('/clubs/sgclub/docs/constitution/file', {
+      method: 'DELETE',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ objectKey }),
+    });
+    assert.equal(res.status, 200);
+    const club = (await res.json()) as {
+      docs: Record<string, boolean>;
+      docMeta: Record<string, unknown>;
+    };
+    assert.equal(club.docs.constitution, false);
+    assert.equal(club.docMeta.constitution, undefined, 'the record is dropped, not emptied');
   });
 
   test('the 10-file cap holds on both the append route and the generic PATCH', async () => {

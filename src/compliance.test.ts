@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import type { RequiredDoc } from './types';
 import {
   computeMarkCompliance,
   computeRevertCompliance,
@@ -6,7 +7,15 @@ import {
   docsUploadedCount,
   docFileMeta,
   agmMeta,
+  cohortStats,
+  computeDocUnavailable,
   REQUIRED_DOCS,
+  DEFAULT_REQUIRED_DOCS,
+  docCompletion,
+  docAccept,
+  docMimeAllowed,
+  safeguardingSatisfied,
+  DOC_FORMAT_MIME,
 } from './data';
 
 // A club with no financial statements can mark that doc "Unavailable": docs.financials
@@ -373,5 +382,242 @@ describe('safeguarding (multi-file) mark/revert', () => {
     );
     expect(undone.docs.safeguarding).toBe(false);
     expect(undone.docMeta.safeguarding).toEqual({ files: [f('a')] });
+  });
+});
+
+// ── Per-tenant catalogue (ADR 0009) ──
+// The helpers take the tenant's catalogue as a parameter; every legacy call site omits
+// it and gets DEFAULT_REQUIRED_DOCS. These pin BOTH halves: that the default path is
+// byte-identical to the pre-catalogue behaviour (dolphins' numbers must not move), and
+// that a custom catalogue drives counts, multi-file thresholds and escape hatches off
+// its own flags rather than the old key literals.
+describe('per-tenant doc catalogue', () => {
+  // A Titans-shaped catalogue: no key from the default six behaves the same way. The
+  // committee doc is deliberately NOT keyed `exco` (a file, not the on-platform form),
+  // and facilityAgreement is multi-file with a minimum of ONE, not two.
+  const TITANS: RequiredDoc[] = [
+    { key: 'leagueEntry', name: 'Club League Entry', accepts: ['pdf', 'xls', 'xlsx'] },
+    { key: 'committee', name: 'Club Committee' },
+    {
+      key: 'facilityAgreement',
+      name: 'Facility Agreements',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 3,
+      allowUnavailable: true,
+    },
+    { key: 'retiredThing', name: 'Retired', archived: true },
+  ];
+  const file = (k) => ({ objectKey: `titans/c/${k}-1.pdf`, size: 10, uploadedAt: 'x' });
+
+  it('counts against the tenant catalogue, ignoring the default six', () => {
+    const club = { docs: { leagueEntry: true, committee: true, facilityAgreement: true } };
+    // Three ACTIVE docs — the archived entry is excluded from the denominator.
+    expect(docsUploadedCount(club, TITANS)).toBe(3);
+    expect(docsAllComplete(club, TITANS)).toBe(true);
+    expect(docCompletion(club, TITANS)).toBe(100);
+    // The same club scored against the defaults is nowhere near complete.
+    expect(docsAllComplete(club)).toBe(false);
+  });
+
+  it('an archived doc never blocks completion even when the club never had it', () => {
+    const club = { docs: { leagueEntry: true, committee: true, facilityAgreement: true } };
+    expect(docsAllComplete(club, TITANS)).toBe(true);
+  });
+
+  it('a tenant with no required docs is trivially complete', () => {
+    expect(docCompletion({ docs: {} }, [])).toBe(100);
+    expect(docsAllComplete({ docs: {} }, [])).toBe(true);
+  });
+
+  it('mark-compliant honours multiFile from the catalogue, not the key name', () => {
+    const club = { docs: {}, docMeta: {} };
+    const { docs, docMeta } = computeMarkCompliance(
+      club,
+      ['facilityAgreement', 'committee'],
+      'AT',
+      TITANS,
+    );
+    expect(docs.facilityAgreement).toBe(true);
+    // The multi-file sentinel PRESERVES a files array; the single-file one does not.
+    expect(docMeta.facilityAgreement).toEqual({ files: [], markedCompliant: true, at: 'AT' });
+    expect(docMeta.committee).toEqual({ markedCompliant: true, at: 'AT' });
+  });
+
+  it('respects a per-doc minFiles of 1 (the default six use 2)', () => {
+    // One file already satisfies facilityAgreement, so mark-compliant must leave it alone.
+    const club = {
+      docs: { facilityAgreement: true },
+      docMeta: { facilityAgreement: { files: [file('facilityAgreement')] } },
+    };
+    const { docMeta, flipped } = computeMarkCompliance(club, ['facilityAgreement'], 'AT', TITANS);
+    expect(flipped).toEqual([]);
+    expect(docMeta.facilityAgreement.markedCompliant).toBeUndefined();
+    // Under the DEFAULT catalogue's 2-file minimum the same shape is NOT satisfied —
+    // proving the threshold comes from the definition, not a constant.
+    expect(safeguardingSatisfied(club.docMeta.facilityAgreement, 1)).toBe(true);
+    expect(safeguardingSatisfied(club.docMeta.facilityAgreement, 2)).toBe(false);
+  });
+
+  it('revert strips an override on a custom multi-file doc but keeps its files', () => {
+    const club = {
+      docs: { facilityAgreement: true },
+      docMeta: {
+        facilityAgreement: {
+          files: [file('facilityAgreement')],
+          markedCompliant: true,
+          at: 'AT',
+        },
+      },
+    };
+    const { docs, docMeta, reverted } = computeRevertCompliance(
+      club,
+      ['facilityAgreement'],
+      TITANS,
+    );
+    expect(reverted).toEqual(['facilityAgreement']);
+    // One file meets this doc's minimum of 1, so it stays satisfied on its own merit.
+    expect(docs.facilityAgreement).toBe(true);
+    expect(docMeta.facilityAgreement).toEqual({ files: [file('facilityAgreement')] });
+  });
+
+  it('a booked meeting is protected by shape, not by the key being "agm"', () => {
+    const club = {
+      docs: { committee: true },
+      docMeta: { committee: { meetingBooked: true, meetingDate: '2026-09-01' } },
+    };
+    const { reverted } = computeRevertCompliance(club, ['committee'], TITANS);
+    expect(reverted).toEqual([]);
+  });
+
+  it('per-doc accepted formats drive the file picker', () => {
+    const [leagueEntry, committee] = TITANS;
+    expect(docAccept(leagueEntry)).toBe('.pdf,.xls,.xlsx');
+    expect(docMimeAllowed(leagueEntry, DOC_FORMAT_MIME.xlsx)).toBe(true);
+    // A doc with no `accepts` keeps the legacy PDF/Word set.
+    expect(docAccept(committee)).toBe('.pdf,.doc,.docx');
+    expect(docMimeAllowed(committee, DOC_FORMAT_MIME.xlsx)).toBe(false);
+  });
+
+  it('default-catalogue behaviour is unchanged (dolphins parity)', () => {
+    const club = Object.fromEntries([
+      ['docs', Object.fromEntries(REQUIRED_DOCS.map((d) => [d.key, true]))],
+    ]);
+    expect(docsUploadedCount(club)).toBe(REQUIRED_DOCS.length);
+    expect(docCompletion(club)).toBe(100);
+    // Omitting the catalogue argument === passing the defaults explicitly.
+    expect(docCompletion(club, DEFAULT_REQUIRED_DOCS)).toBe(docCompletion(club));
+  });
+});
+
+// The doc helpers gained a trailing catalogue parameter, which makes them look like
+// drop-in array predicates — but `filter`/`map` pass the INDEX as the second argument,
+// and a plain default only covers `undefined`. Index 0 therefore reached `.filter` on a
+// number and white-screened the admin dashboard and its nav counter.
+//
+// TypeScript rejects the bare form at TYPED call sites (hence the casts below), but
+// data.ts itself is loose JS and typechecks nothing — which is exactly where the real
+// crash lived. So the guard is a runtime one, and this pins it.
+describe('doc helpers used as array callbacks', () => {
+  const clubs = [
+    { affiliation: 'complete', cqi: 50, docs: {} },
+    { affiliation: 'not_started', cqi: 0, docs: {} },
+  ];
+
+  it('cohortStats survives (it wraps the predicate) and counts against the given catalogue', () => {
+    expect(() => cohortStats(clubs)).not.toThrow();
+    const titans = [{ key: 'leagueEntry', name: 'League entry' }];
+    const complete = [{ affiliation: 'complete', cqi: 1, docs: { leagueEntry: true } }];
+    expect(cohortStats(complete, titans).docsComplete).toBe(1);
+    // Against the shared defaults the same club is nowhere near complete.
+    expect(cohortStats(complete).docsComplete).toBe(0);
+  });
+
+  it('the helpers tolerate a bare .filter/.map that hands them an index', () => {
+    // Casts stand in for an untyped JS caller — the shape that actually shipped broken.
+    const bare = (fn: unknown) => fn as (v: unknown, i: number) => never;
+    expect(() => clubs.filter(bare(docsAllComplete))).not.toThrow();
+    expect(() => clubs.map(bare(docsUploadedCount))).not.toThrow();
+    expect(() => clubs.map(bare(docCompletion))).not.toThrow();
+  });
+});
+
+// The "Unavailable" escape hatch, extracted from main.tsx's setDocUnavailable so the
+// shape branching is pinned rather than trusted. The sentinel must ride ALONGSIDE stored
+// files, never replace them: a flat overwrite would erase a multi-file doc's uploads and
+// drop a single-file doc's objectKey, orphaning that object in a bucket with no
+// lifecycle rule to catch it.
+describe('computeDocUnavailable', () => {
+  const AT2 = '2026-08-18T00:00:00.000Z';
+  const MULTI: RequiredDoc[] = [
+    {
+      key: 'facilityAgreement',
+      name: 'Facility',
+      multiFile: true,
+      minFiles: 1,
+      allowUnavailable: true,
+    },
+    { key: 'financials', name: 'Financials', allowUnavailable: true },
+  ];
+  const f = (k: string) => ({ objectKey: k, size: 1, uploadedAt: 'x' });
+
+  it('marks a single-file doc unavailable without a stored file', () => {
+    const { docs, docMeta } = computeDocUnavailable(
+      { docs: {}, docMeta: {} },
+      'financials',
+      true,
+      AT2,
+      MULTI,
+    );
+    expect(docs.financials).toBe(true);
+    expect(docMeta.financials).toEqual({ unavailable: true, at: AT2 });
+  });
+
+  it('never drops a stored single-file objectKey when marking unavailable', () => {
+    const club = { docs: { financials: true }, docMeta: { financials: f('t/c/financials-1.pdf') } };
+    const { docMeta } = computeDocUnavailable(club, 'financials', true, AT2, MULTI);
+    expect(docMeta.financials.objectKey).toBe('t/c/financials-1.pdf');
+    expect(docMeta.financials.unavailable).toBe(true);
+  });
+
+  it('never erases a multi-file doc’s files when marking unavailable', () => {
+    const club = {
+      docs: { facilityAgreement: true },
+      docMeta: { facilityAgreement: { files: [f('a.pdf'), f('b.pdf')] } },
+    };
+    const { docMeta } = computeDocUnavailable(club, 'facilityAgreement', true, AT2, MULTI);
+    expect(docMeta.facilityAgreement.files).toHaveLength(2);
+    expect(docMeta.facilityAgreement.unavailable).toBe(true);
+  });
+
+  it('undo on a multi-file doc keeps the files and re-derives the flag from them', () => {
+    const club = {
+      docs: { facilityAgreement: true },
+      docMeta: { facilityAgreement: { files: [f('a.pdf')], unavailable: true, at: AT2 } },
+    };
+    const { docs, docMeta } = computeDocUnavailable(club, 'facilityAgreement', false, AT2, MULTI);
+    expect(docMeta.facilityAgreement).toEqual({ files: [f('a.pdf')] });
+    // minFiles is 1, so one remaining file still satisfies it.
+    expect(docs.facilityAgreement).toBe(true);
+  });
+
+  it('undo on a single-file doc with a stored upload drops only the sentinel', () => {
+    const club = {
+      docs: { financials: true },
+      docMeta: { financials: { ...f('t/c/financials-1.pdf'), unavailable: true, at: AT2 } },
+    };
+    const { docs, docMeta } = computeDocUnavailable(club, 'financials', false, AT2, MULTI);
+    expect(docMeta.financials).toEqual(f('t/c/financials-1.pdf'));
+    expect(docs.financials).toBe(true);
+  });
+
+  it('undo with nothing stored clears the record entirely', () => {
+    const club = {
+      docs: { financials: true },
+      docMeta: { financials: { unavailable: true, at: AT2 } },
+    };
+    const { docs, docMeta } = computeDocUnavailable(club, 'financials', false, AT2, MULTI);
+    expect(docMeta.financials).toBeUndefined();
+    expect(docs.financials).toBe(false);
   });
 });

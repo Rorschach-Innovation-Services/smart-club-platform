@@ -3,12 +3,27 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon, Btn, useEscapeClose } from './atoms';
-import { docFileMeta, resolvePreviewSource } from './data';
+import { docFileMeta, resolvePreviewSource, DOC_FORMAT_MIME } from './data';
 import { getDocViewUrl } from './api';
 
 // Local/demo fallback. Vite serves public/ at BASE_URL, so this resolves to
 // `/sample-document.pdf` in the default deploy.
 const SAMPLE_PDF = `${import.meta.env.BASE_URL || '/'}sample-document.pdf`;
+
+// Neither Word docs nor spreadsheets render in an iframe — docFileMeta's `isPdf` only
+// tells us "not a PDF", so distinguish the two here (contentType, falling back to the
+// objectKey extension for legacy uploads with no stored contentType) to pick the right
+// download-fallback copy below.
+const SPREADSHEET_MIMES = new Set([DOC_FORMAT_MIME.xls, DOC_FORMAT_MIME.xlsx, DOC_FORMAT_MIME.ods]);
+const SPREADSHEET_EXTS = new Set(['xls', 'xlsx', 'ods']);
+function nonRenderableKind(meta) {
+  if (meta?.contentType) return SPREADSHEET_MIMES.has(meta.contentType) ? 'spreadsheet' : 'word';
+  const ext = String(meta?.objectKey || '')
+    .toLowerCase()
+    .split('.')
+    .pop();
+  return SPREADSHEET_EXTS.has(ext) ? 'spreadsheet' : 'word';
+}
 
 /**
  * Read-only preview of an uploaded compliance PDF, matching the AffiliationViewModal /
@@ -54,9 +69,10 @@ export function DocPreviewModal({ clubId, docKey, docName, clubName, meta, objec
 
   const caption = metaText || (source === 'demo' ? 'Demo preview · sample document' : 'Document');
   // Demo mode always serves the bundled sample PDF, so render the iframe even
-  // when the entry itself is a Word file — the "open in new tab" hint would
+  // when the entry itself is a non-PDF file — the "open in new tab" hint would
   // point at a PDF and read as broken.
   const renderInline = isPdf || source === 'demo';
+  const fallbackKind = renderInline ? null : nonRenderableKind(meta);
 
   return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -118,13 +134,15 @@ export function DocPreviewModal({ clubId, docKey, docName, clubName, meta, objec
           )}
 
           {state.status === 'ready' && state.src && !renderInline && (
-            // Browsers can't render Word documents in an iframe — offer the
-            // download (the presigned GET serves it) instead of a broken frame.
+            // Browsers can't render Word documents or spreadsheets in an iframe — offer
+            // the download (the presigned GET serves it) instead of a broken frame.
             <div style={{ textAlign: 'center', padding: '48px 8px', color: 'var(--muted)' }}>
               <div style={{ fontWeight: 600, color: 'var(--ink)', marginBottom: 4 }}>
-                Word document
+                {fallbackKind === 'spreadsheet' ? 'Spreadsheet' : 'Word document'}
               </div>
-              Word documents can’t be previewed inline — use “Open in new tab” to download it.
+              {fallbackKind === 'spreadsheet'
+                ? 'Spreadsheets can’t be previewed inline — use “Open in new tab” to download it.'
+                : 'Word documents can’t be previewed inline — use “Open in new tab” to download it.'}
             </div>
           )}
 

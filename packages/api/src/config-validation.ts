@@ -15,7 +15,15 @@ import dayjs from 'dayjs';
 import dayjsUtc from 'dayjs/plugin/utc.js';
 import dayjsCustomParseFormat from 'dayjs/plugin/customParseFormat.js';
 import { HttpError } from './auth.js';
-import type { Cadence, CompetitionStructure, League, SeasonCalendar, TimeSlot } from './types.js';
+import { DOC_FORMAT_MIME, MAX_DOC_FILES_HARD_CAP, MAX_SAFEGUARDING_FILES } from './catalogue.js';
+import type {
+  Cadence,
+  CompetitionStructure,
+  League,
+  RequiredDoc,
+  SeasonCalendar,
+  TimeSlot,
+} from './types.js';
 
 // `HH:MM`, 24h — matches the `IsoTime` doc comment on types.ts, not parsed via dayjs
 // since a bare wall-clock time (no date) is outside what its strict-parse plugins cover.
@@ -318,5 +326,152 @@ export function validateCompetitions(
           `competition "${comp.label}": stage "${overrun.name}" plays in block ${overrun.schedule.blockIndex + 1} but calendar ${calendar.label} has only ${calendar.blocks.length} block${calendar.blocks.length === 1 ? '' : 's'}`,
         );
     }
+  }
+}
+
+/**
+ * Compliance-doc catalogue shape guard (ADR 0009). Lives here (not index.ts) for the
+ * same reason as the calendar/structure validators: import CLIs write tenant config
+ * through repo directly and must run the SAME assertions the operator route runs —
+ * a malformed catalogue would otherwise only surface when a chair's upload 400s.
+ */
+const DOC_KEY_RE = /^[a-zA-Z][a-zA-Z0-9_-]{0,39}$/;
+/**
+ * Imported, not redeclared: the accepted-format set is the same one `DOC_FORMAT_MIME`
+ * (catalogue.ts) enumerates for the presign route. Two independent lists would silently
+ * drift, letting an operator configure `accepts` values the upload route then rejects.
+ */
+const DOC_FORMATS = new Set<string>(Object.keys(DOC_FORMAT_MIME));
+const MAX_REQUIRED_DOCS = 30;
+/**
+ * Imported, not redeclared: this is the same ceiling `validateClubPatch` enforces on a
+ * stored files[] array. Two independent 20s would silently drift, letting an operator
+ * configure a maxFiles the write path then rejects.
+ */
+const MAX_DOC_FILES = MAX_DOC_FILES_HARD_CAP;
+
+export function validateRequiredDocs(docs: unknown): asserts docs is RequiredDoc[] {
+  if (!Array.isArray(docs)) throw new HttpError(400, 'requiredDocs must be an array');
+  if (docs.length > MAX_REQUIRED_DOCS)
+    throw new HttpError(400, `no more than ${MAX_REQUIRED_DOCS} required documents`);
+  const seen = new Set<string>();
+  for (const d of docs as Record<string, unknown>[]) {
+    if (!d || typeof d !== 'object' || Array.isArray(d))
+      throw new HttpError(400, 'each required document must be an object');
+    const key = typeof d.key === 'string' ? d.key : '';
+    if (!DOC_KEY_RE.test(key))
+      throw new HttpError(
+        400,
+        `document key "${String(d.key ?? '')}" must start with a letter and use only letters, digits, - or _ (max 40 chars)`,
+      );
+    if (seen.has(key)) throw new HttpError(400, `duplicate document key "${key}"`);
+    seen.add(key);
+    const name = typeof d.name === 'string' ? d.name.trim() : '';
+    if (!name) throw new HttpError(400, `document "${key}" needs a name`);
+    if (name.length > 80)
+      throw new HttpError(400, `document "${key}": name must be 80 characters or fewer`);
+    if (d.desc !== undefined && (typeof d.desc !== 'string' || d.desc.length > 300))
+      throw new HttpError(400, `document "${key}": description must be 300 characters or fewer`);
+    if (d.kind !== undefined && d.kind !== 'file' && d.kind !== 'form')
+      throw new HttpError(400, `document "${key}": kind must be "file" or "form"`);
+    for (const flag of [
+      'multiFile',
+      'allowUnavailable',
+      'allowMeetingBooked',
+      'allowCourseBooked',
+      'archived',
+    ]) {
+      if (d[flag] !== undefined && typeof d[flag] !== 'boolean')
+        throw new HttpError(400, `document "${key}": ${flag} must be a boolean`);
+    }
+    if (d.kind === 'form') {
+      // v1: a form doc is satisfiable only by the exco affiliation-form path — any other
+      // key would be a requirement nothing on the platform can complete (ADR 0009).
+      if (key !== 'exco')
+        throw new HttpError(
+          400,
+          `document "${key}": kind "form" is only supported for the "exco" key`,
+        );
+      const fileish = [
+        'multiFile',
+        'minFiles',
+        'maxFiles',
+        'accepts',
+        'allowMeetingBooked',
+        'allowCourseBooked',
+        'allowUnavailable',
+      ];
+      const bad = fileish.find((f) => d[f] !== undefined);
+      if (bad)
+        throw new HttpError(400, `document "${key}": ${bad} does not apply to a form document`);
+      // matchHints are checked below for EVERY kind, so this branch must not return
+      // early past them — a form doc can carry hints (harmlessly unused today) and they
+      // still get stored and served on /platform routes, so they stay bounded.
+      assertMatchHints(key, d.matchHints);
+      continue;
+    }
+    if (d.multiFile) {
+      // min default of 1 is deliberate (kept literal, not imported) — it matches
+      // multiFileLimits' own `doc?.minFiles ?? 1` default, not MIN_SAFEGUARDING_FILES
+      // (2), which only applies as catalogue.ts's own fallback for legacy safeguarding
+      // docs with no explicit minFiles. The max default DOES need to match
+      // multiFileLimits' `doc?.maxFiles ?? MAX_SAFEGUARDING_FILES` exactly, so it's
+      // imported rather than hand-copied.
+      const min = d.minFiles === undefined ? 1 : d.minFiles;
+      const max = d.maxFiles === undefined ? MAX_SAFEGUARDING_FILES : d.maxFiles;
+      if (
+        typeof min !== 'number' ||
+        typeof max !== 'number' ||
+        !Number.isInteger(min) ||
+        !Number.isInteger(max) ||
+        min < 1 ||
+        min > max ||
+        max > MAX_DOC_FILES
+      )
+        throw new HttpError(
+          400,
+          `document "${key}": needs 1 <= minFiles <= maxFiles <= ${MAX_DOC_FILES}`,
+        );
+      if (d.allowMeetingBooked)
+        throw new HttpError(
+          400,
+          `document "${key}": allowMeetingBooked applies to single-file documents only`,
+        );
+    } else {
+      if (d.minFiles !== undefined || d.maxFiles !== undefined)
+        throw new HttpError(400, `document "${key}": minFiles/maxFiles need multiFile`);
+      if (d.allowCourseBooked)
+        throw new HttpError(
+          400,
+          `document "${key}": allowCourseBooked applies to multi-file documents only`,
+        );
+    }
+    if (d.accepts !== undefined) {
+      if (
+        !Array.isArray(d.accepts) ||
+        d.accepts.length === 0 ||
+        d.accepts.some((f) => !DOC_FORMATS.has(String(f)))
+      )
+        throw new HttpError(
+          400,
+          `document "${key}": accepts must be a non-empty list from ${[...DOC_FORMATS].join(', ')}`,
+        );
+    }
+    assertMatchHints(key, d.matchHints);
+  }
+}
+
+/** Bound the operator intake-classifier hints. Shared so the form-doc branch can't skip it. */
+function assertMatchHints(key: string, matchHints: unknown): void {
+  if (matchHints === undefined) return;
+  if (
+    !Array.isArray(matchHints) ||
+    matchHints.length > 10 ||
+    matchHints.some((h) => typeof h !== 'string' || !h.trim() || h.length > 40)
+  ) {
+    throw new HttpError(
+      400,
+      `document "${key}": matchHints must be up to 10 short strings (max 40 chars)`,
+    );
   }
 }

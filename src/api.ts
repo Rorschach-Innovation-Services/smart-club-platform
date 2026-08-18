@@ -32,6 +32,10 @@ import type {
   DnsSheet,
   TenantOverview,
   DemographicsResponse,
+  DocIntakePresignItem,
+  DocIntakePresignResult,
+  DocIntakeCommitItem,
+  DocIntakeCommitClubResult,
 } from './types';
 
 /**
@@ -557,6 +561,33 @@ export const platformReopenSetup = (slug: string) =>
 // sanitized InsightsClub projection — never the full Club records.
 export const platformTenantOverview = (slug: string) =>
   request<TenantOverview>(`/platform/tenants/${encodeURIComponent(slug)}/overview`);
+// Bulk document-intake (operator uploads compliance docs for many clubs at once).
+// Mint presigned PUTs for a batch (max 100 rows); `items` is POSITIONAL — index i
+// of the response corresponds to index i of the request, and a bad row fails only
+// that row (never a whole-batch 400). PUT each ok:true row's file to its
+// uploadUrl via uploadToPresigned, then commit the successful rows.
+export const platformDocIntakePresign = (slug: string, items: DocIntakePresignItem[]) =>
+  request<{ items: DocIntakePresignResult[] }>(
+    `/platform/tenants/${encodeURIComponent(slug)}/doc-intake/presign`,
+    { method: 'POST', body: { items } },
+  );
+// Record a batch of already-uploaded files (from platformDocIntakePresign) against
+// clubs' doc records. Grouped server-side by clubId into one write per club, so
+// the response is per-CLUB (not per-item, and not index-aligned with the request):
+// one club failing (a bad row, or a version-conflict retry that still lost) never
+// blocks the other clubs in the same commit.
+export const platformDocIntakeCommit = (slug: string, items: DocIntakeCommitItem[]) =>
+  request<{ clubs: DocIntakeCommitClubResult[] }>(
+    `/platform/tenants/${encodeURIComponent(slug)}/doc-intake/commit`,
+    { method: 'POST', body: { items } },
+  );
+// Operator-created shell club — seeded like a self-signup (same collision guard,
+// docs seeded from the tenant's active catalogue) but with NO chair/membership/
+// Cognito provisioning; the bulk doc-intake flow needs a club to attach uploads to
+// before its chair has ever signed up. The chair attaches later via the normal
+// club-signup link or an admin invite.
+export const platformCreateClub = (slug: string, body: { name: string; district: string }) =>
+  request<Club>(`/platform/tenants/${encodeURIComponent(slug)}/clubs`, { method: 'POST', body });
 
 /**
  * Submit a branding asset (logo or hero image) to S3 via the presigned POST grant

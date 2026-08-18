@@ -5,16 +5,22 @@
 Resolves the tenant from the host (prod) or `x-tenant` / `?tenant=` (dev) and returns the
 **public** subset of config: branding (name, title, logo, favicon, color tokens, copy
 slots), the submission deadline, the league catalogue, the district list, the tutorial
-videos, the per-tenant feature flags, and the season calendars. `knownClubs` and
-`requiredDocs` are not exposed here. `districts` is the resolved list — a legacy row
-without the field falls back to the shared defaults; an explicit `[]` (freshly created
-client) comes through empty.
+videos, the per-tenant feature flags, the season calendars, and the compliance-doc
+catalogue. `knownClubs` is not exposed here. `districts` and `requiredDocs` are the
+resolved lists — a legacy row without the field falls back to the shared defaults; an
+explicit `[]` (freshly created client) comes through empty.
 
 ```
-200 → { tenant, branding, submissionDeadline, leagues, districts, tutorials, features, calendars }
+200 → { tenant, branding, submissionDeadline, leagues, districts, requiredDocs,
+        tutorials, features, calendars }
 400 → unknown tenant
 404 → tenant not found
 ```
+
+`requiredDocs` rides the public payload ([ADR 0009](../architecture/0009-per-tenant-required-docs.md)):
+doc names and behaviour flags are as public as league and district names, and the rep
+portal reads only this payload. The operator-only `matchHints` (bulk-intake classifier
+keywords) are stripped — they are served solely on `GET /platform/tenants/:slug`.
 
 Used at first paint for theming: the SPA ships a neutral default theme and applies
 `branding` (colors, copy, favicon, `--hero-image`) at runtime — see
@@ -29,7 +35,7 @@ it is a projection by construction — a denylist would expose every field later
 `TenantConfig`. Writing is admin-only.
 
 ```
-200 → { tenant, branding, submissionDeadline, leagues, districts,
+200 → { tenant, branding, submissionDeadline, leagues, districts, requiredDocs,
         tutorials, features, calendars, structures, setupCompletedAt }
 401 → not authenticated
 404 → tenant not found
@@ -37,8 +43,10 @@ it is a projection by construction — a denylist would expose every field later
 
 Deliberately held back: `clubSignupLink` (a live credential, managed via
 `/admin/club-signup-link` — see [signup.md](signup.md)), `knownClubs` (reachable via
-`/clubs/directory`), `requiredDocs` (served with the club record that uses it), `adminCount`
-(an internal counter for the last-admin guard) and `setupCompletedBy` (an operator's email).
+`/clubs/directory`), `adminCount` (an internal counter for the last-admin guard) and
+`setupCompletedBy` (an operator's email). `requiredDocs` moved OFF this held-back list
+with [ADR 0009](../architecture/0009-per-tenant-required-docs.md) — it now rides both
+here and the public `GET /tenant`, so the admin console needs no second source.
 
 This is where the admin console reads `structures` from. They are deliberately **not** on the
 public `GET /tenant`: that route is anonymous and hit on every public page load, and up to 50
@@ -48,9 +56,9 @@ payload.
 
 ## `PUT /tenant/config` — update config (admin)
 
-Body: partial `TenantConfig` (branding, `submissionDeadline`, `knownClubs`,
-`requiredDocs`). Merged over the current config. `200 → TenantConfig`. The same
-strip-and-merge core backs the operator's `PUT /platform/tenants/:slug`
+Body: partial `TenantConfig` (branding, `submissionDeadline`, `knownClubs`). Merged over
+the current config. `200 → TenantConfig`. The same strip-and-merge core backs the
+operator's `PUT /platform/tenants/:slug`
 ([ADR 0006](../architecture/0006-platform-operator-and-tenant-registry.md)).
 
 > `clubSignupLink` is stripped from patches — it is managed only via
@@ -68,6 +76,11 @@ strip-and-merge core backs the operator's `PUT /platform/tenants/:slug`
 > has each incoming league's `competitions` overwritten with whatever is currently stored
 > for that key, so this route can rename or reorder leagues but can never mint or drop a
 > binding. Bind competitions via `PUT /platform/tenants/:slug` only.
+
+> `requiredDocs` is **operator-only** (stripped here) and edited via
+> `PUT /platform/tenants/:slug`, which validates each entry's shape and rejects (409)
+> removing a doc key any club still holds data for — archive the entry instead
+> ([ADR 0009](../architecture/0009-per-tenant-required-docs.md)).
 
 > `districts` is **operator-only** (stripped here like `features`/`tutorials`/`adminCount`,
 > ADR 0006) and edited via `PUT /platform/tenants/:slug`, which rejects (409) removing a
@@ -113,6 +126,51 @@ strip-and-merge core backs the operator's `PUT /platform/tenants/:slug`
 > when non-empty so an unaffected save's response shape is unchanged. Only removing the
 > calendar outright (or a block a stage still needs) 409s; editing its dates is a live
 > reference by design — see the addendum linked above.
+
+## Operator bulk document intake (operator only)
+
+Three routes behind the platform gate (`/platform/*` → `authenticate` +
+`requirePlatformOperator`), backing the operator console's bulk-intake wizard. They exist
+because the tenant-side doc routes are unreachable from the platform host, and because a
+100-file drop must not cost 100 read-modify-write cycles.
+
+### `POST /platform/tenants/:slug/doc-intake/presign`
+
+Body `{ items: [{ clubId, docKey, contentType, size }] }`, max 100 (400 beyond). Each item
+is validated against the tenant's resolved catalogue (active, `kind: 'file'`, accepted
+type, ≤ 10 MB) and its club's existence.
+
+```
+200 → { items: [ { ok: true, uploadUrl, objectKey, contentType } | { ok: false, error } ] }
+```
+
+Results are **positional** — one entry per request item, in order, so a single bad row
+never fails the batch. Object keys use the same `${tenant}/${clubId}/${docKey}-${uuid}.${ext}`
+convention as the tenant routes, so view/replace/delete and the erasure helpers all keep
+working on intake-uploaded files.
+
+### `POST /platform/tenants/:slug/doc-intake/commit`
+
+Body `{ items: [{ clubId, docKey, objectKey, size, contentType, sourceName }] }`, max 100.
+Groups by club and applies **one version-pinned write per club** (retried once on a
+version conflict), so a 100-row batch over 12 clubs costs 12 writes. Multi-file docs
+append, deduped on `objectKey`; single-file docs replace, best-effort deleting the
+superseded object _after_ the write lands. `uploadedBy` (operator email) and `sourceName`
+(original filename) are stored as an audit trail.
+
+```
+200 → { clubs: [ { clubId, ok: true, docs } | { clubId, ok: false, error } ] }
+```
+
+One result row **per club**, not per item: a club's batch is all-or-nothing, but one
+club failing never stops the others.
+
+### `POST /platform/tenants/:slug/clubs`
+
+Body `{ name, district }`. Creates a shell club (district validated against the tenant's
+list, id/name collision pre-checked) seeded with the tenant's own doc catalogue. **No**
+chair, membership or Cognito provisioning — the chair attaches later via the normal
+signup link. `201 → Club   400 unknown district / bad name   409 already exists`.
 
 ## `GET /me` — current user (authenticated)
 

@@ -1,9 +1,11 @@
 /**
  * Server-side copy of the shared cricket catalogue defaults, used to validate
- * affiliation input. Districts and leagues are per-tenant config (operator-managed);
- * the constants here are the read-time fallback for legacy tenant rows without an
- * explicit field. Doc keys remain frozen shared defaults (ADR 0005).
+ * affiliation input. Districts, leagues and compliance-doc catalogues are per-tenant
+ * config (operator-managed); the constants here are the read-time fallback for legacy
+ * tenant rows without an explicit field (ADR 0005 froze doc keys; ADR 0009 unfroze
+ * them into TenantConfig.requiredDocs).
  */
+import type { DocFormat, RequiredDoc } from './types.js';
 
 /**
  * Fallback district list for tenants with no `districts` field on their config row
@@ -36,42 +38,217 @@ export function resolveDistricts(cfg?: { districts?: string[] } | null): string[
 }
 
 /**
- * Server-side mirror of REQUIRED_DOCS in the frontend's data.jsx — the only
- * compliance-doc keys the API accepts. Without this gate any authenticated
- * client (e.g. a stale pre-deploy SPA tab) can write retired or arbitrary keys,
- * recreating the orphaned-PII state that cleanup-club-inventory exists to
- * remove (see docs/guides/popia-compliance.md). Keep in sync when
- * REQUIRED_DOCS changes.
+ * The shared default compliance-doc catalogue — today's six keys expressed
+ * declaratively (mirror of DEFAULT_REQUIRED_DOCS in the frontend's data.ts). This is
+ * the read-time fallback for tenants without an explicit `requiredDocs` config field,
+ * and it is behavior-identical to the pre-ADR-0009 hardcoded set: same keys, same
+ * escape hatches, same accepted types. Keep the two mirrors in sync.
  */
-export const DOC_KEYS = new Set([
-  'constitution',
-  'agm',
-  'financials',
-  'exco',
-  'codeOfConduct',
-  'safeguarding',
-]);
+export const DEFAULT_REQUIRED_DOCS: RequiredDoc[] = [
+  {
+    key: 'constitution',
+    name: 'Club constitution',
+    desc: 'Your club’s adopted constitution',
+  },
+  {
+    key: 'agm',
+    name: 'AGM minutes',
+    desc: 'Minutes of your most recent Annual General Meeting',
+    allowMeetingBooked: true,
+  },
+  {
+    key: 'financials',
+    name: 'Annual financial statements',
+    desc: 'Most recent annual financial statements',
+    allowUnavailable: true,
+  },
+  {
+    key: 'exco',
+    name: 'Executive committee',
+    desc: 'Captured on the affiliation form',
+    kind: 'form',
+  },
+  {
+    key: 'codeOfConduct',
+    name: 'Code of conduct',
+    desc: 'Your club’s signed code of conduct',
+  },
+  {
+    key: 'safeguarding',
+    name: 'Safeguarding certificates',
+    desc: 'Safeguarding certificates for at least two club officials',
+    multiFile: true,
+    minFiles: 2,
+    maxFiles: 10,
+    allowCourseBooked: true,
+  },
+];
 
 /**
- * Accepted compliance-upload content types → stored object-key extension.
- * Mirror of DOC_MIME_TYPES in the frontend's data.jsx. Word covers Google Docs
- * (which exports .docx/.pdf). The presigned PUT is minted with exactly one of
- * these, so S3 rejects anything else at upload time.
+ * The tenant's effective compliance-doc catalogue: the explicit config value when
+ * present (including a deliberate [] meaning "no compliance docs"), else the shared
+ * defaults. Same contract as resolveDistricts — legacy rows need no backfill.
  */
-export const DOC_CONTENT_TYPES: Record<string, string> = {
-  'application/pdf': 'pdf',
-  'application/msword': 'doc',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+export function resolveRequiredDocs(cfg?: { requiredDocs?: RequiredDoc[] } | null): RequiredDoc[] {
+  return cfg?.requiredDocs ?? DEFAULT_REQUIRED_DOCS;
+}
+
+/** The catalogue minus archived entries — what completion counts and upload flows see. */
+export function activeRequiredDocs(cfg?: { requiredDocs?: RequiredDoc[] } | null): RequiredDoc[] {
+  return resolveRequiredDocs(cfg).filter((d) => !d.archived);
+}
+
+/**
+ * Every uploadable format → its exact MIME type (mirror of DOC_FORMAT_MIME in the
+ * frontend's data.ts). Word covers Google Docs (exports .docx/.pdf); the spreadsheet
+ * trio exists for catalogues whose docs are filled-in workbooks (league entry forms,
+ * asset registers). The presigned PUT is minted with exactly one of these, so S3
+ * rejects anything else at upload time.
+ */
+export const DOC_FORMAT_MIME: Record<DocFormat, string> = {
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ods: 'application/vnd.oasis.opendocument.spreadsheet',
 };
 
+/** The legacy accepted-format set — the default when a doc declares no `accepts`. */
+export const DEFAULT_DOC_FORMATS: DocFormat[] = ['pdf', 'doc', 'docx'];
+
 /**
- * Safeguarding is a per-person certificate: a club needs one for at least two
- * people, stored as docMeta.safeguarding = { files: [...] }. Mirror of
- * MIN_SAFEGUARDING_FILES in the frontend's data.jsx.
+ * Accepted content types for one doc definition, as mime → stored-extension. Pass
+ * undefined (an unknown/retired key) to get the full format map — those keys were
+ * valid under some earlier catalogue, so their stored files keep resolving.
+ */
+export function acceptedMimes(doc?: RequiredDoc): Record<string, string> {
+  const formats = doc
+    ? (doc.accepts ?? DEFAULT_DOC_FORMATS)
+    : (Object.keys(DOC_FORMAT_MIME) as DocFormat[]);
+  return Object.fromEntries(formats.map((f) => [DOC_FORMAT_MIME[f], f]));
+}
+
+/**
+ * @deprecated ADR 0009 — kept only for pre-catalogue scripts/tests. Route code uses
+ * resolveRequiredDocs(cfg); this frozen set no longer gates anything.
+ */
+export const DOC_KEYS = new Set(DEFAULT_REQUIRED_DOCS.map((d) => d.key));
+
+/** @deprecated ADR 0009 — use acceptedMimes(doc). The legacy pdf/doc/docx map. */
+export const DOC_CONTENT_TYPES: Record<string, string> = Object.fromEntries(
+  DEFAULT_DOC_FORMATS.map((f) => [DOC_FORMAT_MIME[f], f]),
+);
+
+/**
+ * Legacy safeguarding thresholds — now the per-doc defaults for any multiFile doc
+ * that doesn't declare its own minFiles/maxFiles (mirror of the frontend's data.ts).
  */
 export const MIN_SAFEGUARDING_FILES = 2;
-/** Upper bound on stored safeguarding certificates — a runaway-append backstop. */
+/** Upper bound on stored files per multiFile doc — a runaway-append backstop. */
 export const MAX_SAFEGUARDING_FILES = 10;
+/** Absolute per-key stored-file ceiling: no catalogue may raise maxFiles beyond this. */
+export const MAX_DOC_FILES_HARD_CAP = 20;
+
+/**
+ * Effective thresholds for a (possibly retired) multiFile doc.
+ *
+ * The `min` default is 1, matching what `validateRequiredDocs` accepts for a bare
+ * `{ multiFile: true }` — the two used to disagree (validator 1, runtime 2), so such a
+ * doc would validate and display as needing one file while the write path silently
+ * demanded two. "Multi-file" means "more than one is allowed", not "more than one is
+ * required"; a doc that genuinely needs two says so, as safeguarding does in
+ * DEFAULT_REQUIRED_DOCS. The old 2 only ever applied to a doc with no explicit minFiles,
+ * which for the shared defaults never happens.
+ */
+export function multiFileLimits(doc?: RequiredDoc): { min: number; max: number } {
+  return {
+    min: doc?.minFiles ?? 1,
+    max: doc?.maxFiles ?? MAX_SAFEGUARDING_FILES,
+  };
+}
+
+/** One stored compliance-document file (a multi-file doc holds an array of these). */
+export interface DocFileEntry {
+  objectKey: string;
+  size: number;
+  contentType?: string;
+  uploadedAt: string;
+  /** Operator email that committed this file (bulk-intake audit trail only). */
+  uploadedBy?: string;
+  /** Original filename as picked by the operator (bulk-intake audit trail only). */
+  sourceName?: string;
+}
+
+/** docMeta normalized to one shape, whatever historical form it was stored in. */
+export interface NormalizedDocMeta {
+  files: DocFileEntry[];
+  markedCompliant: boolean;
+  courseBooked: boolean;
+  courseDate: string;
+  at?: string;
+}
+
+/**
+ * Normalize every historical docMeta shape to `{ files, markedCompliant, courseBooked,
+ * courseDate, at }`: the `{ files: [...] }` wrapper as-is, a legacy single upload
+ * `{ objectKey }` as a one-entry array, and a bare `{ markedCompliant }` sentinel as an
+ * empty array with the flag set. Mirror of `safeguardingMeta` in the frontend's data.ts.
+ *
+ * Lives here, not in index.ts, because the import CLIs write docMeta through `repo` and
+ * so cannot import the routes — they previously carried a hand-copied replica of this
+ * function, and a drift between the two would silently corrupt stored compliance records
+ * on a production write. Same reasoning as club-id.ts and player-identity.ts.
+ */
+export function normalizeDocMeta(meta: unknown): NormalizedDocMeta {
+  const m = (meta ?? {}) as Record<string, unknown>;
+  const courseBooked = !!m.courseBooked;
+  const courseDate = (m.courseDate as string | undefined) || '';
+  if (Array.isArray(m.files)) {
+    return {
+      files: m.files as DocFileEntry[],
+      markedCompliant: !!m.markedCompliant,
+      courseBooked,
+      courseDate,
+      at: m.at as string | undefined,
+    };
+  }
+  if (m.objectKey) {
+    return {
+      files: [m as unknown as DocFileEntry],
+      markedCompliant: !!m.markedCompliant,
+      courseBooked,
+      courseDate,
+    };
+  }
+  return {
+    files: [],
+    markedCompliant: !!m.markedCompliant,
+    courseBooked,
+    courseDate,
+    at: m.at as string | undefined,
+  };
+}
+
+/**
+ * Re-wrap normalized state as the stored docMeta value. `extra` carries the club-set
+ * "course booked" flag + date so a generic merge or an append/delete recompute can't
+ * strip it; both ride through only when truthy (the canonical course-booked shape is
+ * `{ files, courseBooked: true, courseDate, at }`).
+ */
+export function docMetaValue(
+  files: DocFileEntry[],
+  markedCompliant: boolean,
+  at?: string,
+  extra?: { courseBooked?: boolean; courseDate?: string },
+): Record<string, unknown> {
+  const value: Record<string, unknown> = markedCompliant
+    ? { files, markedCompliant: true, at }
+    : { files };
+  if (extra?.courseBooked) value.courseBooked = true;
+  if (extra?.courseDate) value.courseDate = extra.courseDate;
+  return value;
+}
 
 /** Accepted coach-experience buckets (mirror of COACH_EXPERIENCE in the frontend's data.jsx). */
 export const COACH_EXPERIENCE = new Set(['0-3', '4-10', '10+']);
@@ -154,6 +331,14 @@ export function validateClubPatch(
   validLeagueKeys: Set<string>,
   validDocKeys: Set<string>,
   validDistricts: Set<string>,
+  /**
+   * The tenant's resolved doc catalogue, for escape-hatch enforcement. Optional so the
+   * seed/import CLIs that call this without a tenant config keep working — omitting it
+   * only skips the sentinel check, never loosens the doc-key allowlist above.
+   */
+  docDefs?: RequiredDoc[],
+  /** The club's stored docMeta, so an already-present sentinel is never newly rejected. */
+  currentDocMeta?: Record<string, unknown>,
 ): string | null {
   if (patch.name !== undefined) {
     const n = patch.name.trim();
@@ -213,6 +398,49 @@ export function validateClubPatch(
   const docKeys = [...Object.keys(patch.docs ?? {}), ...Object.keys(patch.docMeta ?? {})];
   const badDocs = [...new Set(docKeys.filter((k) => !validDocKeys.has(k)))];
   if (badDocs.length) return `unknown document keys: ${badDocs.join(', ')}`;
+  // Hard per-key file ceiling. Per-doc maxFiles is enforced on the append routes; this
+  // generic patch is the only other channel that can write a files[] array, and without
+  // a bound a hostile PATCH could balloon docMeta toward the DynamoDB 400KB item limit.
+  for (const [k, v] of Object.entries(patch.docMeta ?? {})) {
+    const files = (v as { files?: unknown } | null)?.files;
+    if (Array.isArray(files) && files.length > MAX_DOC_FILES_HARD_CAP) {
+      return `no more than ${MAX_DOC_FILES_HARD_CAP} stored files for document "${k}"`;
+    }
+  }
+  // Escape-hatch enforcement (ADR 0009). The three "we can't supply this" sentinels are
+  // affordances the catalogue GRANTS per doc; without a server check they were UI-only,
+  // so a rep or a stale tab could PATCH `{ unavailable: true }` onto a doc the operator
+  // deliberately made unskippable and have it count complete.
+  //
+  // Only a sentinel this patch INTRODUCES is rejected: one already on the stored record
+  // rides through untouched. Otherwise removing a flag from the catalogue would brick
+  // every later save for clubs that had legitimately used it (every client spreads the
+  // existing docMeta), stranding them with an unsaveable record. Cleaning up a stale
+  // sentinel is the admin revert path's job, not this validator's.
+  // Docs with no catalogue entry (retired, stored-only) are skipped — history can't be
+  // retro-tightened, matching the doc-key union rule above.
+  if (docDefs) {
+    const SENTINELS: Array<{ field: string; flag: keyof RequiredDoc; label: string }> = [
+      { field: 'unavailable', flag: 'allowUnavailable', label: 'marked unavailable' },
+      {
+        field: 'meetingBooked',
+        flag: 'allowMeetingBooked',
+        label: 'satisfied by a booked meeting',
+      },
+      { field: 'courseBooked', flag: 'allowCourseBooked', label: 'satisfied by a booked course' },
+    ];
+    for (const [k, v] of Object.entries(patch.docMeta ?? {})) {
+      const def = docDefs.find((d) => d.key === k);
+      if (!def) continue;
+      const incoming = (v ?? {}) as Record<string, unknown>;
+      const stored = (currentDocMeta?.[k] ?? {}) as Record<string, unknown>;
+      for (const { field, flag, label } of SENTINELS) {
+        if (incoming[field] && !stored[field] && !def[flag]) {
+          return `"${def.name}" cannot be ${label}`;
+        }
+      }
+    }
+  }
 
   // CQI score + answers — shape checks only. The score is computed client-side (scoreCQI)
   // and provably capped at 100, so the server just bounds it. Answers stay loose on

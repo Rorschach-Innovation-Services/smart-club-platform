@@ -12,7 +12,7 @@
 import { useState as useStateA } from 'react';
 import { useCopy } from './branding';
 import { KPI, CountUp, EmptyState, Icon, Btn } from './atoms';
-import { REQUIRED_DOCS } from './data';
+import { DEFAULT_REQUIRED_DOCS, activeDocs } from './data';
 import { exportSheetsToXlsx } from './exportXlsx';
 import {
   teamCounts,
@@ -29,6 +29,7 @@ import type {
   DemographicBucket,
   DemographicsSummary,
   DemographicsResponse,
+  RequiredDoc,
 } from './types';
 
 /** Sides a club fields in one league — absent map/key counts as 1 (legacy clubs). */
@@ -177,8 +178,11 @@ export function cqiBandRows(clubs: InsightsClub[]) {
 
 export const docTone = (pct: number) => (pct >= 70 ? '' : pct >= 40 ? 'warn' : 'danger');
 
-export function docComplianceRows(clubs: InsightsClub[]) {
-  const docStats = REQUIRED_DOCS.map((d) => {
+export function docComplianceRows(
+  clubs: InsightsClub[],
+  requiredDocs: RequiredDoc[] = DEFAULT_REQUIRED_DOCS,
+) {
+  const docStats = activeDocs(requiredDocs).map((d) => {
     const uploaded = clubs.filter((c) => c.docs?.[d.key]).length;
     const pct = clubs.length ? Math.round((uploaded / clubs.length) * 100) : 0;
     return { key: d.key, name: d.name, count: uploaded, total: clubs.length, pct };
@@ -214,6 +218,7 @@ export function insightsExportSheets({
   districts,
   clearances,
   demographics,
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
 }: InsightsBreakdownProps) {
   const split = clubs.reduce(
     (acc, c) => {
@@ -232,7 +237,7 @@ export function insightsExportSheets({
   const districtBreakdown = districtRows(clubs, leagues, districts);
   const affiliations = affiliationRows(clubs);
   const { bands, submitted, avgCqi } = cqiBandRows(clubs);
-  const { docStats } = docComplianceRows(clubs);
+  const { docStats } = docComplianceRows(clubs, requiredDocs);
   const counts = clearanceCounts(clearances);
   const clearanceTotal = counts.pending + counts.approved + counts.adminOverride + counts.rejected;
   const approvedTotal = counts.approved + counts.adminOverride;
@@ -520,6 +525,13 @@ interface InsightsBreakdownProps {
   onOpenLeague?: (key: string) => void;
   /** Anonymised demographics; the card is skipped while undefined (loading/old backend). */
   demographics?: DemographicsResponse;
+  /**
+   * The tenant's compliance-doc catalogue (ADR 0009). Absent ⇒ the shared default list —
+   * the operator's cross-tenant overview never has a single tenant's catalogue to hand,
+   * so it keeps rendering the "standard doc set" (context === 'operator' already labels
+   * this on the card).
+   */
+  requiredDocs?: RequiredDoc[];
 }
 
 export function InsightsBreakdown({
@@ -530,6 +542,7 @@ export function InsightsBreakdown({
   context = 'admin',
   onOpenLeague,
   demographics,
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
 }: InsightsBreakdownProps) {
   if (!clubs.length)
     return (
@@ -576,7 +589,7 @@ export function InsightsBreakdown({
 
   const affRows = affiliationRows(clubs);
   const { bands, maxBand, submitted, avgCqi } = cqiBandRows(clubs);
-  const { docStats, mostMissing } = docComplianceRows(clubs);
+  const { docStats, mostMissing } = docComplianceRows(clubs, requiredDocs);
   const cc = clearanceCounts(clearances);
   const ccTotal = cc.pending + cc.approved + cc.adminOverride + cc.rejected;
   const ccApproved = cc.approved + cc.adminOverride;
@@ -1077,6 +1090,7 @@ interface AdminInsightsPageProps {
   onOpenLeague?: (key: string) => void;
   demographics?: DemographicsResponse;
   toast?: (message: string, tone?: string) => void;
+  requiredDocs?: RequiredDoc[];
 }
 
 export function AdminInsightsPage({
@@ -1087,6 +1101,7 @@ export function AdminInsightsPage({
   onOpenLeague,
   demographics,
   toast,
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
 }: AdminInsightsPageProps) {
   const copy = useCopy();
   const [exporting, setExporting] = useStateA(false);
@@ -1097,7 +1112,7 @@ export function AdminInsightsPage({
     try {
       await exportSheetsToXlsx(
         'season-insights.xlsx',
-        insightsExportSheets({ clubs, leagues, districts, clearances, demographics }),
+        insightsExportSheets({ clubs, leagues, districts, clearances, demographics, requiredDocs }),
       );
     } catch {
       toast?.('Export failed — please retry', 'warn');
@@ -1138,6 +1153,7 @@ export function AdminInsightsPage({
         clearances={clearances}
         onOpenLeague={onOpenLeague}
         demographics={demographics}
+        requiredDocs={requiredDocs}
       />
     </div>
   );

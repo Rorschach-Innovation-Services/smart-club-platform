@@ -19,7 +19,7 @@ import { handle } from 'hono/aws-lambda';
 import dayjs from 'dayjs';
 import dayjsUtc from 'dayjs/plugin/utc.js';
 import dayjsCustomParseFormat from 'dayjs/plugin/customParseFormat.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   S3Client,
   PutObjectCommand,
@@ -55,11 +55,18 @@ import {
 import * as repo from './repo.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
 import { clubIdFromName } from './club-id.js';
+import {
+  playerNaturalKey,
+  resolvePlayerDob,
+  normalizeId,
+  computeIsMinor,
+} from './player-identity.js';
 import { findReleaseClashes } from './venue-clash.js';
 import {
   validateCalendars,
   validateStructures,
   validateCompetitions,
+  validateRequiredDocs,
   assertValidCadence,
   assertValidTimeSlots,
 } from './config-validation.js';
@@ -67,11 +74,13 @@ import { demographicsByLeague, summarizeDemographics } from './demographics.js';
 import {
   validateClubPatch,
   resolveDistricts,
+  resolveRequiredDocs,
+  activeRequiredDocs,
+  acceptedMimes,
+  multiFileLimits,
+  normalizeDocMeta,
+  docMetaValue,
   OVERARCHING_DISTRICT,
-  DOC_KEYS,
-  DOC_CONTENT_TYPES,
-  MIN_SAFEGUARDING_FILES,
-  MAX_SAFEGUARDING_FILES,
 } from './catalogue.js';
 import {
   sendClubFixtures,
@@ -87,6 +96,7 @@ import type {
   ClubSpec,
   DirectoryClub,
   League,
+  RequiredDoc,
   Membership,
   SeasonRun,
   StageRun,
@@ -191,9 +201,62 @@ async function provisionInviteUser(email: string): Promise<string> {
   }
 }
 
-/** Reject unknown/retired compliance-doc keys before any S3 or record work. */
-function assertDocKey(key: string): void {
-  if (!DOC_KEYS.has(key)) throw new HttpError(400, `unknown document key "${key}"`);
+/**
+ * Doc-key gate for NEW uploads: the key must be an active (non-archived), non-form
+ * entry in the tenant's resolved catalogue. Rejecting here (before any S3 or record
+ * work) is what stops a stale pre-deploy SPA tab writing retired or arbitrary keys —
+ * the orphaned-PII state cleanup-club-inventory exists to remove (ADR 0009).
+ */
+function requireUploadableDoc(cfg: TenantConfig | null, key: string): RequiredDoc {
+  const doc = activeRequiredDocs(cfg).find((d) => d.key === key);
+  if (!doc || doc.kind === 'form') throw new HttpError(400, `unknown document key "${key}"`);
+  return doc;
+}
+
+/**
+ * Doc-key gate for operations on EXISTING records (view/replace/delete): the
+ * tenant's catalogue ∪ keys already stored on the club, so a since-removed or
+ * archived key's file stays viewable and deletable — that IS the cleanup path the
+ * catalogue's referrer delete guard points operators at. Returns undefined for a
+ * stored-only key (callers then derive behavior from the stored meta shape).
+ */
+function requireStoredOrCatalogueDoc(
+  cfg: TenantConfig | null,
+  key: string,
+  club: Club,
+  opts?: {
+    /**
+     * Reject a form-satisfied doc. Set by the RECORD path: a form doc is satisfiable
+     * only by its on-platform form, so accepting a file record against one would let a
+     * rep presign under some other key, PUT a file, then record it as `exco` and flip
+     * the flag without ever completing the committee form — the exact bypass the
+     * kind==='form' gate on POST /clubs/:id/exco exists to prevent. `assertOwnObjectKey`
+     * does not help here: it binds the tenant/club prefix, not the docKey segment.
+     */
+    rejectForm?: boolean;
+  },
+): RequiredDoc | undefined {
+  const doc = resolveRequiredDocs(cfg).find((d) => d.key === key);
+  if (doc) {
+    if (opts?.rejectForm && doc.kind === 'form') {
+      throw new HttpError(400, `"${key}" is completed on the platform, not by uploading a file`);
+    }
+    return doc;
+  }
+  const stored =
+    (club.docs && key in club.docs) || (club.docMeta && key in (club.docMeta as object));
+  if (!stored) throw new HttpError(400, `unknown document key "${key}"`);
+  return undefined;
+}
+
+/**
+ * Whether a doc behaves as multi-file. A catalogue entry answers directly; a retired
+ * key answers off its stored meta shape (a files[] array only ever comes from the
+ * multi-file path, so the shape is authoritative).
+ */
+function isMultiFileDoc(doc: RequiredDoc | undefined, storedMeta: unknown): boolean {
+  if (doc) return !!doc.multiFile;
+  return Array.isArray((storedMeta as { files?: unknown } | null)?.files);
 }
 
 /**
@@ -227,76 +290,12 @@ function assertDocMetaObjectKeys(
   }
 }
 
-/** One stored compliance-document file (safeguarding holds an array of these). */
-interface DocFileEntry {
-  objectKey: string;
-  size: number;
-  contentType?: string;
-  uploadedAt: string;
-}
-
-/**
- * Mirror of `safeguardingMeta` in the frontend's data.jsx — normalizes every
- * historical docMeta.safeguarding shape to `{ files, markedCompliant, at }`:
- * the `{ files: [...] }` wrapper as-is, a legacy single upload `{ objectKey }`
- * as a one-entry array, and the admin `{ markedCompliant }` sentinel as an
- * empty array with the flag set.
- */
-function safeguardingMeta(meta: unknown): {
-  files: DocFileEntry[];
-  markedCompliant: boolean;
-  courseBooked: boolean;
-  courseDate: string;
-  at?: string;
-} {
-  const m = (meta ?? {}) as Record<string, unknown>;
-  const courseBooked = !!m.courseBooked;
-  const courseDate = (m.courseDate as string | undefined) || '';
-  if (Array.isArray(m.files)) {
-    return {
-      files: m.files as DocFileEntry[],
-      markedCompliant: !!m.markedCompliant,
-      courseBooked,
-      courseDate,
-      at: m.at as string | undefined,
-    };
-  }
-  if (m.objectKey) {
-    return {
-      files: [m as unknown as DocFileEntry],
-      markedCompliant: !!m.markedCompliant,
-      courseBooked,
-      courseDate,
-    };
-  }
-  return {
-    files: [],
-    markedCompliant: !!m.markedCompliant,
-    courseBooked,
-    courseDate,
-    at: m.at as string | undefined,
-  };
-}
-
-/**
- * Re-wrap normalized safeguarding state as the stored docMeta value. `extra` carries the
- * club-set "course booked" flag + date so a generic merge or append/delete recompute can't
- * strip it; both ride through only when truthy (the canonical course-booked shape is
- * `{ files, courseBooked: true, courseDate, at }`).
- */
-function safeguardingValue(
-  files: DocFileEntry[],
-  markedCompliant: boolean,
-  at?: string,
-  extra?: { courseBooked?: boolean; courseDate?: string },
-) {
-  const value: Record<string, unknown> = markedCompliant
-    ? { files, markedCompliant: true, at }
-    : { files };
-  if (extra?.courseBooked) value.courseBooked = true;
-  if (extra?.courseDate) value.courseDate = extra.courseDate;
-  return value;
-}
+// docMeta normalization lives in catalogue.ts so the import CLIs (which write through
+// repo and cannot import this module) share ONE definition — a hand-copied replica would
+// drift and silently corrupt stored compliance records. Aliased to the historical names
+// used throughout the routes below.
+const safeguardingMeta = normalizeDocMeta;
+const safeguardingValue = docMetaValue;
 
 const app = new Hono<HonoEnv>();
 
@@ -320,6 +319,16 @@ function withPlayerCount(club: Club): Club {
   return { ...club, players: (club as { playerCount?: number }).playerCount ?? 0 };
 }
 
+/**
+ * The resolved doc catalogue with operator-only tooling fields stripped: matchHints
+ * feed the operator bulk-intake classifier and have no business on a tenant-facing
+ * (let alone unauthenticated) payload. Archived entries ride along — the SPA needs
+ * them to render already-stored files — flagged so counts exclude them.
+ */
+function publicRequiredDocs(cfg: TenantConfig | null): Omit<RequiredDoc, 'matchHints'>[] {
+  return resolveRequiredDocs(cfg).map(({ matchHints: _hints, ...rest }) => rest);
+}
+
 // ───────────────────────── Public routes ─────────────────────────
 
 /** Tenant branding by host (or ?tenant= / x-tenant in dev). No auth. */
@@ -328,14 +337,19 @@ app.get('/tenant', async (c) => {
   if (!tenant) throw new HttpError(400, 'unknown tenant');
   const config = await repo.getTenantConfig(tenant);
   if (!config) throw new HttpError(404, 'tenant not found');
-  // Only branding + deadline + the league catalogue are public; knownClubs/requiredDocs
-  // gate behind auth. Leagues are non-sensitive (names only) and the affiliation picker
-  // needs them, so they ride the already-fetched tenant payload.
+  // Only branding + deadline + the catalogues are public; knownClubs gates behind
+  // auth. Leagues are non-sensitive (names only) and the affiliation picker needs
+  // them, so they ride the already-fetched tenant payload.
   return c.json({
     tenant: config.tenant,
     branding: config.branding,
     submissionDeadline: config.submissionDeadline,
     leagues: config.leagues ?? [],
+    // The compliance-doc catalogue (ADR 0009, reversing ADR 0005's omission): doc
+    // names/flags are as public as league and district names — the rep portal reads
+    // only this payload, and the tenant's requirements are published to clubs anyway.
+    // matchHints (operator tooling) are stripped; legacy rows resolve to the defaults.
+    requiredDocs: publicRequiredDocs(config),
     // District names are as public as league names — signup/affiliation pickers
     // need them. Legacy rows without the field resolve to the shared defaults.
     districts: resolveDistricts(config),
@@ -892,13 +906,16 @@ app.post('/club-signup', async (c) => {
   if (colliding) return signupReplayOr409(c, tenant, colliding, email);
 
   const sub = await provisionInviteUser(email);
-  const club = buildClubFromSpec({
-    name: clubName,
-    district,
-    chair: repName,
-    chairEmail: email,
-    chairCell: repCellNorm ?? undefined,
-  });
+  const club = buildClubFromSpec(
+    {
+      name: clubName,
+      district,
+      chair: repName,
+      chairEmail: email,
+      chairCell: repCellNorm ?? undefined,
+    },
+    resolveRequiredDocs(cfg),
+  );
   club.onboardedVia = 'self-signup';
   // Implied POPIA consent: submitting the self-signup form (which carries a notice that
   // the union stores these details to administer affiliation) records consent at submit.
@@ -993,92 +1010,8 @@ async function ensureSignupMembership(
   await writeUserGuarded(tenant, next, 0);
 }
 
-function computeIsMinor(dob: string): boolean {
-  const born = new Date(dob);
-  if (Number.isNaN(born.getTime())) return false;
-  const eighteen = new Date(born);
-  eighteen.setFullYear(eighteen.getFullYear() + 18);
-  return eighteen.getTime() > Date.now();
-}
-
-/**
- * Idempotent dedup key for a person within a club. SHARED by the public-link path
- * and the in-portal chair form so the same person can't be registered twice (once
- * per path). Keys on the player's OWN identity — their ID number — NOT on contact
- * fields: a parent/guardian legitimately reuses one email/cell across siblings, so
- * keying on contact collapsed distinct children into one identity and blocked the
- * 2nd+ child (the transfer flow already resolves players by idNumber, so this aligns).
- * The identity is namespaced by idType + nationality because passport numbers are
- * unique only within an issuing country; a bare passport number would false-collide
- * two different foreign players. RSA IDs are nationally unique, scoped under `sa-id`.
- * Caveat: nationality is free text (not enum-validated), so a passport holder who
- * re-registers with a different spelling ("Zimbabwean" vs "Zimbabwe") escapes dedup —
- * best-effort, same class of gap the prior email-vs-cell key had.
- * Falls back to name+dob only when no idNumber is present (should not happen — it is
- * required on both paths), so the identity is never derived from an empty string.
- *
- * The result is a sha256 hash of that identity, NOT the plaintext: this key is both the
- * DynamoDB sk and the `:nk` URL segment in the id-doc endpoints, so hashing keeps the raw
- * national ID out of id-doc URLs, API access logs, and Sentry (POPIA data-minimisation).
- * Hashing is deterministic, so dedup and the cross-path guarantee are unchanged; the
- * plaintext idNumber lives only in the item's `idNumber` attribute (transfers match on it).
- */
-function playerNaturalKey(body: Partial<PlayerRegistration>): string {
-  const id = normalizeId(body.idNumber);
-  const identity = id
-    ? (body.idType ?? 'sa-id') === 'passport'
-      ? `passport-${normalizeId(body.nationality)}-${id}`
-      : `sa-id-${id}`
-    : `${body.firstName}-${body.lastName}-${body.dob}`;
-  return createHash('sha256').update(identity.toLowerCase()).digest('hex');
-}
-
-/**
- * Derive an ISO date of birth from a 13-digit RSA ID (YYMMDD…). The century digit is
- * absent, so we pivot year-relative (not on a frozen constant): assume the 2000s, and
- * fall back to the 1900s only if that lands in the future. This self-updates each year,
- * so it never silently rots. Returns null if the digits don't form a real date.
- */
-function dobFromSaId(idNumber: string): string | null {
-  if (!/^\d{13}$/.test(idNumber)) return null;
-  const yy = Number(idNumber.slice(0, 2));
-  const mm = Number(idNumber.slice(2, 4));
-  const dd = Number(idNumber.slice(4, 6));
-  const currentYear = new Date().getFullYear();
-  const year = 2000 + yy <= currentYear ? 2000 + yy : 1900 + yy;
-  if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
-  const iso = `${year}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime()) || d.getTime() > Date.now()) return null;
-  // Guard against rollover (e.g. 0230 → Mar 02): the parsed date must match the inputs.
-  if (d.getUTCMonth() + 1 !== mm || d.getUTCDate() !== dd) return null;
-  return iso;
-}
-
 const MAX_ID_DOC_BYTES = 5 * 1024 * 1024; // 5 MB — ID photos/scans
 const ID_DOC_TYPES = new Set(['image/jpeg', 'image/png', 'application/pdf']);
-
-/** Plausibility floor for a self-asserted passport DOB (rejects obviously-bogus dates). */
-const MIN_DOB = '1920-01-01';
-/**
- * Resolve a player's date of birth. SA citizens (default) derive it from the forgery-
- * resistant 13-digit RSA ID. Non-SA citizens (`idType: 'passport'`) supply it directly —
- * there is no oracle to derive it from a passport, so the client value is trusted, bounded
- * only by a future-date and plausibility-floor check. Returns null if it can't be resolved.
- */
-function resolvePlayerDob(body: Partial<PlayerRegistration>): string | null {
-  if (body.idType === 'passport') {
-    if (!body.dob) return null;
-    const d = new Date(body.dob);
-    if (Number.isNaN(d.getTime()) || d.getTime() > Date.now() || body.dob < MIN_DOB) return null;
-    return body.dob;
-  }
-  return dobFromSaId(body.idNumber!);
-}
-/** Normalise an ID for storage/matching — trims and upper-cases (passports are alphanumeric). */
-function normalizeId(idNumber: string | undefined): string {
-  return (idNumber || '').trim().toUpperCase();
-}
 
 /**
  * Find a club's player by normalized ID number (no GSI on idNumber — a linear scan of
@@ -1489,11 +1422,13 @@ app.patch('/clubs/:id', async (c) => {
     ...(cfg?.leagues ?? []).map((l) => l.key),
     ...(current.leagues ?? []),
   ]);
-  // Same union for doc keys: a patch may carry/clear a retired key already on the
-  // club (pre-cleanup state) but can never introduce one — e.g. a stale pre-deploy
-  // admin tab's "mark all compliant" must not repopulate keys after cleanup.
+  // Same union for doc keys: the tenant's resolved catalogue plus keys already on the
+  // club (pre-cleanup state) — a patch may carry/clear a retired key but can never
+  // introduce one — e.g. a stale pre-deploy admin tab's "mark all compliant" must not
+  // repopulate keys after cleanup.
+  const requiredDocs = resolveRequiredDocs(cfg);
   const validDocKeys = new Set([
-    ...DOC_KEYS,
+    ...requiredDocs.map((d) => d.key),
     ...Object.keys(current.docs ?? {}),
     ...Object.keys(current.docMeta ?? {}),
   ]);
@@ -1504,52 +1439,65 @@ app.patch('/clubs/:id', async (c) => {
     ...resolveDistricts(cfg),
     ...(current.district ? [current.district] : []),
   ]);
-  const invalid = validateClubPatch(patch, validLeagueKeys, validDocKeys, validDistricts);
+  const invalid = validateClubPatch(
+    patch,
+    validLeagueKeys,
+    validDocKeys,
+    validDistricts,
+    requiredDocs,
+    current.docMeta,
+  );
   if (invalid) throw new HttpError(400, invalid);
   if (patch.docMeta) assertDocMetaObjectKeys(ra.tenant, id, patch.docMeta);
   // Stale-client guard: docMeta is replaced wholesale (see repo.updateClub), so a
   // pre-multi-file client's "mark compliant" (bare sentinel) or revert (key omitted)
-  // would erase the safeguarding files array — uploaded certificates must survive
-  // any generic patch that touches docMeta. Merge the stored files back in and keep
-  // the docs flag consistent with the preserved minimum.
+  // would erase a multi-file doc's files array — uploaded files must survive any
+  // generic patch that touches docMeta. Runs per multi-file key: every catalogue
+  // entry flagged multiFile, plus any stored key whose meta carries a files[] array
+  // (covers retired keys after a catalogue change). Merge the stored files back in
+  // and keep the docs flag consistent with the preserved minimum.
   if (patch.docMeta) {
-    const incoming = safeguardingMeta((patch.docMeta as Record<string, unknown>).safeguarding);
-    // A client can also hand-craft an oversized files array straight into the
-    // generic patch — the append route's cap must hold here too.
-    if (incoming.files.length > MAX_SAFEGUARDING_FILES) {
-      throw new HttpError(400, `no more than ${MAX_SAFEGUARDING_FILES} safeguarding certificates`);
+    const multiKeys = new Set(requiredDocs.filter((d) => d.multiFile).map((d) => d.key));
+    for (const [k, v] of Object.entries(current.docMeta ?? {})) {
+      if (Array.isArray((v as { files?: unknown } | null)?.files)) multiKeys.add(k);
     }
-    const stored = safeguardingMeta(current.docMeta?.safeguarding);
-    if (stored.files.length) {
-      const have = new Set(incoming.files.map((f) => f.objectKey));
-      const files = [...incoming.files, ...stored.files.filter((f) => !have.has(f.objectKey))];
-      // Carry the course-booked flag/date from the INCOMING patch (not `stored`): this
-      // generic PATCH is the channel a client uses to both set AND clear a booking, so it
-      // carries the full intended safeguarding state — preferring stored here would make a
-      // clear impossible. (Append/delete derive from stored because they mutate one file,
-      // not the booking.) All clients spread existing docMeta, so an unrelated patch keeps
-      // the booking; re-deriving from files only is what would silently strip it.
-      (patch.docMeta as Record<string, unknown>).safeguarding = safeguardingValue(
-        files,
-        incoming.markedCompliant,
-        incoming.at,
-        { courseBooked: incoming.courseBooked, courseDate: incoming.courseDate },
-      );
-      const docs = patch.docs as Record<string, boolean> | undefined;
-      // The doc stays satisfied at the file minimum OR when a course is booked — don't
-      // let the merge downgrade a course-booked club below the count threshold.
-      if (
-        docs &&
-        docs.safeguarding === false &&
-        (incoming.courseBooked || files.length >= MIN_SAFEGUARDING_FILES)
-      ) {
-        docs.safeguarding = true;
+    for (const k of multiKeys) {
+      const docDef = requiredDocs.find((d) => d.key === k);
+      const { min, max } = multiFileLimits(docDef?.multiFile ? docDef : undefined);
+      const incoming = safeguardingMeta((patch.docMeta as Record<string, unknown>)[k]);
+      // A client can also hand-craft an oversized files array straight into the
+      // generic patch — the append route's cap must hold here too.
+      if (incoming.files.length > max) {
+        throw new HttpError(400, `no more than ${max} stored files for document "${k}"`);
       }
-      // The merge is read-modify-write off `current`: without pinning that version,
-      // a safeguarding append landing between this read and the repo's own re-read
-      // would be silently overwritten by the merged (stale) docMeta — the very loss
-      // this guard exists to prevent. Pin so the race 409s and the client retries.
-      patch.version ??= current.version;
+      const stored = safeguardingMeta(current.docMeta?.[k]);
+      if (stored.files.length) {
+        const have = new Set(incoming.files.map((f) => f.objectKey));
+        const files = [...incoming.files, ...stored.files.filter((f) => !have.has(f.objectKey))];
+        // Carry the course-booked flag/date from the INCOMING patch (not `stored`): this
+        // generic PATCH is the channel a client uses to both set AND clear a booking, so it
+        // carries the full intended doc state — preferring stored here would make a
+        // clear impossible. (Append/delete derive from stored because they mutate one file,
+        // not the booking.) All clients spread existing docMeta, so an unrelated patch keeps
+        // the booking; re-deriving from files only is what would silently strip it.
+        (patch.docMeta as Record<string, unknown>)[k] = safeguardingValue(
+          files,
+          incoming.markedCompliant,
+          incoming.at,
+          { courseBooked: incoming.courseBooked, courseDate: incoming.courseDate },
+        );
+        const docs = patch.docs as Record<string, boolean> | undefined;
+        // The doc stays satisfied at the file minimum OR when a course is booked — don't
+        // let the merge downgrade a course-booked club below the count threshold.
+        if (docs && docs[k] === false && (incoming.courseBooked || files.length >= min)) {
+          docs[k] = true;
+        }
+        // The merge is read-modify-write off `current`: without pinning that version,
+        // an append landing between this read and the repo's own re-read would be
+        // silently overwritten by the merged (stale) docMeta — the very loss this
+        // guard exists to prevent. Pin so the race 409s and the client retries.
+        patch.version ??= current.version;
+      }
     }
   }
   // A club that saves affiliation-form data (exco/leagues/coaches/ground) without
@@ -2128,14 +2076,20 @@ app.patch('/clubs/:id/clearances/:cid', async (c) => {
   }
 });
 
-/** Save the exec committee; also flips docs.exco true. */
+/** Save the exec committee; also flips docs.exco true when it is a form-satisfied doc. */
 app.post('/clubs/:id/exco', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   assertClubAccess(ra, id);
   const exco = await c.req.json<Record<string, unknown>>();
+  const cfg = await repo.getTenantConfig(ra.tenant);
   const current = await repo.getClub(ra.tenant, id);
   if (!current) throw new HttpError(404, 'club not found');
+  // The docs.exco flip is gated on the catalogue defining exco as a FORM doc — key
+  // presence alone is not enough: a tenant whose catalogue has no exco entry (or a
+  // file-based committee doc under another key) must not have a form save silently
+  // satisfy a required upload (ADR 0009).
+  const excoIsFormDoc = activeRequiredDocs(cfg).some((d) => d.key === 'exco' && d.kind === 'form');
   // Saving the exco is real affiliation-form progress: promote a not-yet-started club to
   // 'in_progress' (this path bypasses PATCH /clubs/:id, so it carries its own bump). Only
   // include the key when it changes — a 'complete' or already-'in_progress' club is left as-is.
@@ -2144,7 +2098,7 @@ app.post('/clubs/:id/exco', async (c) => {
     id,
     {
       exco,
-      docs: { ...current.docs, exco: true },
+      ...(excoIsFormDoc ? { docs: { ...current.docs, exco: true } } : {}),
       ...(current.affiliation === 'not_started' ? { affiliation: 'in_progress' as const } : {}),
     },
     ra.email,
@@ -2157,22 +2111,26 @@ app.post('/clubs/:id/docs/:key/upload-url', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   const key = c.req.param('key');
-  assertDocKey(key);
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  const docDef = requireUploadableDoc(cfg, key);
   assertClubAccess(ra, id);
-  // PDF and Word are accepted (Google Docs exports as .docx/.pdf). A MISSING
-  // contentType falls back to PDF (legacy no-body clients); a present-but-unknown
-  // one must 400 here — silently signing it as PDF would let the upload through
-  // only for the record PATCH to reject it, orphaning the object in S3. The
-  // presign locks the upload to the echoed type, so the client must PUT with
-  // exactly this Content-Type.
+  // Accepted types come from the doc's own definition (legacy default: PDF/Word —
+  // Google Docs exports as .docx/.pdf; spreadsheet docs opt in via `accepts`). A
+  // MISSING contentType falls back to PDF (legacy no-body clients); a
+  // present-but-unaccepted one must 400 here — silently signing it as PDF would let
+  // the upload through only for the record PATCH to reject it, orphaning the object
+  // in S3. The presign locks the upload to the echoed type, so the client must PUT
+  // with exactly this Content-Type.
+  const mimes = acceptedMimes(docDef);
   const { contentType } = await c.req
     .json<{ contentType?: string }>()
     .catch(() => ({ contentType: undefined }));
-  if (contentType !== undefined && !DOC_CONTENT_TYPES[contentType]) {
-    throw new HttpError(400, 'contentType must be PDF or Word');
+  if (contentType !== undefined && !mimes[contentType]) {
+    throw new HttpError(400, 'file type not accepted for this document');
   }
   const ct = contentType ?? 'application/pdf';
-  const objectKey = `${ra.tenant}/${id}/${key}-${randomUUID()}.${DOC_CONTENT_TYPES[ct]}`;
+  if (!mimes[ct]) throw new HttpError(400, 'file type not accepted for this document');
+  const objectKey = `${ra.tenant}/${id}/${key}-${randomUUID()}.${mimes[ct]}`;
   const url = await getSignedUrl(
     s3,
     new PutObjectCommand({
@@ -2190,27 +2148,32 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   const key = c.req.param('key');
-  assertDocKey(key);
   assertClubAccess(ra, id);
   const meta = await c.req.json<{ objectKey: string; size: number; contentType?: string }>();
   if (!meta.objectKey) throw new HttpError(400, 'objectKey required');
   assertOwnObjectKey(ra.tenant, id, meta.objectKey);
   if (typeof meta.size !== 'number' || meta.size <= 0 || meta.size > MAX_DOC_BYTES) {
-    throw new HttpError(400, 'file must be a non-empty PDF or Word document under 10 MB');
+    throw new HttpError(400, 'file must be non-empty and under 10 MB');
   }
-  if (meta.contentType !== undefined && !DOC_CONTENT_TYPES[meta.contentType]) {
-    throw new HttpError(400, 'contentType must be PDF or Word');
-  }
+  const cfg = await repo.getTenantConfig(ra.tenant);
   const current = await repo.getClub(ra.tenant, id);
   if (!current) throw new HttpError(404, 'club not found');
+  // Catalogue ∪ stored keys: recording against a since-removed key is allowed (the
+  // file was already minted/uploaded under it), but a never-known key still 400s — and
+  // a form-satisfied key is rejected outright, matching the presign route.
+  const docDef = requireStoredOrCatalogueDoc(cfg, key, current, { rejectForm: true });
+  if (meta.contentType !== undefined && !acceptedMimes(docDef)[meta.contentType]) {
+    throw new HttpError(400, 'file type not accepted for this document');
+  }
   const docMeta = current.docMeta ?? {};
-  if (key === 'safeguarding') {
-    // Safeguarding certificates are per-person and APPEND — files coexist (no
-    // delete-previous), and the doc only completes at the 2-person minimum.
+  if (isMultiFileDoc(docDef, docMeta[key])) {
+    // Multi-file docs (safeguarding pattern) APPEND — files coexist (no
+    // delete-previous), and the doc only completes at the definition's minimum.
+    const { min, max } = multiFileLimits(docDef);
     const norm = safeguardingMeta(docMeta[key]);
     const exists = norm.files.some((f) => f.objectKey === meta.objectKey);
-    if (!exists && norm.files.length >= MAX_SAFEGUARDING_FILES) {
-      throw new HttpError(400, `no more than ${MAX_SAFEGUARDING_FILES} safeguarding certificates`);
+    if (!exists && norm.files.length >= max) {
+      throw new HttpError(400, `no more than ${max} stored files for this document`);
     }
     const files = exists
       ? norm.files
@@ -2230,9 +2193,8 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
         docs: {
           ...current.docs,
           // A booked course keeps the doc satisfied independently of the file count, so
-          // appending a (sub-minimum) certificate must not undo a course-booked club.
-          [key]:
-            norm.markedCompliant || norm.courseBooked || files.length >= MIN_SAFEGUARDING_FILES,
+          // appending a (sub-minimum) file must not undo a course-booked club.
+          [key]: norm.markedCompliant || norm.courseBooked || files.length >= min,
         },
         // Preserve any course-booked flag/date — uploading a certificate must not strip it.
         docMeta: {
@@ -2250,62 +2212,115 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
     );
     return c.json(updated);
   }
-  // Replacing a wrongly-uploaded file: best-effort delete the previous S3 object so a
-  // stale PDF (PII) isn't orphaned in the bucket (POPIA data-minimisation). A failed
-  // delete must never fail the replace, and we skip non-S3 keys (e.g. local dev).
   const prev = docMeta[key] as { objectKey?: string } | undefined;
   const prevKey = prev?.objectKey;
-  if (prevKey && prevKey !== meta.objectKey && !prevKey.startsWith('local/')) {
-    try {
-      await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: prevKey }));
-    } catch (err) {
-      // Orphaned object is recoverable via a bucket lifecycle rule; don't block the replace.
-      // Log once so accumulation is observable rather than silent.
-      console.warn(`docs replace: failed to delete prior object ${prevKey}`, err);
-    }
-  }
   const updated = await applyClubPatch(
     ra.tenant,
     id,
     {
       docs: { ...current.docs, [key]: true },
-      docMeta: { ...docMeta, [key]: { ...meta, uploadedAt: now() } },
+      // NAMED fields only — never `...meta`. The body is un-narrowed client JSON, and this
+      // route bypasses validateClubPatch entirely, so a spread persisted whatever the
+      // caller sent: a few hundred KB of junk here pushes the club item past DynamoDB's
+      // 400 KB ceiling and bricks EVERY later write to that club, and an injected
+      // `files: [{objectKey: '<other tenant>/…'}]` would forge exactly the record
+      // integrity that view-url treats as its security gate (it deliberately has no
+      // assertOwnObjectKey of its own).
+      docMeta: {
+        ...docMeta,
+        [key]: {
+          objectKey: meta.objectKey,
+          size: meta.size,
+          contentType: meta.contentType,
+          uploadedAt: now(),
+        },
+      },
     },
     ra.email,
   );
+  // Replacing a wrongly-uploaded file: best-effort delete the previous S3 object so a
+  // stale PDF (PII) isn't orphaned in the bucket (POPIA data-minimisation). AFTER the
+  // write lands — deleting first would strand a live docMeta pointer at a missing object
+  // if the write then failed. A failed delete must never fail the replace, and we skip
+  // non-S3 keys (e.g. local dev).
+  if (prevKey && prevKey !== meta.objectKey && !prevKey.startsWith('local/')) {
+    try {
+      await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: prevKey }));
+    } catch (err) {
+      // Orphaned object is recoverable via a reconciliation sweep; don't block the replace.
+      // Log once so accumulation is observable rather than silent.
+      console.warn(`docs replace: failed to delete prior object ${prevKey}`, err);
+    }
+  }
   return c.json(updated);
 });
 
 /**
- * Remove one stored safeguarding certificate (the only multi-file doc). Recomputes
- * the docs flag from the remaining files; an admin override keeps the doc compliant.
+ * Remove one stored file from a doc. Recomputes the docs flag from what remains; an
+ * admin override or a booked course keeps the doc compliant.
+ *
+ * Handles BOTH shapes. Multi-file docs drop the named file from `files[]`. Single-file
+ * docs drop the whole record — which is the only way to clear one: the upload path can
+ * replace a file but never remove it. Without this an ARCHIVED single-file doc was a
+ * dead end (ADR 0009 promises archived files stay "viewable/deletable", and the
+ * catalogue's delete guard tells operators to clear each club's record first, which was
+ * impossible for single-file keys — the object stayed in the bucket forever).
  */
 app.delete('/clubs/:id/docs/:key/file', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   const key = c.req.param('key');
-  assertDocKey(key);
   assertClubAccess(ra, id);
-  if (key !== 'safeguarding') {
-    throw new HttpError(400, 'per-file removal only applies to safeguarding');
-  }
   const { objectKey } = await c.req.json<{ objectKey?: string }>().catch(() => ({}) as never);
   if (!objectKey) throw new HttpError(400, 'objectKey required');
   assertOwnObjectKey(ra.tenant, id, objectKey);
+  const cfg = await repo.getTenantConfig(ra.tenant);
   const current = await repo.getClub(ra.tenant, id);
   if (!current) throw new HttpError(404, 'club not found');
   const docMeta = current.docMeta ?? {};
+  // Catalogue ∪ stored keys — a retired or archived key's files must stay deletable
+  // (this route is the cleanup path the catalogue's delete guard points at).
+  const docDef = requireStoredOrCatalogueDoc(cfg, key, current);
+  if (!isMultiFileDoc(docDef, docMeta[key])) {
+    // Single-file: the objectKey must be the one on record (same "must be ON RECORD"
+    // gate as view-url — that check is what stops a rep S3-deleting an arbitrary key).
+    const stored = docMeta[key] as { objectKey?: string } | undefined;
+    if (!stored?.objectKey || stored.objectKey !== objectKey) {
+      throw new HttpError(404, 'no such file on record for this document');
+    }
+    const norm1 = safeguardingMeta(docMeta[key]);
+    const nextMeta = { ...docMeta };
+    // Symmetric with the multi-file branch below: an admin override outlives the file it
+    // was recorded alongside, so only a fully-empty state drops the key.
+    if (norm1.markedCompliant) {
+      nextMeta[key] = { markedCompliant: true, at: norm1.at };
+    } else {
+      delete nextMeta[key];
+    }
+    const updated = await applyClubPatch(
+      ra.tenant,
+      id,
+      {
+        docs: { ...current.docs, [key]: norm1.markedCompliant },
+        docMeta: nextMeta,
+        version: current.version,
+      },
+      ra.email,
+    );
+    // Delete AFTER the write lands — a delete before a failed/409'd write would strand a
+    // live docMeta pointer at a missing object. Best-effort; never fails the removal.
+    if (!objectKey.startsWith('local/')) {
+      try {
+        await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: objectKey }));
+      } catch (err) {
+        console.warn(`docs remove: failed to delete object ${objectKey}`, err);
+      }
+    }
+    return c.json(updated);
+  }
   const norm = safeguardingMeta(docMeta[key]);
   if (!norm.files.some((f) => f.objectKey === objectKey)) {
     throw new HttpError(404, 'no such file on record for this document');
-  }
-  // Best-effort S3 delete (PII minimisation); never block the record update.
-  if (!objectKey.startsWith('local/')) {
-    try {
-      await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: objectKey }));
-    } catch (err) {
-      console.warn(`docs remove: failed to delete object ${objectKey}`, err);
-    }
   }
   const files = norm.files.filter((f) => f.objectKey !== objectKey);
   const nextMeta = { ...docMeta };
@@ -2325,7 +2340,8 @@ app.delete('/clubs/:id/docs/:key/file', async (c) => {
     {
       docs: {
         ...current.docs,
-        [key]: norm.markedCompliant || norm.courseBooked || files.length >= MIN_SAFEGUARDING_FILES,
+        [key]:
+          norm.markedCompliant || norm.courseBooked || files.length >= multiFileLimits(docDef).min,
       },
       docMeta: nextMeta,
       // Same read-modify-write pinning as the append path.
@@ -2333,6 +2349,15 @@ app.delete('/clubs/:id/docs/:key/file', async (c) => {
     },
     ra.email,
   );
+  // Best-effort S3 delete (PII minimisation), AFTER the record write lands — deleting
+  // first would strand the remaining docMeta entry at a missing object on a 409.
+  if (!objectKey.startsWith('local/')) {
+    try {
+      await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: objectKey }));
+    } catch (err) {
+      console.warn(`docs remove: failed to delete object ${objectKey}`, err);
+    }
+  }
   return c.json(updated);
 });
 
@@ -2341,20 +2366,22 @@ app.post('/clubs/:id/docs/:key/view-url', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   const key = c.req.param('key');
-  assertDocKey(key);
   assertClubAccess(ra, id);
   const { objectKey: requested } = await c.req
     .json<{ objectKey?: string }>()
     .catch(() => ({}) as { objectKey?: string });
+  const cfg = await repo.getTenantConfig(ra.tenant);
   const club = await repo.getClub(ra.tenant, id);
   if (!club) throw new HttpError(404, 'club not found');
   const docMeta = club.docMeta ?? {};
+  // Catalogue ∪ stored keys — a retired/archived key's file stays viewable.
+  const docDef = requireStoredOrCatalogueDoc(cfg, key, club);
   // Resolve the target file. The requested objectKey must be ON RECORD for this
   // doc — that check is the security gate against presigning arbitrary bucket
-  // keys. Safeguarding holds several files (default: first, for old clients);
+  // keys. Multi-file docs hold several files (default: first, for old clients);
   // single-file docs ignore a matching param and 404 a foreign one.
   let entry: { objectKey?: string; contentType?: string } | undefined;
-  if (key === 'safeguarding') {
+  if (isMultiFileDoc(docDef, docMeta[key])) {
     const norm = safeguardingMeta(docMeta[key]);
     entry = requested ? norm.files.find((f) => f.objectKey === requested) : norm.files[0];
   } else {
@@ -3138,9 +3165,11 @@ function validateLeagues(
  *
  *   clubSignupLink   a live credential; it has its own route
  *   knownClubs       the operator's directory, reachable via /clubs/directory
- *   requiredDocs     compliance config, served with the club record that uses it
  *   adminCount       an internal counter for the last-admin guard
  *   setupCompletedBy an operator's email address — not tenant-facing at all
+ *
+ * requiredDocs moved OFF this held-back list with ADR 0009: it now rides both here
+ * and the public GET /tenant (names/flags only — matchHints stay operator-side).
  */
 app.get('/tenant/config', async (c) => {
   const { tenant } = c.get('requestAuth')!;
@@ -3152,6 +3181,7 @@ app.get('/tenant/config', async (c) => {
     submissionDeadline: config.submissionDeadline,
     leagues: config.leagues ?? [],
     districts: resolveDistricts(config),
+    requiredDocs: publicRequiredDocs(config),
     tutorials: tutorialsFor(config),
     features: config.features ?? {},
     calendars: config.calendars ?? [],
@@ -3176,6 +3206,7 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { knownClubs?: unknown }).knownClubs;
   delete (patch as { calendars?: unknown }).calendars;
   delete (patch as { structures?: unknown }).structures;
+  delete (patch as { requiredDocs?: unknown }).requiredDocs;
   const next = await applyTenantConfigPatch(tenant, patch, { preserveCompetitions: true });
   return c.json(next);
 });
@@ -3582,6 +3613,34 @@ app.put('/platform/tenants/:slug', async (c) => {
           throw new HttpError(
             409,
             `"${d}" is still in use — ${clubRefs} club${clubRefs === 1 ? '' : 's'} and ${leagueRefs} league${leagueRefs === 1 ? '' : 's'} reference it; reassign them first`,
+          );
+      }
+    }
+  }
+  if (body.requiredDocs !== undefined) {
+    validateRequiredDocs(body.requiredDocs); // shape 400s must win over the guard's 409
+    patch.requiredDocs = body.requiredDocs;
+    // Referrer delete guard (ADR 0009), mirroring leagues/districts: a REMOVED doc key
+    // whose data still lives on any club — a real upload's docMeta OR a mark-compliant
+    // override's docs flag — would orphan stored PII with no cleanup owner (there is no
+    // tenant-admin path that removes doc keys). Archiving is the sanctioned retire path:
+    // an `archived` entry keeps its key, so it never trips this guard. For a legacy
+    // tenant with no requiredDocs field, removal is computed against the
+    // DEFAULT_REQUIRED_DOCS fallback — the first explicit save that drops a referenced
+    // default is correctly blocked. Clubs with only a false flag never block.
+    const current = await getCurrent();
+    const nextKeys = new Set(body.requiredDocs.map((d) => d.key));
+    const removed = resolveRequiredDocs(current).filter((d) => !nextKeys.has(d.key));
+    if (removed.length > 0) {
+      const clubs = await getClubs();
+      for (const doc of removed) {
+        const n = clubs.filter(
+          (cl) => cl.docs?.[doc.key] === true || (cl.docMeta && doc.key in (cl.docMeta as object)),
+        ).length;
+        if (n > 0)
+          throw new HttpError(
+            409,
+            `${n} club${n === 1 ? ' still holds' : 's still hold'} data for "${doc.name}" — archive the document instead, or clear each club's record first`,
           );
       }
     }
@@ -4005,6 +4064,366 @@ app.post('/platform/tenants/:slug/tutorial-upload/abort', async (c) => {
     if ((err as { name?: string }).name !== 'NoSuchUpload') throw err;
   }
   return c.json({ ok: true });
+});
+
+/** One row of the bulk doc-intake presign request. */
+interface DocIntakePresignItem {
+  clubId: string;
+  docKey: string;
+  contentType: string;
+  size: number;
+}
+/** Max rows accepted per doc-intake presign/commit call — the review UI batches in
+ *  pages well under this; it exists as a backstop against a runaway request. */
+const DOC_INTAKE_MAX_ITEMS = 100;
+
+/**
+ * POST /platform/tenants/:slug/doc-intake/presign — mint presigned PUTs for a batch
+ * of operator-selected files, one per {clubId, docKey}. Mirrors the tenant-side
+ * POST /clubs/:id/docs/:key/upload-url objectKey convention EXACTLY
+ * (`${tenant}/${clubId}/${docKey}-${uuid}.${ext}`) so the resulting keys keep working
+ * with assertOwnObjectKey, view-url, replace-delete and the erasure helpers.
+ *
+ * Errors are POSITIONAL (one result per input item, `{ok:false,error}` for a bad
+ * row) rather than a whole-batch 400 — the review UI has already screened obvious
+ * mistakes client-side, so a residual bad row (e.g. a club deleted mid-review)
+ * should not block the other 99 rows in the same drag-drop.
+ */
+app.post('/platform/tenants/:slug/doc-intake/presign', async (c) => {
+  const slug = c.req.param('slug');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const body = await c.req
+    .json<{ items?: DocIntakePresignItem[] }>()
+    .catch(() => ({}) as { items?: DocIntakePresignItem[] });
+  const items = Array.isArray(body.items) ? body.items : [];
+  if (items.length > DOC_INTAKE_MAX_ITEMS) {
+    throw new HttpError(400, `no more than ${DOC_INTAKE_MAX_ITEMS} items per request`);
+  }
+  // Resolved ONCE for the whole batch — every item is checked against the same
+  // club set + catalogue snapshot, not a fresh read per row (this can be a
+  // 100-row batch).
+  const clubIds = new Set((await repo.listClubs(slug)).map((cl) => cl.id));
+  const catalogue = activeRequiredDocs(cfg);
+  const results = await Promise.all(
+    items.map(async (item) => {
+      if (!item?.clubId || !clubIds.has(item.clubId)) {
+        return { ok: false as const, error: `unknown club: ${item?.clubId ?? ''}` };
+      }
+      // Active, non-form entries only — same gate as requireUploadableDoc, but
+      // against the ALREADY-RESOLVED catalogue (not a per-item repo round-trip).
+      const docDef = catalogue.find((d) => d.key === item.docKey);
+      if (!docDef || docDef.kind === 'form') {
+        return { ok: false as const, error: `unknown document key: ${item.docKey}` };
+      }
+      const mimes = acceptedMimes(docDef);
+      if (!item.contentType || !mimes[item.contentType]) {
+        return { ok: false as const, error: 'file type not accepted for this document' };
+      }
+      if (typeof item.size !== 'number' || item.size <= 0 || item.size > MAX_DOC_BYTES) {
+        return { ok: false as const, error: 'file must be non-empty and under 10 MB' };
+      }
+      const objectKey = `${slug}/${item.clubId}/${item.docKey}-${randomUUID()}.${mimes[item.contentType]}`;
+      const uploadUrl = await getSignedUrl(
+        s3,
+        new PutObjectCommand({
+          Bucket: UPLOADS_BUCKET,
+          Key: objectKey,
+          ContentType: item.contentType,
+        }),
+        { expiresIn: 300 },
+      );
+      return { ok: true as const, uploadUrl, objectKey, contentType: item.contentType };
+    }),
+  );
+  return c.json({ items: results });
+});
+
+/** One row of the bulk doc-intake commit request. */
+interface DocIntakeCommitItem {
+  clubId: string;
+  docKey: string;
+  objectKey: string;
+  size: number;
+  contentType?: string;
+  /** Original filename the operator picked — audit trail only. NOT the dedupe key:
+   *  that is `objectKey` (see buildDocIntakePatch), because two different files can
+   *  legitimately share a name and byte length. */
+  sourceName?: string;
+}
+
+/**
+ * Validate every item destined for ONE club's patch before any mutation or S3 side
+ * effect runs — a bad row later in the array must not leave an earlier row's
+ * best-effort delete fired against a patch that's about to be thrown away.
+ */
+function validateDocIntakeItems(
+  tenant: string,
+  clubId: string,
+  items: DocIntakeCommitItem[],
+  catalogue: RequiredDoc[],
+): void {
+  const prefix = `${tenant}/${clubId}/`;
+  for (const item of items) {
+    // Reuses assertOwnObjectKey's exact prefix semantics (incl. the `local/` dev
+    // sentinel) — this IS the security gate against an operator batch smuggling in
+    // a foreign club's (or arbitrary bucket) key. Type-guarded first: a row missing
+    // objectKey would otherwise throw a TypeError, which the per-club catch flattens
+    // into "failed to save this club's documents" — losing the per-row precision the
+    // rest of this route's error design is built on.
+    if (typeof item.objectKey !== 'string' || !item.objectKey) {
+      throw new HttpError(400, `objectKey required for document "${item.docKey}"`);
+    }
+    if (!item.objectKey.startsWith('local/') && !item.objectKey.startsWith(prefix)) {
+      throw new HttpError(400, `objectKey does not belong to club ${clubId}`);
+    }
+    const docDef = catalogue.find((d) => d.key === item.docKey);
+    if (!docDef || docDef.kind === 'form') {
+      throw new HttpError(400, `unknown document key "${item.docKey}"`);
+    }
+    if (typeof item.size !== 'number' || item.size <= 0 || item.size > MAX_DOC_BYTES) {
+      throw new HttpError(400, 'file must be non-empty and under 10 MB');
+    }
+    // Same accepted-type gate the presign routes and the rep record path apply. The
+    // stored contentType is reflected straight back as ResponseContentType by view-url,
+    // so an unvalidated one here would be the only way into that header.
+    if (item.contentType !== undefined && !acceptedMimes(docDef)[item.contentType]) {
+      throw new HttpError(400, `file type not accepted for document "${item.docKey}"`);
+    }
+  }
+}
+
+/**
+ * Build the merged docs/docMeta patch for one club's batch of committed uploads.
+ * Processes items in order so multiple rows targeting the same multiFile key
+ * append correctly against each other's accumulated state. Single-file docs best-
+ * effort delete the previous object exactly like PATCH /clubs/:id/docs/:key does
+ * (skip `local/` keys, never fail the commit on a delete error).
+ */
+function buildDocIntakePatch(
+  tenant: string,
+  clubId: string,
+  current: Club,
+  items: DocIntakeCommitItem[],
+  catalogue: RequiredDoc[],
+  operatorEmail: string,
+): {
+  docs: Record<string, boolean>;
+  docMeta: Record<string, unknown>;
+  /**
+   * Objects the committed patch orphans (replaced single-file uploads). Returned rather
+   * than deleted here: this builder runs again on a version-conflict retry, and a delete
+   * issued before the write is durable can leave a club's docMeta pointing at an object
+   * that no longer exists — an unviewable compliance document with no record of why.
+   * The caller deletes these only once applyClubPatch has landed.
+   */
+  supersededKeys: string[];
+} {
+  validateDocIntakeItems(tenant, clubId, items, catalogue);
+  const docs = { ...current.docs };
+  const docMeta = { ...(current.docMeta ?? {}) };
+  const supersededKeys: string[] = [];
+  for (const item of items) {
+    const docDef = catalogue.find((d) => d.key === item.docKey)!; // validated above
+    if (docDef.multiFile) {
+      const { min, max } = multiFileLimits(docDef);
+      const norm = safeguardingMeta(docMeta[item.docKey]);
+      // Dedupe on objectKey — exact, and the only field that actually identifies a stored
+      // file. sourceName+size looked equivalent but is not: two genuinely different files
+      // that happen to share a name and byte length (very ordinary for scanned forms) would
+      // collapse to one, silently discarding the second AND orphaning its already-uploaded
+      // S3 object. The case this guards is a re-sent commit for the SAME upload, which
+      // carries the same objectKey by construction.
+      const dup = norm.files.some((f) => f.objectKey === item.objectKey);
+      if (!dup && norm.files.length >= max) {
+        throw new HttpError(400, `no more than ${max} stored files for document "${item.docKey}"`);
+      }
+      const files = dup
+        ? norm.files
+        : [
+            ...norm.files,
+            {
+              objectKey: item.objectKey,
+              size: item.size,
+              contentType: item.contentType,
+              uploadedAt: now(),
+              uploadedBy: operatorEmail,
+              sourceName: item.sourceName,
+            },
+          ];
+      // Same completion rule as the append route: a course-booked/marked-compliant
+      // club stays satisfied regardless of file count.
+      docs[item.docKey] = norm.markedCompliant || norm.courseBooked || files.length >= min;
+      docMeta[item.docKey] = safeguardingValue(files, norm.markedCompliant, norm.at, {
+        courseBooked: norm.courseBooked,
+        courseDate: norm.courseDate,
+      });
+    } else {
+      const prev = docMeta[item.docKey] as { objectKey?: string } | undefined;
+      const prevKey = prev?.objectKey;
+      // Queue, never delete here — see supersededKeys on the return type.
+      if (prevKey && prevKey !== item.objectKey && !prevKey.startsWith('local/')) {
+        supersededKeys.push(prevKey);
+      }
+      docMeta[item.docKey] = {
+        objectKey: item.objectKey,
+        size: item.size,
+        contentType: item.contentType,
+        uploadedAt: now(),
+        uploadedBy: operatorEmail,
+        sourceName: item.sourceName,
+      };
+      docs[item.docKey] = true;
+    }
+  }
+  return { docs, docMeta, supersededKeys };
+}
+
+/**
+ * Commit one club's batch: read → build patch → ONE version-pinned applyClubPatch,
+ * retrying exactly once on a version conflict (re-read + rebuild the patch off the
+ * fresh row) before giving up and reporting this club as failed. Never partial —
+ * either the whole club's batch lands in one write, or none of it does.
+ */
+async function commitClubDocIntake(
+  tenant: string,
+  clubId: string,
+  items: DocIntakeCommitItem[],
+  catalogue: RequiredDoc[],
+  operatorEmail: string,
+): Promise<Club> {
+  let current = await repo.getClub(tenant, clubId);
+  if (!current) throw new HttpError(404, `club not found: ${clubId}`);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const { supersededKeys, ...patch } = buildDocIntakePatch(
+      tenant,
+      clubId,
+      current,
+      items,
+      catalogue,
+      operatorEmail,
+    );
+    try {
+      const updated = await applyClubPatch(
+        tenant,
+        clubId,
+        { ...patch, version: current.version },
+        operatorEmail,
+      );
+      // Only now that the record is durable: drop the objects this commit replaced.
+      // Deleting earlier would orphan a live docMeta pointer if the write then failed
+      // (a retry that also fails leaves the club with an unviewable document). A failed
+      // delete is recoverable bucket residue, so it must never fail the commit.
+      for (const key of supersededKeys) {
+        try {
+          await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: key }));
+        } catch (err) {
+          console.warn(`doc-intake commit: failed to delete superseded object ${key}`, err);
+        }
+      }
+      return updated;
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 409 && attempt === 0) {
+        current = await repo.getClub(tenant, clubId);
+        if (!current) throw new HttpError(404, `club not found: ${clubId}`);
+        continue;
+      }
+      throw err;
+    }
+  }
+  // Unreachable (the loop always returns or throws), but keeps the function's
+  // return type honest for TypeScript.
+  throw new HttpError(409, 'club changed; refetch');
+}
+
+/**
+ * POST /platform/tenants/:slug/doc-intake/commit — record a batch of already-
+ * uploaded files (minted via .../presign) against clubs' doc records. Grouped by
+ * club and applied as ONE write per club (never one write per item) so a 100-row
+ * batch touching 12 clubs costs 12 version-pinned writes, not 100. Per-club
+ * atomicity with partial results: one club's batch failing (bad row, or two
+ * failed version-conflict retries) must not stop the other clubs in the same
+ * commit from landing.
+ */
+app.post('/platform/tenants/:slug/doc-intake/commit', async (c) => {
+  const auth = c.get('auth')!;
+  const slug = c.req.param('slug');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const body = await c.req
+    .json<{ items?: DocIntakeCommitItem[] }>()
+    .catch(() => ({}) as { items?: DocIntakeCommitItem[] });
+  const items = Array.isArray(body.items) ? body.items : [];
+  if (items.length > DOC_INTAKE_MAX_ITEMS) {
+    throw new HttpError(400, `no more than ${DOC_INTAKE_MAX_ITEMS} items per request`);
+  }
+  const byClub = new Map<string, DocIntakeCommitItem[]>();
+  for (const item of items) {
+    if (!item?.clubId) throw new HttpError(400, 'every item requires a clubId');
+    const list = byClub.get(item.clubId);
+    if (list) list.push(item);
+    else byClub.set(item.clubId, [item]);
+  }
+  const catalogue = activeRequiredDocs(cfg);
+  const clubs = await Promise.all(
+    [...byClub.entries()].map(async ([clubId, clubItems]) => {
+      try {
+        const updated = await commitClubDocIntake(slug, clubId, clubItems, catalogue, auth.email);
+        return { clubId, ok: true as const, docs: updated.docs };
+      } catch (err) {
+        const error =
+          err instanceof HttpError ? err.message : 'failed to save this club’s documents';
+        return { clubId, ok: false as const, error };
+      }
+    }),
+  );
+  return c.json({ clubs });
+});
+
+/**
+ * POST /platform/tenants/:slug/clubs — operator-created shell club, seeded exactly
+ * like a self-signup (buildClubFromSpec + the tenant's ACTIVE catalogue) but with
+ * NO chair/membership/Cognito provisioning: the bulk doc-intake flow needs a club
+ * to attach uploads to before its chair has ever signed up, and the chair attaches
+ * later through the normal club-signup link (or an admin invite). Collision
+ * pre-check mirrors POST /club-signup's (id AND name, case-insensitive) so the
+ * same "name taken" story applies whether the club arrives via self-signup or the
+ * operator console.
+ */
+app.post('/platform/tenants/:slug/clubs', async (c) => {
+  const slug = c.req.param('slug');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const body = await c.req
+    .json<{ name?: string; district?: string }>()
+    .catch(() => ({}) as { name?: string; district?: string });
+  const name = (body.name ?? '').trim();
+  if (!name) throw new HttpError(400, 'name is required');
+  if (name.length > 80) throw new HttpError(400, 'name must be 80 characters or fewer');
+  // clubIdFromName's output alphabet can collapse an all-punctuation name to ''
+  // (see /club-signup) — operator input gets the same guard.
+  const id = clubIdFromName(name);
+  if (!id) throw new HttpError(400, 'club name must contain letters or numbers');
+  const district = body.district ?? '';
+  if (!resolveDistricts(cfg).includes(district))
+    throw new HttpError(400, `unknown district: ${district}`);
+  const existing = await repo.listClubs(slug);
+  const nameKey = name.toLowerCase();
+  if (existing.some((cl) => cl.id === id || cl.name.trim().toLowerCase() === nameKey)) {
+    throw new HttpError(409, 'a club with this name already exists');
+  }
+  const club = buildClubFromSpec({ name, district }, resolveRequiredDocs(cfg));
+  try {
+    await repo.createClub(slug, club);
+  } catch (err) {
+    // A concurrent create (operator double-click, or a race with a self-signup)
+    // won the id between our pre-check and this put.
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      throw new HttpError(409, 'a club with this name already exists');
+    }
+    throw err;
+  }
+  return c.json(club, 201);
 });
 
 /**
@@ -5084,7 +5503,7 @@ function buildInitialExco(spec: ClubSpec): Record<string, unknown> | undefined {
   return { chair: { name: name ?? '', email: email ?? '', cell: cell ?? '' } };
 }
 
-function buildClubFromSpec(spec: ClubSpec): Club {
+function buildClubFromSpec(spec: ClubSpec, requiredDocs: RequiredDoc[]): Club {
   const id = spec.id ?? clubIdFromName(spec.name ?? 'club');
   return {
     id,
@@ -5094,14 +5513,9 @@ function buildClubFromSpec(spec: ClubSpec): Club {
     chair: spec.chair ?? '',
     affiliation: 'not_started',
     cqi: 0,
-    docs: {
-      constitution: false,
-      agm: false,
-      financials: false,
-      exco: false,
-      codeOfConduct: false,
-      safeguarding: false,
-    },
+    // Seeded all-false from the tenant's ACTIVE catalogue (ADR 0009) — archived
+    // entries never start on a new club.
+    docs: Object.fromEntries(requiredDocs.filter((d) => !d.archived).map((d) => [d.key, false])),
     players: 0,
     teams: 0,
     women: 0,

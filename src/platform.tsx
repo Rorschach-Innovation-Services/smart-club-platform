@@ -18,7 +18,7 @@ import { queryClient, qk } from './query';
 import * as api from './api';
 import { ApiError, EMAIL_RE } from './api';
 import { resolveCopy } from './branding';
-import { Icon, Pill, Btn, EmptyState, useToast, useEscapeClose } from './atoms';
+import { Icon, Pill, Btn, Card, EmptyState, useToast, useEscapeClose } from './atoms';
 import { LeagueForm } from './admin';
 import { DISTRICTS } from './data';
 import { OVERARCHING_DISTRICT } from './leagues';
@@ -28,6 +28,8 @@ import { formatDayYear, formatStampDay } from './dates';
 import { StructuresCard, CompetitionsModal } from './platform-structures';
 import { SeasonSetupWizard } from './platform-season-wizard';
 import { TutorialsCard } from './platform-tutorials';
+import { RequiredDocsCard } from './platform-required-docs';
+import { DocIntakeWizard } from './platform-intake';
 import type {
   TenantConfig,
   TenantSummary,
@@ -423,6 +425,10 @@ export function PlatformPortal({
             <Route path="/platform" element={<TenantListPage />} />
             <Route path="/platform/new" element={<CreateTenantWizard toast={toastShow} />} />
             <Route path="/platform/tenants/:slug" element={<TenantEditPage toast={toastShow} />} />
+            <Route
+              path="/platform/tenants/:slug/doc-intake"
+              element={<DocIntakeWizard toast={toastShow} />}
+            />
             <Route path="/platform/tenants/:slug/overview" element={<TenantOverviewPage />} />
             <Route
               path="/platform/tenants/:slug/overview/leagues/:leagueKey"
@@ -717,6 +723,23 @@ function TenantEditPage({ toast }: { toast: Toast }) {
         <div id="setup-districts">
           <DistrictsCard key={`ds-${config.tenant}`} config={config} save={save} toast={toast} />
         </div>
+        <div id="setup-required-docs">
+          <RequiredDocsCard key={`rd-${config.tenant}`} config={config} save={save} toast={toast} />
+        </div>
+        <Card
+          title="Bulk document intake"
+          sub="Turn a client's whole compliance-doc submission pack (a zip, or a folder) into per-club uploads at once, instead of opening each club's page by hand."
+          action={
+            <Btn
+              tone="outline"
+              size="sm"
+              icon={Icon.Upload}
+              onClick={() => navigate(`/platform/tenants/${slug}/doc-intake`)}
+            >
+              Open wizard
+            </Btn>
+          }
+        />
         <ClubDirectoryCard
           key={`kc-${config.tenant}`}
           slug={slug}

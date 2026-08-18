@@ -23,18 +23,20 @@ import {
   COACHING_LEVELS,
   COACH_EXPERIENCE,
   greeting,
-  REQUIRED_DOCS,
+  DEFAULT_REQUIRED_DOCS,
+  activeDocs,
+  docAccept,
+  docFormats,
+  docMimeAllowed,
+  docMinFiles,
   CQI_STRUCTURE,
   deriveGovernance,
   effectiveAnswers,
   governanceOverrides,
   docFileMeta,
-  DOC_ACCEPT,
   resolveDocMime,
-  isAllowedDocMime,
   extFromMime,
   safeguardingMeta,
-  MIN_SAFEGUARDING_FILES,
   agmMeta,
   docCompletion,
   docsUploadedCount,
@@ -101,7 +103,7 @@ import { ClubNameModal } from './ClubNameModal';
 /* ─── Compliance doc upload — presigned S3 PUT, then mark uploaded ─── */
 interface DocUploadButtonProps {
   clubId: string;
-  docKey: string;
+  doc: { key: string; accepts?: string[] };
   label?: ReactNode;
   onUploaded: (key: string, meta: any) => void | Promise<void>;
   toast: (msg: string, tone?: string) => void;
@@ -110,13 +112,14 @@ interface DocUploadButtonProps {
 }
 function DocUploadButton({
   clubId,
-  docKey,
+  doc,
   label,
   onUploaded,
   toast,
   variant = 'button',
   buttonLabel,
 }: DocUploadButtonProps) {
+  const docKey = doc.key;
   const inputRef = useRefC<HTMLInputElement | null>(null);
   const [busy, setBusy] = useStateC(false);
   const isReplace = variant === 'link';
@@ -126,8 +129,13 @@ function DocUploadButton({
     // file.type is often empty for .doc/.docx — resolve from the extension before
     // validating, or valid Word files get rejected / mislabelled as PDF.
     const mime = resolveDocMime(file);
-    if (!isAllowedDocMime(mime)) {
-      toast('PDF or Word documents only', 'warn');
+    if (!docMimeAllowed(doc, mime)) {
+      toast(
+        `${docFormats(doc)
+          .map((f) => f.toUpperCase())
+          .join(', ')} files only`,
+        'warn',
+      );
       if (inputRef.current) inputRef.current.value = '';
       return;
     }
@@ -166,7 +174,7 @@ function DocUploadButton({
       <input
         ref={inputRef}
         type="file"
-        accept={DOC_ACCEPT}
+        accept={docAccept(doc)}
         style={{ display: 'none' }}
         onChange={handleFile}
       />
@@ -498,6 +506,7 @@ export function ClubHome({
   replayOnboarding,
   submissionDeadline,
   allLeagues = [],
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
   onRenameClub,
 }) {
   const [showNameEdit, setShowNameEdit] = useStateC(false);
@@ -511,8 +520,8 @@ export function ClubHome({
       : daysLeft === 1
         ? '1 day remaining'
         : `${daysLeft} days remaining`;
-  const dc = docCompletion(club);
-  const op = overallProgress(club);
+  const dc = docCompletion(club, requiredDocs);
+  const op = overallProgress(club, requiredDocs);
   const band = cqiBand(club.cqi);
   // Team counts derive from the leagues entered on the affiliation form, summing the
   // per-league team counts (a club may field >1 side); club.teams/juniors are stale.
@@ -773,7 +782,8 @@ export function ClubHome({
                   </div>
                   <div style={{ fontSize: 11.5, color: 'var(--muted)' }}>
                     Upload your compliance documents. (
-                    {REQUIRED_DOCS.length - docsUploadedCount(club)} remaining)
+                    {activeDocs(requiredDocs).length - docsUploadedCount(club, requiredDocs)}{' '}
+                    remaining)
                   </div>
                 </div>
                 <Pill tone="gold" dot>
@@ -3230,13 +3240,14 @@ export function DocumentsView({
   club,
   goto,
   toast,
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
   onUpload,
   onRemoveFile,
   onMarkUnavailable,
-  onSetSafeguardingCourse,
-  onClearSafeguardingCourse,
-  onSetAgmMeeting,
-  onClearAgmMeeting,
+  onSetCourseBooked,
+  onClearCourseBooked,
+  onSetMeetingBooked,
+  onClearMeetingBooked,
   onSaveExco,
   submissionDeadline,
   unionEmail,
@@ -3249,22 +3260,32 @@ export function DocumentsView({
       : daysLeft === 1
         ? '1 day remaining'
         : `${daysLeft} days remaining`;
-  const dc = docCompletion(club);
+  // The active catalogue (what counts, gates and uploads see), split by kind for the
+  // header/Card copy below. Archived entries only resurface if the club still has
+  // stored data for them — rendered separately, further down, muted with no upload.
+  const active = activeDocs(requiredDocs);
+  const archived = requiredDocs.filter(
+    (d) => d.archived && (club.docs?.[d.key] || club.docMeta?.[d.key]),
+  );
+  const fileDocs = active.filter((d) => d.kind !== 'form');
+  const formDocs = active.filter((d) => d.kind === 'form');
+  // The legacy copy names PDF/Word explicitly — keep it verbatim while every active doc
+  // is on the default format set; a tenant with any custom `accepts` gets generic wording.
+  const defaultFormats = active.every((d) => !d.accepts);
+  const dc = docCompletion(club, requiredDocs);
   const [showExcoForm, setShowExcoForm] = useStateC(false);
   const [preview, setPreview] = useStateC(null);
-  // Pending safeguarding-file removal ({ key, entry }) awaiting the confirm modal —
-  // deletion also removes the S3 object, so a stray click must not be enough.
+  // Pending multi-file removal ({ key, entry }) awaiting the confirm modal — deletion
+  // also removes the S3 object, so a stray click must not be enough.
   const [confirmRemove, setConfirmRemove] = useStateC(null);
-  // Safeguarding "no certificates yet → book a course date" affordance. `sgCourseOpen`
-  // reveals the date control; `sgCourseDate` holds the in-progress YYYY-MM-DD value.
-  const [sgCourseOpen, setSgCourseOpen] = useStateC(false);
-  const [sgCourseDate, setSgCourseDate] = useStateC('');
-  // AGM "we haven't held our AGM yet → record the meeting date" affordance — the single-file
-  // analogue of the safeguarding course booking. `agmMeetingOpen` reveals the date control.
-  const [agmMeetingOpen, setAgmMeetingOpen] = useStateC(false);
-  const [agmMeetingDate, setAgmMeetingDate] = useStateC('');
+  // "No certificates yet → book a course date" affordance (multiFile + allowCourseBooked,
+  // the safeguarding pattern). `{ key, date }` — only one booking flow open at a time.
+  const [courseBooking, setCourseBooking] = useStateC({ key: null, date: '' });
+  // "We haven't held it yet → record the meeting date" affordance (single-file +
+  // allowMeetingBooked, the AGM pattern). Same shape, independent of courseBooking.
+  const [meetingBooking, setMeetingBooking] = useStateC({ key: null, date: '' });
   // Today as YYYY-MM-DD — used both as the date input's `min` and to reject past/today.
-  const sgToday = new Date().toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
   const excoBearerCount = (() => {
     if (!club.exco) return 0;
     const fixed = FIXED_EXCO_ROLES.filter((r) => club.exco[r.key]?.name).length;
@@ -3272,36 +3293,34 @@ export function DocumentsView({
     return fixed + extra;
   })();
 
-  // Confirm a safeguarding course date. The date must be in the future —
+  // Confirm the in-progress course-booking date. The date must be in the future —
   // a past or today's date is rejected so the booking always points forward.
-  function confirmSafeguardingCourse() {
-    if (!sgCourseDate) {
-      toast('Choose the date your people will complete the safeguarding course', 'warn');
+  function confirmCourseBooking() {
+    if (!courseBooking.date) {
+      toast('Choose the date your people will complete the course', 'warn');
       return;
     }
-    if (sgCourseDate <= sgToday) {
-      toast('The safeguarding course date must be in the future', 'warn');
+    if (courseBooking.date <= today) {
+      toast('The course completion date must be in the future', 'warn');
       return;
     }
-    onSetSafeguardingCourse && onSetSafeguardingCourse(sgCourseDate);
-    setSgCourseOpen(false);
-    setSgCourseDate('');
+    onSetCourseBooked && onSetCourseBooked(courseBooking.key, courseBooking.date);
+    setCourseBooking({ key: null, date: '' });
   }
 
-  // Confirm the AGM meeting date. Like the safeguarding course, the date must be in the
-  // future — the booking always points forward to a meeting yet to be held.
-  function confirmAgmMeeting() {
-    if (!agmMeetingDate) {
-      toast('Choose the date your AGM will be held', 'warn');
+  // Confirm the in-progress meeting-booking date. Like the course booking, the date
+  // must be in the future — it always points forward to a meeting yet to be held.
+  function confirmMeetingBooking() {
+    if (!meetingBooking.date) {
+      toast('Choose the date the meeting will be held', 'warn');
       return;
     }
-    if (agmMeetingDate <= sgToday) {
-      toast('The AGM meeting date must be in the future', 'warn');
+    if (meetingBooking.date <= today) {
+      toast('The meeting date must be in the future', 'warn');
       return;
     }
-    onSetAgmMeeting && onSetAgmMeeting(agmMeetingDate);
-    setAgmMeetingOpen(false);
-    setAgmMeetingDate('');
+    onSetMeetingBooked && onSetMeetingBooked(meetingBooking.key, meetingBooking.date);
+    setMeetingBooking({ key: null, date: '' });
   }
 
   return (
@@ -3315,9 +3334,19 @@ export function DocumentsView({
             Required <em>compliance documents</em>
           </h1>
           <p className="ph-desc">
-            Per the 2026/27 Cricket Services Club Requirements, {REQUIRED_DOCS.length - 1} documents
-            must be uploaded and one roster captured directly on the platform. PDF or Word documents
-            — max 10 MB per file.
+            Per the 2026/27 Cricket Services Club Requirements, {fileDocs.length} document
+            {fileDocs.length === 1 ? '' : 's'} must be uploaded
+            {formDocs.length > 0 && (
+              <>
+                {' '}
+                and {formDocs.length === 1 ? 'one roster' : `${formDocs.length} rosters`} captured
+                directly on the platform
+              </>
+            )}
+            .{' '}
+            {defaultFormats
+              ? 'PDF or Word documents — max 10 MB per file.'
+              : 'Accepted formats vary by document — max 10 MB per file.'}
           </p>
         </div>
       </div>
@@ -3326,13 +3355,13 @@ export function DocumentsView({
         <KPI
           tone="teal"
           label="Submitted"
-          num={docsUploadedCount(club)}
-          sub={`of ${REQUIRED_DOCS.length} required`}
+          num={docsUploadedCount(club, requiredDocs)}
+          sub={`of ${active.length} required`}
         />
         <KPI
           tone="coral"
           label="Outstanding"
-          num={REQUIRED_DOCS.length - docsUploadedCount(club)}
+          num={active.length - docsUploadedCount(club, requiredDocs)}
           sub="needs attention"
         />
         <KPI label="Completion" num={dc + '%'} sub="overall" />
@@ -3341,37 +3370,44 @@ export function DocumentsView({
 
       <Card
         title="Submit your documents"
-        sub={`${REQUIRED_DOCS.length - 1} file uploads · 1 on-platform form`}
+        sub={`${fileDocs.length} file upload${fileDocs.length === 1 ? '' : 's'}${
+          formDocs.length
+            ? ` · ${formDocs.length} on-platform form${formDocs.length === 1 ? '' : 's'}`
+            : ''
+        }`}
       >
-        {REQUIRED_DOCS.map((d) => {
+        {active.map((d) => {
           const up = club.docs[d.key];
-          const isExco = d.key === 'exco';
-          const isSafeguarding = d.key === 'safeguarding';
-          // Financial statements may be marked "Unavailable" by clubs with none to
-          // upload — a distinct sentinel (vs an admin compliance override).
-          const isFinancials = d.key === 'financials';
-          const unavailable = !!club.docMeta?.[d.key]?.unavailable;
-          // AGM Minutes: a club with no minutes yet may instead record the future date its
-          // AGM will be held — a single-file analogue of the safeguarding course booking.
-          const isAgm = d.key === 'agm';
+          const isForm = d.kind === 'form';
+          const multi = !!d.multiFile;
+          const minFiles = docMinFiles(d);
+          // Unavailable escape hatch (financials pattern, `allowUnavailable`) — a distinct
+          // sentinel (vs an admin compliance override). Gated on the flag: if a doc's
+          // `allowUnavailable` was removed from the catalogue after a club set the
+          // sentinel, the stale sentinel must not keep rendering the pill/copy.
+          const unavailable = !!d.allowUnavailable && !!club.docMeta?.[d.key]?.unavailable;
           const meta = club.docMeta?.[d.key];
-          const agm = isAgm ? agmMeta(meta) : null;
-          const agmBooked = !!agm?.meetingBooked;
+          // Meeting-booked escape hatch (AGM pattern, `allowMeetingBooked`) — single-file only:
+          // a club with no minutes yet may instead record the future date the meeting is held.
+          const meeting = !multi && d.allowMeetingBooked ? agmMeta(meta) : null;
+          const meetingBooked = !!meeting?.meetingBooked;
+          const meetingOpen = meetingBooking.key === d.key;
+          const courseOpen = courseBooking.key === d.key;
           // Real uploads carry docMeta with an objectKey; an admin "mark compliant"
           // override sets the flag with no file. Demo/local mode has no docMeta at all
-          // but should still preview the bundled sample. Safeguarding is multi-file:
-          // one certificate per person, at least two people.
+          // but should still preview the bundled sample. A multi-file doc (`multiFile`)
+          // requires one entry per person, at least `minFiles`.
           const demo = import.meta.env.VITE_LOCAL_AUTH === '1';
           const { real, metaText } = docFileMeta(meta);
-          const sg = isSafeguarding ? safeguardingMeta(meta) : null;
-          const agmDateLabel = agm?.meetingDate ? formatDayYear(agm.meetingDate) : '';
+          const sg = multi ? safeguardingMeta(meta) : null;
+          const meetingDateLabel = meeting?.meetingDate ? formatDayYear(meeting.meetingDate) : '';
           return (
             <div key={d.key} className={`doc-row ${up ? 'uploaded' : ''}`}>
-              <div className="doc-icon">{isExco ? <Icon.Form /> : <Icon.Doc />}</div>
+              <div className="doc-icon">{isForm ? <Icon.Form /> : <Icon.Doc />}</div>
               <div className="doc-info">
                 <div className="doc-name">
                   {d.name}
-                  {isExco && (
+                  {isForm && (
                     <span
                       style={{
                         fontSize: 9.5,
@@ -3391,8 +3427,18 @@ export function DocumentsView({
                   )}
                 </div>
                 <div className="doc-meta">
-                  {isSafeguarding ? (
-                    sg.files.length ? (
+                  {multi ? (
+                    unavailable ? (
+                      <span>
+                        Marked unavailable — no document to upload ·{' '}
+                        <a
+                          style={{ color: 'var(--teal-deep)', cursor: 'pointer' }}
+                          onClick={() => onMarkUnavailable && onMarkUnavailable(d.key, false)}
+                        >
+                          Undo
+                        </a>
+                      </span>
+                    ) : sg.files.length ? (
                       <span style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
                         {sg.files.map((f) => {
                           const fm = docFileMeta(f);
@@ -3434,23 +3480,23 @@ export function DocumentsView({
                             </span>
                           );
                         })}
-                        {sg.files.length < MIN_SAFEGUARDING_FILES && !up && <span>{d.desc}</span>}
+                        {sg.files.length < minFiles && !up && <span>{d.desc}</span>}
                       </span>
                     ) : sg.courseBooked ? (
                       <span>
-                        No certificates yet — your people will complete the safeguarding course on{' '}
+                        No certificates yet — your people will complete the course on{' '}
                         <strong style={{ color: 'var(--navy)' }}>
                           {formatDayYear(sg.courseDate)}
                         </strong>{' '}
                         ·{' '}
                         <a
                           style={{ color: 'var(--teal-deep)', cursor: 'pointer' }}
-                          onClick={() => onClearSafeguardingCourse && onClearSafeguardingCourse()}
+                          onClick={() => onClearCourseBooked && onClearCourseBooked(d.key)}
                         >
                           Undo
                         </a>
                       </span>
-                    ) : sgCourseOpen ? (
+                    ) : courseOpen ? (
                       <span style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         <span>{d.desc}</span>
                         <span className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
@@ -3464,22 +3510,21 @@ export function DocumentsView({
                             <input
                               type="date"
                               className="field-input"
-                              min={sgToday}
-                              value={sgCourseDate}
-                              onChange={(e) => setSgCourseDate(e.target.value)}
+                              min={today}
+                              value={courseBooking.date}
+                              onChange={(e) =>
+                                setCourseBooking({ key: d.key, date: e.target.value })
+                              }
                               style={{ maxWidth: 200 }}
                             />
                           </span>
-                          <Btn tone="ink" size="sm" onClick={confirmSafeguardingCourse}>
+                          <Btn tone="ink" size="sm" onClick={confirmCourseBooking}>
                             Confirm date
                           </Btn>
                           <Btn
                             tone="ghost"
                             size="sm"
-                            onClick={() => {
-                              setSgCourseOpen(false);
-                              setSgCourseDate('');
-                            }}
+                            onClick={() => setCourseBooking({ key: null, date: '' })}
                           >
                             Cancel
                           </Btn>
@@ -3488,18 +3533,18 @@ export function DocumentsView({
                     ) : (
                       d.desc
                     )
-                  ) : isAgm && agmBooked ? (
+                  ) : meetingBooked ? (
                     <span>
-                      No minutes yet — your AGM will be held on{' '}
-                      <strong style={{ color: 'var(--navy)' }}>{agmDateLabel}</strong> ·{' '}
+                      No document yet — the meeting will be held on{' '}
+                      <strong style={{ color: 'var(--navy)' }}>{meetingDateLabel}</strong> ·{' '}
                       <a
                         style={{ color: 'var(--teal-deep)', cursor: 'pointer' }}
-                        onClick={() => onClearAgmMeeting && onClearAgmMeeting()}
+                        onClick={() => onClearMeetingBooked && onClearMeetingBooked(d.key)}
                       >
                         Undo
                       </a>
                     </span>
-                  ) : isAgm && agmMeetingOpen ? (
+                  ) : meetingOpen ? (
                     <span style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <span>{d.desc}</span>
                       <span className="row" style={{ gap: 8, alignItems: 'flex-end' }}>
@@ -3508,34 +3553,33 @@ export function DocumentsView({
                             className="field-label"
                             style={{ display: 'block', marginBottom: 4 }}
                           >
-                            AGM meeting date
+                            Meeting date
                           </span>
                           <input
                             type="date"
                             className="field-input"
-                            min={sgToday}
-                            value={agmMeetingDate}
-                            onChange={(e) => setAgmMeetingDate(e.target.value)}
+                            min={today}
+                            value={meetingBooking.date}
+                            onChange={(e) =>
+                              setMeetingBooking({ key: d.key, date: e.target.value })
+                            }
                             style={{ maxWidth: 200 }}
                           />
                         </span>
-                        <Btn tone="ink" size="sm" onClick={confirmAgmMeeting}>
+                        <Btn tone="ink" size="sm" onClick={confirmMeetingBooking}>
                           Confirm date
                         </Btn>
                         <Btn
                           tone="ghost"
                           size="sm"
-                          onClick={() => {
-                            setAgmMeetingOpen(false);
-                            setAgmMeetingDate('');
-                          }}
+                          onClick={() => setMeetingBooking({ key: null, date: '' })}
                         >
                           Cancel
                         </Btn>
                       </span>
                     </span>
                   ) : up ? (
-                    isExco ? (
+                    isForm ? (
                       <span>
                         Roster captured · {excoBearerCount} bearer{excoBearerCount === 1 ? '' : 's'}{' '}
                         · synced from your affiliation form ·{' '}
@@ -3548,7 +3592,7 @@ export function DocumentsView({
                       </span>
                     ) : unavailable ? (
                       <span>
-                        Marked unavailable — no statements to upload ·{' '}
+                        Marked unavailable — no document to upload ·{' '}
                         <a
                           style={{ color: 'var(--teal-deep)', cursor: 'pointer' }}
                           onClick={() => onMarkUnavailable && onMarkUnavailable(d.key, false)}
@@ -3561,7 +3605,7 @@ export function DocumentsView({
                         {metaText || 'Document'} ·{' '}
                         <DocUploadButton
                           clubId={club.id}
-                          docKey={d.key}
+                          doc={d}
                           label={d.name}
                           onUploaded={onUpload}
                           toast={toast}
@@ -3569,7 +3613,7 @@ export function DocumentsView({
                         />
                       </span>
                     )
-                  ) : isExco ? (
+                  ) : isForm ? (
                     <span>
                       Auto-captured from the affiliation form, or{' '}
                       <a
@@ -3584,9 +3628,13 @@ export function DocumentsView({
                   )}
                 </div>
               </div>
-              {isSafeguarding ? (
+              {multi ? (
                 <>
-                  {up ? (
+                  {unavailable ? (
+                    <Pill tone="gold" dot>
+                      Unavailable
+                    </Pill>
+                  ) : up ? (
                     <Pill tone="teal" dot>
                       Uploaded
                     </Pill>
@@ -3596,56 +3644,78 @@ export function DocumentsView({
                     </Pill>
                   ) : sg.files.length ? (
                     <Pill tone="gold" dot>
-                      {sg.files.length} of {MIN_SAFEGUARDING_FILES} minimum
+                      {sg.files.length} of {minFiles} minimum
                     </Pill>
                   ) : null}
                   {/* Uploading and booking a course date are mutually exclusive: once a
                       course is booked, only the Undo (in the meta text) is offered;
                       otherwise show the uploader, plus a "no certificates yet" path that
-                      books a future course date when no files exist. */}
-                  {!sg.courseBooked && (
+                      books a future course date when no files exist. Marking unavailable
+                      is likewise exclusive with uploading — and only ever offered (below)
+                      while no certificates are stored, so setting it can never discard a
+                      stored file. */}
+                  {!unavailable && !sg.courseBooked && (
                     <DocUploadButton
                       clubId={club.id}
-                      docKey={d.key}
+                      doc={d}
                       label={d.name}
                       onUploaded={onUpload}
                       toast={toast}
                       buttonLabel="Add certificate"
                     />
                   )}
-                  {!sg.courseBooked && !sg.files.length && !sgCourseOpen && (
-                    <Btn
-                      tone="outline"
-                      size="sm"
-                      onClick={() => setSgCourseOpen(true)}
-                      title="No safeguarding certificates yet — book a course date instead"
-                    >
-                      We don&apos;t have these yet
-                    </Btn>
-                  )}
+                  {d.allowCourseBooked &&
+                    !unavailable &&
+                    !sg.courseBooked &&
+                    !sg.files.length &&
+                    !courseOpen && (
+                      <Btn
+                        tone="outline"
+                        size="sm"
+                        onClick={() => setCourseBooking({ key: d.key, date: '' })}
+                        title={`No ${d.name} yet — book a course date instead`}
+                      >
+                        We don&apos;t have these yet
+                      </Btn>
+                    )}
+                  {d.allowUnavailable &&
+                    onMarkUnavailable &&
+                    !unavailable &&
+                    !sg.courseBooked &&
+                    !sg.files.length &&
+                    !courseOpen && (
+                      <Btn
+                        tone="outline"
+                        size="sm"
+                        onClick={() => onMarkUnavailable(d.key, true)}
+                        title={`No ${d.name} to upload`}
+                      >
+                        Unavailable
+                      </Btn>
+                    )}
                 </>
-              ) : isAgm && agmBooked ? (
+              ) : meetingBooked ? (
                 <>
                   <Pill tone="gold" dot>
-                    Meeting booked · {agmDateLabel}
+                    Meeting booked · {meetingDateLabel}
                   </Pill>
-                  {/* The club can still upload real minutes without first undoing the booking —
-                      a successful upload replaces the sentinel with the stored file. */}
+                  {/* The club can still upload the real document without first undoing the
+                      booking — a successful upload replaces the sentinel with the stored file. */}
                   <DocUploadButton
                     clubId={club.id}
-                    docKey={d.key}
+                    doc={d}
                     label={d.name}
                     onUploaded={onUpload}
                     toast={toast}
-                    buttonLabel="Upload minutes"
+                    buttonLabel="Upload document"
                   />
                 </>
               ) : up ? (
                 <>
                   <Pill tone={unavailable ? 'gold' : 'teal'} dot>
-                    {unavailable ? 'Unavailable' : isExco ? 'Completed' : 'Uploaded'}
+                    {unavailable ? 'Unavailable' : isForm ? 'Completed' : 'Uploaded'}
                   </Pill>
-                  {!isExco && !unavailable && (real || demo) && (
+                  {!isForm && !unavailable && (real || demo) && (
                     <Btn
                       tone="ghost"
                       size="sm"
@@ -3655,35 +3725,35 @@ export function DocumentsView({
                     />
                   )}
                 </>
-              ) : isExco ? (
+              ) : isForm ? (
                 <Btn tone="ink" size="sm" icon={Icon.Form} onClick={() => setShowExcoForm(true)}>
                   Complete form
                 </Btn>
               ) : (
                 <div className="row" style={{ gap: 8 }}>
-                  {isFinancials && onMarkUnavailable && (
+                  {d.allowUnavailable && onMarkUnavailable && (
                     <Btn
                       tone="outline"
                       size="sm"
                       onClick={() => onMarkUnavailable(d.key, true)}
-                      title="No financial statements to upload"
+                      title={`No ${d.name} to upload`}
                     >
                       Unavailable
                     </Btn>
                   )}
-                  {isAgm && onSetAgmMeeting && !agmMeetingOpen && (
+                  {d.allowMeetingBooked && onSetMeetingBooked && !meetingOpen && (
                     <Btn
                       tone="outline"
                       size="sm"
-                      onClick={() => setAgmMeetingOpen(true)}
-                      title="No AGM minutes yet — record the date your AGM will be held"
+                      onClick={() => setMeetingBooking({ key: d.key, date: '' })}
+                      title={`No ${d.name} yet — record the date the meeting will be held`}
                     >
-                      We haven&apos;t held our AGM yet
+                      We haven&apos;t held this meeting yet
                     </Btn>
                   )}
                   <DocUploadButton
                     clubId={club.id}
-                    docKey={d.key}
+                    doc={d}
                     label={d.name}
                     onUploaded={onUpload}
                     toast={toast}
@@ -3694,6 +3764,123 @@ export function DocumentsView({
           );
         })}
       </Card>
+
+      {/* Archived catalogue entries the club still has stored data for — kept viewable
+          (and removable) after a doc is retired from the active requirements, but with
+          no upload affordance: a retired doc can only shrink, never grow. */}
+      {archived.length > 0 && (
+        <Card title="No longer required" sub="Kept on file — not part of the active requirements">
+          {archived.map((d) => {
+            const meta = club.docMeta?.[d.key];
+            const multi = !!d.multiFile;
+            const sg = multi ? safeguardingMeta(meta) : null;
+            const { real, metaText } = multi ? { real: false, metaText: '' } : docFileMeta(meta);
+            return (
+              <div key={d.key} className="doc-row archived" style={{ opacity: 0.65 }}>
+                <div className="doc-icon">
+                  <Icon.Doc />
+                </div>
+                <div className="doc-info">
+                  <div className="doc-name">{d.name}</div>
+                  <div className="doc-meta">
+                    {multi ? (
+                      sg.files.length ? (
+                        <span style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                          {sg.files.map((f) => {
+                            const fm = docFileMeta(f);
+                            return (
+                              <span key={f.objectKey}>
+                                {fm.metaText || 'Document'} ·{' '}
+                                <button
+                                  type="button"
+                                  onClick={() => setPreview({ key: d.key, entry: f })}
+                                  style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    padding: 0,
+                                    font: 'inherit',
+                                    color: 'var(--teal-deep)',
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  View
+                                </button>{' '}
+                                ·{' '}
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmRemove({ key: d.key, entry: f })}
+                                  style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    padding: 0,
+                                    font: 'inherit',
+                                    color: 'var(--coral)',
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  Remove
+                                </button>
+                              </span>
+                            );
+                          })}
+                        </span>
+                      ) : (
+                        'No files on record'
+                      )
+                    ) : real ? (
+                      <span>
+                        {metaText || 'Document'} ·{' '}
+                        <button
+                          type="button"
+                          onClick={() => setPreview({ key: d.key })}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            padding: 0,
+                            font: 'inherit',
+                            color: 'var(--teal-deep)',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          View
+                        </button>{' '}
+                        ·{' '}
+                        {/* Single-file docs get Remove here too. It is the ONLY way to clear
+                            one (upload replaces, never removes), and without it retiring a
+                            single-file doc was a dead end: the catalogue's delete guard tells
+                            the operator to clear each club's record first, which was
+                            impossible, so the file stayed in the bucket forever. */}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setConfirmRemove({
+                              key: d.key,
+                              entry: meta as { objectKey: string },
+                            })
+                          }
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            padding: 0,
+                            font: 'inherit',
+                            color: 'var(--coral)',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Remove
+                        </button>
+                      </span>
+                    ) : (
+                      metaText || 'No file on record'
+                    )}
+                  </div>
+                </div>
+                <Pill dot>No longer required</Pill>
+              </div>
+            );
+          })}
+        </Card>
+      )}
 
       {showExcoForm && (
         <ExcoFormModal
@@ -3714,7 +3901,7 @@ export function DocumentsView({
         <DocPreviewModal
           clubId={club.id}
           docKey={preview.key}
-          docName={REQUIRED_DOCS.find((d) => d.key === preview.key)?.name || 'Document'}
+          docName={requiredDocs.find((d) => d.key === preview.key)?.name || 'Document'}
           clubName={club.name}
           // Safeguarding passes the selected file entry (the wrapper has no
           // objectKey of its own); single-file docs pass their stored meta.
@@ -3737,11 +3924,12 @@ export function DocumentsView({
               <div className="fix-confirm-icon danger">
                 <Icon.Alert />
               </div>
-              <div className="fix-confirm-title">Remove this certificate?</div>
+              {/* Wording is doc-agnostic: this modal now serves any doc's file, not just a
+                  safeguarding certificate (single-file docs use it as their only clear path). */}
+              <div className="fix-confirm-title">Remove this file?</div>
               <div className="fix-confirm-body">
-                <strong>{docFileMeta(confirmRemove.entry).fileName || 'This certificate'}</strong>{' '}
-                will be permanently deleted — there is no undo, and the holder would need to upload
-                it again.
+                <strong>{docFileMeta(confirmRemove.entry).fileName || 'This file'}</strong> will be
+                permanently deleted — there is no undo, and it would have to be uploaded again.
               </div>
               <div className="fix-confirm-actions">
                 <Btn tone="outline" onClick={() => setConfirmRemove(null)}>

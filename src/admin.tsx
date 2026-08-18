@@ -16,7 +16,9 @@ import {
 } from './playerFilters';
 import {
   DISTRICTS,
-  REQUIRED_DOCS,
+  DEFAULT_REQUIRED_DOCS,
+  activeDocs,
+  docMinFiles,
   CQI_STRUCTURE,
   effectiveAnswers,
   genuineCqiAnswers,
@@ -27,7 +29,6 @@ import {
   docFileMeta,
   safeguardingMeta,
   agmMeta,
-  MIN_SAFEGUARDING_FILES,
   docCompletion,
   docsUploadedCount,
   docsAllComplete,
@@ -2962,9 +2963,10 @@ export function AdminDashboard({
   onUpdateDeadline,
   support,
   onUpdateSupport,
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
 }) {
   const copy = useCopy();
-  const stats = cohortStats(clubs);
+  const stats = cohortStats(clubs, requiredDocs);
   // Clubs a rep has renamed but no admin has acknowledged yet — surfaced as a worklist
   // tile so the flag is visible without opening each club.
   const renamedCount = clubs.filter((c) => c.nameChangePending).length;
@@ -2976,7 +2978,8 @@ export function AdminDashboard({
   // Open a bcc mail draft to the chairs of every club still missing a submission
   // (affiliation not submitted, no CQI, or any compliance doc outstanding).
   function remindBulk() {
-    const behind = (c) => !affiliationSubmitted(c) || c.cqi === 0 || !docsAllComplete(c);
+    const behind = (c) =>
+      !affiliationSubmitted(c) || c.cqi === 0 || !docsAllComplete(c, requiredDocs);
     openBccReminder({
       emails: clubs.filter(behind).map((c) => c.exco?.chair?.email),
       subject: 'Smart Club Integration — outstanding submissions',
@@ -3002,7 +3005,7 @@ export function AdminDashboard({
 
   // Sort by progress descending for "at risk" / "leaders"
   const ranked = [...clubs]
-    .map((c) => ({ ...c, prog: overallProgress(c) }))
+    .map((c) => ({ ...c, prog: overallProgress(c, requiredDocs) }))
     .sort((a, b) => b.prog - a.prog);
   const leaders = ranked.slice(0, 5);
   const atRisk = [...ranked].sort((a, b) => a.prog - b.prog).slice(0, 5);
@@ -3041,7 +3044,7 @@ export function AdminDashboard({
       num: '05',
       label: 'Compliance Docs',
       tone: 'gold',
-      done: clubs.filter((c) => docsAllComplete(c)).length,
+      done: clubs.filter((c) => docsAllComplete(c, requiredDocs)).length,
       view: 'documents',
     },
   ];
@@ -3086,7 +3089,11 @@ export function AdminDashboard({
             size="sm"
             onClick={() => {
               const rows = clubs.map((c) =>
-                clubExportRow(c, { docCompletion, overallProgress, cqiBand }),
+                clubExportRow(c, {
+                  docCompletion: (club) => docCompletion(club, requiredDocs),
+                  overallProgress: (club) => overallProgress(club, requiredDocs),
+                  cqiBand,
+                }),
               );
               if (!rows.length) return notify('No clubs to export');
               exportRowsToXlsx('cohort-report.xlsx', 'Cohort', rows).catch(() =>
@@ -3636,18 +3643,18 @@ export function AdminSettingsView({
 }
 
 /* ─── Cohort insights — visualises CQI bands, doc compliance, outstanding resources ─── */
-function ClubInsights({ clubs, submissionDeadline }) {
+function ClubInsights({ clubs, submissionDeadline, requiredDocs = DEFAULT_REQUIRED_DOCS }) {
   const deadlineShort = formatDeadlineShort(submissionDeadline);
   const deadlineMid = formatDeadlineMid(submissionDeadline);
   // CQI bands + doc compliance — shared derivations (src/insights.tsx) so the
   // band/threshold definitions can't drift between this panel and the Insights page.
   const bandTone = cqiBandTone;
   const { bands, maxBand, submitted, avgCqi } = cqiBandRows(clubs);
-  const { docStats, mostMissing } = docComplianceRows(clubs);
+  const { docStats, mostMissing } = docComplianceRows(clubs, requiredDocs);
 
   // Resources required — "behind" is keyed on the form fact.
   const notAffiliated = clubs.filter((c) => !affiliationSubmitted(c)).length;
-  const incompleteDocs = clubs.filter((c) => !docsAllComplete(c)).length;
+  const incompleteDocs = clubs.filter((c) => !docsAllComplete(c, requiredDocs)).length;
   const noCqi = clubs.filter((c) => c.cqi === 0).length;
   const totalReminders = notAffiliated + noCqi;
 
@@ -3770,6 +3777,7 @@ export function AdminClubsList({
   // one click (set true + navigate here) instead of making the admin re-find it.
   showShareLink,
   setShowShareLink,
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
 }) {
   const copy = useCopy();
   const [q, setQ] = useStateA('');
@@ -3785,26 +3793,31 @@ export function AdminClubsList({
           c.chair.toLowerCase().includes(q.toLowerCase()),
       );
     if (filter === 'complete')
-      cs = cs.filter((c) => c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0);
+      cs = cs.filter(
+        (c) => c.affiliation === 'complete' && docsAllComplete(c, requiredDocs) && c.cqi > 0,
+      );
     if (filter === 'incomplete')
-      cs = cs.filter((c) => !(c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0));
+      cs = cs.filter(
+        (c) => !(c.affiliation === 'complete' && docsAllComplete(c, requiredDocs) && c.cqi > 0),
+      );
     if (filter === 'affiliation_outstanding') cs = cs.filter((c) => !affiliationSubmitted(c));
     if (filter === 'no_cqi') cs = cs.filter((c) => c.cqi === 0);
     return cs;
-  }, [clubs, q, filter]);
+  }, [clubs, q, filter, requiredDocs]);
 
   const counts = useMemoA(
     () => ({
       all: clubs.length,
-      complete: clubs.filter((c) => c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0)
-        .length,
+      complete: clubs.filter(
+        (c) => c.affiliation === 'complete' && docsAllComplete(c, requiredDocs) && c.cqi > 0,
+      ).length,
       incomplete: clubs.filter(
-        (c) => !(c.affiliation === 'complete' && docsAllComplete(c) && c.cqi > 0),
+        (c) => !(c.affiliation === 'complete' && docsAllComplete(c, requiredDocs) && c.cqi > 0),
       ).length,
       affiliation_outstanding: clubs.filter((c) => !affiliationSubmitted(c)).length,
       no_cqi: clubs.filter((c) => c.cqi === 0).length,
     }),
-    [clubs],
+    [clubs, requiredDocs],
   );
 
   return (
@@ -3827,7 +3840,11 @@ export function AdminClubsList({
             size="sm"
             onClick={() => {
               const rows = filtered.map((c) =>
-                clubExportRow(c, { docCompletion, overallProgress, cqiBand }),
+                clubExportRow(c, {
+                  docCompletion: (club) => docCompletion(club, requiredDocs),
+                  overallProgress: (club) => overallProgress(club, requiredDocs),
+                  cqiBand,
+                }),
               );
               if (!rows.length) return toast?.('No clubs match — nothing to export', 'warn');
               exportRowsToXlsx('club-directory.xlsx', 'Clubs', rows).catch(() =>
@@ -3851,7 +3868,11 @@ export function AdminClubsList({
       ) : (
         <>
           {/* Cohort insights panel — CQI distribution, document compliance, resources required */}
-          <ClubInsights clubs={clubs} submissionDeadline={submissionDeadline} />
+          <ClubInsights
+            clubs={clubs}
+            submissionDeadline={submissionDeadline}
+            requiredDocs={requiredDocs}
+          />
 
           <div className="filter-row">
             <input
@@ -3893,8 +3914,8 @@ export function AdminClubsList({
               </thead>
               <tbody>
                 {filtered.map((c) => {
-                  const dc = docCompletion(c);
-                  const op = overallProgress(c);
+                  const dc = docCompletion(c, requiredDocs);
+                  const op = overallProgress(c, requiredDocs);
                   const band = cqiBand(c.cqi);
                   return (
                     <tr key={c.id} className="clickable" onClick={() => gotoClub(c.id)}>
@@ -4748,6 +4769,7 @@ export function AdminClubDetail({
   onInvite,
   toast,
   allLeagues = [],
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
   onSetLeagues,
   onMarkCompliant,
   onRevertDoc,
@@ -4774,8 +4796,8 @@ export function AdminClubDetail({
   const [noteText, setNoteText] = useStateA('');
   const [noteBusy, setNoteBusy] = useStateA(false);
   if (!club) return null;
-  const dc = docCompletion(club);
-  const op = overallProgress(club);
+  const dc = docCompletion(club, requiredDocs);
+  const op = overallProgress(club, requiredDocs);
   const band = cqiBand(club.cqi);
   // Team counts derive from the leagues entered on the affiliation form, summing the
   // per-league team counts (a club may field >1 side); club.teams/juniors are stale.
@@ -4867,7 +4889,7 @@ export function AdminClubDetail({
       t: 'Compliance',
       done: dc === 100,
       val: dc,
-      detail: `${docsUploadedCount(club)} of ${REQUIRED_DOCS.length} docs uploaded`,
+      detail: `${docsUploadedCount(club, requiredDocs)} of ${activeDocs(requiredDocs).length} docs uploaded`,
     },
   ];
 
@@ -4970,7 +4992,7 @@ export function AdminClubDetail({
         <KPI
           tone="gold"
           label="Documents"
-          num={`${docsUploadedCount(club)}/${REQUIRED_DOCS.length}`}
+          num={`${docsUploadedCount(club, requiredDocs)}/${activeDocs(requiredDocs).length}`}
           sub="compliance docs"
         />
         <KPI
@@ -5118,24 +5140,26 @@ export function AdminClubDetail({
             title="Compliance documents"
             sub="Cricket Services 2026/27 club requirements upload"
           >
-            {REQUIRED_DOCS.map((d) => {
+            {activeDocs(requiredDocs).map((d) => {
               const up = club.docs[d.key];
               // Real uploads carry docMeta with an objectKey; an admin "Mark as
               // compliant" override sets the flag true with a markedCompliant
               // sentinel (no file). docFileMeta never fabricates a filename for the
-              // latter. Safeguarding is multi-file (one certificate per person, min
-              // two people) — render its stored files as sub-rows.
+              // latter. A multi-file doc (the safeguarding pattern) — render its
+              // stored files as sub-rows.
               const meta = club.docMeta?.[d.key];
-              const sg = d.key === 'safeguarding' ? safeguardingMeta(meta) : null;
+              const multi = !!d.multiFile;
+              const sg = multi ? safeguardingMeta(meta) : null;
               const { real, metaText } = docFileMeta(meta);
-              const sgSatisfied = sg ? sg.files.length >= MIN_SAFEGUARDING_FILES : false;
-              // A booked AGM meeting is a club self-declaration (future meeting date), not an
-              // admin override — it must render as its own state, never "Override", and is
-              // not revertable by the admin (the club self-clears via Undo on its portal).
-              const agm = d.key === 'agm' ? agmMeta(meta) : null;
+              const sgSatisfied = sg ? sg.files.length >= docMinFiles(d) : false;
+              // A booked meeting (the AGM pattern, single-file only) is a club
+              // self-declaration (future meeting date), not an admin override — it must
+              // render as its own state, never "Override", and is not revertable by the
+              // admin (the club self-clears via Undo on its portal).
+              const agm = !multi && d.allowMeetingBooked ? agmMeta(meta) : null;
               const agmBooked = !!agm?.meetingBooked;
               const agmDateLabel = agm?.meetingDate && formatDayYear(agm.meetingDate);
-              // Safeguarding "override" = any compliant flag the uploads don't
+              // Multi-file "override" = any compliant flag the uploads don't
               // justify: explicit sentinel, legacy flag-only (no docMeta — the
               // seeded demo clubs), or a grandfathered single file. All revert.
               const override = sg ? up && !sgSatisfied : up && !real && !agmBooked;
@@ -5198,7 +5222,7 @@ export function AdminClubDetail({
                     <div className="doc-row-actions">
                       <Pill tone={override || agmBooked || (sg && !up) ? 'gold' : 'teal'} dot>
                         {sg && !up
-                          ? `${sg.files.length} of ${MIN_SAFEGUARDING_FILES} minimum`
+                          ? `${sg.files.length} of ${docMinFiles(d)} minimum`
                           : agmBooked
                             ? `Meeting booked · ${agmDateLabel}`
                             : override
@@ -5603,7 +5627,7 @@ export function AdminClubDetail({
         <DocPreviewModal
           clubId={club.id}
           docKey={showDocPreview.key}
-          docName={REQUIRED_DOCS.find((d) => d.key === showDocPreview.key)?.name || 'Document'}
+          docName={requiredDocs.find((d) => d.key === showDocPreview.key)?.name || 'Document'}
           clubName={club.name}
           // Safeguarding passes the selected file entry (the wrapper has no
           // objectKey of its own); single-file docs pass their stored meta.
@@ -5653,6 +5677,7 @@ export function AdminClubDetail({
         <RemoveClubModal
           club={club}
           allSeries={allSeries}
+          requiredDocs={requiredDocs}
           onClose={() => setShowRemove(false)}
           // Success navigates back to the clubs list (the parent handler owns
           // that), which unmounts this whole view — no need to close here.
@@ -5697,7 +5722,13 @@ function ConfirmModal({ title, body, confirmLabel = 'Confirm', onConfirm, onClos
    action (child ID-doc PII + Cognito accounts go with the club). A plain
    ConfirmModal is too easy to click through, so the confirm button stays
    disabled until the admin types the club's exact name. ─── */
-function RemoveClubModal({ club, allSeries = [], onClose, onConfirm }) {
+function RemoveClubModal({
+  club,
+  allSeries = [],
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
+  onClose,
+  onConfirm,
+}) {
   useEscapeClose(onClose);
   const [typed, setTyped] = useStateA('');
   const [busy, setBusy] = useStateA(false);
@@ -5712,7 +5743,7 @@ function RemoveClubModal({ club, allSeries = [], onClose, onConfirm }) {
       teamIdsForClub(s, club.id).some((tid) => s.teams.includes(tid)),
   );
   const playerCount = club.players || 0;
-  const docCount = docsUploadedCount(club);
+  const docCount = docsUploadedCount(club, requiredDocs);
   function confirm() {
     if (!match || busy) return;
     setBusy(true);

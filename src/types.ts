@@ -438,6 +438,38 @@ export interface SeasonRun {
   flatFormat?: { seriesType: string; overs: number };
 }
 
+/** File formats a compliance doc can accept (mirror of packages/api types). */
+export type DocFormat = 'pdf' | 'doc' | 'docx' | 'xls' | 'xlsx' | 'ods';
+
+/**
+ * One required compliance document in the tenant's catalogue (ADR 0009). Mirror of
+ * RequiredDoc in packages/api/src/types.ts — behavior is declared as flags, and the
+ * shared default list lives in data.ts DEFAULT_REQUIRED_DOCS.
+ */
+export interface RequiredDoc {
+  key: string;
+  name: string;
+  desc?: string;
+  /** 'form' = satisfied by an on-platform form (the exco pattern), not a file. */
+  kind?: 'file' | 'form';
+  /** Multi-file doc (safeguarding pattern): docMeta[key] = { files: [...] }. */
+  multiFile?: boolean;
+  minFiles?: number;
+  maxFiles?: number;
+  /** "We don't have these" escape hatch (financials pattern). */
+  allowUnavailable?: boolean;
+  /** "Meeting booked for <date>" escape hatch (AGM pattern). Single-file only. */
+  allowMeetingBooked?: boolean;
+  /** "Course booked for <date>" escape hatch (safeguarding pattern). multiFile only. */
+  allowCourseBooked?: boolean;
+  /** Accepted upload formats; absent ⇒ pdf/doc/docx. */
+  accepts?: DocFormat[];
+  /** Operator intake-classifier hints — present only on /platform payloads. */
+  matchHints?: string[];
+  /** Excluded from completion counts; stored files stay viewable. */
+  archived?: boolean;
+}
+
 export interface TenantConfig {
   tenant: string;
   branding: TenantBranding;
@@ -456,7 +488,11 @@ export interface TenantConfig {
    * DISTRICTS constant (data.ts); [] ⇒ new client awaiting operator setup.
    */
   districts?: string[];
-  requiredDocs?: unknown[];
+  /**
+   * Per-tenant compliance-doc catalogue (ADR 0009). Absent ⇒ the frontend falls back
+   * to DEFAULT_REQUIRED_DOCS (data.ts). Served on GET /tenant minus matchHints.
+   */
+  requiredDocs?: RequiredDoc[];
   adminCount?: number;
   tutorials?: TutorialVideo[];
   /**
@@ -606,6 +642,40 @@ export type TutorialUploadGrant =
       partSizeBytes: number;
       partUrls: { partNumber: number; url: string }[];
     };
+
+// ── Operator bulk document-intake (POST /platform/tenants/:slug/doc-intake/*) ──
+
+/** One request row for POST /platform/tenants/:slug/doc-intake/presign. */
+export interface DocIntakePresignItem {
+  clubId: string;
+  docKey: string;
+  contentType: string;
+  size: number;
+}
+/**
+ * One positional result from .../doc-intake/presign — index-aligned with the
+ * request `items` array. A bad row (unknown club/doc key, unaccepted type,
+ * oversize) fails ONLY that row; the batch never 400s wholesale.
+ */
+export type DocIntakePresignResult =
+  | { ok: true; uploadUrl: string; objectKey: string; contentType: string }
+  | { ok: false; error: string };
+
+/** One request row for POST /platform/tenants/:slug/doc-intake/commit, built from
+ *  an already-uploaded .../presign result plus the picked file's own name/size. */
+export interface DocIntakeCommitItem {
+  clubId: string;
+  docKey: string;
+  objectKey: string;
+  size: number;
+  contentType?: string;
+  sourceName?: string;
+}
+/** One per-club result from .../doc-intake/commit — never index-aligned with the
+ *  request (items are grouped server-side by clubId into one write per club). */
+export type DocIntakeCommitClubResult =
+  | { clubId: string; ok: true; docs: Record<string, boolean> }
+  | { clubId: string; ok: false; error: string };
 
 /** GET /platform/tenants/:slug/dns — the vanity-domain go-live instruction sheet. */
 export interface DnsRecord {

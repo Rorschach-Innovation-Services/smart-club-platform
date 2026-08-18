@@ -30,7 +30,8 @@ import { RegisterPage } from './RegisterPage';
 import { ClubSignupPage } from './ClubSignupPage';
 import { TutorialsPage } from './TutorialsPage';
 import {
-  REQUIRED_DOCS,
+  DEFAULT_REQUIRED_DOCS,
+  activeDocs,
   SUBMISSION_DEADLINE_DEFAULT,
   docCompletion,
   docsAllComplete,
@@ -38,6 +39,7 @@ import {
   computeMarkCompliance,
   computeRevertCompliance,
   safeguardingMeta,
+  computeDocUnavailable,
   MIN_SAFEGUARDING_FILES,
   teamIdsForClub,
   distinctClubCount,
@@ -1204,6 +1206,9 @@ function Shell({
   // Union office email for mailto actions — parsed from the tenant support copy
   // slot via the shared parseSupport helper, so it stays correct per tenant.
   const unionEmail = parseSupport(branding?.copy?.support).email;
+  // Per-tenant compliance-doc catalogue (ADR 0009). Absent ⇒ the shared default list —
+  // same fallback shape as allDistricts above — so a legacy tenant's behaviour is unchanged.
+  const requiredDocs = tenantConfig?.requiredDocs ?? DEFAULT_REQUIRED_DOCS;
 
   // ── Derive clubId from URL ──
   let clubId;
@@ -1410,7 +1415,12 @@ function Shell({
   // Doc/meta computation lives in computeMarkCompliance (data.jsx) so it's tested.
   function markComplianceFor(club, keys) {
     if (!club) return Promise.resolve(club);
-    const { docs, docMeta, flipped } = computeMarkCompliance(club, keys, new Date().toISOString());
+    const { docs, docMeta, flipped } = computeMarkCompliance(
+      club,
+      keys,
+      new Date().toISOString(),
+      requiredDocs,
+    );
     // Nothing was Missing → every requested doc is already compliant (upload or
     // existing override). Skip the no-op version-bumping write; just confirm.
     if (!flipped.length) {
@@ -1436,7 +1446,7 @@ function Shell({
   // (shallow merge), so a deleted key does not resurrect server-side.
   function revertComplianceFor(club, keys) {
     if (!club) return Promise.resolve(club);
-    const { docs, docMeta, reverted } = computeRevertCompliance(club, keys);
+    const { docs, docMeta, reverted } = computeRevertCompliance(club, keys, requiredDocs);
     if (!reverted.length) return Promise.resolve(club);
     return (
       patchClubAt(club.version, { docs, docMeta })
@@ -1492,10 +1502,15 @@ function Shell({
   function setDocUnavailable(key, makeUnavailable) {
     const club = activeClub;
     if (!club) return Promise.resolve();
-    const docs = { ...(club.docs || {}), [key]: makeUnavailable };
-    const docMeta = { ...(club.docMeta || {}) };
-    if (makeUnavailable) docMeta[key] = { unavailable: true, at: new Date().toISOString() };
-    else delete docMeta[key];
+    // Doc/meta computation lives in computeDocUnavailable (data.ts) so it's tested —
+    // same split as computeMarkCompliance/computeRevertCompliance above.
+    const { docs, docMeta } = computeDocUnavailable(
+      club,
+      key,
+      makeUnavailable,
+      new Date().toISOString(),
+      requiredDocs,
+    );
     return patchClubAt(club.version, { docs, docMeta })
       .then((updated) => {
         if (makeUnavailable) {
@@ -1510,18 +1525,19 @@ function Shell({
       })
       .catch(() => undefined);
   }
-  // Safeguarding course booking: a club with no certificates yet declares the date its
-  // people will complete the safeguarding course. Sets docs.safeguarding so compliance
-  // reads complete, and stamps a {courseBooked, courseDate} sentinel (preserving any
-  // files already uploaded). Undo clears the booking, re-deriving the flag from files.
-  function setSafeguardingCourse(courseDate) {
+  // Course booking (the safeguarding pattern, `allowCourseBooked`): a club with no
+  // certificates yet declares the date its people will complete the course for `key`.
+  // Sets docs[key] so compliance reads complete, and stamps a {courseBooked, courseDate}
+  // sentinel (preserving any files already uploaded). Undo clears the booking,
+  // re-deriving the flag from files against the doc's own minimum.
+  function setCourseBooked(key, courseDate) {
     const club = activeClub;
     if (!club) return Promise.resolve();
-    const norm = safeguardingMeta(club.docMeta?.safeguarding);
-    const docs = { ...(club.docs || {}), safeguarding: true };
+    const norm = safeguardingMeta(club.docMeta?.[key]);
+    const docs = { ...(club.docs || {}), [key]: true };
     const docMeta = {
       ...(club.docMeta || {}),
-      safeguarding: {
+      [key]: {
         files: norm.files,
         courseBooked: true,
         courseDate,
@@ -1532,21 +1548,22 @@ function Shell({
       .then((updated) => {
         toastShow('Course date recorded', 'ok', {
           label: 'Undo',
-          onClick: () => clearSafeguardingCourse(),
+          onClick: () => clearCourseBooked(key),
         });
         return updated;
       })
       .catch(() => undefined);
   }
-  function clearSafeguardingCourse() {
+  function clearCourseBooked(key) {
     const club = activeClub;
     if (!club) return Promise.resolve();
-    const norm = safeguardingMeta(club.docMeta?.safeguarding);
-    const stillSatisfied = norm.files.length >= MIN_SAFEGUARDING_FILES;
-    const docs = { ...(club.docs || {}), safeguarding: stillSatisfied };
+    const def = requiredDocs.find((d) => d.key === key);
+    const norm = safeguardingMeta(club.docMeta?.[key]);
+    const stillSatisfied = norm.files.length >= (def?.minFiles ?? MIN_SAFEGUARDING_FILES);
+    const docs = { ...(club.docs || {}), [key]: stillSatisfied };
     const docMeta = { ...(club.docMeta || {}) };
-    if (norm.files.length) docMeta.safeguarding = { files: norm.files };
-    else delete docMeta.safeguarding;
+    if (norm.files.length) docMeta[key] = { files: norm.files };
+    else delete docMeta[key];
     return patchClubAt(club.version, { docs, docMeta })
       .then((updated) => {
         toastShow('Reset — upload certificates when ready');
@@ -1554,41 +1571,42 @@ function Shell({
       })
       .catch(() => undefined);
   }
-  // AGM "we haven't held our AGM yet": a club with no minutes to upload records the future
-  // date the AGM will be held. Sets docs.agm so compliance reads complete (per decision a
-  // booked meeting counts the doc complete), and stamps a {meetingBooked, meetingDate}
-  // sentinel — the single-file analogue of the safeguarding course booking. Undo clears it.
-  function setAgmMeeting(meetingDate) {
+  // Meeting booking (the AGM pattern, `allowMeetingBooked`): a club with no minutes to
+  // upload records the future date its meeting for `key` will be held. Sets docs[key] so
+  // compliance reads complete (per decision a booked meeting counts the doc complete), and
+  // stamps a {meetingBooked, meetingDate} sentinel — the single-file analogue of the
+  // course booking above. Undo clears it.
+  function setMeetingBooked(key, meetingDate) {
     const club = activeClub;
     if (!club) return Promise.resolve();
-    const docs = { ...(club.docs || {}), agm: true };
+    const docs = { ...(club.docs || {}), [key]: true };
     const docMeta = {
       ...(club.docMeta || {}),
-      agm: { meetingBooked: true, meetingDate, at: new Date().toISOString() },
+      [key]: { meetingBooked: true, meetingDate, at: new Date().toISOString() },
     };
     return patchClubAt(club.version, { docs, docMeta })
       .then((updated) => {
-        toastShow('AGM date recorded', 'ok', {
+        toastShow('Meeting date recorded', 'ok', {
           label: 'Undo',
-          onClick: () => clearAgmMeeting(),
+          onClick: () => clearMeetingBooked(key),
         });
         return updated;
       })
       .catch(() => undefined);
   }
-  function clearAgmMeeting() {
+  function clearMeetingBooked(key) {
     const club = activeClub;
     if (!club) return Promise.resolve();
     // A real upload (objectKey) outranks the booking — keep the file and stay complete.
-    const existing = club.docMeta?.agm;
+    const existing = club.docMeta?.[key];
     const hasUpload = !!existing?.objectKey;
-    const docs = { ...(club.docs || {}), agm: hasUpload };
+    const docs = { ...(club.docs || {}), [key]: hasUpload };
     const docMeta = { ...(club.docMeta || {}) };
-    if (hasUpload) docMeta.agm = existing;
-    else delete docMeta.agm;
+    if (hasUpload) docMeta[key] = existing;
+    else delete docMeta[key];
     return patchClubAt(club.version, { docs, docMeta })
       .then((updated) => {
-        toastShow('Reset — upload minutes when ready');
+        toastShow('Reset — upload document when ready');
         return updated;
       })
       .catch(() => undefined);
@@ -1932,7 +1950,9 @@ function Shell({
       v: 'documents',
       label: 'Compliance Docs',
       icon: Icon.Upload,
-      num: clubs.filter(docsAllComplete).length + '/' + clubs.length,
+      // Wrapped, not passed bare: filter hands its callback the array index, which would
+      // land in docsAllComplete's catalogue argument.
+      num: clubs.filter((c) => docsAllComplete(c, requiredDocs)).length + '/' + clubs.length,
       dot: 'gold',
     },
     {
@@ -1988,7 +2008,7 @@ function Shell({
             v: 'documents',
             label: 'Documents',
             icon: Icon.Upload,
-            dot: docCompletion(activeClub) === 100 ? 'teal' : 'gold',
+            dot: docCompletion(activeClub, requiredDocs) === 100 ? 'teal' : 'gold',
           },
           { v: 'cqi', label: 'CQI', icon: Icon.Star, dot: activeClub.cqi > 0 ? 'teal' : 'muted' },
           {
@@ -2050,6 +2070,7 @@ function Shell({
             onUpdateDeadline={setSubmissionDeadline}
             support={branding?.copy?.support}
             onUpdateSupport={setSupportContact}
+            requiredDocs={requiredDocs}
           />
         );
       if (view === 'clubs_list')
@@ -2065,6 +2086,7 @@ function Shell({
             onRevokeSignupLink={revokeSignupLink}
             showShareLink={showShareLink}
             setShowShareLink={setShowShareLink}
+            requiredDocs={requiredDocs}
           />
         );
       if (view === 'club_detail')
@@ -2076,6 +2098,7 @@ function Shell({
             onInvite={inviteUser}
             toast={toastShow}
             allLeagues={allLeagues}
+            requiredDocs={requiredDocs}
             onSetLeagues={(keys) => {
               // Prune leagueTeams to the new key set so changing a club's leagues here can't
               // strand orphaned per-league counts (the server PUTs the whole object, and the
@@ -2122,7 +2145,7 @@ function Shell({
             onMarkCompliant={() =>
               markComplianceFor(
                 activeClub,
-                REQUIRED_DOCS.map((d) => d.key),
+                activeDocs(requiredDocs).map((d) => d.key),
               )
             }
             onRevertDoc={(key) => revertComplianceFor(activeClub, [key])}
@@ -2146,6 +2169,7 @@ function Shell({
             gotoClub={setActiveClub}
             onGetSignupLink={openShareLink}
             toast={toastShow}
+            requiredDocs={requiredDocs}
           />
         );
       if (view === 'cqi_admin')
@@ -2179,6 +2203,7 @@ function Shell({
             onOpenLeague={(k) => navigate(`/admin/insights/leagues/${encodeURIComponent(k)}`)}
             demographics={demographicsQuery.data}
             toast={toastShow}
+            requiredDocs={requiredDocs}
           />
         );
       if (view === 'insights_league')
@@ -2284,6 +2309,7 @@ function Shell({
             replayOnboarding={() => setShowOnboarding(true)}
             submissionDeadline={submissionDeadline}
             allLeagues={allLeagues}
+            requiredDocs={requiredDocs}
             onRenameClub={(name) => updateClub({ name })}
           />
         );
@@ -2652,13 +2678,14 @@ function Shell({
             club={activeClub}
             goto={gotoClubView}
             toast={toastShow}
+            requiredDocs={requiredDocs}
             onUpload={uploadDoc}
             onRemoveFile={removeDocFile}
             onMarkUnavailable={setDocUnavailable}
-            onSetSafeguardingCourse={setSafeguardingCourse}
-            onClearSafeguardingCourse={clearSafeguardingCourse}
-            onSetAgmMeeting={setAgmMeeting}
-            onClearAgmMeeting={clearAgmMeeting}
+            onSetCourseBooked={setCourseBooked}
+            onClearCourseBooked={clearCourseBooked}
+            onSetMeetingBooked={setMeetingBooked}
+            onClearMeetingBooked={clearMeetingBooked}
             onSaveExco={saveExco}
             submissionDeadline={submissionDeadline}
             unionEmail={unionEmail}
@@ -2720,7 +2747,15 @@ function Shell({
 }
 
 /* ─── Filtered admin views (Affiliation / Docs / CQI) ─── */
-function AdminFiltered({ clubs, kind, gotoClub, onGetSignupLink, toast }) {
+function AdminFiltered({
+  clubs,
+  kind,
+  gotoClub,
+  onGetSignupLink,
+  toast,
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
+}) {
+  const docsCols = activeDocs(requiredDocs);
   const titles = {
     affiliation: {
       t: 'Affiliation tracker',
@@ -2754,7 +2789,7 @@ function AdminFiltered({ clubs, kind, gotoClub, onGetSignupLink, toast }) {
     kind === 'affiliation'
       ? !affiliationSubmitted(c)
       : kind === 'docs'
-        ? !docsAllComplete(c)
+        ? !docsAllComplete(c, requiredDocs)
         : c.cqi === 0;
 
   function remindOutstanding() {
@@ -2787,9 +2822,9 @@ function AdminFiltered({ clubs, kind, gotoClub, onGetSignupLink, toast }) {
         return {
           ...base,
           ...Object.fromEntries(
-            REQUIRED_DOCS.map((d) => [d.name, c.docs[d.key] ? 'Uploaded' : 'Missing']),
+            docsCols.map((d) => [d.name, c.docs[d.key] ? 'Uploaded' : 'Missing']),
           ),
-          'Progress %': docCompletion(c),
+          'Progress %': docCompletion(c, requiredDocs),
         };
       return {
         ...base,
@@ -2848,7 +2883,7 @@ function AdminFiltered({ clubs, kind, gotoClub, onGetSignupLink, toast }) {
                 )}
                 {kind === 'docs' && (
                   <>
-                    {REQUIRED_DOCS.map((d) => (
+                    {docsCols.map((d) => (
                       <th key={d.key}>{d.name}</th>
                     ))}
                     <th>Progress</th>
@@ -2894,7 +2929,7 @@ function AdminFiltered({ clubs, kind, gotoClub, onGetSignupLink, toast }) {
 
                   {kind === 'docs' && (
                     <>
-                      {REQUIRED_DOCS.map((d) => (
+                      {docsCols.map((d) => (
                         <td key={d.key}>
                           {c.docs[d.key] ? (
                             <Pill tone="teal" dot>
@@ -2909,11 +2944,11 @@ function AdminFiltered({ clubs, kind, gotoClub, onGetSignupLink, toast }) {
                       ))}
                       <td>
                         <ProgChip
-                          value={docCompletion(c)}
+                          value={docCompletion(c, requiredDocs)}
                           tone={
-                            docCompletion(c) === 100
+                            docCompletion(c, requiredDocs) === 100
                               ? 'teal'
-                              : docCompletion(c) > 0
+                              : docCompletion(c, requiredDocs) > 0
                                 ? 'gold'
                                 : 'coral'
                           }
