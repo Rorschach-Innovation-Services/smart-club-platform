@@ -18,3 +18,10 @@ dash.md
 
 # Prod data snapshots written by import-planb-fixtures --confirm — never commit
 planb-backup-*.json
+
+# Prod data snapshots (chair name/email/cell, docMeta) written by
+# import-titans-compliance --confirm — never commit; also covers the
+# titans-import-created-clubs.json revert manifest, which carries no PII itself
+# but lives alongside the backups and is equally not repo content.
+titans-import-backup-*.json
+titans-import-created-clubs.json
