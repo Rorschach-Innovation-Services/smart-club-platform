@@ -19,7 +19,7 @@
  * person (see shared-fixtures' rows 7/8 note). Two rows conflict only when their
  * identity is claimed by MORE THAN ONE club.
  */
-import type { RosterDraftRow, RosterIntakeException, RosterIntakeParseResponse } from './types';
+import type { RosterIntakeException, RosterIntakeParseResponse } from './types';
 
 /* ─── Row identity ─── */
 

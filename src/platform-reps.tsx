@@ -34,6 +34,7 @@ import { queryClient, qk } from './query';
 import * as api from './api';
 import { ApiError, EMAIL_RE } from './api';
 import { Btn, Card, Icon, Pill, useEscapeClose } from './atoms';
+import { docKeyForRole } from './data';
 import { ERR, HINT, InfoTip, ReviewCounters, StepIntro } from './platform-wizard';
 import type {
   Channel,
@@ -80,20 +81,6 @@ const NO_COMMITTEE_ROLE_HINT =
   'Extraction isn’t available yet — no document in the catalogue is marked as the ' +
   'committee list. Assign the role in Required documents, or type the contact’s ' +
   'details in below.';
-
-/* ─── docKeyForRole (client-side mirror) ───
- * Mirrors packages/api/src/catalogue.ts docKeyForRole (not exported from api.ts/
- * types.ts — out of scope for this change). The wizard gates on InsightsClub.intake
- * (already role-resolved server-side); this is only needed to get the literal doc
- * key for the platform view-url call. See the same mirror in
- * platform-roster-intake.tsx. */
-function docKeyForRole(
-  requiredDocs: RequiredDoc[],
-  role: 'memberDatabase' | 'committee',
-): string | null {
-  const hit = requiredDocs.find((d) => d.role === role && !d.archived);
-  return hit?.key ?? null;
-}
 
 /* ─── Rep coverage status ─── */
 
@@ -702,7 +689,10 @@ export function RepsPage({ toast }: { toast: Toast }) {
     return [...r.candidates].sort((a, b) => rank[a.confidence] - rank[b.confidence])[0];
   }
 
-  async function extractClub(club: InsightsClub): Promise<CommitteeExtractResponse | undefined> {
+  async function extractClub(
+    club: InsightsClub,
+    opts?: { silent?: boolean },
+  ): Promise<CommitteeExtractResponse | undefined> {
     setExtractStatus((s) => ({ ...s, [club.id]: 'loading' }));
     try {
       const res = await api.platformCommitteeExtract(slug, club.id);
@@ -711,7 +701,11 @@ export function RepsPage({ toast }: { toast: Toast }) {
       return res;
     } catch {
       setExtractStatus((s) => ({ ...s, [club.id]: 'error' }));
-      toast('Could not read this club’s committee document — try again', 'error');
+      // Bulk mode aggregates failures into one toast (see extractAll) — a per-club toast
+      // here would stack N times for an N-club run.
+      if (!opts?.silent) {
+        toast('Could not read this club’s committee document — try again', 'error');
+      }
       return undefined;
     }
   }
@@ -739,11 +733,19 @@ export function RepsPage({ toast }: { toast: Toast }) {
   async function extractAll() {
     setBulkExtracting(true);
     const eligible = sortedClubs.filter((c) => c.intake?.committee === 'parseable');
+    let failed = 0;
     for (const c of eligible) {
       // eslint-disable-next-line no-await-in-loop -- deliberately sequential; see file header
-      await extractClub(c);
+      const res = await extractClub(c, { silent: true });
+      if (!res) failed++;
     }
     setBulkExtracting(false);
+    if (failed > 0) {
+      toast(
+        `${failed} club${failed === 1 ? '' : 's'} couldn’t be read — retry from the row`,
+        'error',
+      );
+    }
   }
 
   function openInvite(

@@ -194,6 +194,35 @@ describe('StructureIntakeWizard', () => {
     expect(screen.getByDisplayValue('U9 Platinum A')).toBeInTheDocument();
   });
 
+  it('offers the tenant’s custom districts (not the platform defaults) in the Create league modal', async () => {
+    const sections: StructureSection[] = [
+      { sheet: 'JUNIORS', header: 'U/9 PLATINUM A', rows: [{ raw: 'TUKS U9 A' }] },
+    ];
+    vi.mocked(api.platformStructureIntakeParse).mockResolvedValue({
+      sections,
+      sheetsScanned: 1,
+      sheetsWithSections: 1,
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await uploadWorkbook();
+    await screen.findByText('2. Sections');
+
+    await user.click(screen.getByRole('button', { name: /create league…/i }));
+    const dialog = await screen.findByRole('dialog', { name: /create league/i });
+
+    // The tenant config carries districts: ['Central'] (see `config` above). The server
+    // validates a new league's district against the TENANT's district list, so the modal
+    // must offer that custom district…
+    expect(within(dialog).getByRole('option', { name: 'Central' })).toBeInTheDocument();
+    // …and must NOT fall back to the hardcoded platform defaults (src/data.ts DISTRICTS),
+    // which this tenant overrides — offering one would let the operator pick a district the
+    // commit then 400s on for the whole request.
+    expect(
+      within(dialog).queryByRole('option', { name: 'Ethekwini Metro Cricket Union' }),
+    ).not.toBeInTheDocument();
+  });
+
   it('excludes a club with an existing plan by default; Include anyway sets overwrite:true on commit', async () => {
     const sections: StructureSection[] = [
       { sheet: 'SENIORS', header: 'Premier League', rows: [{ raw: 'TUKS 1', venue: 'Buks Oval' }] },

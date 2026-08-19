@@ -64,6 +64,13 @@ const BASE_OVERVIEW = {
       docs: {},
       players: 12,
       leagueTeams: { 'a-league': 1 },
+      // DELIBERATE fixture divergence: a real server never emits `memberDatabase:
+      // 'parseable'` while `BASE_CONFIG.requiredDocs` is [] (with no member-database role
+      // there's no doc to classify, so intake would be 'absent'). It's paired that way on
+      // purpose here so ONE overview can drive both the documents/rosters COUNT tests
+      // (which read `intake`) and the role-GATE tests (which read `requiredDocs`, and each
+      // vary it per case); the two axes are independent in the component, so exercising
+      // them from one fixture is intentional, not an accidental impossible state.
       intake: { memberDatabase: 'parseable', committee: 'unparseable' },
     },
   ],

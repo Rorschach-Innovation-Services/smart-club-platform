@@ -125,9 +125,13 @@ of 21 clubs have a member database"), and the first non-done step is called out 
 
 1. **Document catalogue** — decide what this client submits (Settings → Required
    documents), and mark which document is the **member database** and which is the
-   **committee list**. This is the one hard dependency: the roster and reps steps read
-   those two documents through their assigned ROLE, not by file name, so they stay
-   locked (with an on-screen explanation) until both roles are assigned. See
+   **committee list**. Downstream steps read those documents through their assigned
+   ROLE, not by file name. The one hard gate is the **member-database** role: the roster
+   step stays locked (with an on-screen explanation) until it's assigned, because it has
+   no other way in. The **reps** step is not gated on the committee role — its manual
+   invite works without it, so it unlocks once clubs exist; assigning the committee role
+   just enables extraction from committee documents instead of typing every contact by
+   hand. See
    [ADR 0010](../architecture/0010-self-serve-onboarding.md#1-doc-roles-not-literal-keys).
 2. **Districts & leagues** — set up the client's districts and the leagues its clubs
    play in (Settings). Every club and team plan below is built against these.
@@ -175,7 +179,13 @@ compliance/structure import, roster import — still exist and still work; keep 
 - **Reverting a bad operator commit.** There is deliberately no portal undo (see
   [ADR 0010](../architecture/0010-self-serve-onboarding.md#4-provenance-is-the-revert-contract--there-is-no-portal-undo)) —
   every operator-suite write is provenance-stamped (`intake:roster:…`,
-  `intake:structure:…`), the same shape the CLI revert flags already understand.
+  `intake:structure:…`), the **same shape** as the CLI's own `import:titans-*` markers.
+  A CLI `--revert` mode that understands these `intake:*` batches is **not built yet**,
+  though: `import-titans-roster.ts --revert` is hardcoded to the CLI's own
+  `import:titans-compliance-2026` marker. It's recorded in
+  [ADR 0010 §4](../architecture/0010-self-serve-onboarding.md#4-provenance-is-the-revert-contract--there-is-no-portal-undo)
+  as the natural next step; until then, recovering an operator commit is a hand-written
+  scan on the `registeredBy` prefix (`intake:roster:<slug>:<date>…`), not a flag.
 - **A workbook layout the structure wizard's "unsupported layout" screen rejects.** The
   wizard's manifest-free parser handles most shapes; a genuinely unusual one is still an
   engineer-CLI job, same as any pre-suite client.

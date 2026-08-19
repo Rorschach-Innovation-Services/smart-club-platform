@@ -111,21 +111,17 @@ const OVERWRITE_TIP =
   'with what you see below — leagues/teams not in this workbook are dropped for this club. ' +
   'Excluded by default so an existing plan is never silently overwritten.';
 
-const STATUS_TONE: Record<'ready' | 'check' | 'excluded', string> = {
-  ready: 'teal',
-  check: 'gold',
-  excluded: 'muted',
-};
-
 /* ─── Draft-league creation ─── */
 
 function DraftLeagueModal({
   leagues,
+  districts,
   initialLabel,
   onClose,
   onCreated,
 }: {
   leagues: League[];
+  districts: string[];
   initialLabel?: string;
   onClose: () => void;
   onCreated: (league: League) => void;
@@ -198,7 +194,7 @@ function DraftLeagueModal({
             onChange={(e) => setDistrict(e.target.value)}
           >
             <option value={OVERARCHING_DISTRICT}>{OVERARCHING_DISTRICT}</option>
-            {DISTRICTS.map((d) => (
+            {districts.map((d) => (
               <option key={d} value={d}>
                 {d}
               </option>
@@ -269,11 +265,16 @@ export function StructureIntakeWizard({ toast }: { toast: Toast }) {
     retry: 0,
   });
 
-  const [clubs, setClubs] = useState<InsightsClub[]>([]);
-  useMemo(() => {
-    if (overviewQ.data) setClubs(overviewQ.data.clubs);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overviewQ.data]);
+  // Clubs the operator created inline during THIS wizard session, held locally so a row
+  // can re-match to a brand-new club before the overview query has refetched. The visible
+  // list is derived (not a render-phase state write) from the server overview plus these,
+  // de-duped by id in case a refetch has already picked one up.
+  const [locallyCreatedClubs, setLocallyCreatedClubs] = useState<InsightsClub[]>([]);
+  const clubs = useMemo<InsightsClub[]>(() => {
+    const base = overviewQ.data?.clubs ?? [];
+    const seen = new Set(base.map((c) => c.id));
+    return [...base, ...locallyCreatedClubs.filter((c) => !seen.has(c.id))];
+  }, [overviewQ.data, locallyCreatedClubs]);
   const clubsById = useMemo(() => new Map(clubs.map((c) => [c.id, c])), [clubs]);
   const clubIndex = useMemo(() => buildClubIndex(clubs), [clubs]);
   const sortedClubs = useMemo(
@@ -1007,6 +1008,7 @@ export function StructureIntakeWizard({ toast }: { toast: Toast }) {
       {createLeagueFor !== null && (
         <DraftLeagueModal
           leagues={allLeagues}
+          districts={configQ.data?.districts?.length ? configQ.data.districts : DISTRICTS}
           initialLabel={
             sections ? suggestLeagueLabel(sections[createLeagueFor]?.header ?? '') : undefined
           }
@@ -1031,7 +1033,21 @@ export function StructureIntakeWizard({ toast }: { toast: Toast }) {
               eyebrow="Structure intake · New club"
               onClose={() => setCreateClubFor(null)}
               onCreated={(club) => {
-                setClubs((cs) => [...cs, club as unknown as InsightsClub]);
+                // Build the minimal InsightsClub the wizard actually reads (name for the
+                // pickers/index, empty leagues/leagueTeams so clubHasExistingPlan is false
+                // for a brand-new club). A freshly created shell has no plan or players.
+                const created: InsightsClub = {
+                  id: club.id,
+                  name: club.name,
+                  district: club.district,
+                  affiliation: 'not_started',
+                  cqi: 0,
+                  docs: {},
+                  players: 0,
+                  leagues: [],
+                  leagueTeams: {},
+                };
+                setLocallyCreatedClubs((cs) => [...cs, created]);
                 setRowClub(target.id, club.id);
                 setCreateClubFor(null);
                 toast(`${club.name} created — row re-matched`);

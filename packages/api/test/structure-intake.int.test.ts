@@ -493,6 +493,35 @@ describe('POST /platform/tenants/:slug/structure-intake/commit', () => {
     assert.equal(club?.leagues.length, 0);
   });
 
+  test('a blank/whitespace-only team name → per-club error, nothing written for that club', async () => {
+    const res = await app.request(`/platform/tenants/${TENANT}/structure-intake/commit`, {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        clubs: [
+          {
+            clubId: 'clubduplclub',
+            plan: {
+              leagues: ['premier-men'],
+              leagueTeams: { 'premier-men': 2 },
+              // Second side's name is whitespace only — must reject this club row,
+              // mirroring the venue guard beside it, without blank-writing a nameless team.
+              teamRosters: { 'premier-men': [{ name: 'Real 1st' }, { name: '   ' }] },
+            },
+          },
+        ],
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      clubs: Array<{ clubId: string; ok: boolean; error?: string }>;
+    };
+    assert.equal(body.clubs[0].ok, false);
+    assert.match(body.clubs[0].error ?? '', /team name must not be empty/);
+    const club = await repo.getClub(TENANT, 'clubduplclub');
+    assert.equal(club?.leagues.length, 0);
+  });
+
   test('existing plan without overwrite → per-club 409 "confirm overwrite"', async () => {
     const res = await app.request(`/platform/tenants/${TENANT}/structure-intake/commit`, {
       method: 'POST',

@@ -105,9 +105,10 @@ export function CreateClubModal({
         </div>
         <div className="task-modal-body">
           <p style={HINT}>
-            A shell club — no chair or Cognito account yet, just somewhere to attach these files.
-            The chair signs up normally later. Every row whose folder/file matches this name will
-            re-match to it automatically once it's created.
+            A shell club — no chair or Cognito account yet, just a record to attach data to. The
+            chair signs up normally later. Any row that matches this name re-matches to it
+            automatically once it's created. This creates the club immediately — clubs can't be
+            deleted from the operator console yet.
           </p>
           <div className="field-label" style={{ marginTop: 12 }}>
             Name <span className="req">*</span>
@@ -266,6 +267,9 @@ export function InfoTip({ label, children }: { label: string; children: ReactNod
   const btnRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
   const popId = useId();
+  // Identity of the close-fn this instance registered as the module-level latch, so we
+  // only ever clear the latch when WE still hold it (never another tip that opened after).
+  const closeSelfRef = useRef<(() => void) | null>(null);
 
   const place = useCallback(() => {
     const b = btnRef.current?.getBoundingClientRect();
@@ -304,16 +308,35 @@ export function InfoTip({ label, children }: { label: string; children: ReactNod
     };
   }, [open, place]);
 
+  // Release the module-level single-open latch whenever this tip closes — by outside
+  // click, Escape, or blur (all of which flip `open` to false without going through
+  // `toggle`) — or unmounts. Without this, the latch keeps pointing at a closed (or
+  // unmounted) tip's setter, and the next tip to open calls a stale no-op instead of a
+  // live one.
+  useEffect(() => {
+    if (open) return;
+    if (closeActiveInfoTip === closeSelfRef.current) closeActiveInfoTip = null;
+  }, [open]);
+  useEffect(
+    () => () => {
+      if (closeActiveInfoTip === closeSelfRef.current) closeActiveInfoTip = null;
+    },
+    [],
+  );
+
   function toggle(e: React.MouseEvent) {
     // InfoTip often sits beside a checkbox/radio label; stop the click reaching it.
     e.preventDefault();
     e.stopPropagation();
     if (open) {
       setOpen(false);
+      if (closeActiveInfoTip === closeSelfRef.current) closeActiveInfoTip = null;
       return;
     }
     if (closeActiveInfoTip) closeActiveInfoTip();
-    closeActiveInfoTip = () => setOpen(false);
+    const close = () => setOpen(false);
+    closeSelfRef.current = close;
+    closeActiveInfoTip = close;
     setOpen(true);
   }
 

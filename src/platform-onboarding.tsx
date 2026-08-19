@@ -25,14 +25,8 @@ import { qk } from './query';
 import * as api from './api';
 import { Btn, Card, Pill, ProgressBar } from './atoms';
 import { StepIntro } from './platform-wizard';
-import { DISTRICTS } from './data';
-import type {
-  InsightsClub,
-  RequiredDoc,
-  TenantConfig,
-  TenantOverview,
-  TenantRepsResponse,
-} from './types';
+import { DISTRICTS, roleAssigned } from './data';
+import type { InsightsClub, TenantConfig, TenantOverview, TenantRepsResponse } from './types';
 
 type Toast = (m: string, t?: string) => void;
 
@@ -56,10 +50,6 @@ interface OnboardingStep {
   locked?: boolean;
   actionLabel: string;
   onAction: () => void;
-}
-
-function roleAssigned(requiredDocs: RequiredDoc[], role: 'memberDatabase' | 'committee'): boolean {
-  return requiredDocs.some((d) => d.role === role && !d.archived);
 }
 
 function pct(n: number, of: number): number {
@@ -227,6 +217,13 @@ export function buildOnboardingSteps(
         label: `${clubsWithMemberDb.length} of ${clubs.length} clubs have a member database`,
         pct: pct(clubsWithMemberDb.length, clubs.length),
       },
+      // Per-club member-database counts only populate once the member-database ROLE is
+      // assigned in the catalogue step — without it the server classifies every club's
+      // intake as 'absent', so this bar reads 0 even after documents are uploaded.
+      guidance: !memberDbAssigned
+        ? 'Per-club member-database counts appear only once the member-database role is ' +
+          'assigned in the catalogue step above — until then every club reads as absent here.'
+        : undefined,
       actionLabel: 'Open document intake',
       onAction: () => navigate(`/platform/tenants/${slug}/doc-intake`),
     },

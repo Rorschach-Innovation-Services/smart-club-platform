@@ -305,10 +305,12 @@ export function buildClubPlans(
 }
 
 /**
- * Assemble the commit body: `newLeagues` carries confirmed draft leagues (omitted
- * entirely when there are none — matches the server's `newLeagues?` optionality),
- * `overwriteByClub` sets `overwrite: true` only for clubs the operator explicitly
- * opted into replacing via "Include anyway" on the plan step.
+ * Assemble the commit body: `newLeagues` carries every draft league created in this
+ * wizard session (omitted entirely when there are none — matches the server's
+ * `newLeagues?` optionality); the server itself drops any that are an exact re-send of
+ * a league already on the tenant catalogue. `overwriteByClub` sets `overwrite: true`
+ * only for clubs the operator explicitly opted into replacing via "Include anyway" on
+ * the plan step.
  */
 export function buildCommitPayload(
   clubPlans: Record<string, StructureClubPlan>,

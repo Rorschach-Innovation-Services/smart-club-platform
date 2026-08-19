@@ -5137,6 +5137,7 @@ function currentTeamIds(club: Club): string[] {
  *  `plan.firstTeamVenue`) — mirrors other free-text caps in this file (club/league
  *  names etc). */
 const STRUCTURE_INTAKE_VENUE_MAX_LEN = 120;
+const STRUCTURE_INTAKE_TEAM_NAME_MAX_LEN = 80;
 
 /**
  * Validate + trim one venue value from a structure-intake plan. `undefined`/absent is
@@ -5146,6 +5147,30 @@ const STRUCTURE_INTAKE_VENUE_MAX_LEN = 120;
  * just above it. Returns the trimmed string, or undefined when the input was absent
  * (an empty/whitespace-only value is DROPPED, not stored as `''`).
  */
+/**
+ * Validate + trim one team NAME from a structure-intake plan. Unlike venue this is
+ * required: absent/blank-after-trim, non-string, or over the length cap throws a 400
+ * naming the offending club — the same per-club error category as the venue and
+ * teamRosters-length checks beside it, so one bad row 400s just that club, not the
+ * whole request. Returns the trimmed name.
+ */
+function validateStructureIntakeTeamName(value: unknown, clubId: string): string {
+  if (typeof value !== 'string') {
+    throw new HttpError(400, `club ${clubId}: team name must be a string`);
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new HttpError(400, `club ${clubId}: team name must not be empty`);
+  }
+  if (trimmed.length > STRUCTURE_INTAKE_TEAM_NAME_MAX_LEN) {
+    throw new HttpError(
+      400,
+      `club ${clubId}: team name must be ${STRUCTURE_INTAKE_TEAM_NAME_MAX_LEN} characters or fewer`,
+    );
+  }
+  return trimmed;
+}
+
 function validateStructureIntakeVenue(value: unknown, clubId: string): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== 'string') {
@@ -5180,10 +5205,11 @@ function buildStructureIntakePatch(
         throw new HttpError(400, `teamRosters for "${key}" must list exactly ${count} teams`);
       }
       teamRosters[key] = roster.map((t, i) => {
+        const name = validateStructureIntakeTeamName(t.name, clubId);
         const venue = validateStructureIntakeVenue(t.venue, clubId);
         return {
           id: `tm_${clubId}_${key}_${i + 1}`,
-          name: (t.name ?? '').trim(),
+          name,
           ...(venue ? { venue } : {}),
         };
       });
@@ -5334,6 +5360,13 @@ app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
           juniors: counts.juniors,
         };
       } catch (err) {
+        // An HttpError is an expected per-club validation/conflict (409 existing plan,
+        // 400 bad plan) surfaced to the operator as-is; anything else is unexpected and
+        // was previously swallowed into the generic message with no trace — log it, same
+        // prefix style as the sibling roster-intake/committee-extract routes.
+        if (!(err instanceof HttpError)) {
+          console.error(`structure-intake commit: failed to save ${clubId}`, err);
+        }
         const error =
           err instanceof HttpError ? err.message : 'failed to save this club’s team plan';
         return { clubId, ok: false as const, error };

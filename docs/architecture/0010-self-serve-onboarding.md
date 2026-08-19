@@ -41,8 +41,12 @@ a structural document — roster-intake parse, committee-extract — resolves th
 role and 409s with actionable guidance ("No document in the catalogue is marked as the
 member database — assign the role in Required documents.") when it's unassigned, rather
 than silently finding nothing. The onboarding checklist (frontend) enforces the same
-rule ahead of the API: the roster and reps steps show as blocked, with the same
-guidance, until both roles are assigned.
+rule ahead of the API, but only where a role is a hard dependency: the **roster** step
+shows as blocked, with the same guidance, until the member-database role is assigned
+(it has no path in without that stored file). The **reps** step is NOT gated on the
+committee role — its manual invite path works regardless — so it unlocks as soon as
+clubs exist, carrying a standing hint that assigning the committee role enables
+extraction from committee documents.
 
 ### 2. Server-side parsing, tenant-neutral modules
 

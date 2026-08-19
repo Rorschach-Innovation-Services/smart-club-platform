@@ -21,24 +21,15 @@
  * remapping a band re-calls parse for that club with the new parse input; it's a few
  * seconds against one already-fetched workbook, not a re-upload.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { queryClient, qk } from './query';
 import * as api from './api';
 import { ApiError } from './api';
-import { Btn, Card, EmptyState, Icon, Pill } from './atoms';
-import { resolveDocMime } from './data';
-import {
-  BulkActionBar,
-  ERR,
-  HINT,
-  InfoTip,
-  ReviewCounters,
-  StepIntro,
-  formatBytes,
-  useRowSelection,
-} from './platform-wizard';
+import { Btn, Card, Pill } from './atoms';
+import { docKeyForRole, resolveDocMime } from './data';
+import { InfoTip, ReviewCounters, StepIntro } from './platform-wizard';
 import {
   applyRosterDecision,
   buildClubSummaries,
@@ -94,20 +85,6 @@ const REPLACE_DB_TIP =
   'a fix — edit the file locally, then replace it here instead of visiting document intake.';
 
 const NOT_SUPPORTED_HINT = 'Add it via document intake →';
-
-/* ─── docKeyForRole (client-side mirror) ───
- * The wizard gates on InsightsClub.intake (already role-resolved server-side), but the
- * "Replace member database" affordance needs the literal docKey to presign/commit
- * against — the operator's catalogue may have renamed/slugified it. Small, local
- * mirror of the server's docKeyForRole (catalogue.ts); not exported from api.ts/
- * types.ts (out of scope for this change) so it lives here. */
-function docKeyForRole(
-  requiredDocs: RequiredDoc[],
-  role: 'memberDatabase' | 'committee',
-): string | null {
-  const hit = requiredDocs.find((d) => d.role === role && !d.archived);
-  return hit?.key ?? null;
-}
 
 /* ─── Parse pool (3-concurrent) ─── */
 
@@ -887,7 +864,7 @@ export function RosterIntakeWizard({ toast }: { toast: Toast }) {
                         size="sm"
                         onClick={() => decide({ type: 'exclude-group', groupKeys })}
                       >
-                        Exclude both
+                        {g.rows.length > 2 ? `Exclude all (${g.rows.length})` : 'Exclude both'}
                       </Btn>
                       <InfoTip label="Not sure what to do?">{EXCLUDE_BOTH_TIP}</InfoTip>
                       <Pill tone={resolved ? 'teal' : 'coral'}>
@@ -938,7 +915,8 @@ export function RosterIntakeWizard({ toast }: { toast: Toast }) {
               <ul style={{ margin: '6px 0 0', paddingLeft: 18, fontSize: 12 }}>
                 {allCommitConflicts.map((c, i) => (
                   <li key={i}>
-                    Row {c.rowNumber} ({c.clubId}) — claimed by {c.claimedBy}
+                    Row {c.rowNumber} ({clubs.find((cl) => cl.id === c.clubId)?.name ?? c.clubId}) —
+                    claimed by {c.claimedBy}
                     {c.alreadyRegisteredAt
                       ? ` (already registered at ${c.alreadyRegisteredAt})`
                       : ''}
