@@ -10,6 +10,14 @@ import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 
 const s3 = new S3Client({});
 
+/** Same charset/`..` screen as the `/local-uploads/*` routes' LOCAL_UPLOAD_KEY_RE in
+ *  index.ts (kept as its own copy here — index.ts imports THIS module, so importing
+ *  back would be circular). Applied to every objectKey before it's ever concatenated
+ *  onto LOCAL_UPLOADS_DIR, not just the ones that arrive via the `/local-uploads/*`
+ *  HTTP routes — a stored `local/...` docMeta key read through any other path (roster/
+ *  committee parse, doc view-url, etc) gets the exact same traversal guard. */
+const OBJECT_KEY_RE = /^[A-Za-z0-9._/-]+$/;
+
 /**
  * Read a stored upload's raw bytes.
  *
@@ -23,7 +31,11 @@ const s3 = new S3Client({});
 export async function readUploadObject(objectKey: string): Promise<Buffer> {
   const localDir = process.env.LOCAL_UPLOADS_DIR;
   if (objectKey.startsWith('local/') && localDir) {
-    return readFile(`${localDir}/${objectKey.slice('local/'.length)}`);
+    const key = objectKey.slice('local/'.length);
+    if (key.includes('..') || !OBJECT_KEY_RE.test(key)) {
+      throw new Error(`invalid upload object key: ${objectKey}`);
+    }
+    return readFile(`${localDir}/${key}`);
   }
   const bucket = process.env.UPLOADS_BUCKET!;
   const res = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: objectKey }));

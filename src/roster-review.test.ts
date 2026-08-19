@@ -29,7 +29,7 @@ describe('buildClubSummaries', () => {
           { rowNumber: 2, firstName: 'A', lastName: 'B', dob: '2000-01-01', missingId: false },
           { rowNumber: 3, firstName: 'C', lastName: 'D', dob: '2001-01-01', missingId: false },
         ],
-        exceptions: [{ rowNumber: 4, sheet: 'Seniors', reason: 'bad-checksum' }],
+        exceptions: [{ rowNumber: 4, sheet: 'Seniors', reason: 'bad-id-checksum' }],
         unknownGenderRaw: ['?'],
         unknownRaceRaw: [],
       },
@@ -48,7 +48,7 @@ describe('buildClubSummaries', () => {
         hasIdColumn: false,
         totalDataRows: 2,
         rows: [{ rowNumber: 2, firstName: 'E', lastName: 'F', dob: '2010-01-01', missingId: true }],
-        exceptions: [{ rowNumber: 3, sheet: 'Juniors', reason: 'missing-id' }],
+        exceptions: [{ rowNumber: 3, sheet: 'Juniors', reason: 'bad-id' }],
         unknownGenderRaw: [],
         unknownRaceRaw: ['other'],
       },
@@ -88,28 +88,28 @@ describe('buildClubSummaries', () => {
     expect(summary.template).toBe('standard');
     expect(summary.totalDataRows).toBe(3);
     expect(summary.validRowCount).toBe(2);
-    expect(summary.exceptionsByReason).toEqual({ 'bad-checksum': 1 });
+    expect(summary.exceptionsByReason).toEqual({ 'bad-id-checksum': 1 });
     expect(summary.totalExceptions).toBe(1);
     expect(summary.unknownGenderRaw).toEqual(['?']);
     expect(summary.recoverableIdExceptionCount).toBe(0);
   });
 
-  it('classifies a club whose sheets all lack an ID column as dob-variant, counting missing-id AND bad-id rows as recoverable', () => {
+  it('classifies a club whose sheets all lack an ID column as dob-variant, counting its bad-id rows as recoverable', () => {
     const clubs: ClubParseState[] = [
       { clubId: 'c2', clubName: 'Club Two', allowMissingId: true, parse: parseableDobVariant },
     ];
     const [summary] = buildClubSummaries(clubs);
     expect(summary.template).toBe('dob-variant');
     expect(summary.dobOnlyCount).toBe(1);
-    // parseableDobVariant carries one 'missing-id' exception; bad-id-only clubs (an ID
-    // column present but this row's cell is unusable while a dob is present) are covered
-    // by the dedicated recoverable-count test below.
+    // The server has no ID column to read here, so every row surfaces as a `bad-id`
+    // exception (never a 'missing-id' reason — the server never emits one; see
+    // RosterException in packages/api/src/roster-parse.ts).
     expect(summary.recoverableIdExceptionCount).toBe(1);
     expect(summary.unknownRaceRaw).toEqual(['other']);
     expect(summary.allowMissingId).toBe(true);
   });
 
-  it('counts bad-id exceptions toward the recoverable count, not just missing-id (round-2 E2E: Adelaar read "0 missing-id rows" beside 103 bad-id rows)', () => {
+  it('counts bad-id exceptions toward the recoverable count (round-2 E2E: Adelaar had 103 bad-id rows)', () => {
     const parse: RosterIntakeParseResponse = {
       parseable: true,
       sheets: [

@@ -190,6 +190,44 @@ describe('RepsPage', () => {
     await screen.findByText(/invite a/i);
     expect(screen.getByRole('button', { name: /view document/i })).toBeInTheDocument();
     expect(screen.getByLabelText(/^email$/i)).toHaveValue('');
+    // The server's own reason string is surfaced verbatim, not the generic hint.
+    expect(screen.getByText('Scanned image, no extractable text')).toBeInTheDocument();
+  });
+
+  it('surfaces a legacy-.xls server reason verbatim in the unparseable-doc modal', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.platformCommitteeExtract).mockResolvedValue({
+      status: 'unparseable',
+      reason: 'legacy .xls workbook — save it as .xlsx and re-upload via document intake',
+    });
+    renderPage();
+    await screen.findByRole('heading', { name: /rep invites/i });
+
+    const riversideRow = screen.getByText('Riverside CC').closest('tr')!;
+    await user.click(
+      within(riversideRow).getByRole('button', { name: /extract from committee doc/i }),
+    );
+
+    await screen.findByText(/invite a/i);
+    expect(
+      screen.getByText('legacy .xls workbook — save it as .xlsx and re-upload via document intake'),
+    ).toBeInTheDocument();
+  });
+
+  it('explains extraction is unavailable when no committee role is assigned in the catalogue', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.platformGetTenant).mockResolvedValue({
+      ...config,
+      requiredDocs: [{ key: 'constitution', name: 'Constitution' }],
+    } as unknown as TenantConfig);
+    renderPage();
+    await screen.findByRole('heading', { name: /rep invites/i });
+
+    const phsobRow = screen.getByText('PHSOB Cricket Club').closest('tr')!;
+    await user.click(within(phsobRow).getByRole('button', { name: /^invite manually$/i }));
+
+    await screen.findByText(/invite a/i);
+    expect(screen.getByText(/no document in the catalogue is marked/i)).toBeInTheDocument();
   });
 
   it('shows a copyable login link on success, plus a warning when the server sends one', async () => {
@@ -217,6 +255,42 @@ describe('RepsPage', () => {
       ).toBeInTheDocument(),
     );
     expect(screen.getByText(/no canonical web origin yet/i)).toBeInTheDocument();
+  });
+
+  it('Next club without a rep → shows the next club’s name and a blank form, not the previous result', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.platformInviteRep).mockResolvedValue({
+      sub: 'u2',
+      email: 'newrep@phsob.co.za',
+      loginUrl: 'https://phsob.example.com/?email=newrep%40phsob.co.za',
+      results: [],
+    });
+    renderPage();
+    await screen.findByRole('heading', { name: /rep invites/i });
+
+    const phsobRow = screen.getByText('PHSOB Cricket Club').closest('tr')!;
+    await user.click(within(phsobRow).getByRole('button', { name: /^invite manually$/i }));
+
+    await screen.findByText(/invite a/i);
+    expect(screen.getByRole('dialog')).toHaveTextContent('PHSOB Cricket Club');
+    await user.type(screen.getByLabelText(/^email$/i), 'newrep@phsob.co.za');
+    await user.click(screen.getByRole('button', { name: /create account/i }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByDisplayValue('https://phsob.example.com/?email=newrep%40phsob.co.za'),
+      ).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole('button', { name: /next club without a rep/i }));
+
+    // The next needs-rep club (alphabetically after PHSOB) is Riverside CC.
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('Riverside CC'));
+    expect(screen.queryByDisplayValue(/phsob\.example\.com/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText((_, el) => el?.textContent === 'Account created for newrep@phsob.co.za.'),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/^email$/i)).toHaveValue('');
   });
 
   it('renders the server admin-membership 409 guidance verbatim', async () => {

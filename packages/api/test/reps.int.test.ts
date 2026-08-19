@@ -222,6 +222,24 @@ before(async () => {
       },
     }),
   );
+  // ── CSV fixture: looksLikeSpreadsheet accepts it, but exceljs's xlsx.load can't read
+  //    it — mirrors the roster-intake parse route's CSV-specific reason. ──
+  const csvAbs = path.join(uploadsDir, 'committee/roster.csv');
+  await (await import('node:fs/promises')).mkdir(path.dirname(csvAbs), { recursive: true });
+  await (
+    await import('node:fs/promises')
+  ).writeFile(csvAbs, Buffer.from('Name,Role,Email\nCsv Person,Chair,csv@example.com\n'));
+  await repo.createClub(
+    CANONICAL_TENANT,
+    baseClub('clubcommitteecsv', {
+      'committee-list': {
+        objectKey: 'local/committee/roster.csv',
+        size: 10,
+        contentType: 'text/csv',
+      },
+    }),
+  );
+
   await repo.createClub(
     CANONICAL_TENANT,
     baseClub('clubviewurl', {
@@ -420,6 +438,19 @@ describe('POST /platform/tenants/:slug/clubs/:clubId/committee-extract', () => {
     const body = (await res.json()) as { status: string; reason?: string };
     assert.equal(body.status, 'unparseable');
     assert.match(body.reason ?? '', /legacy \.xls workbook/);
+    assert.doesNotMatch(body.reason ?? '', /corrupted/);
+  });
+
+  test('CSV committee doc → 200 {status:"unparseable"} with a CSV-specific reason', async () => {
+    const res = await app.request(
+      `/platform/tenants/${CANONICAL_TENANT}/clubs/clubcommitteecsv/committee-extract`,
+      { method: 'POST', headers: platformHeaders(OPERATOR) },
+    );
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    const body = (await res.json()) as { status: string; reason?: string };
+    assert.equal(body.status, 'unparseable');
+    assert.match(body.reason ?? '', /^CSV file/);
     assert.doesNotMatch(body.reason ?? '', /corrupted/);
   });
 

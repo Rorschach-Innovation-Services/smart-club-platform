@@ -149,6 +149,8 @@ before(async () => {
   await repo.createClub(TENANT, baseClub('clubvirgin'));
   await repo.createClub(TENANT, baseClub('clubexisting', { leagues: ['premier-men'] }));
   await repo.createClub(TENANT, baseClub('clubduplclub'));
+  await repo.createClub(TENANT, baseClub('clubretry'));
+  await repo.createClub(TENANT, baseClub('clubvenue'));
   await repo.createClub(
     TENANT,
     baseClub('clubwithfixture', {
@@ -178,7 +180,10 @@ after(() => new Promise<void>((resolve) => ddbServer.close(() => resolve())));
 
 describe('POST /platform/tenants/:slug/structure-intake/parse', () => {
   test('base64 cap is enforced on the STRING length BEFORE decoding', async () => {
-    const oversized = 'A'.repeat(2 * 1024 * 1024 + 1);
+    // The cap is base64-STRING length, sized so the DECODED byte count is capped at
+    // 2MB (base64 expands 4/3) — a string of exactly 2MB+1 chars decodes to well under
+    // 2MB and must NOT trip this gate; use a string past the base64-adjusted ceiling.
+    const oversized = 'A'.repeat(Math.ceil((2 * 1024 * 1024 * 4) / 3) + 1);
     const res = await app.request(`/platform/tenants/${TENANT}/structure-intake/parse`, {
       method: 'POST',
       headers: platformHeaders(OPERATOR),
@@ -370,6 +375,95 @@ describe('POST /platform/tenants/:slug/structure-intake/commit', () => {
 
     const notes = (await repo.getClub(TENANT, 'clubvirgin'))?.notes ?? [];
     assert.ok(notes.some((n) => n.text.includes('intake:structure') && n.text.includes('applied')));
+  });
+
+  test('retrying the same newLeagues payload after a partial failure succeeds (idempotent append)', async () => {
+    // 'womens-league' was already appended by the happy-path test above with this EXACT
+    // definition — re-sending it (simulating a retry after e.g. the club-plan half of a
+    // batch failed) must succeed rather than 409 on "duplicate league key", and must not
+    // re-append a second copy.
+    const res = await app.request(`/platform/tenants/${TENANT}/structure-intake/commit`, {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        newLeagues: [
+          {
+            key: 'womens-league',
+            label: "Women's League",
+            group: 'Women',
+            district: 'Test District',
+          },
+        ],
+        clubs: [
+          {
+            clubId: 'clubretry',
+            plan: { leagues: ['womens-league'], leagueTeams: { 'womens-league': 1 } },
+          },
+        ],
+      }),
+    });
+    const body = (await res.json()) as {
+      leaguesAppended: string[];
+      clubs: Array<{ clubId: string; ok: boolean }>;
+    };
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.deepEqual(body.leaguesAppended, [], 'already-present, same-definition — nothing new');
+    assert.equal(body.clubs[0].ok, true);
+
+    const cfg = await repo.getTenantConfig(TENANT);
+    assert.equal(
+      cfg?.leagues?.filter((l) => l.key === 'womens-league').length,
+      1,
+      'no duplicate catalogue entry from the retry',
+    );
+  });
+
+  test('object-valued venue → per-club error, nothing written for that club', async () => {
+    const res = await app.request(`/platform/tenants/${TENANT}/structure-intake/commit`, {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        clubs: [
+          {
+            clubId: 'clubduplclub',
+            plan: {
+              leagues: ['premier-men'],
+              // Object where a trimmed string is expected — buildStructureIntakePatch
+              // must reject this per-club, never crash on `.trim()`.
+              firstTeamVenue: { not: 'a string' },
+            },
+          },
+        ],
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      clubs: Array<{ clubId: string; ok: boolean; error?: string }>;
+    };
+    assert.equal(body.clubs[0].ok, false);
+    assert.match(body.clubs[0].error ?? '', /venue must be a string/);
+    const club = await repo.getClub(TENANT, 'clubduplclub');
+    assert.equal(club?.leagues.length, 0);
+  });
+
+  test('a blank/whitespace-only venue is dropped, not stored as an empty string', async () => {
+    const res = await app.request(`/platform/tenants/${TENANT}/structure-intake/commit`, {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        clubs: [
+          {
+            clubId: 'clubvenue',
+            plan: { leagues: ['premier-men'], firstTeamVenue: '   ' },
+          },
+        ],
+      }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { clubs: Array<{ clubId: string; ok: boolean }> };
+    assert.equal(body.clubs[0].ok, true);
+    const club = await repo.getClub(TENANT, 'clubvenue');
+    assert.equal(club?.ground.venue, undefined);
   });
 
   test('teamRosters length mismatch → per-club error, nothing written for that club', async () => {

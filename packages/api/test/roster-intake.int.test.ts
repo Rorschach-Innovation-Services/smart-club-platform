@@ -19,7 +19,7 @@
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
@@ -222,6 +222,25 @@ before(async () => {
   });
   const pdfFile = { objectKey: 'local/notreal.pdf', size: 100 };
 
+  // Legacy BIFF (.xls) magic bytes — real bytes on disk (the route reads them, not just
+  // the declared contentType) so isLegacyXlsBuffer's sniff actually fires.
+  const legacyXlsBytes = Buffer.concat([
+    Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+    Buffer.alloc(64),
+  ]);
+  const legacyXlsRel = 'legacy/roster.xls';
+  await mkdir(path.join(uploadsDir, 'legacy'), { recursive: true });
+  await writeFile(path.join(uploadsDir, legacyXlsRel), legacyXlsBytes);
+  const legacyXlsFile = { objectKey: `local/${legacyXlsRel}`, size: legacyXlsBytes.length };
+
+  // A real CSV — looksLikeSpreadsheet accepts it (it's in the roster mime/extension
+  // set) but exceljs's `xlsx.load` can't read it; the route must name the real reason.
+  const csvBytes = Buffer.from('First Name,Last Name,ID Number\nCsv,Row,000\n');
+  const csvRel = 'csv/roster.csv';
+  await mkdir(path.join(uploadsDir, 'csv'), { recursive: true });
+  await writeFile(path.join(uploadsDir, csvRel), csvBytes);
+  const csvFile = { objectKey: `local/${csvRel}`, size: csvBytes.length };
+
   await repo.createClub(
     TENANT,
     baseClub('clubalpha', {
@@ -273,8 +292,29 @@ before(async () => {
       },
     }),
   );
+  await repo.createClub(
+    TENANT,
+    baseClub('clublegacyxls', {
+      'member-db': {
+        objectKey: legacyXlsFile.objectKey,
+        size: legacyXlsFile.size,
+        contentType: 'application/vnd.ms-excel',
+      },
+    }),
+  );
+  await repo.createClub(
+    TENANT,
+    baseClub('clubcsv', {
+      'member-db': {
+        objectKey: csvFile.objectKey,
+        size: csvFile.size,
+        contentType: 'text/csv',
+      },
+    }),
+  );
   await repo.createClub(TENANT, baseClub('clubcommit'));
   await repo.createClub(TENANT, baseClub('clubcommitb'));
+  await repo.createClub(TENANT, baseClub('clubdobvalid'));
   await repo.createClub(NOROLE_TENANT, baseClub('clubnorole'));
 
   (global as unknown as { __fixtureIds: Record<string, string> }).__fixtureIds = {
@@ -351,6 +391,30 @@ describe('POST /platform/tenants/:slug/roster-intake/parse', () => {
       body: JSON.stringify({ clubId: 'noSuchClub' }),
     });
     assert.equal(noClub.status, 404);
+  });
+
+  test('legacy .xls bytes (BIFF magic) → 200 {parseable:false} with an actionable reason', async () => {
+    const res = await app.request(`/platform/tenants/${TENANT}/roster-intake/parse`, {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ clubId: 'clublegacyxls' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { parseable: boolean; reason: string };
+    assert.equal(body.parseable, false);
+    assert.match(body.reason, /legacy \.xls workbook — save it as \.xlsx/);
+  });
+
+  test('a stored CSV → 200 {parseable:false} with a CSV-specific reason', async () => {
+    const res = await app.request(`/platform/tenants/${TENANT}/roster-intake/parse`, {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ clubId: 'clubcsv' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { parseable: boolean; reason: string };
+    assert.equal(body.parseable, false);
+    assert.match(body.reason, /^CSV file/);
   });
 
   test('senior sheet parses with a bad-checksum exception, valid rows, and no-store header', async () => {
@@ -458,6 +522,61 @@ describe('POST /platform/tenants/:slug/roster-intake/parse', () => {
 });
 
 describe('POST /platform/tenants/:slug/roster-intake/commit', () => {
+  test('a slash-separated dob → 400, never silently reinterpreted', async () => {
+    const res = await app.request(`/platform/tenants/${TENANT}/roster-intake/commit`, {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        items: [
+          { clubId: 'clubcommit', rowNumber: 1, firstName: 'A', lastName: 'B', dob: '3/4/2020' },
+        ],
+      }),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error?: string };
+    assert.match(body.error ?? '', /dob must be a valid ISO date/);
+  });
+
+  test('an out-of-range calendar date (2020-02-31) → 400, never silently rolled to March', async () => {
+    const res = await app.request(`/platform/tenants/${TENANT}/roster-intake/commit`, {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        items: [
+          {
+            clubId: 'clubcommit',
+            rowNumber: 1,
+            firstName: 'A',
+            lastName: 'B',
+            dob: '2020-02-31',
+          },
+        ],
+      }),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error?: string };
+    assert.match(body.error ?? '', /dob must be a valid ISO date/);
+  });
+
+  test('a real strict-ISO calendar date is accepted', async () => {
+    const res = await app.request(`/platform/tenants/${TENANT}/roster-intake/commit`, {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        items: [
+          {
+            clubId: 'clubdobvalid',
+            rowNumber: 99,
+            firstName: 'Valid',
+            lastName: 'Dob',
+            dob: '2000-02-29', // a real leap day — must NOT be rejected as out-of-range
+          },
+        ],
+      }),
+    });
+    assert.equal(res.status, 200, await res.text());
+  });
+
   test('dob does not match the id-derived dob → 400, nothing written', async () => {
     const res = await app.request(`/platform/tenants/${TENANT}/roster-intake/commit`, {
       method: 'POST',

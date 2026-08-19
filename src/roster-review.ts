@@ -41,9 +41,9 @@ export interface ClubParseState {
   allowMissingId: boolean;
 }
 
-/** Exception counts grouped by machine `reason` key (e.g. 'missing-id',
- *  'bad-checksum', 'unmapped-age-group') — drives the review screen's exception
- *  pills, one pill per reason present. */
+/** Exception counts grouped by machine `reason` key (e.g. 'bad-id',
+ *  'bad-id-checksum', 'unmapped-age-group' — see RosterIntakeException['reason']) —
+ *  drives the review screen's exception pills, one pill per reason present. */
 export type ExceptionsByReason = Record<string, number>;
 
 export interface ClubSummary {
@@ -66,11 +66,12 @@ export interface ClubSummary {
   unknownGenderRaw: string[];
   unknownRaceRaw: string[];
   /** The count shown beside the allowMissingId toggle — rows recoverable by turning it
-   *  on: reason `missing-id` (no ID column at all) OR `bad-id` (an ID column exists but
-   *  this row's cell holds a DOB/garbage while a DOB is present elsewhere) — NOT the
-   *  total exception count, and not `missing-id` alone, which undercounts every club
-   *  whose "ID" column is present but unusable (round-2 E2E: Adelaar had 103 `bad-id`
-   *  rows and read "0 missing-id rows" beside the toggle). */
+   *  on: reason `bad-id` (a row lacking a usable id — no ID column at all, or an ID
+   *  column present but this row's cell holds a DOB/garbage — while a DOB is present)
+   *  — NOT the total exception count. The server never emits a `missing-id` reason (see
+   *  RosterException in packages/api/src/roster-parse.ts); an earlier version of this
+   *  count also added `exceptionsByReason['missing-id']`, a key that could never be
+   *  present, so the extra term was silently a no-op. */
   recoverableIdExceptionCount: number;
   allowMissingId: boolean;
   /** Parsed rows on a sheet whose name reads as a junior sheet (`/junior/i`) but that
@@ -149,8 +150,7 @@ export function buildClubSummaries(clubs: ClubParseState[]): ClubSummary[] {
       template,
       unknownGenderRaw: [...new Set(parse.sheets.flatMap((s) => s.unknownGenderRaw))],
       unknownRaceRaw: [...new Set(parse.sheets.flatMap((s) => s.unknownRaceRaw))],
-      recoverableIdExceptionCount:
-        (exceptionsByReason['missing-id'] ?? 0) + (exceptionsByReason['bad-id'] ?? 0),
+      recoverableIdExceptionCount: exceptionsByReason['bad-id'] ?? 0,
       juniorRowsWithoutTeamCount: parse.sheets
         .filter((s) => /junior/i.test(s.name))
         .reduce((n, s) => n + s.rows.filter((r) => !r.team).length, 0),

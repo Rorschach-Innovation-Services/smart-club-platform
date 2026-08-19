@@ -144,7 +144,7 @@ const dobVariantParse: RosterIntakeParseResponse = {
           team: undefined,
         },
       ],
-      exceptions: [{ rowNumber: 3, sheet: 'Juniors', reason: 'missing-id' }],
+      exceptions: [{ rowNumber: 3, sheet: 'Juniors', reason: 'bad-id' }],
       unknownGenderRaw: [],
       unknownRaceRaw: [],
     },

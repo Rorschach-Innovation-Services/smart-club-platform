@@ -85,6 +85,7 @@ import {
   docMetaValue,
   docKeyForRole,
   OVERARCHING_DISTRICT,
+  DOC_FORMAT_MIME,
 } from './catalogue.js';
 import ExcelJS from 'exceljs';
 import { parseRosterSheet, findCrossClubDuplicates } from './roster-parse.js';
@@ -368,12 +369,42 @@ function localUploadFilePath(reqPath: string): string {
   return path.join(process.env.LOCAL_UPLOADS_DIR!, key.slice('local/'.length));
 }
 
+/** Cheap hardening on the no-auth local PUT sink — a real S3 presigned PUT is bounded
+ *  by the size the presign call itself declared; this dev-only twin has no such
+ *  server-side check otherwise, so an oversized body could exhaust local disk. Set well
+ *  above every real MAX_*_BYTES cap in this file (10MB docs / 2MB structure workbooks)
+ *  so it never blocks a legitimate local upload, only a runaway one. */
+const LOCAL_UPLOAD_PUT_MAX_BYTES = 12 * 1024 * 1024; // 12 MB
+
+/** The `ct` query param on the local GET twin is client-supplied (it stands in for the
+ *  Content-Type an S3 presigned GET would carry) — allowlisted to the platform's known
+ *  document/spreadsheet/image mime set rather than echoed verbatim, so it can't be used
+ *  to make a browser render arbitrary stored bytes as e.g. `text/html`. Anything outside
+ *  this set falls back to `application/octet-stream` (forces a download, never inline
+ *  script execution). image/jpeg + image/png are ID_DOC_TYPES' own values, spelled out
+ *  here (not imported — ID_DOC_TYPES is declared further down this file, after this
+ *  route) rather than reordered, so the two lists can still drift-check against each
+ *  other in review without a forward-reference. */
+const LOCAL_UPLOAD_ALLOWED_CONTENT_TYPES = new Set<string>([
+  ...Object.values(DOC_FORMAT_MIME),
+  'image/jpeg',
+  'image/png',
+  'text/csv',
+]);
+
 /** No-auth local twin of an S3 presigned PUT — dev:local only (see isLocalUploadsMode). */
 app.put('/local-uploads/local/*', async (c) => {
   if (!isLocalUploadsMode()) throw new HttpError(404, 'not found');
   const filePath = localUploadFilePath(c.req.path);
+  const body = Buffer.from(await c.req.arrayBuffer());
+  if (body.length > LOCAL_UPLOAD_PUT_MAX_BYTES) {
+    throw new HttpError(
+      400,
+      `upload exceeds the ${LOCAL_UPLOAD_PUT_MAX_BYTES / (1024 * 1024)}MB local sink limit`,
+    );
+  }
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, Buffer.from(await c.req.arrayBuffer()));
+  await writeFile(filePath, body);
   return c.json({ ok: true });
 });
 
@@ -387,7 +418,12 @@ app.get('/local-uploads/local/*', async (c) => {
   } catch {
     throw new HttpError(404, 'not found');
   }
-  c.header('Content-Type', c.req.query('ct') ?? 'application/octet-stream');
+  const requestedCt = c.req.query('ct');
+  const ct =
+    requestedCt && LOCAL_UPLOAD_ALLOWED_CONTENT_TYPES.has(requestedCt)
+      ? requestedCt
+      : 'application/octet-stream';
+  c.header('Content-Type', ct);
   c.header('Content-Disposition', 'inline');
   return c.body(new Uint8Array(bytes));
 });
@@ -4531,6 +4567,17 @@ function looksLikeSpreadsheet(contentType: string | undefined, objectKey: string
   return !!ext && ROSTER_SPREADSHEET_EXTENSIONS.has(ext);
 }
 
+/** True when a stored file's declared type/extension says CSV — same contentType-wins,
+ *  extension-fallback rule as looksLikeSpreadsheet. exceljs's `xlsx.load` can only read
+ *  the OOXML zip format, so a CSV that passes looksLikeSpreadsheet (it's in the accepted
+ *  mime/extension set) still fails there — this lets the parse/extract routes name the
+ *  real reason instead of the generic "may be corrupted" message. */
+function looksLikeCsv(contentType: string | undefined, objectKey: string): boolean {
+  if (contentType) return contentType === 'text/csv';
+  const ext = objectKey.split('.').pop()?.toLowerCase();
+  return ext === 'csv';
+}
+
 /** The tenant's junior league keys (the /^u\d+$/ convention — see team-plan.ts), derived
  *  server-side so a parse call can never be handed a league key the tenant doesn't run. */
 function juniorLeagueKeysFor(cfg: TenantConfig): Set<string> {
@@ -4597,6 +4644,24 @@ app.post('/platform/tenants/:slug/roster-intake/parse', async (c) => {
   } catch (err) {
     console.error(`roster-intake parse: failed to read ${stored.objectKey}`, err);
     return noStore({ parseable: false, reason: 'unable to read the stored file' });
+  }
+  // Two content shapes exceljs's `xlsx.load` (OOXML zip only) can never read, checked
+  // BEFORE handing it the bytes so the operator gets an accurate, actionable reason
+  // instead of the generic "may be corrupted" message: legacy BIFF .xls (magic-byte
+  // sniff, mirrors committee-extract) and CSV (declared type/extension — csv rides
+  // looksLikeSpreadsheet's accepted set but was never something ExcelJS's xlsx reader
+  // could open).
+  if (isLegacyXlsBuffer(bytes)) {
+    return noStore({
+      parseable: false,
+      reason: 'legacy .xls workbook — save it as .xlsx and re-upload via document intake',
+    });
+  }
+  if (looksLikeCsv(stored.contentType, stored.objectKey)) {
+    return noStore({
+      parseable: false,
+      reason: 'CSV file — save it as .xlsx and re-upload via document intake',
+    });
   }
   const wb = new ExcelJS.Workbook();
   try {
@@ -4713,6 +4778,24 @@ interface RosterIntakeCrossClubConflict {
   alreadyRegisteredAt?: string;
 }
 
+/** Strict `YYYY-MM-DD` shape check, RE-anchored ('3/4/2020' rejected outright). */
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * True only for a real calendar date in strict `YYYY-MM-DD` form. `new Date(str)`
+ * alone accepts far more than that (slash-separated dates, out-of-range days that JS
+ * silently rolls into the next month — '2020-02-31' becomes March 2nd rather than an
+ * Invalid Date) — this re-derives the UTC components after construction and rejects
+ * any mismatch, so an out-of-range day/month 400s instead of silently landing on a
+ * different date than the one the operator typed.
+ */
+function isValidIsoDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !ISO_DATE_RE.test(value)) return false;
+  const [y, m, d] = value.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
 /**
  * Validate one roster-intake commit row against already-resolved tenant state. Returns
  * an error string, or null when the row is clean. A non-null result aborts the WHOLE
@@ -4735,7 +4818,7 @@ function validateRosterIntakeItem(
   if (firstName.length > 80 || lastName.length > 80) {
     return `${at}: names must be 80 characters or fewer`;
   }
-  if (typeof item.dob !== 'string' || !item.dob || Number.isNaN(new Date(item.dob).getTime())) {
+  if (!isValidIsoDate(item.dob)) {
     return `${at}: dob must be a valid ISO date`;
   }
   if (item.idNumber) {
@@ -4832,6 +4915,12 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
 
   // In-batch cross-club conflicts: the SAME detector the CLI and the frontend's
   // roster-review.ts hand-port use (parity pinned by the shared JSON fixture test).
+  // NOTE: the shipped SPA always sends single-club batches (one club at a time through
+  // the review wizard), so this in-batch guard only ever fires for an API-direct caller
+  // that sends multiple clubs in one request — contract: flat items, server groups by
+  // club. The existing-registration check just below (findPlayerAcrossClubs) is what
+  // actually protects the SPA's one-club-at-a-time flow against a player already
+  // registered at a DIFFERENT, previously-committed club.
   const { duplicateNaturalKeys } = findCrossClubDuplicates(
     built.map((b) => ({
       clubId: b.clubId,
@@ -4844,6 +4933,32 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
       },
     })),
   );
+
+  // Existing-registration check (elsewhere in the tenant), for every row NOT already
+  // excluded as an in-batch conflict above. Deduped to one findPlayerAcrossClubs call
+  // per distinct (clubId, naturalKey) pair — a batch can carry the same identity on
+  // several rows — and run with bounded parallelism reusing the `clubs` list this route
+  // already fetched (repo.findPlayerAcrossClubs no longer pays its own listClubs call),
+  // all BEFORE the write loop below.
+  const pairKey = (clubId: string, naturalKey: string) => `${clubId}::${naturalKey}`;
+  const uniquePairs = new Map<string, { clubId: string; naturalKey: string }>();
+  for (const b of built) {
+    const key = pairKey(b.clubId, b.player.naturalKey);
+    if (duplicateNaturalKeys.has(key) || uniquePairs.has(key)) continue;
+    uniquePairs.set(key, { clubId: b.clubId, naturalKey: b.player.naturalKey });
+  }
+  const CROSS_CLUB_CHECK_CONCURRENCY = 8;
+  const elsewhereByPair = new Map<string, Awaited<ReturnType<typeof repo.findPlayerAcrossClubs>>>();
+  const pairList = [...uniquePairs.values()];
+  for (let i = 0; i < pairList.length; i += CROSS_CLUB_CHECK_CONCURRENCY) {
+    const slice = pairList.slice(i, i + CROSS_CLUB_CHECK_CONCURRENCY);
+    // eslint-disable-next-line no-await-in-loop -- sequential chunks, each internally
+    // parallel; bounded by ROSTER_INTAKE_MAX_ITEMS/CROSS_CLUB_CHECK_CONCURRENCY
+    const results = await Promise.all(
+      slice.map((p) => repo.findPlayerAcrossClubs(slug, p.naturalKey, p.clubId, clubs)),
+    );
+    slice.forEach((p, idx) => elsewhereByPair.set(pairKey(p.clubId, p.naturalKey), results[idx]));
+  }
 
   const crossClubConflicts: RosterIntakeCrossClubConflict[] = [];
   const toWrite: typeof built = [];
@@ -4864,8 +4979,7 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
       });
       continue;
     }
-    // eslint-disable-next-line no-await-in-loop -- bounded by ROSTER_INTAKE_MAX_ITEMS
-    const elsewhere = await repo.findPlayerAcrossClubs(slug, b.player.naturalKey, b.clubId);
+    const elsewhere = elsewhereByPair.get(pairKey(b.clubId, b.player.naturalKey)) ?? [];
     if (elsewhere.length > 0) {
       crossClubConflicts.push({
         rowNumber: b.rowNumber,
@@ -4933,6 +5047,10 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
  *  ExcelJS's own read once decoded. No S3 involved — this transport is a direct upload,
  *  not a stored-doc reference (structure workbooks aren't compliance documents). */
 const STRUCTURE_MAX_WORKBOOK_BYTES = 2 * 1024 * 1024; // 2 MB
+/** Base64 STRING-length cap corresponding to STRUCTURE_MAX_WORKBOOK_BYTES of decoded
+ *  bytes (base64 expands by 4/3) — checked against `dataBase64.length`, so the
+ *  effective FILE size limit is truly 2MB rather than ~2.66MB of base64 text. */
+const STRUCTURE_MAX_WORKBOOK_BASE64_LENGTH = Math.ceil((STRUCTURE_MAX_WORKBOOK_BYTES * 4) / 3);
 
 interface StructureIntakeParseBody {
   filename?: string;
@@ -4954,7 +5072,7 @@ app.post('/platform/tenants/:slug/structure-intake/parse', async (c) => {
     .catch(() => ({}) as StructureIntakeParseBody);
   const dataBase64 = body.dataBase64 ?? '';
   if (!dataBase64) throw new HttpError(400, 'dataBase64 is required');
-  if (dataBase64.length > STRUCTURE_MAX_WORKBOOK_BYTES) {
+  if (dataBase64.length > STRUCTURE_MAX_WORKBOOK_BASE64_LENGTH) {
     throw new HttpError(
       400,
       `workbook exceeds the ${STRUCTURE_MAX_WORKBOOK_BYTES / (1024 * 1024)}MB limit`,
@@ -5015,6 +5133,35 @@ function currentTeamIds(club: Club): string[] {
  * generates every team id (`tm_${clubId}_${key}_${n}`) — the client sends names/venues
  * only, keeping the id convention enforceable in exactly one place.
  */
+/** Max length for a structure-intake venue string (team-roster `venue` or
+ *  `plan.firstTeamVenue`) — mirrors other free-text caps in this file (club/league
+ *  names etc). */
+const STRUCTURE_INTAKE_VENUE_MAX_LEN = 120;
+
+/**
+ * Validate + trim one venue value from a structure-intake plan. `undefined`/absent is
+ * fine (the field is optional throughout); present-but-not-a-string, or blank after
+ * trim, or over the length cap throws a 400 naming the offending club — this is a
+ * per-club validation error, same category as the teamRosters length-mismatch check
+ * just above it. Returns the trimmed string, or undefined when the input was absent
+ * (an empty/whitespace-only value is DROPPED, not stored as `''`).
+ */
+function validateStructureIntakeVenue(value: unknown, clubId: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') {
+    throw new HttpError(400, `club ${clubId}: venue must be a string`);
+  }
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length > STRUCTURE_INTAKE_VENUE_MAX_LEN) {
+    throw new HttpError(
+      400,
+      `club ${clubId}: venue must be ${STRUCTURE_INTAKE_VENUE_MAX_LEN} characters or fewer`,
+    );
+  }
+  return trimmed;
+}
+
 function buildStructureIntakePatch(
   clubId: string,
   current: Club,
@@ -5032,28 +5179,38 @@ function buildStructureIntakePatch(
       if (!Array.isArray(roster) || roster.length !== count) {
         throw new HttpError(400, `teamRosters for "${key}" must list exactly ${count} teams`);
       }
-      teamRosters[key] = roster.map((t, i) => ({
-        id: `tm_${clubId}_${key}_${i + 1}`,
-        name: (t.name ?? '').trim(),
-        ...(t.venue ? { venue: t.venue } : {}),
-      }));
+      teamRosters[key] = roster.map((t, i) => {
+        const venue = validateStructureIntakeVenue(t.venue, clubId);
+        return {
+          id: `tm_${clubId}_${key}_${i + 1}`,
+          name: (t.name ?? '').trim(),
+          ...(venue ? { venue } : {}),
+        };
+      });
     }
   }
   const { teams, women, juniors } = deriveTeamPlanCounts(leagueTeams);
   const ground = { ...current.ground };
+  const firstTeamVenue = validateStructureIntakeVenue(plan.firstTeamVenue, clubId);
   // Fill-absent only — a structure-intake commit never overwrites a venue the club
   // already has, even under `overwrite:true` (that flag governs the TEAM PLAN, not
   // ground info the club may have entered through a different path).
-  if (!ground.venue && plan.firstTeamVenue) ground.venue = plan.firstTeamVenue;
+  if (!ground.venue && firstTeamVenue) ground.venue = firstTeamVenue;
   return { leagues, leagueTeams, teamRosters, teams, women, juniors, ground };
 }
 
 /**
  * POST /platform/tenants/:slug/structure-intake/commit — body `{newLeagues?, clubs}`.
  * Ordering:
- *   1. Leagues first, fail-fast WHOLE-REQUEST: `current ∪ newLeagues` runs through the
- *      same applyTenantConfigPatch/validateLeagues path PUT /platform/tenants/:slug uses
- *      (409 on a duplicate key), appended only — nothing else runs if this throws.
+ *   1. Leagues first, fail-fast WHOLE-REQUEST: IDEMPOTENT — `newLeagues` is first
+ *      filtered down to entries that AREN'T an exact re-send of a league already on
+ *      `cfg.leagues` (same key AND same label/group/district/note) — a retry of an
+ *      already-appended league is silently skipped rather than 409ing the whole
+ *      request. A same-KEY-but-different-definition entry is a genuine conflict, not a
+ *      retry, so it's left in the filtered list and still 409s via validateLeagues, same
+ *      as a duplicate key WITHIN `newLeagues` itself. `current ∪ filtered` then runs
+ *      through the same applyTenantConfigPatch/validateLeagues path PUT
+ *      /platform/tenants/:slug uses. Nothing else runs if this throws.
  *   2. Each club plan is then validated + committed INDEPENDENTLY (doc-intake's per-club
  *      partial-result shape): existing plan + no `overwrite` → per-club 409; `overwrite:
  *      true` → checked against the tenant's fixture/series data for references to the
@@ -5084,7 +5241,24 @@ app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
   }
 
   // Step 1 — leagues first, fail-fast whole-request. Nothing else has run if this throws.
-  const newLeagues = Array.isArray(body.newLeagues) ? body.newLeagues : [];
+  // Idempotent: drop any incoming league that's an EXACT re-send of one already on the
+  // stored catalogue (same key AND same key/label/group/district/note) BEFORE validating
+  // — a retry of an already-appended league must succeed, not 409. A same-KEY-but-
+  // DIFFERENT-definition entry is a genuine conflict, not a retry: it's left in place so
+  // validateLeagues' uniqueness check on the combined array still 409s it, same as a
+  // duplicate WITHIN newLeagues itself (also untouched by this filter).
+  const requestedLeagues = Array.isArray(body.newLeagues) ? body.newLeagues : [];
+  const existingLeaguesByKey = new Map((cfg.leagues ?? []).map((l) => [l.key, l]));
+  const sameLeagueDefinition = (a: League, b: League): boolean =>
+    a.key === b.key &&
+    a.label === b.label &&
+    a.group === b.group &&
+    a.district === b.district &&
+    (a.note ?? '') === (b.note ?? '');
+  const newLeagues = requestedLeagues.filter((l) => {
+    const existing = existingLeaguesByKey.get(l.key);
+    return !existing || !sameLeagueDefinition(l, existing);
+  });
   let leaguesAppended: string[] = [];
   if (newLeagues.length > 0) {
     const combined = [...(cfg.leagues ?? []), ...newLeagues];
@@ -5353,6 +5527,13 @@ app.post('/platform/tenants/:slug/clubs/:clubId/committee-extract', async (c) =>
       status: 'unparseable',
       reason:
         "legacy .xls workbook — it can't be read automatically; view the document and type the details in",
+    });
+  }
+  if (looksLikeCsv(stored.contentType, stored.objectKey)) {
+    return noStore({
+      status: 'unparseable',
+      reason:
+        "CSV file — it can't be read automatically; view the document and type the details in",
     });
   }
   const wb = new ExcelJS.Workbook();

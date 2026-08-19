@@ -76,6 +76,11 @@ const UNPARSEABLE_HINT =
 
 const NO_COMMITTEE_DOC_HINT = 'No committee document on file for this club yet.';
 
+const NO_COMMITTEE_ROLE_HINT =
+  'Extraction isn’t available yet — no document in the catalogue is marked as the ' +
+  'committee list. Assign the role in Required documents, or type the contact’s ' +
+  'details in below.';
+
 /* ─── docKeyForRole (client-side mirror) ───
  * Mirrors packages/api/src/catalogue.ts docKeyForRole (not exported from api.ts/
  * types.ts — out of scope for this change). The wizard gates on InsightsClub.intake
@@ -313,8 +318,15 @@ export interface OperatorInviteModalProps {
   /** Prefilled from a committee-extract candidate; absent ⇒ blank manual form. */
   prefillCandidate?: CommitteeExtractCandidate;
   /** Present only on the unparseable-document path — lets the operator view the
-   *  source file beside the form instead of typing blind. */
+   *  source file beside the form instead of typing blind. `reason`, when present, is
+   *  the server's own explanation (e.g. the legacy-.xls or CSV parse-gate message) and
+   *  is shown instead of the generic UNPARSEABLE_HINT. */
   viewDocument?: { slug: string; clubId: string; docKey: string; reason?: string };
+  /** Set when the club has NO role-resolved committee doc key at all — extraction was
+   *  never attempted because there's nothing to extract from. Distinct from
+   *  `viewDocument` (a stored-but-unparseable file): there's no file to view here, just
+   *  an explanation of why the extract button never fired. */
+  noCommitteeRole?: boolean;
   onClose: () => void;
   /** Fired once the account is created, before the result screen — lets the page
    *  refresh coverage without waiting for the modal to close. */
@@ -328,6 +340,7 @@ export function OperatorInviteModal({
   club,
   prefillCandidate,
   viewDocument,
+  noCommitteeRole,
   onClose,
   onInvited,
   onNextClub,
@@ -501,7 +514,7 @@ export function OperatorInviteModal({
                   )}
                   {viewDocument && (
                     <div style={{ ...HINT, margin: 0 }}>
-                      {UNPARSEABLE_HINT}
+                      {viewDocument.reason || UNPARSEABLE_HINT}
                       <div style={{ marginTop: 8 }}>
                         <Btn
                           tone="outline"
@@ -513,6 +526,9 @@ export function OperatorInviteModal({
                         </Btn>
                       </div>
                     </div>
+                  )}
+                  {!viewDocument && noCommitteeRole && (
+                    <div style={{ ...HINT, margin: 0 }}>{NO_COMMITTEE_ROLE_HINT}</div>
                   )}
                   <label style={{ fontSize: 12, color: 'var(--muted)' }}>
                     Email
@@ -925,10 +941,23 @@ export function RepsPage({ toast }: { toast: Toast }) {
 
       {inviteState && (
         <OperatorInviteModal
+          // Remounts the modal on every club switch (and every candidate re-pick for
+          // the SAME club) — without a key, "Next club without a rep →" only swaps the
+          // `club` prop on an ALREADY-mounted component, so its internal `result`/
+          // `email` state survives and the operator sees the PREVIOUS club's success
+          // screen under the NEXT club's name. Composed with the prefill candidate's
+          // own identity (sheet+rowNumber) so picking a different candidate for the
+          // same club also resets the form, not just a club change.
+          key={`${inviteState.club.id}:${
+            inviteState.prefillCandidate
+              ? `${inviteState.prefillCandidate.sheet}-${inviteState.prefillCandidate.rowNumber}`
+              : 'manual'
+          }`}
           slug={slug}
           club={inviteState.club}
           prefillCandidate={inviteState.prefillCandidate}
           viewDocument={inviteState.viewDocument}
+          noCommitteeRole={!committeeDocKey}
           onClose={() => setInviteState(null)}
           onInvited={afterInvite}
           onNextClub={(() => {

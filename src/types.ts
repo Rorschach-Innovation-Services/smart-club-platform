@@ -1061,12 +1061,18 @@ export interface RosterDraftRow {
 
 /** An unparseable/rejected row. Carries NO identity (never a name/id) — flipping
  *  `allowMissingId` or remapping an age band re-parses the club instead of promoting
- *  an exception row client-side. `reason` is a stable machine key (e.g.
- *  'missing-id', 'bad-checksum', 'unmapped-age-group'), not display prose. */
+ *  an exception row client-side. `reason` is a stable machine key, not display prose —
+ *  mirrors RosterException['reason'] in packages/api/src/roster-parse.ts exactly (that
+ *  module is the only place these values are ever produced). */
 export interface RosterIntakeException {
   rowNumber: number;
   sheet: string;
-  reason: string;
+  reason:
+    | 'bad-id'
+    | 'no-usable-identity'
+    | 'bad-id-checksum'
+    | 'unmapped-age-group'
+    | 'missing-surname';
   maskedId?: string;
 }
 

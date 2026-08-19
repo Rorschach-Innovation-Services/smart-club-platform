@@ -39,4 +39,18 @@ describe('readUploadObject — local/ + LOCAL_UPLOADS_DIR offline seam', () => {
     const buf = await readUploadObject('local/nested/bar.txt');
     assert.equal(buf.toString('utf8'), 'nested content');
   });
+
+  test('a `..` traversal key is rejected before touching the filesystem', async () => {
+    await assert.rejects(
+      () => readUploadObject('local/../../etc/passwd'),
+      /invalid upload object key/,
+    );
+  });
+
+  test('a key with a disallowed character is rejected before touching the filesystem', async () => {
+    await assert.rejects(
+      () => readUploadObject('local/weird\0name.txt'),
+      /invalid upload object key/,
+    );
+  });
 });
