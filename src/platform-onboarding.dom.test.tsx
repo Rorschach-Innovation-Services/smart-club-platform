@@ -120,7 +120,7 @@ describe('OnboardingPage', () => {
     expect(rostersCard).toHaveTextContent('Done');
   });
 
-  it('blocks the roster/reps steps with role-assignment guidance when doc roles are unassigned', async () => {
+  it('blocks the roster step but not reps when doc roles are unassigned (reps just needs clubs)', async () => {
     vi.mocked(api.platformGetTenant).mockResolvedValue(BASE_CONFIG);
     vi.mocked(api.platformTenantOverview).mockResolvedValue(BASE_OVERVIEW);
     vi.mocked(api.platformTenantReps).mockResolvedValue(EMPTY_REPS);
@@ -133,18 +133,23 @@ describe('OnboardingPage', () => {
       'Nothing in the catalogue yet — add at least one document before assigning roles.',
     );
 
+    // Rosters genuinely can't work without the member-database role — hard-locked.
     const rostersCard = screen.getByText('Rosters in').closest('.card')!;
     expect(rostersCard).toHaveTextContent(
       /Assign the member-database role in the catalogue step above first/,
     );
     expect(rostersCard.querySelector('button')).toBeDisabled();
 
+    // Reps unlocks once clubs exist — the manual invite path works without the
+    // committee role, so the button stays enabled with only a hint, not a lock.
     const repsCard = screen.getByText('Reps invited').closest('.card')!;
-    expect(repsCard).toHaveTextContent(/Assign the committee role in the catalogue step above/);
-    expect(repsCard.querySelector('button')).toBeDisabled();
+    expect(repsCard).toHaveTextContent(
+      /Assign the committee role in the catalogue step to enable extraction/,
+    );
+    expect(repsCard.querySelector('button')).not.toBeDisabled();
   });
 
-  it('unlocks once both doc roles are assigned and shows the specific missing-role message', async () => {
+  it('unlocks rosters once the member-database role alone is assigned, and reps keeps its hint', async () => {
     const docs: RequiredDoc[] = [
       { key: 'member-db', name: 'Member database', role: 'memberDatabase' },
     ];
@@ -163,8 +168,32 @@ describe('OnboardingPage', () => {
       'No document in the catalogue is marked as the committee document — assign the role in Required documents.',
     );
 
+    // Roster gate reads the member-database role alone, not "both roles assigned".
     const rostersCard = screen.getByText('Rosters in').closest('.card')!;
-    expect(rostersCard.querySelector('button')).toBeDisabled();
+    expect(rostersCard.querySelector('button')).not.toBeDisabled();
+
+    const repsCard = screen.getByText('Reps invited').closest('.card')!;
+    expect(repsCard).toHaveTextContent(
+      /Assign the committee role in the catalogue step to enable extraction/,
+    );
+    expect(repsCard.querySelector('button')).not.toBeDisabled();
+  });
+
+  it('shows the shared-defaults copy on the catalogue step when requiredDocs is unset', async () => {
+    const { requiredDocs: _drop, ...rest } = BASE_CONFIG;
+    vi.mocked(api.platformGetTenant).mockResolvedValue(rest as unknown as TenantConfig);
+    vi.mocked(api.platformTenantOverview).mockResolvedValue(BASE_OVERVIEW);
+    vi.mocked(api.platformTenantReps).mockResolvedValue(EMPTY_REPS);
+
+    renderPage();
+    await screen.findByRole('heading', { name: /client onboarding/i });
+
+    const catalogueCard = screen.getByText('Document catalogue').closest('.card')!;
+    expect(catalogueCard).toHaveTextContent(
+      'Shared defaults are in effect — save the catalogue (customising if needed) and assign ' +
+        'the member-database and committee roles.',
+    );
+    expect(catalogueCard).not.toHaveTextContent(/Nothing in the catalogue yet/);
   });
 
   it('reads done end-to-end when every step is satisfied', async () => {

@@ -394,6 +394,15 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
   const [uploadStatus, setUploadStatus] = useState<Record<string, UploadStatus>>({});
   const [clubCommits, setClubCommits] = useState<Record<string, ClubCommitResult>>({});
   const [committing, setCommitting] = useState(false);
+  // Snapshot of the rows this run committed, frozen at kick-off. The results table
+  // renders off THIS, never off live `toCommit` — `toCommit` re-derives from `rows`,
+  // which re-derives from `hasExistingDoc`/`clubsById`, which `afterServerWrite()`
+  // refreshes mid-run. The moment a club's just-uploaded doc lands on the refetched
+  // overview, `hasExistingDoc` flips true for that (club, docKey) and `flagExistingDocs`
+  // marks the row `replacesExisting`, which flips it out of `included` and therefore out
+  // of a LIVE `toCommit` — the exact bug: "7 uploaded / 4 clubs updated" with an empty
+  // table, because the very success of the commit erased the row that reported it.
+  const [commitRows, setCommitRows] = useState<IntakeRow[]>([]);
   const [presignByFile, setPresignByFile] = useState<Map<string, DocIntakePresignResult>>(
     new Map(),
   );
@@ -413,6 +422,7 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
   async function runCommit() {
     setCommitting(true);
     const items = toCommit;
+    setCommitRows(items);
     const localPresign = new Map<string, DocIntakePresignResult>();
     const localStatus: Record<string, UploadStatus> = {};
     for (const r of items) localStatus[r.file.id] = { state: 'presigning' };
@@ -1044,7 +1054,7 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {toCommit.map((row) => {
+                    {commitRows.map((row) => {
                       const s = uploadStatus[row.file.id];
                       const club = clubsById.get(row.clubId!);
                       const doc = docsByKey.get(row.docKey!);

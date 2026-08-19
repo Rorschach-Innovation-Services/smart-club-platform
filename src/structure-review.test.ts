@@ -14,6 +14,7 @@ import {
   sectionsReady,
   stripTeamSuffix,
   suggestLeague,
+  suggestLeagueLabel,
   teamRowNeedsAttention,
   type SectionAssignment,
 } from './structure-review';
@@ -65,8 +66,8 @@ describe('suggestLeague', () => {
 
 describe('initialSectionAssignments / sectionsReady', () => {
   const sections: StructureSection[] = [
-    { sheet: 'SENIORS', header: 'Premier League', rows: [] },
-    { sheet: 'SENIORS', header: 'Under 9 Friendlies', rows: [] },
+    { sheet: 'SENIORS', header: 'Premier League', rows: [{ raw: 'TUKS 1' }] },
+    { sheet: 'SENIORS', header: 'Under 9 Friendlies', rows: [{ raw: 'TUKS U9' }] },
   ];
 
   it('prefills a suggestion, unconfirmed, per section', () => {
@@ -80,6 +81,18 @@ describe('initialSectionAssignments / sectionsReady', () => {
     expect(sectionsReady(a)).toBe(false);
     a[1].ignored = true;
     expect(sectionsReady(a)).toBe(true);
+  });
+
+  it('starts a zero-row section (a barren sub-header) already Ignored', () => {
+    const barren: StructureSection[] = [
+      ...sections,
+      { sheet: 'SENIORS', header: '50 - OVERS', rows: [] },
+    ];
+    const a = initialSectionAssignments(barren, LEAGUES);
+    expect(a[2]).toEqual({ leagueKey: null, ignored: true, confirmed: false });
+    // It's ready out of the box — nothing for the operator to do — but still flippable
+    // back (the wizard's toggle is a plain setter, not gated on row count).
+    expect(sectionsReady([a[2]])).toBe(true);
   });
 });
 
@@ -116,6 +129,20 @@ describe('draft leagues', () => {
     // No "Division"/trailing-letter wording — a plain duplicate name is
     // draftKeyCollides' concern, not this one.
     expect(divisionWarning('Premier League', LEAGUES)).toBeNull();
+  });
+});
+
+describe('suggestLeagueLabel', () => {
+  it('strips a trailing "Division <token>" qualifier and title-cases the rest', () => {
+    expect(suggestLeagueLabel('PREMIER LEAGUE DIVISION A')).toBe('Premier League');
+  });
+
+  it('drops slash noise while preserving a genuine trailing letter', () => {
+    expect(suggestLeagueLabel('U/9 PLATINUM A')).toBe('U9 Platinum A');
+  });
+
+  it('leaves a plain header title-cased with no stripping to do', () => {
+    expect(suggestLeagueLabel('PREMIER LEAGUE')).toBe('Premier League');
   });
 });
 

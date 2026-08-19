@@ -9,9 +9,12 @@
  * go-live/mark-complete panel — this page is the map that gets a client there.
  *
  * Order mirrors how the pieces actually depend on each other: the document catalogue
- * (with both structural doc roles assigned — ADR 0010) has to exist before documents
- * can be classified, so the roster/reps steps read from those roles rather than a
- * literal doc key; districts/leagues and clubs exist before anything attaches to them;
+ * (ADR 0010) has to carry structural doc roles before documents can be classified
+ * through them — but only the ROSTER step is genuinely blocked on its role (it parses
+ * from the stored member-database file and has no other path in); the REPS step's
+ * manual invite works without the committee role ever being set, so it only waits on
+ * clubs existing, with a standing hint to assign the role for extraction from committee
+ * documents. Districts/leagues and clubs exist before anything attaches to them;
  * documents come in before rosters, because rosters parse from the stored member
  * database rather than a fresh upload.
  */
@@ -34,10 +37,11 @@ type Toast = (m: string, t?: string) => void;
 
 const INTRO =
   'The order clients get onboarded in, start to finish. Work down the list — each step ' +
-  'names what it needs and links straight to where you do it. The catalogue step is the ' +
-  'one hard dependency: the roster and reps steps read the member-database and committee ' +
-  'documents through the ROLES assigned there, not by file name, so they stay locked until ' +
-  'both roles are assigned.';
+  'names what it needs and links straight to where you do it. The catalogue step assigns ' +
+  'the member-database and committee ROLES that downstream steps read documents through, ' +
+  'not by file name. Rosters stay locked without the member-database role; reps only need ' +
+  'clubs to exist — the committee role just enables extraction from committee documents ' +
+  'instead of inviting reps by hand.';
 
 type StepState = 'done' | 'partial' | 'todo';
 
@@ -144,7 +148,10 @@ export function buildOnboardingSteps(
 
   const rolesGuidance = !catalogueDone
     ? activeDocsCount === 0
-      ? 'Nothing in the catalogue yet — add at least one document before assigning roles.'
+      ? config.requiredDocs === undefined
+        ? 'Shared defaults are in effect — save the catalogue (customising if needed) and ' +
+          'assign the member-database and committee roles.'
+        : 'Nothing in the catalogue yet — add at least one document before assigning roles.'
       : !memberDbAssigned && !committeeAssigned
         ? 'No document in the catalogue is marked as the member database or the committee ' +
           'document — assign both roles in Required documents.'
@@ -228,8 +235,8 @@ export function buildOnboardingSteps(
             : 'No clubs have a stored member database yet',
         pct: pct(dbHoldingWithPlayers.length, dbHoldingClubs.length),
       },
-      locked: !catalogueDone,
-      guidance: !catalogueDone
+      locked: !memberDbAssigned,
+      guidance: !memberDbAssigned
         ? 'Assign the member-database role in the catalogue step above first — rosters parse ' +
           'from that stored file.'
         : undefined,
@@ -246,10 +253,13 @@ export function buildOnboardingSteps(
         label: `${clubsWithActiveRep.length} of ${clubs.length} clubs have a rep`,
         pct: pct(clubsWithActiveRep.length, clubs.length),
       },
-      locked: !catalogueDone,
-      guidance: !catalogueDone
-        ? 'Assign the committee role in the catalogue step above first, or invite reps by ' +
-          'hand without it.'
+      // Committee role is NOT required to unlock this step — the reps page's manual
+      // invite path works without it. It stays locked only for the same reason the
+      // clubs step itself would be: nothing exists yet to invite a rep onto.
+      locked: clubs.length === 0,
+      guidance: !committeeAssigned
+        ? 'Assign the committee role in the catalogue step to enable extraction from ' +
+          'committee documents.'
         : undefined,
       actionLabel: 'Open reps',
       onAction: () => navigate(`/platform/tenants/${slug}/reps`),
@@ -381,7 +391,13 @@ export function OnboardingPage({ toast: _toast }: { toast: Toast }) {
               </div>
             )}
             {s.guidance && (
-              <p style={{ fontSize: 12, color: 'var(--coral, #C0392B)', margin: '10px 0 0' }}>
+              <p
+                style={{
+                  fontSize: 12,
+                  color: s.locked ? 'var(--coral, #C0392B)' : 'var(--muted-2)',
+                  margin: '10px 0 0',
+                }}
+              >
                 {s.guidance}
               </p>
             )}

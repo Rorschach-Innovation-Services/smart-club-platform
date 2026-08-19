@@ -145,6 +145,55 @@ describe('StructureIntakeWizard', () => {
     expect(within(row).getByLabelText(/what does ignore do/i)).toBeInTheDocument();
   });
 
+  it('shows a bulk "Ignore all unassigned sections" button once 2+ sections are unassigned, and it clears them all', async () => {
+    const sections: StructureSection[] = [
+      { sheet: 'SENIORS', header: 'Under 9 Friendlies', rows: [{ raw: 'TUKS U9' }] },
+      { sheet: 'SENIORS', header: 'Under 11 Friendlies', rows: [{ raw: 'TUKS U11' }] },
+      { sheet: 'SENIORS', header: 'Premier League', rows: [{ raw: 'TUKS 1', venue: 'Buks Oval' }] },
+    ];
+    vi.mocked(api.platformStructureIntakeParse).mockResolvedValue({
+      sections,
+      sheetsScanned: 1,
+      sheetsWithSections: 1,
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await uploadWorkbook();
+    await screen.findByText('2. Sections');
+
+    // Premier League auto-suggests and is assigned; the two "Friendlies" sections don't
+    // match any league, so 2 sections are unassigned — the bulk button appears.
+    const bulkBtn = screen.getByRole('button', { name: /ignore all unassigned sections \(2\)/i });
+
+    await user.click(bulkBtn);
+
+    // Both unassigned rows now show "Ignored"; the assigned Premier League row is untouched.
+    expect(screen.getAllByText('Ignored')).toHaveLength(2);
+    expect(
+      screen.queryByRole('button', { name: /ignore all unassigned sections/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue('Premier League')).toBeInTheDocument();
+  });
+
+  it('prefills "Create league…" from the section header, stripped and title-cased', async () => {
+    const sections: StructureSection[] = [
+      { sheet: 'JUNIORS', header: 'U/9 PLATINUM A', rows: [{ raw: 'TUKS U9 A' }] },
+    ];
+    vi.mocked(api.platformStructureIntakeParse).mockResolvedValue({
+      sections,
+      sheetsScanned: 1,
+      sheetsWithSections: 1,
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await uploadWorkbook();
+    await screen.findByText('2. Sections');
+
+    await user.click(screen.getByRole('button', { name: /create league…/i }));
+    await screen.findByRole('dialog', { name: /create league/i });
+    expect(screen.getByDisplayValue('U9 Platinum A')).toBeInTheDocument();
+  });
+
   it('excludes a club with an existing plan by default; Include anyway sets overwrite:true on commit', async () => {
     const sections: StructureSection[] = [
       { sheet: 'SENIORS', header: 'Premier League', rows: [{ raw: 'TUKS 1', venue: 'Buks Oval' }] },
@@ -216,5 +265,54 @@ describe('StructureIntakeWizard', () => {
         },
       },
     ]);
+  });
+
+  it('still shows the committed club row after the post-commit overview refetch lands (root-cause regression)', async () => {
+    // A committed club's plan lands on the refetched overview — exactly the moment
+    // `clubHasExistingPlan` flips true for it. The results table must keep rendering
+    // that row off the commit response, not re-derive it from that live-changed state.
+    const sections: StructureSection[] = [
+      { sheet: 'SENIORS', header: 'Premier League', rows: [{ raw: 'TUKS 1', venue: 'Buks Oval' }] },
+    ];
+    vi.mocked(api.platformStructureIntakeParse).mockResolvedValue({
+      sections,
+      sheetsScanned: 1,
+      sheetsWithSections: 1,
+    });
+    vi.mocked(api.platformTenantOverview)
+      .mockResolvedValueOnce(baseOverview)
+      .mockResolvedValue({
+        ...baseOverview,
+        clubs: [
+          {
+            ...baseOverview.clubs[0],
+            leagues: ['premier-league'],
+            leagueTeams: { 'premier-league': 1 },
+          },
+        ],
+      } as unknown as TenantOverview);
+    vi.mocked(api.platformStructureIntakeCommit).mockResolvedValue({
+      batchId: 'b2',
+      leaguesAppended: [],
+      clubs: [{ clubId: 'tuks', ok: true, teams: 1, women: 0, juniors: 0 }],
+    });
+
+    const user = userEvent.setup();
+    renderWizard();
+    await uploadWorkbook();
+
+    await screen.findByText('2. Sections');
+    await user.click(screen.getByRole('button', { name: /continue to teams/i }));
+    await screen.findByText('3. Teams');
+    await user.click(screen.getByRole('button', { name: /continue to plan/i }));
+    await screen.findByText('4. Plan preview');
+    await user.click(screen.getByRole('button', { name: /continue to commit/i }));
+    await screen.findByText('5. Commit');
+    await user.click(screen.getByRole('button', { name: /^commit \(1 club\)/i }));
+
+    await screen.findByText(/1 committed/i);
+    // The row survives — this is the assertion that fails without the fix.
+    expect(screen.getByText('TUKS Cricket Club')).toBeInTheDocument();
+    expect(screen.getByText('Committed')).toBeInTheDocument();
   });
 });

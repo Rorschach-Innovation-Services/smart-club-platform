@@ -78,14 +78,17 @@ export function suggestLeague(header: string, leagues: League[]): string | null 
 
 /** Initial per-section assignment state right after parse — each section pre-scored by
  *  `suggestLeague` against the tenant's CURRENT leagues (drafts don't exist yet at this
- *  point) and left unconfirmed. */
+ *  point) and left unconfirmed. A section with zero rows (a barren sub-header like
+ *  "50 - OVERS") can contribute nothing to the teams step either way, so it starts
+ *  Ignored rather than costing the operator a manual click — still visible, still
+ *  un-ignorable if it turns out to matter. */
 export function initialSectionAssignments(
   sections: StructureSection[],
   leagues: League[],
 ): SectionAssignment[] {
   return sections.map((s) => ({
-    leagueKey: suggestLeague(s.header, leagues),
-    ignored: false,
+    leagueKey: s.rows.length === 0 ? null : suggestLeague(s.header, leagues),
+    ignored: s.rows.length === 0,
     confirmed: false,
   }));
 }
@@ -139,6 +142,27 @@ export function divisionWarning(draftLabel: string, leagues: League[]): League |
     }
   }
   return null;
+}
+
+/**
+ * Best-effort league-name suggestion for the "Create league…" modal, prefilled from the
+ * triggering section's header: drops slash noise ("U/9" → "U9") and a trailing
+ * "Division <token>" qualifier — division placement is a season-setup decision, not a
+ * naming one, mirroring what `divisionWarning` strips when comparing against existing
+ * leagues — then title-cases what's left. Purely a starting point; the operator can
+ * still edit the field freely before creating.
+ */
+export function suggestLeagueLabel(header: string): string {
+  const stripped = header
+    .replace(/\//g, '')
+    .replace(/\bdivision\s*[a-z0-9]+\b/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return stripped
+    .split(' ')
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ');
 }
 
 /* ─── Teams step ─── */

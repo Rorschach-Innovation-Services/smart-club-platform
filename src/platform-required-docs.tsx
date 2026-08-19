@@ -24,6 +24,7 @@ import { createPortal } from 'react-dom';
 import { BoundedNumber, Btn, Card, Choice, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
 import { ApiError } from './api';
 import { DEFAULT_REQUIRED_DOCS, docMinFiles } from './data';
+import { InfoTip } from './platform-wizard';
 import type { DocFormat, RequiredDoc, TenantConfig } from './types';
 
 type Toast = (m: string, t?: string) => void;
@@ -50,6 +51,21 @@ const FORMAT_OPTIONS: Array<{ value: DocFormat; label: string }> = [
   { value: 'ods', label: 'OpenDocument (.ods)' },
 ];
 const DEFAULT_ACCEPTS: DocFormat[] = ['pdf', 'doc', 'docx'];
+
+/** The two structural doc roles self-serve onboarding gates on (ADR 0010) — see
+ *  `RequiredDoc.role` in types.ts. Order matches the picker and the badge lookup. */
+const ROLE_OPTIONS: Array<{ value: 'memberDatabase' | 'committee'; label: string }> = [
+  { value: 'memberDatabase', label: 'Member database — rosters parse from this document' },
+  { value: 'committee', label: 'Committee list — rep invites read this document' },
+];
+const ROLE_BADGE_LABEL: Record<'memberDatabase' | 'committee', string> = {
+  memberDatabase: 'Member database',
+  committee: 'Committee list',
+};
+const ROLE_TIP =
+  "The roster wizard and the reps page find a club's member-database and committee " +
+  "documents through THIS role, not the document's name — a self-serve catalogue can " +
+  'call it whatever it likes, but nothing downstream reads it until a role is assigned.';
 
 function sameFormatSet(a: DocFormat[], b: DocFormat[]): boolean {
   if (a.length !== b.length) return false;
@@ -81,6 +97,13 @@ function formatSummary(accepts?: DocFormat[]): string {
   if (list.includes('doc') || list.includes('docx')) parts.push('Word');
   if (list.includes('xls') || list.includes('xlsx') || list.includes('ods')) parts.push('Excel');
   return parts.join(', ') || '—';
+}
+
+/** The role chip for one row (ADR 0010) — a quick "is this the one?" glance across a
+ *  30-row catalogue, since role assignment is otherwise buried inside the edit dialog. */
+function roleBadge(doc: RequiredDoc): ReactNode | null {
+  if (!doc.role) return null;
+  return <Pill tone="gold">{ROLE_BADGE_LABEL[doc.role]}</Pill>;
 }
 
 /** Behavior pills for one row — mirrors the flags RequiredDoc declares (ADR 0009). */
@@ -178,12 +201,16 @@ function DocForm({
   doc,
   locked,
   existingKeys,
+  rows,
   onSave,
   onClose,
 }: {
   doc: RequiredDoc | null;
   locked: boolean;
   existingKeys: string[];
+  /** The full current draft (minus this row) — used only to find which OTHER row, if
+   *  any, already holds each role, so the picker can disable it and name the holder. */
+  rows: RequiredDoc[];
   onSave: (doc: RequiredDoc) => void;
   onClose: () => void;
 }) {
@@ -204,7 +231,14 @@ function DocForm({
   const [accepts, setAccepts] = useState<DocFormat[]>(doc?.accepts ?? DEFAULT_ACCEPTS);
   const [matchHints, setMatchHints] = useState<string[]>(doc?.matchHints ?? []);
   const [hintText, setHintText] = useState('');
+  const [role, setRole] = useState<'memberDatabase' | 'committee' | ''>(doc?.role ?? '');
   const [err, setErr] = useState('');
+
+  // Which OTHER (active, non-archived) row in the current draft already holds each
+  // role — the picker disables that option rather than silently letting a save move it,
+  // so the operator clears it on the other doc first (an explicit, deliberate move).
+  const roleHolder = (r: 'memberDatabase' | 'committee'): RequiredDoc | undefined =>
+    rows.find((d) => d.key !== (doc?.key ?? null) && d.role === r && !d.archived);
 
   // 'form' is restricted server-side to key 'exco' — the picker only appears for that key,
   // so a key edit that moves away from 'exco' must fall the draft back to 'file' too.
@@ -287,6 +321,10 @@ function DocForm({
       setErr('Pick at least one accepted file format');
       return;
     }
+    if (role && roleHolder(role)) {
+      setErr(`"${roleHolder(role)!.name}" already holds that role — clear it there first`);
+      return;
+    }
 
     const next: RequiredDoc = {
       key,
@@ -300,6 +338,7 @@ function DocForm({
       ...(kind !== 'form' && !sameFormatSet(accepts, DEFAULT_ACCEPTS) ? { accepts } : {}),
       ...(matchHints.length ? { matchHints } : {}),
       ...(doc?.archived ? { archived: true } : {}),
+      ...(role ? { role } : {}),
     };
     onSave(next);
   }
@@ -348,6 +387,25 @@ function DocForm({
         maxLength={300}
         placeholder="Shown to the chair on the upload screen"
       />
+
+      <div className="field-label" style={{ marginTop: 12 }}>
+        Role <InfoTip label="Why does the role matter?">{ROLE_TIP}</InfoTip>
+      </div>
+      <select
+        className="field-select"
+        value={role}
+        onChange={(e) => setRole(e.target.value as 'memberDatabase' | 'committee' | '')}
+      >
+        <option value="">None</option>
+        {ROLE_OPTIONS.map((opt) => {
+          const holder = roleHolder(opt.value);
+          return (
+            <option key={opt.value} value={opt.value} disabled={!!holder}>
+              {holder ? `${opt.label} (assigned to ${holder.name})` : opt.label}
+            </option>
+          );
+        })}
+      </select>
 
       {key === 'exco' && (
         <div style={{ marginTop: 12 }}>
@@ -639,6 +697,7 @@ export function RequiredDocsCard({
                 </div>
                 {d.desc && <p style={{ ...HINT, margin: '4px 0 0' }}>{d.desc}</p>}
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                  {roleBadge(d)}
                   {behaviorPills(d)}
                   {d.kind !== 'form' && <Pill tone="muted">{formatSummary(d.accepts)}</Pill>}
                 </div>
@@ -717,6 +776,7 @@ export function RequiredDocsCard({
             existingKeys={draft
               .filter((d) => d.key !== (editing !== 'new' ? editing.key : ''))
               .map((d) => d.key)}
+            rows={draft}
             onSave={(next) => upsert(next, editing !== 'new' ? editing.key : null)}
             onClose={() => setEditing(null)}
           />

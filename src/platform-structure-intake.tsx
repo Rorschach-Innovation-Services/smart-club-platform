@@ -36,6 +36,7 @@ import {
   initialSectionAssignments,
   makeDraftLeague,
   sectionsReady,
+  suggestLeagueLabel,
   teamRowNeedsAttention,
   type SectionAssignment,
   type TeamRow,
@@ -120,14 +121,16 @@ const STATUS_TONE: Record<'ready' | 'check' | 'excluded', string> = {
 
 function DraftLeagueModal({
   leagues,
+  initialLabel,
   onClose,
   onCreated,
 }: {
   leagues: League[];
+  initialLabel?: string;
   onClose: () => void;
   onCreated: (league: League) => void;
 }) {
-  const [label, setLabel] = useState('');
+  const [label, setLabel] = useState(initialLabel ?? '');
   const [group, setGroup] = useState('');
   const [district, setDistrict] = useState(OVERARCHING_DISTRICT);
   const [confirmedWarning, setConfirmedWarning] = useState(false);
@@ -318,6 +321,10 @@ export function StructureIntakeWizard({ toast }: { toast: Toast }) {
   }
   function setSectionIgnored(i: number, ignored: boolean) {
     setAssignments((a) => a.map((x, idx) => (idx === i ? { ...x, ignored } : x)));
+  }
+  const unassignedCount = assignments.filter((a) => !a.ignored && !a.leagueKey).length;
+  function ignoreAllUnassigned() {
+    setAssignments((a) => a.map((x) => (!x.ignored && !x.leagueKey ? { ...x, ignored: true } : x)));
   }
 
   // ── Teams ──
@@ -517,6 +524,13 @@ export function StructureIntakeWizard({ toast }: { toast: Toast }) {
       {step === 'sections' && sections && (
         <Card title="2. Sections">
           <StepIntro title="What this step does">{SECTIONS_INTRO}</StepIntro>
+          {unassignedCount >= 2 && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+              <Btn tone="outline" size="sm" onClick={ignoreAllUnassigned}>
+                Ignore all unassigned sections ({unassignedCount})
+              </Btn>
+            </div>
+          )}
           <div className="fix-table-wrap">
             <table className="fix-table">
               <thead>
@@ -933,7 +947,15 @@ export function StructureIntakeWizard({ toast }: { toast: Toast }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {includedClubIds.map((clubId) => {
+                    {/* Rows come from `results` (this run's actual response), never from a
+                        live-recomputed `includedClubIds` — that list depends on `planIncluded`,
+                        which reads `clubsById` off the overview query `afterServerWrite()`
+                        refetches mid-run. The moment a just-committed club's plan lands on the
+                        refetched overview, `clubHasExistingPlan` flips true for it and (absent an
+                        explicit override) `planIncluded` flips false, dropping the club from a
+                        live `includedClubIds` — the exact bug: "4 committed" with an empty table,
+                        because the commit succeeding is what erased the row reporting it. */}
+                    {Object.keys(results).map((clubId) => {
                       const r = results[clubId];
                       const club = clubsById.get(clubId);
                       return (
@@ -985,6 +1007,9 @@ export function StructureIntakeWizard({ toast }: { toast: Toast }) {
       {createLeagueFor !== null && (
         <DraftLeagueModal
           leagues={allLeagues}
+          initialLabel={
+            sections ? suggestLeagueLabel(sections[createLeagueFor]?.header ?? '') : undefined
+          }
           onClose={() => setCreateLeagueFor(null)}
           onCreated={(league) => {
             setDraftLeagues((ls) => [...ls, league]);
