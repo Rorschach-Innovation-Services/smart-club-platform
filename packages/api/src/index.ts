@@ -5268,7 +5268,7 @@ app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
 
   // Step 1 — leagues first, fail-fast whole-request. Nothing else has run if this throws.
   // Idempotent: drop any incoming league that's an EXACT re-send of one already on the
-  // stored catalogue (same key AND same key/label/group/district/note) BEFORE validating
+  // stored catalogue (same key/label/group/district/note/competitions) BEFORE validating
   // — a retry of an already-appended league must succeed, not 409. A same-KEY-but-
   // DIFFERENT-definition entry is a genuine conflict, not a retry: it's left in place so
   // validateLeagues' uniqueness check on the combined array still 409s it, same as a
@@ -5280,7 +5280,8 @@ app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
     a.label === b.label &&
     a.group === b.group &&
     a.district === b.district &&
-    (a.note ?? '') === (b.note ?? '');
+    (a.note ?? '') === (b.note ?? '') &&
+    JSON.stringify(a.competitions ?? null) === JSON.stringify(b.competitions ?? null);
   const newLeagues = requestedLeagues.filter((l) => {
     const existing = existingLeaguesByKey.get(l.key);
     return !existing || !sameLeagueDefinition(l, existing);
