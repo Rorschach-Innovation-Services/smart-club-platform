@@ -91,19 +91,94 @@ describe('buildClubSummaries', () => {
     expect(summary.exceptionsByReason).toEqual({ 'bad-checksum': 1 });
     expect(summary.totalExceptions).toBe(1);
     expect(summary.unknownGenderRaw).toEqual(['?']);
-    expect(summary.missingIdExceptionCount).toBe(0);
+    expect(summary.recoverableIdExceptionCount).toBe(0);
   });
 
-  it('classifies a club whose sheets all lack an ID column as dob-variant, with the missing-id count', () => {
+  it('classifies a club whose sheets all lack an ID column as dob-variant, counting missing-id AND bad-id rows as recoverable', () => {
     const clubs: ClubParseState[] = [
       { clubId: 'c2', clubName: 'Club Two', allowMissingId: true, parse: parseableDobVariant },
     ];
     const [summary] = buildClubSummaries(clubs);
     expect(summary.template).toBe('dob-variant');
     expect(summary.dobOnlyCount).toBe(1);
-    expect(summary.missingIdExceptionCount).toBe(1);
+    // parseableDobVariant carries one 'missing-id' exception; bad-id-only clubs (an ID
+    // column present but this row's cell is unusable while a dob is present) are covered
+    // by the dedicated recoverable-count test below.
+    expect(summary.recoverableIdExceptionCount).toBe(1);
     expect(summary.unknownRaceRaw).toEqual(['other']);
     expect(summary.allowMissingId).toBe(true);
+  });
+
+  it('counts bad-id exceptions toward the recoverable count, not just missing-id (round-2 E2E: Adelaar read "0 missing-id rows" beside 103 bad-id rows)', () => {
+    const parse: RosterIntakeParseResponse = {
+      parseable: true,
+      sheets: [
+        {
+          name: 'Seniors',
+          skipped: false,
+          hasIdColumn: true,
+          totalDataRows: 2,
+          rows: [],
+          exceptions: [
+            { rowNumber: 2, sheet: 'Seniors', reason: 'bad-id' },
+            { rowNumber: 3, sheet: 'Seniors', reason: 'bad-id' },
+          ],
+          unknownGenderRaw: [],
+          unknownRaceRaw: [],
+        },
+      ],
+      dobOnlyCount: 0,
+      juniorLeagueKeys: [],
+      ageGroupRaws: [],
+    };
+    const clubs: ClubParseState[] = [
+      { clubId: 'c4', clubName: 'Adelaar', allowMissingId: false, parse },
+    ];
+    const [summary] = buildClubSummaries(clubs);
+    expect(summary.recoverableIdExceptionCount).toBe(2);
+  });
+
+  it('flags parsed junior-sheet rows with no team as an informational count, keyed on the sheet name reading as junior', () => {
+    const parse: RosterIntakeParseResponse = {
+      parseable: true,
+      sheets: [
+        {
+          name: 'Junior Leagues',
+          skipped: false,
+          hasIdColumn: true,
+          totalDataRows: 2,
+          rows: [
+            { rowNumber: 2, firstName: 'A', lastName: 'B', dob: '2010-01-01', missingId: false },
+            { rowNumber: 3, firstName: 'C', lastName: 'D', dob: '2011-01-01', missingId: false },
+          ],
+          exceptions: [],
+          unknownGenderRaw: [],
+          unknownRaceRaw: [],
+        },
+        {
+          name: 'Seniors',
+          skipped: false,
+          hasIdColumn: true,
+          totalDataRows: 1,
+          rows: [
+            { rowNumber: 2, firstName: 'E', lastName: 'F', dob: '1990-01-01', missingId: false },
+          ],
+          exceptions: [],
+          unknownGenderRaw: [],
+          unknownRaceRaw: [],
+        },
+      ],
+      dobOnlyCount: 0,
+      juniorLeagueKeys: [],
+      ageGroupRaws: [],
+    };
+    const clubs: ClubParseState[] = [
+      { clubId: 'c5', clubName: 'Adelaar', allowMissingId: false, parse },
+    ];
+    const [summary] = buildClubSummaries(clubs);
+    // Both Junior Leagues rows have no team (no age-band column at all); the Seniors
+    // sheet's team-less row is NOT counted — it isn't a junior-named sheet.
+    expect(summary.juniorRowsWithoutTeamCount).toBe(2);
   });
 
   it('does not classify a club with only skipped/empty sheets as dob-variant', () => {

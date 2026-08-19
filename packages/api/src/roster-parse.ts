@@ -36,7 +36,12 @@ export function maskId(id: string): string {
 export interface RosterException {
   rowNumber: number;
   sheet: string;
-  reason: 'bad-id' | 'no-usable-identity' | 'bad-id-checksum' | 'unmapped-age-group';
+  reason:
+    | 'bad-id'
+    | 'no-usable-identity'
+    | 'bad-id-checksum'
+    | 'unmapped-age-group'
+    | 'missing-surname';
   maskedId?: string;
 }
 
@@ -149,10 +154,36 @@ export function parseRosterSheet(
       lastName = collapseWhitespace(
         cellString(row.getCell((header.columns.lastName ?? -1) + 1).value),
       );
+      if (!lastName && firstName.includes(' ')) {
+        // Adelaar's senior sheet is a template variant with the FULL NAME in the "Name"
+        // column and the "Surname" column left blank ("Stephan Pretorius" + "") — split
+        // the LAST word off as the surname, keeping a multi-word first name intact
+        // ("Xavier Zinzan Sanna" → firstName "Xavier Zinzan", lastName "Sanna"), the same
+        // reversible rule splitFullName already applies to a genuine combined-column
+        // template. Fires ONLY when the surname cell is blank: a row where the surname
+        // column HAS a value skips this branch entirely and is untouched, so the natural
+        // keys of already-imported Titans prod players are unaffected — every one of
+        // them came through with a populated surname column, and a blank-surname row like
+        // this one previously FAILED the intake commit validator outright ("firstName and
+        // lastName are required"), so no committed row ever had this shape to begin with.
+        const split = splitFullName(firstName);
+        firstName = split.firstName;
+        lastName = split.lastName;
+      }
     }
     if (!firstName && !lastName) return; // blank row — not counted, not an exception
 
     result.totalDataRows++;
+
+    if (!lastName) {
+      // A single-word name with no surname anywhere (column blank/absent, and nothing to
+      // split) — never silently commit a half-named row. The commit validator requires
+      // both firstName and lastName, so a row this module can't safely resolve becomes an
+      // explicit exception the operator can see and fix at source, instead of one bad row
+      // 400ing the whole club's batch.
+      result.exceptions.push({ rowNumber, sheet: ws.name, reason: 'missing-surname' });
+      return;
+    }
 
     let idNumber: string | undefined;
     let dob: string | null = null;

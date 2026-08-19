@@ -65,10 +65,20 @@ export interface ClubSummary {
   template: 'standard' | 'dob-variant';
   unknownGenderRaw: string[];
   unknownRaceRaw: string[];
-  /** The count shown beside the allowMissingId toggle — this club's `missing-id`
-   *  exception count specifically (not the total exception count). */
-  missingIdExceptionCount: number;
+  /** The count shown beside the allowMissingId toggle — rows recoverable by turning it
+   *  on: reason `missing-id` (no ID column at all) OR `bad-id` (an ID column exists but
+   *  this row's cell holds a DOB/garbage while a DOB is present elsewhere) — NOT the
+   *  total exception count, and not `missing-id` alone, which undercounts every club
+   *  whose "ID" column is present but unusable (round-2 E2E: Adelaar had 103 `bad-id`
+   *  rows and read "0 missing-id rows" beside the toggle). */
+  recoverableIdExceptionCount: number;
   allowMissingId: boolean;
+  /** Parsed rows on a sheet whose name reads as a junior sheet (`/junior/i`) but that
+   *  carry no team — a legitimate outcome when the sheet has no age-band column at all
+   *  (Adelaar's "Junior Leagues" tab: a private-academy list, 0 ageGroupRaws). Never
+   *  blocks commit — informational only, matching the Titans CLI's own behavior of
+   *  writing these rows team-less. */
+  juniorRowsWithoutTeamCount: number;
 }
 
 function countExceptionsByReason(exceptions: RosterIntakeException[]): ExceptionsByReason {
@@ -100,7 +110,8 @@ export function buildClubSummaries(clubs: ClubParseState[]): ClubSummary[] {
         template: 'standard',
         unknownGenderRaw: [],
         unknownRaceRaw: [],
-        missingIdExceptionCount: 0,
+        recoverableIdExceptionCount: 0,
+        juniorRowsWithoutTeamCount: 0,
       };
     }
     if (!parse.parseable) {
@@ -116,7 +127,8 @@ export function buildClubSummaries(clubs: ClubParseState[]): ClubSummary[] {
         template: 'standard',
         unknownGenderRaw: [],
         unknownRaceRaw: [],
-        missingIdExceptionCount: 0,
+        recoverableIdExceptionCount: 0,
+        juniorRowsWithoutTeamCount: 0,
       };
     }
     const sheetsWithRows = parse.sheets.filter((s) => !s.skipped && s.totalDataRows > 0);
@@ -137,7 +149,11 @@ export function buildClubSummaries(clubs: ClubParseState[]): ClubSummary[] {
       template,
       unknownGenderRaw: [...new Set(parse.sheets.flatMap((s) => s.unknownGenderRaw))],
       unknownRaceRaw: [...new Set(parse.sheets.flatMap((s) => s.unknownRaceRaw))],
-      missingIdExceptionCount: exceptionsByReason['missing-id'] ?? 0,
+      recoverableIdExceptionCount:
+        (exceptionsByReason['missing-id'] ?? 0) + (exceptionsByReason['bad-id'] ?? 0),
+      juniorRowsWithoutTeamCount: parse.sheets
+        .filter((s) => /junior/i.test(s.name))
+        .reduce((n, s) => n + s.rows.filter((r) => !r.team).length, 0),
     };
   });
 }

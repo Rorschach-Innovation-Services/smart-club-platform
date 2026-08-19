@@ -182,7 +182,7 @@ describe('RosterIntakeWizard', () => {
     expect(within(row).getByLabelText(/about replacing the member database/i)).toBeInTheDocument();
   });
 
-  it('defaults allowMissingId off, auto-suggests it on for a DOB-variant club, and re-parses on flip', async () => {
+  it('defaults allowMissingId off, auto-suggests it on for a DOB-variant club, immediately re-parses with the flag, and re-parses again on a manual flip', async () => {
     const user = userEvent.setup();
     vi.mocked(api.platformRosterIntakeParse).mockImplementation(async (_slug, body) =>
       body.clubId === 'club-a' ? dobVariantParse : standardParse,
@@ -198,9 +198,20 @@ describe('RosterIntakeWizard', () => {
     const toggle = screen.getByRole('checkbox', { name: /allow players without an id number/i });
     expect(toggle).toBeChecked(); // auto-suggested ON for the DOB-variant club
 
-    expect(api.platformRosterIntakeParse).toHaveBeenCalledTimes(1);
-    await user.click(toggle); // flip off — re-parses
+    // The auto-suggest fires an automatic follow-up parse WITH the flag — the checkbox
+    // must never sit checked next to a stale strict-parse result (round-2 E2E: Adelaar
+    // showed a checked box with the strict parse's 0-parsed/251-bad-id numbers until
+    // manually toggled off/on).
     await waitFor(() => expect(api.platformRosterIntakeParse).toHaveBeenCalledTimes(2));
+    const autoReparseCall = vi.mocked(api.platformRosterIntakeParse).mock.calls.at(-1)!;
+    expect(autoReparseCall[1]).toEqual({
+      clubId: 'club-a',
+      allowMissingId: true,
+      ageGroupMap: undefined,
+    });
+
+    await user.click(toggle); // flip off — re-parses again
+    await waitFor(() => expect(api.platformRosterIntakeParse).toHaveBeenCalledTimes(3));
     const lastCall = vi.mocked(api.platformRosterIntakeParse).mock.calls.at(-1)!;
     expect(lastCall[1]).toEqual({
       clubId: 'club-a',

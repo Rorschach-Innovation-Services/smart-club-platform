@@ -80,8 +80,10 @@ const INTRO_COMMIT =
   'and a failed batch can be retried without repeating the ones that already succeeded.';
 
 const ALLOW_MISSING_ID_TIP =
-  'Players without an ID number are harder to de-duplicate and to match in clearances ' +
-  'later. Turn this on only when the club’s register genuinely has no ID column.';
+  'Enabling this re-parses the workbook and recovers rows without a usable ID number ' +
+  'when a date of birth is present. Players without an ID are harder to de-duplicate ' +
+  'and to match in clearances later — turn this on only when the club’s register ' +
+  'genuinely has no ID column.';
 const MASKED_ID_TIP =
   'ID numbers are shown masked by default. Reveal one only when you need to check it ' +
   'against the source document.';
@@ -109,7 +111,7 @@ function docKeyForRole(
 
 /* ─── Parse pool (3-concurrent) ─── */
 
-type ClubParseStatus = 'idle' | 'queued' | 'parsing' | 'done' | 'error';
+type ClubParseStatus = 'idle' | 'queued' | 'parsing' | 're-parsing' | 'done' | 'error';
 
 const PARSE_CONCURRENCY = 3;
 
@@ -177,8 +179,9 @@ export function RosterIntakeWizard({ toast }: { toast: Toast }) {
     async (
       clubId: string,
       overrides?: { allowMissingId?: boolean; ageGroupMap?: Record<string, string> },
+      opts?: { isReparse?: boolean },
     ) => {
-      setParseStatus((s) => ({ ...s, [clubId]: 'parsing' }));
+      setParseStatus((s) => ({ ...s, [clubId]: opts?.isReparse ? 're-parsing' : 'parsing' }));
       setParseError((s) => ({ ...s, [clubId]: '' }));
       try {
         const res = await api.platformRosterIntakeParse(slug, {
@@ -196,7 +199,25 @@ export function RosterIntakeWizard({ toast }: { toast: Toast }) {
               .every((sh) => !sh.hasIdColumn);
           if (dobVariant && !autoSuggested.current.has(clubId)) {
             autoSuggested.current.add(clubId);
+            const wasUnset = allowMissingId[clubId] === undefined;
             setAllowMissingId((s) => (s[clubId] === undefined ? { ...s, [clubId]: true } : s));
+            if (wasUnset) {
+              // The parse that just landed used the OLD allowMissingId (false, or
+              // whatever was already set) — we're auto-suggesting the toggle ON, so that
+              // result is now stale for what the checkbox shows. Immediately trigger one
+              // follow-up parse with the flag explicit, rather than leaving a checked box
+              // next to a strict parse's results until the operator notices and manually
+              // flips it off/on (round-2 E2E: Adelaar showed a checked box with 0 parsed /
+              // 251 bad-id — the strict-mode numbers — until toggled by hand).
+              void parseClub(
+                clubId,
+                {
+                  allowMissingId: true,
+                  ageGroupMap: overrides?.ageGroupMap ?? ageGroupMap[clubId],
+                },
+                { isReparse: true },
+              );
+            }
           }
         }
       } catch (e) {
@@ -235,15 +256,20 @@ export function RosterIntakeWizard({ toast }: { toast: Toast }) {
     // Pass the value explicitly rather than reading state: React batches the setState
     // above, so a same-tick reparse using the current closure's `allowMissingId` would
     // send the STALE value.
-    void parseClub(clubId, { allowMissingId: on, ageGroupMap: ageGroupMap[clubId] });
+    void parseClub(
+      clubId,
+      { allowMissingId: on, ageGroupMap: ageGroupMap[clubId] },
+      { isReparse: true },
+    );
   }
   function setClubAgeGroupMap(clubId: string, raw: string, leagueKey: string) {
     const nextMap = { ...(ageGroupMap[clubId] ?? {}), [raw]: leagueKey };
     setAgeGroupMap((s) => ({ ...s, [clubId]: nextMap }));
-    void parseClub(clubId, {
-      allowMissingId: allowMissingId[clubId] ?? false,
-      ageGroupMap: nextMap,
-    });
+    void parseClub(
+      clubId,
+      { allowMissingId: allowMissingId[clubId] ?? false, ageGroupMap: nextMap },
+      { isReparse: true },
+    );
   }
 
   // ── Replace member database (per-club, launched from clubs/review hints) ──
@@ -559,6 +585,7 @@ export function RosterIntakeWizard({ toast }: { toast: Toast }) {
                         {(status === 'queued' || status === 'parsing') && (
                           <Pill tone="gold">{status === 'queued' ? 'Queued' : 'Parsing…'}</Pill>
                         )}
+                        {status === 're-parsing' && <Pill tone="gold">Re-parsing…</Pill>}
                         {status === 'done' && <Pill tone="teal">Parsed</Pill>}
                         {status === 'error' && (
                           <Pill tone="coral">{parseError[c.id] || 'Failed'}</Pill>
@@ -631,6 +658,9 @@ export function RosterIntakeWizard({ toast }: { toast: Toast }) {
                         {s.template === 'dob-variant' && (
                           <Pill tone="gold">No ID column — DOB variant</Pill>
                         )}
+                        {parseStatus[s.clubId] === 're-parsing' && (
+                          <Pill tone="gold">Re-parsing…</Pill>
+                        )}
                         {Object.entries(s.exceptionsByReason).map(([reason, n]) => (
                           <Pill key={reason} tone="coral">
                             {reason}: {n}
@@ -646,6 +676,12 @@ export function RosterIntakeWizard({ toast }: { toast: Toast }) {
                             unknown race: {r}
                           </Pill>
                         ))}
+                        {s.juniorRowsWithoutTeamCount > 0 && (
+                          <Pill tone="gold">
+                            {s.juniorRowsWithoutTeamCount} juniors have no age-band column — they’ll
+                            be committed without a junior league assignment
+                          </Pill>
+                        )}
                         <Btn
                           tone="ghost"
                           size="sm"
@@ -686,8 +722,8 @@ export function RosterIntakeWizard({ toast }: { toast: Toast }) {
                       </label>
                       <InfoTip label="About allowing missing IDs">{ALLOW_MISSING_ID_TIP}</InfoTip>
                       <span style={{ fontSize: 11.5, color: 'var(--muted-2)' }}>
-                        {s.missingIdExceptionCount} missing-id row
-                        {s.missingIdExceptionCount === 1 ? '' : 's'}
+                        {s.recoverableIdExceptionCount} row
+                        {s.recoverableIdExceptionCount === 1 ? '' : 's'} without a usable ID number
                       </span>
                     </div>
                   )}
