@@ -11,6 +11,9 @@
  * Env is set HERE before importing repo/app (repo reads it at module load).
  */
 import { createServer } from 'node:http';
+import { mkdirSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const TABLE = 'SmartClubLocal';
 const DDB_PORT = 4567;
@@ -21,6 +24,8 @@ process.env.DYNAMO_ENDPOINT = `http://localhost:${DDB_PORT}`;
 process.env.LOCAL_AUTH = '1';
 process.env.STAGE = 'local';
 process.env.AWS_REGION ??= 'localhost';
+process.env.LOCAL_UPLOADS_DIR ??= path.join(os.tmpdir(), 'smart-club-local-uploads');
+mkdirSync(process.env.LOCAL_UPLOADS_DIR, { recursive: true });
 
 async function main(): Promise<void> {
   // 1. Start dynalite (in-memory DynamoDB).
@@ -66,6 +71,7 @@ async function main(): Promise<void> {
     }),
   );
   console.log(`· created table ${TABLE}`);
+  console.log(`· local uploads dir: ${process.env.LOCAL_UPLOADS_DIR}`);
 
   // 3. Provision tenants (blank). SEED_DEMO=1 also loads sample clubs/series.
   const demo = process.env.SEED_DEMO === '1';

@@ -20,6 +20,8 @@ import dayjs from 'dayjs';
 import dayjsUtc from 'dayjs/plugin/utc.js';
 import dayjsCustomParseFormat from 'dayjs/plugin/customParseFormat.js';
 import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import {
   S3Client,
   PutObjectCommand,
@@ -186,6 +188,16 @@ const TUTORIALS_BUCKET = process.env.TUTORIALS_BUCKET ?? '';
 const USER_POOL_ID = process.env.USER_POOL_ID!;
 const MAX_DOC_BYTES = 10 * 1024 * 1024; // 10 MB
 
+/**
+ * Dev-only local upload sink (self-serve onboarding): true only for `dev:local`
+ * (STAGE=local + LOCAL_UPLOADS_DIR set by src/local/server.ts, or an int test that
+ * sets both directly). Every behavior change gated on this stays byte-identical to
+ * prod otherwise — see the /local-uploads/* routes and the doc-intake presign /
+ * view-url branches below.
+ */
+const isLocalUploadsMode = (): boolean =>
+  process.env.STAGE === 'local' && !!process.env.LOCAL_UPLOADS_DIR;
+
 // Wildcard platform (scheme 1) — real CNAME targets for the operator DNS sheet, and
 // the shared API host. Empty until the wildcard is armed (see infra/tenants.ts).
 const WILDCARD_ENABLED = process.env.WILDCARD_ENABLED === '1';
@@ -337,6 +349,48 @@ function withPlayerCount(club: Club): Club {
 function publicRequiredDocs(cfg: TenantConfig | null): Omit<RequiredDoc, 'matchHints'>[] {
   return resolveRequiredDocs(cfg).map(({ matchHints: _hints, ...rest }) => rest);
 }
+
+// ─────────────── Local-only upload sink (dev:local; 404 elsewhere) ───────────────
+
+/**
+ * `local/`-key bytes only. `..` and anything outside this charset is rejected before
+ * touching the filesystem — this route has no auth (it's the local PUT/GET twin of a
+ * presigned URL, and the local server only ever binds localhost).
+ */
+const LOCAL_UPLOAD_KEY_RE = /^[A-Za-z0-9._/-]+$/;
+
+/** Screen and resolve a `/local-uploads/local/...` request path to its on-disk file. */
+function localUploadFilePath(reqPath: string): string {
+  const key = reqPath.slice('/local-uploads/'.length); // 'local/<slug>/<clubId>/<file>'
+  if (key.includes('..') || !LOCAL_UPLOAD_KEY_RE.test(key)) {
+    throw new HttpError(400, 'invalid upload path');
+  }
+  return path.join(process.env.LOCAL_UPLOADS_DIR!, key.slice('local/'.length));
+}
+
+/** No-auth local twin of an S3 presigned PUT — dev:local only (see isLocalUploadsMode). */
+app.put('/local-uploads/local/*', async (c) => {
+  if (!isLocalUploadsMode()) throw new HttpError(404, 'not found');
+  const filePath = localUploadFilePath(c.req.path);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, Buffer.from(await c.req.arrayBuffer()));
+  return c.json({ ok: true });
+});
+
+/** No-auth local twin of an S3 presigned GET — dev:local only (see isLocalUploadsMode). */
+app.get('/local-uploads/local/*', async (c) => {
+  if (!isLocalUploadsMode()) throw new HttpError(404, 'not found');
+  const filePath = localUploadFilePath(c.req.path);
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(filePath);
+  } catch {
+    throw new HttpError(404, 'not found');
+  }
+  c.header('Content-Type', c.req.query('ct') ?? 'application/octet-stream');
+  c.header('Content-Disposition', 'inline');
+  return c.body(new Uint8Array(bytes));
+});
 
 // ───────────────────────── Public routes ─────────────────────────
 
@@ -2399,6 +2453,10 @@ app.post('/clubs/:id/docs/:key/view-url', async (c) => {
     entry = meta?.objectKey && (!requested || requested === meta.objectKey) ? meta : undefined;
   }
   if (!entry?.objectKey) throw new HttpError(404, 'no file on record for this document');
+  if (entry.objectKey.startsWith('local/') && isLocalUploadsMode()) {
+    const url = `${new URL(c.req.url).origin}/local-uploads/${entry.objectKey}?ct=${encodeURIComponent(entry.contentType ?? 'application/pdf')}`;
+    return c.json({ viewUrl: url });
+  }
   const url = await getSignedUrl(
     s3,
     new GetObjectCommand({
@@ -4160,6 +4218,14 @@ app.post('/platform/tenants/:slug/doc-intake/presign', async (c) => {
       if (typeof item.size !== 'number' || item.size <= 0 || item.size > MAX_DOC_BYTES) {
         return { ok: false as const, error: 'file must be non-empty and under 10 MB' };
       }
+      // Local mode has no S3 bucket: mint a `local/` key (already trusted by
+      // assertOwnObjectKey and the doc-intake commit prefix check) and point the
+      // "presigned" PUT at this same server's own /local-uploads sink instead of S3.
+      if (isLocalUploadsMode()) {
+        const objectKey = `local/${slug}/${item.clubId}/${item.docKey}-${randomUUID()}.${mimes[item.contentType]}`;
+        const uploadUrl = `${new URL(c.req.url).origin}/local-uploads/${objectKey}`;
+        return { ok: true as const, uploadUrl, objectKey, contentType: item.contentType };
+      }
       const objectKey = `${slug}/${item.clubId}/${item.docKey}-${randomUUID()}.${mimes[item.contentType]}`;
       const uploadUrl = await getSignedUrl(
         s3,
@@ -5325,6 +5391,10 @@ app.post('/platform/tenants/:slug/clubs/:clubId/docs/:key/view-url', async (c) =
     entry = meta?.objectKey && (!requested || requested === meta.objectKey) ? meta : undefined;
   }
   if (!entry?.objectKey) throw new HttpError(404, 'no file on record for this document');
+  if (entry.objectKey.startsWith('local/') && isLocalUploadsMode()) {
+    const url = `${new URL(c.req.url).origin}/local-uploads/${entry.objectKey}?ct=${encodeURIComponent(entry.contentType ?? 'application/pdf')}`;
+    return c.json({ viewUrl: url });
+  }
   const url = await getSignedUrl(
     s3,
     new GetObjectCommand({

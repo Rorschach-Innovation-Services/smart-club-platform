@@ -702,15 +702,18 @@ export function docFileMeta(meta) {
 /**
  * Decide what a document preview should render, so a real-but-fileless doc is never
  * misrepresented by the demo sample:
- *  - 'real' → a stored S3 file exists; mint a presigned GET and show it.
- *  - 'demo' → local/demo mode; show the bundled sample PDF (sample clubs have no docMeta).
+ *  - 'real' → a stored file exists; mint a view-url and show it. In local mode a
+ *             `local/`-prefixed objectKey now counts too — the view-url API serves its
+ *             actual bytes off the dev:local upload sink (see /local-uploads/* in
+ *             packages/api/src/index.ts), so there's real content to fetch.
+ *  - 'demo' → local/demo mode with NO stored file at all (sample clubs have no
+ *             docMeta); show the bundled sample PDF.
  *  - 'none' → production doc with no usable file (admin override / empty key); show an
  *             explicit "no file on record" state, NOT the sample.
  */
 export function resolvePreviewSource(meta, isLocalDemo) {
   const objectKey = meta?.objectKey;
-  const hasRealFile = !!objectKey && !String(objectKey).startsWith('local/');
-  if (hasRealFile && !isLocalDemo) return 'real';
+  if (objectKey && (!String(objectKey).startsWith('local/') || isLocalDemo)) return 'real';
   if (isLocalDemo) return 'demo';
   return 'none';
 }
