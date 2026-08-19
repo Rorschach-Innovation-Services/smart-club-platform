@@ -203,6 +203,25 @@ before(async () => {
     }),
   );
   await repo.createClub(CANONICAL_TENANT, baseClub('clubcommitteenofile'));
+
+  // ── Legacy BIFF .xls fixture: a buffer starting with the OLE2 Compound File Binary
+  //    magic bytes (D0 CF 11 E0) — the real shape of Pretoria's committee doc, which
+  //    exceljs's xlsx.load cannot read at all (it only understands OOXML zips). ──
+  const legacyXlsAbs = path.join(uploadsDir, 'committee/legacy.xls');
+  await (await import('node:fs/promises')).mkdir(path.dirname(legacyXlsAbs), { recursive: true });
+  await (
+    await import('node:fs/promises')
+  ).writeFile(legacyXlsAbs, Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0, 0]));
+  await repo.createClub(
+    CANONICAL_TENANT,
+    baseClub('clubcommitteexls', {
+      'committee-list': {
+        objectKey: 'local/committee/legacy.xls',
+        size: 10,
+        contentType: 'application/vnd.ms-excel',
+      },
+    }),
+  );
   await repo.createClub(
     CANONICAL_TENANT,
     baseClub('clubviewurl', {
@@ -389,6 +408,19 @@ describe('POST /platform/tenants/:slug/clubs/:clubId/committee-extract', () => {
     const body = (await res.json()) as { status: string; reason?: string };
     assert.equal(body.status, 'unparseable');
     assert.ok(body.reason);
+  });
+
+  test('legacy .xls committee doc → 200 {status:"unparseable"} with the .xls-specific reason', async () => {
+    const res = await app.request(
+      `/platform/tenants/${CANONICAL_TENANT}/clubs/clubcommitteexls/committee-extract`,
+      { method: 'POST', headers: platformHeaders(OPERATOR) },
+    );
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    const body = (await res.json()) as { status: string; reason?: string };
+    assert.equal(body.status, 'unparseable');
+    assert.match(body.reason ?? '', /legacy \.xls workbook/);
+    assert.doesNotMatch(body.reason ?? '', /corrupted/);
   });
 
   test('xlsx committee doc extracts scored candidates', async () => {

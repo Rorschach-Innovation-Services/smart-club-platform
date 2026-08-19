@@ -23,6 +23,18 @@ import {
  *  kept as its own copy since this module is tenant-neutral and import-free of index.ts. */
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 
+/** Legacy BIFF (Excel 97-2003 .xls / .doc / .ppt — the OLE2 Compound File Binary Format)
+ *  magic bytes. exceljs's `xlsx.load` only understands the OOXML zip format, so a real
+ *  .xls workbook fails there with a generic parse error that reads as "corrupted" even
+ *  though the file is perfectly fine — it's just the wrong (older) Excel format. Checking
+ *  for this signature BEFORE handing the bytes to exceljs lets the committee-extract route
+ *  give operators an accurate, actionable reason instead of blaming the file. */
+const BIFF_MAGIC = [0xd0, 0xcf, 0x11, 0xe0] as const;
+
+export function isLegacyXlsBuffer(bytes: Buffer): boolean {
+  return BIFF_MAGIC.every((byte, i) => bytes[i] === byte);
+}
+
 export type CommitteeField = 'fullName' | 'surname' | 'role' | 'email' | 'cell';
 
 const COMMITTEE_ALIASES: Record<CommitteeField, string[]> = {

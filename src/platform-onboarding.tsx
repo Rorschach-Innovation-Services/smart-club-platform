@@ -25,6 +25,7 @@ import { qk } from './query';
 import * as api from './api';
 import { Btn, Card, Pill, ProgressBar } from './atoms';
 import { StepIntro } from './platform-wizard';
+import { DISTRICTS } from './data';
 import type {
   InsightsClub,
   RequiredDoc,
@@ -85,7 +86,12 @@ export function buildOnboardingSteps(
   const catalogueState: StepState =
     activeDocsCount === 0 ? 'todo' : catalogueDone ? 'done' : 'partial';
 
-  const districtsCount = config.districts?.length ?? 0;
+  // Effective districts: the explicit config value when present (including a deliberate
+  // [] on a freshly created client), else the shared defaults — same fallback the rest
+  // of the app (and the API's resolveDistricts) uses, so this step never reports "0
+  // districts" while the settings editor is showing the platform defaults in effect.
+  // Leagues have no such shared-default fallback — they're purely per-tenant config.
+  const districtsCount = (config.districts ?? DISTRICTS).length;
   const leaguesCount = config.leagues?.length ?? 0;
   const districtsLeaguesState: StepState =
     districtsCount > 0 && leaguesCount > 0
@@ -131,18 +137,31 @@ export function buildOnboardingSteps(
           ? 'partial'
           : 'todo';
 
+  // A club is COVERED as soon as it has any rep at all — invited (pending first sign-in)
+  // or already signed in. `coverage` (repCount per club, from GET reps) already counts
+  // both statuses; deriving from `reps.reps` directly with the same "any status" rule
+  // keeps this in sync even if a club id is missing from `coverage` for some reason.
   const repsList = reps.reps ?? [];
-  const clubsWithActiveRep = clubs.filter((c) =>
-    repsList.some((r) => r.clubIds.includes(c.id) && r.status === 'active'),
+  const coverageByClub = new Map((reps.coverage ?? []).map((cv) => [cv.clubId, cv.repCount]));
+  const hasAnyRep = (clubId: string) =>
+    (coverageByClub.get(clubId) ?? 0) > 0 || repsList.some((r) => r.clubIds.includes(clubId));
+  const clubsWithAnyRep = clubs.filter((c) => hasAnyRep(c.id));
+  const clubsAwaitingFirstSignIn = clubsWithAnyRep.filter(
+    (c) => !repsList.some((r) => r.clubIds.includes(c.id) && r.status === 'active'),
   );
   const repsState: StepState =
     clubs.length === 0
       ? 'todo'
-      : clubsWithActiveRep.length === clubs.length
+      : clubsWithAnyRep.length === clubs.length
         ? 'done'
-        : clubsWithActiveRep.length > 0
+        : clubsWithAnyRep.length > 0
           ? 'partial'
           : 'todo';
+  const repsLabel =
+    `${clubsWithAnyRep.length} of ${clubs.length} clubs have a rep` +
+    (clubsAwaitingFirstSignIn.length > 0
+      ? ` (${clubsAwaitingFirstSignIn.length} awaiting first sign-in)`
+      : '');
 
   const completeState: StepState = config.setupCompletedAt ? 'done' : 'todo';
 
@@ -250,8 +269,8 @@ export function buildOnboardingSteps(
         'Get a signed-in rep onto every club so its chair can manage documents, players and clearances.',
       state: repsState,
       progress: {
-        label: `${clubsWithActiveRep.length} of ${clubs.length} clubs have a rep`,
-        pct: pct(clubsWithActiveRep.length, clubs.length),
+        label: repsLabel,
+        pct: pct(clubsWithAnyRep.length, clubs.length),
       },
       // Committee role is NOT required to unlock this step — the reps page's manual
       // invite path works without it. It stays locked only for the same reason the

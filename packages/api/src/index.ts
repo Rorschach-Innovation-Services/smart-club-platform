@@ -92,7 +92,7 @@ import { luhnValid, normalizeGender, normalizeRace } from './roster-normalize.js
 import { parseStructureWorkbookAllSheets } from './structure-parse.js';
 import { deriveTeamPlanCounts } from './team-plan.js';
 import { readUploadObject } from './uploads.js';
-import { parseCommitteeWorkbookAllSheets } from './committee-parse.js';
+import { isLegacyXlsBuffer, parseCommitteeWorkbookAllSheets } from './committee-parse.js';
 import {
   sendClubFixtures,
   sendStaffInvite,
@@ -5347,6 +5347,13 @@ app.post('/platform/tenants/:slug/clubs/:clubId/committee-extract', async (c) =>
   } catch (err) {
     console.error(`committee-extract: failed to read ${stored.objectKey}`, err);
     return noStore({ status: 'unparseable', reason: 'unable to read the stored file' });
+  }
+  if (isLegacyXlsBuffer(bytes)) {
+    return noStore({
+      status: 'unparseable',
+      reason:
+        "legacy .xls workbook — it can't be read automatically; view the document and type the details in",
+    });
   }
   const wb = new ExcelJS.Workbook();
   try {

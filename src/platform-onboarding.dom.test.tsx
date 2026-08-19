@@ -196,6 +196,45 @@ describe('OnboardingPage', () => {
     expect(catalogueCard).not.toHaveTextContent(/Nothing in the catalogue yet/);
   });
 
+  it('counts a club as covered once it has ANY rep, including one still awaiting first sign-in', async () => {
+    vi.mocked(api.platformGetTenant).mockResolvedValue(BASE_CONFIG);
+    vi.mocked(api.platformTenantOverview).mockResolvedValue(BASE_OVERVIEW);
+    vi.mocked(api.platformTenantReps).mockResolvedValue({
+      reps: [
+        { sub: 'u1', email: 'rep@riverside.co.za', clubIds: ['riverside'], status: 'pending' },
+      ],
+      coverage: [
+        { clubId: 'phsob', repCount: 0 },
+        { clubId: 'riverside', repCount: 1 },
+      ],
+    });
+
+    renderPage();
+    await screen.findByRole('heading', { name: /client onboarding/i });
+
+    // Before this fix, only an ACTIVE (signed-in) rep counted, so an invited-but-pending
+    // rep on riverside still read "0 of 2 clubs have a rep".
+    const repsCard = screen.getByText('Reps invited').closest('.card')!;
+    expect(repsCard).toHaveTextContent('1 of 2 clubs have a rep (1 awaiting first sign-in)');
+    expect(repsCard).toHaveTextContent('In progress');
+  });
+
+  it('resolves districts against the shared defaults when config.districts is unset', async () => {
+    const { districts: _drop, ...rest } = BASE_CONFIG;
+    vi.mocked(api.platformGetTenant).mockResolvedValue(rest as unknown as TenantConfig);
+    vi.mocked(api.platformTenantOverview).mockResolvedValue(BASE_OVERVIEW);
+    vi.mocked(api.platformTenantReps).mockResolvedValue(EMPTY_REPS);
+
+    renderPage();
+    await screen.findByRole('heading', { name: /client onboarding/i });
+
+    // Shared defaults have 5 districts (see src/data.ts DISTRICTS) — before this fix the
+    // step read "0 districts" while the settings editor showed the defaults in effect.
+    const districtsCard = screen.getByText('Districts & leagues').closest('.card')!;
+    expect(districtsCard).toHaveTextContent('5 districts · 1 leagues');
+    expect(districtsCard).toHaveTextContent('Done');
+  });
+
   it('reads done end-to-end when every step is satisfied', async () => {
     vi.mocked(api.platformGetTenant).mockResolvedValue({
       ...BASE_CONFIG,
