@@ -22,6 +22,21 @@ classification/name-resolution logic they share lives in
 normalization (header detection, ID cleanup, race/gender/age-group mapping) lives in
 `packages/api/src/roster-normalize.ts` (also pure, tenant-neutral).
 
+> **This runbook is now the engineer fallback, not the go-forward path.** The self-serve
+> onboarding suite ([ADR 0010](../architecture/0010-self-serve-onboarding.md);
+> operator flow in
+> [onboarding-a-tenant.md §4](../guides/onboarding-a-tenant.md#4-bulk-onboard-a-federated-client--the-operator-checklist))
+> lets an operator run this same class of import — clubs, documents, league structure,
+> rosters, rep invites — from the portal, with no engineer and no CLI. `roster-parse.ts`,
+> `structure-parse.ts` and `team-plan.ts` were extracted out of these scripts to be
+> shared by both, so a fix to the parsing logic lands for the CLI and the wizards
+> together. Keep this runbook for: **reverting** a bad operator-suite commit (the
+> `intake:roster:…` / `intake:structure:…` provenance the wizards write is the same
+> shape these scripts' `--revert` already understands), a workbook layout the structure
+> wizard's "unsupported layout" screen rejects, or a first bulk import large/urgent
+> enough that the two-phase `--parse-only`/`--confirm` CLI flow is genuinely faster than
+> working through the review-table wizards.
+
 ## Prerequisites
 
 1. **ADR 0009 (per-tenant compliance-doc catalogue) is deployed.** This is what lets

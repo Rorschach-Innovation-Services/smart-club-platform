@@ -97,13 +97,94 @@ records; `infra/tenants.ts` carries the same runbook. **Sequence matters.**
    sign-in works end to end. The SPA redirects `<slug>.club.medicoach.co.za` to the vanity
    host so sessions stay on one origin.
 
-## 3. Hand over
+## 3. Hand over — two paths
 
-The first admin signs in via email OTP, generates the tenant's **club signup link**
-(All Clubs → "Invite clubs", or Settings → Club self-registration) and shares it once with
-the club reps. Each rep registers their own club through the link — that creates the club
-**and** the rep's account/membership, so no per-club admin work remains. Team & Access
-(`POST /admin/users`) is only needed for additional admins or extra reps.
+**Small / organic clients** (the club list isn't known up front, or clubs are happy to
+self-register): the first admin signs in via email OTP, generates the tenant's **club
+signup link** (All Clubs → "Invite clubs", or Settings → Club self-registration) and
+shares it once with the club reps. Each rep registers their own club through the link —
+that creates the club **and** the rep's account/membership, so no per-club admin work
+remains. Team & Access (`POST /admin/users`) is only needed for additional admins or
+extra reps.
+
+**Federated clients with a known club list, an affiliation pack, and an existing
+compliance/structure workbook** (a union like Titans): use the operator's own
+**onboarding checklist** instead — §4 below. It's the same shape of work the Titans
+engineer CLIs used to do, now done by an operator with no code and no engineer on the
+critical path.
+
+## 4. Bulk-onboard a federated client — the operator checklist
+
+Open **`/platform/tenants/<slug>/onboarding`** (or the "Client onboarding" card on the
+client's settings page — the operator's step-by-step map for this exact scenario:
+20+ known clubs, an affiliation pack already in hand, a league-structure workbook, and
+club rosters to bring in before any rep can sign in). Each row shows a **done / in
+progress / not started** state, a real progress count where the step is bulk (e.g. "12
+of 21 clubs have a member database"), and the first non-done step is called out as
+**Up next**. Work down the list in order — later steps genuinely depend on earlier ones:
+
+1. **Document catalogue** — decide what this client submits (Settings → Required
+   documents), and mark which document is the **member database** and which is the
+   **committee list**. This is the one hard dependency: the roster and reps steps read
+   those two documents through their assigned ROLE, not by file name, so they stay
+   locked (with an on-screen explanation) until both roles are assigned. See
+   [ADR 0010](../architecture/0010-self-serve-onboarding.md#1-doc-roles-not-literal-keys).
+2. **Districts & leagues** — set up the client's districts and the leagues its clubs
+   play in (Settings). Every club and team plan below is built against these.
+3. **Clubs exist** — get every club onto the register (Settings → club directory, or
+   let the structure wizard in step 5 create them from the workbook as it goes).
+4. **Documents in** — run the **bulk document intake** wizard
+   (`/platform/tenants/<slug>/doc-intake`) against the client's submission pack (a zip
+   or a folder), so every club's member database and committee document land in one
+   pass instead of 20+ individual uploads. **This has to come before rosters** — the
+   roster wizard parses from the stored member database, it never asks for a fresh
+   upload.
+5. **Structure & teams in** — run the **structure intake** wizard
+   (`/platform/tenants/<slug>/structure-intake`) against the league-structure workbook:
+   upload → confirm which workbook section maps to which league (or create a league
+   inline) → match/create clubs → review the per-club team plan → commit. A club with
+   an existing team plan is excluded from the commit by default; confirm "Include
+   anyway" to replace it deliberately.
+6. **Rosters in** — run the **roster intake** wizard
+   (`/platform/tenants/<slug>/roster-intake`): pick the clubs to parse (only clubs with
+   a stored member database are selectable), review each club's parsed players
+   (exceptions, duplicate players across clubs, junior age-band mapping), then commit.
+   A club whose workbook has no ID-number column gets an explicit "no ID column" toggle
+   before committing those rows — it's opt-in per club, never silent.
+7. **Reps invited** — run the **reps** page (`/platform/tenants/<slug>/reps`): extract a
+   contact from each club's stored committee document (a hint, always reviewed before
+   sending) or type one in by hand, then send the invite. A committee document that
+   can't be read automatically (usually a scanned PDF) opens the same invite form next
+   to a "View document" link instead of erroring.
+8. **Setup complete** — once every row reads done, mark setup complete from the
+   client's settings page (the same milestone this guide already covers in §1) and
+   share the live links.
+
+Every wizard step opens with a short "what this does" explanation and an ⓘ next to any
+option whose effect isn't obvious — the checklist and the wizards it links to are
+designed so an operator never needs an engineer, or this document, mid-flow. The design
+reasoning (why parsing is server-side, why there's no portal undo, the ID-number
+decision) is [ADR 0010](../architecture/0010-self-serve-onboarding.md).
+
+## Engineer fallback (large one-off imports, or a workbook shape the wizards reject)
+
+The operator suite in §4 supersedes the original Titans engineer CLIs as the
+**go-forward path** for a federated-client onboarding. The CLIs — catalogue script,
+compliance/structure import, roster import — still exist and still work; keep them for:
+
+- **Reverting a bad operator commit.** There is deliberately no portal undo (see
+  [ADR 0010](../architecture/0010-self-serve-onboarding.md#4-provenance-is-the-revert-contract--there-is-no-portal-undo)) —
+  every operator-suite write is provenance-stamped (`intake:roster:…`,
+  `intake:structure:…`), the same shape the CLI revert flags already understand.
+- **A workbook layout the structure wizard's "unsupported layout" screen rejects.** The
+  wizard's manifest-free parser handles most shapes; a genuinely unusual one is still an
+  engineer-CLI job, same as any pre-suite client.
+- **A first bulk import at a scale or urgency where the review-table wizards are too
+  slow** (thousands of rows, a hard same-day deadline) — the CLI's `--parse-only` /
+  `--confirm` two-phase flow is still the fastest path for a very large one-off.
+
+See [titans-compliance-import.md](../runbooks/titans-compliance-import.md) for the full
+CLI runbook.
 
 ## Dev stages & the seed CLI
 
