@@ -783,6 +783,13 @@ export function RepsPage({ toast }: { toast: Toast }) {
           <p className="ph-desc">Get a signed-in rep onto every club.</p>
         </div>
         <div className="ph-actions">
+          <Btn
+            tone="outline"
+            size="sm"
+            onClick={() => navigate(`/platform/tenants/${slug}/onboarding`)}
+          >
+            Back to onboarding
+          </Btn>
           <Btn tone="outline" size="sm" onClick={() => navigate(`/platform/tenants/${slug}`)}>
             Back to settings
           </Btn>

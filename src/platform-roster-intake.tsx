@@ -470,6 +470,13 @@ export function RosterIntakeWizard({ toast }: { toast: Toast }) {
           </p>
         </div>
         <div className="ph-actions">
+          <Btn
+            tone="outline"
+            size="sm"
+            onClick={() => navigate(`/platform/tenants/${slug}/onboarding`)}
+          >
+            Back to onboarding
+          </Btn>
           <Btn tone="outline" size="sm" onClick={() => navigate(`/platform/tenants/${slug}`)}>
             Back to settings
           </Btn>
