@@ -22,8 +22,8 @@ describe('resolvePreviewSource', () => {
     expect(resolvePreviewSource({ objectKey: '', size: 0 }, false)).toBe('none');
   });
 
-  it('local/ dev key in demo mode → demo', () => {
-    expect(resolvePreviewSource({ objectKey: 'local/constitution.pdf' }, true)).toBe('demo');
+  it('local/ dev key in local mode → real (dev:local upload sink serves actual bytes)', () => {
+    expect(resolvePreviewSource({ objectKey: 'local/constitution.pdf' }, true)).toBe('real');
   });
 
   it('local/ dev key in production → none (not a real S3 object)', () => {

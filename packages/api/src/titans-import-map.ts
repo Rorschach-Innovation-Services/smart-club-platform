@@ -11,6 +11,10 @@
  * be iterated against the real extracted pack — see docs/runbooks/titans-compliance-import.md.
  */
 import { clubIdFromName } from './club-id.js';
+import {
+  parseStructureSheet as parseRawStructureSheet,
+  type RawStructureSection,
+} from './structure-parse.js';
 import type ExcelJS from 'exceljs';
 
 // ───────────────────────── Club roster ─────────────────────────
@@ -327,86 +331,34 @@ export interface StructureSection {
   rows: StructureTeamRow[];
 }
 
-function cellText(v: unknown): string {
-  if (v == null) return '';
-  if (v instanceof Date) return '';
-  if (typeof v === 'object' && 'richText' in (v as object))
-    return (v as { richText: Array<{ text: string }> }).richText.map((r) => r.text).join('');
-  if (typeof v === 'object' && 'result' in (v as object))
-    return String((v as { result: unknown }).result ?? '');
-  return String(v).trim();
-}
-
 /**
- * Grid-scan a SENIORS/JUNIORS-shaped sheet: header rows declare up to 6 (name, VENUE)
- * column pairs side by side; a second header row directly below repeats "VENUE" per
- * pair (carrying an overs figure in the name slot — not real data, skipped); every row
- * after that is data until a fresh header row is hit or the sheet ends. This single scan
- * handles every section on both sheets (SENIORS' 5-, 4- and 1-column-pair blocks;
- * JUNIORS' 6-, 5- and 4-column-pair blocks) with no per-block special-casing, because a
- * header row is identified structurally (a "VENUE" cell in the next column), not by
- * position.
+ * Enrich one manifest-free `RawStructureSection` (structure-parse.ts's grid-scan) with
+ * the Titans-specific fields the shared module can't know: `leagueKey` via
+ * SECTION_LEAGUE_MAP, and each row's resolved `club` via CLUB_MAP's sheetTokens. A
+ * barren sub-header's raw section (see structure-parse.ts) always has zero rows and an
+ * unrecognised header text, so it enriches to `leagueKey: undefined, rows: []` — reported
+ * by callers, never written.
  */
-export function parseStructureSheet(ws: ExcelJS.Worksheet): StructureSection[] {
-  const sections: StructureSection[] = [];
-  /** Live sections, one per (nameCol, venueCol) pair, cleared whenever a new header row
-   * is scanned (so a data row after the last real section for a pair is never mis-read
-   * as belonging to a stale one). */
-  let live: Array<{ nameCol: number; venueCol: number; section: StructureSection }> = [];
-
-  ws.eachRow((row) => {
-    const cols: string[] = [''];
-    for (let c = 1; c <= ws.columnCount; c++) cols[c] = cellText(row.getCell(c).value);
-
-    const headerPairs: number[] = [];
-    for (let c = 1; c < cols.length; c++) {
-      if (cols[c] && cols[c + 1]?.toUpperCase() === 'VENUE') headerPairs.push(c);
-    }
-    if (headerPairs.length > 0) {
-      // A header-SHAPED row (name cell + "VENUE" next to it). The SENIORS sheet repeats
-      // this shape one row below every real header for an overs sub-header ("50 - OVERS"
-      // | "VENUE" | …) that carries no team data — indistinguishable from a real header
-      // by shape alone. The real distinguishing signal is whether ANY pair's header text
-      // resolves via leagueKeyForSection: a genuine header always has at least one
-      // recognised pair; a pure sub-header resolves none. Only replace `live` when at
-      // least one pair was recognised — an all-unrecognised header-shaped row (the overs
-      // sub-header) is skipped in place, leaving the previous section's `live` entries
-      // (and their column positions) intact for the data rows that follow it.
-      const next: typeof live = [];
-      for (const c of headerPairs) {
-        const header = cols[c];
-        const leagueKey = leagueKeyForSection(header);
-        if (leagueKey === undefined) continue; // not a recognised section header — skip
-        const section: StructureSection = { header, sheet: ws.name, leagueKey, rows: [] };
-        sections.push(section);
-        next.push({ nameCol: c, venueCol: c + 1, section });
-      }
-      if (next.length > 0) live = next;
-      return;
-    }
-
-    if (live.length === 0) return;
-    for (const { nameCol, venueCol, section } of live) {
-      const raw = cols[nameCol];
-      if (!raw) continue;
-      // A stray punctuation-only artifact (e.g. a lone "`" left in an otherwise blank
-      // row) is not a team — skip rather than report as an unresolved token.
-      if (/^[`'".,\-–—]+$/.test(raw)) continue;
-      section.rows.push({ raw, venue: cols[venueCol] ?? '', club: resolveClubToken(raw) });
-    }
-  });
-
-  return sections;
+function enrichStructureSection(raw: RawStructureSection): StructureSection {
+  return {
+    header: raw.header,
+    sheet: raw.sheet,
+    leagueKey: leagueKeyForSection(raw.header),
+    rows: raw.rows.map((r) => ({ raw: r.raw, venue: r.venue, club: resolveClubToken(r.raw) })),
+  };
 }
 
 /** Parse both sheets ("SENIORS", "JUNIORS " — note the trailing space) of the Titans
- * league-structure workbook. Throws if either sheet is missing. */
+ * league-structure workbook via the shared manifest-free grid-scan, then apply the
+ * Titans manifests (SECTION_LEAGUE_MAP, CLUB_MAP). Throws if either sheet is missing. */
 export function parseStructureWorkbook(wb: ExcelJS.Workbook): StructureSection[] {
   const seniors = wb.worksheets.find((w) => w.name.trim() === 'SENIORS');
   const juniors = wb.worksheets.find((w) => w.name.trim() === 'JUNIORS');
   if (!seniors) throw new Error('sheet "SENIORS" not found in the structure workbook');
   if (!juniors) throw new Error('sheet "JUNIORS " not found in the structure workbook');
-  return [...parseStructureSheet(seniors), ...parseStructureSheet(juniors)];
+  return [...parseRawStructureSheet(seniors), ...parseRawStructureSheet(juniors)].map(
+    enrichStructureSection,
+  );
 }
 
 /**

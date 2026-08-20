@@ -22,6 +22,30 @@ classification/name-resolution logic they share lives in
 normalization (header detection, ID cleanup, race/gender/age-group mapping) lives in
 `packages/api/src/roster-normalize.ts` (also pure, tenant-neutral).
 
+> **This runbook is now the engineer fallback, not the go-forward path.** The self-serve
+> onboarding suite ([ADR 0010](../architecture/0010-self-serve-onboarding.md);
+> operator flow in
+> [onboarding-a-tenant.md §4](../guides/onboarding-a-tenant.md#4-bulk-onboard-a-federated-client--the-operator-checklist))
+> lets an operator run this same class of import — clubs, documents, league structure,
+> rosters, rep invites — from the portal, with no engineer and no CLI. `roster-parse.ts`,
+> `structure-parse.ts` and `team-plan.ts` were extracted out of these scripts to be
+> shared by both, so a fix to the parsing logic lands for the CLI and the wizards
+> together. Keep this runbook for: **reverting** a bad operator-suite commit (see the
+> caveat below), a workbook layout the structure wizard's "unsupported layout" screen
+> rejects, or a first bulk import large/urgent enough that the two-phase
+> `--parse-only`/`--confirm` CLI flow is genuinely faster than working through the
+> review-table wizards.
+>
+> **Revert caveat:** the `intake:roster:…` / `intake:structure:…` provenance the wizards
+> write is the same _shape_ as these scripts' own `import:titans-*` markers, but a
+> `--revert` mode that understands `intake:*` batches is **not built yet** —
+> `import-titans-roster.ts --revert` is hardcoded to
+> `registeredBy === 'import:titans-compliance-2026'` (see
+> [Revert semantics](#revert-semantics)). It's recorded in
+> [ADR 0010 §4](../architecture/0010-self-serve-onboarding.md#4-provenance-is-the-revert-contract--there-is-no-portal-undo)
+> as the natural next step; until then, recovering an operator commit is a hand-written
+> scan on the `registeredBy` prefix, not a flag.
+
 ## Prerequisites
 
 1. **ADR 0009 (per-tenant compliance-doc catalogue) is deployed.** This is what lets

@@ -537,6 +537,29 @@ export const REQUIRED_DOCS = DEFAULT_REQUIRED_DOCS;
 export const activeDocs = (docs) =>
   (Array.isArray(docs) ? docs : DEFAULT_REQUIRED_DOCS).filter((d) => !d.archived);
 
+/** A structural doc role (self-serve onboarding, ADR 0010) — the two roles downstream
+ *  wizards read documents through, rather than by literal doc key. */
+export type DocRole = 'memberDatabase' | 'committee';
+
+/**
+ * The active doc KEY carrying a structural role, or `null` if none is assigned. Client
+ * mirror of packages/api/src/catalogue.ts `docKeyForRole` — the SPA can't import
+ * packages/api, and `validateRequiredDocs` guarantees at most one active doc per role,
+ * so "first match wins" here is exact. Used where a wizard needs the literal key (to
+ * presign/commit or fetch a view-url), even though gating itself reads the already-
+ * role-resolved `InsightsClub.intake` server projection.
+ */
+export function docKeyForRole(docs: RequiredDoc[], role: DocRole): string | null {
+  const hit = docs.find((d) => d.role === role && !d.archived);
+  return hit?.key ?? null;
+}
+
+/** Whether any active doc in the catalogue carries the given structural role — the
+ *  onboarding checklist's role-assigned test, sharing `docKeyForRole`'s resolution. */
+export function roleAssigned(docs: RequiredDoc[], role: DocRole): boolean {
+  return docKeyForRole(docs, role) !== null;
+}
+
 // ── Compliance document file types ──
 // Every uploadable format → its exact MIME type. Word covers Google Docs (which exports
 // .docx/.pdf); the spreadsheet trio serves catalogues whose docs are filled-in workbooks.
@@ -702,15 +725,18 @@ export function docFileMeta(meta) {
 /**
  * Decide what a document preview should render, so a real-but-fileless doc is never
  * misrepresented by the demo sample:
- *  - 'real' → a stored S3 file exists; mint a presigned GET and show it.
- *  - 'demo' → local/demo mode; show the bundled sample PDF (sample clubs have no docMeta).
+ *  - 'real' → a stored file exists; mint a view-url and show it. In local mode a
+ *             `local/`-prefixed objectKey now counts too — the view-url API serves its
+ *             actual bytes off the dev:local upload sink (see /local-uploads/* in
+ *             packages/api/src/index.ts), so there's real content to fetch.
+ *  - 'demo' → local/demo mode with NO stored file at all (sample clubs have no
+ *             docMeta); show the bundled sample PDF.
  *  - 'none' → production doc with no usable file (admin override / empty key); show an
  *             explicit "no file on record" state, NOT the sample.
  */
 export function resolvePreviewSource(meta, isLocalDemo) {
   const objectKey = meta?.objectKey;
-  const hasRealFile = !!objectKey && !String(objectKey).startsWith('local/');
-  if (hasRealFile && !isLocalDemo) return 'real';
+  if (objectKey && (!String(objectKey).startsWith('local/') || isLocalDemo)) return 'real';
   if (isLocalDemo) return 'demo';
   return 'none';
 }

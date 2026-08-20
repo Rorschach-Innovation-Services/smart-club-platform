@@ -133,40 +133,58 @@ const FIELD_ORDER: RosterField[] = [
 export type HeaderMap = Partial<Record<RosterField, number>>;
 
 /**
+ * A matcher table for `findHeaderRow`: which fields to look for, in claiming order, what
+ * aliases identify each, and what minimum shape counts as "this is a header row". Lets a
+ * future committee extractor (name/surname/role/email/cell) reuse the same scan/claim
+ * mechanics with its own field set, rather than roster's shape being baked into the loop.
+ */
+export interface HeaderFieldConfig<F extends string> {
+  fieldOrder: F[];
+  aliases: Record<F, string[]>;
+  isHeader: (columns: Partial<Record<F, number>>) => boolean;
+}
+
+const ROSTER_HEADER_CONFIG: HeaderFieldConfig<RosterField> = {
+  fieldOrder: FIELD_ORDER,
+  aliases: HEADER_ALIASES,
+  // A real header row always carries either a first+last name pair, or (Centurion
+  // Kavaliers' template) a single combined "Name & Surname" column.
+  isHeader: (columns) =>
+    columns.fullName !== undefined ||
+    (columns.firstName !== undefined && columns.lastName !== undefined),
+};
+
+/**
  * Locate the header row (fuzzy match on 'name'+'surname' or 'player first name') within
  * the first `maxScanRows` rows, and build a field→column map. Never matches by column
  * INDEX — every real template in the pack uses a different column order and extra
  * columns (row numbers, veterans-team annotations, school/parent-email columns), so an
  * index-based mapping would silently misread half the clubs.
  *
- * Returns `null` if no row in range looks like a header (both a name-ish and a
- * surname-ish column present) — the caller reports the file as unparseable rather than
- * guessing a header row and misreading every field beneath it.
+ * Returns `null` if no row in range looks like a header (per `fieldConfig.isHeader`) —
+ * the caller reports the file as unparseable rather than guessing a header row and
+ * misreading every field beneath it. `fieldConfig` defaults to the roster field set.
  */
-export function findHeaderRow(
+export function findHeaderRow<F extends string = RosterField>(
   rows: string[][],
   maxScanRows = 10,
-): { rowIndex: number; columns: HeaderMap } | null {
+  fieldConfig: HeaderFieldConfig<F> = ROSTER_HEADER_CONFIG as unknown as HeaderFieldConfig<F>,
+): { rowIndex: number; columns: Partial<Record<F, number>> } | null {
   for (let r = 0; r < Math.min(rows.length, maxScanRows); r++) {
     const normalized = rows[r].map((c) => normalizeHeader(c));
     const available = new Map<number, string>();
     normalized.forEach((text, i) => {
       if (text) available.set(i, text);
     });
-    const columns: HeaderMap = {};
-    for (const field of FIELD_ORDER) {
-      const col = matchColumn(available, HEADER_ALIASES[field]);
+    const columns: Partial<Record<F, number>> = {};
+    for (const field of fieldConfig.fieldOrder) {
+      const col = matchColumn(available, fieldConfig.aliases[field]);
       if (col !== undefined) {
         columns[field] = col;
         available.delete(col);
       }
     }
-    // A real header row always carries either a first+last name pair, or (Centurion
-    // Kavaliers' template) a single combined "Name & Surname" column.
-    if (columns.fullName !== undefined) return { rowIndex: r, columns };
-    if (columns.firstName !== undefined && columns.lastName !== undefined) {
-      return { rowIndex: r, columns };
-    }
+    if (fieldConfig.isHeader(columns)) return { rowIndex: r, columns };
   }
   return null;
 }
@@ -364,23 +382,32 @@ export function normalizeRace(raw: string): NormalizeResult<string> {
   return { value: undefined, unknownRaw: s };
 }
 
+/** The Titans pack's fixed junior bands — the default `allowedKeys` for CLI callers that
+ * have no per-tenant league list to derive from. */
+export const DEFAULT_JUNIOR_LEAGUE_KEYS = new Set(['u9', 'u11', 'u13', 'u15']);
+
 /**
- * Age-group cell → the titans league key. Tolerates every form seen in the pack: "U9",
- * "U/11", "U 13", "Under 9"/"Under 15" (Harlequins' junior sheet spells it out), a bare
- * number with no prefix at all ("13", "9" — Mamelodi/Atteridgeville's junior sheets),
- * and DACC's "0/9"/"0/11" (a mis-typed leading '0' for 'U'). A combined/ambiguous cell
- * ("13&15", "13 & 15" — Mamelodi again, apparently a player entered in two age groups)
- * does NOT match — there is no single correct league key to return, so it is reported
- * as unknown rather than guessed at; same for anything outside the four configured
- * bands (e.g. a "51" that's almost certainly a transposed "15" typo).
+ * Age-group cell → a league key, gated on `allowedKeys` (the tenant's actual junior
+ * league keys — un-hardcoded so a self-serve tenant's own band set applies, not Titans'
+ * fixed u9-u15). Tolerates every form seen in the pack: "U9", "U/11", "U 13", "Under
+ * 9"/"Under 15" (Harlequins' junior sheet spells it out), a bare number with no prefix at
+ * all ("13", "9" — Mamelodi/Atteridgeville's junior sheets), and DACC's "0/9"/"0/11" (a
+ * mis-typed leading '0' for 'U'). A combined/ambiguous cell ("13&15", "13 & 15" —
+ * Mamelodi again, apparently a player entered in two age groups) does NOT match — there
+ * is no single correct league key to return, so it is reported as unknown rather than
+ * guessed at; same for anything outside `allowedKeys` (e.g. a "51" that's almost
+ * certainly a transposed "15" typo, or a real band the tenant simply doesn't run).
  */
-export function ageGroupToLeagueKey(raw: string): NormalizeResult<string> {
+export function ageGroupToLeagueKey(
+  raw: string,
+  allowedKeys: Set<string> = DEFAULT_JUNIOR_LEAGUE_KEYS,
+): NormalizeResult<string> {
   const s = collapseWhitespace(raw).toUpperCase();
   if (!s) return { value: undefined };
   const m = s.match(/^(?:UNDER\s*|U\s*\/?\s*|0\s*\/?\s*)?(\d{1,2})$/);
   if (m) {
     const key = `u${m[1]}`;
-    if (['u9', 'u11', 'u13', 'u15'].includes(key)) return { value: key };
+    if (allowedKeys.has(key)) return { value: key };
   }
   return { value: undefined, unknownRaw: s };
 }

@@ -25,23 +25,14 @@
  * PUT, so it keeps a parallel `Map<fileId, Blob>` alongside the IntakeFile[] rather than
  * widening the shared type — buildRows/findDuplicates/etc. never see or need the blob.
  */
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-} from 'react';
-import { createPortal } from 'react-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { unzip } from 'fflate';
 import { queryClient, qk } from './query';
 import * as api from './api';
 import { ApiError } from './api';
-import { Btn, Card, EmptyState, Icon, Pill, useEscapeClose } from './atoms';
+import { Btn, Card, EmptyState, Icon, Pill } from './atoms';
 import { DEFAULT_REQUIRED_DOCS, DISTRICTS, resolveDocMime } from './data';
 import {
   buildClubIndex,
@@ -56,22 +47,20 @@ import {
   INTAKE_STRATEGIES,
   type IntakeFile,
   type IntakeRow,
-  type MatchClub,
   type MatchStatus,
 } from './intake-match';
+import {
+  BulkActionBar,
+  CreateClubModal,
+  ERR,
+  HINT,
+  ReviewCounters,
+  formatBytes,
+  useRowSelection,
+} from './platform-wizard';
 import type { DocIntakePresignResult, InsightsClub, RequiredDoc } from './types';
 
 type Toast = (m: string, t?: string) => void;
-
-const ERR: CSSProperties = { color: 'var(--coral, #C0392B)', fontSize: 12, marginTop: 6 };
-const HINT: CSSProperties = { fontSize: 11.5, color: 'var(--muted-2)', margin: '8px 0 0' };
-
-/** "1.4 MB" / "812 KB" — no shared formatter exists yet for arbitrary byte counts. */
-function formatBytes(n: number): string {
-  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
-  return `${n} B`;
-}
 
 /** Chip label + tone per MatchStatus — one place so the table and summary bar agree. */
 const STATUS_META: Record<MatchStatus, { label: string; tone: string }> = {
@@ -187,109 +176,6 @@ function guessClubName(row: IntakeRow): string {
   return deepest || baseStem(row.file.name);
 }
 
-/* ─── Create-club modal (for an unmatched-club row) ─── */
-
-function CreateClubModal({
-  slug,
-  row,
-  districts,
-  onClose,
-  onCreated,
-}: {
-  slug: string;
-  row: IntakeRow;
-  districts: string[];
-  onClose: () => void;
-  onCreated: (club: MatchClub) => void;
-}) {
-  useEscapeClose(onClose);
-  const titleId = useId();
-  const [name, setName] = useState(guessClubName(row));
-  const [district, setDistrict] = useState(districts[0] ?? '');
-  const [err, setErr] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  async function submit() {
-    setErr('');
-    if (!name.trim()) {
-      setErr('Name is required');
-      return;
-    }
-    if (!district) {
-      setErr('District is required');
-      return;
-    }
-    setBusy(true);
-    try {
-      const club = await api.platformCreateClub(slug, { name: name.trim(), district });
-      onCreated(club);
-    } catch (e) {
-      // The backend's collision guard 409s with the exact conflict — surface it verbatim.
-      setErr(e instanceof ApiError ? e.message : 'Could not create the club — try again');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="task-modal" role="dialog" aria-modal="true" aria-labelledby={titleId}>
-        <div className="task-modal-head">
-          <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Bulk intake · New club</div>
-            <div className="task-modal-head-title" id={titleId}>
-              Create <em>{name || 'club'}</em>
-            </div>
-          </div>
-          <button className="task-modal-close" onClick={onClose} title="Close">
-            <Icon.X />
-          </button>
-        </div>
-        <div className="task-modal-body">
-          <p style={HINT}>
-            A shell club — no chair or Cognito account yet, just somewhere to attach these files.
-            The chair signs up normally later. Every row whose folder/file matches this name will
-            re-match to it automatically once it's created.
-          </p>
-          <div className="field-label" style={{ marginTop: 12 }}>
-            Name <span className="req">*</span>
-          </div>
-          <input
-            className="field-input"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            maxLength={80}
-          />
-          <div className="field-label" style={{ marginTop: 12 }}>
-            District <span className="req">*</span>
-          </div>
-          <select
-            className="field-select"
-            value={district}
-            onChange={(e) => setDistrict(e.target.value)}
-          >
-            {districts.map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
-            ))}
-          </select>
-          {err && <div style={{ ...ERR, marginTop: 12 }}>{err}</div>}
-          <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-            <Btn tone="teal" size="sm" onClick={submit} disabled={busy}>
-              {busy ? 'Creating…' : 'Create club'}
-            </Btn>
-            <Btn tone="outline" size="sm" onClick={onClose} disabled={busy}>
-              Cancel
-            </Btn>
-          </div>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
 /* ─── Upload/commit bookkeeping types ─── */
 
 type RowUploadState =
@@ -374,7 +260,7 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
   function resetMatchState() {
     setEdits({});
     setOverrideIncluded({});
-    setSelected(new Set());
+    selection.clear();
   }
 
   async function ingestZip(file: File) {
@@ -409,7 +295,6 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
     Record<string, { clubId: string | null; docKey: string | null }>
   >({});
   const [overrideIncluded, setOverrideIncluded] = useState<Record<string, boolean>>({});
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [createClubFor, setCreateClubFor] = useState<IntakeRow | null>(null);
   const [attentionOnly, setAttentionOnly] = useState(false);
 
@@ -481,19 +366,14 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
       return next;
     });
   }
-  function toggleSelected(id: string, on: boolean) {
-    setSelected((s) => {
-      const next = new Set(s);
-      if (on) next.add(id);
-      else next.delete(id);
-      return next;
-    });
-  }
-
   const visibleRows = attentionOnly ? rows.filter(needsAttention) : rows;
   const readyCount = rows.filter((r) => included.get(r.file.id) && r.status === 'ready').length;
   const excludedCount = rows.filter((r) => !included.get(r.file.id)).length;
   const attentionCount = rows.length - readyCount - excludedCount;
+
+  const selection = useRowSelection(visibleRows.map((r) => r.file.id));
+  const { selected } = selection;
+  const toggleSelected = selection.toggle;
 
   const [bulkClub, setBulkClub] = useState('');
   const [bulkDoc, setBulkDoc] = useState('');
@@ -514,6 +394,15 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
   const [uploadStatus, setUploadStatus] = useState<Record<string, UploadStatus>>({});
   const [clubCommits, setClubCommits] = useState<Record<string, ClubCommitResult>>({});
   const [committing, setCommitting] = useState(false);
+  // Snapshot of the rows this run committed, frozen at kick-off. The results table
+  // renders off THIS, never off live `toCommit` — `toCommit` re-derives from `rows`,
+  // which re-derives from `hasExistingDoc`/`clubsById`, which `afterServerWrite()`
+  // refreshes mid-run. The moment a club's just-uploaded doc lands on the refetched
+  // overview, `hasExistingDoc` flips true for that (club, docKey) and `flagExistingDocs`
+  // marks the row `replacesExisting`, which flips it out of `included` and therefore out
+  // of a LIVE `toCommit` — the exact bug: "7 uploaded / 4 clubs updated" with an empty
+  // table, because the very success of the commit erased the row that reported it.
+  const [commitRows, setCommitRows] = useState<IntakeRow[]>([]);
   const [presignByFile, setPresignByFile] = useState<Map<string, DocIntakePresignResult>>(
     new Map(),
   );
@@ -533,6 +422,7 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
   async function runCommit() {
     setCommitting(true);
     const items = toCommit;
+    setCommitRows(items);
     const localPresign = new Map<string, DocIntakePresignResult>();
     const localStatus: Record<string, UploadStatus> = {};
     for (const r of items) localStatus[r.file.id] = { state: 'presigning' };
@@ -737,6 +627,13 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
           </p>
         </div>
         <div className="ph-actions">
+          <Btn
+            tone="outline"
+            size="sm"
+            onClick={() => navigate(`/platform/tenants/${slug}/onboarding`)}
+          >
+            Back to onboarding
+          </Btn>
           <Btn tone="outline" size="sm" onClick={() => navigate(`/platform/tenants/${slug}`)}>
             Back to settings
           </Btn>
@@ -891,9 +788,13 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
                 marginBottom: 12,
               }}
             >
-              <Pill tone="teal">{readyCount} ready</Pill>
-              <Pill tone="gold">{attentionCount} need attention</Pill>
-              <Pill tone="muted">{excludedCount} excluded</Pill>
+              <ReviewCounters
+                counters={[
+                  { label: 'ready', count: readyCount, tone: 'teal' },
+                  { label: 'need attention', count: attentionCount, tone: 'gold' },
+                  { label: 'excluded', count: excludedCount, tone: 'muted' },
+                ]}
+              />
               <label
                 style={{
                   fontSize: 12,
@@ -912,60 +813,46 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
               </label>
             </div>
 
-            {selected.size > 0 && (
-              <div
-                style={{
-                  display: 'flex',
-                  gap: 8,
-                  flexWrap: 'wrap',
-                  alignItems: 'center',
-                  padding: '8px 10px',
-                  background: 'var(--paper)',
-                  borderRadius: 8,
-                  marginBottom: 12,
-                }}
+            <BulkActionBar count={selected.size}>
+              <select
+                className="field-select"
+                style={{ width: 200 }}
+                value={bulkClub}
+                onChange={(e) => setBulkClub(e.target.value)}
               >
-                <span style={{ fontSize: 12, fontWeight: 700 }}>{selected.size} selected</span>
-                <select
-                  className="field-select"
-                  style={{ width: 200 }}
-                  value={bulkClub}
-                  onChange={(e) => setBulkClub(e.target.value)}
-                >
-                  <option value="">— pick a club —</option>
-                  {sortedClubs.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-                <Btn tone="outline" size="sm" disabled={!bulkClub} onClick={applyBulkClub}>
-                  Assign club to selected
-                </Btn>
-                <select
-                  className="field-select"
-                  style={{ width: 200 }}
-                  value={bulkDoc}
-                  onChange={(e) => setBulkDoc(e.target.value)}
-                >
-                  <option value="">— pick a document —</option>
-                  {pickableDocs.map((d) => (
-                    <option key={d.key} value={d.key}>
-                      {d.name}
-                    </option>
-                  ))}
-                </select>
-                <Btn tone="outline" size="sm" disabled={!bulkDoc} onClick={applyBulkDoc}>
-                  Assign document type to selected
-                </Btn>
-                <Btn tone="ghost" size="sm" onClick={() => setIncluded(selected, false)}>
-                  Exclude selected
-                </Btn>
-                <Btn tone="ghost" size="sm" onClick={() => setIncluded(selected, true)}>
-                  Include selected
-                </Btn>
-              </div>
-            )}
+                <option value="">— pick a club —</option>
+                {sortedClubs.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+              <Btn tone="outline" size="sm" disabled={!bulkClub} onClick={applyBulkClub}>
+                Assign club to selected
+              </Btn>
+              <select
+                className="field-select"
+                style={{ width: 200 }}
+                value={bulkDoc}
+                onChange={(e) => setBulkDoc(e.target.value)}
+              >
+                <option value="">— pick a document —</option>
+                {pickableDocs.map((d) => (
+                  <option key={d.key} value={d.key}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+              <Btn tone="outline" size="sm" disabled={!bulkDoc} onClick={applyBulkDoc}>
+                Assign document type to selected
+              </Btn>
+              <Btn tone="ghost" size="sm" onClick={() => setIncluded(selected, false)}>
+                Exclude selected
+              </Btn>
+              <Btn tone="ghost" size="sm" onClick={() => setIncluded(selected, true)}>
+                Include selected
+              </Btn>
+            </BulkActionBar>
 
             {visibleRows.length === 0 ? (
               <EmptyState
@@ -981,17 +868,8 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
                       <th style={{ width: 30 }}>
                         <input
                           type="checkbox"
-                          checked={
-                            visibleRows.length > 0 &&
-                            visibleRows.every((r) => selected.has(r.file.id))
-                          }
-                          onChange={(e) =>
-                            setSelected(
-                              e.target.checked
-                                ? new Set(visibleRows.map((r) => r.file.id))
-                                : new Set(),
-                            )
-                          }
+                          checked={selection.allSelected}
+                          onChange={(e) => selection.toggleAll(e.target.checked)}
                         />
                       </th>
                       <th>File</th>
@@ -1176,7 +1054,7 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {toCommit.map((row) => {
+                    {commitRows.map((row) => {
                       const s = uploadStatus[row.file.id];
                       const club = clubsById.get(row.clubId!);
                       const doc = docsByKey.get(row.docKey!);
@@ -1252,8 +1130,9 @@ export function DocIntakeWizard({ toast }: { toast: Toast }) {
           return (
             <CreateClubModal
               slug={slug}
-              row={target}
+              initialName={guessClubName(target)}
               districts={districts}
+              eyebrow="Bulk intake · New club"
               onClose={() => setCreateClubFor(null)}
               onCreated={(club) => {
                 setClubs((cs) => [...cs, club as unknown as InsightsClub]);

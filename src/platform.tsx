@@ -30,6 +30,10 @@ import { SeasonSetupWizard } from './platform-season-wizard';
 import { TutorialsCard } from './platform-tutorials';
 import { RequiredDocsCard } from './platform-required-docs';
 import { DocIntakeWizard } from './platform-intake';
+import { StructureIntakeWizard } from './platform-structure-intake';
+import { RosterIntakeWizard } from './platform-roster-intake';
+import { RepsPage } from './platform-reps';
+import { OnboardingPage, buildOnboardingSteps } from './platform-onboarding';
 import type {
   TenantConfig,
   TenantSummary,
@@ -429,6 +433,19 @@ export function PlatformPortal({
               path="/platform/tenants/:slug/doc-intake"
               element={<DocIntakeWizard toast={toastShow} />}
             />
+            <Route
+              path="/platform/tenants/:slug/structure-intake"
+              element={<StructureIntakeWizard toast={toastShow} />}
+            />
+            <Route
+              path="/platform/tenants/:slug/roster-intake"
+              element={<RosterIntakeWizard toast={toastShow} />}
+            />
+            <Route path="/platform/tenants/:slug/reps" element={<RepsPage toast={toastShow} />} />
+            <Route
+              path="/platform/tenants/:slug/onboarding"
+              element={<OnboardingPage toast={toastShow} />}
+            />
             <Route path="/platform/tenants/:slug/overview" element={<TenantOverviewPage />} />
             <Route
               path="/platform/tenants/:slug/overview/leagues/:leagueKey"
@@ -726,20 +743,7 @@ function TenantEditPage({ toast }: { toast: Toast }) {
         <div id="setup-required-docs">
           <RequiredDocsCard key={`rd-${config.tenant}`} config={config} save={save} toast={toast} />
         </div>
-        <Card
-          title="Bulk document intake"
-          sub="Turn a client's whole compliance-doc submission pack (a zip, or a folder) into per-club uploads at once, instead of opening each club's page by hand."
-          action={
-            <Btn
-              tone="outline"
-              size="sm"
-              icon={Icon.Upload}
-              onClick={() => navigate(`/platform/tenants/${slug}/doc-intake`)}
-            >
-              Open wizard
-            </Btn>
-          }
-        />
+        <OnboardingCard slug={slug} config={config} navigate={navigate} />
         <ClubDirectoryCard
           key={`kc-${config.tenant}`}
           slug={slug}
@@ -801,6 +805,91 @@ function TenantEditPage({ toast }: { toast: Toast }) {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Settings-page summary of the onboarding journey (2.5) — replaces the old "Bulk
+ * document intake" card 1:1 (net card count unchanged). Shows overall progress and
+ * quick links to each surface; the full step-by-step detail (states, guidance,
+ * "Up next") lives on the onboarding page this card opens.
+ */
+function OnboardingCard({
+  slug,
+  config,
+  navigate,
+}: {
+  slug: string;
+  config: TenantConfig;
+  navigate: (path: string) => void;
+}) {
+  const overviewQ = useQuery({
+    queryKey: qk.platformTenantOverview(slug),
+    queryFn: () => api.platformTenantOverview(slug),
+    retry: 0,
+  });
+  const repsQ = useQuery({
+    queryKey: qk.platformTenantReps(slug),
+    queryFn: () => api.platformTenantReps(slug),
+    retry: 0,
+  });
+
+  const steps =
+    overviewQ.data && repsQ.data
+      ? buildOnboardingSteps(slug, config, overviewQ.data, repsQ.data, navigate)
+      : [];
+  const doneCount = steps.filter((s) => s.state === 'done').length;
+
+  return (
+    <Card
+      title="Client onboarding"
+      sub={
+        steps.length > 0
+          ? `${doneCount} of ${steps.length} steps done — catalogue, structure, rosters, reps and go-live.`
+          : 'The step-by-step path from an empty catalogue to a signed-in rep on every club.'
+      }
+      action={
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          {steps.length > 0 && (
+            <Pill tone={doneCount === steps.length ? 'teal' : 'gold'}>
+              {doneCount}/{steps.length} done
+            </Pill>
+          )}
+          <Btn
+            tone="outline"
+            size="sm"
+            onClick={() => navigate(`/platform/tenants/${slug}/doc-intake`)}
+          >
+            Documents
+          </Btn>
+          <Btn
+            tone="outline"
+            size="sm"
+            onClick={() => navigate(`/platform/tenants/${slug}/structure-intake`)}
+          >
+            Structure
+          </Btn>
+          <Btn
+            tone="outline"
+            size="sm"
+            onClick={() => navigate(`/platform/tenants/${slug}/roster-intake`)}
+          >
+            Rosters
+          </Btn>
+          <Btn tone="outline" size="sm" onClick={() => navigate(`/platform/tenants/${slug}/reps`)}>
+            Reps
+          </Btn>
+          <Btn
+            tone="teal"
+            size="sm"
+            icon={Icon.Chart}
+            onClick={() => navigate(`/platform/tenants/${slug}/onboarding`)}
+          >
+            Open checklist
+          </Btn>
+        </div>
+      }
+    />
   );
 }
 
@@ -2709,6 +2798,7 @@ function AdminsCard({ config, toast }: { config: TenantConfig; toast: Toast }) {
  * URLs to share) with a low-key "Reopen setup".
  */
 function SetupCard({ slug, config, toast }: { slug: string; config: TenantConfig; toast: Toast }) {
+  const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
   // Shared with DnsPanel (same query key) — gives us the canonical live URL.
   const dns = useQuery({
@@ -2779,6 +2869,15 @@ function SetupCard({ slug, config, toast }: { slug: string; config: TenantConfig
           : 'A readiness check before hand-off. None of it blocks the client, which is already live.'
       }
     >
+      <div style={{ marginBottom: 14 }}>
+        <Btn
+          tone="outline"
+          size="sm"
+          onClick={() => navigate(`/platform/tenants/${slug}/onboarding`)}
+        >
+          Open onboarding checklist
+        </Btn>
+      </div>
       {complete ? (
         <>
           <div

@@ -491,6 +491,15 @@ export interface RequiredDoc {
    * key outright is blocked while any club still holds data under it.
    */
   archived?: boolean;
+  /**
+   * Marks this doc as the canonical source for a self-serve wizard to parse (ADR 0009
+   * follow-up, self-serve onboarding): the operator required-docs editor slugifies
+   * names into per-tenant keys, so a wizard can never gate on literal keys like
+   * `memberDatabase`/`committee` — those exist only via the Titans engineer catalogue
+   * script. `docKeyForRole` resolves the ACTIVE doc holding this role, whatever its key.
+   * At most one ACTIVE doc per role (validateRequiredDocs enforces it).
+   */
+  role?: 'memberDatabase' | 'committee';
 }
 
 /** An entry in the operator-managed club directory (TenantConfig.knownClubs). */

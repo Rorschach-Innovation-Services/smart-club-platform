@@ -20,6 +20,8 @@ import dayjs from 'dayjs';
 import dayjsUtc from 'dayjs/plugin/utc.js';
 import dayjsCustomParseFormat from 'dayjs/plugin/customParseFormat.js';
 import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import {
   S3Client,
   PutObjectCommand,
@@ -60,6 +62,7 @@ import {
   resolvePlayerDob,
   normalizeId,
   computeIsMinor,
+  dobFromSaId,
 } from './player-identity.js';
 import { findReleaseClashes } from './venue-clash.js';
 import {
@@ -80,8 +83,17 @@ import {
   multiFileLimits,
   normalizeDocMeta,
   docMetaValue,
+  docKeyForRole,
   OVERARCHING_DISTRICT,
+  DOC_FORMAT_MIME,
 } from './catalogue.js';
+import ExcelJS from 'exceljs';
+import { parseRosterSheet, findCrossClubDuplicates } from './roster-parse.js';
+import { luhnValid, normalizeGender, normalizeRace } from './roster-normalize.js';
+import { parseStructureWorkbookAllSheets } from './structure-parse.js';
+import { deriveTeamPlanCounts } from './team-plan.js';
+import { readUploadObject } from './uploads.js';
+import { isLegacyXlsBuffer, parseCommitteeWorkbookAllSheets } from './committee-parse.js';
 import {
   sendClubFixtures,
   sendStaffInvite,
@@ -176,6 +188,16 @@ const UPLOADS_BUCKET = process.env.UPLOADS_BUCKET!;
 const TUTORIALS_BUCKET = process.env.TUTORIALS_BUCKET ?? '';
 const USER_POOL_ID = process.env.USER_POOL_ID!;
 const MAX_DOC_BYTES = 10 * 1024 * 1024; // 10 MB
+
+/**
+ * Dev-only local upload sink (self-serve onboarding): true only for `dev:local`
+ * (STAGE=local + LOCAL_UPLOADS_DIR set by src/local/server.ts, or an int test that
+ * sets both directly). Every behavior change gated on this stays byte-identical to
+ * prod otherwise — see the /local-uploads/* routes and the doc-intake presign /
+ * view-url branches below.
+ */
+const isLocalUploadsMode = (): boolean =>
+  process.env.STAGE === 'local' && !!process.env.LOCAL_UPLOADS_DIR;
 
 // Wildcard platform (scheme 1) — real CNAME targets for the operator DNS sheet, and
 // the shared API host. Empty until the wildcard is armed (see infra/tenants.ts).
@@ -328,6 +350,83 @@ function withPlayerCount(club: Club): Club {
 function publicRequiredDocs(cfg: TenantConfig | null): Omit<RequiredDoc, 'matchHints'>[] {
   return resolveRequiredDocs(cfg).map(({ matchHints: _hints, ...rest }) => rest);
 }
+
+// ─────────────── Local-only upload sink (dev:local; 404 elsewhere) ───────────────
+
+/**
+ * `local/`-key bytes only. `..` and anything outside this charset is rejected before
+ * touching the filesystem — this route has no auth (it's the local PUT/GET twin of a
+ * presigned URL, and the local server only ever binds localhost).
+ */
+const LOCAL_UPLOAD_KEY_RE = /^[A-Za-z0-9._/-]+$/;
+
+/** Screen and resolve a `/local-uploads/local/...` request path to its on-disk file. */
+function localUploadFilePath(reqPath: string): string {
+  const key = reqPath.slice('/local-uploads/'.length); // 'local/<slug>/<clubId>/<file>'
+  if (key.includes('..') || !LOCAL_UPLOAD_KEY_RE.test(key)) {
+    throw new HttpError(400, 'invalid upload path');
+  }
+  return path.join(process.env.LOCAL_UPLOADS_DIR!, key.slice('local/'.length));
+}
+
+/** Cheap hardening on the no-auth local PUT sink — a real S3 presigned PUT is bounded
+ *  by the size the presign call itself declared; this dev-only twin has no such
+ *  server-side check otherwise, so an oversized body could exhaust local disk. Set well
+ *  above every real MAX_*_BYTES cap in this file (10MB docs / 2MB structure workbooks)
+ *  so it never blocks a legitimate local upload, only a runaway one. */
+const LOCAL_UPLOAD_PUT_MAX_BYTES = 12 * 1024 * 1024; // 12 MB
+
+/** The `ct` query param on the local GET twin is client-supplied (it stands in for the
+ *  Content-Type an S3 presigned GET would carry) — allowlisted to the platform's known
+ *  document/spreadsheet/image mime set rather than echoed verbatim, so it can't be used
+ *  to make a browser render arbitrary stored bytes as e.g. `text/html`. Anything outside
+ *  this set falls back to `application/octet-stream` (forces a download, never inline
+ *  script execution). image/jpeg + image/png are ID_DOC_TYPES' own values, spelled out
+ *  here (not imported — ID_DOC_TYPES is declared further down this file, after this
+ *  route) rather than reordered, so the two lists can still drift-check against each
+ *  other in review without a forward-reference. */
+const LOCAL_UPLOAD_ALLOWED_CONTENT_TYPES = new Set<string>([
+  ...Object.values(DOC_FORMAT_MIME),
+  'image/jpeg',
+  'image/png',
+  'text/csv',
+]);
+
+/** No-auth local twin of an S3 presigned PUT — dev:local only (see isLocalUploadsMode). */
+app.put('/local-uploads/local/*', async (c) => {
+  if (!isLocalUploadsMode()) throw new HttpError(404, 'not found');
+  const filePath = localUploadFilePath(c.req.path);
+  const body = Buffer.from(await c.req.arrayBuffer());
+  if (body.length > LOCAL_UPLOAD_PUT_MAX_BYTES) {
+    throw new HttpError(
+      400,
+      `upload exceeds the ${LOCAL_UPLOAD_PUT_MAX_BYTES / (1024 * 1024)}MB local sink limit`,
+    );
+  }
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, body);
+  return c.json({ ok: true });
+});
+
+/** No-auth local twin of an S3 presigned GET — dev:local only (see isLocalUploadsMode). */
+app.get('/local-uploads/local/*', async (c) => {
+  if (!isLocalUploadsMode()) throw new HttpError(404, 'not found');
+  const filePath = localUploadFilePath(c.req.path);
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(filePath);
+  } catch {
+    throw new HttpError(404, 'not found');
+  }
+  const requestedCt = c.req.query('ct');
+  const ct =
+    requestedCt && LOCAL_UPLOAD_ALLOWED_CONTENT_TYPES.has(requestedCt)
+      ? requestedCt
+      : 'application/octet-stream';
+  c.header('Content-Type', ct);
+  c.header('Content-Disposition', 'inline');
+  return c.body(new Uint8Array(bytes));
+});
 
 // ───────────────────────── Public routes ─────────────────────────
 
@@ -2390,6 +2489,10 @@ app.post('/clubs/:id/docs/:key/view-url', async (c) => {
     entry = meta?.objectKey && (!requested || requested === meta.objectKey) ? meta : undefined;
   }
   if (!entry?.objectKey) throw new HttpError(404, 'no file on record for this document');
+  if (entry.objectKey.startsWith('local/') && isLocalUploadsMode()) {
+    const url = `${new URL(c.req.url).origin}/local-uploads/${entry.objectKey}?ct=${encodeURIComponent(entry.contentType ?? 'application/pdf')}`;
+    return c.json({ viewUrl: url });
+  }
   const url = await getSignedUrl(
     s3,
     new GetObjectCommand({
@@ -3290,16 +3393,40 @@ function clubTeamCount(club: Club): number {
 }
 
 /**
+ * One doc role's checklist classification — pinned derivation rules (plan 1.4):
+ *   - role unassigned (docKeyForRole returns null), OR the resolved docMeta is a bare
+ *     `{markedCompliant}` sentinel with no stored file (normalizeDocMeta's `files` empty)
+ *     ⇒ 'absent'
+ *   - contentType missing on the stored file ⇒ classify by the objectKey's extension
+ *   - else classify by contentType
+ * Reuses `looksLikeSpreadsheet` (roster-intake parse's own gate) as the parseable test —
+ * both this checklist and the roster/committee parsers care about the exact same thing:
+ * can the stored file actually be read as a workbook.
+ */
+function classifyIntakeDoc(
+  club: Club,
+  requiredDocs: RequiredDoc[],
+  role: NonNullable<RequiredDoc['role']>,
+): 'absent' | 'parseable' | 'unparseable' {
+  const docKey = docKeyForRole(requiredDocs, role);
+  if (!docKey) return 'absent';
+  const stored = normalizeDocMeta(club.docMeta?.[docKey]).files[0];
+  if (!stored?.objectKey) return 'absent';
+  return looksLikeSpreadsheet(stored.contentType, stored.objectKey) ? 'parseable' : 'unparseable';
+}
+
+/**
  * Cross-tenant-safe club projection for the operator overview. A deliberate ALLOWLIST.
  * The operator league drill-down needs the chair's name/email/cell (team contact) and
  * the named-side ids/names, so those DO cross now — but `chairContact` is picked
  * field-by-field (NEVER spread: `exco.chair` also carries `idNumber` and governance
  * term dates) and rosters are stripped to {id,name} (no venue/address/coords).
  * Everything else stays out: exco ID numbers, coaches, notes, commLog, docMeta
- * (S3 keys), cqiAnswers, ground addresses and the LIVE playerRegLink token must never
- * cross the operator surface. Add fields here only after checking what they carry.
+ * (S3 keys — `intake` is a CLASSIFICATION of docMeta, never the objectKeys themselves),
+ * cqiAnswers, ground addresses and the LIVE playerRegLink token must never cross the
+ * operator surface. Add fields here only after checking what they carry.
  */
-function toInsightsClub(club: Club) {
+function toInsightsClub(club: Club, requiredDocs: RequiredDoc[]) {
   const excoChair = (club.exco?.chair ?? {}) as { name?: string; email?: string; cell?: string };
   return {
     id: club.id,
@@ -3319,6 +3446,10 @@ function toInsightsClub(club: Club) {
         roster.map((t) => ({ id: t.id, name: t.name })),
       ]),
     ),
+    intake: {
+      memberDatabase: classifyIntakeDoc(club, requiredDocs, 'memberDatabase'),
+      committee: classifyIntakeDoc(club, requiredDocs, 'committee'),
+    },
   };
 }
 
@@ -3501,7 +3632,7 @@ app.get('/platform/tenants/:slug/overview', async (c) => {
     name: config.branding?.name ?? slug,
     leagues: config.leagues ?? [],
     districts: resolveDistricts(config),
-    clubs: clubs.map(toInsightsClub),
+    clubs: clubs.map((cl) => toInsightsClub(cl, resolveRequiredDocs(config))),
     clearances: clearances.map((r) => ({ status: r.status })),
     demographics: { ...summarizeDemographics(players), perLeague, unattributed },
   });
@@ -4123,6 +4254,14 @@ app.post('/platform/tenants/:slug/doc-intake/presign', async (c) => {
       if (typeof item.size !== 'number' || item.size <= 0 || item.size > MAX_DOC_BYTES) {
         return { ok: false as const, error: 'file must be non-empty and under 10 MB' };
       }
+      // Local mode has no S3 bucket: mint a `local/` key (already trusted by
+      // assertOwnObjectKey and the doc-intake commit prefix check) and point the
+      // "presigned" PUT at this same server's own /local-uploads sink instead of S3.
+      if (isLocalUploadsMode()) {
+        const objectKey = `local/${slug}/${item.clubId}/${item.docKey}-${randomUUID()}.${mimes[item.contentType]}`;
+        const uploadUrl = `${new URL(c.req.url).origin}/local-uploads/${objectKey}`;
+        return { ok: true as const, uploadUrl, objectKey, contentType: item.contentType };
+      }
       const objectKey = `${slug}/${item.clubId}/${item.docKey}-${randomUUID()}.${mimes[item.contentType]}`;
       const uploadUrl = await getSignedUrl(
         s3,
@@ -4280,48 +4419,32 @@ function buildDocIntakePatch(
 }
 
 /**
- * Commit one club's batch: read → build patch → ONE version-pinned applyClubPatch,
- * retrying exactly once on a version conflict (re-read + rebuild the patch off the
- * fresh row) before giving up and reporting this club as failed. Never partial —
- * either the whole club's batch lands in one write, or none of it does.
+ * Read → build patch → ONE version-pinned applyClubPatch, retrying exactly once on a
+ * version conflict (re-read + rebuild the patch off the fresh row) before giving up.
+ * Shared by every operator batch-commit route (doc-intake here; roster/structure
+ * intake in later waves) so the read-build-write-retry shape lives in exactly one
+ * place. `buildPatch` runs once per attempt against the freshly-read club and returns
+ * the raw patch (no `version` field — this attaches the current one itself); a caller
+ * that needs data out of the winning attempt (doc-intake's supersededKeys) captures it
+ * via closure, same as `buildPatch` itself captures its own inputs.
  */
-async function commitClubDocIntake(
+async function commitClubWithRetry(
   tenant: string,
   clubId: string,
-  items: DocIntakeCommitItem[],
-  catalogue: RequiredDoc[],
   operatorEmail: string,
+  buildPatch: (current: Club) => Partial<Club>,
 ): Promise<Club> {
   let current = await repo.getClub(tenant, clubId);
   if (!current) throw new HttpError(404, `club not found: ${clubId}`);
   for (let attempt = 0; attempt < 2; attempt++) {
-    const { supersededKeys, ...patch } = buildDocIntakePatch(
-      tenant,
-      clubId,
-      current,
-      items,
-      catalogue,
-      operatorEmail,
-    );
+    const patch = buildPatch(current);
     try {
-      const updated = await applyClubPatch(
+      return await applyClubPatch(
         tenant,
         clubId,
         { ...patch, version: current.version },
         operatorEmail,
       );
-      // Only now that the record is durable: drop the objects this commit replaced.
-      // Deleting earlier would orphan a live docMeta pointer if the write then failed
-      // (a retry that also fails leaves the club with an unviewable document). A failed
-      // delete is recoverable bucket residue, so it must never fail the commit.
-      for (const key of supersededKeys) {
-        try {
-          await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: key }));
-        } catch (err) {
-          console.warn(`doc-intake commit: failed to delete superseded object ${key}`, err);
-        }
-      }
-      return updated;
     } catch (err) {
       if (err instanceof HttpError && err.status === 409 && attempt === 0) {
         current = await repo.getClub(tenant, clubId);
@@ -4334,6 +4457,40 @@ async function commitClubDocIntake(
   // Unreachable (the loop always returns or throws), but keeps the function's
   // return type honest for TypeScript.
   throw new HttpError(409, 'club changed; refetch');
+}
+
+/**
+ * Commit one club's doc-intake batch via commitClubWithRetry. Never partial — either
+ * the whole club's batch lands in one write, or none of it does.
+ */
+async function commitClubDocIntake(
+  tenant: string,
+  clubId: string,
+  items: DocIntakeCommitItem[],
+  catalogue: RequiredDoc[],
+  operatorEmail: string,
+): Promise<Club> {
+  // buildDocIntakePatch's supersededKeys aren't part of the applyClubPatch payload —
+  // captured here so the winning attempt's value survives past commitClubWithRetry's
+  // return, for the delete pass below.
+  let supersededKeys: string[] = [];
+  const updated = await commitClubWithRetry(tenant, clubId, operatorEmail, (current) => {
+    const built = buildDocIntakePatch(tenant, clubId, current, items, catalogue, operatorEmail);
+    supersededKeys = built.supersededKeys;
+    return { docs: built.docs, docMeta: built.docMeta };
+  });
+  // Only now that the record is durable: drop the objects this commit replaced.
+  // Deleting earlier would orphan a live docMeta pointer if the write then failed
+  // (a retry that also fails leaves the club with an unviewable document). A failed
+  // delete is recoverable bucket residue, so it must never fail the commit.
+  for (const key of supersededKeys) {
+    try {
+      await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: key }));
+    } catch (err) {
+      console.warn(`doc-intake commit: failed to delete superseded object ${key}`, err);
+    }
+  }
+  return updated;
 }
 
 /**
@@ -4380,31 +4537,1122 @@ app.post('/platform/tenants/:slug/doc-intake/commit', async (c) => {
   return c.json({ clubs });
 });
 
+// ───────────────────────── Roster intake (ADR 0009 self-serve onboarding) ─────────────────────────
+
+/** Read-time size ceiling for a stored roster/structure workbook, checked BEFORE any
+ *  S3/local read is attempted (docMeta already carries the size — no need to touch
+ *  storage just to learn a file is too big to parse). Named separately from
+ *  MAX_DOC_BYTES (same value today) because the two gates protect different things:
+ *  MAX_DOC_BYTES bounds what an upload MAY store, this bounds what a parse route WILL
+ *  attempt to read back. */
+const MAX_INTAKE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+/** Content types parseRosterSheet can actually read. `text/csv` isn't in DOC_FORMAT_MIME
+ *  (compliance uploads never accept csv), so a csv roster only ever reaches this gate via
+ *  the extension fallback below — kept here anyway so a legacy upload stamped with it
+ *  isn't rejected before ExcelJS even gets a chance to fail more informatively. */
+const ROSTER_SPREADSHEET_MIMES = new Set([
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // xlsx
+  'application/vnd.ms-excel', // xls
+  'text/csv',
+]);
+const ROSTER_SPREADSHEET_EXTENSIONS = new Set(['xlsx', 'xls', 'csv']);
+
+/** Whether a stored file's declared type is one roster parsing can attempt. contentType
+ *  wins when present; a missing contentType (legacy uploads, some browser PUTs) falls
+ *  back to the objectKey's extension — never a guess at the raw bytes. */
+function looksLikeSpreadsheet(contentType: string | undefined, objectKey: string): boolean {
+  if (contentType) return ROSTER_SPREADSHEET_MIMES.has(contentType);
+  const ext = objectKey.split('.').pop()?.toLowerCase();
+  return !!ext && ROSTER_SPREADSHEET_EXTENSIONS.has(ext);
+}
+
+/** True when a stored file's declared type/extension says CSV — same contentType-wins,
+ *  extension-fallback rule as looksLikeSpreadsheet. exceljs's `xlsx.load` can only read
+ *  the OOXML zip format, so a CSV that passes looksLikeSpreadsheet (it's in the accepted
+ *  mime/extension set) still fails there — this lets the parse/extract routes name the
+ *  real reason instead of the generic "may be corrupted" message. */
+function looksLikeCsv(contentType: string | undefined, objectKey: string): boolean {
+  if (contentType) return contentType === 'text/csv';
+  const ext = objectKey.split('.').pop()?.toLowerCase();
+  return ext === 'csv';
+}
+
+/** The tenant's junior league keys (the /^u\d+$/ convention — see team-plan.ts), derived
+ *  server-side so a parse call can never be handed a league key the tenant doesn't run. */
+function juniorLeagueKeysFor(cfg: TenantConfig): Set<string> {
+  return new Set((cfg.leagues ?? []).map((l) => l.key).filter((k) => /^u\d+$/.test(k)));
+}
+
+interface RosterIntakeParseBody {
+  clubId?: string;
+  allowMissingId?: boolean;
+  ageGroupMap?: Record<string, string>;
+}
+
 /**
- * POST /platform/tenants/:slug/clubs — operator-created shell club, seeded exactly
- * like a self-signup (buildClubFromSpec + the tenant's ACTIVE catalogue) but with
- * NO chair/membership/Cognito provisioning: the bulk doc-intake flow needs a club
- * to attach uploads to before its chair has ever signed up, and the chair attaches
- * later through the normal club-signup link (or an admin invite). Collision
- * pre-check mirrors POST /club-signup's (id AND name, case-insensitive) so the
- * same "name taken" story applies whether the club arrives via self-signup or the
- * operator console.
+ * POST /platform/tenants/:slug/roster-intake/parse — parse ONE club's stored member-
+ * database document into draft roster rows, per worksheet. `allowMissingId` and
+ * `ageGroupMap` are PARSE INPUTS only (roster-parse.ts): exceptions carry no identity,
+ * so flipping either can only be resolved by re-parsing this club, never by promoting an
+ * already-returned row client-side. Gate order, each BEFORE the next: club exists →
+ * role-resolved doc key assigned → club has a stored file → stored size (before any
+ * S3/local read) → content type looks like a spreadsheet → the workbook actually loads.
+ * Carries PII (names, ids, dobs) — always `Cache-Control: no-store`.
  */
-app.post('/platform/tenants/:slug/clubs', async (c) => {
+app.post('/platform/tenants/:slug/roster-intake/parse', async (c) => {
+  const slug = c.req.param('slug');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const body = await c.req.json<RosterIntakeParseBody>().catch(() => ({}) as RosterIntakeParseBody);
+  const clubId = body.clubId ?? '';
+  const club = await repo.getClub(slug, clubId);
+  if (!club) throw new HttpError(404, `club not found: ${clubId}`);
+
+  const catalogue = activeRequiredDocs(cfg);
+  const docKey = docKeyForRole(catalogue, 'memberDatabase');
+  if (!docKey) {
+    throw new HttpError(
+      409,
+      'No document in the catalogue is marked as the member database — assign the role in Required documents.',
+    );
+  }
+  const stored = normalizeDocMeta(club.docMeta?.[docKey]).files[0];
+  if (!stored?.objectKey) {
+    throw new HttpError(
+      409,
+      'This club has no stored member database — upload it via document intake first.',
+    );
+  }
+  if (typeof stored.size !== 'number' || stored.size <= 0 || stored.size > MAX_INTAKE_BYTES) {
+    throw new HttpError(
+      400,
+      `stored file exceeds the ${MAX_INTAKE_BYTES / (1024 * 1024)}MB parse limit — replace it via document intake`,
+    );
+  }
+  const noStore = (payload: unknown) => c.json(payload, 200, { 'Cache-Control': 'no-store' });
+  if (!looksLikeSpreadsheet(stored.contentType, stored.objectKey)) {
+    return noStore({
+      parseable: false,
+      reason: 'not a spreadsheet (xlsx/xls/csv) — this looks like a scan or PDF',
+    });
+  }
+
+  let bytes: Buffer;
+  try {
+    bytes = await readUploadObject(stored.objectKey);
+  } catch (err) {
+    console.error(`roster-intake parse: failed to read ${stored.objectKey}`, err);
+    return noStore({ parseable: false, reason: 'unable to read the stored file' });
+  }
+  // Two content shapes exceljs's `xlsx.load` (OOXML zip only) can never read, checked
+  // BEFORE handing it the bytes so the operator gets an accurate, actionable reason
+  // instead of the generic "may be corrupted" message: legacy BIFF .xls (magic-byte
+  // sniff, mirrors committee-extract) and CSV (declared type/extension — csv rides
+  // looksLikeSpreadsheet's accepted set but was never something ExcelJS's xlsx reader
+  // could open).
+  if (isLegacyXlsBuffer(bytes)) {
+    return noStore({
+      parseable: false,
+      reason: 'legacy .xls workbook — save it as .xlsx and re-upload via document intake',
+    });
+  }
+  if (looksLikeCsv(stored.contentType, stored.objectKey)) {
+    return noStore({
+      parseable: false,
+      reason: 'CSV file — save it as .xlsx and re-upload via document intake',
+    });
+  }
+  const wb = new ExcelJS.Workbook();
+  try {
+    // exceljs resolves its own nested @types/node, structurally incompatible with ours
+    // at the type level only (a runtime Buffer either way) — eslint-disable rather than
+    // a `Buffer` cast, since even that resolves to OUR ambient type, not theirs.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wb.xlsx.load(bytes as any);
+  } catch {
+    return noStore({
+      parseable: false,
+      reason: 'unable to read the workbook — the file may be corrupted',
+    });
+  }
+
+  const juniorLeagueKeys = juniorLeagueKeysFor(cfg);
+  // Overrides outside the tenant's own junior keys are dropped — a caller can't smuggle
+  // in a league the tenant doesn't have (parseRosterSheet also re-checks this itself,
+  // this filters before it even sees the map).
+  const ageGroupMap: Record<string, string> = {};
+  for (const [raw, key] of Object.entries(body.ageGroupMap ?? {})) {
+    if (juniorLeagueKeys.has(key)) ageGroupMap[raw] = key;
+  }
+  const runNow = now();
+  // dobOnlyCount and ageGroupRaws are TOP-LEVEL aggregates (RosterIntakeParseResponse,
+  // src/types.ts) — the junior confirm table and the "N dob-only rows" summary work
+  // across the whole club, not sheet-by-sheet. ageGroupRaws is deduped by raw band
+  // text across every sheet: a raw seen on more than one sheet keeps its MAPPED value
+  // if any sheet resolved one, never regresses a resolved band back to null.
+  let dobOnlyCount = 0;
+  const ageGroupRawsByRaw = new Map<string, string | null>();
+  const sheets = wb.worksheets.map((ws) => {
+    const result = parseRosterSheet(ws, clubId, runNow, {
+      allowMissingId: !!body.allowMissingId,
+      juniorLeagueKeys,
+      ageGroupMap,
+    });
+    if (!result) {
+      return {
+        name: ws.name,
+        skipped: true,
+        hasIdColumn: false,
+        totalDataRows: 0,
+        rows: [],
+        exceptions: [],
+        unknownGenderRaw: [],
+        unknownRaceRaw: [],
+      };
+    }
+    dobOnlyCount += result.rows.filter((r) => r.missingId).length;
+    for (const { raw, leagueKey } of result.ageGroupRaws) {
+      const existing = ageGroupRawsByRaw.get(raw);
+      if (existing === undefined || (existing === null && leagueKey !== null)) {
+        ageGroupRawsByRaw.set(raw, leagueKey);
+      }
+    }
+    return {
+      name: ws.name,
+      skipped: false,
+      hasIdColumn: result.hasIdColumn,
+      totalDataRows: result.totalDataRows,
+      rows: result.rows.map((r) => ({
+        rowNumber: r.rowNumber,
+        firstName: r.player.firstName,
+        lastName: r.player.lastName,
+        dob: r.player.dob,
+        ...(r.player.idNumber ? { idNumber: r.player.idNumber } : {}),
+        missingId: r.missingId,
+        ...(r.player.gender ? { gender: r.player.gender } : {}),
+        ...(r.player.race ? { race: r.player.race } : {}),
+        ...(r.player.team ? { team: r.player.team } : {}),
+      })),
+      exceptions: result.exceptions,
+      unknownGenderRaw: [...new Set(result.unknownGenderRaw)],
+      unknownRaceRaw: [...new Set(result.unknownRaceRaw)],
+    };
+  });
+
+  return noStore({
+    parseable: true,
+    sheets,
+    dobOnlyCount,
+    juniorLeagueKeys: [...juniorLeagueKeys],
+    ageGroupRaws: [...ageGroupRawsByRaw].map(([raw, leagueKey]) => ({ raw, leagueKey })),
+  });
+});
+
+/** Max rows accepted per roster-intake commit call — the review wizard batches per club
+ *  well under this; it exists as a backstop against a runaway request. */
+const ROSTER_INTAKE_MAX_ITEMS = 500;
+
+interface RosterIntakeCommitItem {
+  clubId?: string;
+  rowNumber?: number;
+  firstName?: string;
+  lastName?: string;
+  dob?: string;
+  idNumber?: string;
+  gender?: string;
+  race?: string;
+  team?: string;
+}
+
+/** One cross-club identity conflict a roster-intake commit excluded rather than
+ *  failing the batch over — mirrors RosterIntakeCrossClubConflict (src/types.ts):
+ *  `claimedBy` names the other club holding this identity (in-batch or elsewhere);
+ *  `alreadyRegisteredAt` is present ONLY for the elsewhere-registered variant — the
+ *  discriminant between the two conflict kinds. */
+interface RosterIntakeCrossClubConflict {
+  rowNumber: number;
+  clubId: string;
+  playerNaturalKey: string;
+  claimedBy: string;
+  alreadyRegisteredAt?: string;
+}
+
+/** Strict `YYYY-MM-DD` shape check, RE-anchored ('3/4/2020' rejected outright). */
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * True only for a real calendar date in strict `YYYY-MM-DD` form. `new Date(str)`
+ * alone accepts far more than that (slash-separated dates, out-of-range days that JS
+ * silently rolls into the next month — '2020-02-31' becomes March 2nd rather than an
+ * Invalid Date) — this re-derives the UTC components after construction and rejects
+ * any mismatch, so an out-of-range day/month 400s instead of silently landing on a
+ * different date than the one the operator typed.
+ */
+function isValidIsoDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !ISO_DATE_RE.test(value)) return false;
+  const [y, m, d] = value.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
+/**
+ * Validate one roster-intake commit row against already-resolved tenant state. Returns
+ * an error string, or null when the row is clean. A non-null result aborts the WHOLE
+ * commit before any write (ALL-before-ANY-write) — a malformed row is categorically
+ * different from a cross-club identity conflict, which excludes that row but never
+ * aborts the batch (see the cross-club handling in the route below).
+ */
+function validateRosterIntakeItem(
+  item: RosterIntakeCommitItem,
+  clubIds: Set<string>,
+  leagueKeys: Set<string>,
+  index: number,
+): string | null {
+  const at = `item ${index}`;
+  if (typeof item.rowNumber !== 'number') return `${at}: rowNumber is required`;
+  if (!item.clubId || !clubIds.has(item.clubId)) return `${at}: unknown club`;
+  const firstName = (item.firstName ?? '').trim();
+  const lastName = (item.lastName ?? '').trim();
+  if (!firstName || !lastName) return `${at}: firstName and lastName are required`;
+  if (firstName.length > 80 || lastName.length > 80) {
+    return `${at}: names must be 80 characters or fewer`;
+  }
+  if (!isValidIsoDate(item.dob)) {
+    return `${at}: dob must be a valid ISO date`;
+  }
+  if (item.idNumber) {
+    if (!luhnValid(item.idNumber)) return `${at}: idNumber fails the checksum`;
+    const derived = dobFromSaId(item.idNumber);
+    if (!derived || derived !== item.dob) return `${at}: dob does not match the id number`;
+  }
+  if (item.gender !== undefined && !normalizeGender(item.gender).value) {
+    return `${at}: unrecognised gender "${item.gender}"`;
+  }
+  if (item.race !== undefined && !normalizeRace(item.race).value) {
+    return `${at}: unrecognised race "${item.race}"`;
+  }
+  if (item.team !== undefined && !leagueKeys.has(item.team)) {
+    return `${at}: unknown league key "${item.team}"`;
+  }
+  return null;
+}
+
+/**
+ * POST /platform/tenants/:slug/roster-intake/commit — flat items, server groups by club.
+ * ALL-before-ANY-write: every item is validated before any player is written; a single
+ * malformed row 400s the request untouched. Cross-club identity conflicts (in-batch, via
+ * the shared findCrossClubDuplicates — see the parity fixture test — PLUS an existing-
+ * registration check via repo.findPlayerAcrossClubs) are a SEPARATE, non-fatal category:
+ * conflicting rows are excluded from the write and reported structured in
+ * `crossClubConflicts`, never abort the rest of the batch. Writes are per-row
+ * repo.createPlayer (a ConditionalCheckFailedException is idempotent re-commit, reported
+ * as `alreadyPresent`, never an error) followed by exactly ONE repo.reconcilePlayerCount
+ * per touched club. Carries PII — always `Cache-Control: no-store`.
+ */
+app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
+  const auth = c.get('auth')!;
   const slug = c.req.param('slug');
   const cfg = await repo.getTenantConfig(slug);
   if (!cfg) throw new HttpError(404, 'tenant not found');
   const body = await c.req
-    .json<{ name?: string; district?: string }>()
-    .catch(() => ({}) as { name?: string; district?: string });
-  const name = (body.name ?? '').trim();
+    .json<{ items?: RosterIntakeCommitItem[] }>()
+    .catch(() => ({}) as { items?: RosterIntakeCommitItem[] });
+  const items = Array.isArray(body.items) ? body.items : [];
+  if (items.length > ROSTER_INTAKE_MAX_ITEMS) {
+    throw new HttpError(400, `no more than ${ROSTER_INTAKE_MAX_ITEMS} items per request`);
+  }
+
+  const clubs = await repo.listClubs(slug);
+  const clubIds = new Set(clubs.map((cl) => cl.id));
+  const clubsById = new Map(clubs.map((cl) => [cl.id, cl]));
+  const leagueKeys = new Set((cfg.leagues ?? []).map((l) => l.key));
+
+  for (let i = 0; i < items.length; i++) {
+    const err = validateRosterIntakeItem(items[i], clubIds, leagueKeys, i);
+    if (err) throw new HttpError(400, err);
+  }
+
+  const runNow = now();
+  const yyyymmdd = runNow.slice(0, 10).replace(/-/g, '');
+  const registeredBy = `intake:roster:${slug}:${yyyymmdd}:${auth.email}`;
+
+  const built = items.map((item) => {
+    const clubId = item.clubId!;
+    const firstName = item.firstName!.trim();
+    const lastName = item.lastName!.trim();
+    const dob = item.dob!;
+    const gender = item.gender !== undefined ? normalizeGender(item.gender).value : undefined;
+    const race = item.race !== undefined ? normalizeRace(item.race).value : undefined;
+    const base: Partial<PlayerRegistration> = {
+      clubId,
+      firstName,
+      lastName,
+      dob,
+      idType: 'sa-id',
+      ...(item.idNumber ? { idNumber: item.idNumber } : {}),
+    };
+    const player: PlayerRegistration = {
+      naturalKey: playerNaturalKey(base),
+      clubId,
+      firstName,
+      lastName,
+      dob,
+      isMinor: computeIsMinor(dob),
+      consentAt: runNow,
+      createdAt: runNow,
+      registeredVia: 'portal',
+      registeredBy,
+      status: 'active',
+      version: 0,
+      ...(item.idNumber ? { idNumber: item.idNumber, idType: 'sa-id' as const } : {}),
+      ...(gender ? { gender } : {}),
+      ...(race ? { race } : {}),
+      ...(item.team ? { team: item.team } : {}),
+    };
+    return { clubId, clubName: clubsById.get(clubId)!.name, rowNumber: item.rowNumber!, player };
+  });
+
+  // In-batch cross-club conflicts: the SAME detector the CLI and the frontend's
+  // roster-review.ts hand-port use (parity pinned by the shared JSON fixture test).
+  // NOTE: the shipped SPA always sends single-club batches (one club at a time through
+  // the review wizard), so this in-batch guard only ever fires for an API-direct caller
+  // that sends multiple clubs in one request — contract: flat items, server groups by
+  // club. The existing-registration check just below (findPlayerAcrossClubs) is what
+  // actually protects the SPA's one-club-at-a-time flow against a player already
+  // registered at a DIFFERENT, previously-committed club.
+  const { duplicateNaturalKeys } = findCrossClubDuplicates(
+    built.map((b) => ({
+      clubId: b.clubId,
+      clubName: b.clubName,
+      row: {
+        player: b.player,
+        hadRealId: !!b.player.idNumber,
+        missingId: false,
+        rowNumber: b.rowNumber,
+      },
+    })),
+  );
+
+  // Existing-registration check (elsewhere in the tenant), for every row NOT already
+  // excluded as an in-batch conflict above. Deduped to one findPlayerAcrossClubs call
+  // per distinct (clubId, naturalKey) pair — a batch can carry the same identity on
+  // several rows — and run with bounded parallelism reusing the `clubs` list this route
+  // already fetched (repo.findPlayerAcrossClubs no longer pays its own listClubs call),
+  // all BEFORE the write loop below.
+  const pairKey = (clubId: string, naturalKey: string) => `${clubId}::${naturalKey}`;
+  const uniquePairs = new Map<string, { clubId: string; naturalKey: string }>();
+  for (const b of built) {
+    const key = pairKey(b.clubId, b.player.naturalKey);
+    if (duplicateNaturalKeys.has(key) || uniquePairs.has(key)) continue;
+    uniquePairs.set(key, { clubId: b.clubId, naturalKey: b.player.naturalKey });
+  }
+  const CROSS_CLUB_CHECK_CONCURRENCY = 8;
+  const elsewhereByPair = new Map<string, Awaited<ReturnType<typeof repo.findPlayerAcrossClubs>>>();
+  const pairList = [...uniquePairs.values()];
+  for (let i = 0; i < pairList.length; i += CROSS_CLUB_CHECK_CONCURRENCY) {
+    const slice = pairList.slice(i, i + CROSS_CLUB_CHECK_CONCURRENCY);
+    // eslint-disable-next-line no-await-in-loop -- sequential chunks, each internally
+    // parallel; bounded by ROSTER_INTAKE_MAX_ITEMS/CROSS_CLUB_CHECK_CONCURRENCY
+    const results = await Promise.all(
+      slice.map((p) => repo.findPlayerAcrossClubs(slug, p.naturalKey, p.clubId, clubs)),
+    );
+    slice.forEach((p, idx) => elsewhereByPair.set(pairKey(p.clubId, p.naturalKey), results[idx]));
+  }
+
+  const crossClubConflicts: RosterIntakeCrossClubConflict[] = [];
+  const toWrite: typeof built = [];
+  for (const b of built) {
+    if (duplicateNaturalKeys.has(`${b.clubId}::${b.player.naturalKey}`)) {
+      const otherClubNames = [
+        ...new Set(
+          built
+            .filter((x) => x.player.naturalKey === b.player.naturalKey && x.clubId !== b.clubId)
+            .map((x) => x.clubName),
+        ),
+      ];
+      crossClubConflicts.push({
+        rowNumber: b.rowNumber,
+        clubId: b.clubId,
+        playerNaturalKey: b.player.naturalKey,
+        claimedBy: otherClubNames.join(', '),
+      });
+      continue;
+    }
+    const elsewhere = elsewhereByPair.get(pairKey(b.clubId, b.player.naturalKey)) ?? [];
+    if (elsewhere.length > 0) {
+      crossClubConflicts.push({
+        rowNumber: b.rowNumber,
+        clubId: b.clubId,
+        playerNaturalKey: b.player.naturalKey,
+        claimedBy: elsewhere[0].clubName,
+        alreadyRegisteredAt: elsewhere[0].clubName,
+      });
+      continue;
+    }
+    toWrite.push(b);
+  }
+
+  const byClub = new Map<string, typeof built>();
+  for (const b of toWrite) {
+    const list = byClub.get(b.clubId);
+    if (list) list.push(b);
+    else byClub.set(b.clubId, [b]);
+  }
+
+  // Flat totals (RosterIntakeCommitResponse, src/types.ts) — ALL-before-ANY-write means
+  // there is no per-club ok/error to report; an unexpected (non-conditional) repo error
+  // propagates to the global error handler rather than being swallowed into a per-club
+  // result that no longer exists in this response shape.
+  let created = 0;
+  let alreadyPresent = 0;
+  const playerCount: Record<string, number> = {};
+  for (const [clubId, rows] of byClub) {
+    for (const { player } of rows) {
+      try {
+        // eslint-disable-next-line no-await-in-loop -- one club's rows must land as a
+        // deterministic sequence (idempotent re-commit checks each row independently)
+        await repo.createPlayer(slug, player);
+        created++;
+      } catch (err) {
+        if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+          alreadyPresent++;
+          continue;
+        }
+        throw err;
+      }
+    }
+    // eslint-disable-next-line no-await-in-loop -- one reconcile per touched club, bounded
+    // by ROSTER_INTAKE_MAX_ITEMS/byClub.size
+    const { actual } = await repo.reconcilePlayerCount(slug, clubId);
+    playerCount[clubId] = actual;
+  }
+  console.log(
+    `roster-intake commit: batch=${registeredBy} created=${created} alreadyPresent=${alreadyPresent} clubs=${byClub.size}`,
+  );
+
+  return c.json(
+    { batchId: registeredBy, created, alreadyPresent, crossClubConflicts, playerCount },
+    200,
+    {
+      'Cache-Control': 'no-store',
+    },
+  );
+});
+
+// ───────────────────────── Structure intake (ADR 0009 self-serve onboarding) ─────────────────────────
+
+/** Base64 STRING-length cap on an uploaded structure workbook, checked BEFORE decoding
+ *  (so an oversized payload never even pays the base64-decode cost) and again implied by
+ *  ExcelJS's own read once decoded. No S3 involved — this transport is a direct upload,
+ *  not a stored-doc reference (structure workbooks aren't compliance documents). */
+const STRUCTURE_MAX_WORKBOOK_BYTES = 2 * 1024 * 1024; // 2 MB
+/** Base64 STRING-length cap corresponding to STRUCTURE_MAX_WORKBOOK_BYTES of decoded
+ *  bytes (base64 expands by 4/3) — checked against `dataBase64.length`, so the
+ *  effective FILE size limit is truly 2MB rather than ~2.66MB of base64 text. */
+const STRUCTURE_MAX_WORKBOOK_BASE64_LENGTH = Math.ceil((STRUCTURE_MAX_WORKBOOK_BYTES * 4) / 3);
+
+interface StructureIntakeParseBody {
+  filename?: string;
+  dataBase64?: string;
+}
+
+/**
+ * POST /platform/tenants/:slug/structure-intake/parse — scan every sheet of an uploaded
+ * workbook via the manifest-free parseStructureWorkbookAllSheets. Returns bare sections
+ * only: NO league mapping, NO club resolution — both are operator UI decisions made in a
+ * later wizard step (club matching runs client-side via src/intake-match.ts).
+ */
+app.post('/platform/tenants/:slug/structure-intake/parse', async (c) => {
+  const slug = c.req.param('slug');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const body = await c.req
+    .json<StructureIntakeParseBody>()
+    .catch(() => ({}) as StructureIntakeParseBody);
+  const dataBase64 = body.dataBase64 ?? '';
+  if (!dataBase64) throw new HttpError(400, 'dataBase64 is required');
+  if (dataBase64.length > STRUCTURE_MAX_WORKBOOK_BASE64_LENGTH) {
+    throw new HttpError(
+      400,
+      `workbook exceeds the ${STRUCTURE_MAX_WORKBOOK_BYTES / (1024 * 1024)}MB limit`,
+    );
+  }
+  const buffer = Buffer.from(dataBase64, 'base64');
+  const wb = new ExcelJS.Workbook();
+  try {
+    // See the roster-intake parse route for why this cast is needed.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wb.xlsx.load(buffer as any);
+  } catch {
+    throw new HttpError(400, 'unable to read the workbook — check the file is a valid .xlsx');
+  }
+  const scan = parseStructureWorkbookAllSheets(wb);
+  return c.json({
+    sections: scan.sections,
+    sheetsScanned: scan.sheetsScanned,
+    sheetsWithSections: scan.sheetsWithSections,
+  });
+});
+
+/** Max clubs accepted per structure-intake commit call. */
+const STRUCTURE_COMMIT_MAX_CLUBS = 100;
+
+interface StructureIntakeTeamSpec {
+  name?: string;
+  venue?: string;
+}
+interface StructureIntakeClubPlan {
+  leagues?: string[];
+  leagueTeams?: Record<string, number>;
+  teamRosters?: Record<string, StructureIntakeTeamSpec[]>;
+  firstTeamVenue?: string;
+}
+interface StructureIntakeClubItem {
+  clubId?: string;
+  overwrite?: boolean;
+  plan?: StructureIntakeClubPlan;
+}
+interface StructureIntakeCommitBody {
+  newLeagues?: League[];
+  clubs?: StructureIntakeClubItem[];
+}
+
+/** Every `tm_…` id currently on a club's team rosters — the ids a fixture-reference guard
+ *  must check before an `overwrite:true` regenerates them (see the route below). A single-
+ *  team league has no roster entry (the club itself is the team, id === clubId) — those
+ *  ids never change on overwrite, so they're deliberately excluded here. */
+function currentTeamIds(club: Club): string[] {
+  return Object.values(club.teamRosters ?? {}).flatMap((roster) => roster.map((t) => t.id));
+}
+
+/**
+ * Build the {leagues, leagueTeams, teamRosters, teams/women/juniors, ground} patch for
+ * one club's structure-intake plan. Pure over `current` (mirrors buildDocIntakePatch) so
+ * it can run again unchanged on a commitClubWithRetry version-conflict retry. Server-
+ * generates every team id (`tm_${clubId}_${key}_${n}`) — the client sends names/venues
+ * only, keeping the id convention enforceable in exactly one place.
+ */
+/** Max length for a structure-intake venue string (team-roster `venue` or
+ *  `plan.firstTeamVenue`) — mirrors other free-text caps in this file (club/league
+ *  names etc). */
+const STRUCTURE_INTAKE_VENUE_MAX_LEN = 120;
+const STRUCTURE_INTAKE_TEAM_NAME_MAX_LEN = 80;
+
+/**
+ * Validate + trim one venue value from a structure-intake plan. `undefined`/absent is
+ * fine (the field is optional throughout); present-but-not-a-string, or blank after
+ * trim, or over the length cap throws a 400 naming the offending club — this is a
+ * per-club validation error, same category as the teamRosters length-mismatch check
+ * just above it. Returns the trimmed string, or undefined when the input was absent
+ * (an empty/whitespace-only value is DROPPED, not stored as `''`).
+ */
+/**
+ * Validate + trim one team NAME from a structure-intake plan. Unlike venue this is
+ * required: absent/blank-after-trim, non-string, or over the length cap throws a 400
+ * naming the offending club — the same per-club error category as the venue and
+ * teamRosters-length checks beside it, so one bad row 400s just that club, not the
+ * whole request. Returns the trimmed name.
+ */
+function validateStructureIntakeTeamName(value: unknown, clubId: string): string {
+  if (typeof value !== 'string') {
+    throw new HttpError(400, `club ${clubId}: team name must be a string`);
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new HttpError(400, `club ${clubId}: team name must not be empty`);
+  }
+  if (trimmed.length > STRUCTURE_INTAKE_TEAM_NAME_MAX_LEN) {
+    throw new HttpError(
+      400,
+      `club ${clubId}: team name must be ${STRUCTURE_INTAKE_TEAM_NAME_MAX_LEN} characters or fewer`,
+    );
+  }
+  return trimmed;
+}
+
+function validateStructureIntakeVenue(value: unknown, clubId: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') {
+    throw new HttpError(400, `club ${clubId}: venue must be a string`);
+  }
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length > STRUCTURE_INTAKE_VENUE_MAX_LEN) {
+    throw new HttpError(
+      400,
+      `club ${clubId}: venue must be ${STRUCTURE_INTAKE_VENUE_MAX_LEN} characters or fewer`,
+    );
+  }
+  return trimmed;
+}
+
+function buildStructureIntakePatch(
+  clubId: string,
+  current: Club,
+  item: StructureIntakeClubItem,
+): Partial<Club> {
+  const plan = item.plan!;
+  const leagues = plan.leagues ?? [];
+  const leagueTeams: Record<string, number> = {};
+  const teamRosters: Record<string, { id: string; name: string; venue?: string }[]> = {};
+  for (const key of leagues) {
+    const count = plan.leagueTeams?.[key] ?? 1;
+    leagueTeams[key] = count;
+    if (count >= 2) {
+      const roster = plan.teamRosters?.[key];
+      if (!Array.isArray(roster) || roster.length !== count) {
+        throw new HttpError(400, `teamRosters for "${key}" must list exactly ${count} teams`);
+      }
+      teamRosters[key] = roster.map((t, i) => {
+        const name = validateStructureIntakeTeamName(t.name, clubId);
+        const venue = validateStructureIntakeVenue(t.venue, clubId);
+        return {
+          id: `tm_${clubId}_${key}_${i + 1}`,
+          name,
+          ...(venue ? { venue } : {}),
+        };
+      });
+    }
+  }
+  const { teams, women, juniors } = deriveTeamPlanCounts(leagueTeams);
+  const ground = { ...current.ground };
+  const firstTeamVenue = validateStructureIntakeVenue(plan.firstTeamVenue, clubId);
+  // Fill-absent only — a structure-intake commit never overwrites a venue the club
+  // already has, even under `overwrite:true` (that flag governs the TEAM PLAN, not
+  // ground info the club may have entered through a different path).
+  if (!ground.venue && firstTeamVenue) ground.venue = firstTeamVenue;
+  return { leagues, leagueTeams, teamRosters, teams, women, juniors, ground };
+}
+
+/**
+ * POST /platform/tenants/:slug/structure-intake/commit — body `{newLeagues?, clubs}`.
+ * Ordering:
+ *   1. Leagues first, fail-fast WHOLE-REQUEST: IDEMPOTENT — `newLeagues` is first
+ *      filtered down to entries that AREN'T an exact re-send of a league already on
+ *      `cfg.leagues` (same key AND same label/group/district/note) — a retry of an
+ *      already-appended league is silently skipped rather than 409ing the whole
+ *      request. A same-KEY-but-different-definition entry is a genuine conflict, not a
+ *      retry, so it's left in the filtered list and still 409s via validateLeagues, same
+ *      as a duplicate key WITHIN `newLeagues` itself. `current ∪ filtered` then runs
+ *      through the same applyTenantConfigPatch/validateLeagues path PUT
+ *      /platform/tenants/:slug uses. Nothing else runs if this throws.
+ *   2. Each club plan is then validated + committed INDEPENDENTLY (doc-intake's per-club
+ *      partial-result shape): existing plan + no `overwrite` → per-club 409; `overwrite:
+ *      true` → checked against the tenant's fixture/series data for references to the
+ *      club's CURRENT team ids first (an overwrite regenerates every `tm_…` id, which
+ *      would otherwise dangle a live fixture) → validateClubPatch against the post-append
+ *      league keys → commitClubWithRetry.
+ * Provenance (`intake:structure:<slug>:<yyyymmdd>:<operator>`) is appended as a club note,
+ * best-effort — it never fails the commit.
+ */
+app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
+  const auth = c.get('auth')!;
+  const slug = c.req.param('slug');
+  let cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const body = await c.req
+    .json<StructureIntakeCommitBody>()
+    .catch(() => ({}) as StructureIntakeCommitBody);
+  const clubItems = Array.isArray(body.clubs) ? body.clubs : [];
+  if (clubItems.length > STRUCTURE_COMMIT_MAX_CLUBS) {
+    throw new HttpError(400, `no more than ${STRUCTURE_COMMIT_MAX_CLUBS} clubs per request`);
+  }
+  const seenClubIds = new Set<string>();
+  for (const item of clubItems) {
+    if (!item?.clubId) throw new HttpError(400, 'every item requires a clubId');
+    if (!item.plan) throw new HttpError(400, `item for club ${item.clubId} requires a plan`);
+    if (seenClubIds.has(item.clubId)) throw new HttpError(400, `duplicate clubId: ${item.clubId}`);
+    seenClubIds.add(item.clubId);
+  }
+
+  // Step 1 — leagues first, fail-fast whole-request. Nothing else has run if this throws.
+  // Idempotent: drop any incoming league that's an EXACT re-send of one already on the
+  // stored catalogue (same key/label/group/district/note/competitions) BEFORE validating
+  // — a retry of an already-appended league must succeed, not 409. A same-KEY-but-
+  // DIFFERENT-definition entry is a genuine conflict, not a retry: it's left in place so
+  // validateLeagues' uniqueness check on the combined array still 409s it, same as a
+  // duplicate WITHIN newLeagues itself (also untouched by this filter).
+  const requestedLeagues = Array.isArray(body.newLeagues) ? body.newLeagues : [];
+  const existingLeaguesByKey = new Map((cfg.leagues ?? []).map((l) => [l.key, l]));
+  const sameLeagueDefinition = (a: League, b: League): boolean =>
+    a.key === b.key &&
+    a.label === b.label &&
+    a.group === b.group &&
+    a.district === b.district &&
+    (a.note ?? '') === (b.note ?? '') &&
+    JSON.stringify(a.competitions ?? null) === JSON.stringify(b.competitions ?? null);
+  const newLeagues = requestedLeagues.filter((l) => {
+    const existing = existingLeaguesByKey.get(l.key);
+    return !existing || !sameLeagueDefinition(l, existing);
+  });
+  let leaguesAppended: string[] = [];
+  if (newLeagues.length > 0) {
+    const combined = [...(cfg.leagues ?? []), ...newLeagues];
+    cfg = await applyTenantConfigPatch(slug, { leagues: combined });
+    leaguesAppended = newLeagues.map((l) => l.key);
+  }
+
+  const runNow = now();
+  const yyyymmdd = runNow.slice(0, 10).replace(/-/g, '');
+  const batchId = `intake:structure:${slug}:${yyyymmdd}:${auth.email}`;
+  const validLeagueKeys = new Set((cfg.leagues ?? []).map((l) => l.key));
+  const docDefs = resolveRequiredDocs(cfg);
+  const validDocKeys = new Set(docDefs.map((d) => d.key));
+  const validDistricts = new Set(resolveDistricts(cfg));
+
+  const clubs = await Promise.all(
+    clubItems.map(async (item) => {
+      const clubId = item.clubId!;
+      try {
+        const existing = await repo.getClub(slug, clubId);
+        if (!existing) throw new HttpError(404, `club not found: ${clubId}`);
+        const hasExistingPlan = existing.leagues.length > 0;
+        if (hasExistingPlan && item.overwrite !== true) {
+          throw new HttpError(
+            409,
+            'this club already has a team plan — confirm overwrite to replace it',
+          );
+        }
+        if (hasExistingPlan && item.overwrite === true) {
+          const ids = new Set(currentTeamIds(existing));
+          if (ids.size > 0) {
+            const allSeries = await repo.listSeries(slug);
+            const referenced = allSeries.some((s) => s.teams.some((t) => ids.has(t)));
+            if (referenced) {
+              throw new HttpError(
+                409,
+                'teams are referenced by existing fixtures — resolve or remove those fixtures before overwriting',
+              );
+            }
+          }
+        }
+        let counts = { teams: 1, women: 0, juniors: 0 };
+        await commitClubWithRetry(slug, clubId, auth.email, (current) => {
+          const patch = buildStructureIntakePatch(clubId, current, item);
+          const err = validateClubPatch(
+            patch,
+            validLeagueKeys,
+            validDocKeys,
+            validDistricts,
+            docDefs,
+            current.docMeta,
+          );
+          if (err) throw new HttpError(400, err);
+          counts = { teams: patch.teams!, women: patch.women!, juniors: patch.juniors! };
+          return patch;
+        });
+        // Provenance note — best-effort, never fails the commit.
+        try {
+          await repo.appendClubNote(slug, clubId, {
+            id: randomUUID(),
+            text: `${batchId} — team plan ${hasExistingPlan ? 'overwritten' : 'applied'}`,
+            author: auth.email,
+            at: runNow,
+          });
+        } catch (err) {
+          console.warn(`structure-intake commit: failed to append note for ${clubId}`, err);
+        }
+        return {
+          clubId,
+          ok: true as const,
+          teams: counts.teams,
+          women: counts.women,
+          juniors: counts.juniors,
+        };
+      } catch (err) {
+        // An HttpError is an expected per-club validation/conflict (409 existing plan,
+        // 400 bad plan) surfaced to the operator as-is; anything else is unexpected and
+        // was previously swallowed into the generic message with no trace — log it, same
+        // prefix style as the sibling roster-intake/committee-extract routes.
+        if (!(err instanceof HttpError)) {
+          console.error(`structure-intake commit: failed to save ${clubId}`, err);
+        }
+        const error =
+          err instanceof HttpError ? err.message : 'failed to save this club’s team plan';
+        return { clubId, ok: false as const, error };
+      }
+    }),
+  );
+
+  return c.json({ batchId, leaguesAppended, clubs });
+});
+
+// ───────────────────────── Rep invites (ADR 0009 self-serve onboarding, plan 1.3) ─────────────────────────
+
+/**
+ * GET /platform/tenants/:slug/reps — the coverage table's data: every REP in the tenant
+ * (admins EXCLUDED — Team & Access is where those live) enriched from repo.getUser same
+ * as GET /admin/users, plus per-club rep counts INCLUDING zero-rep clubs (the coverage
+ * table's whole point is surfacing the gaps).
+ */
+app.get('/platform/tenants/:slug/reps', async (c) => {
+  const slug = c.req.param('slug');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const [clubs, roster] = await Promise.all([repo.listClubs(slug), repo.listTenantUsers(slug)]);
+  const enriched = await Promise.all(
+    roster.map(async (entry) => {
+      const profile = await repo.getUser(entry.sub);
+      const membership = profile?.memberships.find((m) => m.tenantId === slug);
+      const role = membership?.role ?? (entry.role as 'admin' | 'rep');
+      if (role !== 'rep') return null;
+      return {
+        sub: entry.sub,
+        email: profile?.email ?? entry.email,
+        clubIds: membership?.clubIds ?? [],
+        invitedAt: membership?.invitedAt,
+        invitedBy: membership?.invitedBy,
+        status: (profile?.lastLoginAt ? 'active' : 'pending') as 'active' | 'pending',
+      };
+    }),
+  );
+  const reps = enriched.filter((r): r is NonNullable<typeof r> => r !== null);
+  const repCounts = new Map<string, number>();
+  for (const rep of reps) {
+    for (const clubId of rep.clubIds) repCounts.set(clubId, (repCounts.get(clubId) ?? 0) + 1);
+  }
+  const coverage = clubs.map((cl) => ({ clubId: cl.id, repCount: repCounts.get(cl.id) ?? 0 }));
+  return c.json({ reps, coverage });
+});
+
+interface InviteRepBody {
+  email?: string;
+  clubIds?: string[];
+  channels?: Channel[];
+  link?: string;
+}
+
+/**
+ * POST /platform/tenants/:slug/reps — mirror of POST /admin/users pinned to role:'rep',
+ * tenant resolved from the slug rather than requestAuth. Tightenings vs the admin route:
+ * every clubId is validated against listClubs (an operator can't scope a rep to a club
+ * that doesn't exist); a user who already holds an ADMIN membership on this tenant is a
+ * 409 ("manage them in Team & Access") rather than a silent demote — adminCount delta is
+ * always 0, since this route can never touch the admin tier either way. loginUrl prefers
+ * the tenant-canonical origin; a dormant tenant (no canonical origin yet, no explicit
+ * `link`) falls back to the request Origin same as resolveLoginUrl always has, but that
+ * fallback is now surfaced via a `warning` field instead of shipping silently.
+ */
+app.post('/platform/tenants/:slug/reps', async (c) => {
+  const auth = c.get('auth')!;
+  const slug = c.req.param('slug');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const body = await c.req.json<InviteRepBody>().catch(() => ({}) as InviteRepBody);
+  const email = (body.email ?? '').trim().toLowerCase();
+  if (!email) throw new HttpError(400, 'email required');
+  if (!EMAIL_RE.test(email)) throw new HttpError(400, 'valid email required');
+  const clubIds = Array.isArray(body.clubIds) ? body.clubIds : [];
+  if (clubIds.length === 0) throw new HttpError(400, 'a rep must be scoped to at least one club');
+  const validClubIds = new Set((await repo.listClubs(slug)).map((cl) => cl.id));
+  const badClub = clubIds.find((id) => !validClubIds.has(id));
+  if (badClub) throw new HttpError(400, `unknown club: ${badClub}`);
+
+  if (body.channels !== undefined) validateChannels(body.channels);
+  const loginUrl = resolveLoginUrl(c, slug, body.link);
+  // Only the SILENT-fallback case (no explicit link, no canonical origin yet) is
+  // surfaced — an operator-supplied link is trusted as-is, and a tenant with a real
+  // canonical origin never hits this branch.
+  const warning =
+    !body.link && !canonicalWebOrigin(slug)
+      ? 'This tenant has no canonical domain yet — the invite link uses the request origin and may need correcting.'
+      : undefined;
+
+  const sub = await provisionInviteUser(email);
+  const existing = await repo.getUser(sub);
+  const others = (existing?.memberships ?? []).filter((m) => m.tenantId !== slug);
+  const prior = (existing?.memberships ?? []).find((m) => m.tenantId === slug);
+  if (prior?.role === 'admin') {
+    throw new HttpError(409, 'this user is a tenant admin — manage them in Team & Access');
+  }
+  if (prior && existing?.lastLoginAt) {
+    throw new HttpError(409, 'user already active — use resend or edit role');
+  }
+
+  const membership: Membership = {
+    tenantId: slug,
+    role: 'rep',
+    clubIds,
+    invitedAt: prior?.invitedAt ?? now(),
+    invitedBy: prior?.invitedBy ?? auth.email,
+  };
+  const next: UserProfile = {
+    sub,
+    email,
+    memberships: [...others, membership],
+    onboardingSeen: existing?.onboardingSeen ?? {},
+    ...(existing?.lastLoginAt ? { lastLoginAt: existing.lastLoginAt } : {}),
+  };
+  // adminCount delta is always 0 — a rep invite never touches the admin tier (the
+  // admin-membership 409 above is what stops a silent demote, not a delta of -1 here).
+  await writeUserGuarded(slug, next, 0);
+
+  let results: SendResult[] | undefined;
+  if (body.channels && body.channels.length > 0) {
+    const orgName = await tenantOrgName(slug);
+    ({ results } = await sendStaffInvite({
+      email,
+      orgName,
+      channels: body.channels,
+      link: loginUrl,
+    }));
+  }
+  return c.json(
+    { sub, email, loginUrl, ...(results ? { results } : {}), ...(warning ? { warning } : {}) },
+    201,
+  );
+});
+
+/**
+ * POST /platform/tenants/:slug/clubs/:clubId/committee-extract — NEVER invites; produces
+ * CANDIDATES for the reps page's prefilled invite form. Same gate order as roster-intake
+ * parse: club → role-resolved doc key (409 with guidance) → stored file (409) → size
+ * (before any read) → content type (PDF/doc/image/scan → 200 `{status:'unparseable'}`,
+ * a designed path, never an error the caller has to branch around). Carries PII (names,
+ * emails, cells) — always `Cache-Control: no-store`.
+ */
+app.post('/platform/tenants/:slug/clubs/:clubId/committee-extract', async (c) => {
+  const slug = c.req.param('slug');
+  const clubId = c.req.param('clubId');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const club = await repo.getClub(slug, clubId);
+  if (!club) throw new HttpError(404, `club not found: ${clubId}`);
+
+  const catalogue = activeRequiredDocs(cfg);
+  const docKey = docKeyForRole(catalogue, 'committee');
+  if (!docKey) {
+    throw new HttpError(
+      409,
+      'No document in the catalogue is marked as the committee list — assign the role in Required documents.',
+    );
+  }
+  const stored = normalizeDocMeta(club.docMeta?.[docKey]).files[0];
+  if (!stored?.objectKey) {
+    throw new HttpError(
+      409,
+      'This club has no stored committee list — upload it via document intake first.',
+    );
+  }
+  if (typeof stored.size !== 'number' || stored.size <= 0 || stored.size > MAX_INTAKE_BYTES) {
+    throw new HttpError(
+      400,
+      `stored file exceeds the ${MAX_INTAKE_BYTES / (1024 * 1024)}MB parse limit — replace it via document intake`,
+    );
+  }
+  const noStore = (payload: unknown) => c.json(payload, 200, { 'Cache-Control': 'no-store' });
+  if (!looksLikeSpreadsheet(stored.contentType, stored.objectKey)) {
+    return noStore({
+      status: 'unparseable',
+      reason: 'not a spreadsheet (xlsx/xls/csv) — this looks like a scan, PDF, or Word doc',
+    });
+  }
+
+  let bytes: Buffer;
+  try {
+    bytes = await readUploadObject(stored.objectKey);
+  } catch (err) {
+    console.error(`committee-extract: failed to read ${stored.objectKey}`, err);
+    return noStore({ status: 'unparseable', reason: 'unable to read the stored file' });
+  }
+  if (isLegacyXlsBuffer(bytes)) {
+    return noStore({
+      status: 'unparseable',
+      reason:
+        "legacy .xls workbook — it can't be read automatically; view the document and type the details in",
+    });
+  }
+  if (looksLikeCsv(stored.contentType, stored.objectKey)) {
+    return noStore({
+      status: 'unparseable',
+      reason:
+        "CSV file — it can't be read automatically; view the document and type the details in",
+    });
+  }
+  const wb = new ExcelJS.Workbook();
+  try {
+    // See the roster-intake parse route for why this cast is needed.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wb.xlsx.load(bytes as any);
+  } catch {
+    return noStore({
+      status: 'unparseable',
+      reason: 'unable to read the workbook — the file may be corrupted',
+    });
+  }
+  const candidates = parseCommitteeWorkbookAllSheets(wb);
+  return noStore({ status: 'ok', candidates });
+});
+
+/**
+ * POST /platform/tenants/:slug/clubs/:clubId/docs/:key/view-url — thin operator twin of
+ * POST /clubs/:id/docs/:key/view-url (same on-record objectKey gate: the requested key
+ * must already be on the club's docMeta, never an arbitrary bucket key), so the reps page
+ * can show a committee PDF beside the manual invite form.
+ */
+app.post('/platform/tenants/:slug/clubs/:clubId/docs/:key/view-url', async (c) => {
+  const slug = c.req.param('slug');
+  const clubId = c.req.param('clubId');
+  const key = c.req.param('key');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const club = await repo.getClub(slug, clubId);
+  if (!club) throw new HttpError(404, 'club not found');
+  const { objectKey: requested } = await c.req
+    .json<{ objectKey?: string }>()
+    .catch(() => ({}) as { objectKey?: string });
+  const docMeta = club.docMeta ?? {};
+  const docDef = requireStoredOrCatalogueDoc(cfg, key, club);
+  let entry: { objectKey?: string; contentType?: string } | undefined;
+  if (isMultiFileDoc(docDef, docMeta[key])) {
+    const norm = safeguardingMeta(docMeta[key]);
+    entry = requested ? norm.files.find((f) => f.objectKey === requested) : norm.files[0];
+  } else {
+    const meta = docMeta[key] as { objectKey?: string; contentType?: string } | undefined;
+    entry = meta?.objectKey && (!requested || requested === meta.objectKey) ? meta : undefined;
+  }
+  if (!entry?.objectKey) throw new HttpError(404, 'no file on record for this document');
+  if (entry.objectKey.startsWith('local/') && isLocalUploadsMode()) {
+    const url = `${new URL(c.req.url).origin}/local-uploads/${entry.objectKey}?ct=${encodeURIComponent(entry.contentType ?? 'application/pdf')}`;
+    return c.json({ viewUrl: url });
+  }
+  const url = await getSignedUrl(
+    s3,
+    new GetObjectCommand({
+      Bucket: UPLOADS_BUCKET,
+      Key: entry.objectKey,
+      ResponseContentType: entry.contentType ?? 'application/pdf',
+      ResponseContentDisposition: 'inline',
+    }),
+    { expiresIn: 900 },
+  );
+  return c.json({ viewUrl: url });
+});
+
+/**
+ * Operator-created shell club, seeded exactly like a self-signup (buildClubFromSpec +
+ * the tenant's ACTIVE catalogue) but with NO chair/membership/Cognito provisioning:
+ * the bulk doc-intake flow (and, in a later wave, the structure-intake wizard's inline
+ * club creation) needs a club to attach uploads/teams to before its chair has ever
+ * signed up, and the chair attaches later through the normal club-signup link (or an
+ * admin invite). Collision pre-check mirrors POST /club-signup's (id AND name,
+ * case-insensitive) so the same "name taken" story applies whether the club arrives
+ * via self-signup or the operator console.
+ */
+async function createOperatorClub(
+  slug: string,
+  cfg: TenantConfig,
+  spec: { name?: string; district?: string },
+): Promise<Club> {
+  const name = (spec.name ?? '').trim();
   if (!name) throw new HttpError(400, 'name is required');
   if (name.length > 80) throw new HttpError(400, 'name must be 80 characters or fewer');
   // clubIdFromName's output alphabet can collapse an all-punctuation name to ''
   // (see /club-signup) — operator input gets the same guard.
   const id = clubIdFromName(name);
   if (!id) throw new HttpError(400, 'club name must contain letters or numbers');
-  const district = body.district ?? '';
+  const district = spec.district ?? '';
   if (!resolveDistricts(cfg).includes(district))
     throw new HttpError(400, `unknown district: ${district}`);
   const existing = await repo.listClubs(slug);
@@ -4423,6 +5671,18 @@ app.post('/platform/tenants/:slug/clubs', async (c) => {
     }
     throw err;
   }
+  return club;
+}
+
+/** POST /platform/tenants/:slug/clubs — see createOperatorClub. */
+app.post('/platform/tenants/:slug/clubs', async (c) => {
+  const slug = c.req.param('slug');
+  const cfg = await repo.getTenantConfig(slug);
+  if (!cfg) throw new HttpError(404, 'tenant not found');
+  const body = await c.req
+    .json<{ name?: string; district?: string }>()
+    .catch(() => ({}) as { name?: string; district?: string });
+  const club = await createOperatorClub(slug, cfg, body);
   return c.json(club, 201);
 });
 

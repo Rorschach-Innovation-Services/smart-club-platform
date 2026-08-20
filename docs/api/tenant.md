@@ -172,6 +172,146 @@ list, id/name collision pre-checked) seeded with the tenant's own doc catalogue.
 chair, membership or Cognito provisioning — the chair attaches later via the normal
 signup link. `201 → Club   400 unknown district / bad name   409 already exists`.
 
+## Self-serve onboarding suite (operator only)
+
+Seven routes behind the same platform gate as bulk document intake, backing the
+structure/roster/reps operator wizards — see
+[ADR 0010](../architecture/0010-self-serve-onboarding.md) for the design reasoning
+(doc roles, provenance-as-revert-contract, the ID-number decision). Every parse/extract
+response carries `Cache-Control: no-store` (PII). "Role-resolved doc key" below means
+`docKeyForRole(requiredDocs, role)` (`catalogue.ts`) — a 409 naming the fix ("assign the
+role in Required documents") if the tenant's catalogue has no active doc with that role.
+
+### `POST /platform/tenants/:slug/roster-intake/parse`
+
+Body `{ clubId, allowMissingId?, ageGroupMap? }` — **one club per call**, the wizard fans
+out with bounded concurrency. Gate order: club exists → role-resolved `memberDatabase`
+doc key → club has a stored file → stored size ≤ 10 MB (checked before any read) →
+content type looks like a spreadsheet (else `200 { parseable: false, reason }`) →
+workbook loads. `allowMissingId`/`ageGroupMap` are **parse inputs only** — exceptions
+carry no row identity, so changing either requires re-parsing the club, never
+client-side promotion of a previously-returned exception row.
+
+```
+200 → { parseable: true, sheets: [{ name, skipped, hasIdColumn, totalDataRows, rows,
+         exceptions, unknownGenderRaw, unknownRaceRaw }], dobOnlyCount,
+         juniorLeagueKeys, ageGroupRaws: [{ raw, leagueKey }] }
+    | { parseable: false, reason }
+```
+
+A junior row whose age band maps to nothing is an `unmapped-age-group` **exception**,
+never silently committed team-less.
+
+### `POST /platform/tenants/:slug/roster-intake/commit`
+
+Body `{ items: [{ clubId, rowNumber, firstName, lastName, dob, idNumber?, gender?,
+race?, team?, … }] }`, max 500 items — server groups by club. **All-before-any-write**:
+every row is validated (name length, ISO dob, Luhn-valid id whose embedded dob matches,
+gender/race normalized, team in the tenant's leagues) before any player is written; one
+bad row 400s the whole request untouched. Cross-club identity conflicts (in-batch via
+the shared duplicate detector, plus an existing-registration check) are a separate,
+**non-fatal** category — excluded from the write and reported in `crossClubConflicts`.
+Writes are per-row `createPlayer` (a conditional-check failure is an idempotent
+re-commit, counted as `alreadyPresent`, never an error) followed by one
+`reconcilePlayerCount` per touched club.
+
+```
+200 → { batchId, created, alreadyPresent, crossClubConflicts, playerCount }
+```
+
+`batchId` is the provenance stamp written onto every created player:
+`intake:roster:<slug>:<yyyymmdd>:<operatorEmail>`.
+
+### `POST /platform/tenants/:slug/structure-intake/parse`
+
+Body `{ filename, dataBase64 }` — the workbook as base64 (no S3 round trip; cap
+2 MB checked on the base64 string length **before** decoding). Runs the manifest-free,
+tenant-neutral section parser over every sheet — no league mapping, no club matching;
+both are operator choices made client-side on the next screens.
+
+```
+200 → { sections: [{ sheet, header, rows: [{ raw, venue }] }], sheetsScanned,
+         sheetsWithSections }
+```
+
+### `POST /platform/tenants/:slug/structure-intake/commit`
+
+Body `{ newLeagues?, clubs: [{ clubId, overwrite?, plan: { leagues, leagueTeams,
+teamRosters, firstTeamVenue? } }] }`, max 100 clubs. Ordering matters:
+
+1. **Leagues append first, fail-fast for the whole request** — a duplicate league key
+   409s before any club write runs.
+2. Each club plan then validates and commits **independently** (doc-intake's per-club
+   partial-result shape). A club with an existing plan and no `overwrite` is a per-club
+   409 ("confirm overwrite to replace it"); `overwrite: true` regenerates every team id
+   and is checked against the tenant's fixture/series data first — a referenced id 409s
+   ("teams are referenced by existing fixtures") instead of dangling a live fixture.
+   Team ids (`tm_<clubId>_<key>_<n>`) are always server-generated.
+3. A provenance note (`intake:structure:<slug>:<yyyymmdd>:<operatorEmail> — team plan
+applied|overwritten`) is appended to the club, best-effort — it never fails the
+   commit.
+
+```
+200 → { batchId, leaguesAppended, clubs: [{ clubId, ok, error?, teams?, women?,
+         juniors? }] }
+```
+
+### `GET /platform/tenants/:slug/reps`
+
+The coverage table's data — every **rep** in the tenant (admins excluded; those live in
+Team & Access), enriched the same way as `GET /admin/users`, plus a per-club rep count
+that **includes zero-rep clubs**.
+
+```
+200 → { reps: [{ sub, email, clubIds, invitedAt?, invitedBy?, status }],
+         coverage: [{ clubId, repCount }] }
+```
+
+### `POST /platform/tenants/:slug/reps`
+
+Body `{ email, clubIds, channels?, link? }` — a mirror of `POST /admin/users` pinned to
+`role: 'rep'`, tenant resolved from the slug. Tightenings vs. the admin route: every
+`clubId` is validated against the tenant's clubs; a user who already holds an **admin**
+membership on this tenant is a 409 ("manage them in Team & Access") rather than a silent
+demote — this route can never touch the admin tier, so `adminCount` delta is always 0.
+`loginUrl` prefers the tenant's canonical web origin; a dormant tenant with no canonical
+origin yet and no explicit `link` falls back to the request Origin, surfaced via a
+`warning` field rather than shipped silently. `sendStaffInvite` only fires when
+`channels` is non-empty — no channels means link-only, nothing sent automatically.
+
+```
+201 → { sub, email, loginUrl, results?, warning? }
+409 → already a tenant admin | already active (use resend/edit role)
+```
+
+### `POST /platform/tenants/:slug/clubs/:clubId/committee-extract`
+
+**Never invites** — produces candidates for the reps page's prefilled invite form. Same
+gate order as roster-intake parse (role-resolved `committee` doc key → stored file →
+size → content type), but an unreadable document is a **designed 200**, not an error:
+
+```
+200 → { status: 'ok', candidates: [{ name, role, email?, cell?, confidence, sheet,
+         rowNumber }] }
+    | { status: 'unparseable', reason }
+```
+
+`confidence` is `'high'` (a chair row), `'medium'` (vice/deputy), or `'low'` (any other
+officer with an email) — a hint the invite modal always surfaces for review, never an
+oracle that skips it.
+
+### `POST /platform/tenants/:slug/clubs/:clubId/docs/:key/view-url`
+
+Thin operator twin of the tenant-side `POST /clubs/:id/docs/:key/view-url` — same
+on-record-objectKey gate (the requested key must already be on the club's `docMeta`,
+never an arbitrary bucket key) — so the reps page can show a committee document beside
+the manual invite form for an unparseable file.
+
+```
+200 → { viewUrl }        # 15-minute presigned GET, inline disposition
+404 → no file on record for this document
+```
+
 ## `GET /me` — current user (authenticated)
 
 Returns the caller's `UserProfile` (`sub`, `email`, `memberships`, `onboardingSeen`),

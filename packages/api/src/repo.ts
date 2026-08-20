@@ -1290,13 +1290,18 @@ export async function getPlayer(
  * register endpoint is token-gated + rate-limited so the fan-out is bounded. Matches on
  * naturalKey — the same key the clearance machinery addresses both rows by, so a divergent key
  * (e.g. a passport nationality respelling) won't match, exactly as a clearance couldn't anyway.
+ *
+ * `preFetchedClubs`, when passed, is used INSTEAD of an internal `listClubs` call — a caller
+ * that already has the tenant's club list (e.g. the roster-intake commit route, checking many
+ * rows in one request) passes it through so this doesn't re-fetch it on every single call.
  */
 export async function findPlayerAcrossClubs(
   tenant: string,
   naturalKey: string,
   excludeClubId: string,
+  preFetchedClubs?: Array<{ id: string; name: string }>,
 ): Promise<Array<{ clubId: string; clubName: string; status: PlayerRegistration['status'] }>> {
-  const clubs = await listClubs(tenant);
+  const clubs = preFetchedClubs ?? (await listClubs(tenant));
   const hits = await Promise.all(
     clubs
       .filter((c) => c.id !== excludeClubId)
