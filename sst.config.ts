@@ -102,7 +102,26 @@ export default $config({
     });
 
     // ── Uploads: private compliance PDFs + tenant logos (presigned access) ──
-    const uploads = new sst.aws.Bucket('Uploads');
+    // CORS so the SPA can `fetch(presignedUrl)` the bytes for inline Word/Excel rendering
+    // (SheetJS / docx-preview parse in-browser). iframe/img embeds — PDFs, ID photos —
+    // don't need this, which is why they worked before. GET only; NOT the TutorialAssets
+    // '*' allowOrigins — this bucket holds PII, so origins are the tenant web origins only:
+    //  - prod: the enumerated vanity/custom domains (allowedOrigins) + the wildcard club
+    //    suffix (S3 allows one '*' per origin entry) for `<slug>.club.medicoach.co.za`.
+    //  - non-prod: the raw CloudFront domain dev cloud stages serve the SPA from (domain is
+    //    undefined off-prod, matching the API's own originAllowed trust) + dev:local.
+    const uploads = new sst.aws.Bucket('Uploads', {
+      cors: {
+        allowMethods: ['GET'],
+        allowHeaders: ['*'],
+        // Accepted trade-off: non-prod `https://*.cloudfront.net` admits ANY CloudFront
+        // origin, not just our dev stage's — fine off-prod because the capability still
+        // requires a valid presigned URL (the CORS grant alone opens nothing).
+        allowOrigins: isProd
+          ? [...allowedOrigins(VANITY), 'https://*.club.medicoach.co.za']
+          : ['https://*.cloudfront.net', 'http://localhost:3201'],
+      },
+    });
 
     // ── Tutorial videos: public how-to-use-the-app MP4s, served straight from S3 ──
     // Public-read bucket served over its regional HTTPS REST endpoint. No CloudFront: this

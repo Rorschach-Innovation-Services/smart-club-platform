@@ -5604,18 +5604,28 @@ app.post('/platform/tenants/:slug/clubs/:clubId/docs/:key/view-url', async (c) =
     .catch(() => ({}) as { objectKey?: string });
   const docMeta = club.docMeta ?? {};
   const docDef = requireStoredOrCatalogueDoc(cfg, key, club);
-  let entry: { objectKey?: string; contentType?: string } | undefined;
+  let entry: { objectKey?: string; contentType?: string; size?: number } | undefined;
   if (isMultiFileDoc(docDef, docMeta[key])) {
     const norm = safeguardingMeta(docMeta[key]);
     entry = requested ? norm.files.find((f) => f.objectKey === requested) : norm.files[0];
   } else {
-    const meta = docMeta[key] as { objectKey?: string; contentType?: string } | undefined;
+    const meta = docMeta[key] as
+      | { objectKey?: string; contentType?: string; size?: number }
+      | undefined;
     entry = meta?.objectKey && (!requested || requested === meta.objectKey) ? meta : undefined;
   }
   if (!entry?.objectKey) throw new HttpError(404, 'no file on record for this document');
+  // contentType + objectKey + size ride along so the operator committee preview can pick an
+  // inline renderer (Word/Excel/PDF/image) and gate oversized files to the download path —
+  // it holds no docMeta of its own, unlike the tenant modal.
   if (entry.objectKey.startsWith('local/') && isLocalUploadsMode()) {
     const url = `${new URL(c.req.url).origin}/local-uploads/${entry.objectKey}?ct=${encodeURIComponent(entry.contentType ?? 'application/pdf')}`;
-    return c.json({ viewUrl: url });
+    return c.json({
+      viewUrl: url,
+      contentType: entry.contentType,
+      objectKey: entry.objectKey,
+      size: entry.size,
+    });
   }
   const url = await getSignedUrl(
     s3,
@@ -5627,7 +5637,12 @@ app.post('/platform/tenants/:slug/clubs/:clubId/docs/:key/view-url', async (c) =
     }),
     { expiresIn: 900 },
   );
-  return c.json({ viewUrl: url });
+  return c.json({
+    viewUrl: url,
+    contentType: entry.contentType,
+    objectKey: entry.objectKey,
+    size: entry.size,
+  });
 });
 
 /**

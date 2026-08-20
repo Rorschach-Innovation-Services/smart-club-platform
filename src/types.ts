@@ -1299,4 +1299,10 @@ export type CommitteeExtractResponse =
  *  page can show a committee PDF beside the manual invite form. */
 export interface PlatformDocViewUrlResponse {
   viewUrl: string;
+  // The operator committee preview holds no docMeta of its own, so the route echoes the
+  // stored file's contentType (+ objectKey + size) — enough for docPreviewKind to pick a
+  // renderer and for the inline renderers to gate oversized files to the download path.
+  contentType?: string;
+  objectKey?: string;
+  size?: number;
 }

@@ -3,27 +3,13 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon, Btn, useEscapeClose } from './atoms';
-import { docFileMeta, resolvePreviewSource, DOC_FORMAT_MIME } from './data';
+import { docFileMeta, resolvePreviewSource, docPreviewKind } from './data';
+import { SheetInlinePreview, DocxInlinePreview } from './DocInlineRenderers';
 import { getDocViewUrl } from './api';
 
 // Local/demo fallback. Vite serves public/ at BASE_URL, so this resolves to
 // `/sample-document.pdf` in the default deploy.
 const SAMPLE_PDF = `${import.meta.env.BASE_URL || '/'}sample-document.pdf`;
-
-// Neither Word docs nor spreadsheets render in an iframe — docFileMeta's `isPdf` only
-// tells us "not a PDF", so distinguish the two here (contentType, falling back to the
-// objectKey extension for legacy uploads with no stored contentType) to pick the right
-// download-fallback copy below.
-const SPREADSHEET_MIMES = new Set([DOC_FORMAT_MIME.xls, DOC_FORMAT_MIME.xlsx, DOC_FORMAT_MIME.ods]);
-const SPREADSHEET_EXTS = new Set(['xls', 'xlsx', 'ods']);
-function nonRenderableKind(meta) {
-  if (meta?.contentType) return SPREADSHEET_MIMES.has(meta.contentType) ? 'spreadsheet' : 'word';
-  const ext = String(meta?.objectKey || '')
-    .toLowerCase()
-    .split('.')
-    .pop();
-  return SPREADSHEET_EXTS.has(ext) ? 'spreadsheet' : 'word';
-}
 
 /**
  * Read-only preview of an uploaded compliance PDF, matching the AffiliationViewModal /
@@ -46,7 +32,7 @@ export function DocPreviewModal({ clubId, docKey, docName, clubName, meta, objec
   const source = resolvePreviewSource(meta, import.meta.env.VITE_LOCAL_AUTH === '1');
   const [state, setState] = useState({ status: 'loading', src: null });
   const [reloadKey, setReloadKey] = useState(0);
-  const { metaText, isPdf } = docFileMeta(meta);
+  const { metaText } = docFileMeta(meta);
 
   useEffect(() => {
     if (source === 'demo') {
@@ -68,11 +54,10 @@ export function DocPreviewModal({ clubId, docKey, docName, clubName, meta, objec
   }, [source, clubId, docKey, objectKey, reloadKey]);
 
   const caption = metaText || (source === 'demo' ? 'Demo preview · sample document' : 'Document');
-  // Demo mode always serves the bundled sample PDF, so render the iframe even
-  // when the entry itself is a non-PDF file — the "open in new tab" hint would
-  // point at a PDF and read as broken.
-  const renderInline = isPdf || source === 'demo';
-  const fallbackKind = renderInline ? null : nonRenderableKind(meta);
+  // Demo mode always serves the bundled sample PDF, so force the pdf iframe even when the
+  // entry itself is a non-PDF file — the "open in new tab" hint would otherwise point at a
+  // PDF and read as broken.
+  const kind = source === 'demo' ? 'pdf' : docPreviewKind(meta);
 
   return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -133,20 +118,45 @@ export function DocPreviewModal({ clubId, docKey, docName, clubName, meta, objec
             </div>
           )}
 
-          {state.status === 'ready' && state.src && !renderInline && (
-            // Browsers can't render Word documents or spreadsheets in an iframe — offer
-            // the download (the presigned GET serves it) instead of a broken frame.
-            <div style={{ textAlign: 'center', padding: '48px 8px', color: 'var(--muted)' }}>
-              <div style={{ fontWeight: 600, color: 'var(--ink)', marginBottom: 4 }}>
-                {fallbackKind === 'spreadsheet' ? 'Spreadsheet' : 'Word document'}
-              </div>
-              {fallbackKind === 'spreadsheet'
-                ? 'Spreadsheets can’t be previewed inline — use “Open in new tab” to download it.'
-                : 'Word documents can’t be previewed inline — use “Open in new tab” to download it.'}
-            </div>
+          {state.status === 'ready' && state.src && kind === 'sheet' && (
+            <SheetInlinePreview url={state.src} size={meta?.size} />
           )}
 
-          {state.status === 'ready' && state.src && renderInline && (
+          {state.status === 'ready' && state.src && kind === 'docx' && (
+            <DocxInlinePreview url={state.src} size={meta?.size} />
+          )}
+
+          {state.status === 'ready' && state.src && kind === 'image' && (
+            <img
+              src={state.src}
+              alt={`${docName} preview`}
+              onError={() => setState({ status: 'error', src: null })}
+              style={{
+                display: 'block',
+                maxWidth: '100%',
+                maxHeight: '68vh',
+                margin: '0 auto',
+                borderRadius: 8,
+              }}
+            />
+          )}
+
+          {state.status === 'ready' &&
+            state.src &&
+            (kind === 'word-legacy' || kind === 'unknown') && (
+              // No in-browser renderer (legacy .doc) or an unrecognised type — offer the
+              // download (the presigned GET serves it) instead of a broken frame.
+              <div style={{ textAlign: 'center', padding: '48px 8px', color: 'var(--muted)' }}>
+                <div style={{ fontWeight: 600, color: 'var(--ink)', marginBottom: 4 }}>
+                  {kind === 'word-legacy' ? 'Legacy Word document' : 'Preview unavailable'}
+                </div>
+                {kind === 'word-legacy'
+                  ? 'This is a legacy .doc file — it can’t be previewed inline; use “Open in new tab” to download it.'
+                  : 'This file can’t be previewed inline — use “Open in new tab” to download it.'}
+              </div>
+            )}
+
+          {state.status === 'ready' && state.src && kind === 'pdf' && (
             <iframe
               title={`${docName} preview`}
               src={state.src}

@@ -870,6 +870,25 @@ export function useEscapeClose(onClose: () => void) {
 }
 
 /**
+ * Close-on-Escape for a NESTED modal opened above another modal. A capture-phase
+ * window listener fires before useEscapeClose's bubble-phase one and calls
+ * stopImmediatePropagation, so Escape closes only this inner surface — the parent
+ * modal's own useEscapeClose never sees the key. (Same technique as InfoDot.)
+ */
+export function useNestedEscapeClose(onClose: () => void) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopImmediatePropagation();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, [onClose]);
+}
+
+/**
  * Horizontal-scroll wrapper with an edge fade + "scroll for more" affordance, shown only
  * while columns are off-screen. Wrap a `<table>` INSIDE its `.tbl-w` so wide tables — the
  * compliance docs tracker, the season viewer's 11-column schedule — scroll with a visible

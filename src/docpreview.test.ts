@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolvePreviewSource, docFileMeta } from './data';
+import { resolvePreviewSource, docFileMeta, docPreviewKind, DOC_FORMAT_MIME } from './data';
 
 // The preview source decision is the riskiest part of the doc-preview feature: it must
 // never substitute the demo sample for a real (or real-but-fileless) production document.
@@ -49,5 +49,59 @@ describe('docFileMeta', () => {
     expect(docFileMeta({ markedCompliant: true }).real).toBe(false);
     expect(docFileMeta(undefined).real).toBe(false);
     expect(docFileMeta(undefined).metaText).toBe('');
+  });
+
+  it('isPdf delegates to docPreviewKind', () => {
+    expect(docFileMeta({ objectKey: 'a/b.pdf', contentType: DOC_FORMAT_MIME.pdf }).isPdf).toBe(
+      true,
+    );
+    expect(docFileMeta({ objectKey: 'a/b.xlsx', contentType: DOC_FORMAT_MIME.xlsx }).isPdf).toBe(
+      false,
+    );
+  });
+});
+
+describe('docPreviewKind', () => {
+  it('maps each format by its exact contentType', () => {
+    expect(docPreviewKind({ contentType: DOC_FORMAT_MIME.pdf })).toBe('pdf');
+    expect(docPreviewKind({ contentType: DOC_FORMAT_MIME.docx })).toBe('docx');
+    expect(docPreviewKind({ contentType: DOC_FORMAT_MIME.doc })).toBe('word-legacy');
+    expect(docPreviewKind({ contentType: DOC_FORMAT_MIME.xls })).toBe('sheet');
+    expect(docPreviewKind({ contentType: DOC_FORMAT_MIME.xlsx })).toBe('sheet');
+    expect(docPreviewKind({ contentType: DOC_FORMAT_MIME.ods })).toBe('sheet');
+    expect(docPreviewKind({ contentType: 'image/jpeg' })).toBe('image');
+    expect(docPreviewKind({ contentType: 'image/png' })).toBe('image');
+  });
+
+  it('falls back to the objectKey extension when contentType is missing (legacy uploads)', () => {
+    expect(docPreviewKind({ objectKey: 't/c/agm.pdf' })).toBe('pdf');
+    expect(docPreviewKind({ objectKey: 't/c/roster.DOCX' })).toBe('docx');
+    expect(docPreviewKind({ objectKey: 't/c/exco.doc' })).toBe('word-legacy');
+    expect(docPreviewKind({ objectKey: 't/c/members.xls' })).toBe('sheet');
+    expect(docPreviewKind({ objectKey: 't/c/members.xlsx' })).toBe('sheet');
+    expect(docPreviewKind({ objectKey: 't/c/members.ods' })).toBe('sheet');
+    expect(docPreviewKind({ objectKey: 't/c/id.jpeg' })).toBe('image');
+    expect(docPreviewKind({ objectKey: 't/c/id.PNG' })).toBe('image');
+  });
+
+  it('a recognised contentType wins over the extension', () => {
+    expect(docPreviewKind({ objectKey: 'x/y.pdf', contentType: DOC_FORMAT_MIME.xlsx })).toBe(
+      'sheet',
+    );
+  });
+
+  it('an unrecognised contentType falls through to the objectKey extension', () => {
+    expect(docPreviewKind({ contentType: 'application/octet-stream', objectKey: 'x.xlsx' })).toBe(
+      'sheet',
+    );
+  });
+
+  it('unrecognised types and empty meta are unknown', () => {
+    // unrecognised contentType, no objectKey to fall through to
+    expect(docPreviewKind({ contentType: 'application/zip' })).toBe('unknown');
+    expect(docPreviewKind({ objectKey: 't/c/data.csv' })).toBe('unknown');
+    expect(docPreviewKind({ objectKey: 'noextension' })).toBe('unknown');
+    expect(docPreviewKind({})).toBe('unknown');
+    expect(docPreviewKind(undefined)).toBe('unknown');
   });
 });

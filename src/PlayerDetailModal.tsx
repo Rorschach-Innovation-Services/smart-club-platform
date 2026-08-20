@@ -1,9 +1,10 @@
 /* ─── Player detail — read-only modal shared by the admin + club rosters ─── */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Icon, Btn, useEscapeClose, playerStatusPill } from './atoms';
+import { Icon, Btn, useEscapeClose, useNestedEscapeClose, playerStatusPill } from './atoms';
 import { getPlayerIdDocViewUrl } from './api';
+import { docPreviewKind } from './data';
 import type { PlayerRegistration } from './types';
 import { formatDayYear, formatStampDay } from './dates';
 
@@ -79,6 +80,125 @@ const Row = ({ label, value }: { label: string; value: React.ReactNode }) => (
 );
 
 /**
+ * Inline preview of a player's ID document (photo or PDF), replacing the old bare
+ * `window.open`. Mints a presigned GET on mount (the API sets inline disposition) and
+ * renders an image or a PDF iframe by kind — an <img>/<iframe> embed needs no CORS, so
+ * this surface has no bucket-CORS dependency. "Open in new tab" stays as the download/
+ * mobile path, and an unrecognised kind degrades to that button alone.
+ */
+function IdDocPreviewModal({
+  clubId,
+  player,
+  onClose,
+}: {
+  clubId: string;
+  player: PlayerRegistration;
+  onClose: () => void;
+}) {
+  // A nested modal above PlayerDetailModal: capture-phase Escape so the first press
+  // closes only this ID-doc preview, not the parent too (both use window keydown).
+  useNestedEscapeClose(onClose);
+  const [state, setState] = useState<{ status: 'loading' | 'ready' | 'error'; src: string | null }>(
+    { status: 'loading', src: null },
+  );
+  const [reloadKey, setReloadKey] = useState(0);
+  const kind = docPreviewKind(player.idDocMeta);
+
+  useEffect(() => {
+    let alive = true;
+    setState({ status: 'loading', src: null });
+    getPlayerIdDocViewUrl(clubId, player.naturalKey)
+      .then((r) => alive && setState({ status: 'ready', src: r.viewUrl }))
+      .catch(() => alive && setState({ status: 'error', src: null }));
+    return () => {
+      alive = false;
+    };
+  }, [clubId, player.naturalKey, reloadKey]);
+
+  return createPortal(
+    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div
+        className="task-modal"
+        role="dialog"
+        aria-modal="true"
+        style={{ maxWidth: 720, width: '92vw' }}
+      >
+        <div className="task-modal-head">
+          <div className="task-modal-head-text">
+            <div className="task-modal-head-eyebrow">ID document</div>
+            <div className="task-modal-head-title">
+              {`${player.firstName ?? ''} ${player.lastName ?? ''}`.trim() || 'Player'}
+            </div>
+          </div>
+          <button className="task-modal-close" onClick={onClose} title="Close">
+            <Icon.X />
+          </button>
+        </div>
+        <div className="task-modal-body">
+          {state.status === 'ready' && state.src && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+              <Btn
+                tone="outline"
+                size="sm"
+                icon={Icon.Eye}
+                onClick={() => window.open(state.src!, '_blank', 'noopener,noreferrer')}
+              >
+                Open in new tab
+              </Btn>
+            </div>
+          )}
+          {state.status === 'loading' && (
+            <div style={{ textAlign: 'center', padding: '40px 8px', color: 'var(--muted)' }}>
+              Loading preview…
+            </div>
+          )}
+          {state.status === 'error' && (
+            <div style={{ textAlign: 'center', padding: '40px 8px', color: 'var(--muted)' }}>
+              Could not open the ID document. Please try again.
+              <div style={{ marginTop: 12 }}>
+                <Btn tone="outline" size="sm" onClick={() => setReloadKey((k) => k + 1)}>
+                  Try again
+                </Btn>
+              </div>
+            </div>
+          )}
+          {state.status === 'ready' && state.src && kind === 'image' && (
+            <img
+              src={state.src}
+              alt="ID document"
+              onError={() => setState({ status: 'error', src: null })}
+              style={{
+                display: 'block',
+                maxWidth: '100%',
+                maxHeight: '68vh',
+                margin: '0 auto',
+                borderRadius: 8,
+              }}
+            />
+          )}
+          {state.status === 'ready' && state.src && kind !== 'image' && (
+            // pdf (and any unexpected kind) → iframe; "Open in new tab" above covers the
+            // rest (mobile, or a browser that won't inline the type).
+            <iframe
+              title="ID document preview"
+              src={state.src}
+              style={{
+                width: '100%',
+                height: '68vh',
+                border: '1px solid var(--line, rgba(10,15,20,0.12))',
+                borderRadius: 8,
+                background: '#fff',
+              }}
+            />
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/**
  * Read-only view of a single player, opened by clicking a roster row on either the admin
  * or club players list. Every field is already in hand from the list fetch — the only
  * network call is the on-demand presign for the ID document. `teamLabel` is the resolved
@@ -98,22 +218,7 @@ export function PlayerDetailModal({
   onClose: () => void;
 }) {
   useEscapeClose(onClose);
-  const [docBusy, setDocBusy] = useState(false);
-  const [docError, setDocError] = useState('');
-
-  async function viewIdDoc() {
-    if (!clubId || !player.naturalKey) return;
-    setDocBusy(true);
-    setDocError('');
-    try {
-      const { viewUrl } = await getPlayerIdDocViewUrl(clubId, player.naturalKey);
-      window.open(viewUrl, '_blank', 'noopener,noreferrer');
-    } catch {
-      setDocError('Could not open the ID document. Please try again.');
-    } finally {
-      setDocBusy(false);
-    }
-  }
+  const [showIdDoc, setShowIdDoc] = useState(false);
 
   const fullName = `${player.firstName ?? ''} ${player.lastName ?? ''}`.trim() || '—';
 
@@ -197,14 +302,8 @@ export function PlayerDetailModal({
             <>
               <SectionTitle>ID document</SectionTitle>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingTop: 4 }}>
-                <Btn
-                  tone="outline"
-                  size="sm"
-                  icon={Icon.Eye}
-                  onClick={viewIdDoc}
-                  disabled={docBusy}
-                >
-                  {docBusy ? 'Opening…' : 'View ID document'}
+                <Btn tone="outline" size="sm" icon={Icon.Eye} onClick={() => setShowIdDoc(true)}>
+                  View ID document
                 </Btn>
                 {player.previousIdDocMeta?.objectKey && (
                   <span style={{ fontSize: 11.5, color: 'var(--muted)' }}>
@@ -212,15 +311,13 @@ export function PlayerDetailModal({
                   </span>
                 )}
               </div>
-              {docError && (
-                <div style={{ fontSize: 11.5, color: 'var(--danger, #c0392b)', marginTop: 6 }}>
-                  {docError}
-                </div>
-              )}
             </>
           )}
         </div>
       </div>
+      {showIdDoc && clubId && player.naturalKey && (
+        <IdDocPreviewModal clubId={clubId} player={player} onClose={() => setShowIdDoc(false)} />
+      )}
     </div>,
     document.body,
   );

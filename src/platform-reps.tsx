@@ -34,7 +34,8 @@ import { queryClient, qk } from './query';
 import * as api from './api';
 import { ApiError, EMAIL_RE } from './api';
 import { Btn, Card, Icon, Pill, useEscapeClose } from './atoms';
-import { docKeyForRole } from './data';
+import { docKeyForRole, docPreviewKind } from './data';
+import { SheetInlinePreview, DocxInlinePreview } from './DocInlineRenderers';
 import { ERR, HINT, InfoTip, ReviewCounters, StepIntro } from './platform-wizard';
 import type {
   Channel,
@@ -109,12 +110,16 @@ const CONFIDENCE_META: Record<
 };
 
 /* ─── Committee document preview ───
- * Lean adaptation of DocPreviewModal's ready/loading/error shape, but hitting the
- * OPERATOR route (platformDocViewUrl) instead of the tenant-scoped getDocViewUrl —
- * an operator viewing another tenant's file can't use the club-console endpoint.
- * No contentType is returned by the platform view-url route, so this always offers
- * "Open in new tab" as the primary path rather than guessing whether the iframe
- * will render (a scanned PDF usually will; a Word/Excel committee sheet won't). */
+ * Hits the OPERATOR route (platformDocViewUrl) instead of the tenant-scoped
+ * getDocViewUrl — an operator viewing another tenant's file can't use the club-console
+ * endpoint. The route now echoes the stored file's contentType/objectKey, so this reuses
+ * docPreviewKind + the shared inline renderers (Word/Excel/PDF/image) exactly like the
+ * tenant modal, instead of iframing everything.
+ *
+ * REGRESSION GUARD: kind 'unknown' (a legacy entry with no contentType, or deploy skew
+ * where the backend hasn't shipped the contentType echo yet) still attempts the raw
+ * iframe — a scanned committee PDF that worked before must never downgrade to a fallback
+ * message. */
 function CommitteeDocPreview({
   slug,
   clubId,
@@ -129,24 +134,34 @@ function CommitteeDocPreview({
   onClose: () => void;
 }) {
   useEscapeClose(onClose);
-  const [state, setState] = useState<{ status: 'loading' | 'ready' | 'error'; src: string | null }>(
-    {
-      status: 'loading',
-      src: null,
-    },
-  );
+  const [state, setState] = useState<{
+    status: 'loading' | 'ready' | 'error';
+    src: string | null;
+    kind: ReturnType<typeof docPreviewKind>;
+    size?: number;
+  }>({ status: 'loading', src: null, kind: 'unknown' });
 
   useEffect(() => {
     let alive = true;
     api
       .platformDocViewUrl(slug, clubId, docKey)
-      .then((r) => alive && setState({ status: 'ready', src: r.viewUrl }))
-      .catch(() => alive && setState({ status: 'error', src: null }));
+      .then(
+        (r) =>
+          alive &&
+          setState({
+            status: 'ready',
+            src: r.viewUrl,
+            kind: docPreviewKind({ contentType: r.contentType, objectKey: r.objectKey }),
+            size: r.size,
+          }),
+      )
+      .catch(() => alive && setState({ status: 'error', src: null, kind: 'unknown' }));
     return () => {
       alive = false;
     };
   }, [slug, clubId, docKey]);
 
+  const { status, src, kind, size } = state;
   return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div
@@ -165,39 +180,67 @@ function CommitteeDocPreview({
           </button>
         </div>
         <div className="task-modal-body">
-          {state.status === 'loading' && (
+          {status === 'loading' && (
             <div style={{ textAlign: 'center', padding: '40px 8px', color: 'var(--muted)' }}>
               Loading preview…
             </div>
           )}
-          {state.status === 'error' && (
+          {status === 'error' && (
             <div style={{ textAlign: 'center', padding: '40px 8px', color: 'var(--muted)' }}>
               Couldn’t load this document right now.
             </div>
           )}
-          {state.status === 'ready' && state.src && (
+          {status === 'ready' && src && (
             <>
               <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
                 <Btn
                   tone="outline"
                   size="sm"
                   icon={Icon.Eye}
-                  onClick={() => window.open(state.src!, '_blank', 'noopener,noreferrer')}
+                  onClick={() => window.open(src, '_blank', 'noopener,noreferrer')}
                 >
                   Open in new tab
                 </Btn>
               </div>
-              <iframe
-                title={`${clubName} committee document preview`}
-                src={state.src}
-                style={{
-                  width: '100%',
-                  height: '60vh',
-                  border: '1px solid var(--line, rgba(10,15,20,0.12))',
-                  borderRadius: 8,
-                  background: '#fff',
-                }}
-              />
+              {kind === 'sheet' ? (
+                <SheetInlinePreview url={src} size={size} height="60vh" />
+              ) : kind === 'docx' ? (
+                <DocxInlinePreview url={src} size={size} height="60vh" />
+              ) : kind === 'image' ? (
+                <img
+                  src={src}
+                  alt={`${clubName} committee document preview`}
+                  onError={() => setState({ status: 'error', src: null, kind: 'unknown' })}
+                  style={{
+                    display: 'block',
+                    maxWidth: '100%',
+                    maxHeight: '60vh',
+                    margin: '0 auto',
+                    borderRadius: 8,
+                  }}
+                />
+              ) : kind === 'word-legacy' ? (
+                <div style={{ textAlign: 'center', padding: '40px 8px', color: 'var(--muted)' }}>
+                  <div style={{ fontWeight: 600, color: 'var(--ink)', marginBottom: 4 }}>
+                    Legacy Word document
+                  </div>
+                  This is a legacy .doc file — it can’t be previewed inline; use “Open in new tab”
+                  to download it.
+                </div>
+              ) : (
+                // pdf + unknown → raw iframe (regression guard: never downgrade a working PDF).
+                <iframe
+                  title={`${clubName} committee document preview`}
+                  src={src}
+                  style={{
+                    width: '100%',
+                    height: '60vh',
+                    border: '1px solid var(--line, rgba(10,15,20,0.12))',
+                    borderRadius: 8,
+                    background: '#fff',
+                  }}
+                />
+              )}
             </>
           )}
         </div>

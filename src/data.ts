@@ -613,6 +613,56 @@ export function extFromMime(mime) {
   return hit ? hit[0] : 'pdf';
 }
 
+/**
+ * The inline-preview render strategy a compliance/ID file maps to. Driven by the stored
+ * `contentType`, falling back to the objectKey extension for legacy uploads and Windows'
+ * empty `file.type` (the same dual strategy as resolveDocMime). The preview modal + every
+ * doc surface branch on this:
+ *  - 'pdf'   → iframe (unchanged);              'docx'  → docx-preview (sandboxed iframe)
+ *  - 'sheet' → SheetJS → HTML (sandboxed iframe); 'image' → <img> (ID docs, jpeg/png)
+ *  - 'word-legacy' → .doc (Word 97 binary): no in-browser renderer, download fallback
+ *  - 'unknown'     → anything unrecognised (also download fallback / raw iframe attempt)
+ */
+export type DocPreviewKind = 'pdf' | 'docx' | 'sheet' | 'image' | 'word-legacy' | 'unknown';
+
+const SHEET_PREVIEW_MIMES = new Set([
+  DOC_FORMAT_MIME.xls,
+  DOC_FORMAT_MIME.xlsx,
+  DOC_FORMAT_MIME.ods,
+]);
+const IMAGE_PREVIEW_MIMES = new Set(['image/jpeg', 'image/png']);
+const PREVIEW_KIND_BY_EXT: Record<string, DocPreviewKind> = {
+  pdf: 'pdf',
+  docx: 'docx',
+  doc: 'word-legacy',
+  xls: 'sheet',
+  xlsx: 'sheet',
+  ods: 'sheet',
+  jpg: 'image',
+  jpeg: 'image',
+  png: 'image',
+};
+
+export function docPreviewKind(meta): DocPreviewKind {
+  const ct = meta?.contentType;
+  // A recognised contentType wins outright (it can even override a conflicting extension).
+  // An UNrecognised one falls through to the objectKey extension — a generic
+  // application/octet-stream on an `.xlsx` should still preview — and only when both
+  // signals fail do we land on 'unknown'.
+  if (ct) {
+    if (ct === DOC_FORMAT_MIME.pdf) return 'pdf';
+    if (ct === DOC_FORMAT_MIME.docx) return 'docx';
+    if (ct === DOC_FORMAT_MIME.doc) return 'word-legacy';
+    if (SHEET_PREVIEW_MIMES.has(ct)) return 'sheet';
+    if (IMAGE_PREVIEW_MIMES.has(ct)) return 'image';
+  }
+  const ext = String(meta?.objectKey || '')
+    .toLowerCase()
+    .split('.')
+    .pop();
+  return PREVIEW_KIND_BY_EXT[ext] ?? 'unknown';
+}
+
 // Doc-completion helpers — the single source of truth for every count/gate so the
 // definition can't drift across call sites. Driven by the tenant's catalogue (default:
 // the shared list), skip archived entries, and tolerate clubs whose `docs` object
@@ -712,13 +762,10 @@ export function docFileMeta(meta) {
   const metaText = [fileName, uploadedDate && `uploaded ${uploadedDate}`, sizeMB]
     .filter(Boolean)
     .join(' · ');
-  // Word docs can't render in an iframe — the preview modal branches on this.
-  // Legacy uploads (no contentType) predate Word support, so they're PDFs.
-  const isPdf = !real
-    ? true
-    : meta.contentType
-      ? meta.contentType === DOC_MIME_TYPES.pdf
-      : String(meta.objectKey).toLowerCase().endsWith('.pdf');
+  // The preview modal branches on docPreviewKind now; isPdf stays as its narrow twin
+  // (pdf-or-not) so existing callers/tests keep resolving. Delegating keeps the
+  // contentType/extension dual strategy in one place (docPreviewKind).
+  const isPdf = docPreviewKind(meta) === 'pdf';
   return { real, fileName, uploadedDate, sizeMB, metaText, isPdf };
 }
 
