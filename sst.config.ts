@@ -101,19 +101,41 @@ export default $config({
       ttl: 'expiresAt',
     });
 
-    // ── Uploads: private compliance PDFs + tenant logos (presigned access) ──
-    // CORS so the SPA can `fetch(presignedUrl)` the bytes for inline Word/Excel rendering
-    // (SheetJS / docx-preview parse in-browser). iframe/img embeds — PDFs, ID photos —
-    // don't need this, which is why they worked before. GET only; NOT the TutorialAssets
-    // '*' allowOrigins — this bucket holds PII, so origins are the tenant web origins only:
+    // ── Uploads: private compliance docs + registration ID documents (PII, presigned) ──
+    // This bucket holds sensitive files only — compliance docs and the ID documents captured
+    // at registration. Branding/tenant logos do NOT live here: those are presigned-POSTed to
+    // TutorialAssets, not this bucket.
+    //
+    // CORS covers exactly two browser flows:
+    //  - GET: the SPA `fetch(presignedUrl)`s the bytes for inline Word/Excel rendering
+    //    (SheetJS / docx-preview parse in-browser). iframe/img embeds — PDFs, ID photos —
+    //    are not cross-origin XHR, so they need no CORS (which is why they never broke).
+    //  - PUT: the browser presigned-PUT uploads — registration ID docs (RegisterPage),
+    //    club-portal compliance docs, and operator doc/roster intake (all via
+    //    uploadToPresigned in src/api.ts). Every one sets an explicit content-type on the
+    //    fetch, so the browser always fires a CORS preflight — GET-only rejected them all.
+    //    maxAge caches that preflight for an hour so repeat uploads skip the extra OPTIONS.
+    //
+    // History — do NOT re-tighten to GET-only: before commit 04e524a this bucket had NO
+    // explicit `cors` arg, and SST v3's default rule (see .sst/platform createCorsRule:
+    // GET/PUT/POST/DELETE/HEAD from '*') was silently carrying the upload path. 04e524a added
+    // an explicit GET-only rule, which broke every browser upload in prod on 20 Aug 2026.
+    //
+    // POST/DELETE/HEAD are deliberately absent: presigned POSTs and multipart part-PUT/ETag
+    // flows target TutorialAssets, and deletes happen server-side — none of them are browser
+    // calls against this bucket.
+    //
+    // NOT the TutorialAssets '*' allowOrigins — this bucket holds PII, so origins are the
+    // tenant web origins only:
     //  - prod: the enumerated vanity/custom domains (allowedOrigins) + the wildcard club
     //    suffix (S3 allows one '*' per origin entry) for `<slug>.club.medicoach.co.za`.
     //  - non-prod: the raw CloudFront domain dev cloud stages serve the SPA from (domain is
     //    undefined off-prod, matching the API's own originAllowed trust) + dev:local.
     const uploads = new sst.aws.Bucket('Uploads', {
       cors: {
-        allowMethods: ['GET'],
+        allowMethods: ['GET', 'PUT'],
         allowHeaders: ['*'],
+        maxAge: '1 hour',
         // Accepted trade-off: non-prod `https://*.cloudfront.net` admits ANY CloudFront
         // origin, not just our dev stage's — fine off-prod because the capability still
         // requires a valid presigned URL (the CORS grant alone opens nothing).
