@@ -1613,6 +1613,67 @@ export function computeSameClubSlotOverlaps(series: OverlapSeriesInput[]): {
   return { crossSeries, sameSeries };
 }
 
+// ───────────────────────── Groundless-club report (informational) ─────────────────────────
+
+/** A club a sheet name resolved to whose prod record has no usable ground — empty/
+ * whitespace, or a junk placeholder (None/N/A/-/TBD/TBC, per the shared JUNK_GROUND
+ * rule from venue-clash.ts, the same rule the bootstrap/registry sync uses) — AND that
+ * the Venue Allocations sheet does not re-base. Its home fixtures have no home ground,
+ * so the clash pass plays them at the opponent's ground (union Rule 4). */
+export interface GroundlessClub {
+  clubId: string;
+  clubName: string;
+  /** The raw stored ground value ('' when unset, or the junk text, e.g. 'None'). */
+  venue: string;
+  /** Distinct leagueKeys in which the club hosts home fixtures, sorted. */
+  leagues: string[];
+  /** How many of this run's fixtures list the club as the home side. */
+  homeFixtures: number;
+}
+
+/** Distinct HOME clubs across the built series whose prod record has no usable ground
+ * and which the Venue Allocations re-base map doesn't cover. Keyed off home fixtures —
+ * a club that never hosts has nothing to relocate — so `homeFixtures` is its home-fixture
+ * total. Pure; no repo/IO. */
+export function computeGroundlessClubs(
+  built: Array<{
+    // `leagueKey` is optional only to accept `BuiltSeries` (whose `series: Series` doesn't
+    // advertise it in the type, though it is always set at runtime).
+    series: { leagueKey?: string; participants?: Array<{ teamId: string; clubId: string }> };
+    fixtures: Array<{ home: string }>;
+  }>,
+  clubsById: Map<string, Club>,
+  reBaseMap: Map<string, string>,
+): GroundlessClub[] {
+  const acc = new Map<string, { homeFixtures: number; leagues: Set<string> }>();
+  for (const { series, fixtures } of built) {
+    const teamToClub = new Map((series.participants ?? []).map((p) => [p.teamId, p.clubId]));
+    for (const f of fixtures) {
+      const clubId = teamToClub.get(f.home);
+      if (!clubId) continue;
+      const entry = acc.get(clubId) ?? { homeFixtures: 0, leagues: new Set<string>() };
+      entry.homeFixtures++;
+      if (series.leagueKey) entry.leagues.add(series.leagueKey);
+      acc.set(clubId, entry);
+    }
+  }
+  const out: GroundlessClub[] = [];
+  for (const [clubId, { homeFixtures, leagues }] of acc) {
+    if (reBaseMap.has(clubId)) continue; // re-based → its allocated ground applies
+    const club = clubsById.get(clubId);
+    const raw = club?.ground?.venue ?? '';
+    if (raw.trim() && !JUNK_GROUND.test(raw.trim())) continue; // has a usable ground
+    out.push({
+      clubId,
+      clubName: club?.name ?? clubId,
+      venue: raw,
+      leagues: [...leagues].sort(),
+      homeFixtures,
+    });
+  }
+  return out.sort((a, b) => a.clubId.localeCompare(b.clubId));
+}
+
 // ───────────────────────── Reconciliation safety rails (1g) ─────────────────────────
 
 /** The computed stale set must be a SUBSET of DELETE_SLUGS (empty is fine — that's the
@@ -1857,6 +1918,27 @@ function printVenueAllocations(rows: VenueAllocationRow[]) {
     console.log(
       `  [${r.league}] ${r.clubName}: ${r.groundOnSheet} → ${r.allocatedGround}  (${r.reason})`,
     );
+}
+
+/** Groundless-club sign-off block — every distinct home club with no usable ground the
+ * clash pass will relocate to the opponent's venue. Informational only; exit codes are
+ * unchanged. Columns are padded so the id/name/venue line up. */
+function printGroundlessClubs(groundless: GroundlessClub[]) {
+  console.log(
+    `\n── Clubs with no usable ground (${groundless.length}) — their home fixtures go to the opponent's ground`,
+  );
+  if (groundless.length === 0) return;
+  const venOf = (g: GroundlessClub) => `(venue: '${g.venue}')`;
+  const idW = Math.max(...groundless.map((g) => g.clubId.length));
+  const nameW = Math.max(...groundless.map((g) => g.clubName.length));
+  const venW = Math.max(...groundless.map((g) => venOf(g).length));
+  for (const g of groundless)
+    console.log(
+      `   ${g.clubId.padEnd(idW)}  ${g.clubName.padEnd(nameW)}  ${venOf(g).padEnd(venW)}  leagues: ${g.leagues.join(' · ')} · home fixtures: ${g.homeFixtures}`,
+    );
+  console.log(
+    "   Set each club's ground in the console (or via bootstrap-fixture-prereqs for Parkgate) before --confirm if the union has allocated one.",
+  );
 }
 
 // ───────────────────────── Modes ─────────────────────────
@@ -2112,6 +2194,11 @@ async function runImport(args: Args) {
   // Printed before every abort gate below — the operator reviews every alias/redirect
   // outcome regardless of whether this run goes on to write.
   printResolutionLog(resolutions, leagueLabel);
+
+  // Which resolved home clubs have no usable ground — their home games play at the
+  // opponent's venue (Rule 4). Informational; never gates the write.
+  const groundlessClubs = computeGroundlessClubs(built, clubsById, reBaseMap);
+  printGroundlessClubs(groundlessClubs);
 
   if (stageRoundFailure) {
     console.error('\n✗ refusing to continue — see stage/round errors above.');
@@ -2398,6 +2485,9 @@ async function runImport(args: Args) {
 
   console.log(`\n${built.length} series to write.`);
   console.log(`${slotOverlaps.length} same-club same-slot overlaps (informational).`);
+  console.log(
+    `${groundlessClubs.length} club(s) with no usable ground — their home fixtures play at the opponent's ground.`,
+  );
   if (!args.confirm) {
     console.log('[dry-run] nothing written. Re-run with --confirm to import.');
     return;

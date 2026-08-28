@@ -63,6 +63,23 @@ automatically, so the dry run shows three `s-planb-premier-men-t20-1` auto-moves
    no unresolved clashes; the GENUINE-edits section empty (the INFORMATIONAL date/time list
    will be long — expected, since this revision amends dates); `23` series to write.
 
+   It also prints, right after the name-resolution sign-off, a **"Clubs with no usable
+   ground"** block listing every home club whose prod record has no usable ground (empty or a
+   junk placeholder like `None`) and which the Venue Allocations sheet doesn't re-base — their
+   home fixtures play at the opponent's ground under Rule 4. On this revision expect **two**
+   before the bootstrap ground-fix: `parkgate-hambanathi-cc (venue: '')`, 16 home fixtures, and
+   `umgababa-cricket-club (venue: 'None')`, 8 home fixtures.
+   - **Parkgate is fixed by the bootstrap.** Running `bootstrap-fixture-prereqs --confirm`
+     (step 1) sets `parkgate-hambanathi-cc`'s ground to `Phoenix Stonebridge` (union facility
+     list), so on the dry run AFTER the confirmed bootstrap the block shows only **one** club
+     (Umgababa) and Parkgate's 16 home fixtures land at its own ground.
+   - **Umgababa is an open question for the union.** Its ground is the literal text `None`, so
+     the importer treats it as groundless and, under Rule 4, plays its 8 home games at the
+     opponents' grounds. This is not a blocker — the import proceeds. When the union answers
+     where Umgababa hosts, set the ground on the club record in the console and either
+     re-import (a re-import overwrites, lifecycle preserved) or hand-edit the 8 fixtures'
+     venues directly. The block is informational only — it never changes the exit code.
+
    ```bash
    npx sst shell --stage prod -- npm --prefix packages/api run import-planb -- \
      --file "…Dolphins…xlsx" --t20 "…REVISED…xlsx"

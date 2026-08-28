@@ -73,6 +73,7 @@ const API_DIR = path.resolve(testDir, '..');
 const TSX_BIN = path.join(API_DIR, 'node_modules', '.bin', 'tsx');
 const IMPORTER = path.join(API_DIR, 'src', 'import-planb-fixtures.ts');
 const COMPARE = path.join(API_DIR, 'src', 'compare-planb-fixtures.ts');
+const BOOTSTRAP = path.join(API_DIR, 'src', 'bootstrap-fixture-prereqs.ts');
 
 const DOLPHINS_FILE = path.join(SHEETS_DIR ?? '', 'KZNCU Dolphins Updated Fixtures.xlsx');
 const REVISED_FILE = path.join(
@@ -396,6 +397,29 @@ if (!ENABLED) {
         Number.isFinite(overlapCount) && overlapCount >= 1,
         `expected ≥1 informational overlap, got: ${overlapHeader}`,
       );
+
+      // Groundless-club report: exactly the two home clubs with no usable ground —
+      // Parkgate (empty ground) and Umgababa (ground "None") — with their home-fixture
+      // counts. Their home games route to the opponent's ground (Rule 4).
+      const groundlessHeader = out
+        .split('\n')
+        .find((l) =>
+          /── Clubs with no usable ground \(\d+\) — their home fixtures go to the opponent's ground/.test(
+            l,
+          ),
+        );
+      assert.ok(groundlessHeader, 'the groundless-club block is printed');
+      assert.match(groundlessHeader!, /\(2\)/, 'exactly two groundless clubs');
+      const parkgateLine = out
+        .split('\n')
+        .find((l) => /parkgate-hambanathi-cc/.test(l) && /home fixtures:/.test(l));
+      const umgababaLine = out
+        .split('\n')
+        .find((l) => /umgababa-cricket-club/.test(l) && /home fixtures:/.test(l));
+      assert.ok(parkgateLine, 'Parkgate listed as groundless');
+      assert.ok(umgababaLine, 'Umgababa listed as groundless');
+      assert.match(parkgateLine!, /home fixtures: 16\b/, 'Parkgate has 16 home fixtures');
+      assert.match(umgababaLine!, /home fixtures: 8\b/, 'Umgababa has 8 home fixtures');
 
       // GENUINE-edits section empty; 23 to write.
       assert.ok(
@@ -761,6 +785,43 @@ if (!ENABLED) {
       const unknown = await runCli(IMPORTER, ['--frobnicate']);
       assert.equal(unknown.code, 1, unknown.out);
       assert.ok(unknown.out.includes('unknown flag'));
+    });
+
+    // ─────────────────────────── Bootstrap rehearsal (Parkgate ground fix) ───────────────────────────
+
+    test('15. bootstrap --confirm sets Parkgate ground; dry run then drops Parkgate from the groundless block', async () => {
+      // The bootstrap CLI runs headless against the seeded local table (it only imports
+      // repo.js — no sst), so drive it as a child process like the importer.
+      const boot = await runCli(BOOTSTRAP, ['--confirm']);
+      assert.equal(boot.code, 0, boot.out);
+      // Parkgate already exists in the snapshot → its ground is SET, no club is created.
+      assert.ok(
+        boot.out.includes('updated club parkgate-hambanathi-cc (ground → Phoenix Stonebridge)'),
+        `expected the Parkgate ground update line, got:\n${boot.out}`,
+      );
+      assert.ok(
+        boot.out.includes('already resolves to'),
+        'Parkgate resolves to the existing record',
+      );
+      assert.ok(!/\bwrote club /.test(boot.out), 'bootstrap creates no club record');
+
+      // Dry run after the fix: Parkgate now has Phoenix Stonebridge, so it drops out of the
+      // groundless block; Umgababa (ground "None") remains — an open question for the union.
+      const dry = await runImport();
+      assert.equal(dry.code, 0, dry.out);
+      const header = dry.out
+        .split('\n')
+        .find((l) => /── Clubs with no usable ground \(\d+\)/.test(l));
+      assert.ok(header, 'the groundless-club block is printed');
+      const parkgateStillListed = dry.out
+        .split('\n')
+        .some((l) => /parkgate-hambanathi-cc/.test(l) && /home fixtures:/.test(l));
+      assert.ok(!parkgateStillListed, 'Parkgate is no longer in the groundless block');
+      const umgababaListed = dry.out
+        .split('\n')
+        .some((l) => /umgababa-cricket-club/.test(l) && /home fixtures:/.test(l));
+      assert.ok(umgababaListed, 'Umgababa is still groundless');
+      assert.match(header!, /\(1\)/, 'only Umgababa remains groundless after the Parkgate fix');
     });
   });
 }

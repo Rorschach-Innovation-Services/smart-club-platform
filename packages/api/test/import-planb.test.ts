@@ -8,6 +8,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
+import type { Club } from '../src/types.js';
 
 const {
   isoDate,
@@ -19,6 +20,7 @@ const {
   pairKey,
   parseWorkbook,
   computeSameClubSlotOverlaps,
+  computeGroundlessClubs,
 } = await import('../src/import-planb-fixtures.js');
 
 // Mirrors the module's own (unexported) constants — kept in sync by inspection, not
@@ -602,5 +604,72 @@ describe('computeSameClubSlotOverlaps — same-club same-slot detection', () => 
       crossSeries[0].entries.map((e) => `${e.seriesSlug}/${e.fixtureId} v ${e.opponent}`),
       ['legacy-league/f1 v club-z', 'premier-men-t20-2/f2 v club-b'],
     );
+  });
+});
+
+describe('computeGroundlessClubs — home clubs with no usable ground', () => {
+  const club = (id: string, name: string, venue?: string): Club =>
+    ({ id, name, ground: venue === undefined ? {} : { venue } }) as unknown as Club;
+  // parkgate: empty-string ground; umgababa: junk "None"; delta: a real ground;
+  // rebased: junk ground but re-based by the Venue Allocations sheet.
+  const clubsById = new Map<string, Club>([
+    ['parkgate', club('parkgate', 'Parkgate Hambanathi CC', '')],
+    ['umgababa', club('umgababa', 'Umgababa Cricket Club', 'None')],
+    ['delta', club('delta', 'Delta CC', 'Tills')],
+    ['rebased', club('rebased', 'Re-based CC', 'None')],
+  ]);
+  const series = (leagueKey: string, pairs: Array<[string, string]>) => ({
+    series: {
+      leagueKey,
+      participants: [...new Set(pairs.flat())].map((cid) => ({ teamId: `tm_${cid}`, clubId: cid })),
+    },
+    fixtures: pairs.map(([home, away], i) => ({
+      id: `f${i + 1}`,
+      home: `tm_${home}`,
+      away: `tm_${away}`,
+    })),
+  });
+
+  test('an empty ground and a junk "None" are both groundless; a real ground is excluded', () => {
+    const built = [
+      series('promotion-women-s-league', [
+        ['parkgate', 'delta'],
+        ['delta', 'parkgate'], // delta hosts once but has a real ground → excluded
+        ['umgababa', 'parkgate'],
+      ]),
+    ];
+    const out = computeGroundlessClubs(built, clubsById, new Map());
+    assert.deepEqual(
+      out.map((g) => g.clubId),
+      ['parkgate', 'umgababa'], // sorted by clubId, delta excluded (has a ground)
+    );
+    assert.equal(out.find((g) => g.clubId === 'parkgate')!.venue, '');
+    assert.equal(out.find((g) => g.clubId === 'umgababa')!.venue, 'None');
+  });
+
+  test('a re-based club is excluded even though its own ground is junk', () => {
+    const built = [series('promotion-women-s-league', [['rebased', 'delta']])];
+    const reBase = new Map([['rebased', 'Harlequins 1']]);
+    assert.deepEqual(computeGroundlessClubs(built, clubsById, reBase), []);
+  });
+
+  test('home-fixture count and leagues are accumulated across series', () => {
+    const built = [
+      series('promotion-women-s-league', [
+        ['parkgate', 'delta'],
+        ['parkgate', 'umgababa'],
+      ]),
+      series('promotion', [['parkgate', 'delta']]),
+    ];
+    const out = computeGroundlessClubs(built, clubsById, new Map());
+    const pg = out.find((g) => g.clubId === 'parkgate')!;
+    assert.equal(pg.homeFixtures, 3);
+    assert.deepEqual(pg.leagues, ['promotion', 'promotion-women-s-league']);
+  });
+
+  test('a groundless club that never hosts is not reported', () => {
+    // umgababa is only ever the away side here → nothing to relocate, not listed.
+    const built = [series('promotion-women-s-league', [['delta', 'umgababa']])];
+    assert.deepEqual(computeGroundlessClubs(built, clubsById, new Map()), []);
   });
 });
