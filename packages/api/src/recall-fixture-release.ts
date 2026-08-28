@@ -80,6 +80,11 @@ async function main() {
     await repo.updateSeries(TENANT, String(s.id), {
       released: false,
       releasedAt: null,
+      // Recalling to draft clears any withholding (ADR 0011), matching the console's
+      // recall path — the series is re-approved and re-released from scratch, choosing
+      // withholding afresh. `removeUndefinedValues` drops these from the stored item.
+      withheld: undefined,
+      revealedAt: undefined,
       version: s.version,
     });
     console.log(`recalled ${s.id} → draft`);

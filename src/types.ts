@@ -876,9 +876,15 @@ export interface Series {
   approvedAt?: string | null;
   released: boolean;
   releasedAt: string | null;
+  /** Fields withheld from clubs on a released series (ADR 0011). Server-owned: set at release, cleared by reveal/recall. Absent ⇒ nothing withheld. */
+  withheld?: { venue?: true; time?: true };
+  /** When each withheld field was revealed to clubs. */
+  revealedAt?: { venue?: string; time?: string };
   version: number;
   [key: string]: unknown;
 }
+
+export type WithheldField = 'venue' | 'time';
 
 /** Stored object metadata for a player's uploaded ID document. */
 export interface PlayerIdDocMeta {

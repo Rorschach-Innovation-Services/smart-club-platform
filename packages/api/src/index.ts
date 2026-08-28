@@ -65,6 +65,7 @@ import {
   dobFromSaId,
 } from './player-identity.js';
 import { findReleaseClashes } from './venue-clash.js';
+import { normaliseWithheld, projectSeriesForClub, isWithheld } from './series-projection.js';
 import {
   validateCalendars,
   validateStructures,
@@ -121,6 +122,7 @@ import type {
   PlayerRegistration,
   PlayerClearance,
   AdminClearanceView,
+  WithheldField,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
 import { orgCopy } from './branding.js';
@@ -335,6 +337,15 @@ app.use(
 );
 
 const now = () => new Date().toISOString();
+
+/**
+ * The TENANT's calendar day, not the Lambda's. Lambda runs UTC and the union is UTC+2,
+ * so a plain `dayjs()` here is still on yesterday until 02:00 local — long enough for a
+ * chair to see fixtures in the portal (which reads the browser's local day) while the
+ * broadcast, and the club-facing `GET /series` projection, refuse them, on the one
+ * morning that matters. Shared by both so the two read gates can never disagree.
+ */
+const tenantToday = () => dayjs().utcOffset(TENANT_UTC_OFFSET_MINUTES).format('YYYY-MM-DD');
 
 /** Surface the club's denormalized player count as `players` (no N+1 COUNT). */
 function withPlayerCount(club: Club): Club {
@@ -2584,23 +2595,21 @@ app.post('/clubs/:id/send-fixtures', async (c) => {
   // client for what gets broadcast. If there's nothing to share, release the just-claimed
   // marker so this 409 doesn't poison a legitimate retry once fixtures are released.
   const allSeries = await repo.listSeries(ra.tenant);
-  // The TENANT's calendar day, not the Lambda's. Lambda runs UTC and the union is
-  // UTC+2, so a plain `dayjs()` here is still on yesterday until 02:00 local — long
-  // enough for the chair to see fixtures in the portal (which reads the browser's local
-  // day) while the broadcast refuses to send them, on the one morning that matters.
-  const today = dayjs().utcOffset(TENANT_UTC_OFFSET_MINUTES).format('YYYY-MM-DD');
-  const releasedSeries = allSeries.filter((s) => {
-    if (!s.released || !Array.isArray(s.teams)) return false;
-    // Delayed activation (ADR 0008): a junior series is released up front but stays
-    // invisible until `activateFrom`. This MIRRORS the club portal's read-side gate —
-    // broadcasting a schedule the chair can't see in their own portal would be worse
-    // than not sending it. Absent/malformed ⇒ visible, so legacy series are unaffected.
-    if (s.activateFrom && s.activateFrom > today) return false;
+  // Same club-facing projection the portal's `GET /series` applies (ADR 0011): released +
+  // activated series only, withheld venue/time stripped — the broadcast can never carry a
+  // ground or kick-off the chair's own portal is hiding. `buildClubSchedule` reads each
+  // series' `withheld` flag to print "Venue TBC" and drop the distance line.
+  const today = tenantToday();
+  const releasedSeries = allSeries
+    .map((s) => projectSeriesForClub(s, today))
+    .filter((s): s is Series => s !== null)
     // A multi-team club participates under its `tm_…` ids, not its clubId — match
     // against the club's resolved team set so its fixtures aren't missed.
-    const mine = new Set(teamIdsForClub(s, id));
-    return s.teams.some((t) => mine.has(t));
-  });
+    .filter((s) => {
+      if (!Array.isArray(s.teams)) return false;
+      const mine = new Set(teamIdsForClub(s, id));
+      return s.teams.some((t) => mine.has(t));
+    });
   if (releasedSeries.length === 0) {
     await repo.releaseInviteClaim(ra.tenant, id, idempotencyKey);
     throw new HttpError(409, 'no released fixtures to share');
@@ -2666,8 +2675,17 @@ function validateSeriesSchedule(
 }
 
 app.get('/series', async (c) => {
-  const { tenant } = c.get('requestAuth')!;
-  return c.json(await repo.listSeries(tenant));
+  const ra = c.get('requestAuth')!;
+  const all = await repo.listSeries(ra.tenant);
+  // Admins get the raw list (drafts, unreleased venues/times, approval state). Everyone
+  // else sees the club-facing projection: released + activated series only, with any
+  // withheld fields stripped (ADR 0011). Release filtering used to be client-only, which
+  // leaked every draft and all fields to reps.
+  if (ra.membership.role === 'admin') return c.json(all);
+  const today = tenantToday();
+  return c.json(
+    all.map((s) => projectSeriesForClub(s, today)).filter((s): s is Series => s !== null),
+  );
 });
 
 app.post('/series', requireAdmin, async (c) => {
@@ -2703,14 +2721,21 @@ app.post('/series', requireAdmin, async (c) => {
   series.version = 1;
   series.released = series.released ?? false;
   series.releasedAt = series.releasedAt ?? null;
+  // Withholding is chosen at release, never at create — a brand-new series is a draft
+  // (ADR 0011). Drop any client-sent values so they can only be set by the release PATCH.
+  delete series.withheld;
+  delete series.revealedAt;
   await repo.putSeries(tenant, series);
   return c.json(series, 201);
 });
 
+/** A series PATCH may also carry the `reveal` ACTION key — not a stored field. */
+type SeriesPatch = Partial<Series> & { reveal?: unknown };
+
 app.patch('/series/:id', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
-  const patch = await c.req.json<Partial<Series>>();
+  const patch = (await c.req.json()) as SeriesPatch;
   const current = await repo.getSeries(ra.tenant, id);
   if (!current) throw new HttpError(404, 'series not found');
   // Same gsi1-sort-key guard as POST. `updateSeries` rewrites `gsi1sk` from the patched
@@ -2734,6 +2759,69 @@ app.patch('/series/:id', requireAdmin, async (c) => {
     if (!config) throw new HttpError(404, 'tenant not found');
     validateSeriesSchedule(patch.schedule, config);
   }
+  // ── Progressive release (ADR 0011) ──
+  // `revealedAt` is server-owned audit; never accept it off the wire.
+  delete patch.revealedAt;
+
+  // `reveal` is an ACTION key, not a stored field: reveal one or both withheld fields on
+  // an already-released series. It is computed entirely from `current` and stripped
+  // before the write. A reveal cannot RE-approve or re-run the clash gate (it changes no
+  // real data), and carrying `released` alongside it is a client bug, not two intents.
+  if (patch.reveal !== undefined) {
+    if (patch.released !== undefined)
+      throw new HttpError(400, 'reveal cannot be combined with released');
+    if (!Array.isArray(patch.reveal) || patch.reveal.length === 0)
+      throw new HttpError(400, 'reveal must be a non-empty array of "venue" and/or "time"');
+    for (const f of patch.reveal)
+      if (f !== 'venue' && f !== 'time')
+        throw new HttpError(400, 'reveal entries must be "venue" or "time"');
+    if (!current.released) throw new HttpError(409, 'series is not released');
+    const withheld = { ...(current.withheld ?? {}) };
+    const revealedAt = { ...(current.revealedAt ?? {}) };
+    const at = now();
+    for (const f of patch.reveal as WithheldField[]) {
+      if (!withheld[f]) throw new HttpError(409, `nothing withheld for ${f}`);
+      delete withheld[f];
+      revealedAt[f] = at;
+    }
+    // Reveal never bumps releasedAt — the schedule went out at release; this only
+    // un-hides a field. Clearing the last withheld key drops the object entirely.
+    // Narrow the write to exactly the reveal-owned keys plus the caller's version. Sibling
+    // keys riding along on the patch (fixtures, approved, name…) are a client bug, not part
+    // of the reveal intent, so they are ignored rather than persisted through this action.
+    const revealWithheld = Object.keys(withheld).length ? withheld : undefined;
+    try {
+      return c.json(
+        await repo.updateSeries(ra.tenant, id, {
+          withheld: revealWithheld,
+          revealedAt,
+          version: patch.version,
+        }),
+      );
+    } catch (err) {
+      if (err instanceof VersionConflictError) throw new HttpError(409, 'series changed; refetch');
+      throw err;
+    }
+  }
+
+  // Withheld fields are chosen ONLY on the false→true release transition, and only when
+  // the patch actually carries a `withheld` key. Gating on the flag value alone would
+  // wipe/rewrite it on the FIRST in-season fixture edit — `updateSeries` PATCHes the
+  // whole object, `released: true` included — silently revealing everything. Any other
+  // patch (including that whole-object edit) drops the key, so the stored value is kept.
+  if (patch.released === true && !current.released && 'withheld' in patch)
+    patch.withheld = normaliseWithheld(patch.withheld);
+  else delete patch.withheld;
+  // Recall clears both: a series pulled back to draft carries no withholding to re-apply
+  // when it is next released.
+  if (patch.released === false) {
+    // Setting these to `undefined` deletes the attributes: `repo.updateSeries` spreads the
+    // patch and the DocumentClient marshalls with `removeUndefinedValues: true` (repo.ts:94),
+    // so an undefined value drops the key rather than storing a null.
+    patch.withheld = undefined;
+    patch.revealedAt = undefined;
+  }
+
   // Approval gate. Approve/unapprove stamps approvedAt server-side. Editing the
   // fixtures of a DRAFT series recalls any prior approval (must re-approve before
   // release); a live series keeps its state so in-season edits still reach clubs.
@@ -2803,7 +2891,11 @@ app.delete('/series/:id', requireAdmin, async (c) => {
    the Series each stage-group materialises into. Admin-only to write, reps read (their
    club's fixtures resolve through it). Same optimistic concurrency as series. */
 
-app.get('/season-runs', async (c) => {
+// Admin-only: the frozen `structureSnapshot` embeds each stage's `schedule.slots` (the
+// kick-off times a series may withhold under ADR 0011), and the only caller is the
+// admin-gated console query (`enabled: role === 'admin'`). Reps read their fixtures
+// through the projected `GET /series`, never here.
+app.get('/season-runs', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   return c.json(await repo.listSeasonRuns(tenant));
 });
@@ -2843,7 +2935,7 @@ app.post('/season-runs', requireAdmin, async (c) => {
   return c.json(run, 201);
 });
 
-app.get('/season-runs/:id', async (c) => {
+app.get('/season-runs/:id', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   const run = await repo.getSeasonRun(tenant, c.req.param('id'));
   if (!run) throw new HttpError(404, 'season run not found');
@@ -3001,6 +3093,9 @@ app.post('/series/:id/duplicate', requireAdmin, async (c) => {
     releasedAt: null,
     version: 1,
   };
+  // A copy is a fresh draft — withholding belongs to the original's release, not the clone.
+  delete copy.withheld;
+  delete copy.revealedAt;
   await repo.putSeries(tenant, copy);
   return c.json(copy, 201);
 });
@@ -6593,6 +6688,10 @@ interface FixtureLite {
   date?: string;
   round?: number;
   time?: string;
+  venueName?: string;
+  venueOverride?: string;
+  venueLat?: number;
+  venueLon?: number;
 }
 
 type LatLon = { lat?: number; lon?: number } | undefined;
@@ -6664,6 +6763,11 @@ export function buildClubSchedule(
   const season = seasonFromSeries(releasedSeries);
   const blocks: string[] = [];
   for (const s of releasedSeries) {
+    // A series released with fields withheld (ADR 0011) reaches players the same way it
+    // reaches the portal: no ground, no distance, no kick-off. The projection already
+    // stripped the fixture keys; these flags drive the substitute copy.
+    const hideVenue = isWithheld(s, 'venue');
+    const hideTime = isWithheld(s, 'time');
     // Match fixtures against the club's resolved team set (its `tm_…` ids for a
     // multi-team club, else its clubId). A same-club derby (both sides ours) lists
     // once from the home side's view, naming the other side as the opponent.
@@ -6684,29 +6788,35 @@ export function buildClubSchedule(
       // pick as much as for "Other" — without touching `venueName`. Reading only the
       // allocated name texted players a different ground from the one the portal was
       // showing them, for the single most common manual venue change there is.
-      const override = (f as { venueOverride?: string }).venueOverride?.trim();
-      const allocated = (f as { venueName?: string }).venueName;
-      const venue =
-        override ||
-        allocated ||
-        (isHome
-          ? me.venue || club.ground?.venue || 'Home ground TBA'
-          : opp.venue || 'Opponent ground TBA');
-      let line = `  R${f.round ?? '?'} · ${fmtFixtureDate(f.date)}${f.time ? ` · ${f.time}` : ''} · ${isHome ? 'Home' : 'Away'} vs ${opp.name} · ${venue}`;
+      const override = f.venueOverride?.trim();
+      const allocated = f.venueName;
+      const venue = hideVenue
+        ? 'Venue TBC'
+        : override ||
+          allocated ||
+          (isHome
+            ? me.venue || club.ground?.venue || 'Home ground TBA'
+            : opp.venue || 'Opponent ground TBA');
+      const timePart = !hideTime && f.time ? ` · ${f.time}` : '';
+      let line = `  R${f.round ?? '?'} · ${fmtFixtureDate(f.date)}${timePart} · ${isHome ? 'Home' : 'Away'} vs ${opp.name} · ${venue}`;
       // Distance to where the match is actually played; falls back to the opponent's
-      // ground for a series that has never been through allocation.
-      const vLat = (f as { venueLat?: number }).venueLat;
-      const vLon = (f as { venueLon?: number }).venueLon;
-      // Coordinates are only trustworthy when they describe the ground we just NAMED. An
-      // override typed after the last allocation leaves the old ground's coordinates
-      // behind, and quoting a round trip to a ground nobody is going to is worse than
-      // quoting none.
-      const coordsMatchVenue = !override || override === allocated;
-      const pinnedVenue = coordsMatchVenue && Number.isFinite(vLat) && Number.isFinite(vLon);
-      if (!isHome || pinnedVenue) {
-        const to = pinnedVenue ? { lat: vLat, lon: vLon } : { lat: opp.lat, lon: opp.lon };
-        const km = Math.round(haversineKm(to, club.ground) * 2);
-        if (km > 0) line += ` · ${km.toLocaleString()} km round-trip`;
+      // ground for a series that has never been through allocation. Skipped wholesale
+      // when the venue is withheld — a round-trip would leak the ground being hidden.
+      if (!hideVenue) {
+        // Coordinates are only trustworthy when they describe the ground we just NAMED.
+        // An override typed after the last allocation leaves the old ground's coordinates
+        // behind, and quoting a round trip to a ground nobody is going to is worse than
+        // quoting none.
+        const coordsMatchVenue = !override || override === allocated;
+        const pinnedVenue =
+          coordsMatchVenue && Number.isFinite(f.venueLat) && Number.isFinite(f.venueLon);
+        if (!isHome || pinnedVenue) {
+          const to = pinnedVenue
+            ? { lat: f.venueLat, lon: f.venueLon }
+            : { lat: opp.lat, lon: opp.lon };
+          const km = Math.round(haversineKm(to, club.ground) * 2);
+          if (km > 0) line += ` · ${km.toLocaleString()} km round-trip`;
+        }
       }
       lines.push(line);
     }

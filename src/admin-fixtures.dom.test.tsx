@@ -75,6 +75,7 @@ const setup = (s: Series = series()) => {
       onSetReleased={vi.fn()}
       onAskRelease={vi.fn()}
       onAskRecall={vi.fn()}
+      onAskReveal={vi.fn()}
       onApprove={vi.fn()}
       onUnapprove={vi.fn()}
       onAllocateVenues={vi.fn()}
@@ -678,5 +679,80 @@ describe('the season viewer — every schedule on screen, downloads inside it', 
     renderPage([series({ fixtures: [] } as Partial<Series>)]);
     const dialog = await openViewer(user);
     expect(within(dialog).getByText(/no fixtures in this series yet/i)).toBeTruthy();
+  });
+});
+
+describe('progressive release — withhold at release, reveal later (ADR 0011)', () => {
+  const renderPage = (
+    s: Series,
+    spies: { onSetReleased?: ReturnType<typeof vi.fn>; onReveal?: ReturnType<typeof vi.fn> } = {},
+  ) => {
+    const onSetReleased = spies.onSetReleased ?? vi.fn();
+    const onReveal = spies.onReveal ?? vi.fn();
+    renderWithProviders(
+      <AdminFixtures
+        clubs={clubs}
+        allSeries={[s]}
+        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
+        onUpdateSeries={vi.fn()}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onSetReleased={onSetReleased}
+        onReveal={onReveal}
+        onSetApproved={vi.fn()}
+        toast={vi.fn()}
+        allVenues={[]}
+        allSeasonRuns={[]}
+        allLeagues={[]}
+        tenantConfig={{ structures: [], calendars: [] } as unknown as TenantConfig}
+        onSaveVenue={vi.fn()}
+        onDeleteVenue={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCreateSeasonRun={vi.fn()}
+        onPatchSeasonRun={vi.fn()}
+        onDeleteSeasonRun={vi.fn()}
+        onGenerateStageSeries={vi.fn()}
+      />,
+    );
+    return { onSetReleased, onReveal };
+  };
+
+  it('withholds start times chosen in the release dialog', async () => {
+    const user = userEvent.setup();
+    const { onSetReleased } = renderPage(series({ approved: true } as Partial<Series>));
+
+    // Header CTA opens the ReleaseDialog (not an immediate release).
+    await user.click(screen.getAllByRole('button', { name: /release to clubs/i })[0]);
+    const dialog = screen.getByRole('dialog', { name: /release .*to clubs/i });
+    expect(onSetReleased).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole('checkbox', { name: /withhold start times/i }));
+    await user.click(within(dialog).getByRole('button', { name: /release to clubs/i }));
+
+    expect(onSetReleased).toHaveBeenCalledWith('s1', true, { time: true });
+  });
+
+  it('shows a withheld badge and reveals venues through the confirm modal', async () => {
+    const user = userEvent.setup();
+    const { onReveal } = renderPage(
+      series({ approved: true, released: true, withheld: { venue: true } } as Partial<Series>),
+    );
+
+    // The series card carries the withheld badge.
+    expect(screen.getAllByText(/venues withheld/i).length).toBeGreaterThan(0);
+
+    // Header CTA → confirm modal → dispatch reveal(['venue']).
+    await user.click(screen.getAllByRole('button', { name: /reveal venues/i })[0]);
+    const confirmBox = screen
+      .getByText(/reveal venues to all clubs\?/i)
+      .closest('.fix-confirm-box') as HTMLElement;
+    await user.click(within(confirmBox).getByRole('button', { name: /^reveal venues$/i }));
+
+    expect(onReveal).toHaveBeenCalledWith('s1', ['venue']);
+  });
+
+  it('never claims WhatsApp notifications are sent on release', () => {
+    renderPage(series({ approved: true, released: true } as Partial<Series>));
+    expect(screen.queryByText(/whatsapp notifications sent/i)).toBeNull();
   });
 });

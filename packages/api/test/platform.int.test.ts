@@ -3174,8 +3174,10 @@ describe('season runs (ADR 0008)', () => {
     assert.equal(one.status, 200);
   });
 
-  test('reps can read but not write', async () => {
-    assert.equal((await app.request('/season-runs', { headers: H(REP) })).status, 200);
+  test('reps cannot list or write season runs (admin-only — ADR 0011)', async () => {
+    // GET /season-runs is admin-only: its structureSnapshot embeds stage kick-off slots
+    // (a field a series may withhold), and the only caller is the admin-gated console.
+    assert.equal((await app.request('/season-runs', { headers: H(REP) })).status, 403);
     assert.equal((await post(run({ id: 'rep-run' }), REP)).status, 403);
   });
 

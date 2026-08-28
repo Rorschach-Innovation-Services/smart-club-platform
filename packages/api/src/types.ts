@@ -834,9 +834,21 @@ export interface Series {
   approvedAt?: string | null;
   released: boolean;
   releasedAt: string | null;
+  /**
+   * Fields withheld from clubs on a released series (ADR 0011). Set ONLY by the release
+   * PATCH (the false→true transition); cleared per key by `reveal`, wholesale by recall.
+   * Absent ⇒ nothing withheld — every series released before this existed reads as
+   * fully visible. Storage keeps the real venue/time data; withholding is a read-side
+   * projection for club users, so the release clash gate still sees real venues.
+   */
+  withheld?: { venue?: true; time?: true };
+  /** Audit: when each withheld field was revealed. Cleared by recall; `releasedAt` is never bumped by a reveal. */
+  revealedAt?: { venue?: string; time?: string };
   version: number;
   [key: string]: unknown;
 }
+
+export type WithheldField = 'venue' | 'time';
 
 /** Stored object metadata for a player's uploaded ID document (parallels club docMeta). */
 export interface PlayerIdDocMeta {

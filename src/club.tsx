@@ -4397,6 +4397,18 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
   const fixtureVenue = fixtureVenueCoords;
 
   /**
+   * Progressive release (ADR 0011): an admin may withhold a series' venues and/or start
+   * times at release, revealing each later. The server strips the corresponding fixture
+   * fields on the wire — BUT it deliberately does NOT strip participants' home-ground
+   * snapshots (those reach the rep through `GET /clubs`, independent of the fixture). So
+   * the portal cannot infer "withheld" from a missing `venueName`; it must read the
+   * series' `withheld` flag explicitly. These two helpers are the single source of that
+   * truth for the hero, the KPI tiles, the table and the footnote.
+   */
+  const venueWithheld = (s) => !!s?.withheld?.venue;
+  const timeWithheld = (s) => !!s?.withheld?.time;
+
+  /**
    * The venue name to display for a fixture. The allocated ground wins (ADR 0008
    * phase 2) — deriving from the home side would tell the two clubs to go to different
    * grounds whenever allocation has moved a fixture, which is routine. Shared by the
@@ -4405,9 +4417,12 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
    *
    * `mySide` is the fixture's HOME team (resolved from `f.home`, regardless of which
    * side this club is on) and `opp` is this club's opponent — the same resolution the
-   * table already did, just named for reuse.
+   * table already did, just named for reuse. `s` is the fixture's series: when its venue
+   * is withheld the ground is not yet public, so we say so rather than fall back to a
+   * home-ground snapshot the server left intact.
    */
-  function venueNameFor(f, isHome, mySide, opp) {
+  function venueNameFor(f, isHome, mySide, opp, s) {
+    if (venueWithheld(s)) return 'Venue to be confirmed';
     return (
       f.venueOverride ||
       f.venueName ||
@@ -4498,8 +4513,8 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
           <div className="club-fix-empty-title">Awaiting release from the {copy.office}</div>
           <div className="club-fix-empty-sub">
             Once the union office signs off on the 2026/27 fixture list, every match you're playing
-            — round, date, opponent, venue and travel costs — will populate here automatically.
-            You'll also receive an email &amp; WhatsApp the moment it goes live.
+            — round, date, opponent, venue and travel costs — will populate here automatically. It
+            appears here the moment it goes live.
           </div>
           <div className="club-fix-empty-meta">
             <span className="sdot" /> Status: <strong>Draft · awaiting release</strong>
@@ -4508,6 +4523,13 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
       </div>
     );
   }
+
+  // A partial travel total is worse than none: if ANY of this club's series is still
+  // withholding venues, the km/fuel tiles and the footnote can't be truthful, so they
+  // stand down until every ground is public. `anyWithheld` (venue OR time) drives the
+  // share-with-players hint further down.
+  const anyVenueWithheld = myReleased.some(venueWithheld);
+  const anyWithheld = myReleased.some((s) => venueWithheld(s) || timeWithheld(s));
 
   // Aggregate totals across all released series this club is in
   let totalMatches = 0,
@@ -4533,7 +4555,10 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
       const away = resolveTeam(s, f.away, clubBy);
       const homeSide = isHome ? club : home;
       const awaySide = isHome ? away : club;
-      if (homeSide?.ground && awaySide?.ground) {
+      // Skip travel while this series withholds venues: the ground is not yet public,
+      // so any distance would be a guess off the home-ground snapshot the server left
+      // intact (see `venueWithheld`).
+      if (!venueWithheld(s) && homeSide?.ground && awaySide?.ground) {
         const c = fixtureCost(
           homeSide,
           awaySide,
@@ -4575,13 +4600,25 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
     : null;
   const nextOpp = nextFixture ? resolveTeam(nextFixture._series, nextOppId, clubBy) : null;
   const nextOppName = nextOpp?.name || 'TBA';
-  const nextVenue = nextFixture ? venueNameFor(nextFixture, nextIsHome, nextMySide, nextOpp) : null;
+  const nextVenue = nextFixture
+    ? venueNameFor(nextFixture, nextIsHome, nextMySide, nextOpp, nextFixture._series)
+    : null;
   const nextTime = nextFixture ? formatTime(nextFixture.time) : null;
   // Same "Time TBC only where meaningful" rule as the table (~1013 in admin.tsx) —
   // shown only once this club's next series has at least one OTHER timed fixture.
   const nextSeriesHasTimes = nextFixture
     ? nextFixture._series.fixtures.some((f) => !!formatTime(f.time))
     : false;
+  // A withheld start time is a definite "coming later", so it speaks regardless of the
+  // seriesHasTimes heuristic above — the union has promised a time, just not yet.
+  const nextTimeWithheld = nextFixture ? timeWithheld(nextFixture._series) : false;
+  const nextTimeText = nextTimeWithheld
+    ? 'Time to be confirmed'
+    : nextTime
+      ? nextTime
+      : nextSeriesHasTimes
+        ? 'Time TBC'
+        : null;
 
   return (
     <div>
@@ -4634,18 +4671,40 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
         <div className="club-fix-kpi">
           <div className="club-fix-kpi-l">Travel · away</div>
           <div className="club-fix-kpi-n">
-            {Math.round(totalKm).toLocaleString()}{' '}
-            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--muted)' }}>km</span>
+            {anyVenueWithheld ? (
+              <span style={{ color: 'var(--muted)' }}>—</span>
+            ) : (
+              <>
+                {Math.round(totalKm).toLocaleString()}{' '}
+                <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--muted)' }}>km</span>
+              </>
+            )}
           </div>
-          <div className="club-fix-kpi-meta">round-trip across all away games</div>
+          <div className="club-fix-kpi-meta">
+            {anyVenueWithheld
+              ? 'shown once venues are confirmed'
+              : 'round-trip across all away games'}
+          </div>
         </div>
         <div className="club-fix-kpi green">
           <div className="club-fix-kpi-l">Season fuel</div>
-          <div className="club-fix-kpi-n">R {Math.round(totalCost).toLocaleString()}</div>
+          <div className="club-fix-kpi-n">
+            {anyVenueWithheld ? (
+              <span style={{ color: 'var(--muted)' }}>—</span>
+            ) : (
+              <>R {Math.round(totalCost).toLocaleString()}</>
+            )}
+          </div>
           <div className="club-fix-kpi-meta">
-            est · {myReleased[0]?.carsPerAwayTrip || DEFAULT_CARS} cars × R{' '}
-            {myReleased[0]?.costPerKm || DEFAULT_COST_PER_KM}
-            /km
+            {anyVenueWithheld ? (
+              'shown once venues are confirmed'
+            ) : (
+              <>
+                est · {myReleased[0]?.carsPerAwayTrip || DEFAULT_CARS} cars × R{' '}
+                {myReleased[0]?.costPerKm || DEFAULT_COST_PER_KM}
+                /km
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -4668,12 +4727,13 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                 {nextFixture.round}
               </div>
               {/* Time is shown only when set; "Time TBC" only once the series uses
-                  times elsewhere (same rule as the fixtures table below). Venue always
-                  shows — it always resolves to something, even if just "TBA". */}
-              {(nextTime || nextSeriesHasTimes || nextVenue) && (
+                  times elsewhere (same rule as the fixtures table below), or "Time to be
+                  confirmed" when withheld. Venue always shows — it resolves to something,
+                  even if just "TBA" or "Venue to be confirmed". */}
+              {(nextTimeText || nextVenue) && (
                 <div className="club-fix-next-sub" style={{ marginTop: 2 }}>
-                  {nextTime ? nextTime : nextSeriesHasTimes ? 'Time TBC' : null}
-                  {(nextTime || nextSeriesHasTimes) && nextVenue ? ' · ' : ''}
+                  {nextTimeText}
+                  {nextTimeText && nextVenue ? ' · ' : ''}
                   {nextVenue}
                 </div>
               )}
@@ -4715,6 +4775,11 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
             // fixture — computed once per series, not per row, so series that never
             // use times (most of them) stay silent rather than noisy.
             const seriesHasTimes = s.fixtures.some((f) => !!formatTime(f.time));
+            // Withheld state for THIS series (ADR 0011): drives the Venue text, the
+            // presence of the Distance/Travel-cost columns, the suburb sub-line and the
+            // time cell. Read from the series flag, never inferred from missing fields.
+            const hideVenue = venueWithheld(s);
+            const hideTime = timeWithheld(s);
 
             return (
               <div key={s.id} className="club-fix-series">
@@ -4722,6 +4787,11 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                   <div>
                     <div className="club-fix-series-eyebrow">
                       Released · {formatStampDay(s.releasedAt)}
+                      {hideVenue && ' · venues to be confirmed'}
+                      {hideTime && ' · times to be confirmed'}
+                      {!hideVenue &&
+                        s.revealedAt?.venue &&
+                        ` · venues confirmed ${formatStampDay(s.revealedAt.venue)}`}
                     </div>
                     <div className="club-fix-series-name">{s.name}</div>
                     <div className="club-fix-series-meta">
@@ -4747,8 +4817,8 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                         <th>Opponent</th>
                         <th>H/A</th>
                         <th>Venue</th>
-                        <th style={{ textAlign: 'right' }}>Distance</th>
-                        <th style={{ textAlign: 'right' }}>Travel cost</th>
+                        {!hideVenue && <th style={{ textAlign: 'right' }}>Distance</th>}
+                        {!hideVenue && <th style={{ textAlign: 'right' }}>Travel cost</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -4759,7 +4829,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                         // roster edit, and an intra-club derby names the other side correctly.
                         const opp = resolveTeam(s, oppId, clubBy);
                         const mySide = resolveTeam(s, f.home, clubBy);
-                        const venueName = venueNameFor(f, isHome, mySide, opp);
+                        const venueName = venueNameFor(f, isHome, mySide, opp, s);
                         // THIS club's journey, not the fixture's total. `fixtureCost`
                         // sums both sides' legs when the ground is pinned — right for a
                         // union's series total, wrong on a screen a club budgets fuel
@@ -4769,7 +4839,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                           cost = null;
                         const homeSide = isHome ? club : opp;
                         const awaySide = isHome ? opp : club;
-                        if (homeSide?.ground && awaySide?.ground) {
+                        if (!hideVenue && homeSide?.ground && awaySide?.ground) {
                           const c = fixtureCost(
                             homeSide,
                             awaySide,
@@ -4826,7 +4896,10 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                                   an untimed fixture renders nothing, as before. */}
                               {(() => {
                                 const time = formatTime(f.time);
-                                if (!time && !seriesHasTimes) return null;
+                                // A withheld start time always speaks; otherwise show
+                                // the time when set, or "Time TBC" only where the series
+                                // uses times elsewhere.
+                                if (!hideTime && !time && !seriesHasTimes) return null;
                                 return (
                                   <div
                                     style={{
@@ -4836,7 +4909,9 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                                       fontFamily: "'Montserrat',sans-serif",
                                     }}
                                   >
-                                    {time ? (
+                                    {hideTime ? (
+                                      'Time to be confirmed'
+                                    ) : time ? (
                                       <>
                                         {time}
                                         {f.slot ? ` · ${f.slot}` : ''}
@@ -4880,36 +4955,54 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                               >
                                 {venueName}
                               </div>
-                              {!isHome && opp?.ground?.suburb && (
+                              {/* Suburb comes from the opponent's home-ground snapshot,
+                                  which the server leaves intact — so it must be hidden
+                                  too while the venue is withheld, or it would leak where
+                                  the match is likely to be played. */}
+                              {!hideVenue && !isHome && opp?.ground?.suburb && (
                                 <div style={{ fontSize: 10.5, color: 'var(--muted)' }}>
                                   {opp.ground.suburb}
                                 </div>
                               )}
                             </td>
-                            <td
-                              style={{ textAlign: 'right', fontFamily: "'Montserrat',sans-serif" }}
-                            >
-                              {dist !== null ? (
-                                <span style={{ fontWeight: 700, fontSize: 12.5 }}>
-                                  {Math.round(dist)} km
-                                </span>
-                              ) : (
-                                <span style={{ color: 'var(--muted-2)' }}>—</span>
-                              )}
-                            </td>
-                            <td
-                              style={{ textAlign: 'right', fontFamily: "'Montserrat',sans-serif" }}
-                            >
-                              {cost !== null ? (
-                                <span
-                                  style={{ fontWeight: 800, color: 'var(--green)', fontSize: 13 }}
-                                >
-                                  R {Math.round(cost).toLocaleString()}
-                                </span>
-                              ) : (
-                                <span style={{ color: 'var(--muted-2)' }}>—</span>
-                              )}
-                            </td>
+                            {!hideVenue && (
+                              <td
+                                style={{
+                                  textAlign: 'right',
+                                  fontFamily: "'Montserrat',sans-serif",
+                                }}
+                              >
+                                {dist !== null ? (
+                                  <span style={{ fontWeight: 700, fontSize: 12.5 }}>
+                                    {Math.round(dist)} km
+                                  </span>
+                                ) : (
+                                  <span style={{ color: 'var(--muted-2)' }}>—</span>
+                                )}
+                              </td>
+                            )}
+                            {!hideVenue && (
+                              <td
+                                style={{
+                                  textAlign: 'right',
+                                  fontFamily: "'Montserrat',sans-serif",
+                                }}
+                              >
+                                {cost !== null ? (
+                                  <span
+                                    style={{
+                                      fontWeight: 800,
+                                      color: 'var(--green)',
+                                      fontSize: 13,
+                                    }}
+                                  >
+                                    R {Math.round(cost).toLocaleString()}
+                                  </span>
+                                ) : (
+                                  <span style={{ color: 'var(--muted-2)' }}>—</span>
+                                )}
+                              </td>
+                            )}
                           </tr>
                         );
                       })}
@@ -4922,12 +5015,15 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
         </div>
       ))}
 
-      {/* Footnote */}
-      <div className="club-fix-foot">
-        Travel cost is estimated at R {myReleased[0]?.costPerKm || DEFAULT_COST_PER_KM}/km ×{' '}
-        {myReleased[0]?.carsPerAwayTrip || 3} cars per away trip — published with the fixture
-        release. Adjustments to schedule require a {copy.office} sign-off.
-      </div>
+      {/* Footnote — suppressed while any series withholds venues, since the travel
+          figures it explains are themselves standing down until grounds are public. */}
+      {!anyVenueWithheld && (
+        <div className="club-fix-foot">
+          Travel cost is estimated at R {myReleased[0]?.costPerKm || DEFAULT_COST_PER_KM}/km ×{' '}
+          {myReleased[0]?.carsPerAwayTrip || 3} cars per away trip — published with the fixture
+          release. Adjustments to schedule require a {copy.office} sign-off.
+        </div>
+      )}
 
       {/* Share-with-players modal — portaled for the same transformed-ancestor
           reason as the certificate-removal confirm. */}
@@ -4947,6 +5043,27 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                 <strong>{playerCount}</strong> registered player{playerCount === 1 ? '' : 's'}.
                 Players registered as minors are skipped. Choose how to reach them:
               </div>
+              {/* Withheld-field heads-up (ADR 0011): venues/times may still be pending,
+                  so the chair can choose to wait rather than send an incomplete schedule
+                  now and a second, complete one later. No API change — purely advisory. */}
+              {anyWithheld && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: 'var(--muted)',
+                    background: 'var(--paper2)',
+                    border: '1px solid var(--line)',
+                    borderRadius: 8,
+                    padding: '8px 12px',
+                    marginBottom: 12,
+                    lineHeight: 1.45,
+                  }}
+                >
+                  Some venues or start times are still to be confirmed by the {copy.office} —
+                  players will get a second message when they're revealed, so you may prefer to
+                  wait.
+                </div>
+              )}
               <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 4 }}>
                 {[
                   { k: 'email', label: 'Email' },

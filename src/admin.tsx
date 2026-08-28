@@ -109,6 +109,7 @@ import { parseSupport } from './support';
 import { DocPreviewModal } from './DocPreviewModal';
 import { PlayerDetailModal } from './PlayerDetailModal';
 import { RegLinkModal } from './RegLinkModal';
+import { ReleaseDialog } from './ReleaseDialog';
 import { ClubNameModal } from './ClubNameModal';
 import {
   Icon,
@@ -156,6 +157,8 @@ interface AdminFixturesProps {
   onDeleteSeries;
   onDuplicateSeries;
   onSetReleased;
+  /** Reveal one or more withheld fields on a released series (ADR 0011). */
+  onReveal?;
   onSetApproved;
   toast: (message: string, tone?: string) => void;
   allCalendars?: SeasonCalendar[];
@@ -263,6 +266,7 @@ export function AdminFixtures({
   onDeleteSeries,
   onDuplicateSeries,
   onSetReleased,
+  onReveal,
   onSetApproved,
   toast,
   allCalendars = [],
@@ -290,7 +294,8 @@ export function AdminFixtures({
   const [viewerOpen, setViewerOpen] = useStateA(false);
   const [activeId, setActiveId] = useStateA(allSeries[0]?.id);
   const active = allSeries.find((s) => s.id === activeId) || allSeries[0];
-  const [confirm, setConfirm] = useStateA(null); // shared confirmation modal state
+  const [confirm, setConfirm] = useStateA(null); // shared confirmation modal state (recall/reveal)
+  const [releaseFor, setReleaseFor] = useStateA(null); // series whose ReleaseDialog is open
   const clubBy = (id) => clubs.find((c) => c.id === id);
   // Resolve a fixture id → team (series participant). A single-team club resolves to
   // itself; a multi-team club's `tm_…` id resolves via the series snapshot.
@@ -355,27 +360,40 @@ export function AdminFixtures({
     ).catch(() => toast?.('Export failed — please retry'));
   }
 
-  // Shared release/recall confirmation builders — used by header, card, and bottom bar
+  // Release opens the ReleaseDialog (where venues/times can be withheld); recall and
+  // reveal use the shared .fix-confirm modal. Used by header, card, and bottom bar.
   function askRelease(s) {
-    setConfirm({
-      title: `Release ${s.fixtures.length} fixtures to the league?`,
-      body: `This publishes the full ${s.name} schedule to all ${distinctClubCount(s)} affiliated clubs. They'll see it in their portals immediately and receive email + WhatsApp notifications.`,
-      onYes: () => {
-        onSetReleased(s.id, true);
-        setConfirm(null);
-        toast?.(s.name + ' · released to ' + distinctClubCount(s) + ' clubs');
-      },
-    });
+    setReleaseFor(s);
   }
   function askRecall(s) {
     setConfirm({
       title: 'Recall this release?',
-      body: "All clubs will be notified that the schedule has been pulled back to draft. They won't see updates until you release again.",
+      body: 'Clubs will no longer see this schedule in their portals. No notification is sent. Any withheld venues or times are cleared — you choose again next time you release.',
       danger: true,
+      yesLabel: 'Yes, recall',
       onYes: () => {
         onSetReleased(s.id, false);
         setConfirm(null);
         toast?.(s.name + ' · recalled to draft');
+      },
+    });
+  }
+  // Reveal a withheld field (venue/time) to every club — whole series, irreversible
+  // without recalling. Confirmed through the shared modal, then dispatched to the API.
+  function reveal(s, field: 'venue' | 'time') {
+    const noun = field === 'venue' ? 'venues' : 'times';
+    setConfirm({
+      title: `Reveal ${noun} to all clubs?`,
+      body:
+        field === 'venue'
+          ? `Every club in ${s.name} will see the allocated grounds, distance and travel cost immediately. This can't be withdrawn without recalling the whole release.`
+          : `Every club in ${s.name} will see the start times immediately. This can't be withdrawn without recalling the whole release.`,
+      yesLabel: field === 'venue' ? 'Reveal venues' : 'Reveal times',
+      onYes: () => {
+        onReveal?.(s.id, [field])
+          ?.then?.(() => toast?.(s.name + ' · ' + noun + ' revealed'))
+          ?.catch?.(() => {});
+        setConfirm(null);
       },
     });
   }
@@ -413,11 +431,13 @@ export function AdminFixtures({
               yet; this just unlocks Release.
             </p>
             <p>
-              <strong>Release to clubs</strong> — publish it to every club’s portal and notify them
-              by email and WhatsApp.
+              <strong>Release to clubs</strong> — publish it to every club’s portal. No email or
+              WhatsApp is sent; each club chooses when to share fixtures with its players. You can
+              withhold venues and/or start times at release and reveal them later.
             </p>
             <p>
-              <strong>Recall / Withdraw</strong> — pull a released or approved series back.
+              <strong>Recall / Withdraw</strong> — pull a released or approved series back. No
+              notification is sent.
             </p>
             <p>
               <strong>View season</strong> — open every competition’s schedule on screen, with
@@ -434,9 +454,21 @@ export function AdminFixtures({
               Release is gated on admin approval; approve first, then release. */}
           {active &&
             (active.released ? (
-              <Btn tone="outline" size="sm" onClick={() => askRecall(active)}>
-                Recall release
-              </Btn>
+              <>
+                {onReveal && active.withheld?.venue && (
+                  <Btn tone="teal" size="sm" onClick={() => reveal(active, 'venue')}>
+                    Reveal venues
+                  </Btn>
+                )}
+                {onReveal && active.withheld?.time && (
+                  <Btn tone="teal" size="sm" onClick={() => reveal(active, 'time')}>
+                    Reveal times
+                  </Btn>
+                )}
+                <Btn tone="outline" size="sm" onClick={() => askRecall(active)}>
+                  Recall release
+                </Btn>
+              </>
             ) : active.approved ? (
               <>
                 <Btn tone="outline" size="sm" onClick={() => unapprove(active)}>
@@ -546,6 +578,10 @@ export function AdminFixtures({
                     ) : (
                       <div className="series-card-draft">Draft</div>
                     )}
+                    {/* Withheld-field badges — a released series can hold back venues and/or
+                        times; both can coexist with the "Hidden until …" activation badge. */}
+                    {s.released && s.withheld?.venue && <Pill tone="gold">Venues withheld</Pill>}
+                    {s.released && s.withheld?.time && <Pill tone="gold">Times withheld</Pill>}
                   </div>
                   <div
                     style={{
@@ -606,6 +642,7 @@ export function AdminFixtures({
               onSetReleased={onSetReleased}
               onAskRelease={askRelease}
               onAskRecall={askRecall}
+              onAskReveal={onReveal ? reveal : undefined}
               onApprove={approve}
               onUnapprove={unapprove}
               toast={toast}
@@ -665,13 +702,36 @@ export function AdminFixtures({
                   icon={confirm.danger ? undefined : Icon.Arrow}
                   onClick={confirm.onYes}
                 >
-                  {confirm.danger ? 'Yes, recall' : 'Release to clubs'}
+                  {confirm.yesLabel ?? (confirm.danger ? 'Yes, recall' : 'Release to clubs')}
                 </Btn>
               </div>
             </div>
           </div>,
           document.body,
         )}
+
+      {releaseFor && (
+        <ReleaseDialog
+          seriesName={releaseFor.name}
+          clubCount={distinctClubCount(releaseFor)}
+          onClose={() => setReleaseFor(null)}
+          onConfirm={(withheld) => {
+            const held = [withheld.venue && 'venues', withheld.time && 'times'].filter(Boolean);
+            const msg =
+              releaseFor.name +
+              ' · released to ' +
+              distinctClubCount(releaseFor) +
+              ' clubs' +
+              (held.length ? ' · ' + held.join(' & ') + ' withheld' : '');
+            // Toast only after the release PATCH resolves — a failed release (clash gate,
+            // version race) rejects the chain and withToast has already surfaced the error.
+            onSetReleased(releaseFor.id, true, withheld)
+              ?.then?.(() => toast?.(msg))
+              ?.catch?.(() => {});
+            setReleaseFor(null);
+          }}
+        />
+      )}
 
       {launcherOpen && (
         <GenerateFixturesLauncher
@@ -918,6 +978,7 @@ export function FixtureTable({
   onSetReleased,
   onAskRelease,
   onAskRecall,
+  onAskReveal,
   onApprove,
   onUnapprove,
   toast,
@@ -1462,8 +1523,20 @@ export function FixtureTable({
               </div>
               <div className="fix-release-text-sub">
                 Published {formatStamp(series.releasedAt)} · every club portal now shows their
-                schedule + travel costs · email + WhatsApp notifications sent
+                schedule{series.withheld?.venue ? '' : ' + travel costs'}. No email or WhatsApp is
+                sent — each club shares fixtures with its players when it chooses.
               </div>
+              {(series.withheld?.venue || series.withheld?.time) && (
+                <div
+                  className="fix-release-text-sub"
+                  style={{ marginTop: 6, color: 'var(--gold-deep,var(--muted))' }}
+                >
+                  Withheld from clubs:{' '}
+                  {[series.withheld?.venue && 'venues', series.withheld?.time && 'times']
+                    .filter(Boolean)
+                    .join(' · ')}
+                </div>
+              )}
             </>
           ) : series.approved ? (
             <>
@@ -1487,9 +1560,21 @@ export function FixtureTable({
         </div>
         <div className="fix-release-actions">
           {series.released ? (
-            <Btn tone="outline" onClick={() => onAskRecall?.(series)}>
-              Recall draft
-            </Btn>
+            <>
+              {onAskReveal && series.withheld?.venue && (
+                <Btn tone="teal" onClick={() => onAskReveal(series, 'venue')}>
+                  Reveal venues
+                </Btn>
+              )}
+              {onAskReveal && series.withheld?.time && (
+                <Btn tone="teal" onClick={() => onAskReveal(series, 'time')}>
+                  Reveal times
+                </Btn>
+              )}
+              <Btn tone="outline" onClick={() => onAskRecall?.(series)}>
+                Recall draft
+              </Btn>
+            </>
           ) : series.approved ? (
             <>
               <Btn tone="outline" onClick={() => onUnapprove?.(series)}>
@@ -3833,8 +3918,7 @@ export function AdminSettingsView({
             <span style={chip(false)}>SMS · not used</span>
           </div>
           <p style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.6, margin: 0 }}>
-            Fixture releases, staff invites and player broadcasts go out over email and WhatsApp. No
-            SMS is sent.
+            Staff invites and player broadcasts go out over email and WhatsApp. No SMS is sent.
           </p>
         </Card>
       </div>

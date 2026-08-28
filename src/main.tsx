@@ -658,7 +658,11 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     // (a dedicated, single-field write). Omitting it lets the server's gate recall a
     // draft series' approval whenever its fixtures are edited — so the admin must
     // re-approve before release. (A live series keeps its state, per the server rule.)
-    const { approved: _a, approvedAt: _aa, ...rest } = next;
+    // Strip withheld/revealedAt too: withholding is server-owned, chosen only at
+    // release and changed only via reveal/recall. The server also drops them from a
+    // whole-object PATCH, but omitting them here keeps a stale-tab edit from ever
+    // carrying an out-of-date mask on the wire (ADR 0011).
+    const { approved: _a, approvedAt: _aa, withheld: _w, revealedAt: _ra, ...rest } = next;
     withToast(
       () => api.patchSeries(seriesId, { ...rest, version: cur.version }),
       'Could not save fixtures',
@@ -888,19 +892,44 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       .catch(() => {});
   }
 
-  function setReleased(seriesId, value) {
+  function setReleased(seriesId, value, withheld) {
     // Send the cached version so release/recall is race-safe (409 on conflict),
     // not silent last-write-wins. rawConflict: the server's 409s here carry copy the
     // admin must read — "Release blocked — N venue clash(es): …" from the clash gate,
     // or "series changed; refetch" on a genuine version race.
+    // `withheld` is honoured ONLY on release (value === true); the server writes it only
+    // on the false→true transition. Recall (value === false) sends no mask — the server
+    // clears withheld/revealedAt (ADR 0011).
     const cur = allSeries.find((s) => s.id === seriesId);
-    withToast(
-      () => api.patchSeries(seriesId, { released: value, version: cur?.version }),
+    // Return the promise so the release dialog can chain its "released…" toast off success
+    // only — a failed PATCH (clash gate, version race) rejects the chain and withToast has
+    // already surfaced the error. The caller mops up the rejection with its own `.catch`.
+    return withToast(
+      () =>
+        api.patchSeries(seriesId, {
+          released: value,
+          ...(value && withheld ? { withheld } : {}),
+          version: cur?.version,
+        }),
       'Could not update release',
       { rawConflict: true },
-    )
-      .then(() => invalidate(qk.series()))
-      .catch(() => {});
+    ).then(() => invalidate(qk.series()));
+  }
+  // Reveal one or more withheld fields on a released series (per-field, whole series).
+  // An action key computed server-side from the CURRENT withheld set — never a whole-
+  // object write — so a stale tab can't un-reveal or re-withhold. rawConflict: the
+  // server's 409s ("series is not released", "nothing withheld for venue") are copy the
+  // admin must read. Returns the promise so the caller can chain a toast (ADR 0011).
+  function revealSeries(seriesId, fields) {
+    const cur = allSeries.find((s) => s.id === seriesId);
+    // Return the promise WITHOUT swallowing: the caller chains a success toast off it, so
+    // the chain must reject on a failed PATCH (a 409) rather than resolve. withToast has
+    // already surfaced the error toast; the caller's own `.catch` mops up the rejection.
+    return withToast(
+      () => api.patchSeries(seriesId, { reveal: fields, version: cur?.version }),
+      'Could not reveal',
+      { rawConflict: true },
+    ).then(() => invalidate(qk.series()));
   }
   // Approve / unapprove a series for release (single-field write so a fixture edit
   // can independently recall approval server-side). Returns the promise so callers
@@ -1039,6 +1068,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   deleteSeries,
                   duplicateSeries,
                   setReleased,
+                  revealSeries,
                   setApproved,
                   onCreateSeries,
                   onCreateLeague,
@@ -1107,6 +1137,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   deleteSeries,
                   duplicateSeries,
                   setReleased,
+                  revealSeries,
                   setApproved,
                   onCreateSeries,
                   onCreateLeague,
@@ -1184,6 +1215,7 @@ function Shell({
   deleteSeries,
   duplicateSeries,
   setReleased,
+  revealSeries,
   setApproved,
   onCreateSeries,
   onCreateLeague,
@@ -2230,6 +2262,7 @@ function Shell({
             onDeleteSeries={deleteSeries}
             onDuplicateSeries={duplicateSeries}
             onSetReleased={setReleased}
+            onReveal={revealSeries}
             onSetApproved={setApproved}
             toast={toastShow}
             allCalendars={allCalendars}

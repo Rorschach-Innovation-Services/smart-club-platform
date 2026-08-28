@@ -32,13 +32,13 @@ flight — the same defensive snapshotting `Series.participants` uses for team i
 Both are **stripped from PATCH** rather than rejected, so a client round-tripping a whole
 run object doesn't get a confusing 400.
 
-| Route                     | Auth        | Notes                                                                                                                                                                                                                 |
-| ------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /season-runs`        | rep + admin | `200 → SeasonRun[]`                                                                                                                                                                                                   |
-| `POST /season-runs`       | admin       | Requires `id`, `leagueKey`, `seasonLabel` and both snapshots. Sets `version: 1`, stamps `createdAt`/`createdBy`. `409` on a duplicate id — never silently overwrite a live season.                                    |
-| `GET /season-runs/:id`    | rep + admin | `200 → SeasonRun` · `404`                                                                                                                                                                                             |
-| `PATCH /season-runs/:id`  | admin       | Partial update — stage status, group entrants, `carriedPoints`, audit entries. Send the current `version`; mismatch → `409 "season run changed; refetch"`. Two admins resolving the same stage is a real scenario.    |
-| `DELETE /season-runs/:id` | admin       | `200 → { ok: true }`. **Does not delete the series its stages produced** — those are real, possibly-released fixtures clubs have seen. Orphaning a back-pointer is recoverable; deleting a published schedule is not. |
+| Route                     | Auth  | Notes                                                                                                                                                                                                                                                          |
+| ------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /season-runs`        | admin | `200 → SeasonRun[]`. Admin-only: the frozen `structureSnapshot` embeds each stage's `schedule.slots` (kick-off times a series may withhold, ADR 0011), and the only caller is the admin-gated console. Reps read fixtures through the projected `GET /series`. |
+| `POST /season-runs`       | admin | Requires `id`, `leagueKey`, `seasonLabel` and both snapshots. Sets `version: 1`, stamps `createdAt`/`createdBy`. `409` on a duplicate id — never silently overwrite a live season.                                                                             |
+| `GET /season-runs/:id`    | admin | `200 → SeasonRun` · `404`. Admin-only for the same reason as the list: the frozen `structureSnapshot` embeds each stage's `schedule.slots`. Reps read fixtures through the projected `GET /series`.                                                            |
+| `PATCH /season-runs/:id`  | admin | Partial update — stage status, group entrants, `carriedPoints`, audit entries. Send the current `version`; mismatch → `409 "season run changed; refetch"`. Two admins resolving the same stage is a real scenario.                                             |
+| `DELETE /season-runs/:id` | admin | `200 → { ok: true }`. **Does not delete the series its stages produced** — those are real, possibly-released fixtures clubs have seen. Orphaning a back-pointer is recoverable; deleting a published schedule is not.                                          |
 
 Season runs are swept by tenant erasure and by cohort clearing, like series.
 
@@ -73,25 +73,60 @@ Knockout placeholders (`win:f3`) are **not** booked as sides — they are series
 two brackets both contain `win:f1`, and treating them as teams would make one competition's
 final clash with another's over sides that don't exist yet.
 
-## `GET /series` — list (rep + admin)
+## Progressive release (ADR 0011)
 
-`200 → Series[]` for the tenant. (The club fixtures view filters this to released series
-that include the club.)
+An admin may **withhold** venues and/or start times when releasing a series — dates and
+opponents are known before grounds and kick-offs are. Two optional server-owned fields
+carry this:
+
+| Field        | Meaning                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `withheld`   | `{ venue?: true, time?: true }` — which fields are hidden from clubs. Set **only** on the false→true release transition; only `true` keys are stored (empty ⇒ absent). Absent ⇒ nothing withheld, so every series released before this feature reads as fully visible. The store keeps the REAL venue/time data — withholding is a read-side projection, so the release clash gate still sees real venues. |
+| `revealedAt` | `{ venue?: string, time?: string }` — audit stamp of when each field was revealed. Cleared by recall. `releasedAt` is **never** bumped by a reveal — the schedule went out at release.                                                                                                                                                                                                                     |
+
+`POST /series` and `POST /series/:id/duplicate` drop both fields: withholding belongs to a
+release, never a draft.
+
+## `GET /series` — list (rep + admin, role-projected)
+
+`200 → Series[]` for the tenant.
+
+- **admin** — the raw list: drafts, unreleased venues/times, approval state.
+- **rep (any non-admin)** — the club-facing projection (ADR 0011):
+  - unreleased series and released-but-not-yet-`activateFrom` series are **omitted**
+    (server now mirrors the portal/send-fixtures read gate; release filtering used to be
+    client-only, leaking every draft and all fields to reps);
+  - `approved`/`approvedAt` stripped;
+  - `withheld.time` ⇒ each fixture loses `time`/`slot`, the series loses `schedule.slots`;
+  - `withheld.venue` ⇒ each fixture loses all venue keys (`venueId`, `venueName`,
+    `venueLat`, `venueLon`, `venueStatus`, `venueReason`, `venueLocked`, `venueOverride`);
+  - `withheld`/`revealedAt` are **kept** so the client renders "to be confirmed"
+    explicitly. Participants' home-ground `venue`/`lat`/`lon` are **not** stripped (reps
+    already have them from `GET /clubs`), so clients must check `withheld.venue` rather
+    than infer from missing fields.
 
 ## `POST /series` — create (admin)
 
 Body: a full series object including client-generated `fixtures[]`. The server sets
-`version: 1` and defaults `released: false`, `releasedAt: null`.
+`version: 1`, defaults `released: false`, `releasedAt: null`, and drops any
+`withheld`/`revealedAt`.
 
 ```
 201 → Series
 ```
 
-## `PATCH /series/:id` — update / release / recall (admin)
+## `PATCH /series/:id` — update / release / recall / reveal (admin)
 
-Partial update — covers fixture edits, regeneration (send the whole new `fixtures[]`), and
-release/recall. When `released` is set, the server stamps `releasedAt` (release → now,
-recall → null) for trustworthy timestamps.
+Partial update — covers fixture edits, regeneration (send the whole new `fixtures[]`),
+release/recall, and per-field reveal. When `released` is set, the server stamps
+`releasedAt` (release → now, recall → null) for trustworthy timestamps.
+
+| Patch                                                    | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{ released: true, withheld: {venue?, time?}, version }` | Only on the false→true transition (`!current.released`) and only when the patch carries a `withheld` key. Shape-validated (`400 "withheld must be { venue?: boolean, time?: boolean }"`); only `true` keys stored. Approval + clash gates unchanged — the clash gate runs on the real (unwithheld) venues.                                                                                                                                                                                                                            |
+| `{ reveal: ['venue' \| 'time', …], version }`            | Action key, not a stored field — computed from `current` and stripped before the write. `400` on a bad entry or if the patch also carries `released`; `409 "series is not released"`; `409 "nothing withheld for <field>"`. Deletes the key from `withheld`, stamps `revealedAt[field] = now()`; never re-approves, never re-runs the clash gate, never bumps `releasedAt`. The write is narrowed to `withheld`/`revealedAt`/`version` — any other keys riding along on a reveal patch (`fixtures`, `approved`, `name`…) are ignored. |
+| `{ released: false, … }`                                 | Recall — clears both `withheld` and `revealedAt`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| any other patch carrying `withheld`/`revealedAt`         | Both dropped ⇒ the stored values are kept. This includes the whole-object PATCH of an already-released series (which carries `released: true`): withholding is chosen only at release, so an in-season fixture edit never silently reveals a field. To change withholding, recall and re-release.                                                                                                                                                                                                                                     |
 
 Send the current `version`; mismatch → `409 "series changed; refetch"`. This is the path
 most exposed to concurrent edits (two admins, or one in two tabs), so always refetch on 409.
@@ -106,7 +141,8 @@ most exposed to concurrent edits (two admins, or one in two tabs), so always ref
 
 ## `POST /series/:id/duplicate` — duplicate (admin)
 
-Clones the series with a fresh id, `name + " · Copy"`, `released: false`, `version: 1`.
+Clones the series with a fresh id, `name + " · Copy"`, `released: false`, `version: 1`, and
+no `withheld`/`revealedAt`.
 
 ```
 201 → Series
