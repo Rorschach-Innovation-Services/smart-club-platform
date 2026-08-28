@@ -147,3 +147,14 @@ there to infer from, and would give the game away.
   withheld series never silently un-withholds it (see the runbook's post-import section).
 - **No backfill.** Every series released before this feature has `withheld` undefined, so
   it reads as fully visible — the absence of the field is the correct legacy behaviour.
+- **Legacy `participants` are synthesised on the rep read path.** §5 assumed reps hold the
+  club list, but `GET /clubs` is admin-only, so a rep opening a **legacy** series (one with
+  no `participants` snapshot, where every `teams[]` id is a clubId) saw "Removed club" for
+  every opponent. The rep `GET /series` now back-fills `participants` from the tenant's
+  clubs after projection — `{ teamId, clubId, name }` plus the home-ground `venue`/`lat`/
+  `lon` from `club.ground`, skipping any id with no club record — using a separate pure
+  helper (`withLegacyParticipants`) so `projectSeriesForClub` stays a pure field-strip. A
+  series that already carries `participants` is untouched. Consistent with §5, the
+  synthesised home grounds are included even when `venue` is withheld (public identity,
+  distinct from the fixture's hidden allocated venue); the client still shows "Venue to be
+  confirmed" by checking `withheld.venue` explicitly.

@@ -139,6 +139,19 @@ import {
   ScrollX,
 } from './atoms';
 
+/* A compact marker for why a fixture is off its home ground. The full `venueReason`
+   already reads in the suburb line; this is the at-a-glance pill (full reason on hover).
+   Only the operator-facing moves get a pill — a plain allocated ground or a Union T20
+   slot is the normal case and gets none. Prefixes match what the allocator/import write
+   (see competition/venues.ts and packages/api/src/import-planb-fixtures.ts). */
+function venueReasonPill(reason?: string, status?: string): string | null {
+  if (!reason || status === 'home') return null;
+  if (reason.startsWith('Moved to avoid')) return 'moved';
+  if (reason.startsWith('Union directive')) return 'directive';
+  if (reason.startsWith('home club has no ground')) return 'no ground';
+  return null; // 'Allocated ground —', 'Union T20 schedule', anything else → no pill
+}
+
 /* ─── AdminFixtures — series cards + drilldown fixture table with distance + travel-cost ─── */
 interface AdminFixturesProps {
   clubs: Club[];
@@ -723,12 +736,14 @@ export function AdminFixtures({
               distinctClubCount(releaseFor) +
               ' clubs' +
               (held.length ? ' · ' + held.join(' & ') + ' withheld' : '');
-            // Toast only after the release PATCH resolves — a failed release (clash gate,
-            // version race) rejects the chain and withToast has already surfaced the error.
-            onSetReleased(releaseFor.id, true, withheld)
-              ?.then?.(() => toast?.(msg))
-              ?.catch?.(() => {});
-            setReleaseFor(null);
+            // Return the release promise so the dialog stays open while the PATCH is in
+            // flight and closes itself on success. The single success toast fires only
+            // once the PATCH resolves; a failure (clash gate, version race) rejects the
+            // chain so the dialog can show the error inline (withToast has already
+            // surfaced its own toast). The dialog owns closing — no setReleaseFor here.
+            return Promise.resolve(onSetReleased(releaseFor.id, true, withheld)).then(() =>
+              toast?.(msg),
+            );
           }}
         />
       )}
@@ -1397,6 +1412,30 @@ export function FixtureTable({
                         {isLocked(f) && (
                           <span title="Set by hand — allocation won't move it"> 🔒</span>
                         )}
+                        {(() => {
+                          const pill = venueReasonPill(f.venueReason, f.venueStatus);
+                          return pill ? (
+                            <span
+                              className="fix-venue-reason"
+                              title={f.venueReason}
+                              style={{
+                                marginLeft: 5,
+                                padding: '0 5px',
+                                borderRadius: 4,
+                                fontSize: 9.5,
+                                fontWeight: 600,
+                                textTransform: 'uppercase',
+                                letterSpacing: 0.3,
+                                color: 'var(--muted)',
+                                background: 'var(--wash, rgba(0,0,0,0.05))',
+                                whiteSpace: 'nowrap',
+                                cursor: 'help',
+                              }}
+                            >
+                              {pill}
+                            </span>
+                          ) : null;
+                        })()}
                       </div>
                       {/* The reason is the whole point of a greedy allocator over a solver:
                           an operator can argue with "home ground closed for maintenance",

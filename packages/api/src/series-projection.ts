@@ -10,7 +10,7 @@
  * clash gate keep seeing real venues while clubs see "to be confirmed".
  */
 import { HttpError } from './auth.js';
-import type { Series, WithheldField } from './types.js';
+import type { Club, Series, WithheldField } from './types.js';
 
 /** The only two fields an admin may withhold at release. */
 export const WITHHELD_FIELDS: readonly WithheldField[] = ['venue', 'time'];
@@ -101,4 +101,40 @@ export function projectSeriesForClub(series: Series, today: string): Series | nu
   }
 
   return out;
+}
+
+/**
+ * Back-fill `participants` for a LEGACY series — one created before the snapshot existed,
+ * where every `teams[]` id is a clubId. Pure: clones the series, never mutates the input,
+ * and returns it unchanged when it already carries a `participants` snapshot (so a modern
+ * series is never reshaped from the possibly-stale club list).
+ *
+ * A rep's client can't call the admin-only `GET /clubs`, so without a snapshot it renders
+ * each opponent as "Removed club". Synthesising here on the read path gives it the real
+ * name and the club's home-ground snapshot (venue/coords). A `teams[]` id with no club
+ * record is skipped — a deleted club stays a gap rather than a fabricated participant.
+ *
+ * Home-ground identity is public even when the series withholds `venue` (ADR 0011 §5):
+ * the withheld projection hides each fixture's ALLOCATED venue, and the client still shows
+ * "Venue to be confirmed" for those. Call AFTER `projectSeriesForClub`, on the projected
+ * series.
+ */
+export function withLegacyParticipants(series: Series, clubsById: Map<string, Club>): Series {
+  if (Array.isArray(series.participants)) return series;
+  const teams = Array.isArray(series.teams) ? series.teams : [];
+  const participants = teams.flatMap((id) => {
+    const club = clubsById.get(id);
+    if (!club) return [];
+    return [
+      {
+        teamId: id,
+        clubId: id,
+        name: club.name,
+        venue: club.ground?.venue,
+        lat: club.ground?.lat,
+        lon: club.ground?.lon,
+      },
+    ];
+  });
+  return { ...series, participants };
 }

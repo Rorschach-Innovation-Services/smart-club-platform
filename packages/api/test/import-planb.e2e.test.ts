@@ -367,6 +367,21 @@ if (!ENABLED) {
       assert.match(out, /\d+ auto-move\(s\)/);
       assert.ok(out.includes('skipped, ground undeterminable: 0'));
 
+      // Same-club same-slot overlap block is printed, with a real (≥1) count — the union
+      // fields men's/women's/veterans squads sharing a club id, so exact-slot collisions
+      // across different series are expected and informational, never fatal.
+      const overlapHeader = out
+        .split('\n')
+        .find((l) =>
+          /── Same-club same-slot overlaps \(\d+\) — different squads, informational/.test(l),
+        );
+      assert.ok(overlapHeader, 'the same-club same-slot overlap block is printed');
+      const overlapCount = Number(overlapHeader!.match(/overlaps \((\d+)\)/)![1]);
+      assert.ok(
+        Number.isFinite(overlapCount) && overlapCount >= 1,
+        `expected ≥1 informational overlap, got: ${overlapHeader}`,
+      );
+
       // GENUINE-edits section empty; 23 to write.
       assert.ok(
         !out.includes('GENUINE edits'),

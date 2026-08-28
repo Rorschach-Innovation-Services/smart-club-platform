@@ -498,3 +498,154 @@ describe('(c) buildClubSchedule + send-fixtures honour withheld', () => {
     assert.equal(res.status, 201);
   });
 });
+
+describe('(d) releasedAt is server-owned and stamped only on the release transition', () => {
+  test('set on false→true release, untouched by a whole-object edit, null on recall', async () => {
+    await repo.putSeries('dolphins', series('s-d-rel'));
+
+    // false→true: releasedAt is stamped server-side (was null).
+    const rel = await patch('s-d-rel', { released: true, version: await ver('s-d-rel') });
+    assert.equal(rel.status, 200);
+    const stamped = (await repo.getSeries('dolphins', 's-d-rel'))!.releasedAt;
+    assert.ok(stamped, 'releasedAt stamped on release');
+
+    // The stale-tab pattern: the admin re-PATCHes the WHOLE released object (released:true
+    // present) with an edited fixture. releasedAt must NOT be re-stamped — clubs already saw
+    // "Released · <date>", and an in-season edit is not a fresh release.
+    const adminList = (await (await getSeries(ADMIN)).json()) as Series[];
+    const whole = find(adminList, 's-d-rel')!;
+    const edit = await patch('s-d-rel', {
+      ...whole,
+      fixtures: [fixture({ date: '2026-11-20', venueName: 'Edited Ground', venueId: 'v-edit' })],
+      version: await ver('s-d-rel'),
+    });
+    assert.equal(edit.status, 200);
+    assert.equal(
+      (await repo.getSeries('dolphins', 's-d-rel'))!.releasedAt,
+      stamped,
+      'releasedAt unchanged by a whole-object edit of a released series',
+    );
+
+    // Recall clears it.
+    await patch('s-d-rel', { released: false, version: await ver('s-d-rel') });
+    assert.equal((await repo.getSeries('dolphins', 's-d-rel'))!.releasedAt, null, 'null on recall');
+  });
+});
+
+describe('(e) create + duplicate always yield a fresh draft', () => {
+  test('POST with released:true, approved:true is stored as an unapproved, unreleased draft', async () => {
+    const res = await app.request('/series', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify(
+        series('s-e-post', {
+          released: true,
+          releasedAt: '2026-08-10T00:00:00.000Z',
+          approved: true,
+          approvedAt: '2026-08-10T00:00:00.000Z',
+        }),
+      ),
+    });
+    assert.equal(res.status, 201);
+    const stored = (await repo.getSeries('dolphins', 's-e-post'))!;
+    assert.equal(stored.released, false, 'client-sent released:true forced to false on create');
+    assert.equal(stored.releasedAt, null);
+    assert.equal(stored.approved, false, 'client-sent approved:true forced to false on create');
+    assert.equal(stored.approvedAt, null);
+  });
+
+  test('duplicate of a released + approved series is a fresh unapproved draft', async () => {
+    await repo.putSeries(
+      'dolphins',
+      series('s-e-orig', {
+        released: true,
+        releasedAt: '2026-08-10T00:00:00.000Z',
+        approved: true,
+        approvedAt: '2026-08-10T00:00:00.000Z',
+      }),
+    );
+    const res = await app.request('/series/s-e-orig/duplicate', {
+      method: 'POST',
+      headers: headers(ADMIN),
+    });
+    assert.equal(res.status, 201);
+    const copy = (await res.json()) as Series;
+    assert.notEqual(copy.id, 's-e-orig', 'copy is a distinct series');
+    assert.equal(copy.released, false);
+    assert.equal(copy.releasedAt, null);
+    assert.equal(copy.approved, false, 'copy starts unapproved — approval belongs to the original');
+    assert.equal(copy.approvedAt, null);
+    assert.equal(
+      (await repo.getSeries('dolphins', copy.id))!.approved,
+      false,
+      'persisted as draft',
+    );
+  });
+});
+
+describe('(f) legacy participants are synthesised for reps on the read path', () => {
+  before(async () => {
+    await repo.putClub('dolphins', club('home-club'));
+    await repo.putClub('dolphins', club('away-club'));
+  });
+
+  test('rep GET back-fills participants from the club list; admin list is untouched', async () => {
+    // Legacy series: released, teams are clubIds, and NO participants snapshot.
+    await repo.putSeries(
+      'dolphins',
+      series('s-f-legacy', {
+        released: true,
+        releasedAt: '2026-08-10T00:00:00.000Z',
+        participants: undefined,
+      }),
+    );
+
+    const repList = (await (await getSeries(REP)).json()) as Series[];
+    const repS = find(repList, 's-f-legacy')!;
+    assert.ok(Array.isArray(repS.participants), 'participants synthesised for rep');
+    const byId = new Map(repS.participants!.map((p) => [p.teamId, p]));
+    assert.equal(byId.get('home-club')!.name, 'home-club CC', 'real club name, not "Removed club"');
+    assert.equal(byId.get('home-club')!.clubId, 'home-club');
+    assert.equal(byId.get('home-club')!.venue, 'home-club Oval', 'home-ground venue snapshot');
+    assert.equal(byId.get('away-club')!.name, 'away-club CC');
+
+    // The admin path returns the raw stored list — no synthesis, still no participants key.
+    const adminList = (await (await getSeries(ADMIN)).json()) as Series[];
+    assert.equal(
+      'participants' in find(adminList, 's-f-legacy')!,
+      false,
+      'admin list is not reshaped',
+    );
+  });
+
+  test('a team id with no club record is skipped, not fabricated', async () => {
+    await repo.putSeries(
+      'dolphins',
+      series('s-f-ghost', {
+        released: true,
+        releasedAt: '2026-08-10T00:00:00.000Z',
+        teams: ['home-club', 'ghost-club'],
+        participants: undefined,
+      }),
+    );
+    const repList = (await (await getSeries(REP)).json()) as Series[];
+    const repS = find(repList, 's-f-ghost')!;
+    assert.deepEqual(
+      repS.participants!.map((p) => p.teamId),
+      ['home-club'],
+      'a deleted club stays a gap rather than a fabricated participant',
+    );
+  });
+
+  test('a modern series that already carries participants is left untouched', async () => {
+    await repo.putSeries(
+      'dolphins',
+      series('s-f-modern', { released: true, releasedAt: '2026-08-10T00:00:00.000Z' }),
+    );
+    const repList = (await (await getSeries(REP)).json()) as Series[];
+    const repS = find(repList, 's-f-modern')!;
+    // The factory snapshot names are "Home Club"/"Away Club"; synthesis would have used the
+    // club-record names ("home-club CC"). Unchanged names prove the snapshot was not reshaped.
+    assert.equal(repS.participants!.find((p) => p.teamId === 'home-club')!.name, 'Home Club');
+  });
+});

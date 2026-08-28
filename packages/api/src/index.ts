@@ -65,7 +65,12 @@ import {
   dobFromSaId,
 } from './player-identity.js';
 import { findReleaseClashes } from './venue-clash.js';
-import { normaliseWithheld, projectSeriesForClub, isWithheld } from './series-projection.js';
+import {
+  normaliseWithheld,
+  projectSeriesForClub,
+  withLegacyParticipants,
+  isWithheld,
+} from './series-projection.js';
 import {
   validateCalendars,
   validateStructures,
@@ -2683,8 +2688,17 @@ app.get('/series', async (c) => {
   // leaked every draft and all fields to reps.
   if (ra.membership.role === 'admin') return c.json(all);
   const today = tenantToday();
+  // Legacy series (created before the `participants` snapshot existed) carry no team
+  // identity, so a rep's client — which can't call the admin-only GET /clubs — renders
+  // opponents as "Removed club". Synthesise participants from the tenant's clubs on the
+  // read path (ADR 0011 §5) so the rep sees real names/grounds; a modern series already
+  // has the snapshot and is left untouched. Clubs are loaded once per request.
+  const clubsById = new Map((await repo.listClubs(ra.tenant)).map((cl) => [cl.id, cl]));
   return c.json(
-    all.map((s) => projectSeriesForClub(s, today)).filter((s): s is Series => s !== null),
+    all
+      .map((s) => projectSeriesForClub(s, today))
+      .filter((s): s is Series => s !== null)
+      .map((s) => withLegacyParticipants(s, clubsById)),
   );
 });
 
@@ -2719,8 +2733,13 @@ app.post('/series', requireAdmin, async (c) => {
   }
   // Fixtures are generated client-side and POSTed whole.
   series.version = 1;
-  series.released = series.released ?? false;
-  series.releasedAt = series.releasedAt ?? null;
+  // A brand-new series is a DRAFT (ADR 0011): release and approval are earned via PATCH,
+  // never asserted at create. Force the server-owned state regardless of what the client
+  // sent, so a POST can never mint a pre-released or pre-approved series.
+  series.released = false;
+  series.releasedAt = null;
+  series.approved = false;
+  series.approvedAt = null;
   // Withholding is chosen at release, never at create — a brand-new series is a draft
   // (ADR 0011). Drop any client-sent values so they can only be set by the release PATCH.
   delete series.withheld;
@@ -2868,10 +2887,13 @@ app.patch('/series/:id', requireAdmin, async (c) => {
       );
     }
   }
-  // Release/recall stamps releasedAt server-side for trustworthy timestamps.
-  if (typeof patch.released === 'boolean') {
-    patch.releasedAt = patch.released ? now() : null;
-  }
+  // releasedAt is server-owned. Stamp it only on the false→true release transition and
+  // clear it on recall. A whole-object edit of an already-released series carries
+  // `released: true` but must NOT re-stamp the "Released · <date>" clubs already saw — so
+  // drop the key and let the stored value stand (same keep-on-edit rule as `withheld`).
+  if (patch.released === true && !current.released) patch.releasedAt = now();
+  else if (patch.released === false) patch.releasedAt = null;
+  else delete patch.releasedAt;
   try {
     return c.json(await repo.updateSeries(ra.tenant, id, patch));
   } catch (err) {
@@ -3091,9 +3113,12 @@ app.post('/series/:id/duplicate', requireAdmin, async (c) => {
     name: `${orig.name} · Copy`,
     released: false,
     releasedAt: null,
+    approved: false,
+    approvedAt: null,
     version: 1,
   };
-  // A copy is a fresh draft — withholding belongs to the original's release, not the clone.
+  // A copy is a fresh draft — release, approval and withholding all belong to the
+  // original, not the clone. Reset the sign-off state so the copy can't start approved.
   delete copy.withheld;
   delete copy.revealedAt;
   await repo.putSeries(tenant, copy);

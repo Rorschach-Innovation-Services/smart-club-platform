@@ -1423,7 +1423,7 @@ describe('StartFlatSeasonForm', () => {
 
   /** Picks the one operator calendar on offer — the form defaults to "Custom dates". */
   const selectCalendar = async (user: ReturnType<typeof userEvent.setup>, dialog: HTMLElement) =>
-    user.selectOptions(within(dialog).getByLabelText(/dates/i), calendar.id);
+    user.selectOptions(within(dialog).getByRole('combobox', { name: 'Dates' }), calendar.id);
 
   it('blocks a duplicate label for the same league', async () => {
     // The label field defaults to the real current season — match `existingRuns` to

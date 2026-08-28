@@ -1477,6 +1477,139 @@ function runClashPass(
   return { unresolved, autoMoves, skippedUndeterminable };
 }
 
+// ───────────────────────── Same-club same-slot overlaps (informational) ─────────────────────────
+
+/** One series flattened to just what the overlap scan needs: a display slug, the
+ * teamId→clubId snapshot (absent on legacy series, where `home`/`away` ARE clubIds), and
+ * its fixtures. Fed for EVERY series in the tenant AFTER the import — this run's `built`
+ * series replacing their same-id existing rows, plus the untouched existing series — so
+ * the picture is the whole post-import slot map, not just this run's writes. */
+export interface OverlapSeriesInput {
+  /** The series id with the `s-planb-` prefix stripped, or the raw id — display only. */
+  slug: string;
+  /** teamId→clubId; when undefined the fixture's `home`/`away` are clubIds directly. */
+  participants?: Array<{ teamId: string; clubId: string }>;
+  fixtures: Array<{ id?: string; date?: string; time?: string; home?: string; away?: string }>;
+}
+
+/** One club id playing one fixture at a given slot, tagged with where it came from and
+ * who it is against — the atom the overlap groups are built from. */
+export interface OverlapEntry {
+  seriesSlug: string;
+  fixtureId: string;
+  /** The OTHER side's club id, or '?' when it doesn't resolve. */
+  opponent: string;
+  /** The SQUAD (participant/side) playing — the fixture's raw `home`/`away` value: a
+   * per-league teamId, or the club id itself on a legacy/single-team side. Distinguishes
+   * a club's A and B sides (same club id, different squads) so two of them in one slot
+   * are NOT mistaken for one squad double-booked. Not printed — used only to classify. */
+  squadId: string;
+}
+
+/** A single club id booked into two-or-more fixtures at the exact same date+time. */
+export interface SlotOverlap {
+  clubId: string;
+  date: string;
+  time: string;
+  /** The colliding fixtures, sorted by (seriesSlug, fixtureId) for a stable print. */
+  entries: OverlapEntry[];
+}
+
+/** Resolve a fixture side to the club id playing it: through the series' `participants`
+ * snapshot, or — a legacy series with no participants — the side value IS the club id
+ * (mirrors effectiveGroundExisting's home→clubId resolution). */
+function overlapSideClubId(
+  participants: OverlapSeriesInput['participants'],
+  side: string | undefined,
+): string | undefined {
+  if (!side) return undefined;
+  if (!participants) return side;
+  return participants.find((p) => p.teamId === side)?.clubId;
+}
+
+/** Find every club id that appears in two fixtures at the exact same date+time across the
+ * post-import tenant. Two flavours come back:
+ *
+ *   - `crossSeries` — the SAME club id in fixtures of DIFFERENT series (informational).
+ *     A club fields separate squads (men's/women's/veterans) that all share one club id,
+ *     so these are different teams playing at the same time on (usually) different grounds
+ *     — never a real clash, never something to move or abort on, but worth the union's eye.
+ *   - `sameSeries` — the SAME squad twice within ONE series (double-booked into one
+ *     slot). Keyed on the squad (side/teamId), NOT the club id, so a club's A and B
+ *     sides playing at once (different squads, one club id) are never mistaken for it.
+ *     That's a genuine data error, surfaced separately and loudly (still non-fatal — the
+ *     caller prints it, the run doesn't abort).
+ *
+ * Untimed fixtures never overlap: only an exact date+time match counts, so a fixture with
+ * no `time` is dropped from the slot keying entirely — a timed and an untimed fixture of
+ * the same club on the same day are NOT flagged. */
+export function computeSameClubSlotOverlaps(series: OverlapSeriesInput[]): {
+  crossSeries: SlotOverlap[];
+  sameSeries: SlotOverlap[];
+} {
+  const bySlot = new Map<string, OverlapEntry[]>();
+  const meta = new Map<string, { clubId: string; date: string; time: string }>();
+  for (const s of series) {
+    for (const f of s.fixtures) {
+      if (!f.date || !f.time) continue; // untimed rows never overlap
+      const homeClub = overlapSideClubId(s.participants, f.home);
+      const awayClub = overlapSideClubId(s.participants, f.away);
+      const fixtureId = f.id ?? '';
+      const record = (
+        clubId: string | undefined,
+        squadId: string | undefined,
+        opponent: string | undefined,
+      ) => {
+        if (!clubId) return;
+        const key = `${clubId}|${f.date}|${f.time}`;
+        if (!bySlot.has(key)) {
+          bySlot.set(key, []);
+          meta.set(key, { clubId, date: f.date!, time: f.time! });
+        }
+        bySlot.get(key)!.push({
+          seriesSlug: s.slug,
+          fixtureId,
+          opponent: opponent ?? '?',
+          squadId: squadId ?? '?',
+        });
+      };
+      record(homeClub, f.home, awayClub);
+      record(awayClub, f.away, homeClub);
+    }
+  }
+
+  const crossSeries: SlotOverlap[] = [];
+  const sameSeries: SlotOverlap[] = [];
+  for (const [key, entries] of bySlot) {
+    if (entries.length < 2) continue;
+    const { clubId, date, time } = meta.get(key)!;
+    const sorted = [...entries].sort(
+      (a, b) => a.seriesSlug.localeCompare(b.seriesSlug) || a.fixtureId.localeCompare(b.fixtureId),
+    );
+    // ≥2 DISTINCT series at the slot ⇒ different squads sharing a club id (informational).
+    const distinctSeries = new Set(sorted.map((e) => e.seriesSlug));
+    if (distinctSeries.size >= 2) crossSeries.push({ clubId, date, time, entries: sorted });
+    // The SAME squad (series + side/teamId) in ≥2 fixtures at the slot ⇒ that one squad is
+    // double-booked (loud). Keying on the squad — not the club id — is what stops a club's
+    // A and B sides (one club id, two squads, two grounds) reading as a double-booking.
+    const bySquad = new Map<string, OverlapEntry[]>();
+    for (const e of sorted) {
+      const squadKey = `${e.seriesSlug} ${e.squadId}`;
+      if (!bySquad.has(squadKey)) bySquad.set(squadKey, []);
+      bySquad.get(squadKey)!.push(e);
+    }
+    for (const group of bySquad.values())
+      if (group.length >= 2) sameSeries.push({ clubId, date, time, entries: group });
+  }
+  const bySort = (a: SlotOverlap, b: SlotOverlap) =>
+    a.date.localeCompare(b.date) ||
+    a.time.localeCompare(b.time) ||
+    a.clubId.localeCompare(b.clubId);
+  crossSeries.sort(bySort);
+  sameSeries.sort(bySort);
+  return { crossSeries, sameSeries };
+}
+
 // ───────────────────────── Reconciliation safety rails (1g) ─────────────────────────
 
 /** The computed stale set must be a SUBSET of DELETE_SLUGS (empty is fine — that's the
@@ -2144,6 +2277,47 @@ async function runImport(args: Args) {
   }
   console.log(`  skipped, ground undeterminable: ${skippedUndeterminable}`);
 
+  // ── Same-club same-slot overlaps ── one club id in two fixtures at the EXACT same
+  // date+time. Computed over the whole post-import tenant: this run's writes (`built`,
+  // replacing their same-id existing rows) plus the untouched existing series, minus the
+  // DELETE_SLUGS (pruned next — counting them would phantom-overlap their replacements,
+  // the same exclusion the clash pass makes). Across series these are different squads
+  // (men's/women's/veterans share a club id) — never a ground clash, never a move — so
+  // they're informational; a same-series double-booking is a genuine error, printed loud.
+  const overlapInput: OverlapSeriesInput[] = [
+    ...built.map((b) => ({
+      slug: seriesSlug(b.series.id) ?? String(b.series.id),
+      participants: b.series.participants,
+      fixtures: b.fixtures,
+    })),
+    ...existingOther
+      .filter((s) => {
+        const slug = seriesSlug(s.id);
+        return !slug || !DELETE_SLUGS.includes(slug);
+      })
+      .map((s) => ({
+        slug: seriesSlug(s.id) ?? String(s.id),
+        participants: s.participants as Array<{ teamId: string; clubId: string }> | undefined,
+        fixtures: (s.fixtures as StoredFixture[]) ?? [],
+      })),
+  ];
+  const { crossSeries: slotOverlaps, sameSeries: squadDoubleBookings } =
+    computeSameClubSlotOverlaps(overlapInput);
+  const overlapRow = (o: SlotOverlap) =>
+    `   ${o.date} ${o.time}  ${o.clubId}  ${o.entries
+      .map((e) => `${e.seriesSlug}/${e.fixtureId} v ${e.opponent}`)
+      .join(' · ')}`;
+  if (squadDoubleBookings.length) {
+    console.log(
+      `\n── ✗ same squad double-booked (${squadDoubleBookings.length}) — one squad, two fixtures in one slot; FIX THE SHEET`,
+    );
+    for (const o of squadDoubleBookings) console.log(overlapRow(o));
+  }
+  console.log(
+    `\n── Same-club same-slot overlaps (${slotOverlaps.length}) — different squads, informational`,
+  );
+  for (const o of slotOverlaps) console.log(overlapRow(o));
+
   // ── Reconciliation safety rails ──
   let deleteSet: string[];
   try {
@@ -2220,6 +2394,7 @@ async function runImport(args: Args) {
   }
 
   console.log(`\n${built.length} series to write.`);
+  console.log(`${slotOverlaps.length} same-club same-slot overlaps (informational).`);
   if (!args.confirm) {
     console.log('[dry-run] nothing written. Re-run with --confirm to import.');
     return;

@@ -18,6 +18,7 @@ const {
   redirectedNormalise,
   pairKey,
   parseWorkbook,
+  computeSameClubSlotOverlaps,
 } = await import('../src/import-planb-fixtures.js');
 
 // Mirrors the module's own (unexported) constants — kept in sync by inspection, not
@@ -466,5 +467,140 @@ describe('GroundLedger — multi-surface capacity (registry-resolved grounds)', 
       date: '2026-09-01',
     });
     assert.equal(ledger.check('Chatsworth Oval', '2026-09-01', '13:00'), undefined);
+  });
+});
+
+describe('computeSameClubSlotOverlaps — same-club same-slot detection', () => {
+  // A club id shared across two DIFFERENT series (different squads) at the exact same
+  // slot is the informational case; the same club twice in ONE series is the loud one.
+  test('a club id in two different series at the same date+time is a cross-series overlap', () => {
+    const { crossSeries, sameSeries } = computeSameClubSlotOverlaps([
+      {
+        slug: 'premier-women-t20-g1',
+        participants: [
+          { teamId: 'tm_chats_pw_0', clubId: 'chatsworth-sporting' },
+          { teamId: 'tm_opp1', clubId: 'opp-one' },
+        ],
+        fixtures: [
+          { id: 'f1', date: '2026-09-27', time: '09:00', home: 'tm_chats_pw_0', away: 'tm_opp1' },
+        ],
+      },
+      {
+        slug: 'premier-men-t20-2',
+        participants: [
+          { teamId: 'tm_chats_pm_0', clubId: 'chatsworth-sporting' },
+          { teamId: 'tm_opp2', clubId: 'opp-two' },
+        ],
+        fixtures: [
+          { id: 'f2', date: '2026-09-27', time: '09:00', home: 'tm_chats_pm_0', away: 'tm_opp2' },
+        ],
+      },
+    ]);
+    assert.equal(sameSeries.length, 0, 'not a same-series double-booking');
+    assert.equal(crossSeries.length, 1);
+    const o = crossSeries[0];
+    assert.equal(o.clubId, 'chatsworth-sporting');
+    assert.equal(o.date, '2026-09-27');
+    assert.equal(o.time, '09:00');
+    assert.deepEqual(
+      o.entries.map((e) => `${e.seriesSlug}/${e.fixtureId} v ${e.opponent}`),
+      ['premier-men-t20-2/f2 v opp-two', 'premier-women-t20-g1/f1 v opp-one'],
+    );
+  });
+
+  test('a club playing twice in ONE series in one slot is flagged as a same-series double-booking', () => {
+    const { crossSeries, sameSeries } = computeSameClubSlotOverlaps([
+      {
+        slug: 'premier-men-t20-1',
+        participants: [
+          { teamId: 'tm_a', clubId: 'club-a' },
+          { teamId: 'tm_b', clubId: 'club-b' },
+          { teamId: 'tm_c', clubId: 'club-c' },
+        ],
+        fixtures: [
+          // club-a is home in f1 and away in f2, same date+time → double-booked.
+          { id: 'f1', date: '2026-10-04', time: '10:30', home: 'tm_a', away: 'tm_b' },
+          { id: 'f2', date: '2026-10-04', time: '10:30', home: 'tm_c', away: 'tm_a' },
+        ],
+      },
+    ]);
+    assert.equal(crossSeries.length, 0, 'only one series involved — not cross-series');
+    const doubled = sameSeries.find((o) => o.clubId === 'club-a');
+    assert.ok(doubled, 'club-a is reported as double-booked');
+    assert.deepEqual(
+      doubled!.entries.map((e) => `${e.seriesSlug}/${e.fixtureId} v ${e.opponent}`),
+      ['premier-men-t20-1/f1 v club-b', 'premier-men-t20-1/f2 v club-c'],
+    );
+  });
+
+  test('an untimed fixture never overlaps a timed one at the same club/date', () => {
+    const { crossSeries, sameSeries } = computeSameClubSlotOverlaps([
+      {
+        slug: 'series-timed',
+        participants: [
+          { teamId: 'tm_a', clubId: 'club-a' },
+          { teamId: 'tm_b', clubId: 'club-b' },
+        ],
+        fixtures: [{ id: 'f1', date: '2026-09-27', time: '09:00', home: 'tm_a', away: 'tm_b' }],
+      },
+      {
+        slug: 'series-untimed',
+        participants: [
+          { teamId: 'tm_a2', clubId: 'club-a' },
+          { teamId: 'tm_c', clubId: 'club-c' },
+        ],
+        // No time → dropped from the slot keying entirely.
+        fixtures: [{ id: 'f9', date: '2026-09-27', home: 'tm_a2', away: 'tm_c' }],
+      },
+    ]);
+    assert.equal(crossSeries.length, 0);
+    assert.equal(sameSeries.length, 0);
+  });
+
+  test('the same club at two DIFFERENT times on the same date does not overlap', () => {
+    const { crossSeries, sameSeries } = computeSameClubSlotOverlaps([
+      {
+        slug: 'series-x',
+        participants: [
+          { teamId: 'tm_a', clubId: 'club-a' },
+          { teamId: 'tm_b', clubId: 'club-b' },
+        ],
+        fixtures: [{ id: 'f1', date: '2026-09-27', time: '09:00', home: 'tm_a', away: 'tm_b' }],
+      },
+      {
+        slug: 'series-y',
+        participants: [
+          { teamId: 'tm_a2', clubId: 'club-a' },
+          { teamId: 'tm_c', clubId: 'club-c' },
+        ],
+        fixtures: [{ id: 'f2', date: '2026-09-27', time: '13:30', home: 'tm_a2', away: 'tm_c' }],
+      },
+    ]);
+    assert.equal(crossSeries.length, 0);
+    assert.equal(sameSeries.length, 0);
+  });
+
+  test('legacy series (no participants) resolve sides by clubId directly', () => {
+    const { crossSeries } = computeSameClubSlotOverlaps([
+      {
+        // Legacy: home/away ARE club ids, no participants snapshot.
+        slug: 'legacy-league',
+        fixtures: [{ id: 'f1', date: '2026-09-27', time: '09:00', home: 'club-a', away: 'club-z' }],
+      },
+      {
+        slug: 'premier-men-t20-2',
+        participants: [
+          { teamId: 'tm_a', clubId: 'club-a' },
+          { teamId: 'tm_b', clubId: 'club-b' },
+        ],
+        fixtures: [{ id: 'f2', date: '2026-09-27', time: '09:00', home: 'tm_a', away: 'tm_b' }],
+      },
+    ]);
+    assert.equal(crossSeries.length, 1, 'club-a resolved from the legacy series by clubId');
+    assert.equal(crossSeries[0].clubId, 'club-a');
+    assert.deepEqual(
+      crossSeries[0].entries.map((e) => `${e.seriesSlug}/${e.fixtureId} v ${e.opponent}`),
+      ['legacy-league/f1 v club-z', 'premier-men-t20-2/f2 v club-b'],
+    );
   });
 });

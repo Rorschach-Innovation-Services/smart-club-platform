@@ -67,4 +67,102 @@ describe('ReleaseDialog', () => {
     await user.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalled();
   });
+
+  it('closes only once the release has landed', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <ReleaseDialog
+        seriesName="X · 2026/27"
+        clubCount={9}
+        onConfirm={onConfirm}
+        onClose={onClose}
+      />,
+    );
+    await user.click(releaseBtn());
+    expect(onConfirm).toHaveBeenCalledWith({});
+    // The dialog owns closing — it calls onClose after the confirm promise resolves.
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ReleaseDialog — failure stays open (ADR 0011)', () => {
+  const renderWith = (onConfirm: ReturnType<typeof vi.fn>, onClose = vi.fn()) => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <ReleaseDialog
+        seriesName="EMCU Division 2 · 2026/27"
+        clubCount={12}
+        onConfirm={onConfirm}
+        onClose={onClose}
+      />,
+    );
+    return { user, onClose };
+  };
+
+  it('swaps the plain version-conflict boilerplate for the friendly refresh copy', async () => {
+    // A genuine optimistic-concurrency race is server boilerplate, not admin-facing copy:
+    // the dialog shows the app's friendly line, matching withToast's toast (item 1).
+    const onConfirm = vi.fn().mockRejectedValue(new Error('series changed; refetch'));
+    const { user, onClose } = renderWith(onConfirm);
+    await user.click(releaseBtn());
+
+    expect(await screen.findByText(/someone else just changed this — refreshing\./i)).toBeTruthy();
+    expect(screen.queryByText(/series changed; refetch/i)).toBeNull();
+    // A failed release must NOT close over the error.
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('stays open and shows the clash message inline, keeping the withhold choices', async () => {
+    // The clash gate returns a long, actionable message — shown verbatim inside the
+    // dialog. The confirm button goes busy while the PATCH is in flight, and on failure
+    // the dialog stays open with the admin's withhold choices intact for a retry.
+    let reject!: (e: Error) => void;
+    const pending = new Promise<void>((_res, rej) => {
+      reject = rej;
+    });
+    const onConfirm = vi.fn().mockReturnValue(pending);
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <ReleaseDialog
+        seriesName="EMCU Division 2 · 2026/27"
+        clubCount={12}
+        onConfirm={onConfirm}
+        onClose={onClose}
+      />,
+    );
+
+    await user.click(screen.getByRole('checkbox', { name: /withhold venues/i }));
+    await user.click(releaseBtn());
+
+    // In flight: the confirm button is busy and disabled.
+    const busyBtn = screen.getByRole('button', { name: /releasing/i });
+    expect(busyBtn).toBeDisabled();
+    expect(onConfirm).toHaveBeenCalledWith({ venue: true });
+
+    const clash =
+      'Release blocked — 2 venue clash(es): Kingsmead double-booked on 12 Sep; Tongaat Oval double-booked on 19 Sep. Reallocate or move a fixture, then release again.';
+    reject(new Error(clash));
+
+    expect(await screen.findByText(clash)).toBeTruthy();
+    // Still open, not closed.
+    expect(onClose).not.toHaveBeenCalled();
+    // Button back to its resting state and enabled; the withhold choice survived.
+    expect(screen.getByRole('button', { name: /release to clubs/i })).not.toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: /withhold venues/i })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+  });
+
+  it('Cancel still closes while the dialog is showing an error', async () => {
+    const onConfirm = vi.fn().mockRejectedValue(new Error('Release blocked — 1 venue clash(es)'));
+    const { user, onClose } = renderWith(onConfirm);
+    await user.click(releaseBtn());
+    await screen.findByText(/release blocked/i);
+    await user.click(screen.getByRole('button', { name: /cancel/i }));
+    expect(onClose).toHaveBeenCalled();
+  });
 });

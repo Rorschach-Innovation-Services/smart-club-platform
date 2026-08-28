@@ -250,6 +250,14 @@ undeterminable: N` line. The 4 superseded `DELETE_SLUGS` series are excluded fro
     table** per league — every raw sheet name, the club it resolved to, and the
     synthesised teamId when one was created — so every alias/redirect outcome can be
     reviewed before `--confirm`.
+  - After the clash pass the dry run prints a **same-club same-slot overlap** report: every
+    club id booked into two fixtures at the exact same date+time across the whole
+    post-import tenant. Cross-series hits (the bulk) are **informational only** — a club
+    fields separate squads (men's/women's/veterans) that all share one club id, so these
+    are different teams playing at once, never a ground clash and never moved or aborted on.
+    A **same-squad double-booking** (one squad — same side/teamId, so a club's A and B sides
+    are not confused for it — in two fixtures in one slot) is a genuine sheet error and is
+    printed first and loudly (`✗ same squad double-booked`), though it too is non-fatal.
 - Overwritten series (same deterministic id as before) **preserve** any approved/released
   state the admin has set and bump the version. Brand-new series land as **drafts**:
   approve and release each from the admin console (Fixtures & Venues). Direct writes

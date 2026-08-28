@@ -15,7 +15,7 @@
  * ground while the data said another.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AdminFixtures, FixtureTable, SCHEDULE_COLS } from './admin';
 import { renderWithProviders } from './test-utils';
@@ -120,7 +120,7 @@ describe('the venue picker', () => {
     const { user } = setup(allocated());
     await openEditor(user, /kingsmead/i);
 
-    const picker = screen.getByLabelText('Venue') as HTMLSelectElement;
+    const picker = screen.getByRole('combobox', { name: 'Venue' }) as HTMLSelectElement;
     expect(picker.options[picker.selectedIndex].text).toMatch(/allocated · kingsmead/i);
   });
 
@@ -132,7 +132,7 @@ describe('the venue picker', () => {
     const { user, onUpdateSeries } = setup(s);
     await openEditor(user, /kingsmead/i);
 
-    await user.selectOptions(screen.getByLabelText('Venue'), 'primary');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Venue' }), 'primary');
     await user.click(screen.getByRole('button', { name: /save changes/i }));
 
     const [f] = resultingFixtures(onUpdateSeries, s);
@@ -148,7 +148,7 @@ describe('the venue picker', () => {
     const { user, onUpdateSeries } = setup(s);
     await openEditor(user, /kingsmead/i);
 
-    await user.selectOptions(screen.getByLabelText('Venue'), 'secondary');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Venue' }), 'secondary');
     await user.click(screen.getByRole('button', { name: /save changes/i }));
 
     const [f] = resultingFixtures(onUpdateSeries, s);
@@ -165,8 +165,8 @@ describe('the venue picker', () => {
     const { user, onUpdateSeries } = setup(s);
     await openEditor(user, /kingsmead/i);
 
-    await user.selectOptions(screen.getByLabelText('Venue'), 'primary');
-    await user.selectOptions(screen.getByLabelText('Venue'), 'allocated');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Venue' }), 'primary');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Venue' }), 'allocated');
     await user.click(screen.getByRole('button', { name: /save changes/i }));
 
     const [f] = resultingFixtures(onUpdateSeries, s);
@@ -188,7 +188,7 @@ describe('the venue picker', () => {
     const { user, onUpdateSeries } = setup(s);
     await openEditor(user, /spartan park/i);
 
-    await user.selectOptions(screen.getByLabelText('Venue'), 'custom');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Venue' }), 'custom');
     await user.type(screen.getByLabelText(/custom venue/i), 'Kingsmead');
     await user.click(screen.getByRole('button', { name: /save changes/i }));
 
@@ -202,7 +202,7 @@ describe('the venue picker', () => {
     const { user, onUpdateSeries } = setup(s);
     await openEditor(user, /spartan park/i);
 
-    await user.selectOptions(screen.getByLabelText('Venue'), 'secondary');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Venue' }), 'secondary');
     await user.selectOptions(screen.getByLabelText(/home \(host\)/i), 'ilembe');
     await user.click(screen.getByRole('button', { name: /save changes/i }));
 
@@ -754,5 +754,104 @@ describe('progressive release — withhold at release, reveal later (ADR 0011)',
   it('never claims WhatsApp notifications are sent on release', () => {
     renderPage(series({ approved: true, released: true } as Partial<Series>));
     expect(screen.queryByText(/whatsapp notifications sent/i)).toBeNull();
+  });
+});
+
+describe('release fires exactly one success toast', () => {
+  const renderPage = (s: Series) => {
+    const toast = vi.fn();
+    const onSetReleased = vi.fn().mockResolvedValue(undefined);
+    renderWithProviders(
+      <AdminFixtures
+        clubs={clubs}
+        allSeries={[s]}
+        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
+        onUpdateSeries={vi.fn()}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onSetReleased={onSetReleased}
+        onReveal={vi.fn()}
+        onSetApproved={vi.fn()}
+        toast={toast}
+        allVenues={[]}
+        allSeasonRuns={[]}
+        allLeagues={[]}
+        tenantConfig={{ structures: [], calendars: [] } as unknown as TenantConfig}
+        onSaveVenue={vi.fn()}
+        onDeleteVenue={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCreateSeasonRun={vi.fn()}
+        onPatchSeasonRun={vi.fn()}
+        onDeleteSeasonRun={vi.fn()}
+        onGenerateStageSeries={vi.fn()}
+      />,
+    );
+    return { toast, onSetReleased };
+  };
+
+  it('toasts once, after the PATCH resolves, and not from the release bar too', async () => {
+    const user = userEvent.setup();
+    const { toast, onSetReleased } = renderPage(series({ approved: true } as Partial<Series>));
+
+    // Header CTA opens the dialog; the dialog's own "Release to clubs" fires the release.
+    await user.click(screen.getAllByRole('button', { name: /release to clubs/i })[0]);
+    const dialog = screen.getByRole('dialog', { name: /release .*to clubs/i });
+    await user.click(within(dialog).getByRole('button', { name: /release to clubs/i }));
+
+    expect(onSetReleased).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
+    expect(toast).toHaveBeenCalledWith(expect.stringMatching(/·\s*released to \d+ clubs/i));
+  });
+});
+
+describe('the venue-reason marker in the fixture table', () => {
+  const moved = (over: Record<string, unknown>) =>
+    series({
+      fixtures: [
+        {
+          id: 'f1',
+          round: 1,
+          date: '2026-08-08',
+          home: 'spartan',
+          away: 'tongaat',
+          venueOverride: 'Kingsmead',
+          venueStatus: 'neutral',
+          ...over,
+        },
+      ],
+    } as Partial<Series>);
+
+  it('shows a "moved" pill with the full reason as its tooltip', () => {
+    const reason = 'Moved to avoid ground clash — Kingsmead Stadium';
+    setup(moved({ venueReason: reason }));
+    const pill = screen.getByText('moved');
+    expect(pill).toHaveAttribute('title', reason);
+  });
+
+  it('labels a union directive as "directive"', () => {
+    const reason = 'Union directive — Kloof CC unavailable';
+    setup(moved({ venueReason: reason }));
+    expect(screen.getByText('directive')).toHaveAttribute('title', reason);
+  });
+
+  it('labels a groundless home club as "no ground"', () => {
+    const reason = "home club has no ground — played at opponent's venue";
+    setup(moved({ venueReason: reason }));
+    expect(screen.getByText('no ground')).toHaveAttribute('title', reason);
+  });
+
+  it('shows no pill for a routine allocated/Union-T20 ground', () => {
+    const reason = 'Union T20 schedule — exact venue';
+    setup(moved({ venueReason: reason }));
+    // The reason still reads in the suburb line, but no compact pill (no titled marker).
+    expect(screen.queryByTitle(reason)).toBeNull();
+    expect(screen.queryByText('moved')).toBeNull();
+    expect(screen.queryByText('directive')).toBeNull();
+  });
+
+  it('shows no pill when the fixture is on its home ground', () => {
+    const reason = 'Moved to avoid ground clash — Kingsmead Stadium';
+    setup(moved({ venueStatus: 'home', venueReason: reason }));
+    expect(screen.queryByText('moved')).toBeNull();
   });
 });

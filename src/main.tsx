@@ -623,7 +623,12 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       // Most 409s are optimistic-concurrency clashes → generic refresh copy. But user-mgmt
       // 409s ("user already active…", "cannot remove the last admin") carry actionable copy
       // the admin must see, so those callers pass `rawConflict` to surface err.message.
-      const rawConflict = conflict && opts.rawConflict;
+      // Exception: a plain optimistic-concurrency race carries exactly "series changed;
+      // refetch" — server boilerplate, not admin-facing copy — so it always gets the
+      // friendly refresh line even when the caller asked for rawConflict (the flag is
+      // there for the actionable clash-gate/reveal text, not this).
+      const plainConcurrency = conflict && err.message === 'series changed; refetch';
+      const rawConflict = conflict && opts.rawConflict && !plainConcurrency;
       // `rawClientError` surfaces the server's message for ANY 4xx (not just 409) — used where
       // every client-error carries actionable recovery copy (e.g. email correction's 404
       // "sign-in account is missing — remove and re-invite"), which a generic errMsg would mask.

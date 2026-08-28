@@ -3,6 +3,13 @@ import { createPortal } from 'react-dom';
 import { Icon, Btn, useEscapeClose } from './atoms';
 import type { WithheldField } from './types';
 
+// A plain optimistic-concurrency race surfaces as exactly this server boilerplate; the
+// clash gate, by contrast, returns a long actionable "Release blocked — …" message. We
+// show the clash text verbatim and swap the boilerplate for the app's friendly line —
+// the same distinction withToast (main.tsx) makes for the toast (ADR 0011).
+const CONCURRENCY_RAW = 'series changed; refetch';
+const CONCURRENCY_FRIENDLY = 'Someone else just changed this — refreshing.';
+
 /* ─── ReleaseDialog — publish a series' schedule to clubs, optionally withholding
    venues and/or start times (ADR 0011) ───
 
@@ -20,8 +27,11 @@ export function ReleaseDialog({
 }: {
   seriesName: string;
   clubCount: number;
-  /** Called with the withheld mask (true keys only; `{}` when nothing is withheld). */
-  onConfirm: (withheld: { venue?: true; time?: true }) => void;
+  /** Called with the withheld mask (true keys only; `{}` when nothing is withheld).
+      Return the release promise so the dialog can stay open while the PATCH is in
+      flight and surface a rejection (e.g. the clash-gate 409) inline instead of
+      closing over it. A `void` return is treated as an immediate success. */
+  onConfirm: (withheld: { venue?: true; time?: true }) => void | Promise<unknown>;
   onClose: () => void;
 }) {
   useEscapeClose(onClose);
@@ -30,14 +40,32 @@ export function ReleaseDialog({
     venue: false,
     time: false,
   });
+  // The PATCH runs while the dialog is still open: the confirm button goes busy and a
+  // failure (the clash gate returns a long "Release blocked — …" message) is shown
+  // inline so the admin's withhold choices survive the error and can be retried.
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const toggle = (f: WithheldField) => setWithheld((w) => ({ ...w, [f]: !w[f] }));
 
-  function confirm() {
+  async function confirm() {
     // True keys only — an unticked field is omitted, never stored as `false`.
     const mask: { venue?: true; time?: true } = {};
     if (withheld.venue) mask.venue = true;
     if (withheld.time) mask.time = true;
-    onConfirm(mask);
+    setError(null);
+    setBusy(true);
+    try {
+      await Promise.resolve(onConfirm(mask));
+      onClose(); // close only once the release has actually landed
+    } catch (e) {
+      const raw = (e instanceof Error && e.message) || '';
+      setError(
+        raw === CONCURRENCY_RAW
+          ? CONCURRENCY_FRIENDLY
+          : raw || 'Release failed — please try again.',
+      );
+      setBusy(false); // stay open, re-enable, keep the withhold choices
+    }
   }
 
   const toggles: Array<{ field: WithheldField; label: string; hint: string }> = [
@@ -97,12 +125,21 @@ export function ReleaseDialog({
               </button>
             ))}
           </div>
+          {error && (
+            <div
+              className="field-error"
+              role="alert"
+              style={{ marginTop: 16, whiteSpace: 'pre-wrap' }}
+            >
+              {error}
+            </div>
+          )}
           <div className="fix-confirm-actions" style={{ marginTop: 22 }}>
             <Btn tone="outline" onClick={onClose}>
               Cancel
             </Btn>
-            <Btn tone="teal" icon={Icon.Arrow} onClick={confirm}>
-              Release to clubs
+            <Btn tone="teal" icon={Icon.Arrow} onClick={confirm} disabled={busy}>
+              {busy ? 'Releasing…' : 'Release to clubs'}
             </Btn>
           </div>
         </div>

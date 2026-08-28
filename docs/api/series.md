@@ -101,15 +101,24 @@ release, never a draft.
   - `withheld.venue` ⇒ each fixture loses all venue keys (`venueId`, `venueName`,
     `venueLat`, `venueLon`, `venueStatus`, `venueReason`, `venueLocked`, `venueOverride`);
   - `withheld`/`revealedAt` are **kept** so the client renders "to be confirmed"
-    explicitly. Participants' home-ground `venue`/`lat`/`lon` are **not** stripped (reps
-    already have them from `GET /clubs`), so clients must check `withheld.venue` rather
-    than infer from missing fields.
+    explicitly. Participants' home-ground `venue`/`lat`/`lon` are **not** stripped, so
+    clients must check `withheld.venue` rather than infer from missing fields;
+  - **legacy participants back-fill** — a series with no `participants` snapshot (created
+    before the snapshot existed, where every `teams[]` id is a clubId) has `participants`
+    synthesised from the tenant's clubs: `{ teamId, clubId, name }` plus home-ground
+    `venue`/`lat`/`lon` from `club.ground`, skipping any id with no club record. Without
+    this a rep's client — which can't call the admin-only `GET /clubs` — renders opponents
+    as "Removed club". Home-ground identity is public even when `venue` is withheld (ADR
+    0011 §5): the fixture's allocated venue is still hidden and the client shows "Venue to
+    be confirmed". A series that already carries `participants` is left untouched.
 
 ## `POST /series` — create (admin)
 
-Body: a full series object including client-generated `fixtures[]`. The server sets
-`version: 1`, defaults `released: false`, `releasedAt: null`, and drops any
-`withheld`/`revealedAt`.
+Body: a full series object including client-generated `fixtures[]`. A brand-new series is
+always a **draft**: the server sets `version: 1` and **forces** `released: false`,
+`releasedAt: null`, `approved: false`, `approvedAt: null` regardless of what the client
+sent — release and approval are earned via `PATCH`, never asserted at create — and drops
+any `withheld`/`revealedAt`.
 
 ```
 201 → Series
@@ -118,8 +127,11 @@ Body: a full series object including client-generated `fixtures[]`. The server s
 ## `PATCH /series/:id` — update / release / recall / reveal (admin)
 
 Partial update — covers fixture edits, regeneration (send the whole new `fixtures[]`),
-release/recall, and per-field reveal. When `released` is set, the server stamps
-`releasedAt` (release → now, recall → null) for trustworthy timestamps.
+release/recall, and per-field reveal. `releasedAt` is server-owned: stamped **only** on the
+false→true release transition (→ now) and cleared on recall (→ null). A whole-object edit of
+an already-released series carries `released: true` but does **not** re-stamp `releasedAt` —
+the key is dropped so the stored value (the date clubs already saw) is kept, the same
+keep-on-edit rule as `withheld`.
 
 | Patch                                                    | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -141,8 +153,10 @@ most exposed to concurrent edits (two admins, or one in two tabs), so always ref
 
 ## `POST /series/:id/duplicate` — duplicate (admin)
 
-Clones the series with a fresh id, `name + " · Copy"`, `released: false`, `version: 1`, and
-no `withheld`/`revealedAt`.
+Clones the series with a fresh id, `name + " · Copy"`, `version: 1`, and no
+`withheld`/`revealedAt`. A copy is a fresh **draft**: `released: false`, `releasedAt: null`,
+`approved: false`, `approvedAt: null` — release and approval belong to the original, so a
+copy never starts approved or released.
 
 ```
 201 → Series
