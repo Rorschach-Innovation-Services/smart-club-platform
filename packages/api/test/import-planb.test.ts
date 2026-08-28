@@ -7,9 +7,18 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import ExcelJS from 'exceljs';
 
-const { isoDate, isoTime, GroundLedger, assertDeleteSet, normalise, redirectedNormalise, pairKey } =
-  await import('../src/import-planb-fixtures.js');
+const {
+  isoDate,
+  isoTime,
+  GroundLedger,
+  assertDeleteSet,
+  normalise,
+  redirectedNormalise,
+  pairKey,
+  parseWorkbook,
+} = await import('../src/import-planb-fixtures.js');
 
 // Mirrors the module's own (unexported) constants — kept in sync by inspection, not
 // import, since assertDeleteSet's contract is what's under test here.
@@ -171,6 +180,249 @@ describe('normalise / redirectedNormalise / pairKey — cross-file name matching
       pairKey('Southern Natal', 'Harlequins'),
     );
     assert.notEqual(pairKey('UKZN', 'Delta'), pairKey('UKZN', 'Umzinto'));
+  });
+});
+
+// ── parseWorkbook fixtures ──
+// Excel serialises a date cell as UTC-midnight and a bare time as a 1899-12-30 epoch
+// Date; these two helpers mirror that exactly (isoDate/isoTime tell them apart by year).
+function dateCell(y: number, m: number, d: number): Date {
+  return new Date(Date.UTC(y, m - 1, d));
+}
+function timeCell(h: number, m: number): Date {
+  return new Date(Date.UTC(1899, 11, 30, h, m));
+}
+
+// parseWorkbook throws if any of the six manifest sheets is missing, so every workbook
+// carries all six — trailing spaces on the real names included.
+const SHEET_NAMES = [
+  'Premier Men ',
+  'Promotion Men ',
+  'Premier Women ',
+  'Promotion Women',
+  'Veterans Premier',
+  'Veterans Promotion',
+];
+
+/** A row as a 1-based column→value map, empties everywhere else. */
+function cells(map: Record<number, unknown>): unknown[] {
+  const nums = Object.keys(map).map(Number);
+  const max = nums.length ? Math.max(...nums) : 0;
+  const arr: unknown[] = new Array(max).fill(null);
+  for (const n of nums) arr[n - 1] = map[n];
+  return arr;
+}
+
+function makeWorkbook(rowsBySheet: Record<string, unknown[][]>): ExcelJS.Workbook {
+  const wb = new ExcelJS.Workbook();
+  for (const name of SHEET_NAMES) {
+    const ws = wb.addWorksheet(name);
+    for (const row of rowsBySheet[name.trim()] ?? []) ws.addRow(row as ExcelJS.CellValue[]);
+  }
+  return wb;
+}
+
+describe('parseWorkbook — narrow sheet', () => {
+  test('a bare "T20 Premier Women Group 2" header (no womens) slugs to g2, with round/date/time running', () => {
+    const wb = makeWorkbook({
+      'Premier Women': [
+        cells({ 1: 'T20 Premier Women Group 2' }),
+        cells({ 1: 'Week 1' }),
+        cells({ 1: 'Home1', 3: 'v', 4: 'Away1', 5: dateCell(2026, 9, 5), 6: timeCell(9, 0) }),
+        cells({ 5: dateCell(2026, 9, 6) }), // date-only row → resets running time to null
+        cells({ 1: 'Home2', 3: 'v', 4: 'Away2' }), // inherits the date, no time
+        cells({ 6: timeCell(10, 0) }), // time-only row sets a new running time
+        cells({ 1: 'Home3', 3: 'v', 4: 'Away3' }),
+      ],
+    });
+    const { sections, orphans } = parseWorkbook(wb);
+    assert.equal(orphans.length, 0);
+    assert.equal(sections.length, 1);
+    const g2 = sections[0];
+    assert.equal(g2.spec.slug, 'premier-women-t20-g2');
+    assert.equal(g2.fixtures.length, 3);
+    assert.deepEqual(g2.fixtures[0], {
+      round: 1,
+      date: '2026-09-05',
+      time: '09:00',
+      homeName: 'Home1',
+      awayName: 'Away1',
+    });
+    assert.equal(g2.fixtures[1].date, '2026-09-06');
+    assert.equal(g2.fixtures[1].time, undefined); // the date-without-time row cleared it
+    assert.equal(g2.fixtures[2].date, '2026-09-06');
+    assert.equal(g2.fixtures[2].time, '10:00');
+  });
+
+  test('the legacy "T20 Womens Premier Women Group 2" header still matches', () => {
+    const wb = makeWorkbook({
+      'Premier Women': [
+        cells({ 1: 'T20 Womens Premier Women Group 2' }),
+        cells({ 1: 'Week 1' }),
+        cells({ 1: 'HomeL', 3: 'v', 4: 'AwayL', 5: dateCell(2026, 9, 5) }),
+      ],
+    });
+    const { sections } = parseWorkbook(wb);
+    assert.equal(sections.length, 1);
+    assert.equal(sections[0].spec.slug, 'premier-women-t20-g2');
+    assert.equal(sections[0].fixtures.length, 1);
+  });
+});
+
+describe('parseWorkbook — wide Promotion Women', () => {
+  const SAT = [
+    dateCell(2026, 10, 24),
+    dateCell(2026, 11, 21),
+    dateCell(2027, 1, 23),
+    dateCell(2027, 2, 20),
+  ];
+  const SUN = [
+    dateCell(2026, 10, 25),
+    dateCell(2026, 11, 22),
+    dateCell(2027, 1, 24),
+    dateCell(2027, 2, 21),
+  ];
+  const BASES = [1, 7, 13, 19];
+  // Same logical content in every 6-wide block (Series 1–4), with per-block dates.
+  const wideRow = (
+    perBlock: (i: number, base: number) => Record<number, unknown>,
+    extra: Record<number, unknown> = {},
+  ): unknown[] => {
+    const map: Record<number, unknown> = { ...extra };
+    BASES.forEach((base, i) => Object.assign(map, perBlock(i, base)));
+    return cells(map);
+  };
+
+  const wb = makeWorkbook({
+    'Promotion Women': [
+      wideRow((i, base) => ({ [base]: `Series ${i + 1}` })),
+      // cols 25–27 are team-list metadata: outside every block window, must be ignored.
+      wideRow((_i, base) => ({ [base]: 'T20 Group A' }), {
+        25: 'MetaTeam',
+        26: 'v',
+        27: 'MetaTeam2',
+      }),
+      wideRow((i, base) => ({ [base + 4]: SAT[i] })),
+      wideRow((_i, base) => ({
+        [base]: 'GA-home',
+        [base + 2]: 'v',
+        [base + 3]: timeCell(9, 0),
+        [base + 4]: 'GA-away',
+      })),
+      wideRow((_i, base) => ({ [base]: 'T20 Group B' })),
+      wideRow((_i, base) => ({ [base]: 'Week 1' })),
+      wideRow((i, base) => ({ [base + 4]: SAT[i] })),
+      wideRow((_i, base) => ({
+        [base]: 'GB-home',
+        [base + 2]: 'v',
+        [base + 3]: timeCell(9, 0),
+        [base + 4]: 'GB-away',
+      })),
+      wideRow((_i, base) => ({ [base]: 'Week 2' })),
+      wideRow((i, base) => ({ [base + 4]: SUN[i] })),
+      wideRow((_i, base) => ({
+        [base]: 'GB2-home',
+        [base + 2]: 'v',
+        [base + 3]: timeCell(11, 0),
+        [base + 4]: 'GB2-away',
+      })),
+    ],
+  });
+  const { sections, orphans } = parseWorkbook(wb);
+  const ga = sections.find((s) => s.spec.slug === 'promotion-women-t20-ga')!;
+  const gb = sections.find((s) => s.spec.slug === 'promotion-women-t20-gb')!;
+
+  test('one section per group, no orphans or fixtures from the metadata columns', () => {
+    assert.equal(orphans.length, 0);
+    assert.equal(sections.length, 2);
+    assert.ok(ga && gb);
+    assert.equal(ga.fixtures.length, 4); // one per block
+    assert.equal(gb.fixtures.length, 8); // two per block
+  });
+
+  test('the group spec still expects 40 (4 blocks × 10)', () => {
+    assert.equal(ga.spec.expected, 40);
+  });
+
+  test('round is the block index, and Group B "Week 2" rows stay round 1 in block 1', () => {
+    assert.deepEqual(
+      ga.fixtures.map((f) => f.round),
+      [1, 2, 3, 4],
+    );
+    // Block 1 holds a "Week 1" and a "Week 2" fixture — both must be round 1.
+    assert.equal(gb.fixtures[0].round, 1);
+    assert.equal(gb.fixtures[0].date, '2026-10-24');
+    assert.equal(gb.fixtures[1].round, 1);
+    assert.equal(gb.fixtures[1].date, '2026-10-25');
+  });
+
+  test('fixtures are ordered chronologically by (round, date) across blocks', () => {
+    assert.deepEqual(
+      ga.fixtures.map((f) => f.date),
+      ['2026-10-24', '2026-11-21', '2027-01-23', '2027-02-20'],
+    );
+    assert.deepEqual(
+      gb.fixtures.map((f) => f.round),
+      [1, 1, 2, 2, 3, 3, 4, 4],
+    );
+    assert.deepEqual(
+      gb.fixtures.map((f) => f.date),
+      [
+        '2026-10-24',
+        '2026-10-25',
+        '2026-11-21',
+        '2026-11-22',
+        '2027-01-23',
+        '2027-01-24',
+        '2027-02-20',
+        '2027-02-21',
+      ],
+    );
+  });
+});
+
+describe('parseWorkbook — orphan detection', () => {
+  test('a fixture row under an unknown header is one orphan naming the sheet', () => {
+    const wb = makeWorkbook({
+      'Premier Men': [
+        cells({ 1: 'Some Unknown Header' }),
+        cells({ 1: 'HomeO', 3: 'v', 4: 'AwayO' }),
+      ],
+    });
+    const { sections, orphans } = parseWorkbook(wb);
+    assert.equal(sections.length, 0);
+    assert.equal(orphans.length, 1);
+    assert.match(orphans[0], /Premier Men/);
+    assert.doesNotMatch(orphans[0], /\[block/); // narrow sheet — no block prefix
+  });
+});
+
+describe('parseWorkbook — narrow-sheet regressions', () => {
+  test('a "Series 2" banner still sets round 2 on a narrow sheet', () => {
+    const wb = makeWorkbook({
+      'Premier Women': [
+        cells({ 1: 'T20 Premier Women Group 2' }),
+        cells({ 1: 'Series 2' }),
+        cells({ 1: 'HomeS', 3: 'v', 4: 'AwayS', 5: dateCell(2026, 9, 5) }),
+      ],
+    });
+    const { sections } = parseWorkbook(wb);
+    assert.equal(sections[0].fixtures.length, 1);
+    assert.equal(sections[0].fixtures[0].round, 2);
+  });
+
+  test('a text time cell in column D is not swallowed as the away name', () => {
+    const wb = makeWorkbook({
+      'Premier Women': [
+        cells({ 1: 'T20 Premier Women Group 2' }),
+        cells({ 1: 'Week 1' }),
+        cells({ 1: 'HomeT', 3: 'v', 4: '13:00', 5: 'RealAway', 6: dateCell(2026, 9, 5) }),
+      ],
+    });
+    const { sections } = parseWorkbook(wb);
+    const f = sections[0].fixtures[0];
+    assert.equal(f.awayName, 'RealAway');
+    assert.equal(f.time, '13:00');
   });
 });
 

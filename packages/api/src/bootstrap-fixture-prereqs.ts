@@ -5,16 +5,16 @@
  *   npx sst shell --stage prod -- npm --prefix packages/api run bootstrap-fixture-prereqs            # dry-run
  *   npx sst shell --stage prod -- npm --prefix packages/api run bootstrap-fixture-prereqs -- --confirm
  *
- * Adds the two veterans league entries the import fails closed on, creates the
- * Parkgate club record (Promotion Women Group B), syncs the venue registry from club
- * grounds (it was empty on prod), creates the two REVISED-designated grounds no club
- * record carries, and erases the duplicate fam-cricket-club. Idempotent: existing
- * leagues/clubs/venues are left untouched and reported, so re-running after a partial
- * write is safe.
+ * Adds the two veterans league entries the import fails closed on, ensures the
+ * Parkgate Hambanathi CC club record (Promotion Women Group B) — created only if the
+ * existing prod record is absent — syncs the venue registry from club grounds (it was
+ * empty on prod), creates the two REVISED-designated grounds no club record carries, and
+ * erases the duplicate fam-cricket-club. Idempotent: existing leagues/clubs/venues are
+ * left untouched and reported, so re-running after a partial write is safe.
  *
- * The club records are deliberately skeletal — the names satisfy the import's
- * normalise() matching ("Parkgate" → parkgate, "FAM" → fam), while district, chair and
- * ground are placeholders the admin corrects in the console once the union supplies
+ * A created club record is deliberately skeletal — the name satisfies the import's
+ * resolution (bare "Parkgate" aliases to parkgate-hambanathi-cc), while district and
+ * chair are placeholders the admin corrects in the console once the union supplies
  * details. League group/district are copied from an existing league entry so the new
  * ones file under the same console grouping.
  */
@@ -30,16 +30,20 @@ const NEW_LEAGUES: Array<Pick<League, 'key' | 'label'>> = [
   { key: 'veterans-promotion', label: 'Veterans Promotion' },
 ];
 
-/** Name chosen so the fixture sheets' "Parkgate" resolves via normalise(); rename
- * freely in the console — resolution also matches on the club id. ("FAM" turned out to
- * exist all along as fam-kwamakhutha — the registry sync surfaced it — so the import
- * redirects onto that and the skeletal fam-cricket-club an earlier run created is
- * erased below.) */
+/** The prod club "Parkgate Hambanathi CC" (Promotion Women Group B). The import's
+ * `NAME_ALIASES` maps the sheets' bare "Parkgate" straight to this id, and the club name
+ * matches it too — so this bootstrap resolves the existing record instead of minting a
+ * duplicate, whether the record is found by id or by normalised name. */
+const PARKGATE_ID = 'parkgate-hambanathi-cc';
+/** The skeletal record an earlier run minted before "Parkgate" resolved to the record
+ * above. Only used to warn if that stale record still exists — never created or erased. */
+const LEGACY_PARKGATE_ID = 'parkgate-cricket-club';
 /** Ground per the union facility list ("Parkgate Hambanathi" → Phoenix Stonebridge) —
- * set at creation so its home fixtures have an effective ground immediately. The prod
- * record this script created on 16 Aug was deleted from the console on 17 Aug; this
- * recreates it whole. */
-const NEW_CLUBS = [{ name: 'Parkgate Cricket Club', groundVenue: 'Phoenix Stonebridge' }];
+ * set at creation so its home fixtures have an effective ground immediately. ("FAM"
+ * turned out to exist all along as fam-kwamakhutha — the registry sync surfaced it — so
+ * the import redirects onto that and the skeletal fam-cricket-club an earlier run created
+ * is erased below.) */
+const NEW_CLUBS = [{ name: 'Parkgate Hambanathi CC', groundVenue: 'Phoenix Stonebridge' }];
 const NEW_CLUB_LEAGUES = ['promotion-women-s-league'];
 const DUPLICATE_CLUB_ID = 'fam-cricket-club';
 
@@ -124,7 +128,7 @@ const FACILITY_FIELDS: Array<{ name: string; clubs: string[] }> = [
   { name: 'Phoenix Northcroft', clubs: ['phoenix-cricket-club'] },
   {
     name: 'Phoenix Stonebridge',
-    clubs: ['parkgate-cricket-club', 'phoenix-cricket-club'],
+    clubs: [PARKGATE_ID, 'phoenix-cricket-club'],
   },
   { name: 'Phoenix Sydmore', clubs: ['phoenix-cricket-club'] },
   {
@@ -205,7 +209,10 @@ async function main() {
   const district = modalDistrict(clubs);
   const clubsToAdd: Club[] = [];
   for (const spec of NEW_CLUBS) {
-    const existing = byNorm.get(normalise(spec.name));
+    // Match on the canonical id OR the normalised name — the prod record may have been
+    // renamed in the console but keeps parkgate-hambanathi-cc as its id.
+    const existing =
+      clubs.find((c) => c.id === clubIdFromName(spec.name)) ?? byNorm.get(normalise(spec.name));
     if (existing) {
       console.log(
         `club "${spec.name}" — already resolves to ${existing.name} (${existing.id}), untouched`,
@@ -380,14 +387,23 @@ async function main() {
     );
   }
 
-  // Parkgate has no ground on record; the facility list names Phoenix Stonebridge as
-  // its field. Setting it gives Parkgate's home fixtures an effective ground instead
-  // of "undeterminable".
-  const parkgate = clubs.find((c) => c.id === 'parkgate-cricket-club');
+  // If Parkgate is already on record but carries no ground, the facility list names
+  // Phoenix Stonebridge as its field. Setting it gives Parkgate's home fixtures an
+  // effective ground instead of "undeterminable". (A record created this run already has
+  // it set at creation, so this only touches a pre-existing one.)
+  const parkgate = clubs.find((c) => c.id === PARKGATE_ID);
   const parkgateNeedsGround = parkgate && !parkgate.ground?.venue;
   if (parkgateNeedsGround)
     console.log(
-      `${confirm ? 'set' : '[dry-run] would set'} parkgate-cricket-club ground → "Phoenix Stonebridge" (union facility list)`,
+      `${confirm ? 'set' : '[dry-run] would set'} ${PARKGATE_ID} ground → "Phoenix Stonebridge" (union facility list)`,
+    );
+
+  // A stale skeletal record from before "Parkgate" resolved to parkgate-hambanathi-cc is
+  // reported, never auto-erased — mirrors the fam-cricket-club duplicate branch.
+  const legacyParkgate = clubs.find((c) => c.id === LEGACY_PARKGATE_ID);
+  if (legacyParkgate)
+    console.log(
+      `⚠ legacy club ${LEGACY_PARKGATE_ID} exists — "Parkgate" now resolves to ${PARKGATE_ID}; resolve/rename manually (NOT erased)`,
     );
 
   // ── Duplicate-club cleanup ──
@@ -449,7 +465,7 @@ async function main() {
       ...parkgate,
       ground: { ...parkgate.ground, venue: 'Phoenix Stonebridge' },
     });
-    console.log('updated club parkgate-cricket-club (ground → Phoenix Stonebridge)');
+    console.log(`updated club ${PARKGATE_ID} (ground → Phoenix Stonebridge)`);
   }
   if (dup && dupErasable) {
     await repo.eraseClubData(TENANT, dup);

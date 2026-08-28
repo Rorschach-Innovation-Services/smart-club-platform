@@ -27,6 +27,11 @@
  * else is Dolphins-only and gets a venue from the allocation rules (home club's ground,
  * re-based where barred, from the REVISED file's Venue Allocations sheet).
  *
+ * WIDE SHEETS — most Dolphins sheets are a single top-to-bottom column of sections, but
+ * "Promotion Women" lays each group's four weekends out as four parallel 6-wide windows
+ * (Series 1–4) side by side; `SHEET_LAYOUTS` drives a per-block cursor so the four blocks
+ * merge into one series per group with the block index as the round (see parseWorkbook).
+ *
  * Fail-closed by design: a team name that doesn't resolve to a club, a section the
  * manifest doesn't recognise (0 fixtures parsed), a duplicate or asymmetric Premier T20
  * pair between the two files, a barred ground with no allocation, or an unresolved
@@ -139,6 +144,9 @@ const NAME_ALIASES: Record<string, string> = {
   dut: 'durban-university-of-technology-dut',
   meadowridge: 'meadowridge-sporting-cricket-club',
   rhythmdhs: 'rhythm-dhsob-cricket-club',
+  // Prod record "Parkgate Hambanathi CC" normalises to `parkgatehambanathi`; the
+  // sheets' bare "Parkgate" (norm `parkgate`) can't reach it, so map it straight.
+  parkgate: 'parkgate-hambanathi-cc',
 };
 
 /** Sheet TYPOS/variants that collapse to a DIFFERENT normal-form before the
@@ -192,7 +200,7 @@ export function redirectedNormalise(name: string): string {
   return NAME_REDIRECTS[n] ?? n;
 }
 
-function buildClubIndex(clubs: Club[]): Map<string, Club> {
+export function buildClubIndex(clubs: Club[]): Map<string, Club> {
   const byNorm = new Map<string, Club>();
   for (const c of clubs) {
     byNorm.set(normalise(c.name), c);
@@ -223,7 +231,7 @@ function stripLetterSuffix(name: string): { base: string; letter: string } | nul
 /** Tracks, per league, which clubs appeared as a plain (unsuffixed) team and which
  * appeared as a lettered side — printed as a warning for any club in both sets (the
  * suffixed/unsuffixed mixing check runs per LEAGUE, not per section). */
-interface SuffixUsage {
+export interface SuffixUsage {
   suffixed: Set<string>;
   unsuffixed: Set<string>;
 }
@@ -239,7 +247,7 @@ interface ResolutionEntry {
   clubId: string;
   teamId: string;
 }
-type ResolutionLog = Map<string, ResolutionEntry>;
+export type ResolutionLog = Map<string, ResolutionEntry>;
 
 function recordResolution(
   log: ResolutionLog,
@@ -362,7 +370,7 @@ function cellText(v: unknown): string {
 
 /** Shared shape for the Series this script writes — used both for the Dolphins-file
  * sections and the REVISED-file Group 1-4 promotion sections. */
-interface SeriesSpec {
+export interface SeriesSpec {
   slug: string;
   label: string;
   leagueKey: string;
@@ -450,7 +458,7 @@ const SECTIONS: Record<string, SectionSpec[]> = {
       expected: 5,
     },
     {
-      match: /^t20\s+womens\s+premier\s+women\s+group\s+2$/i,
+      match: /^t20\s+(?:womens\s+)?premier\s+women\s+group\s+2$/i,
       slug: 'premier-women-t20-g2',
       label: 'T20 · Group 2',
       leagueKey: 'premierWomen',
@@ -485,7 +493,8 @@ const SECTIONS: Record<string, SectionSpec[]> = {
       leagueKey: 'promotion-women-s-league',
       seriesType: 'Twenty20 (16-25 overs)',
       maxOvers: 20,
-      expected: 12,
+      // 4 blocks (Series 1–4) × 10 fixtures — the wide layout (see SHEET_LAYOUTS).
+      expected: 40,
     },
     {
       match: /group\s+b$/i,
@@ -494,7 +503,8 @@ const SECTIONS: Record<string, SectionSpec[]> = {
       leagueKey: 'promotion-women-s-league',
       seriesType: 'Twenty20 (16-25 overs)',
       maxOvers: 20,
-      expected: 12,
+      // 4 blocks (Series 1–4) × 10 fixtures — the wide layout (see SHEET_LAYOUTS).
+      expected: 40,
     },
     {
       match: /group\s+c$/i,
@@ -503,7 +513,8 @@ const SECTIONS: Record<string, SectionSpec[]> = {
       leagueKey: 'promotion-women-s-league',
       seriesType: 'Twenty20 (16-25 overs)',
       maxOvers: 20,
-      expected: 12,
+      // 4 blocks (Series 1–4) × 10 fixtures — the wide layout (see SHEET_LAYOUTS).
+      expected: 40,
     },
   ],
   'Veterans Premier': [
@@ -566,111 +577,192 @@ const SECTIONS: Record<string, SectionSpec[]> = {
   ],
 };
 
-interface ParsedFixture {
+/** How a sheet lays its sections out horizontally. `bases` are the 1-based left columns
+ * of each 6-wide window (home=base, `v`=base+2, time=base+3, away/date=base+4); a narrow
+ * sheet has the single window at column 1. `roundFromBlock` means the platform models the
+ * competition as one round per block (Promotion Women: 4 weekends = 4 rounds), so the
+ * round is the 1-based block ordinal and the in-block "Week N"/"Series N" labels — which
+ * are time-slots and section banners, not rounds — never move it. admin.tsx:951 continues
+ * a new round from `last.round + 1`, so these rounds must stay dense from 1. */
+interface SheetLayout {
+  bases: number[];
+  roundFromBlock: boolean;
+}
+const DEFAULT_LAYOUT: SheetLayout = { bases: [1], roundFromBlock: false };
+/** Remove this entry if the union ever reverts Promotion Women to the narrow layout. */
+const SHEET_LAYOUTS: Record<string, SheetLayout> = {
+  'Promotion Women': { bases: [1, 7, 13, 19], roundFromBlock: true },
+};
+
+/** One parse cursor per column block. `block` is the 1-based ordinal (⇒ round when
+ * `roundFromBlock`); `current`/`round`/`date`/`time` are the running state the section
+ * scan carries down the rows of this block's window. */
+interface Cursor {
+  base: number;
+  block: number;
+  current: ParsedSection | null;
+  round: number;
+  date: string | null;
+  time: string | null;
+}
+
+export interface ParsedFixture {
   round: number;
   date: string;
   time?: string;
   homeName: string;
   awayName: string;
 }
-interface ParsedSection {
+export interface ParsedSection {
   spec: SectionSpec;
   fixtures: ParsedFixture[];
   skippedRows: string[];
   dateCorrections: string[];
 }
 
-function parseWorkbook(wb: ExcelJS.Workbook): { sections: ParsedSection[]; orphans: string[] } {
+/** Consume one row's 6-wide window for a single block's cursor. Shared verbatim by narrow
+ * and wide sheets — `cur` holds the block's running state so parallel blocks never bleed
+ * into each other. `bySlug` de-duplicates a group across blocks: a spec first seen in
+ * block 1 is pushed to `out` once, and blocks 2–4 append their fixtures to that one
+ * section (one series per group). */
+function consumeRow(
+  cur: Cursor,
+  values: unknown[],
+  sheetName: string,
+  specs: SectionSpec[],
+  layout: SheetLayout,
+  bySlug: Map<string, ParsedSection>,
+  out: ParsedSection[],
+  orphans: string[],
+) {
+  const a = cellText(values[0]);
+  const isFixtureRow = cellText(values[2]).toLowerCase() === 'v';
+
+  // A matched header starts (or, across blocks, re-enters) a section. Any OTHER non-week,
+  // non-series, non-fixture header text ends the current one — without this, rows under a
+  // header the manifest doesn't know about silently leak into the previous section.
+  const spec = specs.find((s) => s.match.test(a));
+  if (spec) {
+    let section = bySlug.get(spec.slug);
+    if (!section) {
+      section = { spec, fixtures: [], skippedRows: [], dateCorrections: [] };
+      bySlug.set(spec.slug, section);
+      out.push(section);
+    }
+    cur.current = section;
+    cur.round = layout.roundFromBlock ? cur.block : 0;
+    cur.date = null;
+    cur.time = null;
+    return;
+  }
+  if (a && !isFixtureRow && !/^week/i.test(a) && !/^series/i.test(a)) {
+    cur.current = null;
+    return;
+  }
+  // A fixture row with no live section is a manifest gap — fail closed, loudly.
+  if (isFixtureRow && !cur.current && !/semi|final/i.test(a)) {
+    const prefix = layout.bases.length > 1 ? `[block ${cur.block}] ` : '';
+    orphans.push(`${prefix}${sheetName}: ${a} v ${cellText(values[3]) || cellText(values[4])}`);
+    return;
+  }
+
+  // The running date/time: any date or time cell in the window updates it. A row
+  // carrying a date but NO time resets the running time to null — otherwise a Saturday
+  // 13:30 leaks onto Sunday's fixtures in the interleaved layout, where every sheet
+  // restates the time after a date change.
+  let rowHasDate = false;
+  for (const v of values) {
+    const d = isoDate(v);
+    if (d) {
+      cur.date = d;
+      rowHasDate = true;
+    }
+  }
+  let rowHasTime = false;
+  for (const v of values) {
+    const t = isoTime(v);
+    if (t) {
+      cur.time = t;
+      rowHasTime = true;
+    }
+  }
+  if (rowHasDate && !rowHasTime) cur.time = null;
+
+  // The regex matches both "Week N" slot labels and the row-1 "Series N" block banners.
+  // When the round comes from the block, neither must touch it; otherwise "Week N" is the
+  // round as before.
+  const roundMatch = a.match(/^(?:week|series)\s+(\d+)/i);
+  if (roundMatch) {
+    if (!layout.roundFromBlock) cur.round = Number(roundMatch[1]);
+    return;
+  }
+  if (!cur.current) return;
+  if (!isFixtureRow) return;
+
+  // Fixture rows read "Home | | v | time? | Away". A text time cell at base+3 must not be
+  // swallowed as the away name (insurance — the 25 Aug file stores times as Date cells).
+  const away = (isoTime(values[3]) ? '' : cellText(values[3])) || cellText(values[4]);
+  const placeholder = /semi|final/i.test(a) || /semi|final/i.test(away);
+  if (placeholder || !a || !away || !cur.date || !cur.round) {
+    cur.current.skippedRows.push(`${a || '—'} v ${away || '—'} (${cur.date ?? 'no date'})`);
+    return;
+  }
+  let fixed = cur.date;
+  if (fixed < SEASON_START) {
+    const bumped = `${Number(fixed.slice(0, 4)) + 1}${fixed.slice(4)}`;
+    cur.current.dateCorrections.push(`${fixed} → ${bumped} (${a} v ${away})`);
+    fixed = bumped;
+    cur.date = bumped; // later rows in the same week inherit the corrected date
+  }
+  cur.current.fixtures.push({
+    round: cur.round,
+    date: fixed,
+    ...(cur.time ? { time: cur.time } : {}),
+    homeName: a,
+    awayName: away,
+  });
+}
+
+export function parseWorkbook(wb: ExcelJS.Workbook): {
+  sections: ParsedSection[];
+  orphans: string[];
+} {
   const out: ParsedSection[] = [];
   const orphans: string[] = [];
   for (const [sheetName, specs] of Object.entries(SECTIONS)) {
     const ws = wb.worksheets.find((w) => w.name.trim() === sheetName);
     if (!ws) throw new Error(`sheet "${sheetName}" not found in the workbook`);
-    let current: ParsedSection | null = null;
-    let round = 0;
-    let date: string | null = null;
-    let time: string | null = null;
+    const layout = SHEET_LAYOUTS[sheetName] ?? DEFAULT_LAYOUT;
+    const bySlug = new Map<string, ParsedSection>();
+    const cursors: Cursor[] = layout.bases.map((base, i) => ({
+      base,
+      block: i + 1,
+      current: null,
+      round: 0,
+      date: null,
+      time: null,
+    }));
 
     ws.eachRow((row) => {
-      const values: unknown[] = [];
-      for (let c = 1; c <= 6; c++) values.push(row.getCell(c).value);
-      const a = cellText(values[0]);
-      const isFixtureRow = cellText(values[2]).toLowerCase() === 'v';
-
-      // A matched header starts a section. Any OTHER non-week, non-series, non-fixture
-      // header text ends the current one — without this, rows under a header the
-      // manifest doesn't know about silently leak into the previous section.
-      const spec = specs.find((s) => s.match.test(a));
-      if (spec) {
-        current = { spec, fixtures: [], skippedRows: [], dateCorrections: [] };
-        out.push(current);
-        round = 0;
-        date = null;
-        time = null;
-        return;
+      for (const cur of cursors) {
+        const values: unknown[] = [];
+        for (let k = 0; k <= 5; k++) values.push(row.getCell(cur.base + k).value);
+        consumeRow(cur, values, sheetName, specs, layout, bySlug, out, orphans);
       }
-      if (a && !isFixtureRow && !/^week/i.test(a) && !/^series/i.test(a)) {
-        current = null;
-        return;
-      }
-      // A fixture row with no live section is a manifest gap — fail closed, loudly.
-      if (isFixtureRow && !current && !/semi|final/i.test(a)) {
-        orphans.push(`${sheetName}: ${a} v ${cellText(values[3]) || cellText(values[4])}`);
-        return;
-      }
-
-      // The running date/time: any date or time cell in any column updates it. A row
-      // carrying a date but NO time resets the running time to null — otherwise a
-      // Saturday 13:30 leaks onto Sunday's fixtures in the interleaved Promotion Women
-      // layout, where every sheet restates the time after a date change.
-      let rowHasDate = false;
-      for (const v of values) {
-        const d = isoDate(v);
-        if (d) {
-          date = d;
-          rowHasDate = true;
-        }
-      }
-      let rowHasTime = false;
-      for (const v of values) {
-        const t = isoTime(v);
-        if (t) {
-          time = t;
-          rowHasTime = true;
-        }
-      }
-      if (rowHasDate && !rowHasTime) time = null;
-
-      const roundMatch = a.match(/^(?:week|series)\s+(\d+)/i);
-      if (roundMatch) {
-        round = Number(roundMatch[1]);
-        return;
-      }
-      if (!current) return;
-      if (!isFixtureRow) return;
-
-      // Fixture rows read "Home | | v | Away?" with away in column D or E.
-      const away = cellText(values[3]) || cellText(values[4]);
-      const placeholder = /semi|final/i.test(a) || /semi|final/i.test(away);
-      if (placeholder || !a || !away || !date || !round) {
-        current.skippedRows.push(`${a || '—'} v ${away || '—'} (${date ?? 'no date'})`);
-        return;
-      }
-      let fixed = date;
-      if (fixed < SEASON_START) {
-        const bumped = `${Number(fixed.slice(0, 4)) + 1}${fixed.slice(4)}`;
-        current.dateCorrections.push(`${fixed} → ${bumped} (${a} v ${away})`);
-        fixed = bumped;
-        date = bumped; // later rows in the same week inherit the corrected date
-      }
-      current.fixtures.push({
-        round,
-        date: fixed,
-        ...(time ? { time } : {}),
-        homeName: a,
-        awayName: away,
-      });
     });
+
+    // Wide sheets append the same group's fixtures block by block, so a single section
+    // holds all four weekends unsorted; order them chronologically so buildSeries numbers
+    // f1..f40 in play order. Narrow sheets are already in row order — leave them.
+    if (layout.bases.length > 1) {
+      for (const section of bySlug.values())
+        section.fixtures.sort(
+          (x, y) =>
+            x.round - y.round ||
+            x.date.localeCompare(y.date) ||
+            (x.time ?? '').localeCompare(y.time ?? ''),
+        );
+    }
   }
   return { sections: out, orphans };
 }
@@ -678,7 +770,7 @@ function parseWorkbook(wb: ExcelJS.Workbook): { sections: ParsedSection[]; orpha
 /** Mirrors buildPairMap's fail-closed duplicate handling on the REVISED side — a
  * repeated unordered pair within the Dolphins Premier T20 sections is a data problem,
  * not something to silently overwrite in the map. */
-function dolphinsPremierPairs(sections: ParsedSection[]): {
+export function dolphinsPremierPairs(sections: ParsedSection[]): {
   pairs: Map<string, { homeName: string; awayName: string }>;
   duplicates: string[];
 } {
@@ -706,7 +798,7 @@ export function pairKey(a: string, b: string): string {
 
 // ───────────────────────── REVISED workbook (flat-table) parser ─────────────────────────
 
-interface FlatFixtureRow {
+export interface FlatFixtureRow {
   matchNo: number;
   date: string;
   time: string | null;
@@ -718,7 +810,7 @@ interface FlatFixtureRow {
   venueStatusRaw: string;
 }
 
-interface PairMapEntry {
+export interface PairMapEntry {
   venue: string;
   venueStatusRaw: string;
   matchNo: number;
@@ -734,7 +826,7 @@ interface VenueAllocationRow {
   reason: string;
 }
 
-interface FlatT20Result {
+export interface FlatT20Result {
   premierPairs: Map<string, PairMapEntry>;
   promotionByGroup: Map<number, FlatFixtureRow[]>;
   venueAllocations: VenueAllocationRow[];
@@ -881,7 +973,7 @@ function parseVenueAllocations(ws: ExcelJS.Worksheet): VenueAllocationRow[] {
   return out;
 }
 
-function parseFlatT20(wb: ExcelJS.Workbook): FlatT20Result {
+export function parseFlatT20(wb: ExcelJS.Workbook): FlatT20Result {
   const premierWs = wb.worksheets.find((w) => w.name.trim() === 'Premier T20 Fixtures');
   const promotionWs = wb.worksheets.find((w) => w.name.trim() === 'Promotion T20 Fixtures');
   const venueWs = wb.worksheets.find((w) => w.name.trim() === 'Venue Allocations');
@@ -928,7 +1020,7 @@ function comparePairSets(
  * unchanged. `home`/`away` are participant TEAM ids, not club ids (a multi-team club
  * fields several sides), which is what `ClubFixturesView`'s `s.teams.includes(teamId)`
  * filter (src/club.tsx:4211-4216) requires. */
-interface WrittenFixture {
+export interface WrittenFixture {
   id: string;
   round: number;
   date: string;
@@ -945,7 +1037,7 @@ interface WrittenFixture {
   venueReason?: string;
 }
 
-interface BuiltSeries {
+export interface BuiltSeries {
   series: Series;
   fixtures: WrittenFixture[];
   /** The parsed input, index-aligned with `fixtures` — lets venue-assignment code look
@@ -954,7 +1046,7 @@ interface BuiltSeries {
   raw: ParsedFixture[];
 }
 
-function buildSeries(
+export function buildSeries(
   spec: SeriesSpec,
   raw: ParsedFixture[],
   clubs: Club[],
@@ -1708,6 +1800,10 @@ async function runImport(args: Args) {
   const pairCmp = comparePairSets(dolphinsPairs, flat.premierPairs);
 
   for (const s of sections) printSection(s, leagueLabelFallback);
+  if (orphans.length) {
+    console.log(`\n── Orphan fixture rows (${orphans.length}) — matched no section`);
+    for (const o of orphans) console.log(`  ${o}`);
+  }
   const { allExpected: promotionCountsOk, mismatches: promotionMismatches } = printPromotionGroups(
     flat.promotionByGroup,
   );
@@ -2138,11 +2234,17 @@ async function runImport(args: Args) {
       s.approvedAt = existing.approvedAt ?? null;
       s.released = existing.released ?? false;
       s.releasedAt = existing.releasedAt ?? null;
+      // Carry the progressive-release masking (ADR 0011) — a re-import must never
+      // silently un-withhold venues/times a released series is still holding back.
+      s.withheld = existing.withheld;
+      s.revealedAt = existing.revealedAt;
       s.version = (Number(existing.version) || 1) + 1;
     }
     await repo.putSeries(TENANT, s);
+    const withheldNote =
+      existing && s.withheld ? ` (withheld: ${Object.keys(s.withheld).join(',')})` : '';
     console.log(
-      `wrote ${s.id}  v${s.version}${existing ? ' (overwrote, lifecycle preserved)' : ''}`,
+      `wrote ${s.id}  v${s.version}${existing ? ' (overwrote, lifecycle preserved)' : ''}${withheldNote}`,
     );
   }
   console.log(

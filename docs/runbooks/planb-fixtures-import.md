@@ -14,6 +14,79 @@ removes it again when the season machinery takes over.
    Promotion Men); Premier Men T20 keeps its matchups/dates/times from the Dolphins file
    and only borrows venues from this one, matched by unordered team pair.
 
+## 25 Aug 2026 revision
+
+The union revised `KZNCU Dolphins Updated Fixtures.xlsx` on 25 Aug 2026 (the REVISED T20
+workbook is unchanged since 16 Aug). This is a **re-import over the 16 Aug series** — every
+`s-planb-*` id already exists on prod, so every write is an OVERWRITE with lifecycle
+preserved (see Reconciliation). The sheet changes the parser now handles:
+
+- **Premier Women Group 2 header.** The sheet dropped the stale `womens` token; the G2
+  header regex is now `(?:womens\s+)?`, so both the old and new wordings match and its 5
+  fixtures no longer fall out as orphans.
+- **Promotion Women is now a WIDE sheet.** Each group plays its 10 matchups across FOUR
+  weekends laid out as four parallel 6-wide column blocks (Series 1–4, base columns
+  1/7/13/19) instead of one narrow column. `SHEET_LAYOUTS` (in `import-planb-fixtures.ts`)
+  drives a per-block cursor that merges the four blocks into **one series per group, round
+  = weekend (1–4), 40 fixtures/group** (was 12). The block dates are 2026-10-24/25,
+  2026-11-21/22, 2027-01-23/24, 2027-02-20/21; the in-block "Week N" labels are time-slots,
+  not rounds, and are ignored for round assignment. **If the union ever reverts Promotion
+  Women to the narrow single-column layout, delete the `'Promotion Women'` entry from
+  `SHEET_LAYOUTS`** and restore the group `expected` counts.
+- **Parkgate** now resolves to the prod club `parkgate-hambanathi-cc` via `NAME_ALIASES`
+  (Group B was recut with Parkgate); the bootstrap no longer mints a `parkgate-cricket-club`
+  duplicate.
+
+Because the `expected` counts were updated to 40 for the three Promotion Women groups,
+**`--allow-count-mismatch` must NOT be needed** for this revision — a count mismatch here
+means a parse regression, not a deliberate sheet change, and should be read, not bypassed.
+
+The only substantive venue difference (Hillary Malvern's Premier T20 home games: the sheet
+says Kloof CC, prod holds Peace Park under the union's 17 Aug directive) is resolved **in
+favour of the platform** — the importer's `VENUE_DIRECTIVES` re-derives Peace Park
+automatically, so the dry run shows three `s-planb-premier-men-t20-1` auto-moves
+`Kloof CC → Peace Park [union directive]`.
+
+### Operator sequence (25 Aug re-import, prod)
+
+1. **Bootstrap dry run** — expect NO "would create club" line for Parkgate (the prod record
+   already exists); `--confirm` only if it wants to set Parkgate's ground to Phoenix
+   Stonebridge, or reports a stale legacy Parkgate club to resolve.
+
+   ```bash
+   npx sst shell --stage prod -- npm --prefix packages/api run bootstrap-fixture-prereqs
+   ```
+
+2. **Import dry run** — must show ga/gb/gc `✓ 40`, g2 `✓ 5`, no orphans; the name-resolution
+   sign-off table `Parkgate → Parkgate Hambanathi CC (parkgate-hambanathi-cc)` with zero
+   unresolved names; three `s-planb-premier-men-t20-1` auto-moves `Kloof CC → Peace Park`;
+   no unresolved clashes; the GENUINE-edits section empty (the INFORMATIONAL date/time list
+   will be long — expected, since this revision amends dates); `23` series to write.
+
+   ```bash
+   npx sst shell --stage prod -- npm --prefix packages/api run import-planb -- \
+     --file "…Dolphins…xlsx" --t20 "…REVISED…xlsx"
+   ```
+
+3. **Import** — `--confirm` with **no `--discard-edits` and no `--allow-count-mismatch`**.
+   Note the printed backup path; every existing-id line reads `overwrote, lifecycle
+preserved` (and, after Track B, appends `(withheld: …)` for any series still holding a
+   field back).
+
+4. **Post-import verification** — re-export series+clubs JSON and run
+   `compare-planb-fixtures.ts` (see below) → `✓ matches` on every slug (venue diffs only
+   the 3 Peace Park lines).
+
+5. **Series remain unreleased.** Approve and release from the console — ideally after
+   Track B ships, so venues/times can be withheld at release.
+
+**Risks.** The four Promotion Women weekends pack 10 fixtures/weekend/group across 5 slots
+on the same dates as other leagues — review the clash pass, never `--allow-clashes`
+blindly. If `parkgate-hambanathi-cc` has no ground, its home games go homeless — the
+bootstrap dry run in step 1 is what catches that. The fixture-id churn (`f1..f12 → f1..f40`)
+is safe while the series are unreleased and carry no results — this is the last cheap
+moment for it.
+
 ## Prerequisites (before the first dry run)
 
 **One step: run `bootstrap-fixture-prereqs`.**
@@ -36,11 +109,15 @@ or after a console change, is always safe. In one confirmed run it:
   divisions under one key would put plain "Chatsworth Sporting" and "Chatsworth
   Sporting B" in the same league namespace and trip the suffixed/unsuffixed ambiguity
   guard.)
-- **Creates the Parkgate club record** (Promotion Women Group B) — deliberately skeletal
-  (district/chair are placeholders the admin corrects in the console once the union
-  supplies details), but with its ground pre-set to `Phoenix Stonebridge` per the union's
-  facility list, so its home fixtures have an effective ground from the first run instead
-  of "undeterminable".
+- **Ensures the Parkgate club record** (Promotion Women Group B). The sheets' bare
+  "Parkgate" resolves through `NAME_ALIASES` to the prod club `parkgate-hambanathi-cc`, so
+  the bootstrap finds the existing record (by id or normalised name) and leaves it
+  untouched. Only if that record is genuinely absent does it create one — deliberately
+  skeletal (district/chair are placeholders the admin corrects in the console), with its
+  ground pre-set to `Phoenix Stonebridge` per the union's facility list so its home
+  fixtures have an effective ground immediately instead of "undeterminable". A stale
+  `parkgate-cricket-club` from an earlier run is reported for manual cleanup, never
+  auto-erased.
 - **Syncs the venue registry from club grounds** (mirrors the console's "Sync from club
   records"): one venue per distinct ground name, junk names (`None`/`N/A`/`-`/`TBD`/`TBC`)
   skipped, and alias-aware — a club record saying "Phoenix Stonebridge" won't spawn a
@@ -200,16 +277,54 @@ undeterminable: N` line. The 4 superseded `DELETE_SLUGS` series are excluded fro
 
 ## Reconciliation — what changes on prod
 
-| Action                                 | Series                                                                                                                                                     |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| OVERWRITE (lifecycle preserved)        | `premier-men-50ov-top6`, `-bottom6`; `promotion-men-30ov-top10`, `-bottom10`; `premier-women-30ov-top4`, `-bottom4`                                        |
-| OVERWRITE (from REVISED, exact venues) | `promotion-men-t20-g1..g4`                                                                                                                                 |
-| CREATE (new, land as drafts)           | `premier-men-t20-1/-2`; `premier-women-t20-g1/-g2`; `promotion-women-t20-ga/gb/gc`; `veterans-premier-t20-1/-2/-30ov`; `veterans-promotion-t20-1/-2/-30ov` |
-| DELETE (via `--prune`)                 | `premier-men-t20-top6`, `-bottom6`; `premier-women-t20-top4`, `-bottom4`                                                                                   |
-| KEEP (untouched by either workbook)    | `promotion-men-50ov-g1`, `-g2`                                                                                                                             |
+| Action                                                                              | Series                                                                                                                                                     |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OVERWRITE (lifecycle preserved)                                                     | `premier-men-50ov-top6`, `-bottom6`; `promotion-men-30ov-top10`, `-bottom10`; `premier-women-30ov-top4`, `-bottom4`                                        |
+| OVERWRITE (from REVISED, exact venues)                                              | `promotion-men-t20-g1..g4`                                                                                                                                 |
+| CREATE on first import / OVERWRITE on re-import (lifecycle preserved, version bump) | `premier-men-t20-1/-2`; `premier-women-t20-g1/-g2`; `promotion-women-t20-ga/gb/gc`; `veterans-premier-t20-1/-2/-30ov`; `veterans-promotion-t20-1/-2/-30ov` |
+| DELETE (via `--prune`)                                                              | `premier-men-t20-top6`, `-bottom6`; `premier-women-t20-top4`, `-bottom4`                                                                                   |
+| KEEP (untouched by either workbook)                                                 | `promotion-men-50ov-g1`, `-g2`                                                                                                                             |
+
+After the 16 Aug import, **all 23 `s-planb-*` series already exist on prod** — so the 25 Aug
+re-import (and any later revision) OVERWRITEs every one of them, preserving each series'
+approved/released lifecycle (and, after Track B, its `withheld`/`revealedAt` masking) and
+bumping the version.
 
 Pruning a still-released series prints a loud warning; it is still deleted (an admin who
 prunes early is explicitly choosing to pull it from club portals).
+
+## Post-import verification (`compare-planb-fixtures.ts`)
+
+After `--confirm`, re-export the prod series and clubs to local JSON and diff them against
+the sheets with the read-only `compare-planb-fixtures.ts` (touches no AWS — both sides come
+from files on disk, exit code always 0):
+
+```bash
+# Export series + clubs (raw DynamoDB Query JSON) — medicoach profile, prod table:
+aws dynamodb query --profile medicoach --table-name <prod-table> \
+  --index-name gsi1 --key-condition-expression 'gsi1pk = :pk' \
+  --expression-attribute-values '{":pk":{"S":"TENANT#dolphins#TYPE#SERIES"}}' > series.json
+aws dynamodb query --profile medicoach --table-name <prod-table> \
+  --index-name gsi1 --key-condition-expression 'gsi1pk = :pk' \
+  --expression-attribute-values '{":pk":{"S":"TENANT#dolphins#TYPE#CLUB"}}' > clubs.json
+
+npx tsx packages/api/src/compare-planb-fixtures.ts \
+  --file "…Dolphins…xlsx" --t20 "…REVISED…xlsx" \
+  --series-json series.json --clubs-json clubs.json
+```
+
+Expect `✓ matches` on every slug — the only venue diffs are the 3 Hillary Malvern Peace
+Park lines (sheet Kloof CC vs the platform's directive-derived Peace Park).
+
+**Fixture ids are reassigned every import** (`f1..f12` became `f1..f40` for the
+wide Promotion Women groups). For the narrow sheets that ordering is just row order; for
+the wide Promotion Women sheet the rows are sorted first by round, then date, then time, so
+its ids follow (round, date, time, then row order). That churn is harmless while the series are unreleased and
+carry no results. It does shape the import's own edit gate, though: `diffAdminEdits` flags a
+prod-only fixture id as a GENUINE edit **only when a section SHRINKS** — so a future
+revision that DROPS fixtures will fail closed and must be **read**, not waved through with
+`--discard-edits` by reflex. Re-import also **preserves `withheld`/`revealedAt`** (Track B),
+so a released-but-withheld series is never silently un-withheld by a re-import.
 
 ## The server-side release gate (PATCH /series)
 
@@ -246,6 +361,23 @@ replacements first and prune only after — that was safe when the superseded se
 still live to clubs and there was no gate stopping a release next to them; it minimised
 the gap where clubs would see neither schedule. With the gate in place that order no
 longer works: prune first, release second.
+
+## Progressive release (ADR 0011)
+
+An admin may **withhold** venues and/or start times when releasing an `s-planb-*` series —
+dates and matchups go out to clubs while grounds or kick-offs are still being settled (see
+[ADR 0011](../architecture/0011-progressive-fixture-release.md)). This changes nothing about
+the import or the gate above: the series item always stores the **real** venue and time, and
+the clash gate evaluates those real grounds — a withheld release is gated on the same
+double-booking check as a fully-visible one, so withholding can never sneak a clash past the
+gate. Withholding is chosen only at the release moment; recall (`released: false`), including
+the `recall-release` script and any other `released: false` write, **clears** `withheld` and
+`revealedAt`, so a recalled series carries no mask to silently re-apply when it is next
+released. To reveal a withheld field later, use the console's "Reveal venues" / "Reveal times"
+action, which sends the `reveal` key on `PATCH /series/:id` — never write `withheld`/
+`revealedAt` directly from a repo script, since only the API path stamps `revealedAt` and
+leaves `releasedAt` untouched. A re-import preserves both fields (see the post-import section
+above), so re-running the importer over a released-but-withheld series never un-withholds it.
 
 ## `recall-release` — recover from an accidental early release
 
