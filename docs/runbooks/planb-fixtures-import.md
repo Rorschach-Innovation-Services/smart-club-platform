@@ -74,8 +74,10 @@ preserved` (and, after Track B, appends `(withheld: …)` for any series still h
    field back).
 
 4. **Post-import verification** — re-export series+clubs JSON and run
-   `compare-planb-fixtures.ts` (see below) → `✓ matches` on every slug (venue diffs only
-   the 3 Peace Park lines).
+   `compare-planb-fixtures.ts` (see below) → `only-sheet 0`/`only-platform 0`, `✓ matches`
+   on the non-T20 slugs, and only alias-form `[import-authored auto-move]` venue diffs plus
+   the 3 `Union directive` Peace Park lines (see "Post-import verification" for what to
+   read).
 
 5. **Series remain unreleased.** Approve and release from the console — ideally after
    Track B ships, so venues/times can be withheld at release.
@@ -313,8 +315,17 @@ npx tsx packages/api/src/compare-planb-fixtures.ts \
   --series-json series.json --clubs-json clubs.json
 ```
 
-Expect `✓ matches` on every slug — the only venue diffs are the 3 Hillary Malvern Peace
-Park lines (sheet Kloof CC vs the platform's directive-derived Peace Park).
+Expect `only-sheet 0` and `only-platform 0` (the summary TOTAL row), and `✓ matches` on
+every non-T20 slug. The **six T20 slugs DO show venue diffs** — do not expect zero. Almost
+all are cosmetic: the tool compares the sheet's short venue name against the platform's
+registry-resolved fuller name (e.g. sheet `Hammond` vs platform `Hammond Cricket Oval`,
+`Tills` vs `Tills Crescent Ground`), and both alias to the same ground via `groundKey`.
+Those lines are tagged `[import-authored auto-move]` — they are the import's own writes, not
+a real mismatch. The only SUBSTANTIVE diffs are exactly **3 Hillary Malvern lines** carrying
+`(platform reason: "Union directive — Kloof CC unavailable")` (sheet Kloof CC vs the
+platform's directive-derived Peace Park). Read any venue-diff line that is **neither**
+`[import-authored auto-move]` **nor** a `Union directive` line — that would be a genuine
+divergence. (On the 25 Aug snapshot: 56 alias-form lines + 3 directive lines, 59 total.)
 
 **Fixture ids are reassigned every import** (`f1..f12` became `f1..f40` for the
 wide Promotion Women groups). For the narrow sheets that ordering is just row order; for
@@ -325,6 +336,36 @@ prod-only fixture id as a GENUINE edit **only when a section SHRINKS** — so a 
 revision that DROPS fixtures will fail closed and must be **read**, not waved through with
 `--discard-edits` by reflex. Re-import also **preserves `withheld`/`revealedAt`** (Track B),
 so a released-but-withheld series is never silently un-withheld by a re-import.
+
+## Local rehearsal (e2e test)
+
+`packages/api/test/import-planb.e2e.test.ts` drives the whole flow end-to-end against an
+in-process dynalite table seeded from a read-only snapshot of the prod `dolphins` tenant —
+parse-only, dry run, `--confirm`, the post-import compare, idempotent re-run, lifecycle/
+progressive-release preservation, and every fail-closed gate (count mismatch, orphan
+sections, unresolved names, pair asymmetry, venue clash, the genuine-edit gate, prune/
+revert, flag validation). It runs the real CLI as a child process and asserts on exit codes,
+stdout, and the rows read back through `repo.ts` — no mocks.
+
+It is **environment-gated** so CI and `npm test` skip it (the workbooks and the prod snapshot
+contain club-contact PII and never enter the repo). Provide two directories:
+
+```bash
+cd packages/api
+PLANB_SHEETS_DIR=/path/to/dir-with-both-xlsx \
+PLANB_SEED_DIR=/path/to/dir-with-three-raw-json \
+  npx tsx --test test/import-planb.e2e.test.ts
+```
+
+- `PLANB_SHEETS_DIR` must contain both workbooks under their exact names
+  (`KZNCU Dolphins Updated Fixtures.xlsx` and
+  `KZNCU_2026-27_T20_Fixtures_Premier_and_Promotion_REVISED.xlsx`).
+- `PLANB_SEED_DIR` must contain the three raw DynamoDB Query exports
+  (`prod-series-raw.json`, `prod-clubs-raw.json`, `prod-tenant-raw.json`).
+
+With either var unset the suite registers a single skipped test explaining how to run it. The
+importer's `planb-backup-*.json` is written to a throwaway temp cwd, never the repo. Backups
+and perturbed workbook copies live under the OS temp dir and are cleaned up after the run.
 
 ## The server-side release gate (PATCH /series)
 
@@ -413,6 +454,15 @@ went out the moment the series was released the first time.
   aborts the run by default — same fail-closed reasoning as the 0-fixture case, one
   level less severe. Pass `--allow-count-mismatch` to write anyway if a sheet revision
   has deliberately changed a count (e.g. a bye week added).
+  - **A DROPPED row needs `--allow-count-mismatch` AND `--discard-edits`.** When a section
+    SHRINKS against an already-imported tenant, `--allow-count-mismatch` clears the count
+    gate but the missing row leaves a prod-only fixture id (`f30` when 30 became 29), which
+    the admin-edit gate flags as a GENUINE edit and aborts on (`existing series carry admin
+edits`) — the deliberate "a revision that drops fixtures must be READ" rail. So a real
+    row-drop revision needs **both** flags. Remember `--discard-edits` also erases captured
+    statuses/results, so read the genuine-edits list before passing it. (A section that only
+    GAINS rows trips neither gate beyond the count one, so `--allow-count-mismatch` alone
+    suffices there.)
 - A duplicate or asymmetric Premier T20 pair between the two files aborts the run — the
   premise that both files schedule the same 15+15 matchups must hold exactly. This now
   includes a duplicate pair WITHIN the Dolphins file's own Premier T20 sections, not
