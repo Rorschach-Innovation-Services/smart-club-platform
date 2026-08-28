@@ -76,7 +76,11 @@ import {
   todayIso,
 } from './competition/calendar';
 import { fixturesFromPlan, legacyRoundDates, roundsForTeamCount } from './competition/fixtures';
-import { fixtureVenueCoords as fixtureVenue, isLocked } from './competition/venues';
+import {
+  fixtureVenueCoords as fixtureVenue,
+  isLocked,
+  VENUE_REASON_PREFIX,
+} from './competition/venues';
 import { DEFAULT_SERIES_OVERS, isSlotRef, SERIES_TYPES, slotRefLabel } from './competition/formats';
 import type {
   Cadence,
@@ -88,6 +92,7 @@ import type {
   TimeSlot,
   Venue,
   Weekday,
+  WithheldField,
 } from './types';
 import { SeasonRunsPanel, GenerateFixturesLauncher } from './season-run';
 import { VenuesCard } from './venues-card';
@@ -146,10 +151,23 @@ import {
    (see competition/venues.ts and packages/api/src/import-planb-fixtures.ts). */
 function venueReasonPill(reason?: string, status?: string): string | null {
   if (!reason || status === 'home') return null;
-  if (reason.startsWith('Moved to avoid')) return 'moved';
-  if (reason.startsWith('Union directive')) return 'directive';
-  if (reason.startsWith('home club has no ground')) return 'no ground';
-  return null; // 'Allocated ground —', 'Union T20 schedule', anything else → no pill
+  if (reason.startsWith(VENUE_REASON_PREFIX.movedToAvoid)) return 'moved';
+  if (reason.startsWith(VENUE_REASON_PREFIX.unionDirective)) return 'directive';
+  if (reason.startsWith(VENUE_REASON_PREFIX.homeNoGround)) return 'no ground';
+  return null; // allocatedGround, unionT20, anything else → no pill
+}
+
+/* The at-a-glance pill for why a fixture is off its home ground (full reason on hover).
+   The styles live in the `.fix-venue-reason` rule (index.html) so the row markup carries
+   no per-row inline style object. */
+function VenueReasonPill({ reason, status }: { reason?: string; status?: string }) {
+  const pill = venueReasonPill(reason, status);
+  if (!pill) return null;
+  return (
+    <span className="fix-venue-reason" title={reason}>
+      {pill}
+    </span>
+  );
 }
 
 /* ─── AdminFixtures — series cards + drilldown fixture table with distance + travel-cost ─── */
@@ -171,7 +189,7 @@ interface AdminFixturesProps {
   onDuplicateSeries;
   onSetReleased;
   /** Reveal one or more withheld fields on a released series (ADR 0011). */
-  onReveal?;
+  onReveal?: (id: string, fields: WithheldField[]) => Promise<unknown> | void;
   onSetApproved;
   toast: (message: string, tone?: string) => void;
   allCalendars?: SeasonCalendar[];
@@ -385,9 +403,13 @@ export function AdminFixtures({
       danger: true,
       yesLabel: 'Yes, recall',
       onYes: () => {
-        onSetReleased(s.id, false);
+        // Mirror the release path: chain the "recalled" toast off success only. setReleased
+        // (main.tsx) no longer swallows rejections, so a 409/5xx would otherwise fire a false
+        // success toast and leave an unhandled rejection — withToast already surfaced the error.
+        Promise.resolve(onSetReleased(s.id, false))
+          .then(() => toast?.(s.name + ' · recalled to draft'))
+          .catch(() => {});
         setConfirm(null);
-        toast?.(s.name + ' · recalled to draft');
       },
     });
   }
@@ -403,9 +425,9 @@ export function AdminFixtures({
           : `Every club in ${s.name} will see the start times immediately. This can't be withdrawn without recalling the whole release.`,
       yesLabel: field === 'venue' ? 'Reveal venues' : 'Reveal times',
       onYes: () => {
-        onReveal?.(s.id, [field])
-          ?.then?.(() => toast?.(s.name + ' · ' + noun + ' revealed'))
-          ?.catch?.(() => {});
+        Promise.resolve(onReveal?.(s.id, [field]))
+          .then(() => toast?.(s.name + ' · ' + noun + ' revealed'))
+          .catch(() => {});
         setConfirm(null);
       },
     });
@@ -652,7 +674,6 @@ export function AdminFixtures({
               onUpdateSeries={onUpdateSeries}
               onDeleteSeries={onDeleteSeries}
               onDuplicateSeries={onDuplicateSeries}
-              onSetReleased={onSetReleased}
               onAskRelease={askRelease}
               onAskRecall={askRecall}
               onAskReveal={onReveal ? reveal : undefined}
@@ -990,7 +1011,6 @@ export function FixtureTable({
   onUpdateSeries,
   onDeleteSeries,
   onDuplicateSeries,
-  onSetReleased,
   onAskRelease,
   onAskRecall,
   onAskReveal,
@@ -1412,30 +1432,7 @@ export function FixtureTable({
                         {isLocked(f) && (
                           <span title="Set by hand — allocation won't move it"> 🔒</span>
                         )}
-                        {(() => {
-                          const pill = venueReasonPill(f.venueReason, f.venueStatus);
-                          return pill ? (
-                            <span
-                              className="fix-venue-reason"
-                              title={f.venueReason}
-                              style={{
-                                marginLeft: 5,
-                                padding: '0 5px',
-                                borderRadius: 4,
-                                fontSize: 9.5,
-                                fontWeight: 600,
-                                textTransform: 'uppercase',
-                                letterSpacing: 0.3,
-                                color: 'var(--muted)',
-                                background: 'var(--wash, rgba(0,0,0,0.05))',
-                                whiteSpace: 'nowrap',
-                                cursor: 'help',
-                              }}
-                            >
-                              {pill}
-                            </span>
-                          ) : null;
-                        })()}
+                        <VenueReasonPill reason={f.venueReason} status={f.venueStatus} />
                       </div>
                       {/* The reason is the whole point of a greedy allocator over a solver:
                           an operator can argue with "home ground closed for maintenance",

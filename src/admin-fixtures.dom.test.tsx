@@ -72,7 +72,6 @@ const setup = (s: Series = series()) => {
       onUpdateSeries={onUpdateSeries}
       onDeleteSeries={vi.fn()}
       onDuplicateSeries={vi.fn()}
-      onSetReleased={vi.fn()}
       onAskRelease={vi.fn()}
       onAskRecall={vi.fn()}
       onAskReveal={vi.fn()}
@@ -801,6 +800,61 @@ describe('release fires exactly one success toast', () => {
     expect(onSetReleased).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(toast).toHaveBeenCalledTimes(1));
     expect(toast).toHaveBeenCalledWith(expect.stringMatching(/·\s*released to \d+ clubs/i));
+  });
+});
+
+describe('recall fires no false success toast when the recall fails', () => {
+  // setReleased (main.tsx) no longer swallows rejections, so askRecall must chain its
+  // "recalled" toast off success only — a rejecting handler must NOT toast success, and
+  // the swallowed rejection must not surface as an unhandled rejection.
+  const renderPage = (s: Series) => {
+    const toast = vi.fn();
+    const onSetReleased = vi.fn().mockRejectedValue(new Error('series changed; refetch'));
+    renderWithProviders(
+      <AdminFixtures
+        clubs={clubs}
+        allSeries={[s]}
+        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
+        onUpdateSeries={vi.fn()}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onSetReleased={onSetReleased}
+        onReveal={vi.fn()}
+        onSetApproved={vi.fn()}
+        toast={toast}
+        allVenues={[]}
+        allSeasonRuns={[]}
+        allLeagues={[]}
+        tenantConfig={{ structures: [], calendars: [] } as unknown as TenantConfig}
+        onSaveVenue={vi.fn()}
+        onDeleteVenue={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCreateSeasonRun={vi.fn()}
+        onPatchSeasonRun={vi.fn()}
+        onDeleteSeasonRun={vi.fn()}
+        onGenerateStageSeries={vi.fn()}
+      />,
+    );
+    return { toast, onSetReleased };
+  };
+
+  it('does not toast "recalled" when onSetReleased rejects', async () => {
+    const user = userEvent.setup();
+    const { toast, onSetReleased } = renderPage(
+      series({ approved: true, released: true } as Partial<Series>),
+    );
+
+    // Header CTA opens the shared confirm modal (not an immediate recall).
+    await user.click(screen.getByRole('button', { name: /recall release/i }));
+    const confirmBox = screen
+      .getByText(/recall this release\?/i)
+      .closest('.fix-confirm-box') as HTMLElement;
+    await user.click(within(confirmBox).getByRole('button', { name: /yes, recall/i }));
+
+    expect(onSetReleased).toHaveBeenCalledWith('s1', false);
+    // Let the rejected recall promise settle (its .catch swallows the rejection).
+    await new Promise((r) => setTimeout(r, 0));
+    expect(toast).not.toHaveBeenCalledWith(expect.stringMatching(/recalled/i));
   });
 });
 

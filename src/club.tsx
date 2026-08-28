@@ -4792,6 +4792,9 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                       {!hideVenue &&
                         s.revealedAt?.venue &&
                         ` · venues confirmed ${formatStampDay(s.revealedAt.venue)}`}
+                      {!hideTime &&
+                        s.revealedAt?.time &&
+                        ` · times confirmed ${formatStampDay(s.revealedAt.time)}`}
                     </div>
                     <div className="club-fix-series-name">{s.name}</div>
                     <div className="club-fix-series-meta">
@@ -5043,9 +5046,10 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                 <strong>{playerCount}</strong> registered player{playerCount === 1 ? '' : 's'}.
                 Players registered as minors are skipped. Choose how to reach them:
               </div>
-              {/* Withheld-field heads-up (ADR 0011): venues/times may still be pending,
-                  so the chair can choose to wait rather than send an incomplete schedule
-                  now and a second, complete one later. No API change — purely advisory. */}
+              {/* Withheld-field heads-up (ADR 0011): venues/times may still be pending.
+                  Nothing sends automatically on reveal, so sending now means re-sharing
+                  the complete schedule later — the chair may prefer to wait. Purely
+                  advisory; no API change. */}
               {anyWithheld && (
                 <div
                   style={{
@@ -5059,9 +5063,8 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                     lineHeight: 1.45,
                   }}
                 >
-                  Some venues or start times are still to be confirmed by the {copy.office} —
-                  players will get a second message when they're revealed, so you may prefer to
-                  wait.
+                  Some venues or start times are still to be confirmed by the {copy.office} — you'll
+                  need to share the fixtures again once they're revealed, so you may prefer to wait.
                 </div>
               )}
               <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 4 }}>

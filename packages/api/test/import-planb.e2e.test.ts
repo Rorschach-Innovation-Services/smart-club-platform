@@ -61,14 +61,12 @@ const TABLE = 'SmartClubPlanbE2E';
 const TENANT = 'dolphins';
 const ENDPOINT = `http://localhost:${DDB_PORT}`;
 
-// Env repo.ts reads at module load — set BEFORE importing repo.js below.
-process.env.TABLE_NAME = TABLE;
-process.env.DYNAMO_ENDPOINT = ENDPOINT;
-process.env.AWS_REGION ??= 'localhost';
-process.env.AWS_ACCESS_KEY_ID ??= 'test';
-process.env.AWS_SECRET_ACCESS_KEY ??= 'test';
-process.env.STAGE = 'local';
-process.env.AWS_MAX_ATTEMPTS = '1';
+// The sheet revision the fixtures under PLANB_SHEETS_DIR are expected to be. The failure-mode
+// tests perturb specific cell addresses (A51, A102, E3 — see runCli calls ~L545, 616, 631)
+// that are tied to THIS revision's row layout; if the union ships a new revision that shifts
+// those rows, update both the workbooks and those cell addresses in lockstep. Interpolated
+// into the suite name so a mismatch is visible in the test output.
+const SHEET_REVISION = '25 Aug 2026';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const API_DIR = path.resolve(testDir, '..');
@@ -109,7 +107,7 @@ interface StoredSeries {
 }
 
 if (!ENABLED) {
-  describe('Plan B importer end-to-end', () => {
+  describe(`Plan B importer end-to-end (sheet revision ${SHEET_REVISION})`, () => {
     test(
       'SKIPPED — set PLANB_SHEETS_DIR and PLANB_SEED_DIR to run (see docs/runbooks/planb-fixtures-import.md)',
       { skip: 'PLANB_SHEETS_DIR and/or PLANB_SEED_DIR not set' },
@@ -117,6 +115,16 @@ if (!ENABLED) {
     );
   });
 } else {
+  // Env repo.ts reads at module load — set BEFORE importing repo.js in before() below. Only
+  // set on the enabled path: a skipped suite touches no repo/child and must not mutate env.
+  process.env.TABLE_NAME = TABLE;
+  process.env.DYNAMO_ENDPOINT = ENDPOINT;
+  process.env.AWS_REGION ??= 'localhost';
+  process.env.AWS_ACCESS_KEY_ID ??= 'test';
+  process.env.AWS_SECRET_ACCESS_KEY ??= 'test';
+  process.env.STAGE = 'local';
+  process.env.AWS_MAX_ATTEMPTS = '1';
+
   // Dynamic so the env above is in place first.
   let ddb: import('@aws-sdk/client-dynamodb').DynamoDBClient;
   let ddbMod: typeof import('@aws-sdk/client-dynamodb');
@@ -174,10 +182,14 @@ if (!ENABLED) {
       try {
         await ddb.send(new DescribeTableCommand({ TableName: TABLE }));
       } catch (e) {
-        if ((e as { name?: string }).name === 'ResourceNotFoundException') return;
+        if ((e as { name?: string }).name === 'ResourceNotFoundException') return; // gone — done
+        throw e; // any other error is real (e.g. dynalite down) — don't swallow it
       }
       await new Promise((r) => setTimeout(r, 15));
     }
+    // Still present after 200×15ms — fail loudly rather than let the next createTable throw
+    // an unrelated ResourceInUseException.
+    throw new Error(`table ${TABLE} still present after delete; dynalite did not drop it`);
   };
 
   const seed = async () => {
@@ -201,7 +213,7 @@ if (!ENABLED) {
     args: string[],
   ): Promise<{ code: number | null; out: string; cwd: string }> => {
     const cwd = mkdtempSync(path.join(workDir, 'run-'));
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const child = spawn(TSX_BIN, [script, ...args], {
         cwd,
         env: {
@@ -218,6 +230,9 @@ if (!ENABLED) {
       let out = '';
       child.stdout.on('data', (d) => (out += d));
       child.stderr.on('data', (d) => (out += d));
+      // A spawn failure (e.g. a missing node_modules/.bin/tsx) fires 'error', never 'close' —
+      // reject so the suite fails fast with the real cause instead of hanging until timeout.
+      child.on('error', reject);
       child.on('close', (code) => resolve({ code, out, cwd }));
     });
   };
@@ -314,7 +329,7 @@ if (!ENABLED) {
     4: ['2027-02-20', '2027-02-21'],
   };
 
-  describe('Plan B importer end-to-end', () => {
+  describe(`Plan B importer end-to-end (sheet revision ${SHEET_REVISION})`, () => {
     // ─────────────────────────── Happy path ───────────────────────────
 
     test('1. --parse-only: parses clean, no repo touched', async () => {

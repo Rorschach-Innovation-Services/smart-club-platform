@@ -7,7 +7,7 @@
  * or WhatsApped on release.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { screen } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ReleaseDialog } from './ReleaseDialog';
 import { renderWithProviders } from './test-utils';
@@ -155,6 +155,29 @@ describe('ReleaseDialog — failure stays open (ADR 0011)', () => {
       'aria-checked',
       'true',
     );
+  });
+
+  it('does not close on Escape while a confirm is in flight', async () => {
+    // While the PATCH is in flight the dialog must not close out from under it — Escape
+    // (like the backdrop, the X and Cancel) is gated on the busy state.
+    let resolve!: () => void;
+    const pending = new Promise<void>((res) => {
+      resolve = res;
+    });
+    const onConfirm = vi.fn().mockReturnValue(pending);
+    const onClose = vi.fn();
+    const { user } = renderWith(onConfirm, onClose);
+
+    await user.click(releaseBtn());
+    // In flight: the confirm button is busy.
+    expect(screen.getByRole('button', { name: /releasing/i })).toBeDisabled();
+
+    await user.keyboard('{Escape}');
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Once it lands, the dialog closes itself (and Escape would work again).
+    resolve();
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it('Cancel still closes while the dialog is showing an error', async () => {

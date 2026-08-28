@@ -112,11 +112,17 @@ known double-booking, because the gate never looks at the projection.
 ### 5. Participants' home grounds are not stripped
 
 `projectSeriesForClub` strips venue fields off `fixtures[]` but leaves each participant's
-home-ground `venue`/`lat`/`lon` snapshot alone. Reps already have those from
-`GET /clubs`; stripping them would be theatre that also breaks the club list. The client
-and `buildClubSchedule` therefore **must check `withheld.venue` explicitly** rather than
-infer a withheld venue from missing fixture fields — the participant snapshot is still
-there to infer from, and would give the game away.
+home-ground `venue`/`lat`/`lon` snapshot alone. A modern released series already carries
+that home-ground `venue`/`lat`/`lon` to reps inside its `participants` snapshot, and the
+club portal's opponent-suburb / round-trip-distance UI is built directly on it — stripping
+it would break that UI for no gain. It would also be inconsistent: a **legacy** series has
+its participants (and their home grounds) synthesised back on the rep read path anyway (see
+Consequences), so stripping only on modern series would hide on one and not the other. The
+secret progressive release actually withholds is the **fixture's** allocated ground — a
+distinct, fixture-level fact — not a club's own public home ground. The client and
+`buildClubSchedule` therefore **must check `withheld.venue` explicitly** rather than infer a
+withheld venue from missing fixture fields — the participant snapshot is still there to
+infer from, and would give the game away.
 
 ## Rejected alternatives
 
@@ -126,8 +132,9 @@ there to infer from, and would give the game away.
 - **A separate `/series/for-club` endpoint.** Forks every series read and duplicates the
   activate/approve gating. A role branch over one pure projection keeps the two views
   provably consistent.
-- **Stripping participants' home grounds too.** Breaks the club list reps already hold,
-  for no gain — the ground is available from `GET /clubs` regardless.
+- **Stripping participants' home grounds too.** Breaks the club portal's opponent-suburb /
+  distance UI, which reads the participant home-ground snapshot, for no gain — the withheld
+  secret is the fixture's allocated ground, not a club's public home ground.
 
 ## Consequences
 
@@ -147,8 +154,8 @@ there to infer from, and would give the game away.
   withheld series never silently un-withholds it (see the runbook's post-import section).
 - **No backfill.** Every series released before this feature has `withheld` undefined, so
   it reads as fully visible — the absence of the field is the correct legacy behaviour.
-- **Legacy `participants` are synthesised on the rep read path.** §5 assumed reps hold the
-  club list, but `GET /clubs` is admin-only, so a rep opening a **legacy** series (one with
+- **Legacy `participants` are synthesised on the rep read path.** Reps have no club-list
+  endpoint (`GET /clubs` is admin-only), so a rep opening a **legacy** series (one with
   no `participants` snapshot, where every `teams[]` id is a clubId) saw "Removed club" for
   every opponent. The rep `GET /series` now back-fills `participants` from the tenant's
   clubs after projection — `{ teamId, clubId, name }` plus the home-ground `venue`/`lat`/

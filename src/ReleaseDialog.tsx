@@ -1,14 +1,13 @@
 import { useState, useId } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon, Btn, useEscapeClose } from './atoms';
+import { SERIES_CONFLICT_MESSAGE, SERIES_CONFLICT_FRIENDLY } from './api';
 import type { WithheldField } from './types';
 
 // A plain optimistic-concurrency race surfaces as exactly this server boilerplate; the
 // clash gate, by contrast, returns a long actionable "Release blocked — …" message. We
 // show the clash text verbatim and swap the boilerplate for the app's friendly line —
 // the same distinction withToast (main.tsx) makes for the toast (ADR 0011).
-const CONCURRENCY_RAW = 'series changed; refetch';
-const CONCURRENCY_FRIENDLY = 'Someone else just changed this — refreshing.';
 
 /* ─── ReleaseDialog — publish a series' schedule to clubs, optionally withholding
    venues and/or start times (ADR 0011) ───
@@ -34,7 +33,6 @@ export function ReleaseDialog({
   onConfirm: (withheld: { venue?: true; time?: true }) => void | Promise<unknown>;
   onClose: () => void;
 }) {
-  useEscapeClose(onClose);
   const titleId = useId();
   const [withheld, setWithheld] = useState<Record<WithheldField, boolean>>({
     venue: false,
@@ -46,6 +44,14 @@ export function ReleaseDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const toggle = (f: WithheldField) => setWithheld((w) => ({ ...w, [f]: !w[f] }));
+  // While the PATCH is in flight the dialog must not close out from under it — every
+  // dismissal path (Escape, backdrop, the X, Cancel) routes through this guard so an
+  // in-flight release can't be abandoned mid-write. Once busy clears (success closes it;
+  // failure re-enables), dismissal works normally again.
+  const close = () => {
+    if (!busy) onClose();
+  };
+  useEscapeClose(close);
 
   async function confirm() {
     // True keys only — an unticked field is omitted, never stored as `false`.
@@ -60,8 +66,8 @@ export function ReleaseDialog({
     } catch (e) {
       const raw = (e instanceof Error && e.message) || '';
       setError(
-        raw === CONCURRENCY_RAW
-          ? CONCURRENCY_FRIENDLY
+        raw === SERIES_CONFLICT_MESSAGE
+          ? SERIES_CONFLICT_FRIENDLY
           : raw || 'Release failed — please try again.',
       );
       setBusy(false); // stay open, re-enable, keep the withhold choices
@@ -82,7 +88,7 @@ export function ReleaseDialog({
   ];
 
   return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && close()}>
       <div className="task-modal" role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <div className="task-modal-head">
           <div className="task-modal-head-text">
@@ -91,7 +97,7 @@ export function ReleaseDialog({
               Release {seriesName} to clubs
             </div>
           </div>
-          <button className="task-modal-close" onClick={onClose} title="Close">
+          <button className="task-modal-close" onClick={close} title="Close">
             <Icon.X />
           </button>
         </div>
@@ -135,7 +141,7 @@ export function ReleaseDialog({
             </div>
           )}
           <div className="fix-confirm-actions" style={{ marginTop: 22 }}>
-            <Btn tone="outline" onClick={onClose}>
+            <Btn tone="outline" onClick={close}>
               Cancel
             </Btn>
             <Btn tone="teal" icon={Icon.Arrow} onClick={confirm} disabled={busy}>

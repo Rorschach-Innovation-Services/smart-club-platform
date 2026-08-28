@@ -111,6 +111,13 @@ export function setAuthLostHandler(fn: (() => void) | null) {
 
 const SESSION_EXPIRED = 'Your session has expired — please sign in again.';
 
+// A plain optimistic-concurrency race surfaces as exactly this server boilerplate
+// (never admin-facing copy); the UI swaps it for the friendly refresh line. Shared so
+// withToast (main.tsx) and ReleaseDialog match one source instead of duplicating the
+// literals (ADR 0011).
+export const SERIES_CONFLICT_MESSAGE = 'series changed; refetch';
+export const SERIES_CONFLICT_FRIENDLY = 'Someone else just changed this — refreshing.';
+
 export class ApiError extends Error {
   status: number;
   // Optional machine-readable discriminator from the error body (e.g. club

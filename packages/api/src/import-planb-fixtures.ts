@@ -1561,6 +1561,9 @@ export function computeSameClubSlotOverlaps(series: OverlapSeriesInput[]): {
         opponent: string | undefined,
       ) => {
         if (!clubId) return;
+        // `time` is compared verbatim — the importer normalises every parsed time to HH:MM,
+        // so a hand-edited `9:00` would not match `09:00` and could hide an overlap; this is
+        // an informational report only, so a missed edge case is acceptable.
         const key = `${clubId}|${f.date}|${f.time}`;
         if (!bySlot.has(key)) {
           bySlot.set(key, []);

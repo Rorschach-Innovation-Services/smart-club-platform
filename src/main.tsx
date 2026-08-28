@@ -19,7 +19,7 @@ import { leagueParticipants } from './leagues';
 import { allocateVenues, buildLedger } from './competition/venues';
 import { findBlock } from './competition/calendar';
 import * as api from './api';
-import { ApiError } from './api';
+import { ApiError, SERIES_CONFLICT_MESSAGE, SERIES_CONFLICT_FRIENDLY } from './api';
 import { resolveTenantSlug, applyTheme, redirectToCanonicalOrigin } from './config';
 import { setActiveTenant } from './api';
 import { AuthProvider, useAuth, membershipFor } from './auth';
@@ -627,7 +627,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       // refetch" — server boilerplate, not admin-facing copy — so it always gets the
       // friendly refresh line even when the caller asked for rawConflict (the flag is
       // there for the actionable clash-gate/reveal text, not this).
-      const plainConcurrency = conflict && err.message === 'series changed; refetch';
+      const plainConcurrency = conflict && err.message === SERIES_CONFLICT_MESSAGE;
       const rawConflict = conflict && opts.rawConflict && !plainConcurrency;
       // `rawClientError` surfaces the server's message for ANY 4xx (not just 409) — used where
       // every client-error carries actionable recovery copy (e.g. email correction's 404
@@ -641,7 +641,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
         rawConflict || rawClientError || authError
           ? err.message
           : conflict
-            ? 'Someone else just changed this — refreshing.'
+            ? SERIES_CONFLICT_FRIENDLY
             : errMsg || err.message,
         'warn',
       );

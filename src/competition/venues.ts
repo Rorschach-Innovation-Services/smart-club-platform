@@ -42,6 +42,20 @@ import { isSlotRef } from './formats';
 import type { GeneratedFixture } from './fixtures';
 import type { IsoDate, Venue, VenueStatus, Weekday } from '../types';
 
+/**
+ * Venue-reason prefixes the Plan-B import writes (packages/api/src/import-planb-fixtures.ts)
+ * and that the admin fixtures table matches to render its at-a-glance pill. Authored here so
+ * the client-side matcher references one source instead of scattered string literals. Only the
+ * operator-facing moves get a pill; `allocatedGround` / `unionT20` are the routine case (no pill).
+ */
+export const VENUE_REASON_PREFIX = {
+  movedToAvoid: 'Moved to avoid',
+  unionDirective: 'Union directive',
+  homeNoGround: 'home club has no ground',
+  allocatedGround: 'Allocated ground —',
+  unionT20: 'Union T20 schedule',
+} as const;
+
 /** The three factors the source document names, in the order they're applied by default. */
 export type AllocationFactor = 'home-preference' | 'distance' | 'availability';
 

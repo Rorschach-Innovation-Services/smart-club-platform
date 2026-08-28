@@ -10,7 +10,8 @@
  * The JSON inputs are raw DynamoDB Query output ({"Items":[{attr:{S:…}}…]}), unmarshalled
  * here. The incoming (sheet) series are built EXACTLY the way import-planb-fixtures.ts's
  * main() builds them — reusing that module's parsing/resolution machinery — but nothing
- * aborts: this is a report, not a write gate. Exit code is always 0.
+ * aborts on a DIFFERENCE: this is a report, not a write gate, so reported diffs still exit
+ * 0. A genuine CRASH (bad path, malformed JSON, ExcelJS error) exits 1.
  */
 import { readFileSync } from 'node:fs';
 import ExcelJS from 'exceljs';
@@ -422,5 +423,6 @@ main()
   })
   .catch((e) => {
     console.error(e instanceof Error ? (e.stack ?? e.message) : e);
-    process.exitCode = 0; // report tool — never fail the shell
+    process.exitCode = 1; // a crash (bad path, malformed JSON, ExcelJS error) — fail loudly.
+    // Reported DIFFERENCES still exit 0 (see main()'s .then above); only a thrown error lands here.
   });

@@ -70,8 +70,7 @@ automatically, so the dry run shows three `s-planb-premier-men-t20-1` auto-moves
 
 3. **Import** — `--confirm` with **no `--discard-edits` and no `--allow-count-mismatch`**.
    Note the printed backup path; every existing-id line reads `overwrote, lifecycle
-preserved` (and, after Track B, appends `(withheld: …)` for any series still holding a
-   field back).
+preserved` and appends `(withheld: …)` for any series still holding a field back.
 
 4. **Post-import verification** — re-export series+clubs JSON and run
    `compare-planb-fixtures.ts` (see below) → `only-sheet 0`/`only-platform 0`, `✓ matches`
@@ -79,8 +78,8 @@ preserved` (and, after Track B, appends `(withheld: …)` for any series still h
    the 3 `Union directive` Peace Park lines (see "Post-import verification" for what to
    read).
 
-5. **Series remain unreleased.** Approve and release from the console — ideally after
-   Track B ships, so venues/times can be withheld at release.
+5. **Series remain unreleased.** Approve and release from the console, withholding
+   venues/times at release if the union hasn't confirmed them yet.
 
 **Risks.** The four Promotion Women weekends pack 10 fixtures/weekend/group across 5 slots
 on the same dates as other leagues — review the clash pass, never `--allow-clashes`
@@ -297,8 +296,8 @@ undeterminable: N` line. The 4 superseded `DELETE_SLUGS` series are excluded fro
 
 After the 16 Aug import, **all 23 `s-planb-*` series already exist on prod** — so the 25 Aug
 re-import (and any later revision) OVERWRITEs every one of them, preserving each series'
-approved/released lifecycle (and, after Track B, its `withheld`/`revealedAt` masking) and
-bumping the version.
+approved/released lifecycle (and its `withheld`/`revealedAt` masking) and bumping the
+version.
 
 Pruning a still-released series prints a loud warning; it is still deleted (an admin who
 prunes early is explicitly choosing to pull it from club portals).
@@ -342,8 +341,9 @@ its ids follow (round, date, time, then row order). That churn is harmless while
 carry no results. It does shape the import's own edit gate, though: `diffAdminEdits` flags a
 prod-only fixture id as a GENUINE edit **only when a section SHRINKS** — so a future
 revision that DROPS fixtures will fail closed and must be **read**, not waved through with
-`--discard-edits` by reflex. Re-import also **preserves `withheld`/`revealedAt`** (Track B),
-so a released-but-withheld series is never silently un-withheld by a re-import.
+`--discard-edits` by reflex. Re-import also **preserves `withheld`/`revealedAt`** — the
+lifecycle-preserve block carries them — so a released-but-withheld series is never silently
+un-withheld by a re-import.
 
 ## Local rehearsal (e2e test)
 

@@ -110,6 +110,20 @@ describe('ClubFixturesView — withheld venue and time', () => {
     expect(queryAllByText(/time to be confirmed/i)).toHaveLength(0);
   });
 
+  it('records both venues and times in the eyebrow once each is revealed', () => {
+    // The eyebrow must reflect BOTH reveal stamps, not just the venue one — a series can
+    // have its venues confirmed on one date and its times on another.
+    const { getByText } = renderView(
+      series({
+        revealedAt: { venue: '2026-09-03T09:00:00.000Z', time: '2026-09-05T09:00:00.000Z' },
+      }),
+    );
+
+    const eyebrow = getByText(/venues confirmed/i);
+    expect(eyebrow.textContent).toMatch(/venues confirmed 3 Sep 2026/i);
+    expect(eyebrow.textContent).toMatch(/times confirmed 5 Sep 2026/i);
+  });
+
   it('keeps venue and distance but replaces the time when only the time is withheld', () => {
     const { queryAllByText, getByText } = renderView(series({ withheld: { time: true } }));
 

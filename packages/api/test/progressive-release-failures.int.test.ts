@@ -452,8 +452,9 @@ describe('(8) exactly which keys each withholding strips (rep projection)', () =
     // Time keys untouched when only venue is withheld.
     assert.equal(f!.time, '09:00', 'time kept when only venue withheld');
     assert.equal(f!.slot, 'morning', 'slot kept when only venue withheld');
-    // Participants' home-ground venue/lat/lon are deliberately NOT stripped — reps already
-    // have them from GET /clubs (documented decision).
+    // Participants' home-ground venue/lat/lon are deliberately NOT stripped — a modern
+    // snapshot already carries them to reps and the portal's opponent UI depends on them;
+    // the secret is fixture-level (ADR 0011 §5).
     const home = (s.participants as Array<Record<string, unknown>>).find(
       (p) => p.teamId === 'home-club',
     )!;
@@ -530,24 +531,16 @@ describe('(10) reveal shape validation (never a 500)', () => {
   });
 });
 
-describe('(11) send-fixtures as a chair + observable schedule text', () => {
+describe('(11) buildClubSchedule prints a full line when nothing is withheld', () => {
+  // The withheld-venue and withheld-time schedule-text variants, and the rep/chair
+  // send-fixtures 201 for a withheld released series, are all covered by
+  // progressive-release.int.test.ts describe (c). Only the fully-visible baseline — both the
+  // venue AND the kick-off time printed — is unique here, so that's all that's kept.
   const clubsById = () =>
     new Map([
       ['home-club', club('home-club')],
       ['away-club', club('away-club')],
     ]);
-
-  test('a venue+time-withheld line reads "Venue TBC", no distance, no time', () => {
-    const { text } = buildClubSchedule(
-      club('home-club'),
-      [series('s11-w', { released: true, withheld: { venue: true, time: true } })],
-      clubsById(),
-    );
-    assert.match(text, /Venue TBC/, 'withheld venue shows TBC');
-    assert.doesNotMatch(text, /Ground \d+/, 'the withheld ground name never leaks');
-    assert.doesNotMatch(text, /km round-trip/, 'no round-trip distance when venue withheld');
-    assert.doesNotMatch(text, /09:00/, 'no kick-off time when time withheld');
-  });
 
   test('a non-withheld line carries the venue and the kick-off time', () => {
     const { text } = buildClubSchedule(
@@ -557,37 +550,6 @@ describe('(11) send-fixtures as a chair + observable schedule text', () => {
     );
     assert.match(text, /Ground \d+/, 'venue shown when nothing withheld');
     assert.match(text, /09:00/, 'time shown when nothing withheld');
-  });
-
-  test('a chair (rep scoped to the club) can send-fixtures for a withheld released series', async () => {
-    await repo.createClub('dolphins', club('home-club'));
-    await repo.putSeries(
-      'dolphins',
-      series('s11-send', {
-        released: true,
-        releasedAt: '2026-08-10T00:00:00.000Z',
-        withheld: { venue: true, time: true },
-      }),
-    );
-    await repo.createPlayer('dolphins', {
-      naturalKey: 'ChairReach',
-      clubId: 'home-club',
-      firstName: 'Chair',
-      lastName: 'Reach',
-      dob: '1990-01-01',
-      isMinor: false,
-      consentAt: '2026-05-01T00:00:00.000Z',
-      createdAt: '2026-05-01T00:00:00.000Z',
-      email: 'chair.reach@home.co.za',
-      cell: '0768563602',
-    } as Parameters<typeof repo.createPlayer>[1]);
-
-    const res = await app.request('/clubs/home-club/send-fixtures', {
-      method: 'POST',
-      headers: headers(REP),
-      body: JSON.stringify({ channels: ['email'], idempotencyKey: 'prf-send-1' }),
-    });
-    assert.equal(res.status, 201);
   });
 });
 
