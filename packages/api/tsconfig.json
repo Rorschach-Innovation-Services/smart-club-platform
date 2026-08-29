@@ -15,9 +15,9 @@
     "noEmit": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts"],
-  // seed-cohort.ts imports the frontend generation engine (src/competition/*), which is
-  // authored under `strict: false`. Nothing in the api tree imports it back, so excluding
-  // it keeps THIS project strict; it is type-checked by tsconfig.seed.json instead and
-  // both run in the `typecheck` script.
-  "exclude": ["src/seed-cohort.ts"]
+  // seed-cohort.ts / export-cohort.ts import from the frontend tree (src/competition/*,
+  // src/data.ts, src/cqiScore.ts), which is authored under `strict: false`. Nothing in the
+  // api tree imports them back, so excluding them keeps THIS project strict; they are
+  // type-checked by tsconfig.seed.json instead and both run in the `typecheck` script.
+  "exclude": ["src/seed-cohort.ts", "src/export-cohort.ts"]
 }

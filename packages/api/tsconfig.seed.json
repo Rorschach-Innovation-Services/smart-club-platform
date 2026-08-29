@@ -1,13 +1,15 @@
 {
   /*
-   * Type-check project for seed-cohort.ts alone.
+   * Type-check project for the CLIs that reach into the frontend tree — seed-cohort.ts
+   * and export-cohort.ts.
    *
-   * The CLI is the one place the two trees meet: it persists through packages/api
-   * (strict) while importing the fixture-generation engine from src/competition/*
-   * (strict: false, and typed against the frontend's own src/types.ts). Checking it in
-   * the api project would drag that tree in under strict rules it was never written for.
+   * These are the places the two trees meet: they persist through packages/api (strict)
+   * while importing from src/ — the fixture-generation engine (src/competition/*) and the
+   * CQI catalogue/scoring (src/data.ts, src/cqiScore.ts) — which is `strict: false` and
+   * typed against the frontend's own src/types.ts. Checking them in the api project would
+   * drag that tree in under strict rules it was never written for.
    *
-   * `lib` stays ES2022 with no DOM: the competition modules are pure TS — dayjs and type
+   * `lib` stays ES2022 with no DOM: those modules are pure TS — dayjs, exceljs and type
    * imports only — and src/types.ts references no DOM types. If that ever stops being
    * true, this file failing is the signal.
    */
@@ -19,6 +21,6 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false
   },
-  "include": ["src/seed-cohort.ts"],
+  "include": ["src/seed-cohort.ts", "src/export-cohort.ts"],
   "exclude": []
 }

@@ -25,3 +25,6 @@ planb-backup-*.json
 # but lives alongside the backups and is equally not repo content.
 titans-import-backup-*.json
 titans-import-created-clubs.json
+
+# generated cohort exports (contain PII)
+cohort-export-*.xlsx

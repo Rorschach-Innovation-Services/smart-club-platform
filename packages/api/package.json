@@ -9,6 +9,7 @@
     "test": "tsx --test test/*.test.ts",
     "seed": "tsx src/seed.ts",
     "seed-cohort": "tsx src/seed-cohort.ts",
+    "export-cohort": "tsx src/export-cohort.ts",
     "import-planb": "tsx src/import-planb-fixtures.ts",
     "configure-tenant-docs": "tsx src/configure-tenant-docs.ts",
     "import-titans-compliance": "tsx src/import-titans-compliance.ts",
