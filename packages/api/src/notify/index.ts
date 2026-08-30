@@ -21,7 +21,6 @@ import {
   sendFixturesWhatsApp,
   sendRegLinkWhatsApp,
   sendClearanceWhatsApp,
-  sendClearanceResolvedWhatsApp,
   toE164,
 } from './whatsapp.js';
 
@@ -332,7 +331,7 @@ interface ClearanceResolvedCopy {
   playerName: string;
   toClubName: string;
   outcome: 'approved' | 'rejected';
-  /** Email-only admin note (never crosses to WhatsApp — see the whatsapp.ts template notes). */
+  /** Admin note carried in the resolved email body. */
   reason?: string;
   /** Reject outcome — steers the rejected email copy (see ClearanceResolvedEmailInput). */
   rejectOutcome?: RejectOutcome;
@@ -362,41 +361,14 @@ async function sendClearanceResolvedEmailChannel(
   }
 }
 
-async function sendClearanceResolvedWhatsAppChannel(
-  chair: ChairContact,
-  copy: ClearanceResolvedCopy,
-): Promise<SendResult> {
-  const e164 = toE164(chair.cell);
-  if (!e164) {
-    return {
-      channel: 'whatsapp',
-      status: 'skipped',
-      ...(chair.cell ? { to: chair.cell } : {}),
-      error: 'no valid chair cell on file',
-    };
-  }
-  try {
-    // The reason is deliberately dropped here — the WhatsApp template carries names only.
-    const { messageId } = await sendClearanceResolvedWhatsApp({
-      to: e164,
-      chairName: chair.name,
-      fromClubName: copy.fromClubName,
-      playerName: copy.playerName,
-      toClubName: copy.toClubName,
-      outcome: copy.outcome,
-    });
-    return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
-  } catch (err) {
-    return { channel: 'whatsapp', status: 'failed', to: e164, error: errMessage(err) };
-  }
-}
-
 /**
- * Tell a club chairman the union office has RESOLVED a clearance (issued or declined it),
- * over email and/or WhatsApp. Called once per club (source and destination) by the caller,
- * who owns the comm-log append. Non-throwing per channel (a bad/blank chair contact becomes
- * a `skipped`/`failed` result, never sinking the other channel). The admin reason travels on
- * the email only — the WhatsApp channel sends names, not the free-text note.
+ * Tell a club chairman the union office has RESOLVED a clearance (issued or declined it).
+ * Email only by design — the pending notice is the one that needs a response; resolutions are
+ * informational, the email carries the reason, and 2 clubs × 2 channels per resolution was
+ * judged too much WhatsApp volume (each business-initiated message is a billed Meta
+ * conversation). Called once per club (source and destination) by the caller, who owns the
+ * comm-log append. Non-throwing (a bad/blank chair email becomes a `skipped`/`failed` result),
+ * so the comm log still records a `skipped` row when there is no chair email on file.
  */
 export async function sendClearanceResolvedNotice(args: {
   chair: { name?: string; email?: string; cell?: string };
@@ -406,10 +378,8 @@ export async function sendClearanceResolvedNotice(args: {
   outcome: 'approved' | 'rejected';
   reason?: string;
   rejectOutcome?: RejectOutcome;
-  channels: Channel[];
 }): Promise<{ results: SendResult[] }> {
-  const { chair, fromClubName, playerName, toClubName, outcome, reason, rejectOutcome, channels } =
-    args;
+  const { chair, fromClubName, playerName, toClubName, outcome, reason, rejectOutcome } = args;
   const contact: ChairContact = {
     name: (chair.name ?? '').trim(),
     email: (chair.email ?? '').trim(),
@@ -423,13 +393,7 @@ export async function sendClearanceResolvedNotice(args: {
     reason,
     rejectOutcome,
   };
-  const results = await Promise.all(
-    channels.map((channel) =>
-      channel === 'email'
-        ? sendClearanceResolvedEmailChannel(contact, copy)
-        : sendClearanceResolvedWhatsAppChannel(contact, copy),
-    ),
-  );
+  const results = [await sendClearanceResolvedEmailChannel(contact, copy)];
   return { results };
 }
 

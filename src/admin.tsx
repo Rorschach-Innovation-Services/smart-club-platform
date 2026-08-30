@@ -7666,7 +7666,7 @@ export function AdminClearances({
             D: `${req.fromClubName} is not on the system — rejecting leaves them registered and active at ${req.toClubName}`,
           };
           const rejectNotified =
-            " Both clubs' chairs will be notified by email/WhatsApp where contact details are on file. You can reopen this clearance later if needed.";
+            " Both clubs' chairs will be notified by email where an address is on file. You can reopen this clearance later if needed.";
           const junkHint = ` If this registration is junk, use Override & approve and then delete the player instead.`;
           const rejectConfirmBody = {
             A: `This will reject ${req.playerName}'s transfer to ${req.toClubName} on the Union's authority. The move is cancelled and they return to active at ${req.fromClubName}.${rejectNotified}`,
@@ -7814,7 +7814,7 @@ export function AdminClearances({
                         req,
                         body: sourcelessKnown
                           ? `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf — even though ${req.fromClubName} has no record of them. If this registration should not exist at all, issue it and then remove the player from ${req.toClubName}'s roster (Clubs → ${req.toClubName} → Players). Say which you are doing: the reason is shown to both clubs, and recorded against your name for the union's record.`
-                          : `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf. Both clubs' chairs will be notified by email/WhatsApp where contact details are on file.`,
+                          : `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf. Both clubs' chairs will be notified by email where an address is on file.`,
                         // Keep the dialog open until the request settles. Close on success AND
                         // on 'conflict' — the toast already told the admin and the card has
                         // refetched, so a retry would only 409 again. Stay open only for a

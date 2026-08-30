@@ -6568,9 +6568,10 @@ describe('Clearance chairman notice (comm log + channels)', () => {
 
 describe('Clearance resolved notice (union reject / override → both clubs)', () => {
   // notify runs in dry-run here (no FROM_EMAIL / WhatsApp secrets), so every channel
-  // "sends" without network and the comm-log rows record the would-be outcome. A club with
-  // a full chair (email + cell) → email `sent` + whatsapp `sent`; email-only → whatsapp
-  // `skipped`.
+  // "sends" without network and the comm-log rows record the would-be outcome. The RESOLVED
+  // notice (reject / override) is EMAIL ONLY by design, so each notified club gets exactly one
+  // `email` row and no whatsapp row. (The reopen notice below still fans out over WhatsApp —
+  // the source chair gets email + whatsapp; the destination chair's whatsapp is `skipped`.)
   const mkClub = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
     id,
     name,
@@ -6687,13 +6688,15 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
     const dst = await repo.getClub('dolphins', 'crv-a-dst');
     const srcRows = (src?.commLog ?? []).filter((e) => e.kind === 'clearance-rejected');
     const dstRows = (dst?.commLog ?? []).filter((e) => e.kind === 'clearance-rejected');
-    assert.equal(srcRows.length, 2, 'source club: one row per channel');
-    assert.equal(dstRows.length, 2, 'destination club: one row per channel');
-    // Source chair is full (email + cell) → both sent; dest chair email-only → whatsapp skipped.
+    // Resolved notice is email-only: exactly one email row per club and no whatsapp row.
+    assert.equal(srcRows.length, 1, 'source club: one email row');
+    assert.equal(dstRows.length, 1, 'destination club: one email row');
     assert.equal(srcRows.find((e) => e.channel === 'email')?.status, 'sent');
-    assert.equal(srcRows.find((e) => e.channel === 'whatsapp')?.status, 'sent');
     assert.equal(dstRows.find((e) => e.channel === 'email')?.status, 'sent');
-    assert.equal(dstRows.find((e) => e.channel === 'whatsapp')?.status, 'skipped');
+    assert.ok(
+      [...srcRows, ...dstRows].every((e) => e.channel === 'email'),
+      'no whatsapp row for a resolved notice',
+    );
     assert.ok(
       [...srcRows, ...dstRows].every((e) => e.by === 'admin@test'),
       'attributed to the rejecting admin',
@@ -6793,12 +6796,17 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
     const dst = await repo.getClub('dolphins', 'crv-b-dst');
     const srcRows = (src?.commLog ?? []).filter((e) => e.kind === 'clearance-approved');
     const dstRows = (dst?.commLog ?? []).filter((e) => e.kind === 'clearance-approved');
-    assert.equal(srcRows.length, 2, 'source club notified');
-    assert.equal(dstRows.length, 2, 'destination club notified');
+    // Resolved notice is email-only: exactly one email row per club and no whatsapp row.
+    assert.equal(srcRows.length, 1, 'source club notified (email only)');
+    assert.equal(dstRows.length, 1, 'destination club notified (email only)');
     assert.ok([...srcRows, ...dstRows].every((e) => e.status === 'sent'));
+    assert.ok(
+      [...srcRows, ...dstRows].every((e) => e.channel === 'email'),
+      'no whatsapp row for a resolved notice',
+    );
     assert.equal(
-      dstRows.find((e) => e.channel === 'whatsapp')?.idempotencyKey,
-      'clearance-crv-b-clr-approved-v1-whatsapp',
+      dstRows.find((e) => e.channel === 'email')?.idempotencyKey,
+      'clearance-crv-b-clr-approved-v1-email',
     );
   });
 
@@ -6836,11 +6844,9 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
     });
     assert.equal(res.status, 200);
     const dst = await repo.getClub('dolphins', 'crv-c-dst');
-    assert.equal(
-      (dst?.commLog ?? []).filter((e) => e.kind === 'clearance-approved').length,
-      2,
-      'destination club notified on both channels',
-    );
+    const dstApproved = (dst?.commLog ?? []).filter((e) => e.kind === 'clearance-approved');
+    assert.equal(dstApproved.length, 1, 'destination club notified (email only)');
+    assert.equal(dstApproved[0]?.channel, 'email', 'no whatsapp row for a resolved notice');
     // No Club record for the directory source, so there is nowhere a notice could land.
     assert.equal(await repo.getClub('dolphins', 'crv-c-dir'), null);
   });
@@ -6917,11 +6923,17 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
       srcCountBefore,
       'source count unchanged',
     );
-    // Both clubs' full chairs notified.
+    // Both clubs' chairs notified by email (resolved notice is email-only: one row each).
     const src = await repo.getClub('dolphins', 'crv-d-src');
     const dst = await repo.getClub('dolphins', 'crv-d-dst');
-    assert.equal((src?.commLog ?? []).filter((e) => e.kind === 'clearance-rejected').length, 2);
-    assert.equal((dst?.commLog ?? []).filter((e) => e.kind === 'clearance-rejected').length, 2);
+    const srcRej = (src?.commLog ?? []).filter((e) => e.kind === 'clearance-rejected');
+    const dstRej = (dst?.commLog ?? []).filter((e) => e.kind === 'clearance-rejected');
+    assert.equal(srcRej.length, 1);
+    assert.equal(dstRej.length, 1);
+    assert.ok(
+      [...srcRej, ...dstRej].every((e) => e.channel === 'email'),
+      'no whatsapp row for a resolved notice',
+    );
   });
 
   // (d') the count decrement is now INSIDE the reject write, not a post-commit cleanup. When the

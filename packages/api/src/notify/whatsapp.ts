@@ -48,20 +48,6 @@ const REGLINK_TEMPLATE_LANG = process.env.WHATSAPP_REGLINK_TEMPLATE_LANG ?? 'en'
 // this template before real sends; see the runbook.
 const CLEARANCE_TEMPLATE = process.env.WHATSAPP_CLEARANCE_TEMPLATE ?? 'club_clearance_pending';
 const CLEARANCE_TEMPLATE_LANG = process.env.WHATSAPP_CLEARANCE_TEMPLATE_LANG ?? 'en';
-// Clearance-RESOLVED heads-up to BOTH clubs' chairmen when the union office issues or
-// declines a clearance — {{1}} chair name, {{2}} player name, {{3}} from-club name,
-// {{4}} to-club name. Body-only Utility templates, no buttons/links. The admin's free-text
-// reason is DELIBERATELY not sent over WhatsApp (free admin text about a named player
-// crossing to Meta is a POPIA concern — it rides the email + club portal instead). Create +
-// approve both templates before real sends; see docs/runbooks/whatsapp-templates.md.
-const CLEARANCE_APPROVED_TEMPLATE =
-  process.env.WHATSAPP_CLEARANCE_APPROVED_TEMPLATE ?? 'club_clearance_approved';
-const CLEARANCE_APPROVED_TEMPLATE_LANG =
-  process.env.WHATSAPP_CLEARANCE_APPROVED_TEMPLATE_LANG ?? 'en';
-const CLEARANCE_REJECTED_TEMPLATE =
-  process.env.WHATSAPP_CLEARANCE_REJECTED_TEMPLATE ?? 'club_clearance_rejected';
-const CLEARANCE_REJECTED_TEMPLATE_LANG =
-  process.env.WHATSAPP_CLEARANCE_REJECTED_TEMPLATE_LANG ?? 'en';
 const GRAPH_VERSION = 'v22.0';
 export const WHATSAPP_DRY_RUN = process.env.NOTIFY_DRY_RUN === '1' || !TOKEN || !PHONE_NUMBER_ID;
 
@@ -286,44 +272,5 @@ export async function sendClearanceWhatsApp(
       { type: 'text', text: cleanParam(toClubName) },
     ],
     `clearance notice for ${fromClubName}`,
-  );
-}
-
-export interface ClearanceResolvedWhatsAppInput {
-  to: string; // already E.164 (see toE164)
-  chairName: string;
-  fromClubName: string;
-  playerName: string;
-  toClubName: string;
-  /** 'approved' → issued template; 'rejected' → declined template. */
-  outcome: 'approved' | 'rejected';
-}
-
-/**
- * Clearance-RESOLVED heads-up to a club chairman (both clubs, per the caller): the union
- * office has issued or declined a transfer. Picks the approved/rejected template by
- * outcome — {{1}} chair, {{2}} player, {{3}} from-club, {{4}} to-club. NO reason variable
- * (see the template notes above — the admin note rides the email, not Meta). The player
- * name arrives from the public register form, so every param rides through cleanParam.
- */
-export async function sendClearanceResolvedWhatsApp(
-  input: ClearanceResolvedWhatsAppInput,
-): Promise<{ messageId: string }> {
-  const { to, chairName, fromClubName, playerName, toClubName, outcome } = input;
-  const [template, lang] =
-    outcome === 'approved'
-      ? [CLEARANCE_APPROVED_TEMPLATE, CLEARANCE_APPROVED_TEMPLATE_LANG]
-      : [CLEARANCE_REJECTED_TEMPLATE, CLEARANCE_REJECTED_TEMPLATE_LANG];
-  return sendTemplate(
-    to,
-    template,
-    lang,
-    [
-      { type: 'text', text: cleanParam(chairName || 'there') },
-      { type: 'text', text: cleanParam(playerName) },
-      { type: 'text', text: cleanParam(fromClubName) },
-      { type: 'text', text: cleanParam(toClubName) },
-    ],
-    `clearance ${outcome} notice for ${fromClubName}`,
   );
 }
