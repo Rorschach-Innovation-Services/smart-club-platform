@@ -14,6 +14,7 @@
  */
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 import { randomUUID } from 'node:crypto';
+import type { RejectOutcome } from '../types.js';
 
 const SES_REGION = process.env.SES_REGION ?? 'eu-west-1';
 const FROM_EMAIL = process.env.FROM_EMAIL;
@@ -294,12 +295,14 @@ export interface ClearanceResolvedEmailInput {
   /** Free admin note recorded on the resolution. Appended as "Reason: …" when present. */
   reason?: string;
   /**
-   * How the clearance originated. A registration-origin reject is the inverse of a
-   * request-origin one: the destination row is flagged `clearance-rejected` and the source
-   * row is removed, so the rejected copy must not claim the player "remains registered" at
-   * the source. Absent or 'request' → request-origin copy.
+   * For a REJECTED clearance, what became of the player — reject now cancels the move rather
+   * than flagging the destination row, so the body copy states where the player ended up:
+   * `source-reactivated` (they stay at / return to the source), `moved-to-source` (the
+   * registration moved to the source club), `stays-at-destination` (the source is off-system,
+   * so they stay put). Absent on an approved notice; a rejected notice with no value falls
+   * back to the source-reactivated copy.
    */
-  origin?: 'registration' | 'request';
+  rejectOutcome?: RejectOutcome;
 }
 
 /**
@@ -312,22 +315,28 @@ export function clearanceResolvedEmailContent(input: ClearanceResolvedEmailInput
   text: string;
   html: string;
 } {
-  const { chairName, fromClubName, playerName, toClubName, outcome, reason, origin } = input;
+  const { chairName, fromClubName, playerName, toClubName, outcome, reason, rejectOutcome } = input;
   // Portal-entered roster names aren't whitespace-collapsed on the way in — never let a
   // newline reach an email header.
   const subject = `Clearance ${outcome} — ${playerName.replace(/\s+/g, ' ').trim()}`;
   const greetName = chairName || 'there';
 
-  // The rejected copy depends on origin: a request-origin reject leaves the player where they
-  // were (source), while a registration-origin reject flags the destination row and removes
-  // the source record — the inverse. The approved copy is true for both.
+  // Reject now CANCELS the move — the player ends up at the source (or stays put), never on a
+  // terminal `clearance-rejected` destination row — so the rejected copy states the outcome and
+  // that the clearance can be reopened. The approved copy is unchanged (true for every case).
+  const rejectedLead =
+    `${playerName}'s clearance from ${fromClubName} to ${toClubName} has been rejected by the ` +
+    `union office.`;
+  const rejectedDetail =
+    rejectOutcome === 'moved-to-source'
+      ? `Their registration has been moved to ${fromClubName}, and they no longer appear on ` +
+        `${toClubName}'s roster.`
+      : rejectOutcome === 'stays-at-destination'
+        ? `${fromClubName} is not on the system, so their registration stays at ${toClubName}.`
+        : `The move is cancelled and they remain registered at ${fromClubName}.`;
   const rejectedBody =
-    origin === 'registration'
-      ? `${playerName}'s clearance from ${fromClubName} to ${toClubName} has been rejected by the ` +
-        `union office; their registration at ${toClubName} is flagged as clearance-rejected, and ` +
-        `any record of them at ${fromClubName} has been removed.`
-      : `${playerName}'s clearance from ${fromClubName} to ${toClubName} has been rejected by the ` +
-        `union office; they remain registered at ${fromClubName}.`;
+    `${rejectedLead} ${rejectedDetail} ` +
+    `The union office can reopen this clearance if it was rejected in error.`;
   const body =
     outcome === 'approved'
       ? `${playerName}'s clearance from ${fromClubName} to ${toClubName} has been issued by the ` +
@@ -387,6 +396,145 @@ export async function sendClearanceResolvedEmail(
           Html: { Data: html, Charset: 'UTF-8' },
           Text: { Data: text, Charset: 'UTF-8' },
         },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}
+
+export interface ClearanceReopenedEmailInput {
+  to: string;
+  chairName: string;
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+}
+
+/**
+ * Build the SOURCE-chair reopen email: the pending clearance copy (the source club must decide
+ * the transfer again) with a preamble saying the union office reopened a previously rejected
+ * clearance. Pure (no SES, no env) — exported so tests can assert the rendered copy. The pending
+ * WhatsApp template rides alongside it (see notify/index.ts); there is no new Meta template.
+ */
+export function clearanceReopenedSourceEmailContent(input: ClearanceReopenedEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { chairName, fromClubName, playerName, toClubName } = input;
+  const subject = `Clearance reopened — ${playerName.replace(/\s+/g, ' ').trim()}`;
+  const greetName = chairName || 'there';
+  const preamble =
+    `The union office has reopened a previously rejected clearance — it needs your club's ` +
+    `decision again.`;
+
+  const text =
+    `Hello ${greetName},\n\n` +
+    `${preamble}\n\n` +
+    `A player clearance is awaiting ${fromClubName}'s review: ${playerName} has applied to join ` +
+    `${toClubName} and needs a clearance from your club.\n\n` +
+    `Please have this reviewed and approved or rejected in your club portal, or contact your ` +
+    `union office if you have any questions.\n\n` +
+    `Thank you,\nThe union office`;
+
+  const safeName = escapeHtml(greetName);
+  const safeFrom = escapeHtml(fromClubName);
+  const safePlayer = escapeHtml(playerName);
+  const safeTo = escapeHtml(toClubName);
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hello ${safeName},</p>` +
+    `<p>${escapeHtml(preamble)}</p>` +
+    `<p>A player clearance is awaiting <strong>${safeFrom}</strong>'s review: <strong>${safePlayer}</strong> ` +
+    `has applied to join <strong>${safeTo}</strong> and needs a clearance from your club.</p>` +
+    `<p>Please have this reviewed and approved or rejected in your club portal, or contact your ` +
+    `union office if you have any questions.</p>` +
+    `<p>Thank you,<br/>The union office</p>` +
+    `</div>`;
+
+  return { subject, text, html };
+}
+
+/**
+ * Build the DESTINATION-chair reopen email. Unlike the source, the destination does NOT act on
+ * the clearance — the source club decides — so this is its own body rather than the pending copy,
+ * and no WhatsApp template exists for it (the caller records that channel skipped).
+ */
+export function clearanceReopenedDestEmailContent(input: ClearanceReopenedEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { chairName, fromClubName, playerName } = input;
+  const subject = `Clearance reopened — ${playerName.replace(/\s+/g, ' ').trim()}`;
+  const greetName = chairName || 'there';
+  const body =
+    `The union office has reopened ${playerName}'s clearance from ${fromClubName} to your club; ` +
+    `the move is under review again and ${fromClubName} will decide.`;
+
+  const text =
+    `Hello ${greetName},\n\n` +
+    `${body}\n\n` +
+    `If you have any questions, please contact your union office.\n\n` +
+    `Thank you,\nThe union office`;
+
+  const safeName = escapeHtml(greetName);
+  const safeBody = escapeHtml(body);
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hello ${safeName},</p>` +
+    `<p>${safeBody}</p>` +
+    `<p>If you have any questions, please contact your union office.</p>` +
+    `<p>Thank you,<br/>The union office</p>` +
+    `</div>`;
+
+  return { subject, text, html };
+}
+
+/** Send the SOURCE-chair reopen email (pending copy + preamble). Dry-run gated like its siblings. */
+export async function sendClearanceReopenedSourceEmail(
+  input: ClearanceReopenedEmailInput,
+): Promise<{ messageId: string }> {
+  const { to, fromClubName } = input;
+  const { subject, text, html } = clearanceReopenedSourceEmailContent(input);
+  if (EMAIL_DRY_RUN) {
+    console.log(
+      `[notify:email dry-run] would send clearance-reopened (source) notice to ${to} for ${fromClubName}`,
+    );
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [to] },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: { Html: { Data: html, Charset: 'UTF-8' }, Text: { Data: text, Charset: 'UTF-8' } },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}
+
+/** Send the DESTINATION-chair reopen email (its own body). Dry-run gated like its siblings. */
+export async function sendClearanceReopenedDestEmail(
+  input: ClearanceReopenedEmailInput,
+): Promise<{ messageId: string }> {
+  const { to, fromClubName } = input;
+  const { subject, text, html } = clearanceReopenedDestEmailContent(input);
+  if (EMAIL_DRY_RUN) {
+    console.log(
+      `[notify:email dry-run] would send clearance-reopened (destination) notice to ${to} for ${fromClubName}`,
+    );
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [to] },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: { Html: { Data: html, Charset: 'UTF-8' }, Text: { Data: text, Charset: 'UTF-8' } },
       },
     }),
   );

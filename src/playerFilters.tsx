@@ -130,6 +130,7 @@ export function PlayerFilterBar({ filters, onChange, players, teamLabel, clubs =
         <option value="all">All statuses</option>
         <option value="active">Active</option>
         <option value="clearance-pending">Clearance pending</option>
+        {/* 'clearance-rejected' is legacy — reject no longer writes it; rows from before still render. */}
         <option value="clearance-rejected">Clearance rejected</option>
         <option value="inactive">Inactive</option>
       </select>

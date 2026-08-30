@@ -837,7 +837,14 @@ export interface ClubCommEvent {
   at: string;
   by: string;
   idempotencyKey: string;
-  kind?: 'invite' | 'fixtures' | 'reglink';
+  kind?:
+    | 'invite'
+    | 'fixtures'
+    | 'reglink'
+    | 'clearance'
+    | 'clearance-approved'
+    | 'clearance-rejected'
+    | 'clearance-reopened';
   summary?: string;
 }
 
@@ -894,6 +901,9 @@ export interface PlayerIdDocMeta {
   contentType?: string;
 }
 
+// `'clearance-rejected'` is LEGACY — reject no longer writes it. A rejected transfer now
+// cancels the move and the player ends up active at the source club (reversible via reopen).
+// Rows written before this change still carry the status and must keep rendering.
 export type PlayerStatus = 'active' | 'clearance-pending' | 'inactive' | 'clearance-rejected';
 
 export interface PlayerRegistration {
@@ -933,7 +943,14 @@ export interface PlayerRegistration {
   /** Previous club's vetted ID doc, carried over when a registration-origin clearance is approved. */
   previousIdDocMeta?: PlayerIdDocMeta;
   status?: PlayerStatus;
-  /** Set when a registration-origin clearance was rejected; meaningful only while status is 'clearance-rejected'. */
+  /**
+   * LEGACY (read-only). Was set when a registration-origin clearance was rejected under the
+   * old behaviour: the player stayed on this (current) club's roster flagged
+   * 'clearance-rejected'. Reject no longer writes these — it now cancels the move (see
+   * repo.rejectClearance) — but pre-existing rows may still carry them, so activation paths
+   * still scrub them (see rekeyPlayer / resolveClearance). Meaningful ONLY while
+   * status === 'clearance-rejected'.
+   */
   clearanceRejectedAt?: string;
   clearanceRejectedReason?: string;
   registeredBy?: string;
@@ -942,6 +959,15 @@ export interface PlayerRegistration {
 }
 
 export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejected';
+
+/**
+ * What a reject did to the player's registration — set on reject, cleared on reopen. Drives the
+ * admin toast and the club-portal card copy. Mirrors the API's RejectOutcome:
+ *   source-reactivated  — the move is cancelled; the player is (or returns to) active at the source.
+ *   moved-to-source     — the registration (details + ID doc) is moved to the source club.
+ *   stays-at-destination — the source is not on the system, so the player stays at the destination.
+ */
+export type RejectOutcome = 'source-reactivated' | 'moved-to-source' | 'stays-at-destination';
 
 /** An inter-club transfer/clearance request. */
 export interface PlayerClearance {
@@ -972,6 +998,11 @@ export interface PlayerClearance {
   rejectedAt?: string | null;
   rejectedBy?: string;
   rejectReason?: string;
+  /** How the reject resolved (see RejectOutcome). Public; set on reject, cleared on reopen. */
+  rejectOutcome?: RejectOutcome;
+  /** Set when a rejected clearance was reopened (rejected → pending); cleared again on re-reject. */
+  reopenedAt?: string;
+  reopenedBy?: string;
   /**
    * Free text on an override: why the union issued the clearance on the clubs' behalf. Written
    * only on an ADMIN override, but SHOWN TO BOTH CLUBS — it rides the mirror as well as the
@@ -988,19 +1019,29 @@ export interface PlayerClearance {
 }
 
 /**
- * A clearance as GET /admin/clearances returns it — the stored row plus one derived field.
+ * A clearance as GET /admin/clearances returns it — the stored row plus two derived fields.
  * Deliberately NOT on PlayerClearance: every writer spreads a whole clearance, so a derived
- * field on the persisted type is one pass-through away from being stored. ABSENT means unknown
- * (older API, the derivation failed, or that pair could not be read) and must be treated as its
- * own state, not folded into either answer — the console fails closed on the irreversible
- * action when it is.
+ * field on the persisted type is one pass-through away from being stored.
+ *
+ * `predictedRejectCase` predicts which reject case applies, computed server-side from the SAME
+ * detection the reject itself uses (the actual roster state), so the console never has to infer
+ * it from a boolean. Present only on PENDING clearances. ABSENT means the API could not work it
+ * out (older API, the derivation failed, or that pair could not be read) and must be treated as
+ * its own state — the console fails closed and DISABLES Reject when it is, because a reject may
+ * create or replace a row at another club and the admin must see the right consequence first.
+ *
+ * `sourceRostered` is retained (informational, pending only) — it still drives the Reallocate
+ * offer; it no longer drives Reject enablement.
  *
  * NOTE this copy is DOCUMENTATION ONLY for now. The compiler enforcement it describes is real
  * on the API side (packages/api/src/types.ts); here AdminClearances' props are untyped and
  * tsconfig.app.json still has noImplicitAny off, so nothing checks it until the strict ratchet
  * lands. Do not read it as a guarantee on this side of the wire.
  */
-export type AdminClearanceView = PlayerClearance & { sourceRostered?: boolean };
+export type AdminClearanceView = PlayerClearance & {
+  sourceRostered?: boolean;
+  predictedRejectCase?: 'A' | 'B' | 'B-placeholder' | 'B-active' | 'C' | 'D';
+};
 
 export type RegistrationReviewKind = 'off-system-alert' | 'cross-club-hold';
 export type RegistrationReviewStatus = 'open' | 'resolved';

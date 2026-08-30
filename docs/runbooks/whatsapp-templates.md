@@ -19,6 +19,17 @@ All three are **Utility** templates, **body-only** (no header, no buttons, no li
 chair may hold no portal login (chair invites were removed with admin onboarding), so the
 copy points at the club portal / union office rather than telling the recipient to sign in.
 
+> **Reopen reuses the pending template — no new Meta template.** When the union office reopens
+> a rejected clearance (`POST /admin/clearances/:cid/reopen`), the comm-log kind is
+> `clearance-reopened` and the daily pending-notice cap is bypassed (a reopen is deliberate
+> admin action). The two chairs get **different** content: the **source** chair receives the
+> pending WhatsApp template above (the source club must decide the transfer again), while the
+> **destination** chair's WhatsApp channel is recorded `skipped` with error
+> `no destination template for reopen` — the destination gets an **email-only** heads-up
+> (there is deliberately no destination reopen template, and the pending copy would wrongly
+> tell the destination its club must act). If you ever add one, wire a new secret and body
+> here; until then the skipped row keeps the comm log honest.
+
 > **POPIA — no reason over WhatsApp.** The admin's free-text reject/override note is
 > **never** sent on WhatsApp. Free admin text about a named player crossing to Meta is a
 > cross-border-transfer concern, so the resolved templates carry names only; the reason

@@ -285,6 +285,7 @@ export function playerStatusPill(status?: string) {
         Clearance pending
       </Pill>
     );
+  // 'clearance-rejected' is legacy — reject no longer writes it; rows from before still render.
   if (status === 'clearance-rejected')
     return (
       <Pill tone="coral" dot>

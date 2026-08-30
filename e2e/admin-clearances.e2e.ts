@@ -2,6 +2,8 @@ import { test, expect } from '@playwright/test';
 import {
   signInAsAdmin,
   seedPendingClearance,
+  seedRegistrationClearance,
+  listPlayers,
   rejectViaApi,
   overrideViaApi,
   fetchClearance,
@@ -24,6 +26,11 @@ const CLUBS = {
   reject: { from: 'crusaders', to: 'berea' },
   override: { from: 'phoenix', to: 'verulam' },
   stale: { from: 'rhythm', to: 'warriors' },
+  // Case C (registration-origin, source club exists but holds no row): the player registers at
+  // `linkClub` and declares `prevClub` as their previous club. `prevClub` holds no row for the
+  // run-unique name, so reject moves the registration there. See the test for why leftovers at
+  // `prevClub` are harmless.
+  regC: { linkClub: 'verulam', prevClub: 'phoenix', prevName: 'Phoenix' },
 };
 
 // A status pill button reads "<Label> <count>"; assert on the count that follows the label.
@@ -97,7 +104,7 @@ test('search narrows across statuses, counts, and clears', async ({ page, reques
   expect(a.id).not.toBe(b.id);
 });
 
-test('rejecting a clearance in the UI resolves it and logs both clubs', async ({
+test('rejecting a clearance in the UI cancels the move, then reopen restores it and it can be re-rejected', async ({
   page,
   request,
 }) => {
@@ -121,9 +128,10 @@ test('rejecting a clearance in the UI resolves it and logs both clubs', async ({
   await dialog.getByPlaceholder('Reason (optional — shown to both clubs)').fill(reason);
   await dialog.getByRole('button', { name: 'Yes, reject clearance' }).click();
 
-  // Dialog closes only on success; a success toast confirms the rejection.
+  // Dialog closes only on success; the toast now reads with the new "cancels the move" copy —
+  // this is a rep-initiated (request-origin) clearance, so the source is reactivated in place.
   await expect(dialog).toHaveCount(0);
-  await expect(page.locator('.toast')).toContainText('clearance rejected');
+  await expect(page.locator('.toast', { hasText: 'move is cancelled' })).toBeVisible();
 
   // The card now shows a "Rejected" pill; in the searched set Pending→0, Rejected→1.
   await expect(card.locator('.clr-resolved-bar')).toContainText('Rejected');
@@ -135,11 +143,43 @@ test('rejecting a clearance in the UI resolves it and logs both clubs', async ({
   expect(after?.status).toBe('rejected');
   expect(after?.rejectReason).toBe(reason);
 
-  // Both clubs' comm logs carry the rejection notice.
+  // ── Reopen via the UI ── the rejected card offers a Reopen button (a snapshot exists).
+  await card.getByRole('button', { name: 'Reopen' }).click();
+  const reopenDialog = page.locator('.fix-confirm-box');
+  await expect(reopenDialog).toBeVisible();
+  // The reopen confirm has no reason field, just the confirm button.
+  await reopenDialog.getByRole('button', { name: 'Yes, reopen clearance' }).click();
+
+  await expect(reopenDialog).toHaveCount(0);
+  await expect(page.locator('.toast', { hasText: 'reopened' })).toBeVisible();
+
+  // Back to pending: searched Pending→1, Rejected→0 (both depend on the post-reopen refetch).
+  await expect.poll(() => pillCount(page, 'Pending')).toBe(1);
+  await expect.poll(() => pillCount(page, 'Rejected')).toBe(0);
+
+  // The clearance is pending again and the reject reason has been cleared.
+  const reopened = await fetchClearance(request, clr.id);
+  expect(reopened?.status).toBe('pending');
+  expect(reopened?.rejectReason).toBeUndefined();
+
+  // Both clubs' comm logs now carry the REOPENED notice too.
   for (const clubId of [CLUBS.reject.from, CLUBS.reject.to]) {
     await page.goto(`/admin/clubs/${clubId}`);
-    await expect(page.getByText(/Clearance rejected notice/).first()).toBeVisible();
+    await expect(page.getByText(/Clearance reopened notice/).first()).toBeVisible();
   }
+
+  // ── Reject again via the UI (no reason this time) ── it resolves back to rejected.
+  await openClearancesFilteredTo(page, name);
+  await expect(card).toBeVisible();
+  await card.getByRole('button', { name: 'Reject' }).click();
+  const dialog2 = page.locator('.fix-confirm-box');
+  await expect(dialog2).toBeVisible();
+  await dialog2.getByRole('button', { name: 'Yes, reject clearance' }).click();
+  await expect(dialog2).toHaveCount(0);
+  await expect(page.locator('.toast', { hasText: 'move is cancelled' })).toBeVisible();
+
+  const reRejected = await fetchClearance(request, clr.id);
+  expect(reRejected?.status).toBe('rejected');
 });
 
 test('overriding a clearance in the UI issues it and logs both clubs', async ({
@@ -219,18 +259,61 @@ test('a clearance resolved behind the UI closes the reject dialog with a warning
   await expect(card.locator('.clr-resolved-bar')).toContainText('Union override');
 });
 
-/**
- * (e) Blocked reject — SKIPPED.
- *
- * The Reject button is disabled only for a sourceless/off-system clearance: an off-system
- * directory source, or a pending REGISTRATION-origin clearance whose source club holds no
- * roster row (`sourceRostered === false`). None of those states is reachable through the
- * clearance-create API used above (it always mints an origin-less, on-system clearance whose
- * source club really rosters the player). The only way to produce one is the public
- * self-registration route (`POST /register/:clubId`), which requires minting a signup token
- * AND a mandatory presigned ID-document upload — the latter 500s locally unless the stack is
- * booted with UPLOADS_BUCKET + AWS creds (see project memory: "dev:local uploads bucket").
- * That setup is out of scope for this harness, so the blocked-reject affordance is left to the
- * API integration suite, which drives those repo primitives directly.
- */
-test.skip('reject is disabled with an override explanation for a sourceless clearance', () => {});
+test('rejecting a registration-origin (case C) clearance moves the player to the previous club, and reopen moves them back', async ({
+  page,
+  request,
+}) => {
+  const name = `RegCaseC-${RUN}`;
+  const { linkClub, prevClub, prevName } = CLUBS.regC;
+  // A run-unique name means `prevClub` (Phoenix) holds no row for this player → case C. The test
+  // ends with a reopen, so what it leaves behind is a `clearance-pending` row at Verulam and a
+  // pending clearance in Phoenix's queue — never colliding with another test's name searches.
+  const clr = await seedRegistrationClearance(request, { linkClub, prevClub, name });
+  expect(clr.origin).toBe('registration');
+
+  await openClearancesFilteredTo(page, name);
+  const card = page.locator('.clr-card', { hasText: `Test ${name}` });
+  await expect(card).toBeVisible();
+  // Case-C sub copy on the pending card, and Reject is enabled (server predicted case C).
+  await expect(card).toContainText('has no record of this player');
+  const rejectBtn = card.getByRole('button', { name: 'Reject' });
+  await expect(rejectBtn).toBeEnabled();
+  await rejectBtn.click();
+
+  const dialog = page.locator('.fix-confirm-box');
+  await expect(dialog).toBeVisible();
+  // The confirm body spells out that the registration moves to the previous club (Phoenix).
+  await expect(dialog).toContainText('moves the registration');
+  await expect(dialog).toContainText(prevName);
+  await dialog.getByRole('button', { name: 'Yes, reject clearance' }).click();
+
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator('.toast', { hasText: 'moved back to' })).toBeVisible();
+
+  // The registration is now ACTIVE at Phoenix with the SAME ID-doc objectKey, and gone from Verulam.
+  await expect
+    .poll(
+      async () => (await listPlayers(request, prevClub)).find((p) => p.lastName === name)?.status,
+    )
+    .toBe('active');
+  const moved = (await listPlayers(request, prevClub)).find((p) => p.lastName === name);
+  expect(moved?.idDocMeta?.objectKey).toBe(clr.idDocObjectKey);
+  expect((await listPlayers(request, linkClub)).find((p) => p.lastName === name)).toBeUndefined();
+
+  // ── Reopen via the UI ── the registration moves back: clearance-pending at Verulam, gone from Phoenix.
+  await card.getByRole('button', { name: 'Reopen' }).click();
+  const reopenDialog = page.locator('.fix-confirm-box');
+  await expect(reopenDialog).toBeVisible();
+  await reopenDialog.getByRole('button', { name: 'Yes, reopen clearance' }).click();
+  await expect(reopenDialog).toHaveCount(0);
+  await expect(page.locator('.toast', { hasText: 'reopened' })).toBeVisible();
+
+  await expect
+    .poll(
+      async () => (await listPlayers(request, linkClub)).find((p) => p.lastName === name)?.status,
+    )
+    .toBe('clearance-pending');
+  expect((await listPlayers(request, prevClub)).find((p) => p.lastName === name)).toBeUndefined();
+  // The card is pending again (Reject available once more).
+  await expect(card.getByRole('button', { name: 'Reject' })).toBeVisible();
+});

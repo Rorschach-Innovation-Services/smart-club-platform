@@ -5,13 +5,15 @@
  * routes record these results and return them to the caller verbatim, so the
  * toast reflects reality instead of optimism.
  */
-import type { Club, Channel, SendResult, PlayerRegistration } from '../types.js';
+import type { Club, Channel, SendResult, PlayerRegistration, RejectOutcome } from '../types.js';
 import {
   sendStaffInviteEmail,
   sendFixturesEmail,
   sendRegLinkEmail,
   sendClearanceEmail,
   sendClearanceResolvedEmail,
+  sendClearanceReopenedSourceEmail,
+  sendClearanceReopenedDestEmail,
 } from './email.js';
 import type { TutorialLink, RegLinkOrgCopy } from './email.js';
 import {
@@ -332,8 +334,8 @@ interface ClearanceResolvedCopy {
   outcome: 'approved' | 'rejected';
   /** Email-only admin note (never crosses to WhatsApp — see the whatsapp.ts template notes). */
   reason?: string;
-  /** Clearance origin — steers the rejected email copy (see ClearanceResolvedEmailInput). */
-  origin?: 'registration' | 'request';
+  /** Reject outcome — steers the rejected email copy (see ClearanceResolvedEmailInput). */
+  rejectOutcome?: RejectOutcome;
 }
 
 async function sendClearanceResolvedEmailChannel(
@@ -403,10 +405,11 @@ export async function sendClearanceResolvedNotice(args: {
   toClubName: string;
   outcome: 'approved' | 'rejected';
   reason?: string;
-  origin?: 'registration' | 'request';
+  rejectOutcome?: RejectOutcome;
   channels: Channel[];
 }): Promise<{ results: SendResult[] }> {
-  const { chair, fromClubName, playerName, toClubName, outcome, reason, origin, channels } = args;
+  const { chair, fromClubName, playerName, toClubName, outcome, reason, rejectOutcome, channels } =
+    args;
   const contact: ChairContact = {
     name: (chair.name ?? '').trim(),
     email: (chair.email ?? '').trim(),
@@ -418,7 +421,7 @@ export async function sendClearanceResolvedNotice(args: {
     toClubName,
     outcome,
     reason,
-    origin,
+    rejectOutcome,
   };
   const results = await Promise.all(
     channels.map((channel) =>
@@ -426,6 +429,101 @@ export async function sendClearanceResolvedNotice(args: {
         ? sendClearanceResolvedEmailChannel(contact, copy)
         : sendClearanceResolvedWhatsAppChannel(contact, copy),
     ),
+  );
+  return { results };
+}
+
+// ───────────────────── Clearance reopened (source decides again; dest FYI) ─────────────────────
+
+async function sendReopenedSourceEmailChannel(
+  chair: ChairContact,
+  copy: ClearanceCopy,
+): Promise<SendResult> {
+  if (!EMAIL_RE.test(chair.email)) {
+    return {
+      channel: 'email',
+      status: 'skipped',
+      ...(chair.email ? { to: chair.email } : {}),
+      error: 'no valid chair email on file',
+    };
+  }
+  try {
+    const { messageId } = await sendClearanceReopenedSourceEmail({
+      to: chair.email,
+      chairName: chair.name,
+      ...copy,
+    });
+    return { channel: 'email', status: 'sent', to: chair.email, messageId };
+  } catch (err) {
+    return { channel: 'email', status: 'failed', to: chair.email, error: errMessage(err) };
+  }
+}
+
+async function sendReopenedDestEmailChannel(
+  chair: ChairContact,
+  copy: ClearanceCopy,
+): Promise<SendResult> {
+  if (!EMAIL_RE.test(chair.email)) {
+    return {
+      channel: 'email',
+      status: 'skipped',
+      ...(chair.email ? { to: chair.email } : {}),
+      error: 'no valid chair email on file',
+    };
+  }
+  try {
+    const { messageId } = await sendClearanceReopenedDestEmail({
+      to: chair.email,
+      chairName: chair.name,
+      ...copy,
+    });
+    return { channel: 'email', status: 'sent', to: chair.email, messageId };
+  } catch (err) {
+    return { channel: 'email', status: 'failed', to: chair.email, error: errMessage(err) };
+  }
+}
+
+/**
+ * Tell one club's chairman the union office has REOPENED a rejected clearance. The two clubs get
+ * DIFFERENT content: the pending copy ("your club must decide") is true only for the SOURCE, so
+ * the source chair receives the pending email (with a reopen preamble) plus the pending WhatsApp
+ * template — there is no new Meta template — while the destination chair receives an email-only
+ * heads-up and the WhatsApp channel is recorded `skipped` ('no destination template for reopen')
+ * so the comm log stays honest. Called once per club (source and destination) by the caller, who
+ * owns the comm-log append. Non-throwing per channel, like the other clearance senders.
+ */
+export async function sendClearanceReopenedNotice(args: {
+  side: 'source' | 'destination';
+  chair: { name?: string; email?: string; cell?: string };
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+  channels: Channel[];
+}): Promise<{ results: SendResult[] }> {
+  const { side, chair, fromClubName, playerName, toClubName, channels } = args;
+  const contact: ChairContact = {
+    name: (chair.name ?? '').trim(),
+    email: (chair.email ?? '').trim(),
+    cell: (chair.cell ?? '').trim(),
+  };
+  const copy: ClearanceCopy = { fromClubName, playerName, toClubName };
+  const results = await Promise.all(
+    channels.map((channel): Promise<SendResult> => {
+      if (channel === 'email') {
+        return side === 'source'
+          ? sendReopenedSourceEmailChannel(contact, copy)
+          : sendReopenedDestEmailChannel(contact, copy);
+      }
+      // WhatsApp: the source reuses the pending template; the destination has no template at all,
+      // so its channel is recorded skipped rather than sent — the comm log must not imply a send.
+      if (side === 'source') return sendClearanceWhatsAppChannel(contact, copy);
+      return Promise.resolve<SendResult>({
+        channel: 'whatsapp',
+        status: 'skipped',
+        ...(contact.cell ? { to: contact.cell } : {}),
+        error: 'no destination template for reopen',
+      });
+    }),
   );
   return { results };
 }

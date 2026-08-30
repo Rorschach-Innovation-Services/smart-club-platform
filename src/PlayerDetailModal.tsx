@@ -279,6 +279,7 @@ export function PlayerDetailModal({
             value={player.registeredVia === 'portal' ? 'Portal' : 'Link'}
           />
           <Row label="Registered on" value={fmtStamp(player.createdAt)} />
+          {/* 'clearance-rejected' is legacy — reject no longer writes it; rows from before still render. */}
           {player.status === 'clearance-rejected' && (
             <div
               style={{

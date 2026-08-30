@@ -738,8 +738,11 @@ export interface ClubCommEvent {
    * broadcast is recorded as one PII-free summary event per channel, not one row per player.
    * A 'clearance' row is the chairman heads-up recorded when a clearance opens against the club.
    * A 'clearance-approved' / 'clearance-rejected' row is recorded on BOTH clubs when the union
-   * office resolves a clearance (override → approved, reject → rejected). The daily cap counts
-   * `kind === 'clearance'` only, so these resolution notices never consume it.
+   * office resolves a clearance (override → approved, reject → rejected). A 'clearance-reopened'
+   * row is recorded on BOTH clubs when the union office reopens a previously rejected clearance
+   * (source chair gets the pending template + preamble; the destination chair gets an email-only
+   * notice, WhatsApp logged skipped). The daily cap counts `kind === 'clearance'` only, so these
+   * resolution/reopen notices never consume it.
    */
   kind?:
     | 'invite'
@@ -747,7 +750,8 @@ export interface ClubCommEvent {
     | 'reglink'
     | 'clearance'
     | 'clearance-approved'
-    | 'clearance-rejected';
+    | 'clearance-rejected'
+    | 'clearance-reopened';
   /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
   summary?: string;
 }
@@ -868,6 +872,12 @@ export interface PlayerIdDocMeta {
   contentType?: string;
 }
 
+/**
+ * Roster lifecycle. `'clearance-rejected'` is LEGACY (read-only): reject no longer writes it —
+ * a rejected transfer now cancels the move (player active at the source club) rather than
+ * flagging the destination row. The value is kept so rows written before this change still
+ * render; no new code sets it.
+ */
 export type PlayerStatus = 'active' | 'clearance-pending' | 'inactive' | 'clearance-rejected';
 
 export interface PlayerRegistration {
@@ -922,13 +932,24 @@ export interface PlayerRegistration {
   /** Roster lifecycle. Absent ⇒ treated as 'active'. */
   status?: PlayerStatus;
   /**
-   * Set when a registration-origin clearance was REJECTED: the player stays on this
-   * (current) club's roster flagged 'clearance-rejected' instead of reverting to the
-   * previous club. Meaningful ONLY while status === 'clearance-rejected' — cleared on
-   * any later activation (see resolveClearance). `lastClub` holds the previous club name.
+   * LEGACY (read-only). Was set when a registration-origin clearance was rejected under the
+   * old behaviour: the player stayed on this (current) club's roster flagged
+   * 'clearance-rejected'. Reject no longer writes these — it now cancels the move (see
+   * repo.rejectClearance) — but pre-existing rows may still carry them, so activation paths
+   * still scrub them (see rekeyPlayer / resolveClearance). Meaningful ONLY while
+   * status === 'clearance-rejected'.
    */
   clearanceRejectedAt?: string;
   clearanceRejectedReason?: string;
+  /**
+   * Marks a MINIMAL source-club stand-in written by the registration-clearance backfill
+   * (backfill-registration-clearance.ts) or the admin reassign — name/ID/team only, no contact
+   * details and no ID document. Reject's case detection replaces such a row with the real
+   * registration rather than reactivating the stub (case B″). Legacy placeholders written
+   * before this flag are recognised by heuristic (pending AND no idDocMeta AND no cell AND no
+   * email AND no registeredVia); see repo.isPlaceholder.
+   */
+  placeholder?: true;
   /** Email of the chair/admin who registered the player via the portal. */
   registeredBy?: string;
   /** Which path created the row. Absent ⇒ 'link' (back-compat with pre-existing rows). */
@@ -941,6 +962,48 @@ export interface PlayerRegistration {
 }
 
 export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejected';
+
+/**
+ * What a reject did to the player, in terms the UI can speak truthfully (public — set on the
+ * clearance at reject, cleared on reopen). Mapped from the internal {@link RejectCase}:
+ *   request/dest-deleted → 'source-reactivated' (the move is cancelled; player at the source club)
+ *   moved-over-placeholder/moved-to-source → 'moved-to-source' (the registration moved to the source club)
+ *   dest-activated → 'stays-at-destination' (source is off-system; player stays at the destination)
+ */
+export type RejectOutcome = 'source-reactivated' | 'moved-to-source' | 'stays-at-destination';
+
+/**
+ * How a reject was actually applied, derived from the LIVE row state at reject time (never from
+ * a stored flag). Internal: it rides the canonical only (stripped from the mirror and from every
+ * HTTP response) as part of {@link RejectSnapshot}, and drives the reversible Reopen.
+ *   request              — rep-initiated transfer (no destination row); source row → active
+ *   dest-deleted         — registration-origin; destination row deleted, source reactivated (B) or left as-is (B′)
+ *   moved-over-placeholder— the source held only a placeholder; the real registration replaces it (B″)
+ *   moved-to-source      — the source club exists but held no row; the registration is moved there (C)
+ *   dest-activated       — the source is an off-system directory entry; the player stays at the destination (D)
+ */
+export type RejectCase =
+  | 'request'
+  | 'dest-deleted'
+  | 'moved-over-placeholder'
+  | 'moved-to-source'
+  | 'dest-activated';
+
+/**
+ * The pre-reject row state a Reopen restores. CANONICAL ONLY — never mirrored, never returned
+ * over HTTP (the repo read layer and publicClearance strip it). `destRow` is the deleted
+ * destination registration (B/B′), restored byte-equal on reopen; `placeholderRow` is the
+ * source placeholder replaced in B″, restored on reopen; C/D carry neither (reopen moves the
+ * LIVE row so post-reject edits survive). A rejected-and-never-reopened clearance retains this
+ * snapshot — and, via it, the destination's ID-document object keys — indefinitely, so erasure
+ * paths must collect them (see repo.clearanceDocObjectKeys; POPIA).
+ */
+export interface RejectSnapshot {
+  case: RejectCase;
+  destRow?: PlayerRegistration;
+  placeholderRow?: PlayerRegistration;
+  sourceReactivated?: boolean;
+}
 
 /**
  * An inter-club transfer/clearance request. Stored as TWO items written together:
@@ -992,13 +1055,26 @@ export interface PlayerClearance {
   rejectedBy?: string;
   rejectReason?: string;
   /**
+   * What the reject did, in UI-truthful terms (public; set on reject, cleared on reopen).
+   * Rides the canonical AND the mirror so both clubs' portals can word the outcome correctly.
+   */
+  rejectOutcome?: RejectOutcome;
+  /**
+   * The pre-reject row state a Reopen restores. CANONICAL ONLY — stripped from the mirror by
+   * clearanceItems and from every HTTP response by publicClearance / the repo read layer.
+   */
+  rejectSnapshot?: RejectSnapshot;
+  /** When/who reopened a previously rejected clearance (rejected → pending). Cleared on a re-reject. */
+  reopenedAt?: string;
+  reopenedBy?: string;
+  /**
    * Free text on an override: why the union issued the clearance on the clubs' behalf. Written
    * only on an ADMIN override, but SHOWN TO BOTH CLUBS — it rides the mirror as well as the
-   * canonical, exactly like rejectReason. Load-bearing when override is used to DISPOSE of a
-   * clearance that should never have existed (junk registration, or a player who named a club
-   * they never played for) — reject is refused for sourceless clearances and deletion is
-   * blocked while pending, so override is the only exit, and without this the resolved record
-   * reads as a genuine approved transfer.
+   * canonical, exactly like rejectReason. Override remains the DISPOSAL path for a clearance
+   * that should never have existed (junk registration, or a player who named a club they never
+   * played for): reject now MOVES such a registration to the named club rather than discarding
+   * it, and deletion is blocked while pending, so override-then-delete is the only clean exit —
+   * and without this the resolved record reads as a genuine approved transfer.
    */
   overrideReason?: string;
   /** Email of the union admin who overrode, mirroring rejectedBy. Admin overrides only. */

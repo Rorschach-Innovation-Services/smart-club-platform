@@ -144,21 +144,32 @@ the old text. It did not happen here, but check both sides if it is ever re-run.
 
 ## Aftercare — this is the part that matters
 
-**Never reject these.** Rejection flags a legitimately active player `clearance-rejected`,
-which is terminal: there is no reactivation endpoint, and for a sourceless clearance the
-destination row is the player's only registration record. Recovery means deleting the row —
-which purges the S3 ID doc and loses `createdAt`/`consentAt` — and re-registering from scratch.
+> The "never reject" rule below described the OLD reject. Since
+> [ADR 0012](../architecture/0012-clearance-reject-cancels-the-move.md) shipped, reject **cancels
+> the move** — the player ends up active at the source club — and is **reversible**. It is safe on
+> these clearances; the old server guard (a 409 for sourceless clearances) was removed with that
+> change. The two paragraphs that follow are kept for the record of what the risk used to be.
 
-Once the change ships this is **server-enforced**, not just documented:
-`POST /admin/clearances/:cid/reject` returns 409 for any registration-origin clearance whose
-source club holds no row for the player, and the admin console disables the button and explains
-why. Do not weaken that guard.
+**Reject is now safe and reversible on these clearances.** Under the old behaviour, rejecting a
+registration-origin clearance flagged a legitimately active player `clearance-rejected` (a
+terminal status with no reactivation endpoint), deleted the source row, and purged its ID doc —
+so for these sourceless clearances one click destroyed the player's only registration record.
+That reject is gone. Reject now moves the registration to the club the player declared and can be
+reopened; see the per-case effects below.
 
-**Until it is deployed, none of that is running.** Check before relying on it — if
-`GET /admin/clearances` returns no `sourceRostered` field on pending registration-origin
-clearances, the guard is not live and the console's Reject button is enabled.
+What reject does to one of these declared-club clearances depends on the live rows — the
+[API reference case table](../api/clearances.md#reject-cases) is authoritative. For the sourceless
+shape the backfill writes (registration-origin, no source row, source club on the system), reject
+takes **case C**: the destination registration is **moved** to the source club — active, with its
+ID document, and now that club's record to manage — and removed from the destination. **Reopen**
+(`POST /admin/clearances/:cid/reopen`) undoes it, moving the live row back. Reject is **not** a
+disposal tool: because it hands the registration to the named club, use it only when the move
+genuinely belongs there — junk is disposed of separately (below).
 
 The available resolutions are:
+
+- **reject** — cancel the move (case C for these: the registration moves to the declared
+  previous club, reversible via reopen); correct when the player did leave that club;
 
 - the source club approves in its portal (correct when the player did play there);
 - the union office **overrides & approves**;
@@ -168,8 +179,11 @@ The available resolutions are:
 ### Disposing of a clearance that should never have existed
 
 Junk from a leaked registration link, or a player who named a club they genuinely never played
-for. Reject is refused for these (above) and the player cannot be deleted while
-`clearance-pending`, so the procedure is two steps:
+for. **Do not reject these to dispose of them** — reject cancels the move by handing the
+registration to the named club (case C moves it there; see
+[ADR 0012](../architecture/0012-clearance-reject-cancels-the-move.md)), which is the opposite of
+discarding it. The player also cannot be deleted while `clearance-pending`. So disposal is two
+steps, unchanged:
 
 1. **Override & approve, with a reason.** Write what actually happened —
    _"not a real registration, removing"_. This is not optional in spirit: without it the
@@ -190,10 +204,15 @@ There is deliberately no cancel/void route. Override-with-a-reason was chosen ov
 the information a separate status would have. Revisit if disposal becomes frequent enough that
 scanning the history for annotated overrides is a chore.
 
-There are **no notifications** for clearances, so nothing tells those clubs to act. Expect
-club-portal queues and selection complaints until they are worked through: a
-`clearance-pending` player still appears on the roster and in demographics, but their club
-cannot delete them.
+Clearance resolutions **do** notify both clubs' chairs now — override, reject, and reopen each
+record a best-effort email/WhatsApp heads-up (comm-log kinds `clearance-approved`,
+`clearance-rejected`, `clearance-reopened`; the open notice is `clearance`). The daily
+anti-abuse cap counts only the open notice, so resolutions never consume it. See
+[whatsapp-templates.md](whatsapp-templates.md) for the templates and
+[the clearances API reference](../api/clearances.md#notifications) for the per-outcome wording
+and the split reopen notice. Still expect club-portal queues and selection complaints until the
+pending clearances are worked through: a `clearance-pending` player appears on the roster and in
+demographics, but their club cannot delete them.
 
 ## Related
 

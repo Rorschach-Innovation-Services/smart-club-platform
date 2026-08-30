@@ -1,13 +1,13 @@
 /**
  * AdminClearances — the union office's oversight of player movement between clubs.
  *
- * Three things make this worth pinning down. It decides where a player is registered, so
- * a wrong action moves a real person's eligibility. Every action is irreversible from this
- * screen. And the off-system case is a genuine trap: a clearance whose source club has no
- * record on the platform can never be answered by a rep, so offering Reject there would
- * reject a transfer on behalf of a club that was never asked.
- *
- * That last rule is why prod's backfilled clearances are approve/override-only.
+ * Rejecting a clearance now CANCELS THE MOVE: the player ends up active at the source club,
+ * however the clearance was created. What a reject actually does depends on the source club's
+ * real roster state, which the API works out and returns as `predictedRejectCase` — the console
+ * never infers it from a boolean. Reject is disabled ONLY when that prediction is ABSENT (fail
+ * closed), because a reject can create or replace a row at another club (cases C / B-placeholder)
+ * and the admin must see the right consequence before confirming. Every reject is reversible from
+ * this screen via Reopen, so nothing here is terminal any more.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, within, waitFor } from '@testing-library/react';
@@ -35,13 +35,17 @@ const request = (over: Record<string, unknown> = {}) => ({
   toClubId: 'ukzn',
   toClubName: 'UKZN CC',
   origin: 'transfer',
+  // A rep-initiated transfer is case A — the server predicts it. Reject is enabled by default;
+  // individual tests override `predictedRejectCase` (incl. to `undefined` for the deploy-skew
+  // fail-closed path).
+  predictedRejectCase: 'A',
   ...over,
 });
 
 const setup = (
   clearances: Array<Record<string, unknown>>,
   busyId?: string,
-  busyAction?: 'reject' | 'override' | 'reassign',
+  busyAction?: 'reject' | 'override' | 'reassign' | 'reopen',
 ) => {
   // The handlers resolve to a tri-state in production ('ok' | 'conflict' | 'failed'; the
   // dialog closes unless the result is 'failed'); default them to 'ok' so an ordinary
@@ -49,6 +53,7 @@ const setup = (
   const onOverride = vi.fn().mockResolvedValue('ok');
   const onReject = vi.fn().mockResolvedValue('ok');
   const onReassign = vi.fn().mockResolvedValue('ok');
+  const onReopen = vi.fn().mockResolvedValue('ok');
   const user = userEvent.setup();
   renderWithProviders(
     <AdminClearances
@@ -58,32 +63,45 @@ const setup = (
       onOverride={onOverride}
       onReject={onReject}
       onReassign={onReassign}
+      onReopen={onReopen}
       busyId={busyId}
       busyAction={busyAction}
     />,
   );
-  return { user, onOverride, onReject, onReassign };
+  return { user, onOverride, onReject, onReassign, onReopen };
 };
 
-const card = (name = /sipho/i) => screen.getByText(name).closest('.clr-card') as HTMLElement;
+const card = (name: RegExp = /sipho/i) =>
+  screen.getByText(name).closest('.clr-card') as HTMLElement;
 
 beforeEach(() => vi.clearAllMocks());
 
 describe('a clearance whose previous club is not on the system', () => {
-  const offSystem = () =>
-    request({ fromClubId: 'oldtown', fromClubName: 'Old Town CC', fromClubDirectory: true });
+  const offSystem = (over: Record<string, unknown> = {}) =>
+    request({
+      fromClubId: 'oldtown',
+      fromClubName: 'Old Town CC',
+      fromClubDirectory: true,
+      // No club record for the source ⇒ the server predicts case D (dest-activated): a reject
+      // leaves the player registered and active at the destination.
+      predictedRejectCase: 'D',
+      ...over,
+    });
 
-  it('cannot be rejected — no rep was ever able to answer it', () => {
-    const { onReject } = setup([offSystem()]);
+  it('rejects in place — the player simply stays at the destination', async () => {
+    // Case D. Reject is available (it is reversible and non-destructive here), and the confirm
+    // says exactly what happens: nothing moves, they stay at the destination club.
+    const { user, onReject } = setup([offSystem()]);
 
     const reject = within(card()).getByRole('button', { name: /^reject$/i });
-    expect(reject).toBeDisabled();
-    expect(onReject).not.toHaveBeenCalled();
-  });
+    expect(reject).toBeEnabled();
 
-  it('says why, rather than leaving a dead control', () => {
-    setup([offSystem()]);
-    expect(within(card()).getByTitle(/not on the system and cannot respond/i)).toBeInTheDocument();
+    await user.click(reject);
+    expect(screen.getByText(/they stay registered and active at UKZN CC/i)).toBeVisible();
+    expect(onReject).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: /yes, reject clearance/i }));
+    expect(onReject).toHaveBeenCalledTimes(1);
   });
 
   it('marks the source club so the reason is visible at a glance', () => {
@@ -103,14 +121,75 @@ describe('a clearance whose previous club is not on the system', () => {
     setup([offSystem()]);
     expect(within(card()).getByRole('button', { name: /override & approve/i })).toBeEnabled();
   });
+});
 
-  it('drops the flag once a club registers under that id', () => {
-    // The cross-check ages the flag out; without it a clearance stays un-rejectable
-    // forever even after the club signs up.
-    setup([request({ fromClubId: 'berea', fromClubDirectory: true })]);
+describe('the reject confirmation names the predicted case', () => {
+  // Every reject cancels the move; the copy has to describe the case the SERVER predicted, so an
+  // admin sees whether a row is being created, replaced or simply left where it is.
+  it('case A — a rep-initiated transfer returns the player to active at the source', async () => {
+    const { user } = setup([request({ predictedRejectCase: 'A' })]);
+    await user.click(within(card()).getByRole('button', { name: /^reject$/i }));
+    expect(
+      screen.getByText(/the move is cancelled and they return to active at Berea CC/i),
+    ).toBeVisible();
+  });
 
-    expect(within(card()).getByRole('button', { name: /^reject$/i })).toBeEnabled();
-    expect(within(card()).queryByText(/not on system/i)).toBeNull();
+  it('case B — the source row reactivates and the pending destination row is removed', async () => {
+    const { user } = setup([request({ origin: 'registration', predictedRejectCase: 'B' })]);
+    await user.click(within(card()).getByRole('button', { name: /^reject$/i }));
+    expect(
+      screen.getByText(
+        /return to active at Berea CC, and their pending registration at UKZN CC is removed/i,
+      ),
+    ).toBeVisible();
+  });
+
+  it('case B-placeholder — the full registration replaces the placeholder at the source', async () => {
+    const { user } = setup([
+      request({ origin: 'registration', predictedRejectCase: 'B-placeholder' }),
+    ]);
+    await user.click(within(card()).getByRole('button', { name: /^reject$/i }));
+    // Names the placeholder, the replacement at the source, and the junk-disposal alternative.
+    expect(
+      screen.getByText(
+        /holds only a placeholder for this player, so their full registration.*is moved to Berea CC, replacing the placeholder/i,
+      ),
+    ).toBeVisible();
+    expect(screen.getByText(/If this registration is junk, use Override & approve/i)).toBeVisible();
+  });
+
+  it('case B-active — the player is already active at the source', async () => {
+    const { user } = setup([request({ origin: 'registration', predictedRejectCase: 'B-active' })]);
+    await user.click(within(card()).getByRole('button', { name: /^reject$/i }));
+    // Scope to the confirm-body prefix — the pending sub-text repeats the same clause.
+    expect(
+      screen.getByText(
+        /on the Union's authority\. They are already active at Berea CC; rejecting removes their pending registration at UKZN CC/i,
+      ),
+    ).toBeVisible();
+  });
+
+  it('case C — the registration is moved to the source, which becomes its owner', async () => {
+    const { user } = setup([request({ origin: 'registration', predictedRejectCase: 'C' })]);
+    await user.click(within(card()).getByRole('button', { name: /^reject$/i }));
+    expect(
+      screen.getByText(
+        /Berea CC has no record of this player, so rejecting moves the registration.*becomes Berea CC's to manage/i,
+      ),
+    ).toBeVisible();
+    expect(screen.getByText(/If this registration is junk, use Override & approve/i)).toBeVisible();
+  });
+
+  it('unknown — Reject is disabled when the API could not predict the case', () => {
+    // Web and API deploy separately, so `predictedRejectCase` can be absent — and a partial read
+    // can leave it absent for individual clearances. Unknown fails CLOSED on the irreversible-
+    // looking control, with copy that tells the admin to refresh.
+    setup([request({ predictedRejectCase: undefined })]);
+
+    expect(within(card()).getByRole('button', { name: /^reject$/i })).toBeDisabled();
+    expect(
+      within(card()).getByTitle(/could not work out where this player's record is/i),
+    ).toBeInTheDocument();
   });
 });
 
@@ -160,54 +239,14 @@ describe('an ordinary clearance', () => {
     expect(within(card()).getByText(/union@dolphins\.test/i)).toBeVisible();
   });
 
-  it('confirms before rejecting, and names what happens to the player', async () => {
+  it('confirms before rejecting, and says the move is cancelled', async () => {
     const { user, onReject } = setup([request()]);
 
     await user.click(within(card()).getByRole('button', { name: /^reject$/i }));
-    expect(screen.getByText(/They stay registered at Berea CC/i)).toBeVisible();
-    expect(onReject).not.toHaveBeenCalled();
-  });
-
-  it('describes a registration-origin rejection differently, and says it is permanent', async () => {
-    // A transfer bounces the player back; a registration-origin rejection leaves them at
-    // the NEW club flagged, and removes them from the old one. Saying the wrong one
-    // misinforms the decision. Permanence is the load-bearing part: there is no reactivation
-    // endpoint, so this flag is the player's final state and the copy has to say so.
-    // `sourceRostered: true` — the source club DOES hold this player, which is what makes
-    // rejection a legitimately available (and informed) decision here.
-    const { user } = setup([request({ origin: 'registration', sourceRostered: true })]);
-
-    await user.click(within(card()).getByRole('button', { name: /^reject$/i }));
-    // Scoped to phrasing unique to the confirmation body — the card summary above it also
-    // mentions the flag, so a bare /clearance-rejected/ matches twice.
     expect(
-      screen.getByText(
-        /flagged clearance-rejected — which is permanent.*only registration record.*Any record of them at Berea CC is removed/i,
-      ),
+      screen.getByText(/the move is cancelled and they return to active at Berea CC/i),
     ).toBeVisible();
-  });
-
-  it('blocks rejection when the source club has no record of the player', async () => {
-    // The source cannot decide on an informed basis, so Reject would flag a legitimately
-    // registered player permanently. Reallocation is offered in its place.
-    setup([request({ origin: 'registration', sourceRostered: false })]);
-
-    expect(within(card()).getByRole('button', { name: /^reject$/i })).toBeDisabled();
-    expect(within(card()).getByRole('button', { name: /reallocate source/i })).toBeVisible();
-  });
-
-  it('blocks rejection when the API did not say whether the source holds the player', async () => {
-    // Web and API deploy separately, so `sourceRostered` can be absent — and a partial read can
-    // leave it absent for individual clearances too. Unknown must fail CLOSED on the
-    // irreversible action, WITHOUT asserting the sourceless story or offering the action the
-    // server would refuse. Folding unknown back into `sourceless` is the specific regression
-    // this pins.
-    setup([request({ origin: 'registration' })]);
-
-    expect(within(card()).getByRole('button', { name: /^reject$/i })).toBeDisabled();
-    expect(within(card()).queryByRole('button', { name: /reallocate source/i })).toBeNull();
-    expect(screen.getByText(/could not confirm whether Berea CC holds this player/i)).toBeVisible();
-    expect(screen.queryByText(/has no record of this player on its roster/i)).toBeNull();
+    expect(onReject).not.toHaveBeenCalled();
   });
 
   it('labels the in-flight action so a reject never reads as an approval', () => {
@@ -228,6 +267,74 @@ describe('an ordinary clearance', () => {
     expect(within(card()).getByRole('button', { name: /issuing/i })).toBeDisabled();
     expect(within(card()).getByRole('button', { name: /^reject$/i })).toBeDisabled();
     expect(within(card()).queryByRole('button', { name: /rejecting/i })).toBeNull();
+  });
+});
+
+describe('a rejected clearance can be reopened', () => {
+  const rejected = (over: Record<string, unknown> = {}) =>
+    request({
+      status: 'rejected',
+      rejectedBy: 'union@dolphins.test',
+      rejectReason: 'sent in error',
+      rejectOutcome: 'source-reactivated',
+      version: 3,
+      ...over,
+    });
+
+  it('shows Reopen only on a rejected clearance that carries an outcome', () => {
+    setup([rejected(), request({ id: 'p', status: 'pending', playerName: 'Ava Pending' })]);
+
+    expect(within(card(/sipho/i)).getByRole('button', { name: /^reopen$/i })).toBeVisible();
+    // A pending card offers no Reopen — there is nothing to reopen.
+    expect(within(card(/ava pending/i)).queryByRole('button', { name: /^reopen$/i })).toBeNull();
+  });
+
+  it('offers no Reopen on a legacy reject (no snapshot), saying so instead', () => {
+    // A reject done before reopen was supported has no snapshot to restore, so a Reopen would
+    // always 409 — show why rather than a button that can't work.
+    setup([rejected({ rejectOutcome: undefined })]);
+
+    expect(within(card()).queryByRole('button', { name: /^reopen$/i })).toBeNull();
+    expect(within(card()).getByText(/rejected before reopen was supported/i)).toBeVisible();
+  });
+
+  it('confirms, then calls onReopen', async () => {
+    const { user, onReopen } = setup([rejected()]);
+
+    await user.click(within(card()).getByRole('button', { name: /^reopen$/i }));
+    expect(screen.getByText(/goes back to how it was before the rejection/i)).toBeVisible();
+    expect(onReopen).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: /yes, reopen clearance/i }));
+    expect(onReopen).toHaveBeenCalledWith(expect.objectContaining({ id: 'clr-1' }));
+  });
+
+  it('labels the reopen while it is in flight', () => {
+    setup([rejected()], 'clr-1', 'reopen');
+    expect(within(card()).getByRole('button', { name: /reopening/i })).toBeDisabled();
+  });
+
+  it('shows a "Reopened" eyebrow on a pending clearance that was reopened', () => {
+    setup([
+      request({
+        reopenedAt: '2026-08-20T09:00:00.000Z',
+        reopenedBy: 'union@dolphins.test',
+      }),
+    ]);
+    expect(within(card()).getByText(/reopened/i)).toBeVisible();
+    expect(within(card()).getByText(/union@dolphins\.test/i)).toBeVisible();
+  });
+});
+
+describe('a resolved rejection reads truthfully', () => {
+  it('shows the player was moved to the source club', () => {
+    setup([request({ status: 'rejected', rejectOutcome: 'moved-to-source' })]);
+    expect(within(card()).getByText(/moved to Berea CC/i)).toBeVisible();
+  });
+
+  it('shows the player stays at the destination when the source is off-system', () => {
+    setup([request({ status: 'rejected', rejectOutcome: 'stays-at-destination' })]);
+    expect(within(card()).getByText(/stays at UKZN CC/i)).toBeVisible();
   });
 });
 
@@ -437,5 +544,48 @@ describe('the confirm dialog waits for the request to settle', () => {
     expect(onReject).toHaveBeenCalledTimes(1);
     // The handler resolved 'conflict' → the dialog closes (the toast already told the admin).
     await waitFor(() => expect(screen.queryByText(/reject this clearance/i)).toBeNull());
+  });
+});
+
+describe('the reopen dialog waits for the request to settle', () => {
+  const rejected = () =>
+    request({ status: 'rejected', rejectOutcome: 'source-reactivated', version: 3 });
+
+  it('stays open while the reopen is in flight and closes only on success', async () => {
+    const { user, onReopen } = setup([rejected()]);
+    let resolveReopen!: (outcome: 'ok' | 'conflict' | 'failed') => void;
+    onReopen.mockReturnValue(
+      new Promise<'ok' | 'conflict' | 'failed'>((res) => (resolveReopen = res)),
+    );
+
+    await user.click(within(card()).getByRole('button', { name: /^reopen$/i }));
+    await user.click(screen.getByRole('button', { name: /yes, reopen clearance/i }));
+
+    expect(screen.getByText(/reopen this clearance/i)).toBeVisible();
+
+    resolveReopen('ok');
+    await waitFor(() => expect(screen.queryByText(/reopen this clearance/i)).toBeNull());
+  });
+
+  it('stays open when the reopen fails, so the admin can retry', async () => {
+    const { user, onReopen } = setup([rejected()]);
+    onReopen.mockResolvedValue('failed');
+
+    await user.click(within(card()).getByRole('button', { name: /^reopen$/i }));
+    await user.click(screen.getByRole('button', { name: /yes, reopen clearance/i }));
+
+    expect(onReopen).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/reopen this clearance/i)).toBeVisible();
+  });
+
+  it('closes on a 409 conflict — the list has already refetched', async () => {
+    const { user, onReopen } = setup([rejected()]);
+    onReopen.mockResolvedValue('conflict');
+
+    await user.click(within(card()).getByRole('button', { name: /^reopen$/i }));
+    await user.click(screen.getByRole('button', { name: /yes, reopen clearance/i }));
+
+    expect(onReopen).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByText(/reopen this clearance/i)).toBeNull());
   });
 });

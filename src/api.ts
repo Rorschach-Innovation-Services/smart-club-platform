@@ -348,10 +348,15 @@ export const patchClearance = (fromClubId: string, clearanceId: string, body: un
 export const getAllClearances = () => request<PlayerClearance[]>('/admin/clearances');
 export const overrideClearance = (clearanceId: string, body: unknown) =>
   request<PlayerClearance>(`/admin/clearances/${clearanceId}/override`, { method: 'POST', body });
-// Union reject on the clubs' behalf: body { fromClubId, version?, reason? }. Restores the
-// source player; removes a registration-origin clearance's pending destination row.
+// Union reject on the clubs' behalf: body { fromClubId, version?, reason? }. Cancels the move —
+// the player ends up active at the source club (how depends on the case; see rejectOutcome on the
+// response). Reversible via reopenClearance.
 export const rejectClearance = (clearanceId: string, body: unknown) =>
   request<PlayerClearance>(`/admin/clearances/${clearanceId}/reject`, { method: 'POST', body });
+// Union reopen of a rejected clearance (rejected → pending): body { fromClubId, version? }.
+// Restores the pre-reject rows from the snapshot the reject stored; the source club decides again.
+export const reopenClearance = (clearanceId: string, body: unknown) =>
+  request<PlayerClearance>(`/admin/clearances/${clearanceId}/reopen`, { method: 'POST', body });
 // Union reallocation of a directory-sourced clearance to a real club that has since
 // registered: body { fromClubId, newFromClubId, version? }. The clearance moves into the
 // target club's queue for its rep to action via the normal flow.

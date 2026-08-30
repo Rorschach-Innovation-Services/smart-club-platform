@@ -106,6 +106,7 @@ import {
   sendChairOnboarding,
   sendClearanceNotice,
   sendClearanceResolvedNotice,
+  sendClearanceReopenedNotice,
   type Channel,
   type SendResult,
 } from './notify/index.js';
@@ -1239,8 +1240,12 @@ async function notifyClearanceOpened(
  * The two clubs run under Promise.all so worst-case latency is one club's send, not the sum:
  * WhatsApp retries back off 1+2+4s inside a 30s Lambda, and a timeout AFTER the reject/override
  * already committed would re-create the retry → 409 loop this whole feature exists to kill.
- * Each club's results are appended to THAT club's comm log with kind `clearance-${outcome}` and
- * an idempotencyKey `clearance-${id}-${outcome}-${channel}`. The whole thing is best-effort: any
+ * A REJECTED notice's email copy is driven by the clearance's `rejectOutcome` (reject now cancels
+ * the move — see clearanceResolvedEmailContent — rather than flagging a terminal destination row).
+ * Each club's results are appended to THAT club's comm log with kind `clearance-${outcome}` and a
+ * VERSION-suffixed idempotencyKey `clearance-${id}-${outcome}-v${version}-${channel}` — so a
+ * re-reject after a reopen (which bumps the version) is a distinct send. The whole thing is
+ * best-effort: any
  * fault is logged and swallowed, never failing the request. A partial send (the Lambda dies
  * between the two clubs) is NOT replayed — the resolved clearance 409s on any retry — which is
  * accepted: at worst one club's chair is not messaged, and the resolution itself stands.
@@ -1277,7 +1282,7 @@ async function notifyClearanceResolved(
         toClubName: clearance.toClubName,
         outcome,
         ...(reason ? { reason } : {}),
-        ...(clearance.origin ? { origin: clearance.origin } : {}),
+        ...(clearance.rejectOutcome ? { rejectOutcome: clearance.rejectOutcome } : {}),
         channels,
       });
       await repo.appendClubCommEvents(
@@ -1292,7 +1297,9 @@ async function notifyClearanceResolved(
           ...(r.error ? { error: r.error } : {}),
           at: now(),
           by,
-          idempotencyKey: `clearance-${clearance.id}-${outcome}-${r.channel}`,
+          // Version-suffixed like the reopen key: reject → reopen → re-reject bumps the version
+          // each time, so a re-reject after a reopen is a DISTINCT send, not a dedupe collision.
+          idempotencyKey: `clearance-${clearance.id}-${outcome}-v${clearance.version}-${r.channel}`,
           kind: `clearance-${outcome}` as const,
         })),
       );
@@ -1300,6 +1307,72 @@ async function notifyClearanceResolved(
     await Promise.all([notifyClub(fromClub), notifyClub(toClub)]);
   } catch (err) {
     console.error('clearance resolved notice failed', err);
+  }
+}
+
+/**
+ * Notify BOTH clubs' chairmen that the union office has REOPENED a rejected clearance (rejected →
+ * pending). Mirrors notifyClearanceResolved's shape (both clubs, no daily cap, directory/deleted
+ * clubs skipped, best-effort) with one difference: the two chairs get DIFFERENT content. The
+ * pending copy — "your club must decide" — is true only for the SOURCE, so the source chair gets
+ * the pending email (with a reopen preamble) plus the pending WhatsApp template, while the
+ * destination chair gets an email-only heads-up and its WhatsApp channel is recorded `skipped`
+ * (there is no destination reopen template). Kind `clearance-reopened`; idempotencyKey
+ * `clearance-${id}-reopened-v${version}-${channel}` (version-suffixed so repeated reject→reopen
+ * cycles never collide). The cap is bypassed for the same reason a resolution bypasses it — a
+ * reopen is a deliberate authenticated admin action, not the anonymous abuse the cap guards.
+ */
+async function notifyClearanceReopened(
+  tenant: string,
+  tenantConfig: TenantConfig | null,
+  clearance: PlayerClearance,
+  by: string,
+): Promise<void> {
+  try {
+    const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
+      ? ['email', 'whatsapp']
+      : ['email'];
+    const [fromClub, toClub] = await Promise.all([
+      repo.getClub(tenant, clearance.fromClubId),
+      repo.getClub(tenant, clearance.toClubId),
+    ]);
+    const notifyClub = async (club: Club | null, side: 'source' | 'destination'): Promise<void> => {
+      if (!club) return; // directory source (or a club since deleted): nothing to notify
+      const chair = (
+        club.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
+      )?.chair;
+      const { results } = await sendClearanceReopenedNotice({
+        side,
+        chair: {
+          name: chair?.name || club.chair || '',
+          email: chair?.email,
+          cell: chair?.cell,
+        },
+        fromClubName: clearance.fromClubName,
+        playerName: clearance.playerName,
+        toClubName: clearance.toClubName,
+        channels,
+      });
+      await repo.appendClubCommEvents(
+        tenant,
+        club.id,
+        results.map((r) => ({
+          id: randomUUID(),
+          channel: r.channel,
+          ...(r.to ? { to: r.to } : {}),
+          status: r.status,
+          ...(r.messageId ? { messageId: r.messageId } : {}),
+          ...(r.error ? { error: r.error } : {}),
+          at: now(),
+          by,
+          idempotencyKey: `clearance-${clearance.id}-reopened-v${clearance.version}-${r.channel}`,
+          kind: 'clearance-reopened' as const,
+        })),
+      );
+    };
+    await Promise.all([notifyClub(fromClub, 'source'), notifyClub(toClub, 'destination')]);
+  } catch (err) {
+    console.error('clearance reopened notice failed', err);
   }
 }
 
@@ -6400,36 +6473,68 @@ app.get('/admin/insights/demographics', async (c) => {
 app.get('/admin/clearances', async (c) => {
   const ra = c.get('requestAuth')!;
   const list = await repo.listAllClearances(ra.tenant);
-  // `sourceRostered` is derived for the console, never stored: it says whether the source club
-  // actually holds this player. Reject and reassign both key on it server-side, so the console
-  // must be able to disable the one and offer the other rather than failing the admin after a
-  // confirmation dialog. Only a PENDING REGISTRATION-origin clearance can be sourceless, so
-  // that slice is all we ask about — see repo.filterExistingPlayers for the read shape.
+  // Two derived, never-stored hints per PENDING clearance, both omitted (never guessed) whenever
+  // the evidence is missing — a whole-derivation fault OR a per-row unresolved source probe — and
+  // the reject/reassign routes re-derive authoritatively before mutating:
   //
-  // Three outcomes per clearance, and the third is not optional: rostered, not rostered, or NOT
-  // ANSWERED. An unanswered pair must arrive at the console as an ABSENT field, never as
-  // `false` — `false` is the confident state that disables Reject and asserts in copy that the
-  // source club has no record of this player.
-  const pending = list.filter((x) => x.status === 'pending' && x.origin === 'registration');
-  let found = new Set<string>();
+  //  - `predictedRejectCase` — what a reject would do, from the SAME repo.detectRejectCase the
+  //    reject itself runs, so the console can label the confirm dialog per case (A / B / B″ /
+  //    B′ / C / D) instead of inferring it client-side from a boolean. Computed for every pending
+  //    clearance; a request-origin one is always 'A'. In the listing `destPending` is always true,
+  //    so a REGISTRATION-origin case is derivable whenever its source probe resolved — absent ⇒
+  //    the whole derivation failed, or this row's source probe was unresolved (throttled BatchGet).
+  //    The console disables Reject when it is absent (a C/B″ reject creates/replaces a row at
+  //    another club — the admin must see which case before confirming). Derived for PENDING only:
+  //    a rejected card cannot predict whether Reopen will be blocked — the 409 toast covers that.
+  //  - `sourceRostered` — retained for backward compatibility (deploy skew): whether the source
+  //    club actually holds this player. Still drives the console's Reallocate offer. Only a
+  //    pending REGISTRATION-origin clearance can be sourceless, so that slice is all it decorates.
+  //    Omitted (not `false`) for an unresolved probe — "could not check" must never read as
+  //    "not rostered", which would falsely offer Reallocate on a real transfer.
+  //
+  // Both ride on the batched projection repo.getRejectSourceProbes returns (the reject-detection
+  // fields only — POPIA data-minimisation), plus a club-existence lookup so detection can tell
+  // case C (source club exists, no row) from case D (no source club). Keys the BatchGet could not
+  // resolve come back in `unresolved`; those rows get NEITHER hint.
+  const pending = list.filter((x) => x.status === 'pending');
+  const regPending = pending.filter((x) => x.origin === 'registration');
+  let probes = new Map<string, repo.RejectSourceProbe>();
   let unresolved = new Set<string>();
+  let clubExists = new Map<string, boolean>();
   let derived = true;
   try {
-    ({ found, unresolved } = await repo.filterExistingPlayers(
+    ({ probes, unresolved } = await repo.getRejectSourceProbes(
       ra.tenant,
-      pending.map((x) => ({ clubId: x.fromClubId, naturalKey: x.playerNaturalKey })),
+      regPending.map((x) => ({ clubId: x.fromClubId, naturalKey: x.playerNaturalKey })),
     ));
+    const srcClubIds = [...new Set(regPending.map((x) => x.fromClubId))];
+    const clubs = await Promise.all(srcClubIds.map((id) => repo.getClub(ra.tenant, id)));
+    clubExists = new Map(srcClubIds.map((id, i) => [id, !!clubs[i]]));
   } catch (err) {
-    // An optional affordance hint must never take down the list it decorates. Omitting the
-    // field is safe: the console fails CLOSED on absence (Reject stays disabled) and the
-    // reject/reassign routes re-derive it themselves before mutating anything.
     derived = false;
-    console.error('admin/clearances: sourceRostered derivation failed, omitting', err);
+    console.error('admin/clearances: predictedRejectCase derivation failed, omitting', err);
   }
-  const view: AdminClearanceView[] = list.map((x) => {
-    if (!derived || x.status !== 'pending' || x.origin !== 'registration') return x;
+  type AdminClearanceRow = AdminClearanceView & { predictedRejectCase?: repo.PredictedRejectCase };
+  const view: AdminClearanceRow[] = list.map((x) => {
+    if (!derived || x.status !== 'pending') return x;
     const key = `${x.fromClubId}#${x.playerNaturalKey}`;
-    return unresolved.has(key) ? x : { ...x, sourceRostered: found.has(key) };
+    // A registration-origin row whose source probe could not be resolved gets NEITHER hint — a
+    // guessed absence would mis-predict C/D and offer an action the server refuses.
+    if (x.origin === 'registration' && unresolved.has(key)) return x;
+    const probe = probes.get(key);
+    const detection = repo.detectRejectCase({
+      origin: x.origin,
+      // A pending clearance's destination row is clearance-pending by construction; the reject
+      // route re-reads the live dest row and downgrades a drifted case authoritatively.
+      destPending: true,
+      sourceRow: probe ?? null,
+      sourceClubExists: clubExists.get(x.fromClubId) ?? false,
+    });
+    const row: AdminClearanceRow = { ...x };
+    if (detection.predicted) row.predictedRejectCase = detection.predicted;
+    // Legacy compat: source-holds-this-player, for pending registration-origin clearances only.
+    if (x.origin === 'registration') row.sourceRostered = !!probe;
+    return row;
   });
   return c.json(view);
 });
@@ -6474,7 +6579,7 @@ app.post('/admin/clearances/:cid/override', async (c) => {
     // notifyClearanceResolved re: no daily cap and the destination-chair recipient.
     const tenantConfig = await repo.getTenantConfig(ra.tenant).catch(() => null);
     await notifyClearanceResolved(ra.tenant, tenantConfig, resolved, 'approved', ra.email);
-    return c.json(resolved);
+    return c.json(repo.publicClearance(resolved));
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
     if (err instanceof repo.PlayerExistsAtDestinationError) throw new HttpError(409, err.message);
@@ -6492,7 +6597,8 @@ app.post('/admin/clearances/:cid/override', async (c) => {
  *   - a real on-system club the player named but never played for — a mis-picked club, or
  *     one whose roster the player was never on.
  * After the move the clearance is a normal registration-origin one — the new club's rep sees
- * it in their portal and approves/rejects via the usual flow.
+ * it in their portal and issues it via the usual flow (or the union office overrides or rejects
+ * it; reject is admin-only).
  *
  * Refused once the source club holds the player: the clearance is then genuinely in that
  * club's queue (it may be mid-review) and yanking it out from under them would be wrong.
@@ -6560,7 +6666,7 @@ app.post('/admin/clearances/:cid/reassign', async (c) => {
     await notifyClearanceOpened(ra.tenant, tenantConfig, newFromClub, reassigned, ra.email, {
       bypassCap: true,
     });
-    return c.json(reassigned);
+    return c.json(repo.publicClearance(reassigned));
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
     if (err instanceof repo.PlayerExistsAtSourceError) {
@@ -6575,23 +6681,19 @@ app.post('/admin/clearances/:cid/reassign', async (c) => {
 });
 
 /**
- * Union reject: decline a pending clearance on the clubs' behalf. Admin-only (the
- * /admin/* middleware enforces it). For a rep-initiated clearance the source player returns
- * to 'active'. For a REGISTRATION-origin clearance the player STAYS on the destination
- * (current) club's roster flagged 'clearance-rejected' (reason copied onto the row) and is
- * removed from the source (previous) club. Same 404/409 semantics as the override route.
+ * Union reject: decline a pending clearance on the clubs' behalf. Admin-only (the /admin/*
+ * middleware enforces it). Reject now CANCELS THE MOVE — the player ends up active at the source
+ * club, whatever shape the clearance is (request / registration / placeholder / directory) — and
+ * is REVERSIBLE via POST …/reopen. There is no per-shape guard: repo.rejectClearance detects the
+ * case from the live rows and reject is always available on a pending clearance. It writes no
+ * terminal `clearance-rejected` row and purges nothing (the snapshot needs the objects). The
+ * response carries `rejectOutcome` so the console can toast truthfully. Junk registrations are
+ * still disposed of via override-then-delete (reject would hand the registration to the named
+ * club) — see the override route and docs/runbooks/backfill-declared-club-clearance.md.
  *
- * TWO guards 409 before any of that, both because rejection is irreversible — there is no
- * reactivation endpoint, and for a registration-origin clearance the destination row is the
- * player's only surviving record:
- *   1. a directory source with no real club behind the slug — nobody exists to reject;
- *   2. a source club holding NO row for this player — nothing exists to reject ON.
- * Both route the admin to override & approve, or to reallocate. See the runbook at
- * docs/runbooks/backfill-declared-club-clearance.md.
- *
- * On success both clubs' chairmen get a best-effort email/WhatsApp heads-up that the transfer
- * was declined (notifyClearanceResolved) — the reason travels on the email only, and the
- * notify never fails the request.
+ * On success both clubs' chairmen get a best-effort email/WhatsApp heads-up that the transfer was
+ * declined (notifyClearanceResolved) — the reason and the per-outcome copy ride the email only,
+ * and the notify never fails the request.
  */
 app.post('/admin/clearances/:cid/reject', async (c) => {
   const ra = c.get('requestAuth')!;
@@ -6604,31 +6706,6 @@ app.post('/admin/clearances/:cid/reject', async (c) => {
   const current = await repo.getClearance(ra.tenant, body.fromClubId, cid);
   if (!current) throw new HttpError(404, 'clearance not found');
   if (current.status !== 'pending') throw new HttpError(409, 'clearance already resolved');
-  // A directory-sourced clearance has no club rep who could ever legitimately reject, and
-  // rejection is irreversible (no reactivation endpoint) — server-enforced, not UI copy.
-  // The club-existence check re-permits reject once a real club owns the slug: the
-  // decision is genuinely that club's then.
-  if (current.fromClubDirectory && !(await repo.getClub(ra.tenant, current.fromClubId))) {
-    throw new HttpError(
-      409,
-      'the previous club is not on the system — override & approve or reallocate instead',
-    );
-  }
-  // Same irreversibility, different reason: a registration-origin clearance whose source club
-  // holds NO row for this player gives its rep nothing to reject ON. That club is real and has
-  // a rep, but "we have no record of them" is the EXPECTED answer — it is what a roster still
-  // being digitised looks like — not a finding that the transfer is bogus. Acting on it would
-  // flag a legitimately active player 'clearance-rejected', which is terminal and would be
-  // their only surviving record. Override & approve or reallocate to the right club instead.
-  if (
-    current.origin === 'registration' &&
-    !(await repo.getPlayer(ra.tenant, current.fromClubId, current.playerNaturalKey))
-  ) {
-    throw new HttpError(
-      409,
-      'the previous club has no record of this player — override & approve, or reallocate to the club they actually left',
-    );
-  }
   try {
     const rejected = await repo.rejectClearance(ra.tenant, body.fromClubId, cid, {
       at: now(),
@@ -6641,9 +6718,58 @@ app.post('/admin/clearances/:cid/reject', async (c) => {
     // rides the email only — see notifyClearanceResolved / the WhatsApp template notes.
     const tenantConfig = await repo.getTenantConfig(ra.tenant).catch(() => null);
     await notifyClearanceResolved(ra.tenant, tenantConfig, rejected, 'rejected', ra.email);
-    return c.json(rejected);
+    return c.json(repo.publicClearance(rejected));
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
+    if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
+    if (err instanceof repo.SourceClubGoneError) throw new HttpError(409, err.message);
+    throw err;
+  }
+});
+
+/**
+ * Union reopen: reverse a rejected clearance (rejected → pending), restoring the pre-reject rows
+ * from the snapshot the reject stored. Admin-only. The inverse of reject, and repeatable
+ * (reject → reopen → reject → reopen). 404 unknown; 409 if the clearance is not rejected —
+ * `clearance is already open` when still pending, `an issued clearance cannot be reopened` for an
+ * approved/admin-overridden one. repo.reopenClearance drift errors all map to 409:
+ * VersionConflictError → `clearance changed; refetch`; ClearanceReopenBlockedError (rows moved /
+ * legacy reject with no snapshot) / PlayerExistsAtDestinationError / DestinationClubGoneError /
+ * SourceClubGoneError → `err.message`. On success BOTH chairs get a best-effort `clearance-reopened`
+ * notice (source: it must decide again; destination: heads-up only) — never failing the request.
+ */
+app.post('/admin/clearances/:cid/reopen', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cid = c.req.param('cid');
+  const body = await c.req.json<{ fromClubId?: string; version?: number }>();
+  if (!body.fromClubId) throw new HttpError(400, 'fromClubId required');
+  const current = await repo.getClearance(ra.tenant, body.fromClubId, cid);
+  if (!current) throw new HttpError(404, 'clearance not found');
+  if (current.status !== 'rejected') {
+    throw new HttpError(
+      409,
+      current.status === 'pending'
+        ? 'clearance is already open'
+        : 'an issued clearance cannot be reopened',
+    );
+  }
+  try {
+    const reopened = await repo.reopenClearance(ra.tenant, body.fromClubId, cid, {
+      at: now(),
+      by: ra.email,
+      expectedVersion: body.version,
+    });
+    // Best-effort: tell BOTH clubs' chairmen the union reopened the clearance (never fails the
+    // request). Source and destination get different copy — see notifyClearanceReopened.
+    const tenantConfig = await repo.getTenantConfig(ra.tenant).catch(() => null);
+    await notifyClearanceReopened(ra.tenant, tenantConfig, reopened, ra.email);
+    return c.json(repo.publicClearance(reopened));
+  } catch (err) {
+    if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
+    if (err instanceof repo.ClearanceReopenBlockedError) throw new HttpError(409, err.message);
+    if (err instanceof repo.PlayerExistsAtDestinationError) throw new HttpError(409, err.message);
+    if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
+    if (err instanceof repo.SourceClubGoneError) throw new HttpError(409, err.message);
     throw err;
   }
 });

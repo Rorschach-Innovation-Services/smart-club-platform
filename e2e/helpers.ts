@@ -69,6 +69,11 @@ export interface SeededClearance {
   playerName: string;
   idNumber: string;
   status: string;
+  // How the clearance was created ('request' rep-initiated vs 'registration' self-serve) and,
+  // once rejected, where the player ended up. Present on the admin-list view; optional here
+  // because seedPendingClearance's rep-initiated clearances read them back post-reject only.
+  origin?: string;
+  rejectOutcome?: string;
 }
 
 async function getAllClearances(request: APIRequestContext): Promise<SeededClearance[]> {
@@ -135,6 +140,104 @@ export async function seedPendingClearance(
   const found = all.find((c) => c.id === created.id);
   expect(found, 'seeded clearance should appear in GET /admin/clearances').toBeTruthy();
   return found!;
+}
+
+/**
+ * Seed a REGISTRATION-ORIGIN, case-C clearance end-to-end through the PUBLIC self-registration
+ * route. The player registers into `linkClub` and declares `prevClub` as their previous club;
+ * `prevClub` is an on-system demo club that holds NO roster row for this uniquely-named player,
+ * so a Union reject would MOVE the registration there (case C — "source club exists, no row").
+ *
+ * Because every test searches by a run-unique player name, whatever a case-C test leaves behind
+ * (after its closing reopen: a `clearance-pending` row at `linkClub` and a pending clearance in
+ * `prevClub`'s queue) is harmless to other tests — say so at the call site.
+ *
+ * Steps:
+ *   1. mint the link club's player reg-link token (admin) — this rotates the demo club's token,
+ *      which is fine for the e2e stack;
+ *   2. POST the public registration with a `local/…` ID-doc objectKey — assertOwnObjectKey returns
+ *      early for `local/` keys, so no presigned upload (and thus no UPLOADS_BUCKET)
+ *      is needed, unlike the id-doc upload route;
+ *   3. read the clearance back from GET /admin/clearances by the unique player name.
+ *
+ * Returns the admin-list view plus the ID-doc `objectKey` the registration carried, so a test can
+ * assert the moved row keeps byte-identical ID-doc metadata.
+ */
+export async function seedRegistrationClearance(
+  request: APIRequestContext,
+  opts: { linkClub: string; prevClub: string; name: string; team?: string },
+): Promise<SeededClearance & { idDocObjectKey: string }> {
+  const suffix = nextSuffix();
+  // A passport identity sidesteps RSA-ID checksum math: dob is supplied directly (idType passport).
+  const idNumber = `E2E${suffix.toUpperCase().replace(/-/g, '')}`;
+  const objectKey = `local/${TENANT}/${opts.linkClub}/reg-e2e-${suffix}.png`;
+
+  const linkRes = await request.post(`${API_BASE}/clubs/${opts.linkClub}/reg-link`, {
+    headers: apiHeaders(adminAuthHeader()),
+  });
+  expect(
+    linkRes.ok(),
+    `POST /clubs/${opts.linkClub}/reg-link → ${linkRes.status()} ${await linkRes.text()}`,
+  ).toBeTruthy();
+  const { playerRegLink } = (await linkRes.json()) as { playerRegLink: { token: string } };
+
+  const regRes = await request.post(
+    `${API_BASE}/register/${opts.linkClub}?t=${encodeURIComponent(playerRegLink.token)}`,
+    {
+      // The public register route is UNAUTHENTICATED — the token in the query authorizes it,
+      // so no x-dev-auth header. The tenant is resolved from the token, not the x-tenant header.
+      headers: { 'content-type': 'application/json', 'x-tenant': TENANT },
+      data: {
+        firstName: 'Test',
+        lastName: opts.name,
+        idType: 'passport',
+        idNumber,
+        dob: '1995-06-15',
+        race: 'African',
+        gender: 'Male',
+        nationality: 'Zimbabwean',
+        cell: '0821234567',
+        team: opts.team ?? 'premier',
+        district: 'Durban Central',
+        lastClubId: opts.prevClub,
+        idDocMeta: { objectKey, size: 100, contentType: 'image/png' },
+      },
+    },
+  );
+  expect(
+    regRes.ok(),
+    `POST /register/${opts.linkClub} → ${regRes.status()} ${await regRes.text()}`,
+  ).toBeTruthy();
+
+  const playerName = `Test ${opts.name}`;
+  const all = await getAllClearances(request);
+  const found = all.find((c) => c.playerName === playerName && c.fromClubId === opts.prevClub);
+  expect(
+    found,
+    'seeded registration clearance should appear in GET /admin/clearances',
+  ).toBeTruthy();
+  return { ...found!, idDocObjectKey: objectKey };
+}
+
+/** A roster row as returned by GET /clubs/:id/players — only the fields the specs assert on. */
+export interface SeededPlayer {
+  naturalKey: string;
+  firstName: string;
+  lastName: string;
+  status: string;
+  idDocMeta?: { objectKey?: string };
+}
+
+/** List a club's roster (admin) — used to assert where a rejected/reopened player lives. */
+export async function listPlayers(
+  request: APIRequestContext,
+  clubId: string,
+): Promise<SeededPlayer[]> {
+  const res = await request.get(`${API_BASE}/clubs/${clubId}/players`, {
+    headers: apiHeaders(adminAuthHeader()),
+  });
+  expect(res.ok(), `GET /clubs/${clubId}/players → ${res.status()}`).toBeTruthy();
+  return (await res.json()) as SeededPlayer[];
 }
 
 /** Reject a clearance directly via the API (used to pre-resolve state a test needs). */

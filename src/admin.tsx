@@ -5803,6 +5803,7 @@ export function AdminClubDetail({
                   clearance: 'Clearance notice',
                   'clearance-approved': 'Clearance approved notice',
                   'clearance-rejected': 'Clearance rejected notice',
+                  'clearance-reopened': 'Clearance reopened notice',
                   fixtures: 'Fixtures shared with players',
                 };
                 const sendItems = (club.commLog || []).map((e) => {
@@ -7480,6 +7481,7 @@ export function AdminClearances({
   onOverride,
   onReject,
   onReassign,
+  onReopen,
   busyId,
   busyAction,
 }) {
@@ -7533,6 +7535,7 @@ export function AdminClearances({
           <p className="ph-desc">
             Every clearance request across the cohort. Source clubs confirm fees + misconduct, or
             the Union office can override and issue the clearance on the source club's behalf.
+            Rejecting cancels the move and can be reopened.
           </p>
         </div>
         <div className="ph-actions">
@@ -7631,22 +7634,12 @@ export function AdminClearances({
           // club later signs up under the directory entry's exact slug.
           const offSystem =
             req.fromClubDirectory === true && !(clubs ?? []).some((c) => c.id === req.fromClubId);
-          // Three states, not two — `sourceRostered` is derived by the API, and web and API
-          // deploy separately, so "unknown" is a real state and must not be collapsed into
-          // either answer:
-          //   sourcelessKnown — the API said the source club holds no row for this player. It
-          //     cannot decide on an informed basis ("we have no record of them" is what a roster
-          //     still being digitised looks like, not a finding that the transfer is bogus), so
-          //     the server refuses Reject and permits Reallocate. Only this state may drive
-          //     ASSERTIVE copy or offer Reallocate — claiming it on an unknown would tell an
-          //     admin something false about a genuine transfer, and offer an action that 409s.
-          //   rejectBlocked — fails CLOSED on unknown too. Reject is the one irreversible
-          //     control here; the server 409s anyway if the clearance really is sourceless, so a
-          //     wrongly-disabled button costs a refresh, while a wrongly-enabled one is terminal.
+          // `sourceRostered` (API-derived, pending only) still drives the Reallocate offer:
+          //   sourcelessKnown — the API said the source club holds no row for this player, so it
+          //     cannot decide on an informed basis. Only this state (or an off-system source)
+          //     offers Reallocate — the server 409s if it is claimed on a genuine transfer.
           const pendingRegistration = req.status === 'pending' && req.origin === 'registration';
           const sourcelessKnown = pendingRegistration && req.sourceRostered === false;
-          const sourcelessUnknown = pendingRegistration && req.sourceRostered === undefined;
-          const rejectBlocked = offSystem || sourcelessKnown || sourcelessUnknown;
           // Reallocation mirrors the server rule: sourceless, but NOT a directory entry whose
           // slug a real club has since claimed — that clearance is genuinely in its rep's queue.
           // `offSystem` stays an independent trigger so an off-system clearance never loses its
@@ -7654,6 +7647,35 @@ export function AdminClearances({
           const canReallocate =
             (offSystem || sourcelessKnown) &&
             !(req.fromClubDirectory === true && (clubs ?? []).some((c) => c.id === req.fromClubId));
+          // Which reject case applies is now decided SERVER-SIDE (predictedRejectCase), from the
+          // same detection the reject uses, so the console never infers it from a boolean. It is
+          // present only on pending clearances; ABSENT means the API could not work it out
+          // (derivation failed / web-API deploy skew), in which case Reject fails CLOSED and is
+          // disabled — a reject may create or replace a row at another club (cases C/B-placeholder)
+          // and the admin must see the right consequence before confirming.
+          const predicted = req.predictedRejectCase;
+          const rejectDisabled = req.status === 'pending' && !predicted;
+          // Per-case copy: the reject clause inside the pending sub-text, and the reject confirm
+          // body. Keyed by predictedRejectCase; only read when `predicted` is set.
+          const rejectClause = {
+            A: `rejecting cancels the move and returns them to active at ${req.fromClubName}`,
+            B: `rejecting cancels the move — they return to active at ${req.fromClubName} and their pending registration at ${req.toClubName} is removed`,
+            'B-placeholder': `${req.fromClubName} holds only a placeholder for this player (from the union's backfill or a reallocation) — rejecting replaces it with their full registration, details and ID document, and removes them from ${req.toClubName}`,
+            'B-active': `they are already active at ${req.fromClubName}; rejecting removes their pending registration at ${req.toClubName}`,
+            C: `${req.fromClubName} has no record of this player — rejecting moves the registration (details and ID document) to ${req.fromClubName}, where they become active and the record becomes ${req.fromClubName}'s to manage; they are removed from ${req.toClubName}`,
+            D: `${req.fromClubName} is not on the system — rejecting leaves them registered and active at ${req.toClubName}`,
+          };
+          const rejectNotified =
+            " Both clubs' chairs will be notified by email/WhatsApp where contact details are on file. You can reopen this clearance later if needed.";
+          const junkHint = ` If this registration is junk, use Override & approve and then delete the player instead.`;
+          const rejectConfirmBody = {
+            A: `This will reject ${req.playerName}'s transfer to ${req.toClubName} on the Union's authority. The move is cancelled and they return to active at ${req.fromClubName}.${rejectNotified}`,
+            B: `This will reject ${req.playerName}'s clearance on the Union's authority. The move is cancelled — they return to active at ${req.fromClubName}, and their pending registration at ${req.toClubName} is removed.${rejectNotified}`,
+            'B-placeholder': `This will reject ${req.playerName}'s clearance on the Union's authority. ${req.fromClubName} holds only a placeholder for this player, so their full registration — details and ID document — is moved to ${req.fromClubName}, replacing the placeholder, where they become active, and they are removed from ${req.toClubName}.${junkHint}${rejectNotified}`,
+            'B-active': `This will reject ${req.playerName}'s clearance on the Union's authority. They are already active at ${req.fromClubName}; rejecting removes their pending registration at ${req.toClubName}.${rejectNotified}`,
+            C: `This will reject ${req.playerName}'s clearance on the Union's authority. ${req.fromClubName} has no record of this player, so rejecting moves the registration — details and ID document — to ${req.fromClubName}, where they become active and the record becomes ${req.fromClubName}'s to manage; they are removed from ${req.toClubName}.${junkHint}${rejectNotified}`,
+            D: `This will reject ${req.playerName}'s clearance on the Union's authority. ${req.fromClubName} is not on the system, so they stay registered and active at ${req.toClubName}.${rejectNotified}`,
+          };
           return (
             <div
               key={req.id}
@@ -7668,7 +7690,9 @@ export function AdminClearances({
                         ? `✓ Cleared by ${req.fromClubName}`
                         : req.status === 'rejected'
                           ? '✕ Rejected'
-                          : 'Pending'}
+                          : req.reopenedAt
+                            ? `Reopened ${fmtDay(req.reopenedAt)}${req.reopenedBy ? ` · ${req.reopenedBy}` : ''}`
+                            : 'Pending'}
                   </div>
                   <div className="clr-name">
                     {req.playerName}
@@ -7717,17 +7741,9 @@ export function AdminClearances({
                       Act on this clearance on the clubs' behalf?
                     </div>
                     <div className="clr-override-sub">
-                      {offSystem
-                        ? `${req.fromClubName} is not yet on the system, so no club rep can approve this. Override & approve it${canReallocate ? ' — or reallocate it to the club once they register' : ''}.`
-                        : sourcelessKnown
-                          ? `${req.fromClubName} has no record of this player on its roster, so it cannot judge the transfer — which is what a club still adding its squad looks like. Override & approve it${canReallocate ? ', or reallocate it to the club they actually left' : ''}. Rejecting is not available: it would permanently flag a legitimately registered player.`
-                          : sourcelessUnknown
-                            ? `Could not confirm whether ${req.fromClubName} holds this player on its roster, so rejecting is disabled — it is irreversible and must not be done on a guess. Refresh to try again, or override & approve.`
-                            : `The Union office can override ${req.fromClubName}'s approval and issue the clearance to ${req.toClubName} — or reject the request${
-                                req.origin === 'registration'
-                                  ? ` (the player stays at ${req.toClubName}, permanently flagged clearance-rejected, and is removed from ${req.fromClubName})`
-                                  : ` (the player stays registered at ${req.fromClubName})`
-                              }.`}
+                      {rejectDisabled
+                        ? `The Union office can override ${req.fromClubName}'s approval and issue the clearance to ${req.toClubName}${canReallocate ? `, or reallocate it to the club they actually left` : ''}. Rejecting is unavailable: could not work out where this player's record is — refresh and try again.`
+                        : `The Union office can override ${req.fromClubName}'s approval and issue the clearance to ${req.toClubName}, or reject it — ${rejectClause[predicted]}.${canReallocate ? ` If ${req.fromClubName} has since registered under a slightly different name, reallocate this clearance to it instead.` : ''}`}
                     </div>
                   </div>
                   {canReallocate && (
@@ -7757,28 +7773,21 @@ export function AdminClearances({
                   )}
                   <span
                     title={
-                      offSystem
-                        ? 'The previous club is not on the system and cannot respond — override & approve or reallocate instead'
-                        : sourcelessKnown
-                          ? `${req.fromClubName} has no record of this player, so it cannot judge the transfer — override & approve${canReallocate ? ', or reallocate to the club they actually left' : ''}`
-                          : sourcelessUnknown
-                            ? `Could not confirm whether ${req.fromClubName} holds this player — rejecting is irreversible, so it stays disabled until it is known. Refresh to try again`
-                            : undefined
+                      rejectDisabled
+                        ? "Could not work out where this player's record is — refresh and try again"
+                        : undefined
                     }
                   >
                     <Btn
                       tone="outline"
-                      disabled={busy || rejectBlocked}
+                      disabled={busy || rejectDisabled}
                       onClick={() => {
                         setReason('');
                         setConfirm({
                           kind: 'reject',
                           title: 'Reject this clearance?',
                           req,
-                          body:
-                            req.origin === 'registration'
-                              ? `This will reject ${req.playerName}'s clearance on the Union's authority. They stay on ${req.toClubName}'s roster, flagged clearance-rejected — which is permanent: there is no way to return them to active, and this is their only registration record. Any record of them at ${req.fromClubName} is removed.`
-                              : `This will reject ${req.playerName}'s transfer to ${req.toClubName} on the Union's authority. They stay registered at ${req.fromClubName}. Both clubs' chairs will be notified by email/WhatsApp where contact details are on file.`,
+                          body: rejectConfirmBody[predicted],
                           // Keep the dialog open until the request settles. Close on success
                           // AND on 'conflict' — the toast already told the admin and the card
                           // has refetched, so a retry would only 409 again. Stay open only for
@@ -7835,6 +7844,18 @@ export function AdminClearances({
                         : 'Cleared by source club'}
                     </Pill>
                   )}
+                  {/* Where the player ended up, so a rejected card reads truthfully at a glance
+                      — a source-reactivated reject needs no hint (they simply stayed put). */}
+                  {req.status === 'rejected' && req.rejectOutcome === 'moved-to-source' && (
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                      Moved to {req.fromClubName}
+                    </span>
+                  )}
+                  {req.status === 'rejected' && req.rejectOutcome === 'stays-at-destination' && (
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                      Stays at {req.toClubName}
+                    </span>
+                  )}
                   {req.status === 'rejected' && req.rejectReason && (
                     <span style={{ fontSize: 11, color: 'var(--muted)' }}>
                       "{req.rejectReason}"
@@ -7860,6 +7881,45 @@ export function AdminClearances({
                       return at ? formatStampDay(at) : '';
                     })()}
                   </span>
+                  {/* Reopen is offered only when a snapshot exists (rejectOutcome present). A
+                      legacy reject — done before reopen was supported — has no snapshot to
+                      restore, so it always 409s; say so instead of a button that can't work. */}
+                  {req.status === 'rejected' && req.rejectOutcome && (
+                    <Btn
+                      tone="outline"
+                      size="sm"
+                      style={{ marginLeft: 'auto' }}
+                      disabled={busy}
+                      onClick={() => {
+                        setConfirm({
+                          kind: 'reopen',
+                          title: 'Reopen this clearance?',
+                          req,
+                          body: `${req.playerName}'s registration goes back to how it was before the rejection, and ${req.fromClubName}'s chair is notified again. It can be rejected again afterwards.`,
+                          // Keep the dialog open until the request settles; close on success and
+                          // on 'conflict' (already refetched), stay open only on 'failed'.
+                          onYes: async () => {
+                            const result = await onReopen(req);
+                            if (result !== 'failed') setConfirm(null);
+                          },
+                        });
+                      }}
+                    >
+                      {busy && busyAction === 'reopen' ? 'Reopening…' : 'Reopen'}
+                    </Btn>
+                  )}
+                  {req.status === 'rejected' && !req.rejectOutcome && (
+                    <span
+                      style={{
+                        marginLeft: 'auto',
+                        fontSize: 11,
+                        color: 'var(--muted)',
+                        fontFamily: "'Montserrat',sans-serif",
+                      }}
+                    >
+                      Rejected before reopen was supported
+                    </span>
+                  )}
                 </div>
               )}
             </div>
@@ -7948,11 +8008,24 @@ export function AdminClearances({
                       ? 'Rejecting…'
                       : busyAction === 'reassign'
                         ? 'Reallocating…'
-                        : 'Issuing…';
+                        : busyAction === 'reopen'
+                          ? 'Reopening…'
+                          : 'Issuing…';
                   if (confirm.kind === 'reject')
                     return (
                       <Btn tone="ink" disabled={cbusy} onClick={() => confirm.onYes(reason.trim())}>
                         {cbusy ? busyLabel : 'Yes, reject clearance'}
+                      </Btn>
+                    );
+                  if (confirm.kind === 'reopen')
+                    return (
+                      <Btn
+                        tone="teal"
+                        icon={Icon.Arrow}
+                        disabled={cbusy}
+                        onClick={() => confirm.onYes()}
+                      >
+                        {cbusy ? busyLabel : 'Yes, reopen clearance'}
                       </Btn>
                     );
                   if (confirm.kind === 'override')

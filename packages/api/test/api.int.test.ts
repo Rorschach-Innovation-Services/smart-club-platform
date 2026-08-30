@@ -3778,10 +3778,10 @@ describe('registration-origin clearances (previous-club dropdown on the public f
     );
   });
 
-  test('a sourceless clearance cannot be rejected; admin override completes it instead', async () => {
-    // The source club has no record to reject ON, so reject is refused server-side: it would
-    // flag a legitimately active player 'clearance-rejected', which is terminal and would be
-    // their only surviving registration record.
+  test('a sourceless clearance is rejected by MOVING the registration to the source club (case C)', async () => {
+    // rc-a is a real club but holds NO row for this player (its roster isn't digitised). Reject no
+    // longer refuses — it MOVES the registration (details + ID document) to rc-a, active, and
+    // removes it from rc-b. rejectOutcome === 'moved-to-source'; the console predicts case C.
     const reg = await registerAt('rc-b', 'rc-b-token', {
       ...regBody({ idNumber: 'RC9020', cell: '0830000020' }),
       lastClubId: 'rc-a',
@@ -3790,34 +3790,68 @@ describe('registration-origin clearances (previous-club dropdown on the public f
     const clr = (await repo.listClearancesForSource('dolphins', 'rc-a')).find(
       (x) => x.idNumber === 'RC9020',
     )!;
+    const destRow = (await repo.listPlayers('dolphins', 'rc-b')).find(
+      (p) => p.idNumber === 'RC9020',
+    )!;
+    const srcCountBefore = (await repo.getClub('dolphins', 'rc-a'))?.playerCount ?? 0;
+    const destCountBefore = (await repo.getClub('dolphins', 'rc-b'))?.playerCount ?? 0;
+
+    // The console predicts case C and never sees the snapshot.
+    const adminList = (await (
+      await app.request('/admin/clearances', { headers: headers(ADMIN) })
+    ).json()) as { id: string; predictedRejectCase?: string; rejectSnapshot?: unknown }[];
+    const row = adminList.find((x) => x.id === clr.id);
+    assert.equal(row?.predictedRejectCase, 'C');
+    assert.equal(row?.rejectSnapshot, undefined, 'snapshot never leaves the repo');
 
     const rejected = await app.request(`/admin/clearances/${clr.id}/reject`, {
       method: 'POST',
       headers: headers(ADMIN),
-      body: JSON.stringify({ fromClubId: 'rc-a', reason: 'never played for us' }),
+      body: JSON.stringify({ fromClubId: 'rc-a', version: clr.version, reason: 'not our player' }),
     });
-    assert.equal(rejected.status, 409, 'reject refused for a sourceless clearance');
-    assert.equal(
-      (await repo.listClearancesForSource('dolphins', 'rc-a')).find((x) => x.idNumber === 'RC9020')
-        ?.status,
-      'pending',
-      'refused reject mutates nothing',
-    );
-    assert.equal(
-      (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9020')?.status,
-      'clearance-pending',
-      'player not flagged by the refused reject',
-    );
+    assert.equal(rejected.status, 200, 'reject moves the sourceless registration');
+    const body = (await rejected.json()) as {
+      status: string;
+      rejectOutcome?: string;
+      rejectSnapshot?: unknown;
+    };
+    assert.equal(body.status, 'rejected');
+    assert.equal(body.rejectOutcome, 'moved-to-source');
+    assert.equal(body.rejectSnapshot, undefined, 'snapshot stripped from the response');
 
-    // The console surfaces the same fact, so the button is disabled rather than 409-ing.
-    const adminList = (await (
-      await app.request('/admin/clearances', { headers: headers(ADMIN) })
-    ).json()) as { id: string; sourceRostered?: boolean }[];
-    assert.equal(adminList.find((x) => x.id === clr.id)?.sourceRostered, false);
+    // Moved to rc-a, active, with the SAME ID-doc objectKey, and no lastClub naming its own club.
+    const atSource = (await repo.listPlayers('dolphins', 'rc-a')).find(
+      (p) => p.idNumber === 'RC9020',
+    );
+    assert.equal(atSource?.status, 'active');
+    assert.equal(atSource?.idDocMeta?.objectKey, destRow.idDocMeta?.objectKey);
+    assert.equal(
+      atSource?.lastClub,
+      undefined,
+      'the moved row does not name the source as its own previous club',
+    );
+    // Gone from rc-b; both counts moved.
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9020'),
+      undefined,
+      'destination row removed',
+    );
+    assert.equal((await repo.getClub('dolphins', 'rc-a'))?.playerCount ?? 0, srcCountBefore + 1);
+    assert.equal((await repo.getClub('dolphins', 'rc-b'))?.playerCount ?? 0, destCountBefore - 1);
+  });
 
-    // Override is the exit, and it takes a reason — because it is doing double duty here. The
-    // resolved record would otherwise read as "the Union approved this transfer" for a transfer
-    // that never happened, and this history is read for disputes.
+  test('a junk sourceless registration is disposed of by override then delete (not reject)', async () => {
+    // Reject would now HAND the registration to the named club, so junk disposal stays the
+    // override-then-delete path: override (with a reason — it is doing double duty) then delete
+    // the now-active player, which purges the ID docs from S3.
+    const reg = await registerAt('rc-b', 'rc-b-token', {
+      ...regBody({ idNumber: 'RC9025', cell: '0830000025' }),
+      lastClubId: 'rc-a',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await repo.listClearancesForSource('dolphins', 'rc-a')).find(
+      (x) => x.idNumber === 'RC9025',
+    )!;
     const override = await app.request(`/admin/clearances/${clr.id}/override`, {
       method: 'POST',
       headers: headers(ADMIN),
@@ -3827,24 +3861,20 @@ describe('registration-origin clearances (previous-club dropdown on the public f
         reason: '  not a real registration, removing  ',
       }),
     });
-    assert.equal(override.status, 200, 'override is the available resolution');
+    assert.equal(override.status, 200, 'override is the disposal resolution');
     assert.equal(
-      (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9020')?.status,
+      (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9025')?.status,
       'active',
     );
     assert.equal(
-      (await repo.listClearancesForSource('dolphins', 'rc-a')).find((x) => x.idNumber === 'RC9020')
+      (await repo.listClearancesForSource('dolphins', 'rc-a')).find((x) => x.idNumber === 'RC9025')
         ?.overrideReason,
       'not a real registration, removing',
       'annotation trimmed and recorded on the resolved clearance',
     );
-
-    // …and disposal completes: the player is active now, so the delete guard no longer blocks.
-    // That two-step is the documented way to remove a junk registration (deletePlayer also
-    // purges the ID docs from S3).
     const REP_RCB = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['rc-b'] }]);
     const nk = (await repo.listPlayers('dolphins', 'rc-b')).find(
-      (p) => p.idNumber === 'RC9020',
+      (p) => p.idNumber === 'RC9025',
     )!.naturalKey;
     const removed = await app.request(`/clubs/rc-b/players/${nk}`, {
       method: 'DELETE',
@@ -3852,7 +3882,7 @@ describe('registration-origin clearances (previous-club dropdown on the public f
     });
     assert.equal(removed.status, 200, 'a resolved clearance no longer blocks deletion');
     assert.equal(
-      (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9020'),
+      (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9025'),
       undefined,
     );
   });
@@ -3915,26 +3945,81 @@ describe('registration-origin clearances (previous-club dropdown on the public f
     );
     assert.equal(atReal?.status, 'pending');
     assert.equal(atReal?.fromClubName, 'RC Delta CC');
-    // Reallocation gives the new source a placeholder, so from here it is a normal
-    // registration-origin clearance — including reject becoming permitted again, which is the
-    // round trip that makes reallocation a real escape from the sourceless dead end.
-    assert.equal(
-      (await repo.listPlayers('dolphins', 'rc-d')).find((p) => p.idNumber === 'RC9021')?.status,
-      'clearance-pending',
-    );
-    assert.equal(
-      (
-        await app.request(`/admin/clearances/${atReal!.id}/reject`, {
-          method: 'POST',
-          headers: headers(ADMIN),
-          body: JSON.stringify({ fromClubId: 'rc-d', reason: 'not our player after all' }),
-        })
-      ).status,
-      200,
-      'reject is available again once a source row exists',
-    );
+    // Reallocation gives the new source a PLACEHOLDER row (name/ID only, `placeholder: true`).
     // The stale note named the club the clearance was moved AWAY from — it must not survive.
+    const placeholder = (await repo.listPlayers('dolphins', 'rc-d')).find(
+      (p) => p.idNumber === 'RC9021',
+    )!;
+    assert.equal(placeholder.status, 'clearance-pending');
+    assert.equal(placeholder.placeholder, true, 'reallocation writes a placeholder source row');
+    assert.equal(placeholder.idDocMeta, undefined, 'placeholder carries no ID document');
     assert.equal(atReal?.note, undefined, 'note dropped on reallocation');
+
+    // Reject is now the B″ shape: the source holds only a placeholder, so the real registration
+    // (the rc-b destination row, with its ID document) REPLACES the placeholder at rc-d, active,
+    // and the destination row is deleted. Only the destination count drops (the placeholder was
+    // already counted). The console predicts 'B-placeholder'.
+    const adminList = (await (
+      await app.request('/admin/clearances', { headers: headers(ADMIN) })
+    ).json()) as { id: string; predictedRejectCase?: string }[];
+    assert.equal(adminList.find((x) => x.id === atReal!.id)?.predictedRejectCase, 'B-placeholder');
+
+    const destBefore = (await repo.listPlayers('dolphins', 'rc-b')).find(
+      (p) => p.idNumber === 'RC9021',
+    )!;
+    const rcdCountBefore = (await repo.getClub('dolphins', 'rc-d'))?.playerCount ?? 0;
+    const rcbCountBefore = (await repo.getClub('dolphins', 'rc-b'))?.playerCount ?? 0;
+
+    const rejected = await app.request(`/admin/clearances/${atReal!.id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'rc-d', reason: 'not our player after all' }),
+    });
+    assert.equal(rejected.status, 200, 'reject is available again once a source row exists');
+    assert.equal(
+      ((await rejected.json()) as { rejectOutcome?: string }).rejectOutcome,
+      'moved-to-source',
+    );
+
+    // The placeholder is replaced by the real registration: active, WITH the destination's ID
+    // document, and the placeholder flag is gone.
+    const atSource = (await repo.listPlayers('dolphins', 'rc-d')).find(
+      (p) => p.idNumber === 'RC9021',
+    );
+    assert.equal(atSource?.status, 'active');
+    assert.equal(atSource?.idDocMeta?.objectKey, destBefore.idDocMeta?.objectKey);
+    assert.equal(atSource?.placeholder, undefined, 'placeholder marker cleared');
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9021'),
+      undefined,
+      'destination row deleted',
+    );
+    assert.equal(
+      (await repo.getClub('dolphins', 'rc-d'))?.playerCount ?? 0,
+      rcdCountBefore,
+      'source count unchanged (placeholder was already counted)',
+    );
+    assert.equal((await repo.getClub('dolphins', 'rc-b'))?.playerCount ?? 0, rcbCountBefore - 1);
+
+    // Reopen restores the placeholder at rc-d and the pending destination row at rc-b.
+    const reopened = await app.request(`/admin/clearances/${atReal!.id}/reopen`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'rc-d' }),
+    });
+    assert.equal(reopened.status, 200);
+    assert.equal(((await reopened.json()) as { status: string }).status, 'pending');
+    const restored = (await repo.listPlayers('dolphins', 'rc-d')).find(
+      (p) => p.idNumber === 'RC9021',
+    );
+    assert.equal(restored?.status, 'clearance-pending');
+    assert.equal(restored?.placeholder, true, 'placeholder restored');
+    assert.equal(restored?.idDocMeta, undefined);
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9021')?.status,
+      'clearance-pending',
+      'destination row re-created pending',
+    );
   });
 
   test('a mid-transfer player cannot open a competing clearance by registering again', async () => {
@@ -4003,8 +4088,10 @@ describe('registration-origin clearances (previous-club dropdown on the public f
     assert.equal(unknown.status, 400);
   });
 
-  test('union rejects a registration-origin clearance: player stays at destination flagged, removed from source', async () => {
-    // Seed at source, then transfer-register at destination.
+  test('union rejects a registration-origin clearance: source reactivated, destination row removed (case B)', async () => {
+    // Seed a REAL row at the source (ID document + contact → not a placeholder), then
+    // transfer-register at the destination. Reject cancels the move: the source row returns to
+    // active, the pending destination row is deleted, dest count −1, source count unchanged.
     await registerAt('rc-a', 'rc-a-token', {
       ...regBody({ idNumber: 'RC9004', cell: '0830000004' }),
       idDocMeta: { objectKey: keyA, size: 100, contentType: 'image/png' },
@@ -4020,6 +4107,12 @@ describe('registration-origin clearances (previous-club dropdown on the public f
     const destCountBefore = (await repo.getClub('dolphins', 'rc-b'))?.playerCount ?? 0;
     const srcCountBefore = (await repo.getClub('dolphins', 'rc-a'))?.playerCount ?? 0;
 
+    // The console predicts case B for this clearance (source real + pending).
+    const adminList = (await (
+      await app.request('/admin/clearances', { headers: headers(ADMIN) })
+    ).json()) as { id: string; predictedRejectCase?: string }[];
+    assert.equal(adminList.find((x) => x.id === clr.id)?.predictedRejectCase, 'B');
+
     const res = await app.request(`/admin/clearances/${clr.id}/reject`, {
       method: 'POST',
       headers: headers(ADMIN),
@@ -4030,37 +4123,54 @@ describe('registration-origin clearances (previous-club dropdown on the public f
       status: string;
       rejectedBy?: string;
       rejectReason?: string;
+      rejectOutcome?: string;
     };
     assert.equal(body.status, 'rejected');
     assert.equal(body.rejectReason, 'Fees owing');
     assert.ok(body.rejectedBy, 'rejecting admin recorded');
+    assert.equal(body.rejectOutcome, 'source-reactivated');
 
-    // Source (previous club) row removed; destination (current club) row KEPT + flagged.
+    // Source (previous club) row reactivated; destination (current club) row DELETED. No terminal
+    // clearance-rejected flag is written anywhere.
     const source = (await repo.listPlayers('dolphins', 'rc-a')).find(
       (p) => p.idNumber === 'RC9004',
     );
-    assert.equal(source, undefined, 'source (previous club) player removed');
-    const dest = (await repo.listPlayers('dolphins', 'rc-b')).find(
-      (p) => p.idNumber === 'RC9004',
-    ) as { status?: string; clearanceRejectedReason?: string; clearanceRejectedAt?: string };
-    assert.equal(dest?.status, 'clearance-rejected', 'player stays at destination, flagged');
-    assert.equal(dest?.clearanceRejectedReason, 'Fees owing');
-    assert.ok(dest?.clearanceRejectedAt, 'reject timestamp copied onto the player');
+    assert.equal(source?.status, 'active', 'source player returns to active');
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'rc-b')).find((p) => p.idNumber === 'RC9004'),
+      undefined,
+      'destination row removed',
+    );
 
-    // Counts: destination unchanged (row survives), source −1 (row gone).
+    // Counts: destination −1 (row deleted), source unchanged (row reactivated in place).
     assert.equal(
       (await repo.getClub('dolphins', 'rc-b'))?.playerCount ?? 0,
-      destCountBefore,
-      'destination count unchanged',
+      destCountBefore - 1,
+      'destination count decremented',
     );
     assert.equal(
       (await repo.getClub('dolphins', 'rc-a'))?.playerCount ?? 0,
-      srcCountBefore - 1,
-      'source count decremented',
+      srcCountBefore,
+      'source count unchanged',
     );
     // The mirror flipped too (destination club sees the outcome).
     const mirror = (await repo.listInboundForDest('dolphins', 'rc-b')).find((x) => x.id === clr.id);
     assert.equal(mirror?.status, 'rejected');
+
+    // POPIA: the reject stored a snapshot of the DESTINATION row (its self-asserted contact/ID)
+    // on the canonical so Reopen can restore it — but the source rep's clearance list must NEVER
+    // carry it. The read layer strips rejectSnapshot on every clearance read.
+    const repView = (await (
+      await app.request('/clubs/rc-a/clearances', { headers: headers(REP_RCA) })
+    ).json()) as { incoming: Array<{ id: string; rejectSnapshot?: unknown }> };
+    const seen = repView.incoming.find((x) => x.id === clr.id);
+    assert.ok(seen, 'the rejected clearance is in the source rep list');
+    assert.equal(seen?.rejectSnapshot, undefined, 'snapshot never reaches the source rep');
+    assert.doesNotMatch(
+      JSON.stringify(repView),
+      /0830000005/,
+      "the destination row's self-asserted cell never leaks to the source rep",
+    );
   });
 
   test('reject is admin-only (403 for reps) and pending-only (409 after resolution)', async () => {
@@ -4117,6 +4227,10 @@ describe('registration-origin clearances (previous-club dropdown on the public f
       body: JSON.stringify({ fromClubId: 'rc-a' }),
     });
     assert.equal(res.status, 200);
+    assert.equal(
+      ((await res.json()) as { rejectOutcome?: string }).rejectOutcome,
+      'source-reactivated',
+    );
     const player = await repo.getPlayer('dolphins', 'rc-a', 'req-reject');
     assert.equal(player?.status, 'active', 'source player unstuck');
     assert.ok(
@@ -5766,20 +5880,37 @@ describe('club directory (operator-entered previous clubs → real pending clear
     assert.equal(resolved?.status, 'admin-override');
   });
 
-  test('union reject is blocked (409) while the directory club is not on the system', async () => {
+  test('union reject of an off-system directory clearance leaves the player active at the destination (case D)', async () => {
+    // Reject is no longer blocked for a directory clearance whose club never signed up: the
+    // source is off-system with no club record, so the move is cancelled by leaving the player
+    // active at the destination in place (case D). rejectOutcome === 'stays-at-destination'.
     const reg = await registerAt('kd-dest', 'kd-dest-token', {
       ...regBody('KD9003'),
       lastClubId: 'montclair-cc',
     });
     assert.equal(reg.status, 201);
     const clr = (await directoryClearanceFor('montclair-cc', 'KD9003'))!;
+    const destCountBefore = (await repo.getClub('dolphins', 'kd-dest'))?.playerCount ?? 0;
     const res = await app.request(`/admin/clearances/${clr.id}/reject`, {
       method: 'POST',
       headers: headers(ADMIN),
       body: JSON.stringify({ fromClubId: 'montclair-cc', version: clr.version }),
     });
-    assert.equal(res.status, 409);
-    assert.equal((await directoryClearanceFor('montclair-cc', 'KD9003'))?.status, 'pending');
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { status: string; rejectOutcome?: string };
+    assert.equal(body.status, 'rejected');
+    assert.equal(body.rejectOutcome, 'stays-at-destination');
+    assert.equal((await directoryClearanceFor('montclair-cc', 'KD9003'))?.status, 'rejected');
+    const player = (await repo.listPlayers('dolphins', 'kd-dest')).find(
+      (p) => p.idNumber === 'KD9003',
+    ) as { status?: string; clearanceRejectedAt?: string } | undefined;
+    assert.equal(player?.status, 'active', 'player stays active at the destination');
+    assert.equal(player?.clearanceRejectedAt, undefined, 'no terminal clearance-rejected flag');
+    assert.equal(
+      (await repo.getClub('dolphins', 'kd-dest'))?.playerCount ?? 0,
+      destCountBefore,
+      'destination count unchanged',
+    );
   });
 
   test('D5: a club signing up under the directory slug inherits the clearance; club-mode approve moves the rostered player cleanly', async () => {
@@ -6025,8 +6156,9 @@ describe('club directory (operator-entered previous clubs → real pending clear
     );
 
     // The club's chair rosters the mid-transfer player as ACTIVE (portal creates have no
-    // cross-club dedup). Reject must still work — and must NOT delete the active row,
-    // decrement the count, or purge its documents (the row isn't held by the clearance).
+    // cross-club dedup). This is the B′ shape: the source now holds an ACTIVE row (not pending,
+    // not a placeholder), so reject deletes the DESTINATION registration and leaves the source
+    // row untouched (never flagged, never count-drifted — the clearance never held it).
     const dest = (await repo.listPlayers('dolphins', 'kd-dest')).find(
       (p) => p.idNumber === 'KD9007',
     )!;
@@ -6045,6 +6177,13 @@ describe('club directory (operator-entered previous clubs → real pending clear
       version: 0,
     });
     assert.equal((await repo.getClub('dolphins', 'queensburgh-cc'))?.playerCount, 1);
+    const destCountBefore = (await repo.getClub('dolphins', 'kd-dest'))?.playerCount ?? 0;
+
+    // The console predicts B-active (source present + active).
+    const adminList = (await (
+      await app.request('/admin/clearances', { headers: headers(ADMIN) })
+    ).json()) as { id: string; predictedRejectCase?: string }[];
+    assert.equal(adminList.find((x) => x.id === clr.id)?.predictedRejectCase, 'B-active');
 
     const rejected = await app.request(`/admin/clearances/${clr.id}/reject`, {
       method: 'POST',
@@ -6052,12 +6191,22 @@ describe('club directory (operator-entered previous clubs → real pending clear
       body: JSON.stringify({ fromClubId: 'queensburgh-cc', version: clr.version }),
     });
     assert.equal(rejected.status, 200, 'reject unblocked once the club is on the system');
-    assert.equal((await directoryClearanceFor('queensburgh-cc', 'KD9007'))?.status, 'rejected');
     assert.equal(
-      (await repo.listPlayers('dolphins', 'kd-dest')).find((p) => p.idNumber === 'KD9007')?.status,
-      'clearance-rejected',
-      'destination row flagged in place',
+      ((await rejected.json()) as { rejectOutcome?: string }).rejectOutcome,
+      'source-reactivated',
     );
+    assert.equal((await directoryClearanceFor('queensburgh-cc', 'KD9007'))?.status, 'rejected');
+    // Destination registration deleted; dest count −1.
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'kd-dest')).find((p) => p.idNumber === 'KD9007'),
+      undefined,
+      'destination row deleted',
+    );
+    assert.equal(
+      (await repo.getClub('dolphins', 'kd-dest'))?.playerCount ?? 0,
+      destCountBefore - 1,
+    );
+    // The actively-rostered source row survives untouched (no flag, no count drift).
     const rosterRow = (await repo.listPlayers('dolphins', 'queensburgh-cc')).find(
       (p) => p.idNumber === 'KD9007',
     );
@@ -6067,6 +6216,55 @@ describe('club directory (operator-entered previous clubs → real pending clear
       1,
       'no count drift for a row the clearance never held',
     );
+  });
+
+  test('case D: predictedRejectCase is D and reject 409s when the destination row is gone (club erased)', async () => {
+    // If the destination club (and its roster) is erased between open and reject, the pending
+    // destination row detection keys on is gone — the reject refuses with a refetch 409 rather
+    // than mutating anything.
+    const { DeleteCommand } = await import('@aws-sdk/lib-dynamodb');
+    const { DynamoDBClient } = await import('@aws-sdk/client-dynamodb');
+    const { DynamoDBDocumentClient } = await import('@aws-sdk/lib-dynamodb');
+    const { playerKey } = (await import('../src/keys.js')) as unknown as {
+      playerKey: (t: string, c: string, nk: string) => { pk: string; sk: string };
+    };
+    const doc = DynamoDBDocumentClient.from(
+      new DynamoDBClient({
+        endpoint: process.env.DYNAMO_ENDPOINT,
+        region: 'localhost',
+        credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+      }),
+    );
+
+    // pinetown-cc is a directory entry never claimed by a real club, so this is a genuine case D.
+    const reg = await registerAt('kd-dest', 'kd-dest-token', {
+      ...regBody('KD9041'),
+      lastClubId: 'pinetown-cc',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await directoryClearanceFor('pinetown-cc', 'KD9041'))!;
+    const adminList = (await (
+      await app.request('/admin/clearances', { headers: headers(ADMIN) })
+    ).json()) as { id: string; predictedRejectCase?: string }[];
+    assert.equal(adminList.find((x) => x.id === clr.id)?.predictedRejectCase, 'D');
+    const destRow = (await repo.listPlayers('dolphins', 'kd-dest')).find(
+      (p) => p.idNumber === 'KD9041',
+    )!;
+    // Simulate the destination roster being erased: the pending row detection needs is gone.
+    await doc.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: playerKey('dolphins', 'kd-dest', destRow.naturalKey),
+      }),
+    );
+
+    const rejected = await app.request(`/admin/clearances/${clr.id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'pinetown-cc', version: clr.version }),
+    });
+    assert.equal(rejected.status, 409, 'a vanished destination row yields a refetch 409');
+    assert.equal((await directoryClearanceFor('pinetown-cc', 'KD9041'))?.status, 'pending');
   });
 });
 
@@ -6416,7 +6614,6 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
   let docClient: { send: (cmd: unknown) => Promise<unknown> };
   let UpdateCommand: new (input: unknown) => unknown;
   let DeleteCommand: new (input: unknown) => unknown;
-  let DocProto: { send: (...a: unknown[]) => Promise<unknown> };
 
   const mintKey = async (clubId: string, token: string) => {
     const up = await app.request(`/register/${clubId}/id-doc/upload-url?t=${token}`, {
@@ -6437,9 +6634,6 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
     const { DynamoDBClient } = await import('@aws-sdk/client-dynamodb');
     UpdateCommand = lib.UpdateCommand as unknown as new (i: unknown) => unknown;
     DeleteCommand = lib.DeleteCommand as unknown as new (i: unknown) => unknown;
-    DocProto = lib.DynamoDBDocumentClient.prototype as unknown as {
-      send: (...a: unknown[]) => Promise<unknown>;
-    };
     docClient = lib.DynamoDBDocumentClient.from(
       new DynamoDBClient({
         endpoint: process.env.DYNAMO_ENDPOINT,
@@ -6504,13 +6698,16 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
       [...srcRows, ...dstRows].every((e) => e.by === 'admin@test'),
       'attributed to the rejecting admin',
     );
+    // The reject-notice idempotency key is version-suffixed (v1 — the reject bumped 0→1) so a
+    // re-reject after a reopen is a distinct send, not a dedupe collision.
     assert.equal(
       srcRows.find((e) => e.channel === 'email')?.idempotencyKey,
-      'clearance-crv-a-clr-rejected-email',
+      'clearance-crv-a-clr-rejected-v1-email',
     );
 
-    // The email body carries the reason (comm-log rows never store the body — assert the
-    // pure content builder the sender renders from).
+    // The email body carries the reason (comm-log rows never store the body — assert the pure
+    // content builder the sender renders from), and the rejected copy is now driven by
+    // rejectOutcome (reject cancels the move — never a terminal clearance-rejected row).
     const email = await import('../src/notify/email.js');
     const content = email.clearanceResolvedEmailContent({
       to: 'chair@crv-a-src.test',
@@ -6520,31 +6717,46 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
       toClubName: 'Res A Dest CC',
       outcome: 'rejected',
       reason: 'Outstanding kit fees',
+      rejectOutcome: 'source-reactivated',
     });
     assert.match(content.text, /Reason: Outstanding kit fees/);
     assert.match(content.html, /<strong>Reason:<\/strong> Outstanding kit fees/);
-
-    // Rejected copy is origin-aware. Request-origin (this clearance): the player stays put
-    // at the source club, so the body must say they remain registered there — and must NOT
-    // claim the destination row was flagged / the source record removed.
-    assert.match(content.text, /they remain registered at Res A Source CC/);
+    // source-reactivated: the move is cancelled and they remain at the source. No terminal-flag
+    // language, and every rejected body offers the reopen.
+    assert.match(
+      content.text,
+      /The move is cancelled and they remain registered at Res A Source CC/,
+    );
+    assert.match(content.text, /can reopen this clearance if it was rejected in error/);
     assert.doesNotMatch(content.text, /flagged as clearance-rejected/);
-    // Registration-origin: the inverse — the destination row is flagged clearance-rejected
-    // and any record at the source club is removed. The public form drives this branch.
-    const regContent = email.clearanceResolvedEmailContent({
+    // moved-to-source: the registration moved to the source club and is gone from the destination.
+    const movedContent = email.clearanceResolvedEmailContent({
       to: 'chair@crv-a-src.test',
       chairName: 'Chair',
       fromClubName: 'Res A Source CC',
       playerName: 'Res A Mover',
       toClubName: 'Res A Dest CC',
       outcome: 'rejected',
-      origin: 'registration',
+      rejectOutcome: 'moved-to-source',
+    });
+    assert.match(movedContent.text, /registration has been moved to Res A Source CC/);
+    assert.match(movedContent.text, /no longer appear on Res A Dest CC's roster/);
+    assert.doesNotMatch(movedContent.text, /flagged as clearance-rejected/);
+    // stays-at-destination: the source is off-system, so they stay at the destination.
+    const staysContent = email.clearanceResolvedEmailContent({
+      to: 'chair@crv-a-src.test',
+      chairName: 'Chair',
+      fromClubName: 'Res A Source CC',
+      playerName: 'Res A Mover',
+      toClubName: 'Res A Dest CC',
+      outcome: 'rejected',
+      rejectOutcome: 'stays-at-destination',
     });
     assert.match(
-      regContent.text,
-      /their registration at Res A Dest CC is flagged as clearance-rejected, and any record of them at Res A Source CC has been removed/,
+      staysContent.text,
+      /Res A Source CC is not on the system, so their registration stays at Res A Dest CC/,
     );
-    assert.doesNotMatch(regContent.text, /they remain registered at/);
+    assert.doesNotMatch(staysContent.text, /flagged as clearance-rejected/);
   });
 
   // (b) request-origin override → clearance-approved on BOTH clubs.
@@ -6586,7 +6798,7 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
     assert.ok([...srcRows, ...dstRows].every((e) => e.status === 'sent'));
     assert.equal(
       dstRows.find((e) => e.channel === 'whatsapp')?.idempotencyKey,
-      'clearance-crv-b-clr-approved-whatsapp',
+      'clearance-crv-b-clr-approved-v1-whatsapp',
     );
   });
 
@@ -6633,10 +6845,9 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
     assert.equal(await repo.getClub('dolphins', 'crv-c-dir'), null);
   });
 
-  // (d) regression guard for the EXISTING conditional swallow: the club META item is raw-
-  // deleted between create and reject, so the post-commit playerCount decrement's
-  // attribute_exists(pk) condition fails — reject still 200s and the player is flagged.
-  test('a registration-origin reject still succeeds when the source club item is gone', async () => {
+  // (d) case B under the notify path: a real source row + a destination registration. Reject
+  // reactivates the source, deletes the destination row (dest count −1), and notifies both clubs.
+  test('a registration-origin reject reactivates the source and removes the destination (case B)', async () => {
     await repo.createClub(
       'dolphins',
       mkClub('crv-d-src', 'Res D Source CC', fullChair('crv-d-src')),
@@ -6674,28 +6885,49 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
     const clr = (await repo.listClearancesForSource('dolphins', 'crv-d-src')).find(
       (x) => x.idNumber === 'CRVD01' && x.status === 'pending',
     )!;
-    // Raw-delete ONLY the source club's META item (players survive) — eraseClubData is NOT
-    // used (it would cascade the player rows too). The post-commit decrement then fails its
-    // attribute_exists(pk) condition, which the inner catch swallows.
-    await docClient.send(
-      new DeleteCommand({ TableName: TABLE, Key: clubKey('dolphins', 'crv-d-src') }),
-    );
+    const destCountBefore = (await repo.getClub('dolphins', 'crv-d-dst'))?.playerCount ?? 0;
+    const srcCountBefore = (await repo.getClub('dolphins', 'crv-d-src'))?.playerCount ?? 0;
+
     const res = await app.request(`/admin/clearances/${clr.id}/reject`, {
       method: 'POST',
       headers: headers(ADMIN),
       body: JSON.stringify({ fromClubId: 'crv-d-src', version: clr.version }),
     });
-    assert.equal(res.status, 200, 'reject still commits despite the vanished club item');
-    assert.equal(((await res.json()) as { status: string }).status, 'rejected');
-    const dest = (await repo.listPlayers('dolphins', 'crv-d-dst')).find(
-      (p) => p.idNumber === 'CRVD01',
+    assert.equal(res.status, 200);
+    const bodyJson = (await res.json()) as { status: string; rejectOutcome?: string };
+    assert.equal(bodyJson.status, 'rejected');
+    assert.equal(bodyJson.rejectOutcome, 'source-reactivated');
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'crv-d-src')).find((p) => p.idNumber === 'CRVD01')
+        ?.status,
+      'active',
+      'source reactivated',
     );
-    assert.equal(dest?.status, 'clearance-rejected', 'player kept at destination, flagged');
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'crv-d-dst')).find((p) => p.idNumber === 'CRVD01'),
+      undefined,
+      'destination row deleted',
+    );
+    assert.equal(
+      (await repo.getClub('dolphins', 'crv-d-dst'))?.playerCount ?? 0,
+      destCountBefore - 1,
+    );
+    assert.equal(
+      (await repo.getClub('dolphins', 'crv-d-src'))?.playerCount ?? 0,
+      srcCountBefore,
+      'source count unchanged',
+    );
+    // Both clubs' full chairs notified.
+    const src = await repo.getClub('dolphins', 'crv-d-src');
+    const dst = await repo.getClub('dolphins', 'crv-d-dst');
+    assert.equal((src?.commLog ?? []).filter((e) => e.kind === 'clearance-rejected').length, 2);
+    assert.equal((dst?.commLog ?? []).filter((e) => e.kind === 'clearance-rejected').length, 2);
   });
 
-  // (d') the NEW outer catch: stub the DocumentClient send so the post-commit ADD playerCount
-  // update rejects with a non-conditional DynamoDB error → reject still 200s, error logged.
-  test('a post-commit throughput error on the count decrement never fails the reject', async () => {
+  // (d') the count decrement is now INSIDE the reject write, not a post-commit cleanup. When the
+  // destination club META is gone the local path swallows the count's conditional failure and the
+  // reject still 200s (its player rows — the ones the reject mutates — survive the META delete).
+  test('a registration-origin reject still 200s when the destination club META is gone (count swallowed)', async () => {
     await repo.createClub(
       'dolphins',
       mkClub('crv-e-src', 'Res E Source CC', fullChair('crv-e-src')),
@@ -6733,50 +6965,28 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
     const clr = (await repo.listClearancesForSource('dolphins', 'crv-e-src')).find(
       (x) => x.idNumber === 'CRVE01' && x.status === 'pending',
     )!;
-
-    // repo's ddb is a DynamoDBDocumentClient instance whose `send` is inherited from the
-    // smithy Client prototype (DynamoDBDocumentClient adds no own `send`). Setting an own
-    // `send` on the prototype shadows it for every instance — including repo's — so we can
-    // fail ONLY the post-commit `ADD playerCount :neg1` update and delegate everything else.
-    const orig = DocProto.send;
-    const errs: unknown[] = [];
-    const origErr = console.error;
-    console.error = (...a: unknown[]) => {
-      errs.push(a);
-    };
-    DocProto.send = function (this: unknown, command: { input?: { UpdateExpression?: string } }) {
-      if (command?.input?.UpdateExpression === 'ADD playerCount :neg1') {
-        return Promise.reject(
-          Object.assign(new Error('throughput exceeded'), {
-            name: 'ProvisionedThroughputExceededException',
-          }),
-        );
-      }
-      return orig.call(this, command);
-    } as typeof DocProto.send;
-    try {
-      const res = await app.request(`/admin/clearances/${clr.id}/reject`, {
-        method: 'POST',
-        headers: headers(ADMIN),
-        body: JSON.stringify({ fromClubId: 'crv-e-src', version: clr.version }),
-      });
-      assert.equal(res.status, 200, 'reject commits even though the count decrement threw');
-      assert.equal(((await res.json()) as { status: string }).status, 'rejected');
-    } finally {
-      DocProto.send = orig;
-      console.error = origErr;
-    }
-    assert.ok(
-      errs.some(
-        (a) => Array.isArray(a) && String(a[0]).includes('reject post-commit cleanup failed'),
-      ),
-      'the post-commit failure was logged',
+    // Raw-delete ONLY the destination club's META item (its player rows survive). The dest count
+    // decrement's attribute_exists(pk) then fails; the local path swallows it (swallowCcf).
+    await docClient.send(
+      new DeleteCommand({ TableName: TABLE, Key: clubKey('dolphins', 'crv-e-dst') }),
     );
-    // The reject itself landed: the destination row is flagged.
-    const dest = (await repo.listPlayers('dolphins', 'crv-e-dst')).find(
-      (p) => p.idNumber === 'CRVE01',
+    const res = await app.request(`/admin/clearances/${clr.id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'crv-e-src', version: clr.version }),
+    });
+    assert.equal(res.status, 200, 'reject commits even though the count decrement was skipped');
+    assert.equal(((await res.json()) as { status: string }).status, 'rejected');
+    // The reject itself landed: the source is reactivated, the destination row is deleted.
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'crv-e-src')).find((p) => p.idNumber === 'CRVE01')
+        ?.status,
+      'active',
     );
-    assert.equal(dest?.status, 'clearance-rejected');
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'crv-e-dst')).find((p) => p.idNumber === 'CRVE01'),
+      undefined,
+    );
   });
 
   // (e) local-path parity: a registration-origin reject whose destination row has already
@@ -6838,5 +7048,383 @@ describe('Clearance resolved notice (union reject / override → both clubs)', (
       body: JSON.stringify({ fromClubId: 'crv-f-src', version: clr.version }),
     });
     assert.equal(res.status, 409, 'the local path yields the same 409 the transaction would');
+  });
+
+  // (f) reopen notifies BOTH chairs, with different content per side; re-reject after a reopen is
+  // a distinct send (version-suffixed keys). Uses a request-origin (case A) clearance so the
+  // notify is exercised without the dest-row juggling of the registration cases.
+  test('reopen notifies both chairs (source pending copy + WhatsApp, destination email-only) and re-reject is distinct', async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('crv-r-src', 'Res R Source CC', fullChair('crv-r-src')),
+    );
+    await repo.createClub('dolphins', mkClub('crv-r-dst', 'Res R Dest CC', fullChair('crv-r-dst')));
+    await repo.createPlayer('dolphins', mkPlayer('crv-r-src', 'res-r-mover'));
+    await repo.createClearance('dolphins', {
+      id: 'crv-r-clr',
+      playerNaturalKey: 'res-r-mover',
+      playerName: 'Res R Mover',
+      fromClubId: 'crv-r-src',
+      toClubId: 'crv-r-dst',
+      fromClubName: 'Res R Source CC',
+      toClubName: 'Res R Dest CC',
+      requestedAt: new Date().toISOString(),
+      feesCleared: false,
+      misconductCleared: false,
+      status: 'pending',
+      clubApprovedAt: null,
+      adminOverrideAt: null,
+      version: 0,
+    });
+    // Reject (case A) → version 1.
+    assert.equal(
+      (
+        await app.request('/admin/clearances/crv-r-clr/reject', {
+          method: 'POST',
+          headers: headers(ADMIN),
+          body: JSON.stringify({ fromClubId: 'crv-r-src' }),
+        })
+      ).status,
+      200,
+    );
+    // Reopen → version 2.
+    const reopened = await app.request('/admin/clearances/crv-r-clr/reopen', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'crv-r-src' }),
+    });
+    assert.equal(reopened.status, 200);
+    assert.equal(((await reopened.json()) as { status: string }).status, 'pending');
+
+    const src = await repo.getClub('dolphins', 'crv-r-src');
+    const dst = await repo.getClub('dolphins', 'crv-r-dst');
+    const srcReopen = (src?.commLog ?? []).filter((e) => e.kind === 'clearance-reopened');
+    const dstReopen = (dst?.commLog ?? []).filter((e) => e.kind === 'clearance-reopened');
+    assert.equal(srcReopen.length, 2, 'source: one row per channel');
+    assert.equal(dstReopen.length, 2, 'destination: one row per channel');
+    // Source (full chair) gets the pending copy on both channels.
+    assert.equal(srcReopen.find((e) => e.channel === 'email')?.status, 'sent');
+    assert.equal(srcReopen.find((e) => e.channel === 'whatsapp')?.status, 'sent');
+    // Destination gets email only; its WhatsApp is skipped (no destination reopen template).
+    assert.equal(dstReopen.find((e) => e.channel === 'email')?.status, 'sent');
+    const dstWa = dstReopen.find((e) => e.channel === 'whatsapp');
+    assert.equal(dstWa?.status, 'skipped');
+    assert.equal(dstWa?.error, 'no destination template for reopen');
+    // Version-suffixed idempotency keys (reopen bumped 1→2).
+    assert.equal(
+      srcReopen.find((e) => e.channel === 'email')?.idempotencyKey,
+      'clearance-crv-r-clr-reopened-v2-email',
+    );
+    assert.equal(
+      dstReopen.find((e) => e.channel === 'whatsapp')?.idempotencyKey,
+      'clearance-crv-r-clr-reopened-v2-whatsapp',
+    );
+
+    // The source reopen email carries the reopen preamble.
+    const email = await import('../src/notify/email.js');
+    const sourceCopy = email.clearanceReopenedSourceEmailContent({
+      to: 'chair@crv-r-src.test',
+      chairName: 'Chair',
+      fromClubName: 'Res R Source CC',
+      playerName: 'Res R Mover',
+      toClubName: 'Res R Dest CC',
+    });
+    assert.match(sourceCopy.text, /reopened a previously rejected clearance/);
+
+    // Re-reject after the reopen → version 3; a DISTINCT clearance-rejected send (v3 ≠ v1).
+    assert.equal(
+      (
+        await app.request('/admin/clearances/crv-r-clr/reject', {
+          method: 'POST',
+          headers: headers(ADMIN),
+          body: JSON.stringify({ fromClubId: 'crv-r-src' }),
+        })
+      ).status,
+      200,
+    );
+    const srcAfter = await repo.getClub('dolphins', 'crv-r-src');
+    const rejectKeys = (srcAfter?.commLog ?? [])
+      .filter((e) => e.kind === 'clearance-rejected' && e.channel === 'email')
+      .map((e) => e.idempotencyKey);
+    assert.ok(
+      rejectKeys.includes('clearance-crv-r-clr-rejected-v1-email'),
+      'first reject key present',
+    );
+    assert.ok(
+      rejectKeys.includes('clearance-crv-r-clr-rejected-v3-email'),
+      're-reject after reopen is a distinct send',
+    );
+  });
+
+  // (g) a directory-sourced reopen notifies only the destination (no source Club record).
+  test('a directory-sourced reopen notifies only the destination club', async () => {
+    await repo.createClub('dolphins', mkClub('crv-g-dst', 'Res G Dest CC', fullChair('crv-g-dst')));
+    const clearance = {
+      id: 'crv-g-clr',
+      playerNaturalKey: 'res-g-mover',
+      playerName: 'Res G Mover',
+      team: undefined,
+      fromClubId: 'crv-g-dir',
+      toClubId: 'crv-g-dst',
+      fromClubName: 'Offline Directory CC',
+      toClubName: 'Res G Dest CC',
+      requestedAt: new Date().toISOString(),
+      origin: 'registration' as const,
+      fromClubDirectory: true,
+      feesCleared: false,
+      misconductCleared: false,
+      status: 'pending' as const,
+      clubApprovedAt: null,
+      adminOverrideAt: null,
+      version: 0,
+    };
+    await repo.createPlayerWithSourcelessClearance(
+      'dolphins',
+      { ...mkPlayer('crv-g-dst', 'res-g-mover'), status: 'clearance-pending' as const },
+      clearance,
+    );
+    // Reject (case D) then reopen.
+    assert.equal(
+      (
+        await app.request('/admin/clearances/crv-g-clr/reject', {
+          method: 'POST',
+          headers: headers(ADMIN),
+          body: JSON.stringify({ fromClubId: 'crv-g-dir' }),
+        })
+      ).status,
+      200,
+    );
+    const reopened = await app.request('/admin/clearances/crv-g-clr/reopen', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'crv-g-dir' }),
+    });
+    assert.equal(reopened.status, 200);
+    const dst = await repo.getClub('dolphins', 'crv-g-dst');
+    assert.equal(
+      (dst?.commLog ?? []).filter((e) => e.kind === 'clearance-reopened').length,
+      2,
+      'destination notified on both channels (its WhatsApp is skipped, but recorded)',
+    );
+    // No Club record for the directory source, so there is nowhere a notice could land.
+    assert.equal(await repo.getClub('dolphins', 'crv-g-dir'), null);
+  });
+});
+
+describe('POST /admin/clearances/:cid/reopen', () => {
+  // Route-level coverage of Reopen: admin-only, the status/validation guards, and the repo's
+  // drift errors mapping to 409. The per-case row restoration is proven in the repo suite and the
+  // registration-origin describe (B″); here we drive the endpoint.
+  const mkClub = (id: string, name: string) => ({
+    id,
+    name,
+    district: 'Test District',
+    sub: `sub-${id}`,
+    chair: 'Chair',
+    affiliation: 'not_started' as const,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#334455',
+    ground: {},
+    leagues: [],
+    version: 1,
+  });
+  const REP_SRC = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['ro-src'] }]);
+
+  const mkClearance = (id: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    playerNaturalKey: id,
+    playerName: 'Reo Pen',
+    fromClubId: 'ro-src',
+    toClubId: 'ro-dst',
+    fromClubName: 'RO Source CC',
+    toClubName: 'RO Dest CC',
+    requestedAt: new Date().toISOString(),
+    feesCleared: false,
+    misconductCleared: false,
+    status: 'pending' as const,
+    clubApprovedAt: null,
+    adminOverrideAt: null,
+    version: 0,
+    ...extra,
+  });
+  const mkSource = (nk: string) => ({
+    naturalKey: nk,
+    clubId: 'ro-src',
+    firstName: 'Reo',
+    lastName: 'Pen',
+    dob: '1992-02-02',
+    idNumber: nk,
+    cell: '0839990000',
+    isMinor: false,
+    status: 'active' as const,
+    consentAt: '2026-05-01T00:00:00.000Z',
+    createdAt: '2026-05-01T00:00:00.000Z',
+  });
+
+  before(async () => {
+    await repo.createClub('dolphins', mkClub('ro-src', 'RO Source CC'));
+    await repo.createClub('dolphins', mkClub('ro-dst', 'RO Dest CC'));
+  });
+
+  const reject = (id: string, body: Record<string, unknown>) =>
+    app.request(`/admin/clearances/${id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'ro-src', ...body }),
+    });
+  const reopen = (id: string, body: Record<string, unknown> = {}, auth = ADMIN) =>
+    app.request(`/admin/clearances/${id}/reopen`, {
+      method: 'POST',
+      headers: headers(auth),
+      body: JSON.stringify({ fromClubId: 'ro-src', ...body }),
+    });
+
+  test('reopen a request-origin (case A) clearance: rejected → pending, repeatable', async () => {
+    await repo.createPlayer('dolphins', mkSource('roa'));
+    await repo.createClearance('dolphins', mkClearance('roa')); // flips source → pending
+    // reject → reopen → reject → reopen.
+    for (let i = 0; i < 2; i++) {
+      assert.equal((await reject('roa', {})).status, 200, `reject #${i + 1}`);
+      assert.equal(
+        (await repo.getPlayer('dolphins', 'ro-src', 'roa'))?.status,
+        'active',
+        'source active after reject',
+      );
+      const res = await reopen('roa');
+      assert.equal(res.status, 200, `reopen #${i + 1}`);
+      const body = (await res.json()) as { status: string; reopenedBy?: string };
+      assert.equal(body.status, 'pending');
+      assert.ok(body.reopenedBy, 'reopening admin recorded');
+      assert.equal(
+        (await repo.getPlayer('dolphins', 'ro-src', 'roa'))?.status,
+        'clearance-pending',
+        'source back to pending after reopen',
+      );
+    }
+  });
+
+  test('reopen is admin-only (403 for reps)', async () => {
+    await repo.createPlayer('dolphins', mkSource('rob'));
+    await repo.createClearance('dolphins', mkClearance('rob'));
+    assert.equal((await reject('rob', {})).status, 200);
+    assert.equal((await reopen('rob', {}, REP_SRC)).status, 403);
+  });
+
+  test('400 without fromClubId, 404 for an unknown clearance', async () => {
+    const noBody = await app.request('/admin/clearances/whatever/reopen', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({}),
+    });
+    assert.equal(noBody.status, 400);
+    assert.equal((await reopen('does-not-exist')).status, 404);
+  });
+
+  test('409 when the clearance is still pending (already open)', async () => {
+    await repo.createPlayer('dolphins', mkSource('roc'));
+    await repo.createClearance('dolphins', mkClearance('roc'));
+    const res = await reopen('roc');
+    assert.equal(res.status, 409);
+    assert.match(((await res.json()) as { error: string }).error, /already open/);
+  });
+
+  test('409 when the clearance was issued (an issued clearance cannot be reopened)', async () => {
+    await repo.createPlayer('dolphins', mkSource('rod'));
+    await repo.createClearance('dolphins', mkClearance('rod'));
+    assert.equal(
+      (
+        await app.request('/admin/clearances/rod/override', {
+          method: 'POST',
+          headers: headers(ADMIN),
+          body: JSON.stringify({ fromClubId: 'ro-src' }),
+        })
+      ).status,
+      200,
+    );
+    const res = await reopen('rod');
+    assert.equal(res.status, 409);
+    assert.match(
+      ((await res.json()) as { error: string }).error,
+      /issued clearance cannot be reopened/,
+    );
+  });
+
+  test('409 on a stale version (clearance changed; refetch)', async () => {
+    await repo.createPlayer('dolphins', mkSource('roe'));
+    await repo.createClearance('dolphins', mkClearance('roe'));
+    assert.equal((await reject('roe', {})).status, 200); // version now 1
+    const res = await reopen('roe', { version: 0 }); // stale
+    assert.equal(res.status, 409);
+    assert.match(((await res.json()) as { error: string }).error, /clearance changed; refetch/);
+  });
+
+  test('409 PlayerExistsAtDestination when the destination re-registered before reopen', async () => {
+    // Case B: a real source row + a destination registration. Reject deletes the dest row; then
+    // someone re-registers at the destination, so reopen cannot restore it.
+    await repo.createPlayer('dolphins', mkSource('rof'));
+    await repo.createPlayerWithClearance(
+      'dolphins',
+      {
+        naturalKey: 'rof',
+        clubId: 'ro-dst',
+        firstName: 'Reo',
+        lastName: 'Pen',
+        dob: '1992-02-02',
+        idNumber: 'rof',
+        cell: '0839991111',
+        isMinor: false,
+        status: 'clearance-pending',
+        lastClub: 'RO Source CC',
+        consentAt: '2026-05-01T00:00:00.000Z',
+        createdAt: '2026-05-01T00:00:00.000Z',
+      },
+      mkClearance('rof', { origin: 'registration' as const }),
+    );
+    assert.equal((await reject('rof', {})).status, 200); // case B: dest row deleted
+    // Re-register the destination row (a fresh capture at the destination club).
+    await repo.createPlayer('dolphins', {
+      naturalKey: 'rof',
+      clubId: 'ro-dst',
+      firstName: 'Reo',
+      lastName: 'Pen',
+      dob: '1992-02-02',
+      idNumber: 'rof',
+      isMinor: false,
+      status: 'clearance-pending',
+      consentAt: '2026-05-01T00:00:00.000Z',
+      createdAt: '2026-05-01T00:00:00.000Z',
+      version: 0,
+    });
+    const res = await reopen('rof');
+    assert.equal(res.status, 409);
+    assert.match(
+      ((await res.json()) as { error: string }).error,
+      /already registered at destination club/i,
+    );
+  });
+
+  test('409 for a legacy rejected clearance with no snapshot', async () => {
+    await repo.createPlayer('dolphins', mkSource('rog'));
+    // A clearance rejected before Reopen existed: status rejected, but no rejectSnapshot.
+    await repo.createClearance(
+      'dolphins',
+      mkClearance('rog', {
+        status: 'rejected' as const,
+        rejectedAt: '2026-06-01T00:00:00.000Z',
+        rejectedBy: 'admin@test',
+        version: 1,
+      }),
+    );
+    const res = await reopen('rog');
+    assert.equal(res.status, 409);
+    assert.match(
+      ((await res.json()) as { error: string }).error,
+      /rejected before reopen was supported/,
+    );
   });
 });

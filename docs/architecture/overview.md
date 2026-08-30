@@ -67,5 +67,9 @@ flowchart TB
 | [0006](0006-platform-operator-and-tenant-registry.md) | Platform operator role, tenant registry, `/platform`   |
 | [0007](0007-wildcard-subdomains-shared-api-host.md)   | Wildcard subdomains on one shared API host             |
 | [0008](0008-configurable-league-structures.md)        | Configurable league structures as stage pipelines      |
+| [0009](0009-per-tenant-required-docs.md)              | Per-tenant compliance-doc catalogue                    |
+| [0010](0010-self-serve-onboarding.md)                 | Self-serve client onboarding suite (operator portal)   |
+| [0011](0011-progressive-fixture-release.md)           | Progressive fixture release (withhold venues/times)    |
+| [0012](0012-clearance-reject-cancels-the-move.md)     | Clearance reject cancels the move, reversible reopen   |
 
 For the data layout and access patterns, see [data-model.md](data-model.md).

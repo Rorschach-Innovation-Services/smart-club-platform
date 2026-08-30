@@ -87,6 +87,7 @@ const STATUS_LABEL: Record<PlayerStatus, string> = {
   active: 'Active',
   'clearance-pending': 'Clearance pending',
   inactive: 'Inactive',
+  // 'clearance-rejected' is legacy — reject no longer writes it; rows from before still render.
   'clearance-rejected': 'Clearance rejected',
 };
 

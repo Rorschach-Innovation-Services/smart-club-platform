@@ -5141,6 +5141,7 @@ export function ClubPlayersView({
   const allRounders = mine.filter((p) => p.isAllRounder).length;
   const wks = mine.filter((p) => p.isWk).length;
   const pendingClearance = mine.filter((p) => p.status === 'clearance-pending').length;
+  // 'clearance-rejected' is legacy — reject no longer writes it; rows from before still render.
   const rejectedClearance = mine.filter((p) => p.status === 'clearance-rejected').length;
 
   return (
@@ -5235,6 +5236,7 @@ export function ClubPlayersView({
             {pendingClearance}
           </div>
         </div>
+        {/* 'clearance-rejected' is legacy — reject no longer writes it; rows from before still render. */}
         {rejectedClearance > 0 && (
           <div className="players-stat">
             <div className="players-stat-l">Clearance rejected</div>
@@ -5501,7 +5503,8 @@ export function ClubClearancesView({
           <p className="ph-desc">
             Players leaving {club.name} need a clearance certificate. Confirm{' '}
             <strong>fees cleared</strong> and <strong>misconduct charges cleared</strong> to issue
-            it — the Union office may override and approve on your behalf.
+            it — the Union office may override and approve on your behalf. If the Union rejects a
+            request, the move is cancelled and the player stays (or returns to) their previous club.
           </p>
         </div>
         <div className="ph-actions">
@@ -5531,7 +5534,11 @@ export function ClubClearancesView({
               <div key={req.id} className="clr-card">
                 <div className="clr-card-head">
                   <div>
-                    <div className="clr-eyebrow">Pending · Union may override</div>
+                    <div className="clr-eyebrow">
+                      {req.reopenedAt
+                        ? `Reopened by Union office · ${fmtDay(req.reopenedAt)}`
+                        : 'Pending · Union may override'}
+                    </div>
                     <div className="clr-name">
                       {req.playerName}
                       {req.origin === 'registration' && (
@@ -5609,10 +5616,13 @@ export function ClubClearancesView({
                     </div>
                     <div className="clr-name">{req.playerName}</div>
                     <div className="clr-meta">
-                      {req.rejectReason
-                        ? `"${req.rejectReason}"`
-                        : `Stays registered at ${req.fromClubName}`}
+                      {req.rejectOutcome === 'moved-to-source'
+                        ? `Their registration is now at ${club.name}`
+                        : req.rejectOutcome === 'stays-at-destination'
+                          ? `Stays registered at ${req.toClubName} — ${club.name} was not on the system when this was rejected`
+                          : `Remains registered at ${club.name}`}
                     </div>
+                    {req.rejectReason && <div className="clr-note">"{req.rejectReason}"</div>}
                   </div>
                   <Pill tone="coral" dot>
                     Rejected
@@ -5658,12 +5668,18 @@ export function ClubClearancesView({
                 <div className="clr-card-head">
                   <div>
                     <div className="clr-eyebrow">
-                      Incoming ·{' '}
-                      {req.status === 'pending'
-                        ? 'Pending source club'
-                        : req.status === 'rejected'
-                          ? 'Rejected'
-                          : 'Cleared'}
+                      {req.status === 'pending' && req.reopenedAt ? (
+                        `Reopened by Union office · ${fmtDay(req.reopenedAt)}`
+                      ) : (
+                        <>
+                          Incoming ·{' '}
+                          {req.status === 'pending'
+                            ? 'Pending source club'
+                            : req.status === 'rejected'
+                              ? 'Rejected'
+                              : 'Cleared'}
+                        </>
+                      )}
                     </div>
                     <div className="clr-name">
                       {req.playerName}
@@ -5676,6 +5692,16 @@ export function ClubClearancesView({
                     <div className="clr-meta">
                       From <strong>{req.fromClubName}</strong> · Requested {fmtDay(req.requestedAt)}
                     </div>
+                    {req.status === 'rejected' && (
+                      <div className="clr-meta">
+                        {req.rejectOutcome === 'stays-at-destination'
+                          ? `The move was cancelled — ${req.fromClubName} is not on the system, so the player stays registered with your club`
+                          : `The move was cancelled — the player is registered at ${req.fromClubName}`}
+                      </div>
+                    )}
+                    {req.status === 'rejected' && req.rejectReason && (
+                      <div className="clr-note">"{req.rejectReason}"</div>
+                    )}
                     {/* THIS club is the destination, so it is the one now holding the player —
                         and if the union used the override to dispose of a registration that
                         should not exist, it is the club that most needs to know why. A bare

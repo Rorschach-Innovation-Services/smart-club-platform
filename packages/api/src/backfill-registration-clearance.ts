@@ -16,8 +16,10 @@
  *   4. source club playerCount +1 (approval and rejection both decrement it).
  *
  * The source club then approves in its portal — or the union admin overrides.
- * NEVER REJECT a backfilled clearance: it flags a legitimately active player
- * 'clearance-rejected' with no reactivation endpoint.
+ * Rejecting a backfilled clearance is safe and reversible: the placeholder marks it as case B″,
+ * so a reject REPLACES the placeholder with the destination's real registration at the source
+ * club (no source-count change — the placeholder was already counted), and Reopen puts the
+ * placeholder back. It never flags a terminal 'clearance-rejected' row.
  *
  * Dry-run by default; pass --confirm to write. Point at prod with:
  *   AWS_PROFILE=medicoach AWS_REGION=af-south-1 \
@@ -106,6 +108,9 @@ async function main() {
     idNumber: player.idNumber,
     team: player.team,
     status: 'clearance-pending',
+    // Marks this as a stand-in with no real registration behind it, so a later reject
+    // REPLACES it with the destination's full row (case B″) instead of reactivating the stub.
+    placeholder: true,
     version: 0,
   };
 
@@ -185,8 +190,8 @@ async function main() {
   console.log(
     '\n✓ Clearance opened. The previous club approves it in the portal (or the union admin\n' +
       '  overrides) to return the player to active at the current club.\n' +
-      '  ⚠ Do NOT reject this clearance: rejection flags a legitimately active player as\n' +
-      "  'clearance-rejected' and there is no reactivation endpoint.",
+      '  Rejecting it is safe (case B″): the placeholder is replaced by the real registration at\n' +
+      '  the previous club, source count unchanged, and Reopen reverses it.',
   );
 }
 
