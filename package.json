@@ -11,6 +11,7 @@
     "lint": "eslint . --ext js,jsx,ts,tsx",
     "typecheck": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "deploy": "sst deploy --stage prod",
@@ -39,6 +40,7 @@
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@sentry/vite-plugin": "^5.3.0",
     "@testing-library/jest-dom": "^7.0.0",
     "@testing-library/react": "^16.3.2",

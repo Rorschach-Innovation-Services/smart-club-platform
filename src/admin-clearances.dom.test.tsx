@@ -10,7 +10,7 @@
  * That last rule is why prod's backfilled clearances are approve/override-only.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, within } from '@testing-library/react';
+import { screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AdminClearances } from './admin';
 import { renderWithProviders } from './test-utils';
@@ -38,10 +38,17 @@ const request = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-const setup = (clearances: Array<Record<string, unknown>>, busyId?: string) => {
-  const onOverride = vi.fn();
-  const onReject = vi.fn();
-  const onReassign = vi.fn();
+const setup = (
+  clearances: Array<Record<string, unknown>>,
+  busyId?: string,
+  busyAction?: 'reject' | 'override' | 'reassign',
+) => {
+  // The handlers resolve to a tri-state in production ('ok' | 'conflict' | 'failed'; the
+  // dialog closes unless the result is 'failed'); default them to 'ok' so an ordinary
+  // confirm click closes the dialog.
+  const onOverride = vi.fn().mockResolvedValue('ok');
+  const onReject = vi.fn().mockResolvedValue('ok');
+  const onReassign = vi.fn().mockResolvedValue('ok');
   const user = userEvent.setup();
   renderWithProviders(
     <AdminClearances
@@ -52,6 +59,7 @@ const setup = (clearances: Array<Record<string, unknown>>, busyId?: string) => {
       onReject={onReject}
       onReassign={onReassign}
       busyId={busyId}
+      busyAction={busyAction}
     />,
   );
   return { user, onOverride, onReject, onReassign };
@@ -126,7 +134,10 @@ describe('an ordinary clearance', () => {
     const { user, onOverride } = setup([request()]);
 
     await user.click(within(card()).getByRole('button', { name: /override & approve/i }));
-    await user.type(screen.getByRole('textbox'), '  not a real registration, removing  ');
+    await user.type(
+      screen.getByPlaceholderText(/reason/i),
+      '  not a real registration, removing  ',
+    );
     await user.click(screen.getByRole('button', { name: /yes, issue clearance/i }));
 
     expect(onOverride).toHaveBeenCalledWith(
@@ -199,11 +210,24 @@ describe('an ordinary clearance', () => {
     expect(screen.queryByText(/has no record of this player on its roster/i)).toBeNull();
   });
 
-  it('disables the actions while one is in flight', () => {
-    setup([request()], 'clr-1');
+  it('labels the in-flight action so a reject never reads as an approval', () => {
+    // The screenshot bug: while a REJECT was in flight the Override button read "Issuing…"
+    // and Reject just greyed out, so a rejection looked like an approval. The busy label
+    // must follow the action actually running.
+    setup([request()], 'clr-1', 'reject');
+
+    expect(within(card()).getByRole('button', { name: /rejecting/i })).toBeDisabled();
+    // Override keeps its normal label — it is not the action in flight.
+    expect(within(card()).getByRole('button', { name: /override & approve/i })).toBeDisabled();
+    expect(within(card()).queryByRole('button', { name: /issuing/i })).toBeNull();
+  });
+
+  it('labels an override in flight without touching the reject label', () => {
+    setup([request()], 'clr-1', 'override');
 
     expect(within(card()).getByRole('button', { name: /issuing/i })).toBeDisabled();
     expect(within(card()).getByRole('button', { name: /^reject$/i })).toBeDisabled();
+    expect(within(card()).queryByRole('button', { name: /rejecting/i })).toBeNull();
   });
 });
 
@@ -225,7 +249,7 @@ describe('the request list', () => {
     // The note is shown to BOTH clubs, so it has to reach the handler intact.
     const { user, onReject } = setup([request()]);
     await user.click(within(card()).getByRole('button', { name: /^reject$/i }));
-    await user.type(screen.getByRole('textbox'), '  Fees outstanding  ');
+    await user.type(screen.getByPlaceholderText(/reason/i), '  Fees outstanding  ');
     await user.click(screen.getByRole('button', { name: /yes, reject clearance/i }));
 
     expect(onReject).toHaveBeenCalledWith(
@@ -290,5 +314,128 @@ describe('the request list', () => {
     // Disabled on purpose — the console should not offer capabilities it lacks.
     setup([request()]);
     expect(screen.getByRole('button', { name: /export/i })).toBeDisabled();
+  });
+});
+
+describe('searching the clearance list', () => {
+  // A pending transfer and a resolved rejection with distinct player, club and id, so a
+  // search on any one field can be told apart from the other card.
+  const cohort = () => [
+    request(),
+    request({
+      id: 'clr-2',
+      status: 'rejected',
+      playerName: 'Thabo Mokoena',
+      idNumber: '9202025900011',
+      fromClubName: 'Glenwood CC',
+      toClubName: 'Durban CC',
+      rejectedBy: 'union@dolphins.test',
+    }),
+  ];
+  const search = () => screen.getByRole('textbox', { name: /search clearances/i });
+  const allPill = () => screen.getByRole('button', { name: /^all\b/i });
+
+  it('narrows across every status by player name', async () => {
+    const { user } = setup(cohort());
+
+    await user.type(search(), 'Thabo');
+    expect(screen.getByText(/thabo mokoena/i)).toBeVisible();
+    expect(screen.queryByText(/sipho ndlovu/i)).toBeNull();
+    // The All pill counts the searched set, not the cohort.
+    expect(allPill()).toHaveTextContent(/all\s*1/i);
+    expect(screen.getByText(/showing 1 of 2 clearances/i)).toBeVisible();
+  });
+
+  it('matches on club name and on ID number', async () => {
+    const { user } = setup(cohort());
+
+    await user.type(search(), 'glenwood');
+    expect(screen.getByText(/thabo mokoena/i)).toBeVisible();
+    expect(screen.queryByText(/sipho ndlovu/i)).toBeNull();
+
+    await user.clear(search());
+    await user.type(search(), '0101015');
+    expect(screen.getByText(/sipho ndlovu/i)).toBeVisible();
+    expect(screen.queryByText(/thabo mokoena/i)).toBeNull();
+  });
+
+  it('reflects the search in the status pill counts, cohort totals aside', async () => {
+    const { user } = setup(cohort());
+
+    await user.type(search(), 'Thabo');
+    // Thabo is rejected: the search leaves Rejected at 1, Pending at 0, All at 1…
+    expect(screen.getByRole('button', { name: /^rejected\b/i })).toHaveTextContent(/rejected\s*1/i);
+    expect(screen.getByRole('button', { name: /^pending\b/i })).toHaveTextContent(/pending\s*0/i);
+    // …while the four stat cards stay cohort totals (1 pending, 1 rejected across the cohort).
+    // Scope to the stat label — "Pending"/"Rejected" also head the pill buttons.
+    expect(
+      screen.getByText('Pending', { selector: '.players-stat-l' }).parentElement,
+    ).toHaveTextContent('1');
+    expect(
+      screen.getByText('Rejected', { selector: '.players-stat-l' }).parentElement,
+    ).toHaveTextContent('1');
+  });
+
+  it('restores the full list when the search is cleared', async () => {
+    const { user } = setup(cohort());
+
+    await user.type(search(), 'Thabo');
+    expect(screen.queryByText(/sipho ndlovu/i)).toBeNull();
+
+    await user.clear(search());
+    expect(screen.getByText(/sipho ndlovu/i)).toBeVisible();
+    expect(screen.getByText(/thabo mokoena/i)).toBeVisible();
+    expect(allPill()).toHaveTextContent(/all\s*2/i);
+    // The result-count line only shows while a search is active.
+    expect(screen.queryByText(/showing .* of .* clearances/i)).toBeNull();
+  });
+
+  it('tells the admin when nothing matches, quoting the query', async () => {
+    const { user } = setup(cohort());
+    await user.type(search(), 'Nonesuch');
+    expect(screen.getByText(/no clearances match "Nonesuch"/i)).toBeVisible();
+  });
+});
+
+describe('the confirm dialog waits for the request to settle', () => {
+  it('stays open while the reject is in flight and closes only on success', async () => {
+    const { user, onReject } = setup([request()]);
+    let resolveReject!: (outcome: 'ok' | 'conflict' | 'failed') => void;
+    onReject.mockReturnValue(
+      new Promise<'ok' | 'conflict' | 'failed'>((res) => (resolveReject = res)),
+    );
+
+    await user.click(within(card()).getByRole('button', { name: /^reject$/i }));
+    await user.click(screen.getByRole('button', { name: /yes, reject clearance/i }));
+
+    // The request is pending — the dialog must not have closed yet.
+    expect(screen.getByText(/reject this clearance/i)).toBeVisible();
+
+    resolveReject('ok');
+    await waitFor(() => expect(screen.queryByText(/reject this clearance/i)).toBeNull());
+  });
+
+  it('stays open when the reject fails, so the toast is visible and the admin can retry', async () => {
+    const { user, onReject } = setup([request()]);
+    onReject.mockResolvedValue('failed');
+
+    await user.click(within(card()).getByRole('button', { name: /^reject$/i }));
+    await user.click(screen.getByRole('button', { name: /yes, reject clearance/i }));
+
+    expect(onReject).toHaveBeenCalledTimes(1);
+    // The handler resolved 'failed' → the dialog stays mounted for a retry.
+    expect(screen.getByText(/reject this clearance/i)).toBeVisible();
+  });
+
+  it('closes on a 409 conflict — the list has already refetched, so a retry would only 409 again', async () => {
+    const { user, onReject } = setup([request()]);
+    onReject.mockResolvedValue('conflict');
+
+    await user.click(within(card()).getByRole('button', { name: /^reject$/i }));
+    await user.click(screen.getByRole('button', { name: /yes, reject clearance/i }));
+
+    expect(onReject).toHaveBeenCalledTimes(1);
+    // The handler resolved 'conflict' → the dialog closes (the toast already told the admin).
+    await waitFor(() => expect(screen.queryByText(/reject this clearance/i)).toBeNull());
   });
 });

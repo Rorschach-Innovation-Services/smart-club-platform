@@ -28,3 +28,7 @@ titans-import-created-clubs.json
 
 # generated cohort exports (contain PII)
 cohort-export-*.xlsx
+
+# Playwright E2E (browser-driven admin tests)
+test-results/
+playwright-report/

@@ -6367,3 +6367,476 @@ describe('Clearance chairman notice (comm log + channels)', () => {
     assert.equal(await repo.getClub('dolphins', 'ntc-dir-prev'), null);
   });
 });
+
+describe('Clearance resolved notice (union reject / override → both clubs)', () => {
+  // notify runs in dry-run here (no FROM_EMAIL / WhatsApp secrets), so every channel
+  // "sends" without network and the comm-log rows record the would-be outcome. A club with
+  // a full chair (email + cell) → email `sent` + whatsapp `sent`; email-only → whatsapp
+  // `skipped`.
+  const mkClub = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    name,
+    district: 'Test District',
+    sub: `sub-${id}`,
+    chair: 'Chair',
+    affiliation: 'not_started' as const,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#778899',
+    ground: {},
+    leagues: [],
+    version: 1,
+    ...extra,
+  });
+  const mkPlayer = (clubId: string, nk: string) => ({
+    naturalKey: nk,
+    clubId,
+    firstName: 'Res',
+    lastName: 'Olve',
+    dob: '1993-03-03',
+    isMinor: false,
+    status: 'active' as const,
+    consentAt: '2026-05-01T00:00:00.000Z',
+    createdAt: '2026-05-01T00:00:00.000Z',
+  });
+  const fullChair = (slug: string) => ({
+    exco: { chair: { name: `Chair ${slug}`, email: `chair@${slug}.test`, cell: '0835551234' } },
+  });
+  const emailOnlyChair = (slug: string) => ({
+    exco: { chair: { name: `Chair ${slug}`, email: `chair@${slug}.test` } },
+  });
+
+  let teamKey: string;
+  let clubKey: (t: string, c: string) => { pk: string; sk: string };
+  let playerKey: (t: string, c: string, nk: string) => { pk: string; sk: string };
+  let docClient: { send: (cmd: unknown) => Promise<unknown> };
+  let UpdateCommand: new (input: unknown) => unknown;
+  let DeleteCommand: new (input: unknown) => unknown;
+  let DocProto: { send: (...a: unknown[]) => Promise<unknown> };
+
+  const mintKey = async (clubId: string, token: string) => {
+    const up = await app.request(`/register/${clubId}/id-doc/upload-url?t=${token}`, {
+      method: 'POST',
+      body: JSON.stringify({ contentType: 'image/png' }),
+    });
+    return ((await up.json()) as { objectKey: string }).objectKey;
+  };
+  const registerAt = (clubId: string, token: string, body: Record<string, unknown>) =>
+    app.request(`/register/${clubId}?t=${token}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  before(async () => {
+    const lib = await import('@aws-sdk/lib-dynamodb');
+    const { DynamoDBClient } = await import('@aws-sdk/client-dynamodb');
+    UpdateCommand = lib.UpdateCommand as unknown as new (i: unknown) => unknown;
+    DeleteCommand = lib.DeleteCommand as unknown as new (i: unknown) => unknown;
+    DocProto = lib.DynamoDBDocumentClient.prototype as unknown as {
+      send: (...a: unknown[]) => Promise<unknown>;
+    };
+    docClient = lib.DynamoDBDocumentClient.from(
+      new DynamoDBClient({
+        endpoint: process.env.DYNAMO_ENDPOINT,
+        region: 'localhost',
+        credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+      }),
+    ) as unknown as { send: (cmd: unknown) => Promise<unknown> };
+    ({ clubKey, playerKey } = (await import('../src/keys.js')) as unknown as {
+      clubKey: typeof clubKey;
+      playerKey: typeof playerKey;
+    });
+    teamKey = ((await repo.getTenantConfig('dolphins'))?.leagues ?? [])[0]?.key ?? '';
+    assert.ok(teamKey, 'precondition: tenant has a league catalogue');
+  });
+
+  // (a) request-origin reject → clearance-rejected on BOTH clubs, reason on the email.
+  test('a request-origin reject logs clearance-rejected on both clubs (reason on the email)', async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('crv-a-src', 'Res A Source CC', fullChair('crv-a-src')),
+    );
+    await repo.createClub(
+      'dolphins',
+      mkClub('crv-a-dst', 'Res A Dest CC', emailOnlyChair('crv-a-dst')),
+    );
+    await repo.createPlayer('dolphins', mkPlayer('crv-a-src', 'res-a-mover'));
+    await repo.createClearance('dolphins', {
+      id: 'crv-a-clr',
+      playerNaturalKey: 'res-a-mover',
+      playerName: 'Res A Mover',
+      fromClubId: 'crv-a-src',
+      toClubId: 'crv-a-dst',
+      fromClubName: 'Res A Source CC',
+      toClubName: 'Res A Dest CC',
+      requestedAt: new Date().toISOString(),
+      feesCleared: false,
+      misconductCleared: false,
+      status: 'pending',
+      clubApprovedAt: null,
+      adminOverrideAt: null,
+      version: 0,
+    });
+    const res = await app.request('/admin/clearances/crv-a-clr/reject', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'crv-a-src', reason: 'Outstanding kit fees' }),
+    });
+    assert.equal(res.status, 200);
+
+    const src = await repo.getClub('dolphins', 'crv-a-src');
+    const dst = await repo.getClub('dolphins', 'crv-a-dst');
+    const srcRows = (src?.commLog ?? []).filter((e) => e.kind === 'clearance-rejected');
+    const dstRows = (dst?.commLog ?? []).filter((e) => e.kind === 'clearance-rejected');
+    assert.equal(srcRows.length, 2, 'source club: one row per channel');
+    assert.equal(dstRows.length, 2, 'destination club: one row per channel');
+    // Source chair is full (email + cell) → both sent; dest chair email-only → whatsapp skipped.
+    assert.equal(srcRows.find((e) => e.channel === 'email')?.status, 'sent');
+    assert.equal(srcRows.find((e) => e.channel === 'whatsapp')?.status, 'sent');
+    assert.equal(dstRows.find((e) => e.channel === 'email')?.status, 'sent');
+    assert.equal(dstRows.find((e) => e.channel === 'whatsapp')?.status, 'skipped');
+    assert.ok(
+      [...srcRows, ...dstRows].every((e) => e.by === 'admin@test'),
+      'attributed to the rejecting admin',
+    );
+    assert.equal(
+      srcRows.find((e) => e.channel === 'email')?.idempotencyKey,
+      'clearance-crv-a-clr-rejected-email',
+    );
+
+    // The email body carries the reason (comm-log rows never store the body — assert the
+    // pure content builder the sender renders from).
+    const email = await import('../src/notify/email.js');
+    const content = email.clearanceResolvedEmailContent({
+      to: 'chair@crv-a-src.test',
+      chairName: 'Chair',
+      fromClubName: 'Res A Source CC',
+      playerName: 'Res A Mover',
+      toClubName: 'Res A Dest CC',
+      outcome: 'rejected',
+      reason: 'Outstanding kit fees',
+    });
+    assert.match(content.text, /Reason: Outstanding kit fees/);
+    assert.match(content.html, /<strong>Reason:<\/strong> Outstanding kit fees/);
+
+    // Rejected copy is origin-aware. Request-origin (this clearance): the player stays put
+    // at the source club, so the body must say they remain registered there — and must NOT
+    // claim the destination row was flagged / the source record removed.
+    assert.match(content.text, /they remain registered at Res A Source CC/);
+    assert.doesNotMatch(content.text, /flagged as clearance-rejected/);
+    // Registration-origin: the inverse — the destination row is flagged clearance-rejected
+    // and any record at the source club is removed. The public form drives this branch.
+    const regContent = email.clearanceResolvedEmailContent({
+      to: 'chair@crv-a-src.test',
+      chairName: 'Chair',
+      fromClubName: 'Res A Source CC',
+      playerName: 'Res A Mover',
+      toClubName: 'Res A Dest CC',
+      outcome: 'rejected',
+      origin: 'registration',
+    });
+    assert.match(
+      regContent.text,
+      /their registration at Res A Dest CC is flagged as clearance-rejected, and any record of them at Res A Source CC has been removed/,
+    );
+    assert.doesNotMatch(regContent.text, /they remain registered at/);
+  });
+
+  // (b) request-origin override → clearance-approved on BOTH clubs.
+  test('an admin override logs clearance-approved on both clubs', async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('crv-b-src', 'Res B Source CC', fullChair('crv-b-src')),
+    );
+    await repo.createClub('dolphins', mkClub('crv-b-dst', 'Res B Dest CC', fullChair('crv-b-dst')));
+    await repo.createPlayer('dolphins', mkPlayer('crv-b-src', 'res-b-mover'));
+    await repo.createClearance('dolphins', {
+      id: 'crv-b-clr',
+      playerNaturalKey: 'res-b-mover',
+      playerName: 'Res B Mover',
+      fromClubId: 'crv-b-src',
+      toClubId: 'crv-b-dst',
+      fromClubName: 'Res B Source CC',
+      toClubName: 'Res B Dest CC',
+      requestedAt: new Date().toISOString(),
+      feesCleared: false,
+      misconductCleared: false,
+      status: 'pending',
+      clubApprovedAt: null,
+      adminOverrideAt: null,
+      version: 0,
+    });
+    const res = await app.request('/admin/clearances/crv-b-clr/override', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'crv-b-src', reason: 'Cleared by union' }),
+    });
+    assert.equal(res.status, 200);
+    const src = await repo.getClub('dolphins', 'crv-b-src');
+    const dst = await repo.getClub('dolphins', 'crv-b-dst');
+    const srcRows = (src?.commLog ?? []).filter((e) => e.kind === 'clearance-approved');
+    const dstRows = (dst?.commLog ?? []).filter((e) => e.kind === 'clearance-approved');
+    assert.equal(srcRows.length, 2, 'source club notified');
+    assert.equal(dstRows.length, 2, 'destination club notified');
+    assert.ok([...srcRows, ...dstRows].every((e) => e.status === 'sent'));
+    assert.equal(
+      dstRows.find((e) => e.channel === 'whatsapp')?.idempotencyKey,
+      'clearance-crv-b-clr-approved-whatsapp',
+    );
+  });
+
+  // (c) directory-sourced override → only the destination club is notified (no source Club).
+  test('a directory-sourced override notifies only the destination club', async () => {
+    await repo.createClub('dolphins', mkClub('crv-c-dst', 'Res C Dest CC', fullChair('crv-c-dst')));
+    const clearance = {
+      id: 'crv-c-clr',
+      playerNaturalKey: 'res-c-mover',
+      playerName: 'Res C Mover',
+      team: undefined,
+      fromClubId: 'crv-c-dir',
+      toClubId: 'crv-c-dst',
+      fromClubName: 'Offline Directory CC',
+      toClubName: 'Res C Dest CC',
+      requestedAt: new Date().toISOString(),
+      origin: 'registration' as const,
+      fromClubDirectory: true,
+      feesCleared: false,
+      misconductCleared: false,
+      status: 'pending' as const,
+      clubApprovedAt: null,
+      adminOverrideAt: null,
+      version: 0,
+    };
+    await repo.createPlayerWithSourcelessClearance(
+      'dolphins',
+      { ...mkPlayer('crv-c-dst', 'res-c-mover'), status: 'clearance-pending' as const },
+      clearance,
+    );
+    const res = await app.request('/admin/clearances/crv-c-clr/override', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'crv-c-dir' }),
+    });
+    assert.equal(res.status, 200);
+    const dst = await repo.getClub('dolphins', 'crv-c-dst');
+    assert.equal(
+      (dst?.commLog ?? []).filter((e) => e.kind === 'clearance-approved').length,
+      2,
+      'destination club notified on both channels',
+    );
+    // No Club record for the directory source, so there is nowhere a notice could land.
+    assert.equal(await repo.getClub('dolphins', 'crv-c-dir'), null);
+  });
+
+  // (d) regression guard for the EXISTING conditional swallow: the club META item is raw-
+  // deleted between create and reject, so the post-commit playerCount decrement's
+  // attribute_exists(pk) condition fails — reject still 200s and the player is flagged.
+  test('a registration-origin reject still succeeds when the source club item is gone', async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('crv-d-src', 'Res D Source CC', fullChair('crv-d-src')),
+    );
+    await repo.createClub('dolphins', mkClub('crv-d-dst', 'Res D Dest CC', fullChair('crv-d-dst')));
+    await repo.putToken('crv-d-src-token', 'dolphins', 'crv-d-src', '2026-06-01T00:00:00.000Z');
+    await repo.putToken('crv-d-dst-token', 'dolphins', 'crv-d-dst', '2026-06-01T00:00:00.000Z');
+    const keySrc = await mintKey('crv-d-src', 'crv-d-src-token');
+    const keyDst = await mintKey('crv-d-dst', 'crv-d-dst-token');
+    const base = {
+      firstName: 'Dee',
+      lastName: 'Mover',
+      idType: 'passport',
+      dob: '1998-08-08',
+      nationality: 'South African',
+      race: 'African',
+      gender: 'Male',
+      team: teamKey,
+      district: 'Ethekwini',
+    };
+    await registerAt('crv-d-src', 'crv-d-src-token', {
+      ...base,
+      idNumber: 'CRVD01',
+      cell: '0830000041',
+      idDocMeta: { objectKey: keySrc, size: 100, contentType: 'image/png' },
+    });
+    const reg = await registerAt('crv-d-dst', 'crv-d-dst-token', {
+      ...base,
+      idNumber: 'CRVD01',
+      cell: '0830000042',
+      idDocMeta: { objectKey: keyDst, size: 100, contentType: 'image/png' },
+      lastClubId: 'crv-d-src',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await repo.listClearancesForSource('dolphins', 'crv-d-src')).find(
+      (x) => x.idNumber === 'CRVD01' && x.status === 'pending',
+    )!;
+    // Raw-delete ONLY the source club's META item (players survive) — eraseClubData is NOT
+    // used (it would cascade the player rows too). The post-commit decrement then fails its
+    // attribute_exists(pk) condition, which the inner catch swallows.
+    await docClient.send(
+      new DeleteCommand({ TableName: TABLE, Key: clubKey('dolphins', 'crv-d-src') }),
+    );
+    const res = await app.request(`/admin/clearances/${clr.id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'crv-d-src', version: clr.version }),
+    });
+    assert.equal(res.status, 200, 'reject still commits despite the vanished club item');
+    assert.equal(((await res.json()) as { status: string }).status, 'rejected');
+    const dest = (await repo.listPlayers('dolphins', 'crv-d-dst')).find(
+      (p) => p.idNumber === 'CRVD01',
+    );
+    assert.equal(dest?.status, 'clearance-rejected', 'player kept at destination, flagged');
+  });
+
+  // (d') the NEW outer catch: stub the DocumentClient send so the post-commit ADD playerCount
+  // update rejects with a non-conditional DynamoDB error → reject still 200s, error logged.
+  test('a post-commit throughput error on the count decrement never fails the reject', async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('crv-e-src', 'Res E Source CC', fullChair('crv-e-src')),
+    );
+    await repo.createClub('dolphins', mkClub('crv-e-dst', 'Res E Dest CC', fullChair('crv-e-dst')));
+    await repo.putToken('crv-e-src-token', 'dolphins', 'crv-e-src', '2026-06-01T00:00:00.000Z');
+    await repo.putToken('crv-e-dst-token', 'dolphins', 'crv-e-dst', '2026-06-01T00:00:00.000Z');
+    const keySrc = await mintKey('crv-e-src', 'crv-e-src-token');
+    const keyDst = await mintKey('crv-e-dst', 'crv-e-dst-token');
+    const base = {
+      firstName: 'Eee',
+      lastName: 'Mover',
+      idType: 'passport',
+      dob: '1997-07-07',
+      nationality: 'South African',
+      race: 'African',
+      gender: 'Male',
+      team: teamKey,
+      district: 'Ethekwini',
+    };
+    await registerAt('crv-e-src', 'crv-e-src-token', {
+      ...base,
+      idNumber: 'CRVE01',
+      cell: '0830000051',
+      idDocMeta: { objectKey: keySrc, size: 100, contentType: 'image/png' },
+    });
+    const reg = await registerAt('crv-e-dst', 'crv-e-dst-token', {
+      ...base,
+      idNumber: 'CRVE01',
+      cell: '0830000052',
+      idDocMeta: { objectKey: keyDst, size: 100, contentType: 'image/png' },
+      lastClubId: 'crv-e-src',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await repo.listClearancesForSource('dolphins', 'crv-e-src')).find(
+      (x) => x.idNumber === 'CRVE01' && x.status === 'pending',
+    )!;
+
+    // repo's ddb is a DynamoDBDocumentClient instance whose `send` is inherited from the
+    // smithy Client prototype (DynamoDBDocumentClient adds no own `send`). Setting an own
+    // `send` on the prototype shadows it for every instance — including repo's — so we can
+    // fail ONLY the post-commit `ADD playerCount :neg1` update and delegate everything else.
+    const orig = DocProto.send;
+    const errs: unknown[] = [];
+    const origErr = console.error;
+    console.error = (...a: unknown[]) => {
+      errs.push(a);
+    };
+    DocProto.send = function (this: unknown, command: { input?: { UpdateExpression?: string } }) {
+      if (command?.input?.UpdateExpression === 'ADD playerCount :neg1') {
+        return Promise.reject(
+          Object.assign(new Error('throughput exceeded'), {
+            name: 'ProvisionedThroughputExceededException',
+          }),
+        );
+      }
+      return orig.call(this, command);
+    } as typeof DocProto.send;
+    try {
+      const res = await app.request(`/admin/clearances/${clr.id}/reject`, {
+        method: 'POST',
+        headers: headers(ADMIN),
+        body: JSON.stringify({ fromClubId: 'crv-e-src', version: clr.version }),
+      });
+      assert.equal(res.status, 200, 'reject commits even though the count decrement threw');
+      assert.equal(((await res.json()) as { status: string }).status, 'rejected');
+    } finally {
+      DocProto.send = orig;
+      console.error = origErr;
+    }
+    assert.ok(
+      errs.some(
+        (a) => Array.isArray(a) && String(a[0]).includes('reject post-commit cleanup failed'),
+      ),
+      'the post-commit failure was logged',
+    );
+    // The reject itself landed: the destination row is flagged.
+    const dest = (await repo.listPlayers('dolphins', 'crv-e-dst')).find(
+      (p) => p.idNumber === 'CRVE01',
+    );
+    assert.equal(dest?.status, 'clearance-rejected');
+  });
+
+  // (e) local-path parity: a registration-origin reject whose destination row has already
+  // raced to 'active' 409s (matching the transactional path's TransactionCanceledException).
+  test('a registration-origin reject 409s when the destination row is already active', async () => {
+    await repo.createClub(
+      'dolphins',
+      mkClub('crv-f-src', 'Res F Source CC', fullChair('crv-f-src')),
+    );
+    await repo.createClub('dolphins', mkClub('crv-f-dst', 'Res F Dest CC', fullChair('crv-f-dst')));
+    await repo.putToken('crv-f-src-token', 'dolphins', 'crv-f-src', '2026-06-01T00:00:00.000Z');
+    await repo.putToken('crv-f-dst-token', 'dolphins', 'crv-f-dst', '2026-06-01T00:00:00.000Z');
+    const keySrc = await mintKey('crv-f-src', 'crv-f-src-token');
+    const keyDst = await mintKey('crv-f-dst', 'crv-f-dst-token');
+    const base = {
+      firstName: 'Eff',
+      lastName: 'Mover',
+      idType: 'passport',
+      dob: '1996-06-06',
+      nationality: 'South African',
+      race: 'African',
+      gender: 'Male',
+      team: teamKey,
+      district: 'Ethekwini',
+    };
+    await registerAt('crv-f-src', 'crv-f-src-token', {
+      ...base,
+      idNumber: 'CRVF01',
+      cell: '0830000061',
+      idDocMeta: { objectKey: keySrc, size: 100, contentType: 'image/png' },
+    });
+    const reg = await registerAt('crv-f-dst', 'crv-f-dst-token', {
+      ...base,
+      idNumber: 'CRVF01',
+      cell: '0830000062',
+      idDocMeta: { objectKey: keyDst, size: 100, contentType: 'image/png' },
+      lastClubId: 'crv-f-src',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await repo.listClearancesForSource('dolphins', 'crv-f-src')).find(
+      (x) => x.idNumber === 'CRVF01' && x.status === 'pending',
+    )!;
+    const destRow = (await repo.listPlayers('dolphins', 'crv-f-dst')).find(
+      (p) => p.idNumber === 'CRVF01',
+    )!;
+    // Simulate a concurrent approve landing first: flip the destination row to 'active'.
+    await docClient.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: playerKey('dolphins', 'crv-f-dst', destRow.naturalKey),
+        UpdateExpression: 'SET #s = :active',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':active': 'active' },
+      }),
+    );
+    const res = await app.request(`/admin/clearances/${clr.id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'crv-f-src', version: clr.version }),
+    });
+    assert.equal(res.status, 409, 'the local path yields the same 409 the transaction would');
+  });
+});

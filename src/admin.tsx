@@ -14,6 +14,7 @@ import {
   hasActiveFilters,
   emptyPlayerFilters,
 } from './playerFilters';
+import { filterClearances } from './clearanceFilters';
 import {
   DISTRICTS,
   DEFAULT_REQUIRED_DOCS,
@@ -83,6 +84,7 @@ import {
 } from './competition/venues';
 import { DEFAULT_SERIES_OVERS, isSlotRef, SERIES_TYPES, slotRefLabel } from './competition/formats';
 import type {
+  AdminClearanceView,
   Cadence,
   Club,
   League,
@@ -5795,9 +5797,17 @@ export function AdminClubDetail({
                   d: `${fmtDate(n.at)} · ${n.author}`,
                   _at: n.at,
                 }));
+                const commLabels = {
+                  invite: 'Onboarding invite',
+                  reglink: 'Registration link',
+                  clearance: 'Clearance notice',
+                  'clearance-approved': 'Clearance approved notice',
+                  'clearance-rejected': 'Clearance rejected notice',
+                  fixtures: 'Fixtures shared with players',
+                };
                 const sendItems = (club.commLog || []).map((e) => {
                   const isFixtures = e.kind === 'fixtures';
-                  const label = isFixtures ? 'Fixtures shared with players' : 'Onboarding invite';
+                  const label = commLabels[e.kind ?? 'invite'] ?? commLabels.invite;
                   // Fixtures broadcasts carry a PII-free count summary; invites name the recipient.
                   const detail = isFixtures
                     ? e.summary
@@ -7471,6 +7481,7 @@ export function AdminClearances({
   onReject,
   onReassign,
   busyId,
+  busyAction,
 }) {
   const [confirm, setConfirm] = useStateA(null);
   // Optional note the admin attaches to a rejection (shown to both clubs).
@@ -7478,17 +7489,29 @@ export function AdminClearances({
   // Target club for a reallocation (the reassign confirm's picker).
   const [reassignTarget, setReassignTarget] = useStateA('');
   const [filter, setFilter] = useStateA('all');
+  // Free-text search across every status; combines with the status pills below.
+  const [q, setQ] = useStateA('');
   const teamLabel = labelByKey(leagues ?? []);
   // requestedAt is an INSTANT — the local calendar day, not the UTC one, or a request
   // logged at 01:00 SAST reads as the previous day.
   const fmtDay = (iso) => (iso ? formatStampDay(iso) : '');
 
-  const all = clearances ?? [];
+  // The admin list carries the derived `sourceRostered` field (AdminClearanceView); the
+  // props are still untyped, so annotate here to keep the derivation typed downstream.
+  const all: AdminClearanceView[] = clearances ?? [];
+  // Search first, then split into status buckets — so the pills (incl. All) count the
+  // SEARCHED set, while the four stat cards keep the cohort totals from `all`.
+  const searched = filterClearances(all, q, teamLabel);
   // `clearanceOverdue()` now always returns false, so there is no longer an
   // "overdue" bucket — every open request is simply pending.
-  const pending = all.filter((r) => r.status === 'pending');
-  const rejected = all.filter((r) => r.status === 'rejected');
-  const resolved = all.filter((r) => r.status === 'approved' || r.status === 'admin-override');
+  const pending = searched.filter((r) => r.status === 'pending');
+  const rejected = searched.filter((r) => r.status === 'rejected');
+  const resolved = searched.filter((r) => r.status === 'approved' || r.status === 'admin-override');
+  // Cohort totals for the stat cards — always the whole set, independent of the search.
+  const isResolved = (r) => r.status === 'approved' || r.status === 'admin-override';
+  const totalPending = all.filter((r) => r.status === 'pending').length;
+  const totalRejected = all.filter((r) => r.status === 'rejected').length;
+  const totalResolved = all.filter(isResolved).length;
 
   const list =
     filter === 'pending'
@@ -7497,7 +7520,7 @@ export function AdminClearances({
         ? resolved
         : filter === 'rejected'
           ? rejected
-          : all;
+          : searched;
 
   return (
     <div>
@@ -7529,26 +7552,33 @@ export function AdminClearances({
         <div className="players-stat">
           <div className="players-stat-l">Pending</div>
           <div className="players-stat-n" style={{ color: 'var(--gold)' }}>
-            {pending.length}
+            {totalPending}
           </div>
         </div>
         <div className="players-stat">
           <div className="players-stat-l">Resolved</div>
           <div className="players-stat-n" style={{ color: 'var(--green)' }}>
-            {resolved.length}
+            {totalResolved}
           </div>
         </div>
         <div className="players-stat">
           <div className="players-stat-l">Rejected</div>
           <div className="players-stat-n" style={{ color: 'var(--coral)' }}>
-            {rejected.length}
+            {totalRejected}
           </div>
         </div>
       </div>
 
       <div className="filter-row" style={{ marginTop: 14 }}>
+        <input
+          className="search-box"
+          aria-label="Search clearances"
+          placeholder="Search by player, ID number or club…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
         {[
-          { k: 'all', l: 'All', n: all.length },
+          { k: 'all', l: 'All', n: searched.length },
           { k: 'pending', l: 'Pending', n: pending.length },
           { k: 'resolved', l: 'Resolved', n: resolved.length },
           { k: 'rejected', l: 'Rejected', n: rejected.length },
@@ -7562,6 +7592,18 @@ export function AdminClearances({
           </button>
         ))}
       </div>
+      {q.trim() && (
+        <div
+          style={{
+            marginTop: 12,
+            fontSize: 11.5,
+            color: 'var(--muted)',
+            fontFamily: "'Montserrat',sans-serif",
+          }}
+        >
+          Showing {searched.length} of {all.length} clearances
+        </div>
+      )}
 
       <div className="clr-list" style={{ marginTop: 14 }}>
         {list.length === 0 && (
@@ -7576,7 +7618,9 @@ export function AdminClearances({
               borderRadius: 'var(--radius-lg)',
             }}
           >
-            No clearance requests match this filter.
+            {q.trim()
+              ? `No clearances match "${q.trim()}".`
+              : 'No clearance requests match this filter.'}
           </div>
         )}
         {list.map((req) => {
@@ -7697,9 +7741,13 @@ export function AdminClearances({
                           title: 'Reallocate this clearance?',
                           body: `${req.fromClubName} has no record on the system. If the club has since registered (perhaps under a slightly different name), reallocate the clearance to it — its rep will then see, and can approve or reject, ${req.playerName}'s transfer to ${req.toClubName}.`,
                           req,
-                          onYes: (targetId) => {
-                            onReassign(req, targetId);
-                            setConfirm(null);
+                          // Keep the dialog open until the request settles.
+                          onYes: async (targetId) => {
+                            const result = await onReassign(req, targetId);
+                            // Close on success AND on 'conflict' — the toast already told the
+                            // admin and the card has refetched, so a retry would only 409 again.
+                            // Stay open only for a transient 'failed' so the admin can retry.
+                            if (result !== 'failed') setConfirm(null);
                           },
                         });
                       }}
@@ -7726,18 +7774,23 @@ export function AdminClearances({
                         setConfirm({
                           kind: 'reject',
                           title: 'Reject this clearance?',
+                          req,
                           body:
                             req.origin === 'registration'
                               ? `This will reject ${req.playerName}'s clearance on the Union's authority. They stay on ${req.toClubName}'s roster, flagged clearance-rejected — which is permanent: there is no way to return them to active, and this is their only registration record. Any record of them at ${req.fromClubName} is removed.`
-                              : `This will reject ${req.playerName}'s transfer to ${req.toClubName} on the Union's authority. They stay registered at ${req.fromClubName}. Both clubs will be notified.`,
-                          onYes: (note) => {
-                            onReject(req, note);
-                            setConfirm(null);
+                              : `This will reject ${req.playerName}'s transfer to ${req.toClubName} on the Union's authority. They stay registered at ${req.fromClubName}. Both clubs' chairs will be notified by email/WhatsApp where contact details are on file.`,
+                          // Keep the dialog open until the request settles. Close on success
+                          // AND on 'conflict' — the toast already told the admin and the card
+                          // has refetched, so a retry would only 409 again. Stay open only for
+                          // a transient 'failed' so the admin can retry.
+                          onYes: async (note) => {
+                            const result = await onReject(req, note);
+                            if (result !== 'failed') setConfirm(null);
                           },
                         });
                       }}
                     >
-                      Reject
+                      {busy && busyAction === 'reject' ? 'Rejecting…' : 'Reject'}
                     </Btn>
                   </span>
                   <Btn
@@ -7749,17 +7802,22 @@ export function AdminClearances({
                       setConfirm({
                         kind: 'override',
                         title: 'Issue this clearance?',
+                        req,
                         body: sourcelessKnown
                           ? `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf — even though ${req.fromClubName} has no record of them. If this registration should not exist at all, issue it and then remove the player from ${req.toClubName}'s roster (Clubs → ${req.toClubName} → Players). Say which you are doing: the reason is shown to both clubs, and recorded against your name for the union's record.`
-                          : `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf. Both clubs will be notified.`,
-                        onYes: (note) => {
-                          onOverride(req, note);
-                          setConfirm(null);
+                          : `This will issue ${req.playerName}'s clearance to ${req.toClubName} on the Union's authority, on ${req.fromClubName}'s behalf. Both clubs' chairs will be notified by email/WhatsApp where contact details are on file.`,
+                        // Keep the dialog open until the request settles. Close on success AND
+                        // on 'conflict' — the toast already told the admin and the card has
+                        // refetched, so a retry would only 409 again. Stay open only for a
+                        // transient 'failed' so the admin can retry.
+                        onYes: async (note) => {
+                          const result = await onOverride(req, note);
+                          if (result !== 'failed') setConfirm(null);
                         },
                       });
                     }}
                   >
-                    {busy ? 'Issuing…' : 'Override & approve'}
+                    {busy && busyAction === 'override' ? 'Issuing…' : 'Override & approve'}
                   </Btn>
                 </div>
               )}
@@ -7877,31 +7935,54 @@ export function AdminClearances({
                 </select>
               )}
               <div className="fix-confirm-actions">
+                {/* Cancel stays enabled while the request is in flight (728eae4 convention);
+                    only the confirm button is disabled + relabelled. */}
                 <Btn tone="outline" onClick={() => setConfirm(null)}>
                   Cancel
                 </Btn>
-                {confirm.kind === 'reject' ? (
-                  <Btn tone="ink" onClick={() => confirm.onYes(reason.trim())}>
-                    Yes, reject clearance
-                  </Btn>
-                ) : confirm.kind === 'override' ? (
-                  <Btn tone="teal" icon={Icon.Arrow} onClick={() => confirm.onYes(reason.trim())}>
-                    Yes, issue clearance
-                  </Btn>
-                ) : confirm.kind === 'reassign' ? (
-                  <Btn
-                    tone="teal"
-                    icon={Icon.Arrow}
-                    disabled={!reassignTarget}
-                    onClick={() => confirm.onYes(reassignTarget)}
-                  >
-                    Reallocate clearance
-                  </Btn>
-                ) : (
-                  <Btn tone="teal" icon={Icon.Arrow} onClick={() => confirm.onYes()}>
-                    Yes, issue clearance
-                  </Btn>
-                )}
+                {(() => {
+                  // Busy only when THIS confirm's request is the one in flight.
+                  const cbusy = !!confirm.req && busyId === confirm.req.id;
+                  const busyLabel =
+                    busyAction === 'reject'
+                      ? 'Rejecting…'
+                      : busyAction === 'reassign'
+                        ? 'Reallocating…'
+                        : 'Issuing…';
+                  if (confirm.kind === 'reject')
+                    return (
+                      <Btn tone="ink" disabled={cbusy} onClick={() => confirm.onYes(reason.trim())}>
+                        {cbusy ? busyLabel : 'Yes, reject clearance'}
+                      </Btn>
+                    );
+                  if (confirm.kind === 'override')
+                    return (
+                      <Btn
+                        tone="teal"
+                        icon={Icon.Arrow}
+                        disabled={cbusy}
+                        onClick={() => confirm.onYes(reason.trim())}
+                      >
+                        {cbusy ? busyLabel : 'Yes, issue clearance'}
+                      </Btn>
+                    );
+                  if (confirm.kind === 'reassign')
+                    return (
+                      <Btn
+                        tone="teal"
+                        icon={Icon.Arrow}
+                        disabled={!reassignTarget || cbusy}
+                        onClick={() => confirm.onYes(reassignTarget)}
+                      >
+                        {cbusy ? busyLabel : 'Reallocate clearance'}
+                      </Btn>
+                    );
+                  return (
+                    <Btn tone="teal" icon={Icon.Arrow} onClick={() => confirm.onYes()}>
+                      Yes, issue clearance
+                    </Btn>
+                  );
+                })()}
               </div>
             </div>
           </div>,

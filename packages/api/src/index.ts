@@ -105,6 +105,7 @@ import {
   sendStaffInvite,
   sendChairOnboarding,
   sendClearanceNotice,
+  sendClearanceResolvedNotice,
   type Channel,
   type SendResult,
 } from './notify/index.js';
@@ -1216,6 +1217,89 @@ async function notifyClearanceOpened(
     );
   } catch (err) {
     console.error('clearance notice failed', err);
+  }
+}
+
+/**
+ * Notify BOTH clubs' chairmen that the union office has RESOLVED a clearance — issued it
+ * (override → 'approved') or declined it (reject → 'rejected'). Mirrors notifyClearanceOpened,
+ * with three deliberate differences:
+ *
+ *  - Both the source (from) and destination (to) clubs are notified, not just the source: a
+ *    resolution changes where the player is registered, which both clubs' offices care about.
+ *    A club that has no record on the system (a directory source) is simply skipped.
+ *  - No daily cap. The pending notice is capped because the PUBLIC register route can open
+ *    clearances anonymously; a resolution is always a deliberate authenticated admin action,
+ *    so there is nothing to rate-limit.
+ *  - The destination CHAIR (from exco.chair, falling back to the club.chair name) is notified —
+ *    the same recipient the pending notice targets — not the rep who requested the transfer, for
+ *    consistency. A club with no chair contact on file gets `skipped` rows, exactly as the
+ *    pending notice does.
+ *
+ * The two clubs run under Promise.all so worst-case latency is one club's send, not the sum:
+ * WhatsApp retries back off 1+2+4s inside a 30s Lambda, and a timeout AFTER the reject/override
+ * already committed would re-create the retry → 409 loop this whole feature exists to kill.
+ * Each club's results are appended to THAT club's comm log with kind `clearance-${outcome}` and
+ * an idempotencyKey `clearance-${id}-${outcome}-${channel}`. The whole thing is best-effort: any
+ * fault is logged and swallowed, never failing the request. A partial send (the Lambda dies
+ * between the two clubs) is NOT replayed — the resolved clearance 409s on any retry — which is
+ * accepted: at worst one club's chair is not messaged, and the resolution itself stands.
+ */
+async function notifyClearanceResolved(
+  tenant: string,
+  tenantConfig: TenantConfig | null,
+  clearance: PlayerClearance,
+  outcome: 'approved' | 'rejected',
+  by: string,
+): Promise<void> {
+  try {
+    const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
+      ? ['email', 'whatsapp']
+      : ['email'];
+    const [fromClub, toClub] = await Promise.all([
+      repo.getClub(tenant, clearance.fromClubId),
+      repo.getClub(tenant, clearance.toClubId),
+    ]);
+    const notifyClub = async (club: Club | null): Promise<void> => {
+      if (!club) return; // directory source (or a club since deleted): nothing to notify
+      const chair = (
+        club.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
+      )?.chair;
+      const reason = outcome === 'rejected' ? clearance.rejectReason : clearance.overrideReason;
+      const { results } = await sendClearanceResolvedNotice({
+        chair: {
+          name: chair?.name || club.chair || '',
+          email: chair?.email,
+          cell: chair?.cell,
+        },
+        fromClubName: clearance.fromClubName,
+        playerName: clearance.playerName,
+        toClubName: clearance.toClubName,
+        outcome,
+        ...(reason ? { reason } : {}),
+        ...(clearance.origin ? { origin: clearance.origin } : {}),
+        channels,
+      });
+      await repo.appendClubCommEvents(
+        tenant,
+        club.id,
+        results.map((r) => ({
+          id: randomUUID(),
+          channel: r.channel,
+          ...(r.to ? { to: r.to } : {}),
+          status: r.status,
+          ...(r.messageId ? { messageId: r.messageId } : {}),
+          ...(r.error ? { error: r.error } : {}),
+          at: now(),
+          by,
+          idempotencyKey: `clearance-${clearance.id}-${outcome}-${r.channel}`,
+          kind: `clearance-${outcome}` as const,
+        })),
+      );
+    };
+    await Promise.all([notifyClub(fromClub), notifyClub(toClub)]);
+  } catch (err) {
+    console.error('clearance resolved notice failed', err);
   }
 }
 
@@ -6362,6 +6446,9 @@ app.get('/admin/clearances', async (c) => {
  * now-active player, which also purges their ID docs from S3.) Without a note the resolved
  * record reads as "the Union approved this transfer" for a transfer that never happened, and
  * this history is read for disputes. The note is how it says otherwise.
+ *
+ * On success both clubs' chairmen get a best-effort email/WhatsApp heads-up that the transfer
+ * was issued (notifyClearanceResolved) — never failing the request.
  */
 app.post('/admin/clearances/:cid/override', async (c) => {
   const ra = c.get('requestAuth')!;
@@ -6382,6 +6469,11 @@ app.post('/admin/clearances/:cid/override', async (c) => {
       reason: body.reason?.trim() || undefined,
       expectedVersion: body.version,
     });
+    // Best-effort: tell BOTH clubs' chairmen the union issued the transfer (never fails the
+    // request; a config read fault degrades to the whatsappInvites default). See
+    // notifyClearanceResolved re: no daily cap and the destination-chair recipient.
+    const tenantConfig = await repo.getTenantConfig(ra.tenant).catch(() => null);
+    await notifyClearanceResolved(ra.tenant, tenantConfig, resolved, 'approved', ra.email);
     return c.json(resolved);
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
@@ -6496,6 +6588,10 @@ app.post('/admin/clearances/:cid/reassign', async (c) => {
  *   2. a source club holding NO row for this player — nothing exists to reject ON.
  * Both route the admin to override & approve, or to reallocate. See the runbook at
  * docs/runbooks/backfill-declared-club-clearance.md.
+ *
+ * On success both clubs' chairmen get a best-effort email/WhatsApp heads-up that the transfer
+ * was declined (notifyClearanceResolved) — the reason travels on the email only, and the
+ * notify never fails the request.
  */
 app.post('/admin/clearances/:cid/reject', async (c) => {
   const ra = c.get('requestAuth')!;
@@ -6540,6 +6636,11 @@ app.post('/admin/clearances/:cid/reject', async (c) => {
       reason: body.reason?.trim() || undefined,
       expectedVersion: body.version,
     });
+    // Best-effort: tell BOTH clubs' chairmen the union declined the transfer (never fails the
+    // request; a config read fault degrades to the whatsappInvites default). The reject reason
+    // rides the email only — see notifyClearanceResolved / the WhatsApp template notes.
+    const tenantConfig = await repo.getTenantConfig(ra.tenant).catch(() => null);
+    await notifyClearanceResolved(ra.tenant, tenantConfig, rejected, 'rejected', ra.email);
     return c.json(rejected);
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');

@@ -271,6 +271,19 @@ export default $config({
       'WhatsappClearanceTemplate',
       'club_clearance_pending',
     );
+    // Clearance-RESOLVED heads-up to BOTH clubs when the union office issues or declines a
+    // clearance. Read by notify/whatsapp.ts (WHATSAPP_CLEARANCE_APPROVED_TEMPLATE /
+    // WHATSAPP_CLEARANCE_REJECTED_TEMPLATE) — create + approve these Utility templates (body
+    // vars {{1}} chair, {{2}} player, {{3}} from-club, {{4}} to-club; no reason variable)
+    // before real sends. See docs/runbooks/whatsapp-templates.md.
+    const whatsappClearanceApprovedTemplate = new sst.Secret(
+      'WhatsappClearanceApprovedTemplate',
+      'club_clearance_approved',
+    );
+    const whatsappClearanceRejectedTemplate = new sst.Secret(
+      'WhatsappClearanceRejectedTemplate',
+      'club_clearance_rejected',
+    );
 
     // ── Error monitoring (Sentry, EU region — medicoach-ap on de.sentry.io) ──
     // DSNs are non-secret but kept out of the repo so they're set per-account without
@@ -363,6 +376,8 @@ export default $config({
         whatsappStaffTemplate,
         whatsappReglinkTemplate,
         whatsappClearanceTemplate,
+        whatsappClearanceApprovedTemplate,
+        whatsappClearanceRejectedTemplate,
       ],
       // SES isn't covered by `link` (it's not an SST resource), so grant it directly.
       // SES authorizes by verified identity, not resource ARN, hence resources: ['*'].
@@ -423,6 +438,8 @@ export default $config({
         WHATSAPP_STAFF_TEMPLATE: whatsappStaffTemplate.value,
         WHATSAPP_REGLINK_TEMPLATE: whatsappReglinkTemplate.value,
         WHATSAPP_CLEARANCE_TEMPLATE: whatsappClearanceTemplate.value,
+        WHATSAPP_CLEARANCE_APPROVED_TEMPLATE: whatsappClearanceApprovedTemplate.value,
+        WHATSAPP_CLEARANCE_REJECTED_TEMPLATE: whatsappClearanceRejectedTemplate.value,
         // Force dry-run regardless of secrets (set NOTIFY_DRY_RUN=1 in the deploy env)
         // — the verified-only/dry-run gate while awaiting SES production access.
         NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',

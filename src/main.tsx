@@ -1276,6 +1276,13 @@ function Shell({
   // ── Player roster + clearance state/data (lives here, where clubId is known) ──
   const [showRequestPlayer, setShowRequestPlayer] = useStateApp(false);
   const [busyClearanceId, setBusyClearanceId] = useStateApp(null);
+  // Which admin action is in flight for busyClearanceId, so the card can label the
+  // right button ('Rejecting…' vs 'Issuing…') instead of greying Reject while the
+  // Override button reads "Issuing…". (approveClearance is the club-rep view — it
+  // sets only busyClearanceId and needs no action kind.)
+  const [busyClearanceAction, setBusyClearanceAction] = useStateApp<
+    'reject' | 'override' | 'reassign' | null
+  >(null);
   const [busyReviewId, setBusyReviewId] = useStateApp(null);
   // Signup-link share modal, lifted to Shell (which persists across admin views)
   // so empty-state buttons can open it in one click: set true + route to the
@@ -1721,96 +1728,157 @@ function Shell({
   // Admin overrides an overdue request, issuing it on the source club's behalf.
   function overrideClearance(req, reason) {
     setBusyClearanceId(req.id);
-    return withToast(
-      () =>
-        api.overrideClearance(req.id, {
-          fromClubId: req.fromClubId,
-          version: req.version,
-          reason: reason || undefined,
-        }),
-      'Could not override clearance',
-      { rawConflict: true },
-    )
-      .then(() => {
-        // Both clubs' clearance views AND rosters change (the player moved), so the
-        // club-scoped caches must drop too — not just the admin list.
-        invalidate(qk.allClearances());
-        invalidate(qk.clearances(req.fromClubId));
-        invalidate(qk.clearances(req.toClubId));
-        invalidate(qk.players(req.fromClubId));
-        invalidate(qk.players(req.toClubId));
-        invalidate(qk.demographics());
-        // A reason means the admin was explaining something — often that they are DISPOSING of a
-        // clearance that should never have existed, in which case "cleared to X" is the wrong
-        // sentence. Stay neutral when one was given.
-        toastShow(
-          reason
-            ? `${req.playerName}'s clearance resolved · Union override`
-            : `${req.playerName} cleared to ${req.toClubName} · Union override`,
-        );
-      })
-      .catch(() => {})
-      .finally(() => setBusyClearanceId(null));
+    setBusyClearanceAction('override');
+    // Its 409 set includes DestinationClubGoneError (a stale destination club), so a
+    // failed override must refetch the clubs list too, not just the clearance caches.
+    return (
+      withToast(
+        () =>
+          api.overrideClearance(req.id, {
+            fromClubId: req.fromClubId,
+            version: req.version,
+            reason: reason || undefined,
+          }),
+        'Could not override clearance',
+        {
+          rawConflict: true,
+          invalidate: [
+            qk.allClearances(),
+            qk.clearances(req.fromClubId),
+            qk.clearances(req.toClubId),
+            qk.clubs(),
+          ],
+        },
+      )
+        .then(() => {
+          // Both clubs' clearance views AND rosters change (the player moved), so the
+          // club-scoped caches must drop too — not just the admin list.
+          invalidate(qk.allClearances());
+          invalidate(qk.clearances(req.fromClubId));
+          invalidate(qk.clearances(req.toClubId));
+          invalidate(qk.players(req.fromClubId));
+          invalidate(qk.players(req.toClubId));
+          invalidate(qk.demographics());
+          // A reason means the admin was explaining something — often that they are DISPOSING of a
+          // clearance that should never have existed, in which case "cleared to X" is the wrong
+          // sentence. Stay neutral when one was given.
+          toastShow(
+            reason
+              ? `${req.playerName}'s clearance resolved · Union override`
+              : `${req.playerName} cleared to ${req.toClubName} · Union override`,
+          );
+          return 'ok';
+        })
+        // Swallow so the promise resolves — the confirm dialog reads the outcome to know
+        // whether to close. A 409 ('conflict') means the list was already refetched, so a
+        // retry would re-send the stale version and 409 forever: close on it too. Only a
+        // transient 'failed' keeps the dialog open with the toast visible for a retry.
+        .catch((err) => (err instanceof ApiError && err.status === 409 ? 'conflict' : 'failed'))
+        .finally(() => {
+          setBusyClearanceId(null);
+          setBusyClearanceAction(null);
+        })
+    );
   }
   // Admin rejects a pending request on the clubs' behalf. Rep-initiated: the source player
   // returns to active. Registration-origin: the player STAYS at the destination (current)
   // club flagged 'clearance-rejected' and is removed from the source (previous) club.
   function rejectClearanceReq(req, reason) {
     setBusyClearanceId(req.id);
-    return withToast(
-      () =>
-        api.rejectClearance(req.id, {
-          fromClubId: req.fromClubId,
-          version: req.version,
-          reason: reason || undefined,
-        }),
-      'Could not reject clearance',
-      { rawConflict: true },
-    )
-      .then(() => {
-        invalidate(qk.allClearances());
-        invalidate(qk.clearances(req.fromClubId));
-        invalidate(qk.clearances(req.toClubId));
-        invalidate(qk.players(req.fromClubId));
-        invalidate(qk.players(req.toClubId));
-        invalidate(qk.demographics());
-        toastShow(
-          req.origin === 'registration'
-            ? `${req.playerName}'s clearance rejected — they remain at ${req.toClubName}, flagged clearance-rejected`
-            : `${req.playerName}'s clearance rejected — they stay at ${req.fromClubName}`,
-        );
-      })
-      .catch(() => {})
-      .finally(() => setBusyClearanceId(null));
+    setBusyClearanceAction('reject');
+    return (
+      withToast(
+        () =>
+          api.rejectClearance(req.id, {
+            fromClubId: req.fromClubId,
+            version: req.version,
+            reason: reason || undefined,
+          }),
+        'Could not reject clearance',
+        // A "clearance changed; refetch" 409 must drop the admin list (staleTime 30s, in
+        // NAV_REFETCH_SKIP) so the stale card doesn't linger — the default 409 set only
+        // invalidates clubs/series/tenant.
+        {
+          rawConflict: true,
+          invalidate: [
+            qk.allClearances(),
+            qk.clearances(req.fromClubId),
+            qk.clearances(req.toClubId),
+          ],
+        },
+      )
+        .then(() => {
+          invalidate(qk.allClearances());
+          invalidate(qk.clearances(req.fromClubId));
+          invalidate(qk.clearances(req.toClubId));
+          invalidate(qk.players(req.fromClubId));
+          invalidate(qk.players(req.toClubId));
+          invalidate(qk.demographics());
+          toastShow(
+            req.origin === 'registration'
+              ? `${req.playerName}'s clearance rejected — they remain at ${req.toClubName}, flagged clearance-rejected`
+              : `${req.playerName}'s clearance rejected — they stay at ${req.fromClubName}`,
+          );
+          return 'ok';
+        })
+        // Swallow so the promise resolves — the confirm dialog reads the outcome to know
+        // whether to close. A 409 ('conflict') means the list was already refetched, so a
+        // retry would re-send the stale version and 409 forever: close on it too. Only a
+        // transient 'failed' keeps the dialog open with the toast visible for a retry.
+        .catch((err) => (err instanceof ApiError && err.status === 409 ? 'conflict' : 'failed'))
+        .finally(() => {
+          setBusyClearanceId(null);
+          setBusyClearanceAction(null);
+        })
+    );
   }
   // Admin reallocates a directory-sourced clearance to a real club that has since
   // registered — it lands in that club's queue for its rep to action normally.
   function reassignClearanceReq(req, newFromClubId) {
     setBusyClearanceId(req.id);
-    return withToast(
-      () =>
-        api.reassignClearance(req.id, {
-          fromClubId: req.fromClubId,
-          newFromClubId,
-          version: req.version,
-        }),
-      'Could not reallocate clearance',
-      { rawConflict: true },
-    )
-      .then((next) => {
-        // The clearance moved partitions, the target club gained a placeholder row, and
-        // the destination row's lastClub was rewritten to the new source name.
-        invalidate(qk.allClearances());
-        invalidate(qk.clearances(req.fromClubId));
-        invalidate(qk.clearances(newFromClubId));
-        invalidate(qk.clearances(req.toClubId));
-        invalidate(qk.players(newFromClubId));
-        invalidate(qk.players(req.toClubId));
-        invalidate(qk.demographics());
-        toastShow(`${req.playerName}'s clearance reallocated to ${next.fromClubName}`);
-      })
-      .catch(() => {})
-      .finally(() => setBusyClearanceId(null));
+    setBusyClearanceAction('reassign');
+    return (
+      withToast(
+        () =>
+          api.reassignClearance(req.id, {
+            fromClubId: req.fromClubId,
+            newFromClubId,
+            version: req.version,
+          }),
+        'Could not reallocate clearance',
+        {
+          rawConflict: true,
+          invalidate: [
+            qk.allClearances(),
+            qk.clearances(req.fromClubId),
+            qk.clearances(req.toClubId),
+            qk.clubs(),
+          ],
+        },
+      )
+        .then((next) => {
+          // The clearance moved partitions, the target club gained a placeholder row, and
+          // the destination row's lastClub was rewritten to the new source name.
+          invalidate(qk.allClearances());
+          invalidate(qk.clearances(req.fromClubId));
+          invalidate(qk.clearances(newFromClubId));
+          invalidate(qk.clearances(req.toClubId));
+          invalidate(qk.players(newFromClubId));
+          invalidate(qk.players(req.toClubId));
+          invalidate(qk.demographics());
+          toastShow(`${req.playerName}'s clearance reallocated to ${next.fromClubName}`);
+          return 'ok';
+        })
+        // Swallow so the promise resolves — the confirm dialog reads the outcome to know
+        // whether to close. A 409 ('conflict') means the list was already refetched, so a
+        // retry would re-send the stale version and 409 forever: close on it too. Only a
+        // transient 'failed' keeps the dialog open with the toast visible for a retry.
+        .catch((err) => (err instanceof ApiError && err.status === 409 ? 'conflict' : 'failed'))
+        .finally(() => {
+          setBusyClearanceId(null);
+          setBusyClearanceAction(null);
+        })
+    );
   }
   // Admin acknowledges an off-system alert (a player named a club not on the system).
   function ackRegistrationReview(review) {
@@ -2298,6 +2366,7 @@ function Shell({
             onReject={rejectClearanceReq}
             onReassign={reassignClearanceReq}
             busyId={busyClearanceId}
+            busyAction={busyClearanceAction}
           />
         );
       if (view === 'reg_reviews')

@@ -76,6 +76,10 @@ import type {
 
 import { tableName } from './env.js';
 import { teamIdsForClub } from './teams.js';
+// Sentry is initialised once in instrument.js (a guarded no-op without SENTRY_DSN / on
+// STAGE=local, so tests import it freely). instrument.js imports nothing from repo, so
+// this is not an import cycle — index.ts already loads it first for its own captures.
+import { Sentry } from './instrument.js';
 
 const TABLE = tableName();
 // DYNAMO_ENDPOINT points at a local DynamoDB (dynalite) for offline dev; any
@@ -2237,6 +2241,24 @@ export async function rejectClearance(
   };
 
   if (localEndpoint) {
+    // Local-path parity with the transactional branch: there, the guarded destReject Update
+    // (attribute_exists(sk) AND #s = 'clearance-pending') is part of the atomic write, so a
+    // destination row that has raced to 'active' (a concurrent approve landed first) or
+    // vanished cancels the whole reject → TransactionCanceledException → VersionConflictError
+    // → 409 refetch. The sequential local path applies destReject with its conditional
+    // failure SWALLOWED as a benign-race guard (below), which would otherwise let a reject
+    // "succeed" against a row it no longer holds. Re-assert the precondition up front so the
+    // local path yields the same 409 the caller depends on FOR THE DESTINATION ROW. The
+    // transactional branch would ALSO cancel on a sourceDelete condition failure (the source
+    // row raced to 'active' after sourceHeld was read); the local path still swallows that,
+    // so the two diverge in that one case — accepted as benign and rare (a concurrent
+    // approve of the very same source row mid-reject), not worth a second up-front read.
+    // NOTE: the transactional branch is untested in the harness — DYNAMO_ENDPOINT is always
+    // set here (api.int.test.ts), so only this local branch runs under test.
+    if (isRegistrationOrigin) {
+      const destNow = await getPlayer(tenant, current.toClubId, current.playerNaturalKey);
+      if (!destNow || destNow.status !== 'clearance-pending') throw new VersionConflictError();
+    }
     try {
       await ddb.send(new PutCommand(canonicalPut));
     } catch (err: unknown) {
@@ -2293,33 +2315,47 @@ export async function rejectClearance(
   }
 
   if (isRegistrationOrigin && sourceHeld) {
-    // The SOURCE row is gone — decrement the SOURCE club's count. Display-only, swallowed
-    // on a vanished club (a bare ADD would resurrect a phantom club item). The destination
-    // count is untouched: that row was counted at registration and survives. Skipped
-    // when the clearance never held a source row (directory-sourced, or the row is an
-    // active roster entry that survives the reject): the count either was never
-    // incremented or still has its player — a decrement would drift the real club's
-    // count, and the purge below would delete a live player's documents.
+    // Post-commit cleanup, wrapped so a fault here can NEVER fail a reject that already
+    // committed. Deliberate departure from resolveClearance, which keeps its count writes
+    // INSIDE the transaction (see resolveClearance): there the count is authoritative for the
+    // move; here it is display-only and backfill-player-counts.ts reconciles any drift. A 500
+    // thrown after the canonical/mirror have already flipped to 'rejected' would send the
+    // admin into a retry → 409 ("already resolved") loop for a reject that in fact succeeded,
+    // so a throttle / IAM / network error on the count decrement (the inner catch rethrows
+    // anything that isn't a benign conditional failure) or on the S3 purge is logged +
+    // reported and swallowed, not propagated.
     try {
-      await ddb.send(
-        new UpdateCommand({
-          TableName: TABLE,
-          Key: clubKey(tenant, fromClubId),
-          UpdateExpression: 'ADD playerCount :neg1',
-          ConditionExpression: 'attribute_exists(pk)',
-          ExpressionAttributeValues: { ':neg1': -1 },
-        }),
+      // The SOURCE row is gone — decrement the SOURCE club's count. Display-only, swallowed
+      // on a vanished club (a bare ADD would resurrect a phantom club item). The destination
+      // count is untouched: that row was counted at registration and survives. Skipped
+      // when the clearance never held a source row (directory-sourced, or the row is an
+      // active roster entry that survives the reject): the count either was never
+      // incremented or still has its player — a decrement would drift the real club's
+      // count, and the purge below would delete a live player's documents.
+      try {
+        await ddb.send(
+          new UpdateCommand({
+            TableName: TABLE,
+            Key: clubKey(tenant, fromClubId),
+            UpdateExpression: 'ADD playerCount :neg1',
+            ConditionExpression: 'attribute_exists(pk)',
+            ExpressionAttributeValues: { ':neg1': -1 },
+          }),
+        );
+      } catch (err: unknown) {
+        if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
+      }
+      // Purge BOTH of the deleted source row's S3 objects (self-asserted + any vetted
+      // previous-club doc it carried from an earlier approved transfer).
+      await deleteUploadObjects(
+        [sourceRow?.idDocMeta?.objectKey, sourceRow?.previousIdDocMeta?.objectKey].filter(
+          (k): k is string => !!k,
+        ),
       );
-    } catch (err: unknown) {
-      if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
+    } catch (err) {
+      console.error('reject post-commit cleanup failed', { tenant, fromClubId, id }, err);
+      Sentry.captureException(err, { extra: { tenant, fromClubId, clearanceId: id } });
     }
-    // Purge BOTH of the deleted source row's S3 objects (self-asserted + any vetted
-    // previous-club doc it carried from an earlier approved transfer).
-    await deleteUploadObjects(
-      [sourceRow?.idDocMeta?.objectKey, sourceRow?.previousIdDocMeta?.objectKey].filter(
-        (k): k is string => !!k,
-      ),
-    );
   }
   return next;
 }

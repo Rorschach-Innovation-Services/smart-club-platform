@@ -11,6 +11,7 @@ import {
   sendFixturesEmail,
   sendRegLinkEmail,
   sendClearanceEmail,
+  sendClearanceResolvedEmail,
 } from './email.js';
 import type { TutorialLink, RegLinkOrgCopy } from './email.js';
 import {
@@ -18,6 +19,7 @@ import {
   sendFixturesWhatsApp,
   sendRegLinkWhatsApp,
   sendClearanceWhatsApp,
+  sendClearanceResolvedWhatsApp,
   toE164,
 } from './whatsapp.js';
 
@@ -316,6 +318,113 @@ export async function sendClearanceNotice(args: {
       channel === 'email'
         ? sendClearanceEmailChannel(contact, copy)
         : sendClearanceWhatsAppChannel(contact, copy),
+    ),
+  );
+  return { results };
+}
+
+// ───────────────────────── Clearance resolved (both clubs' chairs) ─────────────────────────
+
+interface ClearanceResolvedCopy {
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+  outcome: 'approved' | 'rejected';
+  /** Email-only admin note (never crosses to WhatsApp — see the whatsapp.ts template notes). */
+  reason?: string;
+  /** Clearance origin — steers the rejected email copy (see ClearanceResolvedEmailInput). */
+  origin?: 'registration' | 'request';
+}
+
+async function sendClearanceResolvedEmailChannel(
+  chair: ChairContact,
+  copy: ClearanceResolvedCopy,
+): Promise<SendResult> {
+  if (!EMAIL_RE.test(chair.email)) {
+    return {
+      channel: 'email',
+      status: 'skipped',
+      ...(chair.email ? { to: chair.email } : {}),
+      error: 'no valid chair email on file',
+    };
+  }
+  try {
+    const { messageId } = await sendClearanceResolvedEmail({
+      to: chair.email,
+      chairName: chair.name,
+      ...copy,
+    });
+    return { channel: 'email', status: 'sent', to: chair.email, messageId };
+  } catch (err) {
+    return { channel: 'email', status: 'failed', to: chair.email, error: errMessage(err) };
+  }
+}
+
+async function sendClearanceResolvedWhatsAppChannel(
+  chair: ChairContact,
+  copy: ClearanceResolvedCopy,
+): Promise<SendResult> {
+  const e164 = toE164(chair.cell);
+  if (!e164) {
+    return {
+      channel: 'whatsapp',
+      status: 'skipped',
+      ...(chair.cell ? { to: chair.cell } : {}),
+      error: 'no valid chair cell on file',
+    };
+  }
+  try {
+    // The reason is deliberately dropped here — the WhatsApp template carries names only.
+    const { messageId } = await sendClearanceResolvedWhatsApp({
+      to: e164,
+      chairName: chair.name,
+      fromClubName: copy.fromClubName,
+      playerName: copy.playerName,
+      toClubName: copy.toClubName,
+      outcome: copy.outcome,
+    });
+    return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
+  } catch (err) {
+    return { channel: 'whatsapp', status: 'failed', to: e164, error: errMessage(err) };
+  }
+}
+
+/**
+ * Tell a club chairman the union office has RESOLVED a clearance (issued or declined it),
+ * over email and/or WhatsApp. Called once per club (source and destination) by the caller,
+ * who owns the comm-log append. Non-throwing per channel (a bad/blank chair contact becomes
+ * a `skipped`/`failed` result, never sinking the other channel). The admin reason travels on
+ * the email only — the WhatsApp channel sends names, not the free-text note.
+ */
+export async function sendClearanceResolvedNotice(args: {
+  chair: { name?: string; email?: string; cell?: string };
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+  outcome: 'approved' | 'rejected';
+  reason?: string;
+  origin?: 'registration' | 'request';
+  channels: Channel[];
+}): Promise<{ results: SendResult[] }> {
+  const { chair, fromClubName, playerName, toClubName, outcome, reason, origin, channels } = args;
+  const contact: ChairContact = {
+    name: (chair.name ?? '').trim(),
+    email: (chair.email ?? '').trim(),
+    cell: (chair.cell ?? '').trim(),
+  };
+  const copy: ClearanceResolvedCopy = {
+    fromClubName,
+    playerName,
+    toClubName,
+    outcome,
+    reason,
+    origin,
+  };
+  const results = await Promise.all(
+    channels.map((channel) =>
+      channel === 'email'
+        ? sendClearanceResolvedEmailChannel(contact, copy)
+        : sendClearanceResolvedWhatsAppChannel(contact, copy),
     ),
   );
   return { results };

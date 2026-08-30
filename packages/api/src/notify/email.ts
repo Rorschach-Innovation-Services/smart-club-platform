@@ -283,6 +283,116 @@ export async function sendClearanceEmail(
   return { messageId: res.MessageId ?? '' };
 }
 
+export interface ClearanceResolvedEmailInput {
+  to: string;
+  chairName: string;
+  fromClubName: string;
+  playerName: string;
+  toClubName: string;
+  /** 'approved' → the union issued the clearance; 'rejected' → the union declined it. */
+  outcome: 'approved' | 'rejected';
+  /** Free admin note recorded on the resolution. Appended as "Reason: …" when present. */
+  reason?: string;
+  /**
+   * How the clearance originated. A registration-origin reject is the inverse of a
+   * request-origin one: the destination row is flagged `clearance-rejected` and the source
+   * row is removed, so the rejected copy must not claim the player "remains registered" at
+   * the source. Absent or 'request' → request-origin copy.
+   */
+  origin?: 'registration' | 'request';
+}
+
+/**
+ * Build the clearance-resolved email bodies. Pure (no SES, no env) — exported so tests can
+ * assert the rendered copy (e.g. that the admin reason is present and escaped) without
+ * sending anything, mirroring regLinkEmailContent.
+ */
+export function clearanceResolvedEmailContent(input: ClearanceResolvedEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { chairName, fromClubName, playerName, toClubName, outcome, reason, origin } = input;
+  // Portal-entered roster names aren't whitespace-collapsed on the way in — never let a
+  // newline reach an email header.
+  const subject = `Clearance ${outcome} — ${playerName.replace(/\s+/g, ' ').trim()}`;
+  const greetName = chairName || 'there';
+
+  // The rejected copy depends on origin: a request-origin reject leaves the player where they
+  // were (source), while a registration-origin reject flags the destination row and removes
+  // the source record — the inverse. The approved copy is true for both.
+  const rejectedBody =
+    origin === 'registration'
+      ? `${playerName}'s clearance from ${fromClubName} to ${toClubName} has been rejected by the ` +
+        `union office; their registration at ${toClubName} is flagged as clearance-rejected, and ` +
+        `any record of them at ${fromClubName} has been removed.`
+      : `${playerName}'s clearance from ${fromClubName} to ${toClubName} has been rejected by the ` +
+        `union office; they remain registered at ${fromClubName}.`;
+  const body =
+    outcome === 'approved'
+      ? `${playerName}'s clearance from ${fromClubName} to ${toClubName} has been issued by the ` +
+        `union office; they are now registered at ${toClubName}.`
+      : rejectedBody;
+  const reasonLine = reason ? `\n\nReason: ${reason}` : '';
+
+  const text =
+    `Hello ${greetName},\n\n` +
+    `${body}${reasonLine}\n\n` +
+    `If you have any questions, please contact your union office.\n\n` +
+    `Thank you,\nThe union office`;
+
+  const safeName = escapeHtml(greetName);
+  const safeBody = escapeHtml(body);
+  const reasonHtml = reason ? `<p><strong>Reason:</strong> ${escapeHtml(reason)}</p>` : '';
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hello ${safeName},</p>` +
+    `<p>${safeBody}</p>` +
+    `${reasonHtml}` +
+    `<p>If you have any questions, please contact your union office.</p>` +
+    `<p>Thank you,<br/>The union office</p>` +
+    `</div>`;
+
+  return { subject, text, html };
+}
+
+/**
+ * Clearance-resolved notice to a club chairman (recorded on BOTH clubs by the caller),
+ * mirroring the pending notice's shape. Unlike the WhatsApp resolved template, this
+ * email CARRIES the admin reason: the recipients are the two clubs' chairs (not Meta's
+ * infrastructure), so the free-text note stays inside the union's own channel. Same
+ * deliberately link-free body — the chair may hold no portal login — and the same
+ * dry-run gate as the other clearance senders.
+ */
+export async function sendClearanceResolvedEmail(
+  input: ClearanceResolvedEmailInput,
+): Promise<{ messageId: string }> {
+  const { to, fromClubName, outcome } = input;
+  const { subject, text, html } = clearanceResolvedEmailContent(input);
+
+  if (EMAIL_DRY_RUN) {
+    console.log(
+      `[notify:email dry-run] would send clearance-${outcome} notice to ${to} for ${fromClubName}`,
+    );
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [to] },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}
+
 export interface FixturesEmailInput {
   to: string;
   playerName: string;
