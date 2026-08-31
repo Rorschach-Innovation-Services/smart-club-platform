@@ -5,6 +5,7 @@
  *   npx sst shell --stage prod -- npx tsx src/import-planb-fixtures.ts \
  *     --file "<Dolphins xlsx>" --t20 "<REVISED xlsx>" --parse-only        # parse only, no repo/DynamoDB touched
  *   … --file "<Dolphins xlsx>" --t20 "<REVISED xlsx>"                     # dry-run (resolves clubs, allocates venues)
+ *   … --file "<Dolphins xlsx>" --t20 "<REVISED xlsx>" --only <slug>[,…]  # dry-run limited to those built series (import mode only; DELETE set skipped)
  *   … --file "<Dolphins xlsx>" --t20 "<REVISED xlsx>" --confirm           # write
  *   … --prune                                                             # dry-run: list superseded series to delete
  *   … --prune --confirm                                                   # delete them (run BEFORE releasing while all drafts — see runbook "Ordering")
@@ -102,13 +103,22 @@ const BAD_CONDITION_GROUNDS = new Set(
  * `fromGroundKey` matches the fixture's assigned/effective ground; `homeClubId`
  * matches the home side's club. A matched fixture always moves (its current ground is
  * unusable), even when no clash exists. */
-const VENUE_DIRECTIVES: Array<{
+/** Venue Allocations re-bases the union has since REVOKED (31 Aug 2026): Railways owns
+ * Crawford North Coast; Ilembe and Dawnheights share Gledhow Cricket Grounds as their
+ * home ground and must never be placed at Crawford NC. Rows for these clubs are dropped
+ * from both the re-base map and the barred-ground set, so their home fixtures fall
+ * back to the club record's ground (Gledhow) like any un-re-based club. */
+const REVOKED_RE_BASES = new Set(['dawnheights-cricket-club', 'ilembe-cricket-club']);
+
+export interface VenueDirective {
   slug: string;
   fromGroundKey?: string;
   homeClubId?: string;
+  awayClubId?: string;
   candidates: string[];
   why: string;
-}> = [
+}
+const VENUE_DIRECTIVES: VenueDirective[] = [
   {
     slug: 'premier-men-t20-1',
     fromGroundKey: groundKey('Kloof CC'),
@@ -133,7 +143,50 @@ const VENUE_DIRECTIVES: Array<{
     candidates: ['Kingsmead Oval', 'Newlands Oval', 'Siripat 1', 'Siripat 2', 'Siripat 3'],
     why: 'Union directive — dukuza street unusable',
   },
+  {
+    slug: 'promotion-men-30ov-top10',
+    homeClubId: 'saints-cricket-club',
+    awayClubId: 'newlands-cricket-club',
+    candidates: ['Newlands Oval'],
+    why: 'Union directive — Saints v Newlands at Newlands Oval (Chatsworth Oval/Penguin double-booked 8 Nov 08:30)',
+  },
+  // Admin decisions (31 Aug 2026): Saints' Penguin Street and Chatsworth Oval are both
+  // booked by Premier Women Bottom 4 on every Top 10 Sunday, and Gledhow belongs to the
+  // other side's home game those days, so these two Saints fixtures have no sanctioned
+  // ground. Newlands Oval is free all day on both dates — admin placed them there.
+  {
+    slug: 'promotion-men-30ov-top10',
+    homeClubId: 'ilembe-cricket-club',
+    awayClubId: 'saints-cricket-club',
+    candidates: ['Newlands Oval'],
+    why: 'Admin directive — Ilembe v Saints at Newlands Oval (Gledhow is Dawnheights v Newlands, 1 Nov 08:30)',
+  },
+  {
+    slug: 'promotion-men-30ov-top10',
+    homeClubId: 'saints-cricket-club',
+    awayClubId: 'dawnheights-cricket-club',
+    candidates: ['Newlands Oval'],
+    why: 'Admin directive — Saints v Dawnheights at Newlands Oval (Penguin/Chatsworth Oval double-booked 22 Nov 08:30)',
+  },
 ];
+
+/** Whether one venue directive applies to a fixture: the series matches, and each of the
+ * optional matchers (from-ground, home club, away club) that the directive sets is
+ * satisfied. Pure — extracted so the clash pass's `.find` predicate is unit-testable. */
+export function directiveMatches(
+  d: VenueDirective,
+  seriesId: string,
+  ground: string | undefined,
+  homeClubId: string | undefined,
+  awayClubId: string | undefined,
+): boolean {
+  return (
+    `${ID_PREFIX}${d.slug}` === seriesId &&
+    (d.fromGroundKey ? Boolean(ground) && groundKey(ground!) === d.fromGroundKey : true) &&
+    (d.homeClubId ? homeClubId === d.homeClubId : true) &&
+    (d.awayClubId ? awayClubId === d.awayClubId : true)
+  );
+}
 
 // ───────────────────────── Name resolution ─────────────────────────
 
@@ -1205,25 +1258,41 @@ function applyExplicitVenue(
 
 /** Venue Allocations sheet → clubId → allocated ground name. Fails closed (via the
  * returned `unresolved` list) on a club name the prod registry doesn't know. */
-function buildReBaseMap(
+export function buildReBaseMap(
   rows: VenueAllocationRow[],
   clubs: Club[],
   byNorm: Map<string, Club>,
-): { reBaseMap: Map<string, string>; unresolved: string[] } {
+): {
+  reBaseMap: Map<string, string>;
+  unresolved: string[];
+  /** Human-readable lines for rows whose re-base the union has revoked (REVOKED_RE_BASES)
+   * — printed in the dry run; these clubs fall back to their club-record ground. */
+  revoked: string[];
+  /** `rows` minus the revoked ones — feed these to buildBarredGrounds so a revoked row's
+   * groundOnSheet is not barred (the club plays there / at its own ground again). */
+  applicableRows: VenueAllocationRow[];
+} {
   const reBaseMap = new Map<string, string>();
   const unresolved: string[] = [];
+  const revoked: string[] = [];
+  const applicableRows: VenueAllocationRow[] = [];
   for (const r of rows) {
     const club = resolveClub(r.clubName, clubs, byNorm);
     if (!club) {
       unresolved.push(r.clubName);
       continue;
     }
+    if (REVOKED_RE_BASES.has(club.id)) {
+      revoked.push(`${r.clubName} → ${r.allocatedGround} (revoked — plays at club ground)`);
+      continue;
+    }
+    applicableRows.push(r);
     reBaseMap.set(club.id, r.allocatedGround);
   }
-  return { reBaseMap, unresolved };
+  return { reBaseMap, unresolved, revoked, applicableRows };
 }
 
-function buildBarredGrounds(rows: VenueAllocationRow[]): Set<string> {
+export function buildBarredGrounds(rows: VenueAllocationRow[]): Set<string> {
   return new Set(
     rows
       .map((r) => r.groundOnSheet)
@@ -1358,7 +1427,30 @@ function runClashPass(
   // list — that sheet is the union's stated answer to "where do clubs play when there
   // is a conflict", so it outranks even a sheet-fixed venue; anything it can't place
   // stays a human decision.
+  // A fixture DEFERRED past the settle sub-pass: its precomputed placement state, carried
+  // into the relocate sub-pass so the second walk doesn't re-derive it.
+  type DeferredFixture = {
+    series: Series;
+    teamToClub: Map<string, string>;
+    f: WrittenFixture;
+    ground: string | undefined;
+    directive: VenueDirective | undefined;
+    homeless: boolean;
+    mustMove: boolean;
+  };
+
   for (const explicitPhase of [true, false]) {
+    // Each phase runs in TWO sub-passes so a home-ground booking always outranks a
+    // relocation onto that same ground. Resolving in a single row-order walk let an
+    // auto-moved fixture book a ground BEFORE a LATER fixture whose HOME ground it is —
+    // observed on prod: top10 f23 (Saints v Dawnheights, 22 Nov 08:30) clashed at Saints'
+    // ground, was moved to the away side's Gledhow, and then f24 (Ilembe v Lindelani —
+    // Ilembe's own home game at Gledhow) was displaced. Settling every clean home-ground
+    // fixture FIRST, then relocating the conflicted ones, makes the home booking win.
+    const deferred: DeferredFixture[] = [];
+
+    // ── Sub-pass 1: settle ── book every fixture that already sits cleanly on its own
+    // ground; DEFER (don't book, don't move) anything that must move or currently clashes.
     for (const { series, fixtures } of built) {
       const teamToClub = new Map((series.participants ?? []).map((p) => [p.teamId, p.clubId]));
       for (const f of fixtures) {
@@ -1373,11 +1465,14 @@ function runClashPass(
         // A fixture on an unusable ground moves even with no clash: matched union
         // directive first (its RESTRICTED candidate list wins), else the red-list
         // relocation via the normal candidate chain.
-        const directive = VENUE_DIRECTIVES.find(
-          (d) =>
-            `${ID_PREFIX}${d.slug}` === String(series.id) &&
-            (d.fromGroundKey ? Boolean(ground) && groundKey(ground!) === d.fromGroundKey : true) &&
-            (d.homeClubId ? teamToClub.get(f.home) === d.homeClubId : true),
+        const directive = VENUE_DIRECTIVES.find((d) =>
+          directiveMatches(
+            d,
+            String(series.id),
+            ground,
+            teamToClub.get(f.home),
+            teamToClub.get(f.away),
+          ),
         );
         const badGround = Boolean(ground) && BAD_CONDITION_GROUNDS.has(groundKey(ground!));
         const mustMove = Boolean(directive) || badGround || homeless;
@@ -1391,85 +1486,110 @@ function runClashPass(
           });
           continue;
         }
-        // Auto-move candidates, tried in the order a scheduler would. All registry-first
-        // via setVenue, never a barred ground, never the ground we are already clashing
-        // on, deduped by ledger key (so "Toti Oval" and "Toti 1" count as one option).
-        const homeClubId = teamToClub.get(f.home);
-        const awayClubId = teamToClub.get(f.away);
-        const secondary = (clubId: string | undefined) => {
-          const s = clubId ? clubsById.get(clubId)?.ground?.secondaryVenue?.trim() : undefined;
-          return s && !JUNK_GROUND.test(s) ? s : undefined;
-        };
-        const candidates: Array<{ ground: string; label: string }> = [];
-        const addCandidate = (g: string | undefined, label: string) => {
-          if (!g) return;
-          if (ground && groundKey(g) === groundKey(ground)) return;
-          if (candidates.some((c) => groundKey(c.ground) === groundKey(g))) return;
-          if (barredGrounds.has(normaliseGround(g))) return;
-          if (BAD_CONDITION_GROUNDS.has(groundKey(g))) return;
-          candidates.push({ ground: g, label });
-        };
-        const addPermitted = (clubId: string | undefined, label: string) => {
-          for (const v of clubId ? (permittedByClub.get(clubId) ?? []) : [])
-            addCandidate(v.name, label);
-        };
-        if (directive) {
-          // A directive's candidate list is the union's word — nothing else is tried.
-          for (const g of directive.candidates)
-            addCandidate(g, `union directive: ${directive.why}`);
-        } else {
-          if (!explicitPhase) {
-            // Union Rule 4 first, then the clubs' registered secondaries.
-            addCandidate(
-              awayClubId ? allocatedGroundName(awayClubId, clubsById, reBaseMap) : undefined,
-              "away side's allocated ground",
-            );
-            addCandidate(secondary(homeClubId), "home club's secondary ground");
-            addCandidate(secondary(awayClubId), "away club's secondary ground");
-          }
-          // The union's permitted-fields list applies in BOTH phases — for a
-          // union-authored venue it is the only sanctioned escape.
-          addPermitted(homeClubId, "home club's permitted field (union facility list)");
-          addPermitted(awayClubId, "away club's permitted field (union facility list)");
+        deferred.push({ series, teamToClub, f, ground, directive, homeless, mustMove });
+      }
+    }
+
+    // ── Sub-pass 2: relocate ── walk the deferred fixtures in row order, resolving each
+    // against the now fully-settled ledger.
+    for (const { series, teamToClub, f, ground, directive, homeless, mustMove } of deferred) {
+      // Re-check: a deferred non-mustMove fixture clashed at settle time, but the fixture
+      // it clashed with may ITSELF have been deferred and relocated away, freeing the slot
+      // — in which case this one books its own ground as a plain booking.
+      const clash = mustMove ? undefined : ledger.check(ground!, f.date, f.time);
+      if (!clash && !mustMove) {
+        // !mustMove ⇒ !homeless ⇒ ground is defined (the destructured binding can't be
+        // narrowed the way the settle sub-pass's const alias is).
+        ledger.book(ground!, f.date, f.time, {
+          seriesId: String(series.id),
+          fixtureId: f.id,
+          date: f.date,
+          time: f.time,
+        });
+        continue;
+      }
+      // Auto-move candidates, tried in the order a scheduler would. All registry-first
+      // via setVenue, never a barred ground, never the ground we are already clashing
+      // on, deduped by ledger key (so "Toti Oval" and "Toti 1" count as one option).
+      const homeClubId = teamToClub.get(f.home);
+      const awayClubId = teamToClub.get(f.away);
+      const secondary = (clubId: string | undefined) => {
+        const s = clubId ? clubsById.get(clubId)?.ground?.secondaryVenue?.trim() : undefined;
+        return s && !JUNK_GROUND.test(s) ? s : undefined;
+      };
+      const candidates: Array<{ ground: string; label: string }> = [];
+      const addCandidate = (g: string | undefined, label: string) => {
+        if (!g) return;
+        // Never offer a junk registry name (e.g. a "None" row minted from a club's
+        // secondaryVenue "None") as a real ground — it is not a place to play.
+        if (JUNK_GROUND.test(g.trim())) return;
+        if (ground && groundKey(g) === groundKey(ground)) return;
+        if (candidates.some((c) => groundKey(c.ground) === groundKey(g))) return;
+        if (barredGrounds.has(normaliseGround(g))) return;
+        if (BAD_CONDITION_GROUNDS.has(groundKey(g))) return;
+        candidates.push({ ground: g, label });
+      };
+      const addPermitted = (clubId: string | undefined, label: string) => {
+        for (const v of clubId ? (permittedByClub.get(clubId) ?? []) : []) {
+          if (JUNK_GROUND.test(v.name.trim())) continue; // skip junk registry rows (e.g. "None")
+          addCandidate(v.name, label);
         }
-        const because = clash
-          ? `clashed with ${clash.seriesId}/${clash.fixtureId}`
-          : directive
-            ? directive.why
-            : homeless
-              ? "home club has no ground — played at opponent's venue"
-              : 'ground in bad condition (union facility red list)';
-        const target = candidates.find((c) => !ledger.check(c.ground, f.date, f.time));
-        if (target) {
-          setVenue(
-            f,
-            target.ground,
-            'alternative',
-            clash ? `Moved to avoid ground clash — ${target.label}` : because,
-            byNormVenue,
-            registryMiss,
+      };
+      if (directive) {
+        // A directive's candidate list is the union's word — nothing else is tried.
+        for (const g of directive.candidates) addCandidate(g, `union directive: ${directive.why}`);
+      } else {
+        if (!explicitPhase) {
+          // Union Rule 4 first, then the clubs' registered secondaries.
+          addCandidate(
+            awayClubId ? allocatedGroundName(awayClubId, clubsById, reBaseMap) : undefined,
+            "away side's allocated ground",
           );
-          ledger.book(target.ground, f.date, f.time, {
+          addCandidate(secondary(homeClubId), "home club's secondary ground");
+          addCandidate(secondary(awayClubId), "away club's secondary ground");
+        }
+        // The union's permitted-fields list applies in BOTH phases — for a
+        // union-authored venue it is the only sanctioned escape.
+        addPermitted(homeClubId, "home club's permitted field (union facility list)");
+        addPermitted(awayClubId, "away club's permitted field (union facility list)");
+      }
+      const because = clash
+        ? `clashed with ${clash.seriesId}/${clash.fixtureId}`
+        : directive
+          ? directive.why
+          : homeless
+            ? "home club has no ground — played at opponent's venue"
+            : 'ground in bad condition (union facility red list)';
+      const target = candidates.find((c) => !ledger.check(c.ground, f.date, f.time));
+      if (target) {
+        setVenue(
+          f,
+          target.ground,
+          'alternative',
+          clash ? `Moved to avoid ground clash — ${target.label}` : because,
+          byNormVenue,
+          registryMiss,
+        );
+        ledger.book(target.ground, f.date, f.time, {
+          seriesId: String(series.id),
+          fixtureId: f.id,
+          date: f.date,
+          time: f.time,
+        });
+        autoMoves.push(
+          `${series.id} ${f.id}: ${ground ?? '(no home ground)'} → ${target.ground} [${target.label}] on ${f.date}${f.time ? ' ' + f.time : ''} (${because})`,
+        );
+      } else {
+        unresolved.push(
+          `${series.id} ${f.id}: ${ground ?? '(no home ground)'} on ${f.date}${f.time ? ' ' + f.time : ''} — ${because}, no free candidate${candidates.length ? ` (tried: ${candidates.map((c) => c.ground).join(', ')})` : ' (no alternative ground available)'}${explicitPhase && !mustMove ? ' [union-authored venue — decide in the console]' : ''}`,
+        );
+        if (allowClashes && ground) {
+          ledger.book(ground, f.date, f.time, {
             seriesId: String(series.id),
             fixtureId: f.id,
             date: f.date,
             time: f.time,
           });
-          autoMoves.push(
-            `${series.id} ${f.id}: ${ground ?? '(no home ground)'} → ${target.ground} [${target.label}] on ${f.date}${f.time ? ' ' + f.time : ''} (${because})`,
-          );
-        } else {
-          unresolved.push(
-            `${series.id} ${f.id}: ${ground ?? '(no home ground)'} on ${f.date}${f.time ? ' ' + f.time : ''} — ${because}, no free candidate${candidates.length ? ` (tried: ${candidates.map((c) => c.ground).join(', ')})` : ' (no alternative ground available)'}${explicitPhase && !mustMove ? ' [union-authored venue — decide in the console]' : ''}`,
-          );
-          if (allowClashes && ground) {
-            ledger.book(ground, f.date, f.time, {
-              seriesId: String(series.id),
-              fixtureId: f.id,
-              date: f.date,
-              time: f.time,
-            });
-          }
         }
       }
     }
@@ -1707,6 +1827,7 @@ const IMPORT_AUTHORED_REASON_PREFIXES = [
   // write. Keep in sync with the clash pass's `because` strings, or the NEXT re-import
   // misreads its own output as hand-set admin edits and demands --discard-edits.
   'Union directive',
+  'Admin directive',
   'home club has no ground',
   'ground in bad condition',
 ];
@@ -1776,9 +1897,12 @@ interface Args {
   allowCountMismatch: boolean;
   parseOnly: boolean;
   all: boolean;
+  /** Import mode only — restrict the run to these series slugs (compared against
+   * seriesSlug(id)). Empty means every built series. */
+  only: string[];
 }
 
-function parseArgs(argv: string[]): Args {
+export function parseArgs(argv: string[]): Args {
   const args: Args = {
     mode: 'import',
     file: '',
@@ -1789,6 +1913,7 @@ function parseArgs(argv: string[]): Args {
     allowCountMismatch: false,
     parseOnly: false,
     all: false,
+    only: [],
   };
   let prune = false;
   let revert = false;
@@ -1804,16 +1929,23 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--prune') prune = true;
     else if (a === '--revert') revert = true;
     else if (a === '--all') args.all = true;
+    else if (a === '--only')
+      args.only = (argv[++i] ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
     else throw new Error(`unknown flag ${a}`);
   }
   if (prune && revert) throw new Error('--prune and --revert are mutually exclusive');
   if (prune) {
     if (args.file || args.t20) throw new Error('--prune takes no --file/--t20');
+    if (args.only.length) throw new Error('--only is an import-mode flag; not valid with --prune');
     args.mode = 'prune';
     return args;
   }
   if (revert) {
     if (args.file || args.t20) throw new Error('--revert takes no --file/--t20');
+    if (args.only.length) throw new Error('--only is an import-mode flag; not valid with --revert');
     args.mode = 'revert';
     return args;
   }
@@ -2109,11 +2241,12 @@ async function runImport(args: Args) {
   for (const k of missingLeagueKeys)
     console.warn(`  ⚠ league key "${k}" is not configured on this tenant yet`);
 
-  const { reBaseMap, unresolved: unresolvedAllocationClubs } = buildReBaseMap(
-    flat.venueAllocations,
-    clubs,
-    byNorm,
-  );
+  const {
+    reBaseMap,
+    unresolved: unresolvedAllocationClubs,
+    revoked: revokedReBases,
+    applicableRows: applicableAllocationRows,
+  } = buildReBaseMap(flat.venueAllocations, clubs, byNorm);
   if (unresolvedAllocationClubs.length) {
     console.error(
       `\n✗ Venue Allocations sheet has club name(s) that don't resolve to a prod club:\n${unresolvedAllocationClubs.map((n) => `   "${n}"`).join('\n')}`,
@@ -2121,7 +2254,14 @@ async function runImport(args: Args) {
     process.exitCode = 1;
     return;
   }
-  const barredGrounds = buildBarredGrounds(flat.venueAllocations);
+  if (revokedReBases.length) {
+    console.log(
+      `\n── Venue Allocations re-bases REVOKED by union directive (31 Aug 2026): ${revokedReBases.length}`,
+    );
+    for (const r of revokedReBases) console.log(`  ${r}`);
+  }
+  // Barred grounds exclude the revoked rows — a revoked club plays at its own ground again.
+  const barredGrounds = buildBarredGrounds(applicableAllocationRows);
   const resolutions: ResolutionLog = new Map();
 
   // ── Build every Series ──
@@ -2189,6 +2329,35 @@ async function runImport(args: Args) {
       );
     });
     built.push(b);
+  }
+
+  // ── --only: restrict this run to the selected series ── Everything downstream (venue
+  // passes, groundless report, clash pass, overlap report, edit gate, write loop) keys
+  // off `built`, so filtering here scopes the whole run to the selection. A plain filter
+  // PRESERVES `built`'s original (manifest/SECTIONS) order, which is the clash pass's
+  // priority order when two selected series contest one ground/slot — do NOT reorder by
+  // the --only argument order.
+  if (args.only.length) {
+    const slugOf = (b: BuiltSeries) => seriesSlug(b.series.id) ?? String(b.series.id);
+    const availableSlugs = built.map(slugOf);
+    const unknown = args.only.filter((slug) => !availableSlugs.includes(slug));
+    if (unknown.length) {
+      console.error(`\n✗ --only: unknown series slug(s): ${unknown.join(', ')}`);
+      console.error(
+        `   available slugs:\n${[...availableSlugs]
+          .sort()
+          .map((s) => `     ${s}`)
+          .join('\n')}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const wanted = new Set(args.only);
+    const kept = built.filter((b) => wanted.has(slugOf(b)));
+    built.splice(0, built.length, ...kept);
+    console.log(
+      `\n── --only: restricting to ${built.length} of the built series: ${args.only.join(', ')}`,
+    );
   }
 
   // Printed before every abort gate below — the operator reviews every alias/redirect
@@ -2408,21 +2577,26 @@ async function runImport(args: Args) {
   );
   for (const o of slotOverlaps) console.log(overlapRow(o));
 
-  // ── Reconciliation safety rails ──
-  let deleteSet: string[];
-  try {
-    deleteSet = assertDeleteSet(
-      existingSeries.map((s) => String(s.id)),
-      writtenSlugs,
+  // ── Reconciliation safety rails ── Under --only every unselected planb slug would
+  // look stale, so the delete-set computation would misfire — skip it entirely.
+  if (args.only.length) {
+    console.log('\n── DELETE set: skipped (--only run)');
+  } else {
+    let deleteSet: string[];
+    try {
+      deleteSet = assertDeleteSet(
+        existingSeries.map((s) => String(s.id)),
+        writtenSlugs,
+      );
+    } catch (err) {
+      console.error(`\n✗ ${err instanceof Error ? err.message : err}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(
+      `\n── DELETE set (prune BEFORE releasing while the replacements are drafts — the release gate counts these): ${deleteSet.map((s) => `${ID_PREFIX}${s}`).join(', ')}`,
     );
-  } catch (err) {
-    console.error(`\n✗ ${err instanceof Error ? err.message : err}`);
-    process.exitCode = 1;
-    return;
   }
-  console.log(
-    `\n── DELETE set (prune BEFORE releasing while the replacements are drafts — the release gate counts these): ${deleteSet.map((s) => `${ID_PREFIX}${s}`).join(', ')}`,
-  );
 
   const editNotes: string[] = [];
   const dateTimeInfoNotes: string[] = [];
@@ -2483,7 +2657,9 @@ async function runImport(args: Args) {
     return;
   }
 
-  console.log(`\n${built.length} series to write.`);
+  console.log(
+    `\n${built.length} series to write${args.only.length ? ` (--only ${args.only.join(',')})` : ''}.`,
+  );
   console.log(`${slotOverlaps.length} same-club same-slot overlaps (informational).`);
   console.log(
     `${groundlessClubs.length} club(s) with no usable ground — their home fixtures play at the opponent's ground.`,

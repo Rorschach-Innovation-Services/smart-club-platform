@@ -105,6 +105,136 @@ bootstrap dry run in step 1 is what catches that. The fixture-id churn (`f1..f12
 is safe while the series are unreleased and carry no results — this is the last cheap
 moment for it.
 
+## 31 Aug 2026 — Gledhow / Crawford North Coast venue directive
+
+The union corrected the home grounds three Promotion clubs share. **The rule now is:**
+
+- **Railways** owns **Crawford North Coast**.
+- **Ilembe** and **Dawnheights** ("Don Heights") share **Gledhow Cricket Grounds** as
+  their home ground, and their home games must **never** be scheduled at Crawford North
+  Coast.
+
+The prod club records already carry the right grounds (Dawnheights →
+`Gledhow Cricket Ground`, Ilembe → `Gledhow Cricket Grounds ` with a trailing space,
+Railways → `Crawford North Coast`), so no console club edits are needed. The code changes
+that enforce this:
+
+- **The two Venue Allocations re-bases are now revoked in code.** The REVISED T20
+  workbook's "Venue Allocations" sheet re-bases `Dawnheights → Crawford NC (Ilembe barred)`
+  and `Illembe → Crawford NC`; both club ids are in `REVOKED_RE_BASES`
+  (`import-planb-fixtures.ts`), so `buildReBaseMap` drops those rows from the re-base map
+  **and** from the barred-ground set. Their home fixtures therefore fall back to the club
+  record's ground (Gledhow) like any un-re-based club. The dry run prints the dropped rows
+  under **`── Venue Allocations re-bases REVOKED by union directive (31 Aug 2026): 2`** —
+  confirm both Dawnheights and Illembe appear there.
+- **The two Gledhow spellings are one ledger row.** `venue-clash.ts` aliases
+  `gledhowgrounds → gledhowground`, so Ilembe's "Gledhow Cricket Grounds" and Dawnheights'
+  "Gledhow Cricket Ground" resolve to the same `groundKey` and contest one ground/date/slot
+  in the clash pass (and the release gate). The prod registry still has two Gledhow rows;
+  `bootstrap-fixture-prereqs` now logs a warning naming both and merges the shared
+  facility permission onto one — merge the two rows in the console when convenient (not a
+  blocker).
+
+### Saints v Newlands (Top 10 R3, 8 Nov)
+
+A second directive targets one Top 10 fixture. Saints v Newlands is pinned to **Newlands
+Oval** via a `VENUE_DIRECTIVES` entry (matched on `homeClubId` = Saints **and** `awayClubId`
+= Newlands). Before the re-derive the release gate reported the two console-allocator
+placements `f11 CHATSWORTH OVAL` (clashing `premier-women-30ov-bottom4/f4`) and
+`f28 CHATSWORTH OVAL` (clashing `bottom4/f9`) on 8 Nov 08:30; re-deriving the series moves
+Saints v Newlands to Newlands Oval and puts `f28 PTCC v Dawnheights` back at Lahee Park.
+`venue-clash.ts` also aliases Saints' club-record ground "Chatsworth, Penguin Grounds" onto
+the registry's "PENGUIN STREET GROUND" (`chatsworthpenguingrounds → penguinstreetground`)
+so that field is one ledger row too.
+
+### Two more Saints fixtures at Newlands Oval (Top 10 R2 1 Nov, R5 22 Nov) — admin placements
+
+The Penguin alias exposed a real double-booking the platform previously could not see:
+Premier Women Bottom 4 plays KCCD's re-based home games at Penguin Street **and** Chatsworth
+United at Chatsworth Oval at 08:30 on every Top 10 Sunday, so both of Saints' grounds are
+taken whenever Saints hosts. Two Top 10 fixtures therefore had no sanctioned ground once
+Gledhow was reserved for the other side's home game:
+
+- `f8` Ilembe v Saints, 1 Nov 08:30 (Gledhow is Dawnheights v Newlands per the union)
+- `f23` Saints v Dawnheights, 22 Nov 08:30 (Gledhow is Ilembe v Lindelani)
+
+Newlands Oval is free all day on both dates, so the admin placed both there. They are encoded
+as `VENUE_DIRECTIVES` entries whose `why` starts with **`Admin directive —`** (now an
+import-authored reason prefix, so a re-import does not mistake them for hand edits). The dry
+run must show `✓ no unresolved clashes` for the Top 10 — **never pass `--allow-clashes`**;
+if a clash appears, stop and put it to the union/admin.
+
+### Scope — the two unreleased series only
+
+20 of the 25 prod series are already released; **only `s-planb-promotion-men-30ov-top10`
+and `s-planb-promotion-women-t20-ga` are unreleased**, and both must be re-derived. The
+Women's Group A series currently holds Ilembe women's home games at Crawford NC (now
+forbidden) and two of them at Gledhow 08:30 on 25 Oct and 22 Nov — the exact slots the
+union wants the Top 10's Ilembe home games in. Re-deriving **both in one `--only` run** lets
+the clash pass resolve that contention:
+
+```bash
+npx sst shell --stage prod -- npm --prefix packages/api run import-planb -- \
+  --file "…KZNCU Dolphins Updated Fixtures.xlsx" --t20 "…REVISED.xlsx" \
+  --only promotion-men-30ov-top10,promotion-women-t20-ga [--discard-edits] [--confirm]
+```
+
+**Priority under `--only` is manifest order, not argument order.** The clash pass processes
+the selected series in `SECTIONS` order; the `--only` filter preserves `built`'s original
+order (a plain `.filter`), and `promotion-men-30ov-top10` precedes `promotion-women-t20-ga`
+in the manifest. So the Top 10 books Gledhow first and the women's fixture that wanted the
+same slot **auto-moves** — expected: to the away side's ground under Rule 4. (Do not try to
+reorder priority by changing the `--only` argument order; it has no effect.)
+
+**`--discard-edits` is expected for the Top 10, not for Women's Group A.** The console
+allocator's venue reasons on the Top 10 ("Home ground", "One of these sides already has a
+match that day", "Home ground already booked that day — …") are not import-authored, so the
+edit gate flags them as GENUINE edits and demands `--discard-edits`. Before passing it,
+**read the printed GENUINE list and confirm every line is one of those allocator strings** —
+never discard a real hand-edit. Women's Group A carries only import-authored reasons, so it
+alone would not trip the gate.
+
+**Under `--only` the DELETE set is skipped** (every unselected planb slug would otherwise
+look stale) — the run prints `── DELETE set: skipped (--only run)`. Prune is unaffected;
+the superseded series were pruned with the original import.
+
+## Merging duplicate venue rows
+
+The prod `dolphins` registry grew duplicate rows for one physical ground under two
+spellings (a club-record spelling beside the union's — e.g. "CHATSWORTH OVAL" vs
+"Chatsworth Cricket Oval"). `groundKey()` already collapses each pair to one key via
+`VENUE_ALIASES`, so the two rows contend for the same field, but they stay two separate
+registry items with two `homeClubIds` lists and two pins. `merge-duplicate-venues` folds
+each group into one survivor, repoints every fixture that pointed at the loser, and deletes
+the loser. It also removes junk rows named "None"/"N/A"/… that carry no real ground.
+
+```
+npx sst shell --stage prod -- npm --prefix packages/api run merge-duplicate-venues            # dry run
+npx sst shell --stage prod -- npm --prefix packages/api run merge-duplicate-venues -- --confirm
+```
+
+It is generic (groups ALL registry rows by `groundKey`), idempotent (a collapsed group has
+one row, so a re-run is a no-op), and dry-run by default. The survivor per group is chosen
+deterministically: **more fixtures** first (fewest released-series rewrites), then the
+canonical spelling (normalised name equals the group key without going through
+`VENUE_ALIASES`), then a real pin (finite lat AND lon), then the lexically smaller id — and
+the deciding reason is printed as `keep X (reason) ← merge Y`.
+
+**What to expect from the dry run:** each duplicate group with its keep/merge lines and the
+field fills the survivor gains from the loser (homeClubIds unioned; lat/lon and any missing
+scalar copied from the loser, never overwriting a survivor value); a per-series count of
+fixtures to repoint (series id, RELEASED/draft, count); junk rows to delete; and an
+"unhandled reference sites" section. The **only persisted venue-id reference is a fixture's
+`venueId`** — TenantConfig, season-run structure/calendar snapshots, club ground records and
+series participants all reference venues by NAME — so a fixture that names a loser without a
+`venueId` link is listed there rather than silently rewritten. A junk row that is still
+referenced by fixtures is a **hard error**: the run prints it and writes nothing (exit 1).
+
+**With `--confirm`** it first writes a JSON backup of every venue row and every series it
+modifies to `./venue-merge-backup-<tenant>-<iso>.json`, then writes the repointed series
+(version bumped, every other field preserved), the survivor venues, and the loser/junk
+deletes — printing each write line.
+
 ## Prerequisites (before the first dry run)
 
 **One step: run `bootstrap-fixture-prereqs`.**
@@ -191,6 +321,11 @@ npx sst shell --stage prod -- npm --prefix packages/api run import-planb -- \
 …  --allow-clashes       # write even with unresolved venue clashes (fix in the console after)
 …  --allow-count-mismatch # write even though a section/group's parsed count != its expected
                            #   count — the escape hatch for a deliberate future sheet revision
+…  --only <slug>[,<slug>…] # import mode only — restrict the run to those built series (by
+                           #   seriesSlug). Everything downstream scopes to the selection;
+                           #   the DELETE set is skipped. Use it to re-derive one/few
+                           #   unreleased series without touching the released ones. Not
+                           #   valid with --prune/--revert.
 
 # Prune — remove the 4 superseded series (old Premier/Premier Women T20 top6/bottom6/
 # top4/bottom4). Read "Ordering — prune before release" below: with the server-side

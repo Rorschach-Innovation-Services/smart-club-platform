@@ -54,6 +54,8 @@ export const VENUE_ALIASES: Record<string, string> = {
   penguinstreetchatsworth: 'penguinstreetground', // "Penguin Street (Chatsworth)"
   phoenixsydmore: 'sidmore', // East Coast's "Sidmore" = the facility list's "Phoenix Sydmore"
   totioval: 'toti1', // "Toti Oval"
+  gledhowgrounds: 'gledhowground', // Ilembe's club-record spelling of Dawnheights' "Gledhow Cricket Ground" — one shared field (union, 31 Aug 2026)
+  chatsworthpenguingrounds: 'penguinstreetground', // Saints' club-record "Chatsworth, Penguin Grounds" = the registry's "PENGUIN STREET GROUND" (KCCD's re-base) — one field, one ledger row
 };
 
 /** A ground name's ledger/registry lookup key: alias applied over the normal form. */

@@ -106,6 +106,8 @@ const FACILITY_FIELDS: Array<{ name: string; clubs: string[] }> = [
   { name: 'Dhubri Road', clubs: ['merebank-cricket-club'] },
   { name: 'Fairfield Park', clubs: ['hillary-malvern-cricket-club'] },
   { name: 'Glenwood High', clubs: ['east-coast-cc'] },
+  // Shared home ground (union, 31 Aug 2026) — Ilembe's record spells it "Gledhow Cricket Grounds"; venue-clash.ts aliases the two.
+  { name: 'Gledhow Cricket Ground', clubs: ['dawnheights-cricket-club', 'ilembe-cricket-club'] },
   { name: 'Hammond (UKZN)', clubs: ['ukzn-cricket-club'] },
   { name: 'Varsity 4', clubs: ['ukzn-cricket-club'] },
   {
@@ -305,7 +307,18 @@ async function main() {
   // import resolves; union the permitted clubs into homeClubIds; create unpinned rows
   // for fields the registry has never seen (Danville 2, Siripat 3, Highbury 1–3, …).
   const byKey = new Map<string, Venue>();
-  for (const v of existingVenues) byKey.set(groundKey(v.name), v);
+  for (const v of existingVenues) {
+    const k = groundKey(v.name);
+    const prior = byKey.get(k);
+    // Two registry rows sharing one groundKey (e.g. the two Gledhow rows the 31 Aug alias
+    // now collapses). This map keeps the LAST one, so facility-permission merges land on
+    // it deterministically — but the rows should be merged in the console. Warn, proceed.
+    if (prior)
+      console.log(
+        `⚠ venue registry has two rows sharing ground key "${k}": "${prior.name}" (${prior.id}) and "${v.name}" (${v.id}) — facility permissions will merge onto "${v.name}"; merge these rows in the console`,
+      );
+    byKey.set(k, v);
+  }
   for (const v of venuesToAdd.values()) byKey.set(groundKey(v.name), v);
   const pendingNew = new Set(venuesToAdd.values());
   const venueUpdates = new Map<string, Venue>();

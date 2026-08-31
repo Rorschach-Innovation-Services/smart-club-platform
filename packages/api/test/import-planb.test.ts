@@ -21,6 +21,11 @@ const {
   parseWorkbook,
   computeSameClubSlotOverlaps,
   computeGroundlessClubs,
+  buildReBaseMap,
+  buildBarredGrounds,
+  buildClubIndex,
+  parseArgs,
+  directiveMatches,
 } = await import('../src/import-planb-fixtures.js');
 
 // Mirrors the module's own (unexported) constants — kept in sync by inspection, not
@@ -671,5 +676,113 @@ describe('computeGroundlessClubs — home clubs with no usable ground', () => {
     // umgababa is only ever the away side here → nothing to relocate, not listed.
     const built = [series('promotion-women-s-league', [['delta', 'umgababa']])];
     assert.deepEqual(computeGroundlessClubs(built, clubsById, new Map()), []);
+  });
+});
+
+describe('buildReBaseMap — revoked Venue Allocations re-bases (union, 31 Aug 2026)', () => {
+  const club = (id: string, name: string): Club => ({ id, name, ground: {} }) as unknown as Club;
+  // Dawnheights + Illembe (→ ilembe-cricket-club via NAME_REDIRECTS) are the revoked pair;
+  // KCCD is a normal re-base row that must still map.
+  const clubs = [
+    club('dawnheights-cricket-club', 'Dawnheights Cricket Club'),
+    club('ilembe-cricket-club', 'iLembe Cricket Club'),
+    club('kccd-cricket-club', 'KCCD Cricket Club'),
+  ];
+  const byNorm = buildClubIndex(clubs);
+  const rows = [
+    {
+      league: 'Promotion',
+      clubName: 'Dawnheights',
+      groundOnSheet: 'Ilembe',
+      allocatedGround: 'Crawford NC',
+      reason: 'Ilembe barred',
+    },
+    {
+      league: 'Promotion',
+      clubName: 'Illembe',
+      groundOnSheet: 'Ilembe',
+      allocatedGround: 'Crawford NC',
+      reason: '',
+    },
+    {
+      league: 'Promotion',
+      clubName: 'KCCD',
+      groundOnSheet: 'Addison Park',
+      allocatedGround: 'Penguin Street',
+      reason: '',
+    },
+  ];
+
+  test('the two revoked rows are absent from the re-base map; a non-revoked row still maps', () => {
+    const { reBaseMap, revoked, unresolved } = buildReBaseMap(rows, clubs, byNorm);
+    assert.equal(unresolved.length, 0);
+    assert.equal(reBaseMap.has('dawnheights-cricket-club'), false);
+    assert.equal(reBaseMap.has('ilembe-cricket-club'), false);
+    assert.equal(reBaseMap.get('kccd-cricket-club'), 'Penguin Street');
+    assert.equal(revoked.length, 2);
+    assert.ok(revoked.some((r) => /Dawnheights/.test(r)));
+    assert.ok(revoked.some((r) => /Illembe/.test(r)));
+  });
+
+  test("barred grounds exclude the revoked rows' groundOnSheet but keep a non-revoked one", () => {
+    const { applicableRows } = buildReBaseMap(rows, clubs, byNorm);
+    const barred = buildBarredGrounds(applicableRows);
+    assert.equal(barred.has(normalise('Ilembe')), false);
+    assert.equal(barred.has(normalise('Addison Park')), true);
+  });
+});
+
+describe('parseArgs — --only', () => {
+  test('--only a,b parses to a slug list', () => {
+    const args = parseArgs(['--file', 'f.xlsx', '--t20', 't.xlsx', '--only', 'a,b']);
+    assert.deepEqual(args.only, ['a', 'b']);
+    assert.equal(args.mode, 'import');
+  });
+
+  test('--only combined with --prune throws', () => {
+    assert.throws(() => parseArgs(['--prune', '--only', 'a']));
+  });
+});
+
+describe('directiveMatches — home/away club matchers (union, 31 Aug 2026)', () => {
+  const d = {
+    slug: 'promotion-men-30ov-top10',
+    homeClubId: 'saints-cricket-club',
+    awayClubId: 'newlands-cricket-club',
+    candidates: ['Newlands Oval'],
+    why: 'Saints v Newlands at Newlands Oval',
+  };
+  const SID = 's-planb-promotion-men-30ov-top10';
+
+  test('matches only the intended home/away pairing in the right series', () => {
+    assert.equal(
+      directiveMatches(d, SID, undefined, 'saints-cricket-club', 'newlands-cricket-club'),
+      true,
+    );
+  });
+
+  test('the reverse pairing (away side is not Newlands) does not match', () => {
+    assert.equal(
+      directiveMatches(d, SID, undefined, 'saints-cricket-club', 'some-other-club'),
+      false,
+    );
+    // Home/away swapped — Saints as the away side is a different fixture, no match.
+    assert.equal(
+      directiveMatches(d, SID, undefined, 'newlands-cricket-club', 'saints-cricket-club'),
+      false,
+    );
+  });
+
+  test('a different series never matches, even with the right clubs', () => {
+    assert.equal(
+      directiveMatches(
+        d,
+        's-planb-premier-men-t20-1',
+        undefined,
+        'saints-cricket-club',
+        'newlands-cricket-club',
+      ),
+      false,
+    );
   });
 });
