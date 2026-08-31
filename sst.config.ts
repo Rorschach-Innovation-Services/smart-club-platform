@@ -363,8 +363,6 @@ export default $config({
         whatsappStaffTemplate,
         whatsappReglinkTemplate,
         whatsappClearanceTemplate,
-        whatsappClearanceApprovedTemplate,
-        whatsappClearanceRejectedTemplate,
       ],
       // SES isn't covered by `link` (it's not an SST resource), so grant it directly.
       // SES authorizes by verified identity, not resource ARN, hence resources: ['*'].
