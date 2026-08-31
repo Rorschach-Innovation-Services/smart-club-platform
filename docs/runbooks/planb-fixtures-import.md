@@ -288,6 +288,46 @@ permissions (`homeClubIds`) plus the `note`; the data model has **no per-league 
 restriction**, so nothing in the allocator prevents another league from booking Commons. Enforcing
 a true per-league reservation is a separate change.
 
+## Resolving residual venue clashes
+
+After the import and the exact-field-numbering pass there can still be a few ground/date/time
+double-bookings the union's own directives never covered — two series that happen to land the same
+field on the same day, a promotion game sharing a ground with a premier one, or the two Gledhow
+50-over groups. `resolve-venue-clashes` sweeps the **whole `dolphins` tenant** (every series, any
+lifecycle, skipping only `cancelled` fixtures; effective ground = `venueOverride` || `venueName` ||
+the home club's ground via participants — the same scan normalise-venue-names Step 5 runs), and
+moves **one fixture per clash** onto a clash-free ground.
+
+**Which fixture moves** (deterministic, printed with the reason for each clash):
+
+1. If exactly one of the two fixtures sits on its **own home club's ground** (implicit or
+   explicit), the one **not** at home moves.
+2. Else if the pair is from **different series** and one series slug contains `promotion` and the
+   other `premier`, the **Promotion** one moves.
+3. Else if the two carry different **group/series numbers** (`-g2` vs `-g1`, `-2` vs `-1`), the
+   **higher-numbered** moves (for the Gledhow 50-over pairs, g2 = Ilembe moves).
+4. Else the **later fixture id** moves (f37 vs f40 → f40).
+
+Clashes are processed in date order; each move is booked into the ledger so later decisions see it,
+and a fixture that would clash again after already being moved this run is a **hard error**. The
+destination is the first clash-free ground in the importer's candidate chain — away side's allocated
+ground, home then away club's secondary venue, then the home and away clubs' union permitted-fields
+lists — never the ground being clashed on, a junk name, or a red-listed / bad-condition ground.
+
+**The clash gate (mandatory).** The CLI re-scans the whole tenant on the post-change state and
+prints `pre-existing clashes: N, post-change clashes: 0`. It **refuses to write** — hard-errors and
+writes nothing — unless the post-change scan has **zero** clashes (and likewise if any fixture has
+no free candidate ground).
+
+```
+npx sst shell --stage prod -- npm --prefix packages/api run resolve-venue-clashes            # dry run
+npx sst shell --stage prod -- npm --prefix packages/api run resolve-venue-clashes -- --confirm
+```
+
+Dry-run by default; `--confirm` first writes a JSON backup of every touched series to
+`./venue-clash-resolve-backup-<tenant>-<iso>.json`, then writes each affected series with its
+version bumped.
+
 ## Prerequisites (before the first dry run)
 
 **One step: run `bootstrap-fixture-prereqs`.**

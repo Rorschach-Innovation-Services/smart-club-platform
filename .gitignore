@@ -20,6 +20,7 @@ dash.md
 planb-backup-*.json
 venue-merge-backup-*.json
 venue-normalise-backup-*.json
+venue-clash-resolve-backup-*.json
 
 # Prod data snapshots (chair name/email/cell, docMeta) written by
 # import-titans-compliance --confirm — never commit; also covers the
