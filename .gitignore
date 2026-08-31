@@ -18,6 +18,7 @@ dash.md
 
 # Prod data snapshots written by import-planb-fixtures --confirm — never commit
 planb-backup-*.json
+venue-merge-backup-*.json
 
 # Prod data snapshots (chair name/email/cell, docMeta) written by
 # import-titans-compliance --confirm — never commit; also covers the
