@@ -33,23 +33,30 @@ export function normaliseName(name: string): string {
  * the normalised form of real dolphins registry venue names. */
 export const VENUE_ALIASES: Record<string, string> = {
   acc1: 'toti1', // "ACC 1" (REVISED) = Amanzimtoti's Toti 1
-  siripat1: 'siripatroadgrounds', // two fields at one complex, two registry rows —
-  siripat2: 'siripatgrounds', // matching how the REVISED file allocates them
+  // Exact-field numbering (union, 31 Aug 2026): the registry rows and club records are now
+  // named by exact field number ("Siripat 1", "Crusaders 1", "Danville 1", "Harlequins 1"…),
+  // so every OLD spelling aliases FORWARD onto the numbered canonical form.
+  siripatroadgrounds: 'siripat1', // was "Siripat Road Grounds"
+  siripatgrounds: 'siripat2', // was "Siripat Grounds"
   crawfordnc: 'crawfordnorthcoast', // Railways
   laheepark: 'laheeparkoval', // PTCC's pinned "Lahee park cricket oval"
   tills: 'tillscrescentground', // Delta
   hammond: 'hammondoval', // UKZN's "Hammond Cricket Oval"
-  danville1: 'danville', // Rhythm DHSOB
-  harlequins1: 'vanriebekparkharlequins1', // "Van Riebek Park (Harlequins 1)"
-  crusaders1: 'crusaderssports', // "Crusaders Sports Club"
+  danville: 'danville1', // was "Danville"
+  vanriebekparkharlequins1: 'harlequins1', // was "Van Riebek Park (Harlequins 1)"
+  vanriebekparkharlequins2: 'harlequins2', // was "Van Riebek Park (Harlequins 2)"
+  crusaderssports: 'crusaders1', // was "Crusaders Sports Club"
+  crusaders2field: 'crusaders2', // was "Crusaders 2 Field"
+  catormanor: 'catomanor1', // typo generic "Cator Manor" → merged into Cato Manor 1
+  catomanor: 'catomanor1', // generic "Cato Manor" → merged into Cato Manor 1
+  harlequins: 'harlequins1', // generic "Harlequins" → merged into Harlequins 1
+  highburygrounds: 'highbury1', // generic "Highbury grounds" → merged into Highbury 1
   foresthills: 'foresthillssports', // "Forest Hills CC" → "Forest Hills Sports Club"
   phoenixstonebridge: 'stonebridge', // East Coast / Phoenix / Parkgate
   penguinstreet: 'penguinstreetground', // Meadowridge's "PENGUIN STREET GROUND"
   // From the union's "facility updated" permitted-fields sheet (17 Aug 2026).
-  crusaders2: 'crusaders2field',
   dhubriroad: 'dhubriroadgrounds',
   hammondukzn: 'hammondoval', // "Hammond (UKZN)"
-  harlequins2: 'vanriebekparkharlequins2',
   laheepark1: 'laheeparkoval',
   penguinstreetchatsworth: 'penguinstreetground', // "Penguin Street (Chatsworth)"
   phoenixsydmore: 'sidmore', // East Coast's "Sidmore" = the facility list's "Phoenix Sydmore"

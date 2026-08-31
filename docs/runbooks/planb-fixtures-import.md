@@ -235,6 +235,59 @@ modifies to `./venue-merge-backup-<tenant>-<iso>.json`, then writes the repointe
 (version bumped, every other field preserved), the survivor venues, and the loser/junk
 deletes — printing each write line.
 
+## Exact field numbering (union, 31 Aug 2026)
+
+The union requires every multi-field complex to be named by its exact field number ("Siripat 1"
+/ "Siripat 2", "Crusaders 1" / "Crusaders 2", "Harlequins 1" / "Harlequins 2", "Cato Manor 1"…).
+`normalise-venue-names` applies this across the whole `dolphins` tenant in one gated pass.
+
+**What the CLI does**
+
+1. **Renames registry rows (ids kept):** `Siripat Road Grounds → Siripat 1`, `Siripat Grounds →
+   Siripat 2`, `Crusaders Sports Club → Crusaders 1`, `Crusaders 2 Field → Crusaders 2`,
+   `Danville → Danville 1`, `Van Riebek Park (Harlequins 1/2) → Harlequins 1/2`. It verifies the
+   row's current name against the expected old (or already-new) name and **hard-errors on drift**.
+   Every fixture pointing at the row by `venueId` gets the new `venueName`; a fixture that names
+   the old spelling with no `venueId` is linked (venueId + venueName set).
+2. **Merges generic complex rows into a numbered field, lowest free first.** The generic rows
+   `Cato Manor`, `Cator Manor` (typo), `Harlequins` and `Highbury grounds` are ambiguous — they
+   name a complex, not a field. Each fixture on a generic row is re-booked onto the **first
+   candidate field with no clash** at its date+time, using a season-wide ledger seeded with every
+   other fixture of the tenant (same effective-ground rules as the import's clash pass), processed
+   in date order so earlier bookings inform later ones. If no candidate is free for a fixture the
+   run **hard-errors and writes nothing**. The generic row's `homeClubIds` are unioned onto the
+   first candidate (e.g. Chesterville + Lamontville → Cato Manor 1, FAM → Harlequins 1, Merebank →
+   Highbury 1) and the generic row is deleted.
+3. **Renames the ground names on club records** (`venue` / `secondaryVenue`), verifying the old
+   value (trimmed, case-insensitive) before setting. Fixtures with **no explicit venue** take the
+   home club's ground name at display time, so renaming a club record automatically renames those
+   implicit fixtures — the CLI prints "N implicit fixtures follow the club record" and writes no
+   fixture for them.
+4. **Creates reserved `Commons 1` / `Commons 2`** registry rows (no pin, `note: 'Reserved for
+   Premier Women (union, 31 Aug 2026)'`, `homeClubIds` = the Premier Women participants).
+   Idempotent — skipped if a row with the same ground key already exists.
+
+**The clash gate (mandatory).** After computing every in-memory change the CLI runs a whole-tenant
+clash scan on the post-change state and compares it to the same scan on the pre-change state. It
+prints both counts — `pre-existing clashes: N (unchanged), new clashes: 0`. If the changes would
+introduce **any** clash not present before, it **hard-errors and writes nothing**.
+
+```
+npx sst shell --stage prod -- npm --prefix packages/api run normalise-venue-names            # dry run
+npx sst shell --stage prod -- npm --prefix packages/api run normalise-venue-names -- --confirm
+```
+
+Dry-run by default; `--confirm` first writes a JSON backup of every venue row and every
+series/club it will modify to `./venue-normalise-backup-<tenant>-<iso>.json`, then writes the
+repointed series (version bumped), the renamed/merged venues, the generic deletes, the renamed
+clubs and the new Commons rows. It composes with `merge-duplicate-venues` and the alias flips in
+`venue-clash.ts` (old spellings now alias forward onto the numbered canonical names).
+
+**Follow-up — "Reserved" is by convention only.** Commons 1/2 are marked reserved via club
+permissions (`homeClubIds`) plus the `note`; the data model has **no per-league venue
+restriction**, so nothing in the allocator prevents another league from booking Commons. Enforcing
+a true per-league reservation is a separate change.
+
 ## Prerequisites (before the first dry run)
 
 **One step: run `bootstrap-fixture-prereqs`.**
