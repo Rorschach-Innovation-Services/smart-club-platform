@@ -79,6 +79,13 @@ export interface LedgerBooking {
   fixtureId: string;
   date: string;
   time?: string;
+  // Display identity of the fixture that owns the slot, resolved at book time so a hit can
+  // name the other side without a second lookup. `hit.fixtureId` is `''` for id-less
+  // fixtures and unresolvable for `win:f3` slot refs, so we carry names/round instead of
+  // re-deriving them from the raw ref later.
+  home?: string;
+  away?: string;
+  round?: number;
 }
 
 /** How a ground name maps into the ledger: the identity bookings share, and how many
@@ -120,9 +127,11 @@ export class GroundLedger {
 
 interface StoredFixture {
   id?: string;
+  round?: number;
   date?: string;
   time?: string;
   home?: string;
+  away?: string;
   status?: string;
   venueOverride?: string;
   venueName?: string;
@@ -158,19 +167,63 @@ export function registryResolver(venues: Venue[]): (ground: string) => GroundSlo
 }
 
 /**
- * Ground/date/time clashes that RELEASING the subject series would publish: each
- * subject fixture is checked against every other series' fixtures (any lifecycle — a
- * clash with a draft is still a double-booking the season carries) and against the
- * subject's own earlier fixtures. Cancelled fixtures don't book; fixtures with no
- * determinable ground can't clash. Returns human-readable lines, empty when clean.
+ * A single ground/date/time double-booking the subject series would carry: which subject
+ * fixture, at which effective ground, and the other fixture (series + side names + round)
+ * that already holds the slot. The subject-side `home`/`away`/`round` let the server render
+ * a human line ("R1 A v B: …"); the `with` side is what the fixture editor points the admin
+ * at. Serialised straight into the 409 body and the pre-check response.
  */
-export function findReleaseClashes(
+export interface Clash {
+  fixtureId: string; // subject fixture id ('' for an id-less fixture)
+  round?: number;
+  ground: string; // effective ground name as booked
+  date: string;
+  time?: string;
+  home?: string; // subject-side display names
+  away?: string;
+  with: {
+    seriesId: string;
+    seriesName?: string;
+    fixtureId: string;
+    round?: number;
+    home?: string;
+    away?: string;
+  };
+}
+
+/** A fixture side's DISPLAY name: participants snapshot (team name), else the club name
+ * (legacy series where the ref IS a clubId), else the raw ref — a `win:f3` slot placeholder
+ * has neither, so it shows as-is rather than fabricating a name. */
+function resolveSide(
+  s: Series,
+  ref: string | undefined,
+  clubsById: Map<string, Club>,
+): string | undefined {
+  if (!ref) return undefined;
+  const p = s.participants?.find((x) => x.teamId === ref);
+  if (p) return p.name;
+  return clubsById.get(ref)?.name ?? ref;
+}
+
+/**
+ * Ground/date/time clashes the subject series carries: each subject fixture is checked
+ * against every other series' fixtures (any lifecycle — a clash with a draft is still a
+ * double-booking the season carries) and against the subject's own earlier fixtures.
+ * Cancelled fixtures don't book; fixtures with no determinable ground can't clash. Returns
+ * structured `Clash` records (empty when clean); `findReleaseClashes` and `formatClash`
+ * project them back to the legacy prose the release gate has always emitted.
+ */
+export function findClashes(
   subject: Series,
   allSeries: Series[],
   clubs: Club[],
   venues: Venue[],
-): string[] {
+): Clash[] {
   const clubsById = new Map(clubs.map((c) => [c.id, c]));
+  const seriesById = new Map<string, Series>(allSeries.map((s) => [String(s.id), s]));
+  // The subject may be an in-flight edit that isn't the stored copy in `allSeries`; index it
+  // last so a self-clash (or a stale stored twin) resolves its name/sides off the edit.
+  seriesById.set(String(subject.id), subject);
   const ledger = new GroundLedger(registryResolver(venues));
   for (const s of allSeries) {
     if (String(s.id) === String(subject.id)) continue;
@@ -183,26 +236,88 @@ export function findReleaseClashes(
         fixtureId: f.id ?? '',
         date: f.date,
         time: f.time,
+        home: resolveSide(s, f.home, clubsById),
+        away: resolveSide(s, f.away, clubsById),
+        round: f.round,
       });
     }
   }
-  const clashes: string[] = [];
+  const clashes: Clash[] = [];
   for (const f of (subject.fixtures as StoredFixture[]) ?? []) {
     if (!f.date || f.status === 'cancelled') continue;
     const ground = effectiveGround(subject, f, clubsById);
     if (!ground) continue;
     const hit = ledger.check(ground, f.date, f.time);
     if (hit) {
-      clashes.push(
-        `${f.id ?? '?'}: ${ground} on ${f.date}${f.time ? ' ' + f.time : ''} (also ${hit.seriesId}/${hit.fixtureId})`,
-      );
+      clashes.push({
+        fixtureId: f.id ?? '',
+        round: f.round,
+        ground,
+        date: f.date,
+        time: f.time,
+        home: resolveSide(subject, f.home, clubsById),
+        away: resolveSide(subject, f.away, clubsById),
+        with: {
+          seriesId: hit.seriesId,
+          seriesName: seriesById.get(hit.seriesId)?.name,
+          fixtureId: hit.fixtureId,
+          round: hit.round,
+          home: hit.home,
+          away: hit.away,
+        },
+      });
     }
     ledger.book(ground, f.date, f.time, {
       seriesId: String(subject.id),
       fixtureId: f.id ?? '',
       date: f.date,
       time: f.time,
+      home: resolveSide(subject, f.home, clubsById),
+      away: resolveSide(subject, f.away, clubsById),
+      round: f.round,
     });
   }
   return clashes;
+}
+
+/** The legacy release-gate line, byte-for-byte: existing tests and the release toast read
+ * it. Kept as a projection of `Clash` so `findReleaseClashes` stays a thin wrapper. */
+export function formatClash(c: Clash): string {
+  return `${c.fixtureId || '?'}: ${c.ground} on ${c.date}${c.time ? ' ' + c.time : ''} (also ${c.with.seriesId}/${c.with.fixtureId})`;
+}
+
+/** Reader-friendly one-liner for the in-season message and the fixture-editor panel: names
+ * both sides and rounds instead of ids. */
+export function formatClashForHumans(c: Clash): string {
+  const time = c.time ? ' ' + c.time : '';
+  return `R${c.round ?? '?'} ${c.home ?? '?'} v ${c.away ?? '?'}: ${c.ground} on ${c.date}${time} is already booked by ${c.with.seriesName ?? c.with.seriesId} R${c.with.round ?? '?'} · ${c.with.home ?? '?'} v ${c.with.away ?? '?'}`;
+}
+
+/** Identity of a clash as the PAIR-on-that-ground, deliberately WITHOUT date/time: moving a
+ * residual-clashing fixture's kick-off (09:00 → 13:00) against the same untimed partner is
+ * not a NEW double-booking, so the in-season gate's subset test must not count it as one
+ * (ADR 0011 addendum). Ground is normalised so "Toti Oval" and "Toti 1" share a key.
+ *
+ * `fixtureId` is safe as a key component even though `f.id ?? ''` allows an empty string:
+ * every fixture producer assigns a non-empty id — the client generator (`fixturesFromDates`
+ * in src/competition/fixtures.ts, `id: 'f' + fixtureId++`), the union importer
+ * (import-planb-fixtures.ts, `id: \`f${i + 1}\``) and the seeder (seed-cohort.ts, which
+ * emits generator fixtures). So id-less fixtures collapsing to one key is not a real state
+ * for first-party data; the `?? ''` is only a type-level fallback for the optional field.
+ * Boundary of that guarantee: POST/PATCH /series do not enforce a fixture `id` on write, so
+ * a scripted client COULD store id-less fixtures and collapse their keys. Not defended here;
+ * requiring `id` on fixture writes is the follow-up if that ever matters. */
+export function clashKey(c: Clash): string {
+  return `${c.fixtureId}|${groundKey(c.ground)}|${c.with.seriesId}/${c.with.fixtureId}`;
+}
+
+/** Back-compat wrapper: the release gate's original prose-line signature, now a projection
+ * of `findClashes`. Existing callers and tests are untouched. */
+export function findReleaseClashes(
+  subject: Series,
+  allSeries: Series[],
+  clubs: Club[],
+  venues: Venue[],
+): string[] {
+  return findClashes(subject, allSeries, clubs, venues).map(formatClash);
 }

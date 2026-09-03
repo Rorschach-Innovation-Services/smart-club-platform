@@ -893,6 +893,33 @@ export interface Series {
 
 export type WithheldField = 'venue' | 'time';
 
+/**
+ * A ground/date/time double-booking the venue clash gate found (ADR 0011 addendum).
+ * Mirrors `Clash` in packages/api/src/venue-clash.ts — the server is the source of
+ * truth. `fixtureId`/`round` describe the SUBJECT fixture (the one being edited); the
+ * `with` block names the OTHER fixture already holding that ground. `home`/`away` under
+ * `with` are display names (participant snapshot, else club name, else the raw ref).
+ * Carried on a 409 (`{ error, code: 'venue_clash', clashes }`) and returned by the
+ * clash-check pre-check so the fixture editor can point at the exact conflict.
+ */
+export interface Clash {
+  fixtureId: string;
+  round?: number;
+  ground: string;
+  date: string;
+  time?: string;
+  home?: string;
+  away?: string;
+  with: {
+    seriesId: string;
+    seriesName?: string;
+    fixtureId: string;
+    round?: number;
+    home?: string;
+    away?: string;
+  };
+}
+
 /** Stored object metadata for a player's uploaded ID document. */
 export interface PlayerIdDocMeta {
   objectKey: string;

@@ -55,6 +55,10 @@ export class HttpError extends Error {
   constructor(
     public status: number,
     message: string,
+    // Extra fields merged into the JSON error body by app.onError (e.g. a structured
+    // `clashes` list + `code`). Spread BEFORE `error` there so nothing can overwrite the
+    // `error` string every client reads.
+    public details?: Record<string, unknown>,
   ) {
     super(message);
   }

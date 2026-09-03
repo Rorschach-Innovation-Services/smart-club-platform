@@ -3107,7 +3107,11 @@
         margin-top: 8px;
         text-align: right;
       }
-</style>
+    /* Inline warning box for actionable server refusals (release clash gate, in-season
+       "Change blocked" panel). One shared rule so ReleaseDialog and the fixture editor
+       cannot drift: a muted red field, not a stack-trace red. */
+    .field-error{color:#7a1d1d;background:#fbf0ef;border:1px solid #e9b7b1;border-radius:8px;padding:10px 12px;font-size:13px;}
+  </style>
 </head>
 <body>
 

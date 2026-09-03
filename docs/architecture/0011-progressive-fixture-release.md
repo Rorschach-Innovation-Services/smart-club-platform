@@ -165,3 +165,58 @@ infer from, and would give the game away.
   synthesised home grounds are included even when `venue` is withheld (public identity,
   distinct from the fixture's hidden allocated venue); the client still shows "Venue to be
   confirmed" by checking `withheld.venue` explicitly.
+
+## Addendum (2026-09): in-season edits are clash-gated
+
+The release clash gate ran only on the false→true release transition, so an **in-season**
+fixture edit to an already-released series could quietly write a ground double-booking the
+gate exists to prevent. This addendum closes that gap without taking away the ability to
+edit a live series.
+
+- **Live series stay editable.** Admins — and operators, who become tenant admins via the
+  auto-grant — may change venues, dates and times on a released series at will. That is a
+  designed capability (clubs read the live venue on every load); the change reaches clubs
+  with no "venue updated" marker, a deliberate product decision, and **no notification is
+  sent**.
+- **The version pre-check runs before any clash gate.** `PATCH /series/:id` now rejects a
+  stale `version` (→ `409 "series changed; refetch"`) _before_ the clash gates. A stale
+  tab's whole-object PATCH carries every fixture as the tab loaded them; diffed against a
+  newer stored copy it would otherwise be blamed for "introducing" a clash on a fixture the
+  admin never touched. The correct answer to a stale write is the plain concurrency 409.
+- **Every `fixtures` write to a released series is gated** — not just release. A regenerate
+  (whole new `fixtures[]`) and an allocation write-back both land here. Because a
+  regenerate mints new fixture ids, on a series that already carries residual clashes it is
+  refused until those are fixed; that is accepted — regenerating a live schedule is a
+  destructive act anyway.
+- **The rule is "no clash may be introduced", not "no clash may exist".** The gate blocks
+  an edit whose resulting clash set is **not a subset** of the pre-edit set. Applied
+  literally, "block any clash" would make a series that already carries two residual
+  clashes impossible to fix one fixture at a time (the first fix still leaves one). For a
+  clash-free series the two rules are identical. The 409 body always lists exactly the
+  **introduced** clashes.
+- **The clash identity is the fixture PAIR on a ground, without date/time**
+  (`clashKey = fixtureId | groundKey(ground) | withSeriesId/withFixtureId`). Moving a
+  residual-clashing fixture's kick-off (09:00 → 13:00) against the same untimed partner is
+  not a _new_ double-booking — the untimed partner owns the whole ground-day either way —
+  so the subset test must not count it as one. Keying on date/time would trap the admin.
+- **The gate reads REAL venues.** Withholding is a read-side projection for club users
+  (the store always holds the real venue/time), so a clashing edit is refused even while
+  `withheld.venue` hides the ground from clubs; a clean edit leaves the mask intact.
+- **`postponed` fixtures still book their ground** (today's behaviour — only `cancelled`
+  is skipped); an in-season edit to a postponed fixture is gated like any other.
+- **Structured 409 body.** Both the release and in-season 409s now carry
+  `{ error, code: 'venue_clash', clashes: Clash[] }` (details spread before `error`, which
+  every client still reads). `Clash` names the subject fixture and the `with` fixture
+  (series id + name, round, both sides' display names) so the console can point the admin
+  at exactly what to fix. A read-only `POST /series/:id/clash-check` (admin) returns
+  `{ clashes, introduced }` per candidate so the fixture editor's hints match the save gate
+  exactly — ground-name normalisation and `VENUE_ALIASES` live server-side, so a client
+  ledger would drift.
+
+**Known bypasses left for follow-up** (they do not go through `PATCH /series`):
+
+- the venue CLIs in `packages/api/src/` (`resolve-venue-clashes`, `merge-duplicate-venues`,
+  `normalise-venue-names`, the importer) write via `repo.putSeries` directly and are not
+  gated — they are build-time authoring tools run by an operator who owns the clash report;
+- `PATCH /clubs/:id` changing a club's home ground silently re-books every released fixture
+  that inherits that ground implicitly, with no clash check.

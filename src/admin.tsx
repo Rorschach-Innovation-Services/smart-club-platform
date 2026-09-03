@@ -1,6 +1,12 @@
 /* ─── Admin views ─── */
 
-import { useState as useStateA, useMemo as useMemoA, useEffect as useEffectA, useId } from 'react';
+import {
+  useState as useStateA,
+  useMemo as useMemoA,
+  useEffect as useEffectA,
+  useRef as useRefA,
+  useId,
+} from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { useQueries } from '@tanstack/react-query';
@@ -91,6 +97,7 @@ import type {
   SeasonCalendar,
   SeasonRun,
   Series,
+  Clash,
   TimeSlot,
   Venue,
   Weekday,
@@ -111,7 +118,7 @@ import {
 import { exportRowsToXlsx, exportSheetsToXlsx, clubExportRow, playerExportRow } from './exportXlsx';
 import { Sentry } from './sentry';
 import { openBccReminder } from './mailto';
-import { EMAIL_RE } from './api';
+import { EMAIL_RE, ApiError, SERIES_CONFLICT_MESSAGE, SERIES_CONFLICT_FRIENDLY } from './api';
 import { parseSupport } from './support';
 import { DocPreviewModal } from './DocPreviewModal';
 import { PlayerDetailModal } from './PlayerDetailModal';
@@ -172,6 +179,18 @@ function VenueReasonPill({ reason, status }: { reason?: string; status?: string 
   );
 }
 
+/**
+ * One clash-check result: `clashes` is every double-booking a candidate would sit on,
+ * `introduced` is only the ones NEW to that candidate — exactly what the save gate would
+ * refuse on a released series (a residual clash a candidate merely keeps is in `clashes`
+ * but not `introduced`). Aligned by index with the candidates sent.
+ */
+export type ClashResult = { clashes: Clash[]; introduced: Clash[] };
+export type CheckClashes = (
+  seriesId: string,
+  candidates: unknown[],
+) => Promise<{ results: ClashResult[] }>;
+
 /* ─── AdminFixtures — series cards + drilldown fixture table with distance + travel-cost ─── */
 interface AdminFixturesProps {
   clubs: Club[];
@@ -186,13 +205,19 @@ interface AdminFixturesProps {
    *  (not just re-typed) from `onCreateSeries` so a stale call site still passing the old
    *  `(leagueKey) => void` routing shape fails to compile instead of silently no-oping. */
   onSubmitSeries: (series) => Promise<void>;
-  onUpdateSeries;
+  /** Persist an edited series. Every caller awaits the returned promise — EditFixtureRow
+   *  closes the row only on resolve so a clash-gate 409 keeps it open with the reason
+   *  inline. Typed as returning a promise so that contract is enforced, not by convention. */
+  onUpdateSeries: (id: string, updater: (s: Series) => Series) => Promise<unknown>;
   onDeleteSeries;
   onDuplicateSeries;
   onSetReleased;
   /** Reveal one or more withheld fields on a released series (ADR 0011). */
   onReveal?: (id: string, fields: WithheldField[]) => Promise<unknown> | void;
   onSetApproved;
+  /** Admin-only clash pre-check (ADR 0011 addendum). Absent ⇒ the editor shows no hints,
+   *  everything else unchanged. Results align by index with the candidates sent. */
+  onCheckClashes?: CheckClashes;
   toast: (message: string, tone?: string) => void;
   allCalendars?: SeasonCalendar[];
   allSeasonRuns?: SeasonRun[];
@@ -301,6 +326,7 @@ export function AdminFixtures({
   onSetReleased,
   onReveal,
   onSetApproved,
+  onCheckClashes,
   toast,
   allCalendars = [],
   allSeasonRuns = [],
@@ -684,6 +710,7 @@ export function AdminFixtures({
               toast={toast}
               allCalendars={allCalendars}
               onAllocateVenues={onAllocateVenues}
+              onCheckClashes={onCheckClashes}
             />
           )}
         </>
@@ -1021,6 +1048,7 @@ export function FixtureTable({
   toast,
   allCalendars = [] as SeasonCalendar[],
   onAllocateVenues,
+  onCheckClashes,
 }) {
   const copy = useCopy();
   const clubBy = (id) => clubs.find((c) => c.id === id);
@@ -1030,18 +1058,29 @@ export function FixtureTable({
   const [filter, setFilter] = useStateA('all');
   const [confirm, setConfirm] = useStateA(null); // {title, body, onYes} — for delete/regen only; release uses parent's modal
 
-  // Helpers — operate on series.fixtures via onUpdateSeries
+  // Helpers — operate on series.fixtures via onUpdateSeries.
+  // FixtureTable's props are untyped destructuring; bind onUpdateSeries to a locally typed
+  // alias so every write below is known to return a promise (the contract EditFixtureRow's
+  // onSave relies on to close the row only on resolve).
+  const update: (id: string, updater: (s: Series) => Series) => Promise<unknown> = onUpdateSeries;
+  // Return the write promise so the caller (EditFixtureRow's onSave) can close the row on
+  // resolve and surface the clash-gate 409 inline on reject.
   function updateFixture(fixtureId, updates) {
-    onUpdateSeries(series.id, (s) => ({
+    return update(series.id, (s) => ({
       ...s,
-      fixtures: s.fixtures.map((f) => (f.id === fixtureId ? { ...f, ...updates } : f)),
+      // `Series.fixtures` is `unknown[]`; cast to the minimal row shape these helpers touch.
+      fixtures: (s.fixtures as Array<{ id: string }>).map((f) =>
+        f.id === fixtureId ? { ...f, ...updates } : f,
+      ),
     }));
   }
   function deleteFixture(fixtureId) {
-    onUpdateSeries(series.id, (s) => ({
+    // The toast is already shown by onUpdateSeries' withToast on failure; swallow so a
+    // clash-gate/concurrency rejection doesn't surface as an unhandled promise.
+    update(series.id, (s) => ({
       ...s,
-      fixtures: s.fixtures.filter((f) => f.id !== fixtureId),
-    }));
+      fixtures: (s.fixtures as Array<{ id: string }>).filter((f) => f.id !== fixtureId),
+    })).catch(() => {});
   }
   function addFixture() {
     const newId = 'f' + Date.now();
@@ -1091,9 +1130,16 @@ export function FixtureTable({
       status: 'scheduled',
       ...(roundSlot ? { time: roundSlot.start, slot: roundSlot.label } : {}),
     };
-    onUpdateSeries(series.id, (s) => ({ ...s, fixtures: [...s.fixtures, newFix] }));
-    setEditingId(newId);
-    toast?.('Fixture added — edit details');
+    // Open the new row and announce it only once the write lands. A fresh fixture
+    // defaults to the home ground on the planned date and can itself clash on a live
+    // series — the gate refuses it, withToast toasts "Change blocked", and we leave the
+    // editor closed rather than opening a row for a fixture the server never stored.
+    update(series.id, (s) => ({ ...s, fixtures: [...s.fixtures, newFix] }))
+      .then(() => {
+        setEditingId(newId);
+        toast?.('Fixture added — edit details');
+      })
+      .catch(() => {});
   }
   /**
    * Rebuild fixtures from the series' own stored schedule.
@@ -1112,6 +1158,8 @@ export function FixtureTable({
       toast?.('That season calendar no longer exists — pick a new schedule first', 'warn');
       return;
     }
+    // The write promise from whichever branch runs, so the success toast can wait on it.
+    let write: Promise<unknown>;
     if (sched && calendar) {
       // Regenerate only knows how to rebuild a SINGLE-LEG ROUND ROBIN. A season-run
       // series carries its schedule but not its format, so regenerating a double round
@@ -1147,7 +1195,7 @@ export function FixtureTable({
         toast?.(plan.summary, 'warn');
         return;
       }
-      onUpdateSeries(series.id, (s) => ({
+      write = update(series.id, (s) => ({
         ...s,
         startDate: plan.dates[0],
         fixtures: fixturesFromPlan(s.teams, plan.dates, sched.slots, {
@@ -1155,7 +1203,7 @@ export function FixtureTable({
         }),
       }));
     } else {
-      onUpdateSeries(series.id, (s) => ({
+      write = update(series.id, (s) => ({
         ...s,
         fixtures: generateRoundRobin(s.teams, s.startDate, {
           endDateISO: s.endDate,
@@ -1164,7 +1212,10 @@ export function FixtureTable({
       }));
     }
     setConfirm(null);
-    toast?.(`${series.name} · fixtures regenerated`);
+    // Regenerate mints all-new fixture ids, so on a released series carrying a residual
+    // clash the gate refuses it until those are fixed — announce success only once the
+    // write actually lands, never before.
+    write.then(() => toast?.(`${series.name} · fixtures regenerated`)).catch(() => {});
   }
 
   // "Time TBC" is only meaningful once the series has at least one timed fixture —
@@ -1371,14 +1422,21 @@ export function FixtureTable({
                     // The whole list, so a `win:fN` side can be named ("Winner of
                     // Semi-final 1") rather than rendered as a raw id.
                     fixtures={series.fixtures}
+                    seriesId={series.id}
+                    released={series.released}
+                    onCheckClashes={onCheckClashes}
                     teams={series.teams.map((id) => {
                       const r = teamBy(id);
                       return { id, name: r.name, ground: r.ground, club: r.club };
                     })}
-                    onSave={(updates) => {
-                      updateFixture(f.id, updates);
-                      setEditingId(null);
-                    }}
+                    // `updateFixture` returns the `onUpdateSeries` write promise (typed via
+                    // the `update` alias above), so onSave can close the row only on RESOLVE
+                    // — keeping it open with its inline clash panel when the save 409s. Every
+                    // caller (incl. tests) must resolve onUpdateSeries. (Same pattern as
+                    // ReleaseDialog.)
+                    onSave={(updates) =>
+                      updateFixture(f.id, updates).then(() => setEditingId(null))
+                    }
                     onCancel={() => setEditingId(null)}
                   />
                 );
@@ -1673,8 +1731,66 @@ export function FixtureTable({
   );
 }
 
+/**
+ * One clash rendered in the same words as the server's formatClashForHumans (ADR 0011
+ * addendum): the ground/day/time this fixture wants, then the OTHER fixture already
+ * holding it. `with.home/away` are display names the server resolved; falling back to the
+ * raw ref keeps a `win:fN` bracket side legible rather than blank.
+ */
+function clashLine(c: Clash): string {
+  // `formatTime` returns null for a non-strict HH:mm; importer-era rows carry '9:00', so
+  // fall back to the raw value rather than rendering the literal "null".
+  const time = c.time ? ` ${formatTime(c.time) ?? c.time}` : '';
+  const opp =
+    c.with.home && c.with.away
+      ? `${c.with.home} v ${c.with.away}`
+      : c.with.home || c.with.away || c.with.fixtureId;
+  const oppRound = c.with.round != null ? ` R${c.with.round}` : '';
+  return `${c.ground} on ${formatWeekdayDay(c.date)}${time} is already booked by ${
+    c.with.seriesName ?? 'another series'
+  }${oppRound} · ${opp}`;
+}
+
+/**
+ * Inline clash feedback for the fixture editor — shown both from the admin-only pre-check
+ * while a venue is being chosen and from a save 409 (ADR 0011 addendum). Named grounds
+ * plus a fixed "how to fix" list. `field-error` is the same semantic hook ReleaseDialog's
+ * error box uses (styled by one shared rule in index.html's inline stylesheet); the
+ * spacing/type here is inline, matching that component. The clash gate returns actionable
+ * copy, not a stack trace.
+ */
+function ClashPanel({ heading, clashes }: { heading: string; clashes: Clash[] }) {
+  return (
+    <div
+      className="field-error"
+      role="alert"
+      style={{ marginTop: 6, whiteSpace: 'normal', lineHeight: 1.45 }}
+    >
+      <strong>{heading}</strong>
+      <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+        {clashes.map((c, i) => (
+          <li key={i}>{clashLine(c)}</li>
+        ))}
+      </ul>
+      <div style={{ marginTop: 6, fontSize: 12, opacity: 0.85 }}>
+        How to fix: pick another ground · change the date or start time · edit the other fixture
+        instead
+      </div>
+    </div>
+  );
+}
+
 /* Inline edit row */
-function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
+function EditFixtureRow({
+  fixture,
+  fixtures,
+  teams,
+  onSave,
+  onCancel,
+  seriesId,
+  released,
+  onCheckClashes,
+}) {
   // Each label is bound to its control. These sit BESIDE their inputs, so without an id
   // pairing a screen reader announces a row of unnamed boxes — and several fixtures can
   // be open at once, so the ids have to be per-row rather than global.
@@ -1756,6 +1872,156 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
       u('home', newHome);
     }
   }
+
+  // ── Clash hints (ADR 0011 addendum) ──
+  // While a venue is being chosen the editor asks the server which grounds would clash,
+  // one request covering every venue option, and marks the offending ones before the
+  // admin saves. `optionResults` is keyed by picker mode; empty ⇒ no hints (either no
+  // pre-check wired in, or nothing clashes). `saveClashes`/`saveError` capture a rejected
+  // save so the row stays open with the reason inline instead of only a toast; the debounce
+  // effect below clears them on the next booking-field edit, so a landed 409 can't keep
+  // naming a stale clash after the admin re-picks.
+  const [optionResults, setOptionResults] = useStateA<Record<string, ClashResult>>({});
+  const [saving, setSaving] = useStateA(false);
+  const [saveClashes, setSaveClashes] = useStateA<Clash[] | null>(null);
+  const [saveError, setSaveError] = useStateA<string | null>(null);
+  // Monotonic request id: only the newest pre-check response may land, so a slow reply for
+  // an old draft can't overwrite hints for the current one.
+  const reqSeq = useRefA(0);
+  // The debounce effect fires once on mount as well as on every booking-field edit. Only
+  // an actual edit should dismiss a landed 409 panel, so this flag skips the mount run —
+  // a "Change blocked" panel from a save then survives until the admin changes something.
+  const bookingFieldsTouched = useRefA(false);
+
+  // The candidate fixture as it would be SAVED under each available venue option — the
+  // same venue projection the picker's onChange writes — so the server scores exactly what
+  // a save would persist. Keyed by mode; a blank custom box is skipped (it resolves to the
+  // primary ground and would mark "Other" for the wrong reason).
+  function clashCandidates(): Array<{ mode: string; candidate: Record<string, unknown> }> {
+    const homeClub = teams.find((t) => t.id === draft.home);
+    // Only the secondary's NAME is written to a candidate (as an override); the primary
+    // and allocated grounds are derived server-side from the cleared/restored venue fields.
+    const secondaryName = homeClub?.ground?.secondaryVenue || '';
+    const base = { ...draft, id: fixture.id };
+    const out: Array<{ mode: string; candidate: Record<string, unknown> }> = [];
+    if (allocatedName)
+      out.push({
+        mode: 'allocated',
+        candidate: { ...base, ...restoreAllocated, venueOverride: '' },
+      });
+    // Primary is always offered; it carries no override and no allocation.
+    out.push({ mode: 'primary', candidate: { ...base, ...clearAllocated, venueOverride: '' } });
+    if (secondaryName)
+      out.push({
+        mode: 'secondary',
+        candidate: { ...base, ...clearAllocated, venueOverride: secondaryName },
+      });
+    const customText = venueMode === 'custom' ? draft.venueOverride.trim() : '';
+    if (customText)
+      out.push({
+        mode: 'custom',
+        candidate: { ...base, ...clearAllocated, venueOverride: draft.venueOverride },
+      });
+    return out;
+  }
+
+  useEffectA(() => {
+    // A booking-relevant draft field changed (this effect keys on exactly those). Drop any
+    // landed save 409 panel/error so a stale "Change blocked" can't keep naming the OLD
+    // clash after the admin re-picks — but SKIP the mount run, so a 409 survives until the
+    // admin actually edits something. The pre-check below then repaints the panel from the
+    // new pick (clean ⇒ nothing; clashes elsewhere ⇒ the pre-check panel).
+    if (bookingFieldsTouched.current) {
+      setSaveClashes(null);
+      setSaveError(null);
+    } else {
+      bookingFieldsTouched.current = true;
+    }
+    if (!onCheckClashes || !seriesId) return;
+    // Debounced so typing a custom venue or nudging the time coalesces into one request;
+    // it also runs once on mount, so an already-clashing fixture shows its panel when opened.
+    const handle = setTimeout(() => {
+      const seq = ++reqSeq.current;
+      const opts = clashCandidates();
+      if (!opts.length) {
+        setOptionResults({});
+        return;
+      }
+      onCheckClashes(
+        seriesId,
+        opts.map((o) => o.candidate),
+      )
+        .then((res) => {
+          if (seq !== reqSeq.current) return; // a newer request has superseded this one
+          const map: Record<string, ClashResult> = {};
+          opts.forEach((o, i) => {
+            if (res.results[i]) map[o.mode] = res.results[i];
+          });
+          setOptionResults(map);
+        })
+        // The pre-check is advisory: if it fails, degrade to no hints. The save gate is the
+        // real guard, so a flaky check must never toast or block the admin.
+        .catch(() => {});
+    }, 300);
+    return () => clearTimeout(handle);
+    // Only the fields that move a booking (ground/date/time/sides/status) re-run the check;
+    // `round` is cosmetic to the ledger, and `fixture`/`teams` are stable for the row's life.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    onCheckClashes,
+    seriesId,
+    draft.date,
+    draft.time,
+    draft.home,
+    draft.away,
+    draft.status,
+    draft.venueOverride,
+    venueMode,
+  ]);
+
+  const selected = optionResults[venueMode];
+  const selectedClashes = selected?.clashes ?? [];
+  const selectedIntroduced = selected?.introduced ?? [];
+  // What actually stops a save: on a released series only a NEWLY introduced clash is
+  // refused (residual ones stay, so the series can be fixed one fixture at a time); on a
+  // draft every clash is checked again at release.
+  const wouldBlock = released ? selectedIntroduced.length > 0 : selectedClashes.length > 0;
+  // Mark a picker option whose candidate would be refused (released) or would clash at
+  // release (draft). The option stays selectable — the server is the gate, not the label.
+  const optionMarked = (mode: string) => {
+    const r = optionResults[mode];
+    if (!r) return false;
+    return released ? r.introduced.length > 0 : r.clashes.length > 0;
+  };
+  const clashMark = (mode: string) => (optionMarked(mode) ? ' · ⚠ clash' : '');
+
+  async function save() {
+    setSaving(true);
+    setSaveClashes(null);
+    setSaveError(null);
+    try {
+      // Resolves ⇒ the parent closes the row (unmounting this component); reject keeps it
+      // open with the reason inline.
+      await onSave(draft);
+    } catch (err) {
+      const clashes = (err as ApiError)?.details?.clashes as Clash[] | undefined;
+      if (clashes?.length) {
+        setSaveClashes(clashes);
+      } else if (
+        err instanceof ApiError &&
+        err.status === 409 &&
+        err.message === SERIES_CONFLICT_MESSAGE
+      ) {
+        setSaveError(SERIES_CONFLICT_FRIENDLY);
+      } else {
+        // withToast already surfaced the toast; still say something inline so the open row
+        // isn't silently stuck, without pretending we know more than we do.
+        setSaveError((err instanceof Error && err.message) || 'Could not save — please try again.');
+      }
+      setSaving(false);
+    }
+  }
+
   return (
     <tr className="fix-edit-tr">
       <td colSpan={9}>
@@ -1891,11 +2157,25 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
                     }}
                   >
                     {allocatedName && (
-                      <option value="allocated">Allocated · {allocatedName}</option>
+                      <option value="allocated">
+                        Allocated · {allocatedName}
+                        {clashMark('allocated')}
+                      </option>
                     )}
-                    <option value="primary">Primary{primary ? ` · ${primary}` : ' ground'}</option>
-                    {secondary && <option value="secondary">Secondary · {secondary}</option>}
-                    <option value="custom">Other (type below)</option>
+                    <option value="primary">
+                      Primary{primary ? ` · ${primary}` : ' ground'}
+                      {clashMark('primary')}
+                    </option>
+                    {secondary && (
+                      <option value="secondary">
+                        Secondary · {secondary}
+                        {clashMark('secondary')}
+                      </option>
+                    )}
+                    <option value="custom">
+                      Other (type below)
+                      {clashMark('custom')}
+                    </option>
                   </select>
                 </div>
                 <div className="fix-edit-field">
@@ -1912,6 +2192,47 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
               </>
             );
           })()}
+          {/* Clash feedback spans the whole row, above Save. A save 409 wins (it's the
+              authoritative refusal) until the admin next edits a booking field, which the
+              debounce effect uses to clear it; otherwise the selected option's pre-check
+              drives it. */}
+          {(saveClashes || saveError || selectedClashes.length > 0) && (
+            <div className="fix-edit-field" style={{ gridColumn: 'span 6' }}>
+              {saveClashes ? (
+                <ClashPanel heading="Change blocked — not saved" clashes={saveClashes} />
+              ) : saveError ? (
+                <div
+                  className="field-error"
+                  role="alert"
+                  style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}
+                >
+                  {saveError}
+                </div>
+              ) : (
+                <ClashPanel
+                  heading={
+                    selectedIntroduced.length > 0
+                      ? 'This fixture would clash'
+                      : 'Already clashes (before this edit)'
+                  }
+                  clashes={selectedClashes}
+                />
+              )}
+            </div>
+          )}
+          {/* One line above Save telling the admin what a save will do — only when the
+              current pick would actually be refused (released) or re-checked (draft), and
+              only from the pre-check (a landed 409 already says "Change blocked"). */}
+          {wouldBlock && !saveClashes && (
+            <div
+              className="fix-edit-field"
+              style={{ gridColumn: 'span 6', fontSize: 12, color: 'var(--muted)' }}
+            >
+              {released
+                ? 'This series is live — this change will be refused on save.'
+                : 'Clashes are checked again when you release.'}
+            </div>
+          )}
           <div className="fix-edit-field">
             <label htmlFor={`${uid}-status`}>Status</label>
             <select
@@ -1929,11 +2250,11 @@ function EditFixtureRow({ fixture, fixtures, teams, onSave, onCancel }) {
             className="fix-edit-actions"
             style={{ gridColumn: 'span 6', justifyContent: 'flex-end', marginTop: 8 }}
           >
-            <Btn tone="ghost" size="sm" onClick={onCancel}>
+            <Btn tone="ghost" size="sm" onClick={onCancel} disabled={saving}>
               Cancel
             </Btn>
-            <Btn tone="ink" size="sm" icon={Icon.Check} onClick={() => onSave(draft)}>
-              Save changes
+            <Btn tone="ink" size="sm" icon={Icon.Check} onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : 'Save changes'}
             </Btn>
           </div>
         </div>

@@ -142,10 +142,95 @@ keep-on-edit rule as `withheld`.
 
 Send the current `version`; mismatch → `409 "series changed; refetch"`. This is the path
 most exposed to concurrent edits (two admins, or one in two tabs), so always refetch on 409.
+The **version check runs before the clash gate**, so a stale write always gets the plain
+concurrency 409, never a venue-clash one.
 
 ```
-200 → Series   404   409 version conflict
+200 → Series   404   409 version conflict / venue clash
 ```
+
+### Venue clash gate
+
+A fixtures write must not publish a ground/date/time double-booking:
+
+- **At release** (false→true): the series is checked against every other series in the
+  tenant (drafts included). Any clash blocks release.
+- **In-season** (a `fixtures` write to an already-**released** series — regenerate and
+  allocation write-back included): the edit is refused only if it **introduces** a clash,
+  i.e. the resulting clash set is not a subset of the pre-edit set. A series already
+  carrying residual clashes stays fixable one fixture at a time, and moving a residual-
+  clashing fixture's kick-off against the same untimed partner is not counted as new (the
+  clash identity is the fixture pair on a ground, without date/time). Recall
+  (`released: false`) is never gated. The gate reads the **real** venues even when
+  `withheld.venue` hides them from clubs. See the
+  [ADR 0011 in-season addendum](../architecture/0011-progressive-fixture-release.md#addendum-2026-09-in-season-edits-are-clash-gated).
+
+Both gates return `409` with a **structured body** (details spread before `error`, which
+every client still reads):
+
+```jsonc
+{
+  "error": "Change blocked — 1 venue clash(es): …", // release: "Release blocked — …"
+  "code": "venue_clash",
+  "clashes": [
+    {
+      "fixtureId": "f2", // the subject fixture
+      "round": 3,
+      "ground": "Kingsmead",
+      "date": "2026-09-27",
+      "time": "09:00", // omitted for an untimed fixture
+      "home": "Home Club", // subject-side display names
+      "away": "Away Club",
+      "with": {
+        "seriesId": "s-other",
+        "seriesName": "Premier T20",
+        "fixtureId": "f7",
+        "round": 3,
+        "home": "Other Home",
+        "away": "Other Away",
+      },
+    },
+  ],
+}
+```
+
+At release, `clashes` lists every clash; in-season it lists only the **introduced** ones.
+
+## `POST /series/:id/clash-check` — clash pre-check (admin)
+
+A read-only pre-check for the fixture editor: which candidate fixtures would clash, and
+which the in-season save gate would **refuse**. No write, no version check; works on drafts
+and released series alike.
+
+Body: `{ candidates: Fixture[] }` — 1–20 entries, each an object with a string `id`
+(otherwise `400`). Every field the clash ledger reads is type-checked too: `date`, `time`,
+`venueOverride`, `venueName`, `home`, `away` and `status` must each be a string when present
+(`400 "candidate <field> must be a string"`), and `round` a number when present
+(`400 "candidate round must be a number"`) — `null`/omitted is always accepted. Unknown
+series → `404`; a rep → `403`.
+
+```jsonc
+{
+  "results": [
+    // aligned by index to `candidates`
+    {
+      "clashes": [
+        /* Clash */
+      ],
+      "introduced": [
+        /* Clash */
+      ],
+    },
+  ],
+}
+```
+
+For each candidate the subject is `current` with the same-id fixture replaced (or the
+candidate appended if new). `clashes` is every clash the candidate is party to; `introduced`
+is the subset absent from the series' pre-edit clash set — exactly what the in-season gate
+would refuse on a released series, so the editor's "will be refused on save" hint can never
+disagree with the server. A server round-trip (not a client ledger) is deliberate:
+ground-name normalisation and `VENUE_ALIASES` live server-side.
 
 ## `DELETE /series/:id` — delete (admin)
 

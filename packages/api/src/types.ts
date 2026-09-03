@@ -1,5 +1,10 @@
 /** Domain types shared across the API. Mirrors the frontend's data shapes. */
 
+// A venue clash pair, re-exported so `src/types.ts` on the frontend can mirror it without
+// reaching into the clash-detection module. Type-only, so this re-export is erased and
+// introduces no import cycle.
+export type { Clash } from './venue-clash.js';
+
 export type Role = 'admin' | 'rep' | 'operator';
 
 /**

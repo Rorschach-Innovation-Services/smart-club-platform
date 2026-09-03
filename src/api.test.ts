@@ -81,6 +81,26 @@ describe('request auth contract', () => {
     expect(onAuthLost).not.toHaveBeenCalled();
   });
 
+  it('a clash-gate 409 carries the structured clashes on err.details', async () => {
+    // The gate returns `{ error, code: 'venue_clash', clashes }` — everything besides
+    // error/code is preserved on `details` so the fixture editor can point at the exact
+    // conflict without re-parsing the response.
+    const clashes = [
+      { fixtureId: 'f2', ground: 'Kingsmead', date: '2026-09-27', with: { seriesId: 'A' } },
+    ];
+    (fetch as any).mockResolvedValueOnce(
+      errResponse(409, { error: 'Change blocked — 1 venue clash', code: 'venue_clash', clashes }),
+    );
+    const err = await getMe().catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(409);
+    expect(err.code).toBe('venue_clash');
+    expect(err.details?.clashes).toEqual(clashes);
+    // error/code are pulled out of the body, not duplicated onto details.
+    expect(err.details?.error).toBeUndefined();
+    expect(err.details?.code).toBeUndefined();
+  });
+
   it('public routes (auth: false) never touch the token provider or handler', async () => {
     const provider = vi.fn(async () => 'test-token');
     setTokenProvider(provider);

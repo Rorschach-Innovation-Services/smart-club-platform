@@ -18,8 +18,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AdminFixtures, FixtureTable, SCHEDULE_COLS } from './admin';
+import { ApiError } from './api';
 import { renderWithProviders } from './test-utils';
-import type { Club, SeasonCalendar, Series, TenantConfig } from './types';
+import type { Clash, Club, SeasonCalendar, Series, TenantConfig } from './types';
 
 const calendar: SeasonCalendar = {
   id: 'cal',
@@ -61,8 +62,20 @@ const series = (over: Partial<Series> = {}): Series =>
     ...over,
   }) as unknown as Series;
 
-const setup = (s: Series = series()) => {
-  const onUpdateSeries = vi.fn();
+const setup = (
+  s: Series = series(),
+  extra: {
+    onUpdateSeries?: ReturnType<typeof vi.fn>;
+    onCheckClashes?: ReturnType<typeof vi.fn>;
+    toast?: ReturnType<typeof vi.fn>;
+  } = {},
+) => {
+  // Resolve by default: onSave now closes the row only once the write promise lands, so a
+  // bare `vi.fn()` (returning undefined) would still close it — but tests that assert on a
+  // REJECTED save pass their own rejecting mock via `extra`.
+  const onUpdateSeries = extra.onUpdateSeries ?? vi.fn().mockResolvedValue(undefined);
+  const onCheckClashes = extra.onCheckClashes ?? vi.fn().mockResolvedValue({ results: [] });
+  const toast = extra.toast ?? vi.fn();
   const user = userEvent.setup();
   renderWithProviders(
     <FixtureTable
@@ -78,10 +91,11 @@ const setup = (s: Series = series()) => {
       onApprove={vi.fn()}
       onUnapprove={vi.fn()}
       onAllocateVenues={vi.fn()}
-      toast={vi.fn()}
+      onCheckClashes={onCheckClashes}
+      toast={toast}
     />,
   );
-  return { user, onUpdateSeries };
+  return { user, onUpdateSeries, onCheckClashes, toast };
 };
 
 /** Apply the updater `onUpdateSeries` was called with, and return the resulting fixtures. */
@@ -208,6 +222,190 @@ describe('the venue picker', () => {
     const [f] = resultingFixtures(onUpdateSeries, s);
     expect(f.home).toBe('ilembe');
     expect(f.venueOverride).toBe('');
+  });
+});
+
+describe('clash hints and the inline save 409 (ADR 0011 addendum)', () => {
+  const clash = (over: Partial<Clash> = {}): Clash => ({
+    fixtureId: 'f1',
+    ground: 'Spartan Park',
+    date: '2026-08-08',
+    with: {
+      seriesId: 'A',
+      seriesName: 'Premier T20',
+      fixtureId: 'x9',
+      round: 3,
+      home: 'Ilembe CC',
+      away: 'Tongaat CC',
+    },
+    ...over,
+  });
+
+  it('marks the clashing option and names the conflict in a panel', async () => {
+    // Released series: the first candidate is the selected "Primary" option, and the
+    // mocked result gives it an introduced clash — so its label gains the marker and the
+    // panel spells out the other fixture in human words.
+    const c = clash();
+    const onCheckClashes = vi.fn().mockResolvedValue({
+      results: [
+        { clashes: [c], introduced: [c] },
+        { clashes: [], introduced: [] },
+      ],
+    });
+    const { user } = setup(series({ released: true }), { onCheckClashes });
+    await openEditor(user, /spartan park/i);
+
+    await waitFor(() => expect(onCheckClashes).toHaveBeenCalled());
+    await screen.findByText(/this fixture would clash/i);
+    expect(
+      screen.getByText(/is already booked by Premier T20 R3 · Ilembe CC v Tongaat CC/),
+    ).toBeTruthy();
+    const primaryOpt = screen.getByRole('option', { name: /primary/i });
+    expect(primaryOpt.textContent).toMatch(/⚠ clash/);
+    // A live series warns that the save will be refused.
+    expect(
+      screen.getByText(/this series is live — this change will be refused on save/i),
+    ).toBeTruthy();
+  });
+
+  it('renders an importer-era non-strict time (\'9:00\') raw, not "null"', async () => {
+    // formatTime returns null for a non-strict HH:mm; the panel must fall back to the raw
+    // value rather than printing the literal "null".
+    const c = clash({ time: '9:00' });
+    const onCheckClashes = vi.fn().mockResolvedValue({
+      results: [
+        { clashes: [c], introduced: [c] },
+        { clashes: [], introduced: [] },
+      ],
+    });
+    const { user } = setup(series({ released: true }), { onCheckClashes });
+    await openEditor(user, /spartan park/i);
+
+    const panel = await screen.findByText(/is already booked by/i);
+    expect(panel.textContent).toMatch(/9:00/);
+    expect(panel.textContent).not.toMatch(/null/);
+  });
+
+  it('shows no panel and no marker when nothing clashes', async () => {
+    const onCheckClashes = vi.fn().mockResolvedValue({
+      results: [
+        { clashes: [], introduced: [] },
+        { clashes: [], introduced: [] },
+      ],
+    });
+    const { user } = setup(series({ released: true }), { onCheckClashes });
+    await openEditor(user, /spartan park/i);
+
+    await waitFor(() => expect(onCheckClashes).toHaveBeenCalled());
+    expect(screen.queryByText(/would clash|already clashes/i)).toBeNull();
+    expect(screen.queryByText(/⚠ clash/)).toBeNull();
+  });
+
+  it('keeps the row open and shows "Change blocked" when the save is refused', async () => {
+    const c = clash();
+    const err = new ApiError(409, 'Change blocked — 1 venue clash', 'venue_clash', {
+      clashes: [c],
+    });
+    const onUpdateSeries = vi.fn().mockRejectedValue(err);
+    const { user } = setup(series({ released: true }), { onUpdateSeries });
+    await openEditor(user, /spartan park/i);
+
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await screen.findByText(/change blocked — not saved/i);
+    expect(
+      screen.getByText(/is already booked by Premier T20 R3 · Ilembe CC v Tongaat CC/),
+    ).toBeTruthy();
+    // The row is still open (Save is back, not "Saving…").
+    expect(screen.getByRole('button', { name: /save changes/i })).toBeTruthy();
+  });
+
+  it('closes the row when the save resolves', async () => {
+    const { user } = setup(series());
+    await openEditor(user, /spartan park/i);
+
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: /save changes/i })).toBeNull());
+  });
+
+  it('clears the "Change blocked" panel when the admin edits after a 409', async () => {
+    // A landed save 409 names the OLD clash. Editing a booking-relevant field must dismiss
+    // it (the debounce effect clears saveClashes/saveError off the mount-skip flag) so the
+    // panel can't keep pointing at a conflict the new pick no longer has — the pre-check
+    // then repaints from the new candidate (here: clean ⇒ nothing).
+    const c = clash();
+    const err = new ApiError(409, 'Change blocked — 1 venue clash', 'venue_clash', {
+      clashes: [c],
+    });
+    const onUpdateSeries = vi.fn().mockRejectedValue(err);
+    // A clean pre-check for every candidate, so re-picking shows no panel at all.
+    const onCheckClashes = vi.fn().mockResolvedValue({
+      results: [
+        { clashes: [], introduced: [] },
+        { clashes: [], introduced: [] },
+        { clashes: [], introduced: [] },
+      ],
+    });
+    const { user } = setup(series({ released: true }), { onUpdateSeries, onCheckClashes });
+    await openEditor(user, /spartan park/i);
+
+    await user.click(screen.getByRole('button', { name: /save changes/i }));
+    await screen.findByText(/change blocked — not saved/i);
+
+    // Change the venue → the stale 409 panel goes away (and the clean pre-check shows none).
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Venue' }), 'secondary');
+    await waitFor(() => expect(screen.queryByText(/change blocked — not saved/i)).toBeNull());
+    expect(screen.queryByText(/would clash|already clashes/i)).toBeNull();
+  });
+
+  it('runs the pre-check once on mount and once per change (debounced)', async () => {
+    // shouldAdvanceTime lets the fake clock tick with real time so user-event's internal
+    // waits don't deadlock, while advanceTimersByTimeAsync still flushes the 300ms debounce
+    // deterministically for the assertions.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const onCheckClashes = vi.fn().mockResolvedValue({ results: [] });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      setup(series({ released: true }), { onCheckClashes });
+      await openEditor(user, /spartan park/i);
+
+      // Flush the mount-run debounce deterministically (no waitFor — its polling hangs
+      // under fake timers; advancing the clock already resolves the pre-check promise).
+      await vi.advanceTimersByTimeAsync(300);
+      expect(onCheckClashes).toHaveBeenCalledTimes(1);
+
+      // Changing the venue mode re-runs the check exactly once more.
+      await user.selectOptions(screen.getByRole('combobox', { name: 'Venue' }), 'secondary');
+      await vi.advanceTimersByTimeAsync(300);
+      expect(onCheckClashes).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('degrades silently when the pre-check rejects — no panel, no toast', async () => {
+    const onCheckClashes = vi.fn().mockRejectedValue(new Error('boom'));
+    const toast = vi.fn();
+    const { user } = setup(series({ released: true }), { onCheckClashes, toast });
+    await openEditor(user, /spartan park/i);
+
+    await waitFor(() => expect(onCheckClashes).toHaveBeenCalled());
+    expect(screen.queryByText(/would clash|change blocked/i)).toBeNull();
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it('does not open an editor row or toast when adding a fixture is refused', async () => {
+    const err = new ApiError(409, 'Change blocked', 'venue_clash', { clashes: [clash()] });
+    const onUpdateSeries = vi.fn().mockRejectedValue(err);
+    const toast = vi.fn();
+    const { user } = setup(series({ released: true }), { onUpdateSeries, toast });
+
+    await user.click(screen.getByRole('button', { name: /add fixture/i }));
+
+    await waitFor(() => expect(onUpdateSeries).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: /save changes/i })).toBeNull();
+    expect(toast).not.toHaveBeenCalled();
   });
 });
 
@@ -342,7 +540,7 @@ describe('a tenant with no series still gets the season machinery', () => {
         clubs={clubs}
         allSeries={[]}
         onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
-        onUpdateSeries={vi.fn()}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
         onSetReleased={vi.fn()}
@@ -441,7 +639,7 @@ describe('the "Generate fixtures" launcher — one entry point, routed by league
         clubs={registeredClubs}
         allSeries={[]}
         onSubmitSeries={onSubmitSeries}
-        onUpdateSeries={vi.fn()}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
         onSetReleased={vi.fn()}
@@ -559,7 +757,7 @@ describe('the season viewer — every schedule on screen, downloads inside it', 
         clubs={clubs}
         allSeries={allSeries}
         onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
-        onUpdateSeries={vi.fn()}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
         onSetReleased={vi.fn()}
@@ -693,7 +891,7 @@ describe('progressive release — withhold at release, reveal later (ADR 0011)',
         clubs={clubs}
         allSeries={[s]}
         onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
-        onUpdateSeries={vi.fn()}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
         onSetReleased={onSetReleased}
@@ -765,7 +963,7 @@ describe('release fires exactly one success toast', () => {
         clubs={clubs}
         allSeries={[s]}
         onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
-        onUpdateSeries={vi.fn()}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
         onSetReleased={onSetReleased}
@@ -815,7 +1013,7 @@ describe('recall fires no false success toast when the recall fails', () => {
         clubs={clubs}
         allSeries={[s]}
         onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
-        onUpdateSeries={vi.fn()}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
         onSetReleased={onSetReleased}

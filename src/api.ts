@@ -24,6 +24,7 @@ import type {
   RegistrationReview,
   League,
   Series,
+  Clash,
   SeasonRun,
   Venue,
   SendResult,
@@ -123,11 +124,16 @@ export class ApiError extends Error {
   // Optional machine-readable discriminator from the error body (e.g. club
   // signup's 'name_taken') so callers can branch on more than the status.
   code?: string;
-  constructor(status: number, message: string, code?: string) {
+  // Everything else the error body carried besides `error`/`code` — e.g. the clash
+  // gate's `clashes: Clash[]` on a 409 (ADR 0011 addendum). Lets a caller read
+  // structured detail off the rejection without re-parsing the response.
+  details?: Record<string, unknown>;
+  constructor(status: number, message: string, code?: string, details?: Record<string, unknown>) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -175,10 +181,16 @@ async function request<T = any>(
   if (!res.ok) {
     let message = res.statusText;
     let code: string | undefined;
+    let details: Record<string, unknown> | undefined;
     try {
       const data = await res.json();
       message = data.error || message;
       code = data.code;
+      // Keep every other field from the error body (e.g. the clash gate's `clashes`)
+      // as structured detail on the rejection. `error`/`code` are pulled out above so
+      // they don't duplicate onto `details`.
+      const { error: _e, code: _c, ...rest } = data;
+      if (Object.keys(rest).length) details = rest;
     } catch {
       /* non-JSON error body */
     }
@@ -191,7 +203,7 @@ async function request<T = any>(
       _onAuthLost?.();
       message = SESSION_EXPIRED;
     }
-    const err = new ApiError(res.status, message, code);
+    const err = new ApiError(res.status, message, code, details);
     // Report genuine server failures (5xx) — these are real outages worth knowing
     // about even when a caller swallows the rejection. Expected 4xx (validation,
     // auth, 404, 409 conflicts) are intentionally excluded as normal UI flow.
@@ -386,6 +398,16 @@ export const createSeries = (series: unknown) =>
 export const patchSeries = (id: string, patch: unknown) =>
   request<Series>(`/series/${id}`, { method: 'PATCH', body: patch });
 export const deleteSeriesReq = (id: string) => request(`/series/${id}`, { method: 'DELETE' });
+// Admin-only pre-check: ask the server which of these candidate fixtures would clash if
+// saved onto this series (ADR 0011 addendum). `introduced` is exactly what the save gate
+// would refuse on a released series, so the editor's hints can never disagree with the
+// gate; `clashes` includes pre-existing clashes the candidate merely keeps. Results are
+// aligned by index with `candidates`. Pure read — no write, no version check.
+export const checkSeriesClashes = (id: string, candidates: unknown[]) =>
+  request<{ results: Array<{ clashes: Clash[]; introduced: Clash[] }> }>(
+    `/series/${id}/clash-check`,
+    { method: 'POST', body: { candidates } },
+  );
 export const duplicateSeriesReq = (id: string) =>
   request<Series>(`/series/${id}/duplicate`, { method: 'POST' });
 

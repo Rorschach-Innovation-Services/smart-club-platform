@@ -64,7 +64,7 @@ import {
   computeIsMinor,
   dobFromSaId,
 } from './player-identity.js';
-import { findReleaseClashes } from './venue-clash.js';
+import { findClashes, clashKey, formatClash, formatClashForHumans } from './venue-clash.js';
 import {
   normaliseWithheld,
   projectSeriesForClub,
@@ -2976,6 +2976,26 @@ app.patch('/series/:id', requireAdmin, async (c) => {
     }
   }
 
+  // ── Version pre-check before ANY clash gate ──
+  // A stale tab's whole-object PATCH carries every fixture as the tab loaded them; diffed
+  // against a newer `current` it would be blamed for "introducing" a clash on a fixture the
+  // admin never touched. The correct answer to a stale write is the plain concurrency 409,
+  // not a venue-clash 409, so run the version check FIRST. `repo.updateSeries`' conditional
+  // Put stays as the final guard against a race between here and the write.
+  if (patch.version !== undefined && patch.version !== current.version)
+    throw new HttpError(409, 'series changed; refetch');
+
+  // The tenant-wide series/clubs/venues lists both clash gates read, loaded at most once and
+  // only when a gate actually runs — a draft fixture edit with no release transition pays no
+  // list reads, and a release never loads them twice.
+  let clashInputs: Promise<[Series[], Club[], Venue[]]> | undefined;
+  const loadClashInputs = () =>
+    (clashInputs ??= Promise.all([
+      repo.listSeries(ra.tenant),
+      repo.listClubs(ra.tenant),
+      repo.listVenues(ra.tenant),
+    ]));
+
   // Withheld fields are chosen ONLY on the false→true release transition, and only when
   // the patch actually carries a `withheld` key. Gating on the flag value alone would
   // wipe/rewrite it on the FIRST in-season fixture edit — `updateSeries` PATCHes the
@@ -3025,18 +3045,43 @@ app.patch('/series/:id', requireAdmin, async (c) => {
   // series, or fix the clashing venues), never to bypass the gate; see the "Ordering
   // consequence" section of docs/runbooks/planb-fixtures-import.md.
   if (patch.released === true && !current.released) {
-    const [allSeries, clubs, venues] = await Promise.all([
-      repo.listSeries(ra.tenant),
-      repo.listClubs(ra.tenant),
-      repo.listVenues(ra.tenant),
-    ]);
+    const [allSeries, clubs, venues] = await loadClashInputs();
     const subject = { ...current, ...patch, id } as Series;
-    const clashes = findReleaseClashes(subject, allSeries, clubs, venues);
+    const clashes = findClashes(subject, allSeries, clubs, venues);
     if (clashes.length) {
-      const shown = clashes.slice(0, 3).join('; ');
+      const shown = clashes.slice(0, 3).map(formatClash).join('; ');
+      // Keep the message string byte-identical (existing tests assert on it); the structured
+      // `clashes`/`code` ride along in `details` so the release dialog can render the same
+      // per-fixture panel the in-season gate uses.
       throw new HttpError(
         409,
         `Release blocked — ${clashes.length} venue clash(es): ${shown}${clashes.length > 3 ? ` … +${clashes.length - 3} more` : ''}. Fix the venues (or times), then release.`,
+        { clashes, code: 'venue_clash' },
+      );
+    }
+  }
+  // ── In-season clash gate ──
+  // A live series is edited freely by admins (operators via auto-admin) — that is a designed
+  // capability — but a fixtures write to a RELEASED series must never introduce a NEW ground
+  // double-booking, which would publish a clash the release gate exists to prevent. Unlike a
+  // draft (gated only once, at release), a live series is gated on EVERY fixtures write:
+  // regenerate and allocate both land here (a regenerate mints new fixture ids, so on a
+  // series that already carries residual clashes it is refused until those are fixed —
+  // accepted; regenerating a live schedule is destructive anyway). The rule is a SUBSET test,
+  // not "any clash": a series already carrying residual clashes must stay fixable one fixture
+  // at a time, so only clashes whose pair-on-ground identity (clashKey, no date/time) is
+  // absent from the pre-edit set are refused. Recall (released:false) is never gated.
+  if (current.released && patch.released !== false && patch.fixtures !== undefined) {
+    const [allSeries, clubs, venues] = await loadClashInputs();
+    const before = new Set(findClashes(current, allSeries, clubs, venues).map(clashKey));
+    const after = findClashes({ ...current, ...patch, id } as Series, allSeries, clubs, venues);
+    const introduced = after.filter((c) => !before.has(clashKey(c)));
+    if (introduced.length) {
+      const shown = introduced.slice(0, 3).map(formatClashForHumans).join('; ');
+      throw new HttpError(
+        409,
+        `Change blocked — ${introduced.length} venue clash(es): ${shown}${introduced.length > 3 ? ` … +${introduced.length - 3} more` : ''}. Pick another ground or date/time, or move the other fixture, then save again.`,
+        { clashes: introduced, code: 'venue_clash' },
       );
     }
   }
@@ -3053,6 +3098,81 @@ app.patch('/series/:id', requireAdmin, async (c) => {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'series changed; refetch');
     throw err;
   }
+});
+
+/**
+ * Admin-only clash pre-check for the fixture editor: given candidate fixtures, report which
+ * would clash and — crucially — which the save gate would REFUSE. A distinct POST segment, so
+ * it never shadows (or is shadowed by) PATCH /series/:id. Pure read: no write, no version
+ * check, works on drafts and released series alike.
+ *
+ * For each candidate the subject is `current` with the same-id fixture replaced (or the
+ * candidate appended if new), so `introduced` is computed with the SAME clashKey subset logic
+ * the in-season save gate uses — the editor's "will be refused on save" copy can therefore
+ * never disagree with the server. Round-tripping to the server rather than a client ledger is
+ * deliberate: ground-name normalisation and VENUE_ALIASES live only here, and the client
+ * ledger is venueId-keyed, so a client copy would drift from the gate.
+ *
+ * Note: `findClashes` rebuilds the whole-tenant ledger once per candidate (up to 20×) — the
+ * subject changes each time. That is fine at today's tenant sizes; revisit if a tenant's
+ * fixture count makes 20 rebuilds per pre-check felt.
+ */
+app.post('/series/:id/clash-check', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const body = (await c.req.json()) as { candidates?: unknown };
+  const candidates = body.candidates;
+  if (!Array.isArray(candidates) || candidates.length < 1 || candidates.length > 20)
+    throw new HttpError(400, 'candidates must be an array of 1–20 fixtures');
+  // Type every field the ledger reads, not just the id: an unchecked `venueOverride: 123`
+  // (or any non-string here) reaches `normaliseName`/`resolveSide` and TypeErrors into a 500
+  // where the caller deserves the 400 that names the offending field. Strings (or
+  // undefined/null) for the text fields; a number (or undefined/null) for `round`.
+  const STRING_FIELDS = [
+    'date',
+    'time',
+    'venueOverride',
+    'venueName',
+    'home',
+    'away',
+    'status',
+  ] as const;
+  for (const cand of candidates) {
+    if (!cand || typeof cand !== 'object' || typeof (cand as { id?: unknown }).id !== 'string')
+      throw new HttpError(400, 'each candidate must be an object with a string id');
+    const rec = cand as Record<string, unknown>;
+    for (const field of STRING_FIELDS)
+      if (rec[field] != null && typeof rec[field] !== 'string')
+        throw new HttpError(400, `candidate ${field} must be a string`);
+    if (rec.round != null && typeof rec.round !== 'number')
+      throw new HttpError(400, 'candidate round must be a number');
+  }
+  const current = await repo.getSeries(tenant, id);
+  if (!current) throw new HttpError(404, 'series not found');
+  const [allSeries, clubs, venues] = await Promise.all([
+    repo.listSeries(tenant),
+    repo.listClubs(tenant),
+    repo.listVenues(tenant),
+  ]);
+  const before = new Set(findClashes(current, allSeries, clubs, venues).map(clashKey));
+  const fixtures = (current.fixtures ?? []) as Array<{ id?: string }>;
+  const results = (candidates as Array<{ id: string }>).map((cand) => {
+    const replaced = fixtures.some((f) => f.id === cand.id)
+      ? fixtures.map((f) => (f.id === cand.id ? cand : f))
+      : [...fixtures, cand];
+    const subject = { ...current, fixtures: replaced, id } as Series;
+    // Only clashes the candidate itself is party to — as the subject fixture, or (when the
+    // ledger booked it first) as the same-series partner another fixture now clashes into.
+    // Editing one fixture changes only clashes involving it, so this set equals what the
+    // whole-series save gate would compute for this candidate.
+    const clashes = findClashes(subject, allSeries, clubs, venues).filter(
+      (cl) =>
+        cl.fixtureId === cand.id || (cl.with.seriesId === id && cl.with.fixtureId === cand.id),
+    );
+    const introduced = clashes.filter((cl) => !before.has(clashKey(cl)));
+    return { clashes, introduced };
+  });
+  return c.json({ results });
 });
 
 app.delete('/series/:id', requireAdmin, async (c) => {
@@ -7167,7 +7287,10 @@ function hashCode(s: string): number {
 // ───────────────────────── Error handling ─────────────────────────
 
 app.onError((err, c) => {
-  if (err instanceof HttpError) return c.json({ error: err.message }, err.status as 400);
+  if (err instanceof HttpError)
+    // Details first, `error` last: a structured error (e.g. `{ clashes, code }`) rides along
+    // in the same body, but can never clobber the `error` string every existing client reads.
+    return c.json({ ...(err.details ?? {}), error: err.message }, err.status as 400);
   // A body that isn't JSON throws SyntaxError out of `c.req.json()`. That is the caller's
   // mistake, not ours: answering 500 blames the server for it AND pages Sentry every time
   // a script sends a truncated payload. Nothing else in a request throws SyntaxError.

@@ -657,7 +657,10 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   // series, then PATCH the computed value with its version (→ 409 on conflict).
   function updateSeries(seriesId, updater) {
     const cur = allSeries.find((s) => s.id === seriesId);
-    if (!cur) return;
+    // Always hand back a promise so callers can sequence on the write landing (open the
+    // new row, toast success, close the editor) and surface the clash-gate 409 inline —
+    // even on this early return where there is nothing to save.
+    if (!cur) return Promise.resolve();
     const next = updater(cur);
     // Strip approval from generic edits: approval is toggled only via setApproved
     // (a dedicated, single-field write). Omitting it lets the server's gate recall a
@@ -668,12 +671,17 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     // whole-object PATCH, but omitting them here keeps a stale-tab edit from ever
     // carrying an out-of-date mask on the wire (ADR 0011).
     const { approved: _a, approvedAt: _aa, withheld: _w, revealedAt: _ra, ...rest } = next;
-    withToast(
+    // `rawConflict` surfaces the clash gate's actionable "Change blocked — …" copy in the
+    // toast (a plain concurrency 409 still gets the friendly refresh line via
+    // SERIES_CONFLICT_MESSAGE inside withToast). The chain is RETURNED with no trailing
+    // swallow so a caller can react to the rejection (keep the editor open, show the
+    // structured clashes inline); withToast has already toasted, so callers that only
+    // needed the toast add their own `.catch(() => {})`.
+    return withToast(
       () => api.patchSeries(seriesId, { ...rest, version: cur.version }),
       'Could not save fixtures',
-    )
-      .then(() => invalidate(qk.series()))
-      .catch(() => {});
+      { rawConflict: true },
+    ).then(() => invalidate(qk.series()));
   }
   function deleteSeries(seriesId) {
     withToast(() => api.deleteSeriesReq(seriesId), 'Could not delete series')
@@ -874,14 +882,22 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       teamHome,
       ledger,
     });
-    updateSeries(series.id, (cur) => ({ ...cur, fixtures: report.fixtures }));
-    const placed = report.fixtures.length - report.unresolved;
-    toastShow(
-      `${placed} of ${report.fixtures.length} fixtures allocated` +
-        (report.unresolved ? ` · ${report.unresolved} need a ground` : ''),
-      report.unresolved ? 'warn' : undefined,
-    );
-    for (const w of report.warnings) toastShow(w, 'warn');
+    // Announce the allocation only AFTER the write lands. The client ledger is
+    // venueId-keyed while the server gate is name-keyed, so the server can refuse an
+    // allocation the client thought clean (the clash gate runs on this released-series
+    // write too); toasting "N of M allocated" up front would then contradict the
+    // "Change blocked" toast withToast already showed. On rejection do nothing further.
+    updateSeries(series.id, (cur) => ({ ...cur, fixtures: report.fixtures }))
+      .then(() => {
+        const placed = report.fixtures.length - report.unresolved;
+        toastShow(
+          `${placed} of ${report.fixtures.length} fixtures allocated` +
+            (report.unresolved ? ` · ${report.unresolved} need a ground` : ''),
+          report.unresolved ? 'warn' : undefined,
+        );
+        for (const w of report.warnings) toastShow(w, 'warn');
+      })
+      .catch(() => {});
   }
 
   /* ─── Venues (ADR 0008 phase 2) ─── */
@@ -2395,6 +2411,10 @@ function Shell({
             onSetReleased={setReleased}
             onReveal={revealSeries}
             onSetApproved={setApproved}
+            // A STABLE reference on purpose: it is a dependency of the editor's debounced pre-check
+            // effect, and an inline lambda here would re-fire that request on every App
+            // re-render (toast, refetch) with an unchanged draft.
+            onCheckClashes={api.checkSeriesClashes}
             toast={toastShow}
             allCalendars={allCalendars}
             allSeasonRuns={allSeasonRuns}
