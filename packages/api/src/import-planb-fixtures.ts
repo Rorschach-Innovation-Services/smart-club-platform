@@ -72,10 +72,12 @@ const DELETE_SLUGS = [
 
 /** Grounds in bad condition per the union's facility sheet (the RED rows of
  * "facility updated.xlsx", 17 Aug 2026) plus grounds the union's follow-up directives
- * ruled out (Kloof CC; Lindelani's "129 dukuza street" tennis court). Never used:
- * excluded as auto-move candidates, and any fixture assigned or defaulting onto one is
- * force-relocated (directive candidates first, then the clubs' permitted fields).
- * Stored as groundKey() normal forms. */
+ * ruled out (Lindelani's "129 dukuza street" tennis court). Never used: excluded as
+ * auto-move candidates, and any fixture assigned or defaulting onto one is force-
+ * relocated (directive candidates first, then the clubs' permitted fields). Stored as
+ * groundKey() normal forms. Kloof CC was on this list until the union reinstated it
+ * (Sep 2026) — the 2026-27 release schedules Hillary Malvern there, so it is playable
+ * again and no longer barred. */
 const BAD_CONDITION_GROUNDS = new Set(
   [
     'Asherville',
@@ -93,7 +95,6 @@ const BAD_CONDITION_GROUNDS = new Set(
     'Phoenix Tynebridge',
     'Verulam Recreation Ground',
     // Ruled out by the union's 17 Aug follow-up directives, not the red list:
-    'Kloof CC',
     '129 dukuza street Lindelani/ Tennis court',
   ].map((n) => groundKey(n)),
 );
@@ -119,12 +120,9 @@ export interface VenueDirective {
   why: string;
 }
 const VENUE_DIRECTIVES: VenueDirective[] = [
-  {
-    slug: 'premier-men-t20-1',
-    fromGroundKey: groundKey('Kloof CC'),
-    candidates: ['Peace Park', 'Fairfield Park', 'Malvern Park'],
-    why: 'Union directive — Kloof CC unavailable',
-  },
+  // (The premier-men-t20-1 "Kloof CC unavailable" directive was removed Sep 2026 when the
+  // union reinstated Kloof CC — see BAD_CONDITION_GROUNDS. The two-workbook path now leaves
+  // Hillary Malvern's Kloof fixtures where the sheet puts them.)
   {
     slug: 'premier-women-t20-g2',
     fromGroundKey: groundKey('129 dukuza street Lindelani/ Tennis court'),
@@ -233,7 +231,13 @@ const NAME_REDIRECTS: Record<string, string> = {
  * and bootstrap-fixture-prereqs import them from this module. Ground aliasing is
  * deliberately a SEPARATE namespace from club resolution: "Ilembe" is both a club
  * and a barred GROUND name, and the two must never be looked up in the same map. */
-import { normaliseName, groundKey, GroundLedger, JUNK_GROUND } from './venue-clash.js';
+import {
+  normaliseName,
+  groundKey,
+  GroundLedger,
+  JUNK_GROUND,
+  registryResolver,
+} from './venue-clash.js';
 export { groundKey, GroundLedger };
 
 /** Lowercase, strip punctuation, drop generic suffix/roster words. Keeps distinguishing
@@ -1066,6 +1070,445 @@ function comparePairSets(
   return { missingVenue, unusedRevised };
 }
 
+// ───────────────────────── 2026-27 Release workbook (single-file) parser ─────────────────────────
+
+/** The union's NEW single-workbook 2026-27 RELEASE (`KZNCU League Fixtures 2026-2027
+ * Release.xlsx`) replaces the old two-file supply: every league, with exact per-fixture
+ * venues baked in. Release mode imports it into the existing 20 `s-planb-*` series and
+ * takes the sheet's venue as authoritative — no re-bases, no directives, no auto-
+ * relocation (the clash pass is REPORT-ONLY; see runRelease). Promotion Women's three
+ * series are NOT in this workbook and are never touched by release mode. */
+const RELEASE_SHEETS = [
+  'PREMIER MEN',
+  'PREMIER WOMEN',
+  'PROMOTION MEN',
+  'VETERANS PREMIER',
+  'VETERANS PROMOTION',
+] as const;
+
+/** A parsed release fixture — the shared ParsedFixture shape plus the sheet's
+ * authoritative venue. */
+export interface ReleaseParsedFixture extends ParsedFixture {
+  venue: string;
+}
+
+export interface ReleaseSection {
+  spec: SeriesSpec;
+  fixtures: ReleaseParsedFixture[];
+  skippedRows: string[];
+}
+
+export interface ReleaseParseResult {
+  sections: ReleaseSection[];
+  orphans: string[];
+  tbcSkipped: number;
+  amendmentNotes: string[];
+}
+
+/** One release-sheet section header → an existing `s-planb-<slug>` series. The combined
+ * Promotion Men T20 uses the placeholder slug `promotion-men-t20`; splitPromotionT20
+ * later cuts it into `promotion-men-t20-g1..g4` by prod participant membership. `expected`
+ * is asserted loudly like the two-workbook path (bottom10's 45 is the POST-amendment
+ * count). Regexes tolerate the doubled/trailing spaces the real sheet carries. */
+interface ReleaseSectionSpec extends SeriesSpec {
+  sheet: (typeof RELEASE_SHEETS)[number];
+  match: RegExp;
+}
+const T20 = { seriesType: 'Twenty20 (16-25 overs)', maxOvers: 20 } as const;
+const OD = (maxOvers: number) => ({ seriesType: 'One-Day (40-50 overs)', maxOvers });
+const RELEASE_SECTIONS: ReleaseSectionSpec[] = [
+  // ── PREMIER MEN ──
+  { sheet: 'PREMIER MEN', match: /^t20\s+premier\s+men\s+group\s+1$/i, slug: 'premier-men-t20-1', label: 'T20 · Group 1', leagueKey: 'premier', ...T20, expected: 15 },
+  { sheet: 'PREMIER MEN', match: /^t20\s+premier\s+men\s+group\s+2$/i, slug: 'premier-men-t20-2', label: 'T20 · Group 2', leagueKey: 'premier', ...T20, expected: 15 },
+  { sheet: 'PREMIER MEN', match: /^50\s+over\s+top\s+6$/i, slug: 'premier-men-50ov-top6', label: '50 Over · Top 6', leagueKey: 'premier', ...OD(50), expected: 30 },
+  { sheet: 'PREMIER MEN', match: /^50\s+over\s+bottom\s+6$/i, slug: 'premier-men-50ov-bottom6', label: '50 Over · Bottom 6', leagueKey: 'premier', ...OD(50), expected: 30 },
+  // ── PREMIER WOMEN ──
+  { sheet: 'PREMIER WOMEN', match: /^t20\s+premier\s+women\s+group\s+1$/i, slug: 'premier-women-t20-g1', label: 'T20 · Group 1', leagueKey: 'premierWomen', ...T20, expected: 6 },
+  { sheet: 'PREMIER WOMEN', match: /^t20\s+premier\s+women\s+group\s+2$/i, slug: 'premier-women-t20-g2', label: 'T20 · Group 2', leagueKey: 'premierWomen', ...T20, expected: 6 },
+  { sheet: 'PREMIER WOMEN', match: /^30\s+over\s+top\s+4$/i, slug: 'premier-women-30ov-top4', label: '30 Over · Top 4', leagueKey: 'premierWomen', ...OD(30), expected: 12 },
+  { sheet: 'PREMIER WOMEN', match: /^30\s+over\s+bottom\s+4$/i, slug: 'premier-women-30ov-bottom4', label: '30 Over · Bottom 4', leagueKey: 'premierWomen', ...OD(30), expected: 12 },
+  // ── PROMOTION MEN ── the T20 header is a COMBINED block, split into g1..g4 later.
+  { sheet: 'PROMOTION MEN', match: /^promotion\s+men\s*-\s*t20$/i, slug: 'promotion-men-t20', label: 'T20 (combined)', leagueKey: 'promotion', ...T20, expected: 40 },
+  { sheet: 'PROMOTION MEN', match: /^30\s+over\s+promotion\s+top\s+10$/i, slug: 'promotion-men-30ov-top10', label: '30 Over · Top 10', leagueKey: 'promotion', ...OD(30), expected: 45 },
+  { sheet: 'PROMOTION MEN', match: /^30\s+over\s+promotion\s+bottom\s+10$/i, slug: 'promotion-men-30ov-bottom10', label: '30 Over · Bottom 10', leagueKey: 'promotion', ...OD(30), expected: 45 },
+  // ── VETERANS PREMIER ──
+  { sheet: 'VETERANS PREMIER', match: /^veterans\s+premier\s+t20\s+1$/i, slug: 'veterans-premier-t20-1', label: 'T20 · Group 1', leagueKey: 'veterans-premier', ...T20, expected: 15 },
+  { sheet: 'VETERANS PREMIER', match: /^veterans\s+premier\s+t20\s+2$/i, slug: 'veterans-premier-t20-2', label: 'T20 · Group 2', leagueKey: 'veterans-premier', ...T20, expected: 15 },
+  { sheet: 'VETERANS PREMIER', match: /^30\s+over\s+veterans\s+premier\s+league$/i, slug: 'veterans-premier-30ov', label: '30 Over', leagueKey: 'veterans-premier', ...OD(30), expected: 66 },
+  // ── VETERANS PROMOTION ──
+  { sheet: 'VETERANS PROMOTION', match: /^veterans\s+promotion\s+t20\s+1$/i, slug: 'veterans-promotion-t20-1', label: 'T20 · Group 1', leagueKey: 'veterans-promotion', ...T20, expected: 21 },
+  { sheet: 'VETERANS PROMOTION', match: /^veterans\s+promotion\s+t20\s+2$/i, slug: 'veterans-promotion-t20-2', label: 'T20 · Group 2', leagueKey: 'veterans-promotion', ...T20, expected: 28 },
+  { sheet: 'VETERANS PROMOTION', match: /^veterans\s+promotion\s+30\s+over$/i, slug: 'veterans-promotion-30ov', label: '30 Over', leagueKey: 'veterans-promotion', ...OD(30), expected: 105 },
+];
+
+/** The combined Promotion Men T20 placeholder slug (split into g1..g4 downstream). */
+const PROMOTION_T20_COMBINED_SLUG = 'promotion-men-t20';
+
+const RELEASE_MONTHS: Record<string, number> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+/** A release-sheet date: an Excel date cell / formula (via isoDate), or a text spelling
+ * the sheet also uses — "4-Oct-26", "04 Oct 2026", "04-Oct-2026". isoDate stays untouched
+ * (the two-workbook path relies on it) — this only ADDS the month-name text fallback. */
+export function releaseDate(v: unknown): string | null {
+  const iso = isoDate(v);
+  if (iso) return iso;
+  const s =
+    typeof v === 'string'
+      ? v.trim()
+      : v && typeof v === 'object' && 'result' in (v as object)
+        ? String((v as { result: unknown }).result ?? '').trim()
+        : '';
+  const m = s.match(/^(\d{1,2})[-\s]([A-Za-z]{3,9})[-\s](\d{2,4})$/);
+  if (!m) return null;
+  const mon = RELEASE_MONTHS[m[2].slice(0, 3).toLowerCase()];
+  if (!mon) return null;
+  let y = Number(m[3]);
+  if (y < 100) y += 2000;
+  return `${y}-${String(mon).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
+}
+
+/** Column layout of a release sheet. All sheets use home=A; the `v` marker, time, away
+ * and venue columns shift left by one on PROMOTION MEN (which has no blank column B). All
+ * indices are 0-based into the row window we read (cols A–F); cols G+ hold the sidebar
+ * "Team Breakdown", which is never read. */
+function releaseColumns(sheetName: string): {
+  vCol: number;
+  timeCol: number;
+  awayCol: number;
+  venueCol: number;
+} {
+  return sheetName === 'PROMOTION MEN'
+    ? { vCol: 1, timeCol: 2, awayCol: 3, venueCol: 4 }
+    : { vCol: 2, timeCol: 3, awayCol: 4, venueCol: 5 };
+}
+
+/** Hard-coded amendments to `promotion-men-30ov-bottom10` (admin decisions 10 Sep 2026),
+ * applied after the raw parse. The union's sheet duplicates DUT v Simplex in Week 5 (one
+ * copy carries a stray "17-Jan-26" annotation) and, because that duplicate displaced it,
+ * omits Meadowridge v Forest Hills. Net effect: the raw 45 rows (44 distinct) become the
+ * intended 45. Postponed matches keep their original (sheet week) round. */
+function applyBottom10Amendments(section: ReleaseSection): string[] {
+  const notes: string[] = [];
+  const fx = section.fixtures;
+  const isPair = (f: ReleaseParsedFixture, h: string, a: string) =>
+    pairKey(f.homeName, f.awayName) === pairKey(h, a);
+
+  // 1. Drop the duplicate DUT v Simplex, keep one.
+  const dutSimplex = fx.filter((f) => isPair(f, 'DUT', 'Simplex'));
+  for (const dup of dutSimplex.slice(1)) {
+    fx.splice(fx.indexOf(dup), 1);
+    notes.push(`dropped duplicate "${dup.homeName} v ${dup.awayName}" (sheet round ${dup.round})`);
+  }
+  // 2. Postpone DUT v Simplex → 2027-01-17 09:00, Siripat 1 (DUT can't play 29 Nov).
+  const ds = fx.find((f) => isPair(f, 'DUT', 'Simplex'));
+  if (ds) {
+    ds.date = '2027-01-17';
+    ds.time = '09:00';
+    ds.venue = 'Siripat 1';
+    notes.push(`postponed "DUT v Simplex" → 2027-01-17 09:00 @ Siripat 1 (round ${ds.round})`);
+  }
+  // 3. Postpone DUT v Tongaat CA (Week 6) → 2027-01-17 14:00, Collegians.
+  const dt = fx.find((f) => isPair(f, 'DUT', 'Tongaat Cricket Association'));
+  if (dt) {
+    dt.date = '2027-01-17';
+    dt.time = '14:00';
+    dt.venue = 'Collegians';
+    notes.push(
+      `postponed "DUT v Tongaat Cricket Association" → 2027-01-17 14:00 @ Collegians (round ${dt.round})`,
+    );
+  }
+  // 4. Re-add the pairing the duplicate displaced (Meadowridge home, prod orientation).
+  if (!fx.some((f) => isPair(f, 'Meadowridge', 'Forest Hills'))) {
+    fx.push({
+      round: 5,
+      date: '2026-11-29',
+      time: '13:00',
+      homeName: 'Meadowridge',
+      awayName: 'Forest Hills',
+      venue: 'Forest Hills Sports Club',
+    });
+    notes.push(
+      're-added "Meadowridge v Forest Hills" round 5, 2026-11-29 13:00 @ Forest Hills Sports Club',
+    );
+  }
+  return notes;
+}
+
+/** Parse the single release workbook into sections (structural — no club/venue
+ * resolution, no repo). The combined Promotion Men T20 stays one `promotion-men-t20`
+ * section. TBC rows, "T20 Finals Weekend" / "Further 1 round…" banners and the repeated
+ * all-TBC section blocks are skipped; a fixture row under no live section is an orphan
+ * (fail-closed). Bottom-10 amendments are applied here so the count reflects them. */
+export function parseReleaseWorkbook(wb: ExcelJS.Workbook): ReleaseParseResult {
+  const sections: ReleaseSection[] = [];
+  const orphans: string[] = [];
+  let tbcSkipped = 0;
+
+  for (const sheetName of RELEASE_SHEETS) {
+    const ws = wb.worksheets.find((w) => w.name.trim() === sheetName);
+    if (!ws) throw new Error(`release sheet "${sheetName}" not found in the workbook`);
+    const specs = RELEASE_SECTIONS.filter((s) => s.sheet === sheetName);
+    const { vCol, timeCol, awayCol, venueCol } = releaseColumns(sheetName);
+    const bySlug = new Map<string, ReleaseSection>();
+    let cur: ReleaseSection | null = null;
+    let round = 0;
+    let date: string | null = null;
+    let time: string | null = null;
+
+    ws.eachRow((row) => {
+      const values: unknown[] = [];
+      for (let k = 0; k <= 5; k++) values.push(row.getCell(k + 1).value);
+      const a = cellText(values[0]);
+
+      const sec = specs.find((s) => s.match.test(a));
+      if (sec) {
+        let section = bySlug.get(sec.slug);
+        if (!section) {
+          const { sheet: _s, match: _m, ...spec } = sec;
+          section = { spec, fixtures: [], skippedRows: [] };
+          bySlug.set(sec.slug, section);
+          sections.push(section);
+        }
+        cur = section;
+        round = 0;
+        date = null;
+        time = null;
+        return;
+      }
+      // Banners that END the current section — a finals/catch-up header, never a fixture.
+      if (/finals\s+weekend|further\s+1\s+round/i.test(a)) {
+        cur = null;
+        return;
+      }
+      // Week header: carries the round number, a date and (PROMOTION MEN) a slot time.
+      const wk = a.match(/^week\s+(\d+)/i);
+      if (wk) {
+        round = Number(wk[1]);
+        for (const v of values) {
+          const d = releaseDate(v);
+          if (d) date = d;
+        }
+        for (const v of values) {
+          const t = isoTime(v);
+          if (t) time = t;
+        }
+        return;
+      }
+      const isFixture = cellText(values[vCol]).toLowerCase() === 'v';
+      // Time-slot row: blank home, a time in the time column, not a fixture — updates the
+      // running slot time for the fixtures that follow.
+      if (!a && !isFixture) {
+        const t = isoTime(values[timeCol]);
+        if (t) time = t;
+        return;
+      }
+      if (!isFixture) return; // stray non-fixture text inside a section — ignore quietly
+      const home = a;
+      const away = cellText(values[awayCol]);
+      const venue = cellText(values[venueCol]);
+      // A TBC fixture is skipped BEFORE the no-section check — finals/reserve placeholders
+      // are TBC and sit after a banner that cleared the section, so they must not surface
+      // as orphans.
+      if (/^tbc$/i.test(home) || /^tbc$/i.test(away) || /^tbc$/i.test(venue)) {
+        tbcSkipped++;
+        return;
+      }
+      if (!cur) {
+        orphans.push(`${sheetName}: ${home || '—'} v ${away || '—'}`);
+        return;
+      }
+      // A fixture row may carry its own time (PREMIER WOMEN always; PROMOTION MEN
+      // sometimes) — per-row time overrides the running slot time.
+      const rowTime = isoTime(values[timeCol]);
+      const effTime = rowTime ?? time ?? undefined;
+      if (!home || !away || !date) {
+        cur.skippedRows.push(`${home || '—'} v ${away || '—'} (${date ?? 'no date'})`);
+        return;
+      }
+      cur.fixtures.push({
+        round,
+        date,
+        ...(effTime ? { time: effTime } : {}),
+        homeName: home,
+        awayName: away,
+        venue,
+      });
+    });
+  }
+
+  const amendmentNotes: string[] = [];
+  const bottom10 = sections.find((s) => s.spec.slug === 'promotion-men-30ov-bottom10');
+  if (bottom10) amendmentNotes.push(...applyBottom10Amendments(bottom10));
+
+  return { sections, orphans, tbcSkipped, amendmentNotes };
+}
+
+/** A sheet team name → its canonical teamId for a league (mirrors resolveParticipant's
+ * id logic without the logging side effects): a direct club resolve, else a lettered
+ * multi-team side `tm_<clubId>_<leagueKey>_<idx>`. */
+function releaseTeamId(
+  name: string,
+  leagueKey: string,
+  clubs: Club[],
+  byNorm: Map<string, Club>,
+): string | undefined {
+  const direct = resolveClub(name, clubs, byNorm);
+  if (direct) return direct.id;
+  const suffix = stripLetterSuffix(name);
+  if (!suffix) return undefined;
+  const club = resolveClub(suffix.base, clubs, byNorm);
+  if (!club) return undefined;
+  const index = suffix.letter.charCodeAt(0) - 'A'.charCodeAt(0);
+  return `${TEAM_ID_PREFIX}${club.id}_${leagueKey}_${index}`;
+}
+
+/** Cut the combined Promotion Men T20 section into g1..g4 by prod participant membership
+ * (the group whose participants contain both teamIds — the reference approach that placed
+ * all 40 fixtures cleanly, 10 per group), then renumber each group's rounds densely from 1
+ * by the ordinal of its distinct (date, time) so rounds stay dense per series (admin
+ * continues from last.round + 1). A fixture whose sides fall in two different prod groups,
+ * or that resolves to no group, is surfaced (fail-closed) rather than guessed. */
+export function splitPromotionT20(
+  combined: ReleaseSection,
+  clubs: Club[],
+  byNorm: Map<string, Club>,
+  prodSeries: Array<{ id: unknown; participants?: Array<{ teamId: string }> }>,
+): { groups: ReleaseSection[]; unresolved: string[]; crossGroup: string[] } {
+  const teamToGroup = new Map<string, string>();
+  for (const s of prodSeries) {
+    const slug = seriesSlug(s.id);
+    if (!slug || !/^promotion-men-t20-g\d$/.test(slug)) continue;
+    for (const p of s.participants ?? []) teamToGroup.set(p.teamId, slug);
+  }
+  const buckets = new Map<string, ReleaseParsedFixture[]>();
+  const unresolved: string[] = [];
+  const crossGroup: string[] = [];
+  for (const f of combined.fixtures) {
+    const h = releaseTeamId(f.homeName, 'promotion', clubs, byNorm);
+    const a = releaseTeamId(f.awayName, 'promotion', clubs, byNorm);
+    const gh = h ? teamToGroup.get(h) : undefined;
+    const ga = a ? teamToGroup.get(a) : undefined;
+    let slug: string | undefined;
+    if (gh && ga) {
+      if (gh === ga) slug = gh;
+      else {
+        crossGroup.push(`${f.homeName} v ${f.awayName}: prod ${gh} vs ${ga}`);
+        continue;
+      }
+    } else slug = gh ?? ga;
+    if (!slug) {
+      unresolved.push(`${f.homeName} v ${f.awayName}`);
+      continue;
+    }
+    (buckets.get(slug) ?? buckets.set(slug, []).get(slug)!).push(f);
+  }
+
+  const groups: ReleaseSection[] = [];
+  for (let g = 1; g <= 4; g++) {
+    const slug = `promotion-men-t20-g${g}`;
+    const fixtures = (buckets.get(slug) ?? []).slice();
+    const distinct = [...new Set(fixtures.map((f) => `${f.date}|${f.time ?? ''}`))].sort();
+    const roundOf = new Map(distinct.map((k, i) => [k, i + 1]));
+    for (const f of fixtures) f.round = roundOf.get(`${f.date}|${f.time ?? ''}`)!;
+    fixtures.sort(
+      (x, y) =>
+        x.round - y.round ||
+        x.date.localeCompare(y.date) ||
+        (x.time ?? '').localeCompare(y.time ?? ''),
+    );
+    groups.push({
+      spec: {
+        slug,
+        label: `T20 · Group ${g}`,
+        leagueKey: 'promotion',
+        seriesType: T20.seriesType,
+        maxOvers: T20.maxOvers,
+        expected: 10,
+      },
+      fixtures,
+      skippedRows: [],
+    });
+  }
+  return { groups, unresolved, crossGroup };
+}
+
+/** REPORT-ONLY season-wide clash pass for release mode: books every non-written existing
+ * fixture and every incoming release fixture into one registry-aware ledger, reporting any
+ * ground/date/slot double-booking WITHOUT moving anything (the release venue is the union's
+ * word). Unresolved clashes are a hard stop for `--confirm` — release mode never writes a
+ * known double-booking and there is no `--allow-clashes` bypass. */
+function runReleaseClashReport(
+  built: BuiltSeries[],
+  existingOther: Series[],
+  clubsById: Map<string, Club>,
+  venues: Venue[],
+): string[] {
+  const emptyReBase = new Map<string, string>();
+  const ledger = new GroundLedger(registryResolver(venues));
+  for (const s of existingOther) {
+    for (const f of (s.fixtures as StoredFixture[]) ?? []) {
+      if (!f.date || f.status === 'cancelled') continue;
+      const ground = effectiveGroundExisting(s, f, clubsById, emptyReBase);
+      if (!ground) continue;
+      ledger.book(ground, f.date, f.time, {
+        seriesId: String(s.id),
+        fixtureId: f.id ?? '',
+        date: f.date,
+        time: f.time,
+      });
+    }
+  }
+  const clashes: string[] = [];
+  for (const { series, fixtures } of built) {
+    for (const f of fixtures) {
+      const ground = f.venueOverride || f.venueName;
+      if (!ground || !f.date) continue;
+      const hit = ledger.check(ground, f.date, f.time);
+      if (hit)
+        clashes.push(
+          `${series.id} ${f.id}: ${ground} on ${f.date}${f.time ? ' ' + f.time : ''} — already booked by ${hit.seriesId}/${hit.fixtureId}`,
+        );
+      ledger.book(ground, f.date, f.time, {
+        seriesId: String(series.id),
+        fixtureId: f.id,
+        date: f.date,
+        time: f.time,
+      });
+    }
+  }
+  return clashes;
+}
+
+/** Tongaat Cricket Association's home ground (23 release fixtures) has no registry row —
+ * created here, following bootstrap-fixture-prereqs' CUSTOM_VENUES pattern (unpinned, home
+ * of the club, surfaces 1). Written on `--confirm`; in the dry run it is only printed but
+ * still added to the in-memory index so its fixtures resolve/lock as they will once written. */
+const COLLEGIANS_VENUE: Venue = {
+  id: 'v-collegians',
+  name: 'Collegians',
+  homeClubIds: ['tongaat-cricket-association'],
+  surfaces: 1,
+};
+
+function printReleaseSection(section: ReleaseSection) {
+  const { spec } = section;
+  console.log(`\n── ${spec.slug}  (${spec.label})`);
+  for (const r of section.skippedRows) console.log(`  row skipped: ${r}`);
+  if (section.fixtures.length === 0) {
+    console.log('  ✗ 0 fixtures parsed — this section will ABORT the run');
+    return;
+  }
+  for (const f of section.fixtures)
+    console.log(
+      `  R${f.round}  ${f.date}${f.time ? ' · ' + f.time : ''}  ${f.homeName} v ${f.awayName} @ ${f.venue}`,
+    );
+  const mark = section.fixtures.length === spec.expected ? '✓' : '✗ MISMATCH';
+  console.log(`  ${mark} ${section.fixtures.length} fixtures (expected ${spec.expected})`);
+}
+
 // ───────────────────────── Building Series from parsed fixtures ─────────────────────────
 
 /** Mirrors `AllocatedFixture` (src/competition/venues.ts) without importing frontend
@@ -1888,9 +2331,11 @@ async function backupExistingSeries(repo: RepoModule): Promise<string> {
 // ───────────────────────── CLI ─────────────────────────
 
 interface Args {
-  mode: 'import' | 'prune' | 'revert';
+  mode: 'import' | 'prune' | 'revert' | 'release';
   file: string;
   t20: string;
+  /** The single 2026-27 release workbook (release mode). Mutually exclusive with file/t20. */
+  release: string;
   confirm: boolean;
   discardEdits: boolean;
   allowClashes: boolean;
@@ -1907,6 +2352,7 @@ export function parseArgs(argv: string[]): Args {
     mode: 'import',
     file: '',
     t20: '',
+    release: '',
     confirm: false,
     discardEdits: false,
     allowClashes: false,
@@ -1921,6 +2367,7 @@ export function parseArgs(argv: string[]): Args {
     const a = argv[i];
     if (a === '--file') args.file = argv[++i] ?? '';
     else if (a === '--t20') args.t20 = argv[++i] ?? '';
+    else if (a === '--release') args.release = argv[++i] ?? '';
     else if (a === '--confirm') args.confirm = true;
     else if (a === '--discard-edits') args.discardEdits = true;
     else if (a === '--allow-clashes') args.allowClashes = true;
@@ -1938,19 +2385,27 @@ export function parseArgs(argv: string[]): Args {
   }
   if (prune && revert) throw new Error('--prune and --revert are mutually exclusive');
   if (prune) {
-    if (args.file || args.t20) throw new Error('--prune takes no --file/--t20');
+    if (args.file || args.t20 || args.release) throw new Error('--prune takes no --file/--t20/--release');
     if (args.only.length) throw new Error('--only is an import-mode flag; not valid with --prune');
     args.mode = 'prune';
     return args;
   }
   if (revert) {
-    if (args.file || args.t20) throw new Error('--revert takes no --file/--t20');
+    if (args.file || args.t20 || args.release) throw new Error('--revert takes no --file/--t20/--release');
     if (args.only.length) throw new Error('--only is an import-mode flag; not valid with --revert');
     args.mode = 'revert';
     return args;
   }
+  if (args.release) {
+    if (args.file || args.t20)
+      throw new Error('--release is mutually exclusive with --file/--t20');
+    args.mode = 'release';
+    return args;
+  }
   if (!args.file || !args.t20)
-    throw new Error('import mode requires both --file <Dolphins xlsx> and --t20 <REVISED xlsx>');
+    throw new Error(
+      'import mode requires both --file <Dolphins xlsx> and --t20 <REVISED xlsx>, or --release <2026-27 workbook>',
+    );
   return args;
 }
 
@@ -2696,9 +3151,311 @@ async function runImport(args: Args) {
   );
 }
 
+// ───────────────────────── Release mode (single 2026-27 workbook) ─────────────────────────
+
+/** Import the union's single 2026-27 RELEASE workbook into the existing 20 `s-planb-*`
+ * series. The sheet's per-fixture venue is authoritative: resolved registry-first via
+ * setVenue (locked when the registry knows it, venueOverride otherwise) with NO re-bases,
+ * NO union directives and NO auto-relocation. The clash pass is REPORT-ONLY and a hard
+ * stop for `--confirm`. Promotion Women and the keep-list are never in this workbook and
+ * are never touched. Lifecycle (approved/released/withheld/revealedAt), the version bump,
+ * the backup file and the admin-edit gate are all preserved from the two-workbook path. */
+async function runRelease(args: Args) {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(args.release);
+  const { sections, orphans, tbcSkipped, amendmentNotes } = parseReleaseWorkbook(wb);
+
+  for (const s of sections) printReleaseSection(s);
+  console.log(`\nRelease workbook: ${tbcSkipped} TBC/placeholder row(s) skipped.`);
+  if (amendmentNotes.length) {
+    console.log(
+      `\n── Amendments applied to promotion-men-30ov-bottom10 (admin decisions 10 Sep 2026):`,
+    );
+    for (const n of amendmentNotes) console.log(`  ${n}`);
+  }
+  if (orphans.length) {
+    console.log(`\n── Orphan fixture rows (${orphans.length}) — matched no section`);
+    for (const o of orphans) console.log(`  ${o}`);
+  }
+
+  // Structural hard-fail gates — mirror runImport: orphans and 0-fixture sections are
+  // always fatal; a nonzero-but-wrong count aborts unless --allow-count-mismatch. The
+  // combined promotion-men-t20 section asserts 40 here (its g1..g4 split, which needs the
+  // prod series, happens after the repo load below).
+  const hardFailures: string[] = [];
+  if (orphans.length) hardFailures.push(`${orphans.length} orphan fixture row(s) — see above`);
+  for (const s of sections)
+    if (s.fixtures.length === 0) hardFailures.push(`section "${s.spec.slug}" parsed 0 fixtures`);
+  if (!args.allowCountMismatch)
+    for (const s of sections)
+      if (s.fixtures.length !== 0 && s.fixtures.length !== s.spec.expected)
+        hardFailures.push(
+          `section "${s.spec.slug}" parsed ${s.fixtures.length} fixtures (expected ${s.spec.expected})`,
+        );
+  if (hardFailures.length) {
+    console.error(`\n✗ Refusing to continue:\n${hardFailures.map((f) => `   ${f}`).join('\n')}`);
+    if (!args.allowCountMismatch)
+      console.error('   (pass --allow-count-mismatch to write anyway if this is a deliberate revision)');
+    process.exitCode = 1;
+    return;
+  }
+
+  if (args.parseOnly) {
+    console.log(
+      '\n[parse-only] Parsing clean — nothing touched DynamoDB. Re-run without --parse-only to resolve clubs, split the combined Promotion Men T20 into g1..g4 (needs the prod series), resolve venues, and (with --confirm) write.',
+    );
+    return;
+  }
+
+  const repo = await import('./repo.js');
+  const [clubs, config, venues, existingSeries] = await Promise.all([
+    repo.listClubs(TENANT),
+    repo.getTenantConfig(TENANT),
+    repo.listVenues(TENANT),
+    repo.listSeries(TENANT),
+  ]);
+  const byNorm = buildClubIndex(clubs);
+  const clubsById = new Map(clubs.map((c) => [c.id, c]));
+  const byNormVenue = buildVenueIndex(venues);
+  const emptyReBase = new Map<string, string>();
+  const usage: SuffixUsage = { suffixed: new Set(), unsuffixed: new Set() };
+  const unmatched = new Set<string>();
+  const registryMiss = new Set<string>();
+  const resolutions: ResolutionLog = new Map();
+  const leagueLabel = (key: string) =>
+    (config?.leagues ?? []).find((l) => l.key === key)?.label ?? key;
+
+  const wantedLeagueKeys = new Set(RELEASE_SECTIONS.map((s) => s.leagueKey));
+  const configuredLeagueKeys = new Set((config?.leagues ?? []).map((l) => l.key));
+  const missingLeagueKeys = [...wantedLeagueKeys].filter((k) => !configuredLeagueKeys.has(k));
+  console.log(`\nTenant leagues: ${[...configuredLeagueKeys].join(', ') || '(none configured)'}`);
+  for (const k of missingLeagueKeys)
+    console.warn(`  ⚠ league key "${k}" is not configured on this tenant yet`);
+
+  // ── Collegians synthetic registry row ── Add to the in-memory index now (so its 23
+  // fixtures resolve/lock this run) and to the clash-pass venue list; persist on --confirm.
+  const venuesForClash = [...venues];
+  let collegiansToCreate: Venue | null = null;
+  if (!resolveVenue(COLLEGIANS_VENUE.name, byNormVenue)) {
+    collegiansToCreate = COLLEGIANS_VENUE;
+    byNormVenue.set(groundKey(collegiansToCreate.name), collegiansToCreate);
+    venuesForClash.push(collegiansToCreate);
+    console.log(
+      `\n── Collegians venue: ${args.confirm ? 'will CREATE' : '[dry-run] would create'} ${collegiansToCreate.id} (Tongaat CA's ground, unpinned, surfaces 1)`,
+    );
+  }
+
+  // ── Split the combined Promotion Men T20 into g1..g4 via prod participant membership ──
+  const releaseSections: ReleaseSection[] = sections.filter(
+    (s) => s.spec.slug !== PROMOTION_T20_COMBINED_SLUG,
+  );
+  const combined = sections.find((s) => s.spec.slug === PROMOTION_T20_COMBINED_SLUG);
+  if (combined) {
+    const { groups, unresolved, crossGroup } = splitPromotionT20(
+      combined,
+      clubs,
+      byNorm,
+      existingSeries as Array<{ id: unknown; participants?: Array<{ teamId: string }> }>,
+    );
+    if (unresolved.length || crossGroup.length) {
+      console.error('\n✗ Promotion Men T20 split failed — refusing to continue:');
+      for (const u of unresolved) console.error(`   no prod group for: ${u}`);
+      for (const c of crossGroup) console.error(`   cross-group pairing: ${c}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log('\n── Promotion Men T20 split into groups (round renumbered densely per group):');
+    for (const g of groups) {
+      printReleaseSection(g);
+      releaseSections.push(g);
+    }
+    if (!args.allowCountMismatch)
+      for (const g of groups)
+        if (g.fixtures.length !== g.spec.expected) {
+          console.error(
+            `\n✗ ${g.spec.slug} parsed ${g.fixtures.length} fixtures (expected ${g.spec.expected}) — pass --allow-count-mismatch to override.`,
+          );
+          process.exitCode = 1;
+        }
+    if (process.exitCode) return;
+  }
+
+  // ── Build every Series and assign the sheet's authoritative venue (registry-first) ──
+  const built: BuiltSeries[] = [];
+  for (const sec of releaseSections) {
+    const b = buildSeries(sec.spec, sec.fixtures, clubs, byNorm, usage, unmatched, leagueLabel, resolutions);
+    if (!b) continue;
+    const teamToClub = new Map(b.series.participants!.map((p) => [p.teamId, p.clubId]));
+    b.fixtures.forEach((f, i) => {
+      const venue = (b.raw[i] as ReleaseParsedFixture).venue;
+      if (!venue) return; // no venue on the sheet ⇒ leave implicit (home-ground fallback)
+      const homeClubId = teamToClub.get(f.home);
+      const awayClubId = teamToClub.get(f.away);
+      const homeGround = homeClubId
+        ? allocatedGroundName(homeClubId, clubsById, emptyReBase)
+        : undefined;
+      const awayGround = awayClubId
+        ? allocatedGroundName(awayClubId, clubsById, emptyReBase)
+        : undefined;
+      applyExplicitVenue(
+        f,
+        venue,
+        homeGround,
+        awayGround,
+        byNormVenue,
+        'Union 2026-27 release — exact venue',
+        registryMiss,
+      );
+    });
+    built.push(b);
+  }
+
+  // ── --only: restrict to the selected series (preserves manifest order) ──
+  if (args.only.length) {
+    const slugOf = (b: BuiltSeries) => seriesSlug(b.series.id) ?? String(b.series.id);
+    const availableSlugs = built.map(slugOf);
+    const unknown = args.only.filter((slug) => !availableSlugs.includes(slug));
+    if (unknown.length) {
+      console.error(`\n✗ --only: unknown series slug(s): ${unknown.join(', ')}`);
+      console.error(
+        `   available slugs:\n${[...availableSlugs].sort().map((s) => `     ${s}`).join('\n')}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const wanted = new Set(args.only);
+    built.splice(0, built.length, ...built.filter((b) => wanted.has(slugOf(b))));
+    console.log(`\n── --only: restricting to ${built.length} of the built series: ${args.only.join(', ')}`);
+  }
+
+  printResolutionLog(resolutions, leagueLabel);
+
+  if (unmatched.size) {
+    console.error(`\n✗ ${unmatched.size} team name(s) did not resolve to a club — refusing to write:`);
+    for (const n of unmatched) console.error(`   "${n}"`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (registryMiss.size) {
+    console.log(
+      `\n── Venue registry misses (${registryMiss.size}) — written as venueOverride, not locked:`,
+    );
+    for (const g of registryMiss) console.log(`  "${g}"`);
+  }
+
+  const suffixNotes = reportSuffixMixing(usage);
+  if (suffixNotes.length) {
+    console.log(`\n── Suffixed/unsuffixed usage warnings (${suffixNotes.length}):`);
+    for (const n of suffixNotes) console.log(`  ⚠ ${n}`);
+  }
+
+  // ── REPORT-ONLY clash pass ── release mode never relocates and never writes a clash.
+  const writtenSlugs = new Set(built.map((b) => seriesSlug(b.series.id)!));
+  const existingOther = existingSeries.filter((s) => {
+    const slug = seriesSlug(s.id);
+    return !slug || !writtenSlugs.has(slug);
+  });
+  const clashes = runReleaseClashReport(built, existingOther, clubsById, venuesForClash);
+  console.log('\n── Season-wide venue clash pass (REPORT ONLY — release mode never relocates)');
+  if (clashes.length) {
+    console.log(`  ✗ ${clashes.length} unresolved clash(es):`);
+    for (const c of clashes) console.log(`    ${c}`);
+  } else {
+    console.log('  ✓ no unresolved clashes');
+  }
+
+  // ── Admin-edit gate ── (same rails as the two-workbook path) ──
+  const editNotes: string[] = [];
+  const dateTimeInfoNotes: string[] = [];
+  for (const b of built) {
+    const existing = existingSeries.find((s) => s.id === b.series.id);
+    if (existing) {
+      const { genuine, informational } = diffAdminEdits(existing, b.series);
+      editNotes.push(...genuine);
+      dateTimeInfoNotes.push(...informational);
+    }
+  }
+  if (editNotes.length) {
+    console.log(
+      `\n── Admin-edit diff — GENUINE edits (${editNotes.length} note(s), gates --discard-edits):`,
+    );
+    for (const n of editNotes) console.log(`  ${n}`);
+  }
+  if (dateTimeInfoNotes.length) {
+    console.log(`\n── Date/time differences — INFORMATIONAL only (${dateTimeInfoNotes.length} note(s)):`);
+    for (const n of dateTimeInfoNotes) console.log(`  ${n}`);
+  }
+
+  let abort = false;
+  if (suffixNotes.length) {
+    console.error('\n✗ suffixed/unsuffixed team ambiguity (see warnings above) — refusing to write.');
+    abort = true;
+  }
+  if (clashes.length) {
+    console.error(
+      '\n✗ unresolved venue clashes — release mode never writes a known double-booking (no --allow-clashes bypass; fix the sheet or the registry).',
+    );
+    abort = true;
+  }
+  if (missingLeagueKeys.length && args.confirm) {
+    console.error(
+      `\n✗ league key(s) not configured on the tenant: ${missingLeagueKeys.join(', ')} — create them first.`,
+    );
+    abort = true;
+  }
+  if (editNotes.length && !args.discardEdits) {
+    console.error(
+      '\n✗ existing series carry admin edits — refusing to overwrite (pass --discard-edits to overwrite anyway).',
+    );
+    abort = true;
+  }
+  if (abort) {
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log(
+    `\n${built.length} series to write${args.only.length ? ` (--only ${args.only.join(',')})` : ''}.`,
+  );
+  if (!args.confirm) {
+    console.log('[dry-run] nothing written. Re-run with --confirm to import.');
+    return;
+  }
+
+  if (collegiansToCreate) {
+    await repo.putVenue(TENANT, collegiansToCreate);
+    console.log(`created venue ${collegiansToCreate.id} (${collegiansToCreate.name})`);
+  }
+  const backupPath = await backupExistingSeries(repo);
+  for (const b of built) {
+    const s = b.series;
+    const existing = await repo.getSeries(TENANT, s.id);
+    if (existing) {
+      s.approved = existing.approved ?? s.approved;
+      s.approvedAt = existing.approvedAt ?? null;
+      s.released = existing.released ?? false;
+      s.releasedAt = existing.releasedAt ?? null;
+      s.withheld = existing.withheld;
+      s.revealedAt = existing.revealedAt;
+      s.version = (Number(existing.version) || 1) + 1;
+    }
+    await repo.putSeries(TENANT, s);
+    const withheldNote =
+      existing && s.withheld ? ` (withheld: ${Object.keys(s.withheld).join(',')})` : '';
+    console.log(
+      `wrote ${s.id}  v${s.version}${existing ? ' (overwrote, lifecycle preserved)' : ''}${withheldNote}`,
+    );
+  }
+  console.log(
+    `Done. Backup: ${backupPath}. New/overwritten series preserve lifecycle; brand-new ones are DRAFTS — approve and release from the admin console.`,
+  );
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.mode === 'import') return runImport(args);
+  if (args.mode === 'release') return runRelease(args);
   const repo = await import('./repo.js');
   if (args.mode === 'prune') return runPrune(repo, args.confirm);
   return runRevert(repo, args.all, args.confirm);

@@ -63,6 +63,15 @@ export const VENUE_ALIASES: Record<string, string> = {
   totioval: 'toti1', // "Toti Oval"
   gledhowgrounds: 'gledhowground', // Ilembe's club-record spelling of Dawnheights' "Gledhow Cricket Ground" — one shared field (union, 31 Aug 2026)
   chatsworthpenguingrounds: 'penguinstreetground', // Saints' club-record "Chatsworth, Penguin Grounds" = the registry's "PENGUIN STREET GROUND" (KCCD's re-base) — one field, one ledger row
+  // 2026-27 Release workbook spellings (single-file union release) → the numbered
+  // registry canonical forms. Each key is the release sheet's own spelling, normalised.
+  gledhow: 'gledhowground', // release "Gledhow" = the registry's "Gledhow Cricket Ground" (Dawnheights/Ilembe's shared field)
+  totioval1: 'toti1', // release "Toti Oval 1" = Amanzimtoti's "Toti 1"
+  totioval2: 'toti2', // release "Toti Oval 2" = Amanzimtoti's "Toti 2"
+  commons1wbhs: 'commons1', // release "Commons 1 [WBHS]" = the registry's "Commons 1"
+  commons2wbhs: 'commons2', // release "Commons 2 [WBHS]" = the registry's "Commons 2"
+  mpumalanga: 'mpumalangatownshipstadium', // release "Mpumalanga" = West CC's "Mpumalanga Township Cricket Stadium"
+  kloofcountry: 'kloof', // release "Kloof Country Club" = the registry's "Kloof CC" (reinstated Sep 2026)
 };
 
 /** A ground name's ledger/registry lookup key: alias applied over the normal form. */
