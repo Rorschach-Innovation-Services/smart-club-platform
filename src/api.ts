@@ -21,6 +21,7 @@ import type {
   Club,
   PlayerRegistration,
   PlayerClearance,
+  VeteransAffiliatePublic,
   RegistrationReview,
   League,
   Series,
@@ -341,6 +342,27 @@ export const deletePlayer = (clubId: string, naturalKey: string) =>
 
 // Rep-safe {id,name} list of sibling clubs (for clearance source/destination choice).
 export const getClubDirectory = () => request<{ id: string; name: string }[]>('/clubs/directory');
+
+// ── Veterans second-club affiliation (capture-only) ──
+// A player whose own club has no veterans team may play veterans cricket for another club.
+// This links the primary player row to that club without a second roster row (no double-count).
+// Set/swap the veterans club on a player. The name is derived server-side from the id; 400 on
+// own-club/unknown id, 404 unknown player, 409 version conflict. Returns the updated player.
+export const setPlayerVeteransClub = (clubId: string, naturalKey: string, veteransClubId: string) =>
+  request<PlayerRegistration>(
+    `/clubs/${clubId}/players/${encodeURIComponent(naturalKey)}/veterans-club`,
+    { method: 'PUT', body: { veteransClubId } },
+  );
+// Clear a player's veterans club (removes both fields + the affiliation record).
+export const removePlayerVeteransClub = (clubId: string, naturalKey: string) =>
+  request<PlayerRegistration>(
+    `/clubs/${clubId}/players/${encodeURIComponent(naturalKey)}/veterans-club`,
+    { method: 'DELETE' },
+  );
+// The veterans club's view of its affiliates — projected WITHOUT the player's ID number
+// (naturalKey), which is PII the veterans club (not the player's own club) must not see.
+export const getVeteransAffiliates = (clubId: string) =>
+  request<VeteransAffiliatePublic[]>(`/clubs/${clubId}/veterans-affiliates`);
 
 // ── Player clearances (inter-club transfers) ──
 // Returns { incoming, outbound } for a club: incoming = it must action (source),

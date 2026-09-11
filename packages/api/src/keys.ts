@@ -14,7 +14,8 @@ export type EntityType =
   | 'VENUE'
   | 'USER'
   | 'CLEARANCE'
-  | 'REGREVIEW';
+  | 'REGREVIEW'
+  | 'VETAFFIL';
 
 const tenantPrefix = (tenant: string) => `TENANT#${tenant}`;
 
@@ -151,6 +152,27 @@ export const playerKey = (tenant: string, clubId: string, naturalKey: string) =>
 export const playersListKey = (tenant: string, clubId: string) => ({
   pk: `${tenantPrefix(tenant)}#CLUB#${clubId}`,
   skPrefix: 'PLAYER#',
+});
+
+/**
+ * A veterans second-club affiliation, partitioned under the VETERANS club (so that club's
+ * portal can list its affiliates with a single own-partition Query). The pointing player row
+ * lives in the player's PRIMARY club and carries `veteransClubId`; this record is a
+ * denormalised index off it, written ONLY while that row is `active` (the write-on-activation
+ * invariant — see docs/architecture/data-model.md). `naturalKey` is the player's ID number, so
+ * this row is PII: the affiliates GET projects it out (the veterans club is not the player's
+ * own club). It has no gsi1/META listing, so tenant/cohort/club erasure must enumerate
+ * `VETAFFIL#` items explicitly (see listVeteransAffiliations).
+ */
+export const veteransAffiliationKey = (tenant: string, vetsClubId: string, naturalKey: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${vetsClubId}`,
+  sk: `VETAFFIL#${naturalKey}`,
+});
+
+/** pk + sk-prefix to query a veterans club's affiliates (and to enumerate them for erasure). */
+export const veteransAffiliationsListKey = (tenant: string, vetsClubId: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${vetsClubId}`,
+  skPrefix: 'VETAFFIL#',
 });
 
 /**

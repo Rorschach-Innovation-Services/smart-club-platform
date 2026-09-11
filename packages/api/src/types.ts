@@ -919,6 +919,16 @@ export interface PlayerRegistration {
   district?: string;
   /** Club the player was last registered for ('—' if first registration). */
   lastClub?: string;
+  /**
+   * Veterans second-club affiliation (capture-only): the club this player plays veterans
+   * cricket for, when it is not their own. `veteransClub` (the name) is DERIVED server-side from the
+   * validated club (never trusted from the client — same rename-drift tolerance as `lastClub`)
+   * and `veteransClubId` is always set alongside it. A `VETAFFIL#` record under that club
+   * mirrors this pointer while the row is `active` (write-on-activation); it does NOT create a
+   * second roster row and never affects playerCount/demographics/clearances.
+   */
+  veteransClub?: string;
+  veteransClubId?: string;
   battingHand?: 'Right' | 'Left';
   bowlingHand?: 'Right' | 'Left';
   battingType?: string;
@@ -965,6 +975,36 @@ export interface PlayerRegistration {
    */
   version?: number;
 }
+
+/**
+ * A veterans second-club affiliation record (stored under the VETERANS club — see
+ * `veteransAffiliationKey`). A denormalised index off the primary player row's
+ * `veteransClubId`, written only while that row is `active` (write-on-activation). It exists so
+ * a veterans club's portal can list who plays veterans cricket for it without a cross-club scan.
+ * `naturalKey` is the player's ID number (PII) — the affiliates GET returns
+ * {@link VeteransAffiliatePublic}, which projects it out.
+ */
+export interface VeteransAffiliation {
+  /** The player's ID number — the same key the primary player row is addressed by. PII. */
+  naturalKey: string;
+  /**
+   * Display snapshot of the player's name, captured when the record was (re-)written. Like
+   * {@link primaryClubName} it can drift from later roster edits to the primary row — accepted:
+   * the record is re-written on each lifecycle transition, so it re-syncs on the next one.
+   */
+  playerName: string;
+  /** The veterans club this record is partitioned under (the affiliation target). */
+  veteransClubId: string;
+  /** The player's OWN (primary) club — where the pointing player row lives. */
+  primaryClubId: string;
+  primaryClubName: string;
+  createdAt: string;
+  /** How the affiliation was declared. */
+  source: 'registration' | 'admin' | 'portal';
+}
+
+/** The affiliates GET projection: everything a veterans club may see, WITHOUT the PII naturalKey. */
+export type VeteransAffiliatePublic = Omit<VeteransAffiliation, 'naturalKey'>;
 
 export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejected';
 

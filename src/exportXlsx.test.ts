@@ -25,6 +25,7 @@ const EXPECTED_KEYS = [
   'Role',
   'Batting',
   'Bowling',
+  'Veterans club',
   'Status',
 ];
 

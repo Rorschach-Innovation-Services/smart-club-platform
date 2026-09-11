@@ -32,6 +32,8 @@ import {
   venuesListKey,
   playerKey,
   playersListKey,
+  veteransAffiliationKey,
+  veteransAffiliationsListKey,
   clearanceKey,
   inboundClearanceKey,
   clearancesListKey,
@@ -70,6 +72,7 @@ import type {
   UserProfile,
   PlayerRegistration,
   PlayerStatus,
+  VeteransAffiliation,
   PlayerClearance,
   RejectOutcome,
   RejectCase,
@@ -1280,6 +1283,15 @@ export async function deletePlayer(tenant: string, player: PlayerRegistration): 
     (k): k is string => !!k,
   );
   if (objectKeys.length) await deleteUploadObjects(objectKeys);
+  // Write-on-activation invariant: the row is gone, so its VETAFFIL record (if any) must go too.
+  // Best-effort — the record is a denormalised index. (deletePlayer refuses clearance-pending
+  // rows, which never carry a record under write-on-activation, so this only fires for active ones.)
+  if (removed.veteransClubId) {
+    await swallowRecordSync(
+      () => deleteVeteransAffiliation(tenant, removed.veteransClubId!, removed.naturalKey),
+      removed.naturalKey,
+    );
+  }
   // Mirror of createPlayer's count bump: display-only, recomputable, so a failed
   // decrement (club already gone) is swallowed rather than aborting the delete.
   try {
@@ -1350,9 +1362,14 @@ export async function updatePlayer(
   clubId: string,
   naturalKey: string,
   patch: Partial<PlayerRegistration>,
+  outPreImage?: { value?: PlayerRegistration },
 ): Promise<PlayerRegistration> {
   const current = await getPlayer(tenant, clubId, naturalKey);
   if (!current) throw new Error('player not found');
+  // Expose the OCC pre-image (the row the version guard is checked against) so a caller that
+  // needs the OLD field values reads exactly this read, not a separate earlier one that could
+  // race the write.
+  if (outPreImage) outPreImage.value = current;
   const expectedVersion = patch.version ?? current.version ?? 0;
   const next: PlayerRegistration = {
     ...current,
@@ -1378,6 +1395,191 @@ export async function updatePlayer(
     throw err;
   }
   return next;
+}
+
+// ── Veterans second-club affiliations ──
+//
+// A denormalised index off a player row's `veteransClubId`, partitioned under the VETERANS club
+// so its portal can list affiliates with one own-partition Query. The core correctness rule is
+// WRITE-ON-ACTIVATION: a VETAFFIL record exists ⇔ the primary player row carrying
+// `veteransClubId` is `active`. It is never the source of truth (the player row is), so every
+// record write is best-effort at the call sites that ride a committed lifecycle change — a
+// failed sync warns and returns rather than unwinding the write that already landed.
+
+/** Idempotent Put of an affiliation record under its veterans club. */
+export async function putVeteransAffiliation(
+  tenant: string,
+  a: VeteransAffiliation,
+): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...veteransAffiliationKey(tenant, a.veteransClubId, a.naturalKey), ...a },
+    }),
+  );
+}
+
+/** Delete an affiliation record. Idempotent (a missing row is a no-op, not an error). */
+export async function deleteVeteransAffiliation(
+  tenant: string,
+  vetsClubId: string,
+  naturalKey: string,
+): Promise<void> {
+  await ddb.send(
+    new DeleteCommand({
+      TableName: TABLE,
+      Key: veteransAffiliationKey(tenant, vetsClubId, naturalKey),
+    }),
+  );
+}
+
+/** Every affiliate of a veterans club (its own-partition Query). Paged so a large club can't truncate. */
+export async function listVeteransAffiliations(
+  tenant: string,
+  vetsClubId: string,
+): Promise<VeteransAffiliation[]> {
+  const { pk, skPrefix } = veteransAffiliationsListKey(tenant, vetsClubId);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<VeteransAffiliation>(i)!);
+}
+
+/**
+ * Set (or clear, when `vet` is null) a player's veterans club from the admin/portal edit routes.
+ *
+ * `updatePlayer` is the OCC gate and also yields its pre-image (`pre.value`), so the OLD
+ * veterans-club pointer is read from the SAME read the version guard checked — not a separate
+ * earlier read that could race the write. Clearing passes `undefined` for both fields, which
+ * `removeUndefinedValues` drops from the marshalled item, so a clear genuinely removes the
+ * attributes. Only after the row write commits do we reconcile the denormalised record(s): drop
+ * the old club's record if the pointer changed, then — honouring write-on-activation — write the
+ * new one ONLY if the row is `active`. Record writes are best-effort (the row is the source of
+ * truth); the OCC `VersionConflictError` from updatePlayer propagates unchanged (→ 409).
+ */
+export async function setPlayerVeteransClub(
+  tenant: string,
+  clubId: string,
+  naturalKey: string,
+  vet: { id: string; name: string } | null,
+  source: VeteransAffiliation['source'],
+): Promise<PlayerRegistration> {
+  const pre: { value?: PlayerRegistration } = {};
+  const updated = await updatePlayer(
+    tenant,
+    clubId,
+    naturalKey,
+    {
+      veteransClub: vet ? vet.name : undefined,
+      veteransClubId: vet ? vet.id : undefined,
+    },
+    pre,
+  );
+  const oldVetId = pre.value?.veteransClubId;
+  // The pointer moved (or was cleared) — the old club's record no longer describes this player.
+  if (oldVetId && oldVetId !== vet?.id) {
+    await swallowRecordSync(
+      () => deleteVeteransAffiliation(tenant, oldVetId, naturalKey),
+      naturalKey,
+    );
+  }
+  if (vet && isActiveRow(updated)) {
+    // The player row does not carry its own club name — read it for the record's primaryClubName.
+    const primaryClub = await getClub(tenant, clubId).catch(() => null);
+    await swallowRecordSync(
+      () =>
+        putVeteransAffiliation(tenant, {
+          naturalKey,
+          playerName: playerFullName(updated),
+          veteransClubId: vet.id,
+          primaryClubId: clubId,
+          primaryClubName: primaryClub?.name ?? '',
+          createdAt: new Date().toISOString(),
+          source,
+        }),
+      naturalKey,
+    );
+  } else if (vet && !isActiveRow(updated)) {
+    // Row is pending/inactive → invariant forbids a record. A stale one under the NEW club (rare:
+    // re-pointing a pending row) is dropped so the invariant holds.
+    await swallowRecordSync(
+      () => deleteVeteransAffiliation(tenant, vet.id, naturalKey),
+      naturalKey,
+    );
+  }
+  return updated;
+}
+
+/** A row counts as `active` when its status is 'active' or absent (legacy rows default active). */
+function isActiveRow(row: Pick<PlayerRegistration, 'status'>): boolean {
+  return row.status === undefined || row.status === 'active';
+}
+
+const playerFullName = (row: Pick<PlayerRegistration, 'firstName' | 'lastName'>): string =>
+  `${row.firstName} ${row.lastName}`.trim();
+
+/** Run a best-effort affiliation-record write; a failure warns (the record is an index) and returns. */
+const swallowRecordSync = async (fn: () => Promise<unknown>, naturalKey: string): Promise<void> => {
+  try {
+    await fn();
+  } catch (err) {
+    console.warn(`veterans-affiliation sync failed for ${naturalKey}`, err);
+  }
+};
+
+/**
+ * Post-commit reconciliation of a player row's VETAFFIL record with the write-on-activation
+ * invariant (a record exists ⇔ the row carrying `veteransClubId` is `active`). Shared by every
+ * clearance exit that lands or un-lands a row — resolveClearance (all three exit branches),
+ * rejectClearance (cases C/D that leave a row active) and reopenClearance (rows pending again) —
+ * so the invariant holds identically across the local and prod-transaction branches (the latter
+ * untestable under dynalite). Best-effort throughout: the lifecycle write has already committed.
+ *
+ * `row` is the player row in its POST-commit state (its `clubId` is the new primary club):
+ *   - no `veteransClubId`                → nothing to do;
+ *   - not active                         → drop the record (invariant: no record for a non-active row);
+ *   - `veteransClubId === clubId`        → transferred INTO the veterans club: drop the record AND
+ *                                          scrub the two fields off the row (own club ⇒ meaningless);
+ *   - active, different club             → (re-)write the record with the row's current primary club.
+ */
+async function syncVeteransAffiliation(
+  tenant: string,
+  row: PlayerRegistration | null | undefined,
+  opts: { primaryClubName: string; source: VeteransAffiliation['source']; at: string },
+): Promise<void> {
+  const vetId = row?.veteransClubId;
+  if (!row || !vetId) return;
+  const nk = row.naturalKey;
+  if (!isActiveRow(row)) {
+    await swallowRecordSync(() => deleteVeteransAffiliation(tenant, vetId, nk), nk);
+    return;
+  }
+  if (vetId === row.clubId) {
+    await swallowRecordSync(async () => {
+      await deleteVeteransAffiliation(tenant, vetId, nk);
+      // OCC-guarded field scrub (updatePlayer bumps version); tolerate a lost race — best-effort.
+      await updatePlayer(tenant, row.clubId, nk, {
+        veteransClub: undefined,
+        veteransClubId: undefined,
+      });
+    }, nk);
+    return;
+  }
+  await swallowRecordSync(
+    () =>
+      putVeteransAffiliation(tenant, {
+        naturalKey: nk,
+        playerName: playerFullName(row),
+        veteransClubId: vetId,
+        primaryClubId: row.clubId,
+        primaryClubName: opts.primaryClubName,
+        createdAt: opts.at,
+        source: opts.source,
+      }),
+    nk,
+  );
 }
 
 // ── Player clearances (inter-club transfers) ──
@@ -2205,6 +2407,41 @@ export async function resolveClearance(
   };
   const mirrorPut = { TableName: TABLE, Item: mirror };
 
+  // Shared post-commit exit for ALL branches below (the review's "hook in code shared by all
+  // three exit branches"): the player always ends active at the destination on a resolve, so
+  // reconcile its veterans affiliation there. Registration-origin resolve read only the SOURCE
+  // row above, so re-read the DEST row here to learn its veteransClubId. Best-effort inside the
+  // helper — the transfer has already committed.
+  const finish = async (): Promise<PlayerClearance> => {
+    // Whole tail is best-effort: the transfer has already committed, so a transient read failure
+    // here must not 500 the operation (a client retry would then hit VersionConflictError). The
+    // inner sync/delete helpers swallow their own write failures; this guards the getPlayer reads.
+    try {
+      const activatedRow = await getPlayer(tenant, current.toClubId, current.playerNaturalKey);
+      // Old-pointer cleanup (mirrors setPlayerVeteransClub): a registration-origin resolve deletes
+      // the pre-read SOURCE row, so if that row carried a veteransClubId the activated destination
+      // row does not (a different declaration, or none), its (oldVetId, naturalKey) record would be
+      // orphaned forever. Drop it whenever it differs from the destination's pointer — a safe no-op
+      // when unchanged (sk is the naturalKey, the club id is the partition), so this covers every
+      // resolve branch, not just registration-origin.
+      const oldVetId = player?.veteransClubId;
+      if (oldVetId && oldVetId !== activatedRow?.veteransClubId) {
+        await swallowRecordSync(
+          () => deleteVeteransAffiliation(tenant, oldVetId, current.playerNaturalKey),
+          current.playerNaturalKey,
+        );
+      }
+      await syncVeteransAffiliation(tenant, activatedRow, {
+        primaryClubName: current.toClubName,
+        source: isRegistrationOrigin ? 'registration' : 'admin',
+        at: opts.at,
+      });
+    } catch (err) {
+      console.warn(`veterans-affiliation sync failed for ${current.playerNaturalKey}`, err);
+    }
+    return next;
+  };
+
   if (localEndpoint && isRegistrationOrigin) {
     // Offline registration-origin: the canonical's version guard is the race
     // protection, so it runs FIRST — a lost race throws with nothing mutated.
@@ -2232,7 +2469,7 @@ export async function resolveClearance(
       await ddb.send(new UpdateCommand(sourceCount));
     }
     await ddb.send(new PutCommand(mirrorPut));
-    return next;
+    return finish();
   }
 
   if (localEndpoint) {
@@ -2272,7 +2509,7 @@ export async function resolveClearance(
       if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
     }
     await ddb.send(new PutCommand(mirrorPut));
-    return next;
+    return finish();
   }
 
   try {
@@ -2327,7 +2564,7 @@ export async function resolveClearance(
     }
     throw err;
   }
-  return next;
+  return finish();
 }
 
 /**
@@ -2540,7 +2777,7 @@ export async function rejectClearance(
           {},
         );
       }
-      return next;
+      break;
     }
 
     case 'dest-deleted': {
@@ -2594,7 +2831,7 @@ export async function rejectClearance(
         }
         await sendReject(items, { dest: destCountIndex });
       }
-      return next;
+      break;
     }
 
     case 'moved-over-placeholder': {
@@ -2660,7 +2897,7 @@ export async function rejectClearance(
           { dest: 4 },
         );
       }
-      return next;
+      break;
     }
 
     case 'moved-to-source': {
@@ -2730,7 +2967,7 @@ export async function rejectClearance(
           { source: 4, dest: 5 },
         );
       }
-      return next;
+      break;
     }
 
     case 'dest-activated': {
@@ -2785,7 +3022,7 @@ export async function rejectClearance(
           {},
         );
       }
-      return next;
+      break;
     }
 
     default: {
@@ -2793,6 +3030,40 @@ export async function rejectClearance(
       throw new Error(`unhandled reject case ${String(_exhaustive)}`);
     }
   }
+  // Post-commit, shared by every reject case above (each successful outcome `break`s here):
+  // the reject has committed and the player row(s) are in their final state. Reconcile the
+  // veterans affiliation on BOTH the source (fromClubId) and destination (toClubId) rows so the
+  // write-on-activation invariant holds for every case — A/B/B′ (source restored active), B″
+  // (moved active over the placeholder at source), C (moved active to source) and D (stayed
+  // active at dest). syncVeteransAffiliation self-handles a missing row, a non-active row and an
+  // own-club declaration (drop record + scrub fields). This fixes the earlier B″ gap (an active
+  // source row that wrote no record) and the A/B asymmetry (a pre-existing declaration whose
+  // record was never re-written on restore). `source: 'registration'` is context-derived (accepted
+  // imprecision); best-effort throughout — the lifecycle write has already committed.
+  // Best-effort: the reject has already committed, so a transient read failure here must not 500 an
+  // operation that succeeded (a client retry would then hit VersionConflictError). The sync helper
+  // swallows its own write failures; this guards the getPlayer reads so the whole tail is genuinely
+  // best-effort as its comment claims.
+  try {
+    const nk = current.playerNaturalKey;
+    const [src, dst] = await Promise.all([
+      getPlayer(tenant, fromClubId, nk),
+      getPlayer(tenant, current.toClubId, nk),
+    ]);
+    await syncVeteransAffiliation(tenant, src, {
+      primaryClubName: current.fromClubName,
+      source: 'registration',
+      at: opts.at,
+    });
+    await syncVeteransAffiliation(tenant, dst, {
+      primaryClubName: current.toClubName,
+      source: 'registration',
+      at: opts.at,
+    });
+  } catch (err) {
+    console.warn(`veterans-affiliation sync failed for ${current.playerNaturalKey}`, err);
+  }
+  return next;
 }
 
 /**
@@ -2979,7 +3250,7 @@ export async function reopenClearance(
           sourceGuardMsg: 'player no longer available at the source club',
         });
       }
-      return next;
+      break;
     }
 
     case 'dest-deleted': {
@@ -3057,7 +3328,7 @@ export async function reopenClearance(
           },
         );
       }
-      return next;
+      break;
     }
 
     case 'moved-over-placeholder': {
@@ -3128,7 +3399,7 @@ export async function reopenClearance(
           },
         );
       }
-      return next;
+      break;
     }
 
     case 'moved-to-source': {
@@ -3204,7 +3475,7 @@ export async function reopenClearance(
           },
         );
       }
-      return next;
+      break;
     }
 
     case 'dest-activated': {
@@ -3237,7 +3508,7 @@ export async function reopenClearance(
           sourceGuardMsg: 'player no longer available at the destination club',
         });
       }
-      return next;
+      break;
     }
 
     default: {
@@ -3245,6 +3516,32 @@ export async function reopenClearance(
       throw new Error(`unhandled reopen case ${String(_exhaustive)}`);
     }
   }
+  // Post-commit, shared by every case above (each `break`s here): the clearance is pending
+  // again, so any VETAFFIL record a prior reject-time activation (case C/D) wrote now violates
+  // write-on-activation — the row it described is no longer active. Drop it for whichever
+  // restored row still carries a veteransClubId. Best-effort (the record is a denormalised index).
+  // Best-effort: the reopen has already committed, so a transient read failure here must not 500 an
+  // operation that succeeded (a client retry would then hit VersionConflictError). The delete helper
+  // swallows its own write failures; this guards the getPlayer reads so the whole tail is genuinely
+  // best-effort as its comment claims.
+  try {
+    const nk = current.playerNaturalKey;
+    const [src, dst] = await Promise.all([
+      getPlayer(tenant, fromClubId, nk),
+      getPlayer(tenant, current.toClubId, nk),
+    ]);
+    for (const row of [src, dst]) {
+      if (row?.veteransClubId && !isActiveRow(row)) {
+        await swallowRecordSync(
+          () => deleteVeteransAffiliation(tenant, row.veteransClubId!, nk),
+          nk,
+        );
+      }
+    }
+  } catch (err) {
+    console.warn(`veterans-affiliation sync failed for ${current.playerNaturalKey}`, err);
+  }
+  return next;
 }
 
 /**
@@ -4287,6 +4584,11 @@ export async function eraseTenantData(tenant: string): Promise<number> {
     }
     // Invite markers aren't in the gsi1 listing — enumerate + delete them explicitly.
     for (const k of await listClubInviteKeys(tenant, club.id)) keys.push(k);
+    // Veterans affiliations (VETAFFIL#) live under the veterans club's pk with no gsi1/META
+    // listing (like clearances/reviews) — enumerate per club so an erased tenant strands none.
+    for (const a of await listVeteransAffiliations(tenant, club.id)) {
+      keys.push(veteransAffiliationKey(tenant, club.id, a.naturalKey));
+    }
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
   // Season runs are cohort data like series; leaving them behind would strand a
@@ -4337,6 +4639,10 @@ export async function clearCohort(tenant: string): Promise<number> {
         objectKeys.push(r.pendingPlayer.idDocMeta.objectKey);
     }
     for (const k of await listClubInviteKeys(tenant, club.id)) keys.push(k);
+    // Veterans affiliations (VETAFFIL#) — enumerate per club (no gsi1/META listing).
+    for (const a of await listVeteransAffiliations(tenant, club.id)) {
+      keys.push(veteransAffiliationKey(tenant, club.id, a.naturalKey));
+    }
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
   for (const r of await listSeasonRuns(tenant)) keys.push(seasonRunKey(tenant, r.id));
@@ -4389,6 +4695,11 @@ export async function eraseClubData(
     keys.push(playerKey(tenant, club.id, p.naturalKey));
     if (p.idDocMeta?.objectKey) objectKeys.push(p.idDocMeta.objectKey);
     if (p.previousIdDocMeta?.objectKey) objectKeys.push(p.previousIdDocMeta.objectKey);
+    // This club is the player's PRIMARY club, so its VETAFFIL record (if any) lives under the
+    // OTHER (veterans) club — delete it too, or erasing this club would strand a dangling index.
+    if (p.veteransClubId) {
+      keys.push(veteransAffiliationKey(tenant, p.veteransClubId, p.naturalKey));
+    }
   }
 
   // This club as SOURCE: canonical here, mirror under the destination club.
@@ -4479,6 +4790,28 @@ export async function eraseClubData(
   // Invite markers aren't in the gsi1 listing — enumerate + delete them explicitly
   // (they carry recipient contact in their stored results).
   for (const k of await listClubInviteKeys(tenant, club.id)) keys.push(k);
+
+  // Veterans affiliations WHERE THIS CLUB IS THE VETERANS CLUB (its affiliates). The pointing
+  // player rows live in OTHER (primary) clubs; scrub their veteransClub/veteransClubId BEFORE
+  // deleting the VETAFFIL rows, because these records are the ONLY index back to those rows —
+  // a crash mid-erase must stay re-runnable. Conditional (only scrub a row STILL pointing here,
+  // so a since-moved player isn't clobbered) and best-effort; a moved/removed row just no-ops.
+  for (const a of await listVeteransAffiliations(tenant, club.id)) {
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: playerKey(tenant, a.primaryClubId, a.naturalKey),
+          UpdateExpression: 'REMOVE veteransClub, veteransClubId ADD version :one',
+          ConditionExpression: 'attribute_exists(sk) AND veteransClubId = :vc',
+          ExpressionAttributeValues: { ':one': 1, ':vc': club.id },
+        }),
+      );
+    } catch (err: unknown) {
+      if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
+    }
+    keys.push(veteransAffiliationKey(tenant, club.id, a.naturalKey));
+  }
 
   await batchDelete(keys);
   // S3 purge BEFORE the META delete: the objectKeys are only derivable while the

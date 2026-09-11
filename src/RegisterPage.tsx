@@ -53,6 +53,11 @@ const EMPTY = {
   // Current/destination club. '' ⇒ the link club (default). Only shown, and only sent, when
   // the player's previous club differs from the link club (see showCurrentClub below).
   currentClubChoice: '',
+  // Veterans second-club affiliation (capture-only): '' (unanswered) | 'no' | 'yes'. When
+  // 'yes', `vetsClubId` names the club this player plays veterans cricket for — it must be a
+  // club other than their chosen current club. Optional; a blank pick sends nothing.
+  vetsChoice: '',
+  vetsClubId: '',
   battingHand: 'Right',
   battingType: 'Mid Order',
   bowlingHand: 'Right',
@@ -146,6 +151,21 @@ export function RegisterPage() {
   ].filter((cl) => cl.id !== d.lastClubChoice);
   // The effective destination: the picked current club, or the link club when hidden/default.
   const currentClubId = showCurrentClub ? d.currentClubChoice || clubId : clubId;
+  // Veterans-club options: sibling clubs on the system (directory entries excluded — a club not
+  // on the system can't be a veterans club), minus the chosen CURRENT club (you can't play
+  // veterans cricket "for" your own club). The API's `clubs` payload excludes the link club, so
+  // re-add it as an option when the current club isn't the link club (same recombination trick
+  // as the current-club picker above).
+  const vetsClubOptions = [
+    ...(currentClubId !== clubId ? [{ id: clubId, name: clubName }] : []),
+    ...clubs.filter((cl) => !cl.directory),
+  ].filter((cl) => cl.id !== currentClubId);
+  // The current-club pick is dynamic; if it moves onto the club the player named as their
+  // veterans club, that pair is invalid (veterans club === own club) — so clear the veterans
+  // pick. Runs off the derived currentClubId, which tracks the current-club dropdown.
+  useEffect(() => {
+    if (d.vetsClubId && d.vetsClubId === currentClubId) setD((f) => ({ ...f, vetsClubId: '' }));
+  }, [currentClubId, d.vetsClubId]);
   // Nudge: the player typed a previous club into "Other" that actually names a club on the
   // system (the link club or a sibling). The server suppresses the off-system alert either
   // way, but picking it from the list links the registration correctly — so point them at it.
@@ -263,6 +283,9 @@ export function RegisterPage() {
         // other than the link club — that registers them into (and holds them for) that
         // club instead. Omitted ⇒ backend defaults the destination to the link club.
         ...(currentClubId !== clubId ? { currentClubId } : {}),
+        // Veterans second-club affiliation — sent only when the player answered "yes" and picked
+        // a club. The server derives the club name and validates it (≠ current club, on-system).
+        ...(d.vetsChoice === 'yes' && d.vetsClubId ? { veteransClubId: d.vetsClubId } : {}),
         battingHand: d.battingHand,
         bowlingHand: d.bowlingHand,
         battingType: d.battingType,
@@ -637,6 +660,50 @@ export function RegisterPage() {
                     </div>
                   )}
                 </>
+              )}
+              {/* Veterans second-club affiliation — capture-only, optional. A plain Yes/No
+                  segmented control (the shared <Seg> hard-codes a " hander" suffix, so it can't
+                  be reused for this). "Yes" reveals a club picker, excluding the chosen current
+                  club. No answer sends nothing. */}
+              <div className="reg-span">
+                <Label label="Are you playing veterans cricket for another club?" />
+                <div className="seg">
+                  {[
+                    { v: 'yes', l: 'Yes' },
+                    { v: 'no', l: 'No' },
+                  ].map((o) => (
+                    <button
+                      key={o.v}
+                      type="button"
+                      className={`seg-btn ${d.vetsChoice === o.v ? 'on' : ''}`}
+                      onClick={() =>
+                        setD((f) => ({
+                          ...f,
+                          vetsChoice: o.v,
+                          // Leaving 'yes' clears any pick so it can't ride along as a hidden value.
+                          vetsClubId: o.v === 'yes' ? f.vetsClubId : '',
+                        }))
+                      }
+                    >
+                      {o.l}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {d.vetsChoice === 'yes' && (
+                <Select
+                  span
+                  label="Veterans club"
+                  value={d.vetsClubId}
+                  onChange={(e) => setVal('vetsClubId', e.target.value)}
+                  placeholder="Select the club you play veterans cricket for"
+                >
+                  {vetsClubOptions.map((cl) => (
+                    <option key={cl.id} value={cl.id}>
+                      {cl.name}
+                    </option>
+                  ))}
+                </Select>
               )}
             </>
           )}
