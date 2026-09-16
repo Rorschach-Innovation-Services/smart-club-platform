@@ -11,7 +11,7 @@ import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { useQueries } from '@tanstack/react-query';
 import * as api from './api';
-import { qk } from './query';
+import { qk, queryClient } from './query';
 import { useCopy } from './branding';
 import {
   PlayerFilterBar,
@@ -8844,6 +8844,18 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
           teamLabel={
             selectedPlayer.team ? teamLabel[selectedPlayer.team] || selectedPlayer.team : ''
           }
+          // The veterans-club picker is drawn from the admin's own club list (real on-system
+          // clubs), NOT the per-row clubName strings — the editor excludes the player's own club.
+          veteransEdit={{
+            clubs: list.map((c) => ({ id: c.id, name: c.name || c.slug || '—' })),
+            onSave: (id) =>
+              (id
+                ? api.setPlayerVeteransClub(selectedPlayer.clubId, selectedPlayer.naturalKey, id)
+                : api.removePlayerVeteransClub(selectedPlayer.clubId, selectedPlayer.naturalKey)
+              ).then(() =>
+                queryClient.invalidateQueries({ queryKey: qk.players(selectedPlayer.clubId) }),
+              ),
+          }}
           onClose={() => setSelectedPlayer(null)}
         />
       )}

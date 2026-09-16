@@ -120,6 +120,7 @@ export function playerExportRow(
     Role: resolveRole(p) || '',
     Batting: p.battingHand || '',
     Bowling: p.bowlingHand || '',
+    'Veterans club': p.veteransClub || '',
     Status: p.status ? STATUS_LABEL[p.status] || p.status : 'Active',
   };
 }

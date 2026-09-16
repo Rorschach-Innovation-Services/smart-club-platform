@@ -94,7 +94,16 @@ import {
   cqiBand,
   scoreCQI,
 } from './atoms';
-import { getDocUploadUrl, uploadToPresigned } from './api';
+import { useQuery } from '@tanstack/react-query';
+import {
+  getDocUploadUrl,
+  uploadToPresigned,
+  getClubDirectory,
+  getVeteransAffiliates,
+  setPlayerVeteransClub,
+  removePlayerVeteransClub,
+} from './api';
+import { qk, queryClient } from './query';
 import { DocPreviewModal } from './DocPreviewModal';
 import { RegLinkModal } from './RegLinkModal';
 import { PlayerDetailModal } from './PlayerDetailModal';
@@ -5121,6 +5130,22 @@ export function ClubPlayersView({
   const [selectedPlayer, setSelectedPlayer] = useStateC(null); // row-click detail modal
   const [busyNk, setBusyNk] = useStateC(null); // naturalKey of the row being deleted
   const [filters, setFilters] = useStateC(emptyPlayerFilters);
+  // Real on-system clubs for the veterans-club picker (rep-accessible), minus this club —
+  // a player can't play veterans cricket "for" their own club.
+  const directoryQuery = useQuery({
+    queryKey: qk.clubDirectory(),
+    queryFn: getClubDirectory,
+  });
+  const vetClubs = (directoryQuery.data ?? []).filter((c) => c.id !== club.id);
+  // Players from OTHER clubs who declared this club as their veterans second club. View-only
+  // here: this club may see the affiliation but not the affiliate's ID number (projected out
+  // server-side); removing a bogus declaration stays with the union office / the primary club.
+  const affiliatesQuery = useQuery({
+    queryKey: qk.veteransAffiliates(club.id),
+    queryFn: () => getVeteransAffiliates(club.id),
+    enabled: !!club.id,
+  });
+  const affiliates = affiliatesQuery.data ?? [];
   async function openLink() {
     // Mint a link on first open so the modal never shows an empty value.
     if (!club.playerRegLink && onGenerateLink) await onGenerateLink();
@@ -5383,15 +5408,77 @@ export function ClubPlayersView({
           </tbody>
         </table>
       </div>
+      <VeteransAffiliatesCard affiliates={affiliates} loading={affiliatesQuery.isLoading} />
+
       {selectedPlayer && (
         <PlayerDetailModal
           player={selectedPlayer}
           clubId={club.id}
           clubName={club.name}
           teamLabel={selectedPlayer.team ? label(selectedPlayer.team) : ''}
+          // Chairs declare/remove a player's veterans second club from their own roster.
+          veteransEdit={{
+            clubs: vetClubs,
+            onSave: (id) =>
+              (id
+                ? setPlayerVeteransClub(club.id, selectedPlayer.naturalKey, id)
+                : removePlayerVeteransClub(club.id, selectedPlayer.naturalKey)
+              ).then(() => queryClient.invalidateQueries({ queryKey: qk.players(club.id) })),
+          }}
           onClose={() => setSelectedPlayer(null)}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * View-only list of players from OTHER clubs who play veterans cricket for this club. The
+ * affiliation never adds a roster row or a player-count — it's a capture-only cross-reference,
+ * and the ID number is deliberately absent (projected out server-side). Hidden entirely when
+ * there are none, so it never clutters a roster for clubs the feature doesn't touch.
+ */
+function VeteransAffiliatesCard({
+  affiliates,
+  loading,
+}: {
+  affiliates: { playerName: string; primaryClubName: string; createdAt: string }[];
+  loading: boolean;
+}) {
+  if (loading || affiliates.length === 0) return null;
+  return (
+    <div style={{ marginTop: 22 }}>
+      <div className="rp-section-eyebrow">Veterans affiliates</div>
+      <p className="ph-desc" style={{ margin: '4px 0 10px' }}>
+        Players from other clubs registered to play veterans cricket for this club. They stay on
+        their own club's roster — this is a reference only.
+      </p>
+      <div className="tbl-w">
+        <table className="tbl">
+          <thead>
+            <tr>
+              <th>Player</th>
+              <th>Primary club</th>
+              <th>Since</th>
+            </tr>
+          </thead>
+          <tbody>
+            {affiliates.map((a, i) => (
+              <tr key={`${a.playerName}:${a.primaryClubName}:${i}`}>
+                <td>
+                  <div className="rost-name">{a.playerName}</div>
+                </td>
+                <td>
+                  <div style={{ fontSize: 12.5 }}>{a.primaryClubName}</div>
+                </td>
+                <td>
+                  <span className="rost-sub">{fmtDay(a.createdAt)}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

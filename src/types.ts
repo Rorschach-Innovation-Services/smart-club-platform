@@ -960,6 +960,14 @@ export interface PlayerRegistration {
   team?: string;
   district?: string;
   lastClub?: string;
+  /**
+   * Veterans second-club affiliation (capture-only): the club this player plays veterans
+   * cricket for, when it is not their own. `veteransClub` (the name) is derived server-side;
+   * `veteransClubId` is always set alongside it. Does not create a second roster row and never
+   * affects playerCount/demographics/clearances.
+   */
+  veteransClub?: string;
+  veteransClubId?: string;
   battingHand?: 'Right' | 'Left';
   bowlingHand?: 'Right' | 'Left';
   battingType?: string;
@@ -984,6 +992,24 @@ export interface PlayerRegistration {
   registeredVia?: 'link' | 'portal';
   version?: number;
 }
+
+/**
+ * A veterans second-club affiliation record (stored under the veterans club). Written only
+ * while the primary player row is `active` (write-on-activation). `naturalKey` is the player's
+ * ID number (PII) — the affiliates GET returns {@link VeteransAffiliatePublic} without it.
+ */
+export interface VeteransAffiliation {
+  naturalKey: string;
+  playerName: string;
+  veteransClubId: string;
+  primaryClubId: string;
+  primaryClubName: string;
+  createdAt: string;
+  source: 'registration' | 'admin' | 'portal';
+}
+
+/** The affiliates GET projection: what a veterans club may see, WITHOUT the PII naturalKey. */
+export type VeteransAffiliatePublic = Omit<VeteransAffiliation, 'naturalKey'>;
 
 export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejected';
 

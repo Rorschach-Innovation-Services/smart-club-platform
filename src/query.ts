@@ -39,6 +39,7 @@ export const qk = {
   allRegistrationReviews: () => ['registration-reviews-all', t()],
   demographics: () => ['demographics', t()],
   clubDirectory: () => ['club-directory', t()],
+  veteransAffiliates: (clubId: string) => ['veterans-affiliates', t(), clubId],
   signupLink: () => ['signup-link', t()],
   // Operator portal keys are deliberately NOT tenant-scoped: /platform/* is
   // tenant-independent (the slug in the key names the MANAGED tenant, not the host's).

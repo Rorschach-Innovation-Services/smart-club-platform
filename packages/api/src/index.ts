@@ -127,6 +127,7 @@ import type {
   TutorialVideo,
   UserProfile,
   PlayerRegistration,
+  VeteransAffiliatePublic,
   PlayerClearance,
   AdminClearanceView,
   WithheldField,
@@ -510,6 +511,28 @@ function directoryClubs(cfg: TenantConfig | null | undefined): DirectoryClub[] {
   );
 }
 
+/**
+ * Validate an optional veterans second-club declaration (capture-only — the union polices
+ * eligibility manually). Shared by public registration, admin player-create and the veterans-club
+ * PUT so the guards can't drift apart: trims the raw id; treats an empty/absent value as "none"
+ * (returns undefined); rejects the player's OWN club (400); requires an ON-SYSTEM club — a
+ * directory (off-system) id has no club item and correctly fails `getClub` (400). The returned
+ * name is DERIVED server-side from the validated club, never trusted from the client. Callers that
+ * require a value (the PUT) enforce non-empty at their call site before calling this.
+ */
+async function resolveVeteransClub(
+  tenant: string,
+  raw: unknown,
+  ownClubId: string,
+): Promise<{ id: string; name: string } | undefined> {
+  const id = typeof raw === 'string' ? raw.trim() : '';
+  if (!id) return undefined;
+  if (id === ownClubId) throw new HttpError(400, 'veterans club cannot be your own club');
+  const vc = await repo.getClub(tenant, id);
+  if (!vc) throw new HttpError(400, 'unknown veterans club');
+  return { id: vc.id, name: vc.name };
+}
+
 /** Validate a registration link → returns the club name. Token self-describes tenant. */
 app.get('/register/:clubId', async (c) => {
   const token = c.req.query('t');
@@ -657,6 +680,10 @@ app.post('/register/:clubId', async (c) => {
     destClubId = currentClubId;
     destClub = picked;
   }
+  // Optional veterans second-club declaration (capture-only): the player may play veterans
+  // cricket for another ON-SYSTEM club. No extra rate limit: this rides the existing registration
+  // caps (an idempotent Put, no action queue, no third-party write primitive).
+  const veteransClub = await resolveVeteransClub(resolved.tenant, body.veteransClubId, destClubId);
   // Names are unauthenticated free text that later rides into outbound messages (the
   // clearance chairman notice) — collapse whitespace runs and bound the length so a
   // hostile value can't carry payloads or break a WhatsApp template parameter.
@@ -683,6 +710,9 @@ app.post('/register/:clubId', async (c) => {
     team: body.team,
     district: body.district,
     lastClub: body.lastClub,
+    // Veterans second-club affiliation — name derived server-side (above), never from the client.
+    veteransClub: veteransClub?.name,
+    veteransClubId: veteransClub?.id,
     battingHand: body.battingHand,
     bowlingHand: body.bowlingHand,
     battingType: body.battingType,
@@ -811,6 +841,27 @@ app.post('/register/:clubId', async (c) => {
     }
     if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
     throw err;
+  }
+
+  // Plain-active outcome (no clearance was opened — createSelfRegistration returned no
+  // clearanceFromName above): the player row is live on the joining club's roster now, so
+  // materialize the veterans affiliation (write-on-activation). Clearance-pending outcomes
+  // returned earlier — their record is written when the clearance resolves (see repo hooks).
+  // Best-effort, exactly like the off-system alert below: the registration already committed.
+  if (player.veteransClubId) {
+    try {
+      await repo.putVeteransAffiliation(resolved.tenant, {
+        naturalKey: player.naturalKey,
+        playerName: `${player.firstName} ${player.lastName}`,
+        veteransClubId: player.veteransClubId,
+        primaryClubId: player.clubId,
+        primaryClubName: destClub.name,
+        createdAt: now(),
+        source: 'registration',
+      });
+    } catch (err) {
+      console.warn('failed to write veterans affiliation', err);
+    }
   }
 
   // Off-system previous club: the player named a club not on the system ("Other" free
@@ -2044,6 +2095,8 @@ app.post('/clubs/:id/players', async (c) => {
   if (isMinor && !body.guardianName) {
     throw new HttpError(400, 'guardianName required for minors (POPIA)');
   }
+  // Optional veterans second-club declaration (capture-only) — same guards as the public path.
+  const veteransClub = await resolveVeteransClub(ra.tenant, body.veteransClubId, id);
   const naturalKey = playerNaturalKey({ ...body, dob });
   const player: PlayerRegistration = {
     naturalKey,
@@ -2065,6 +2118,9 @@ app.post('/clubs/:id/players', async (c) => {
     team: body.team,
     district: body.district,
     lastClub: body.lastClub,
+    // Veterans second-club affiliation — name derived server-side (above), never from the client.
+    veteransClub: veteransClub?.name,
+    veteransClubId: veteransClub?.id,
     battingHand: body.battingHand,
     bowlingHand: body.bowlingHand,
     battingType: body.battingType,
@@ -2085,6 +2141,23 @@ app.post('/clubs/:id/players', async (c) => {
       throw new HttpError(409, 'a player with these details is already registered for this club');
     }
     throw err;
+  }
+  // Portal-created rows are active immediately, so materialize the affiliation now
+  // (write-on-activation). Best-effort — the registration already committed.
+  if (veteransClub) {
+    try {
+      await repo.putVeteransAffiliation(ra.tenant, {
+        naturalKey,
+        playerName: `${player.firstName} ${player.lastName}`,
+        veteransClubId: veteransClub.id,
+        primaryClubId: id,
+        primaryClubName: club.name,
+        createdAt: now(),
+        source: 'portal',
+      });
+    } catch (err) {
+      console.warn('failed to write veterans affiliation', err);
+    }
   }
   return c.json(player, 201);
 });
@@ -2200,6 +2273,74 @@ app.delete('/clubs/:id/players/:nk', async (c) => {
     throw err;
   }
   return c.json({ ok: true });
+});
+
+/**
+ * Set (or change) a player's veterans second-club affiliation (admin or the player's own club
+ * rep). Capture-only — the union polices eligibility manually. Same guards as registration: the
+ * veterans club must be on-system and not the player's own club. `source` records who declared it
+ * ('admin' for a union admin, 'portal' for a club rep). The affiliation record follows the row's
+ * activation state inside the repo (write-on-activation). 409 on an OCC version conflict.
+ */
+app.put('/clubs/:id/players/:nk/veterans-club', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const nk = c.req.param('nk');
+  assertClubAccess(ra, id);
+  const body = await c.req.json<{ veteransClubId?: string }>();
+  // The PUT requires a value (unlike the capture-only register paths); enforce non-empty here,
+  // then share the own-club / on-system guards via the common helper.
+  if (typeof body.veteransClubId !== 'string' || !body.veteransClubId.trim()) {
+    throw new HttpError(400, 'veteransClubId is required');
+  }
+  const vet = await resolveVeteransClub(ra.tenant, body.veteransClubId, id);
+  const source = ra.membership.role === 'admin' ? 'admin' : 'portal';
+  try {
+    const updated = await repo.setPlayerVeteransClub(ra.tenant, id, nk, vet!, source);
+    return c.json(updated);
+  } catch (err) {
+    if (err instanceof Error && err.message === 'player not found') {
+      throw new HttpError(404, 'player not found');
+    }
+    if (err instanceof VersionConflictError) throw new HttpError(409, 'player changed; refetch');
+    throw err;
+  }
+});
+
+/** Clear a player's veterans second-club affiliation (admin or the player's own club rep). */
+app.delete('/clubs/:id/players/:nk/veterans-club', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const nk = c.req.param('nk');
+  assertClubAccess(ra, id);
+  const source = ra.membership.role === 'admin' ? 'admin' : 'portal';
+  try {
+    const updated = await repo.setPlayerVeteransClub(ra.tenant, id, nk, null, source);
+    return c.json(updated);
+  } catch (err) {
+    if (err instanceof Error && err.message === 'player not found') {
+      throw new HttpError(404, 'player not found');
+    }
+    if (err instanceof VersionConflictError) throw new HttpError(409, 'player changed; refetch');
+    throw err;
+  }
+});
+
+/**
+ * List a veterans club's affiliates (players from OTHER clubs who play veterans cricket for it).
+ * View-only for the club; removal of a bogus declaration stays with the union admin / primary
+ * club. The projection deliberately OMITS `naturalKey` (the player's ID number): the veterans
+ * club is not the player's own club and must not see that PII.
+ */
+app.get('/clubs/:id/veterans-affiliates', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const affiliates = await repo.listVeteransAffiliations(ra.tenant, id);
+  const projected: VeteransAffiliatePublic[] = affiliates.map(
+    ({ naturalKey: _naturalKey, ...rest }) => rest,
+  );
+  return c.json(projected);
 });
 
 // ── Player clearances (inter-club transfers) ──

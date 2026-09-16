@@ -199,6 +199,85 @@ function IdDocPreviewModal({
 }
 
 /**
+ * Inline editor for a player's veterans second-club affiliation. Picks a club (excluding the
+ * player's own — a player can't play veterans cricket "for" the club they already belong to)
+ * and Saves, or Removes the link. The server derives the club name and rejects an own-club or
+ * unknown id; on a version conflict it 409s. Local `sel` state drives the current display so a
+ * successful write reflects immediately without waiting on the parent's cache refetch.
+ */
+function VeteransClubEditor({
+  player,
+  ownClubId,
+  clubs,
+  onSave,
+}: {
+  player: PlayerRegistration;
+  ownClubId: string;
+  clubs: { id: string; name: string }[];
+  onSave: (id: string | null) => Promise<void>;
+}) {
+  const [sel, setSel] = useState(player.veteransClubId ?? '');
+  // The currently-saved link, tracked locally: the parent never refreshes the `player` prop after
+  // a save, so deriving this from the prop would leave Remove hidden until the modal reopens.
+  const [savedId, setSavedId] = useState(player.veteransClubId ?? '');
+  const [busy, setBusy] = useState<null | 'save' | 'remove'>(null);
+  const [error, setError] = useState('');
+  const options = clubs.filter((c) => c.id !== ownClubId);
+  const hasLink = !!savedId;
+
+  async function run(id: string | null, which: 'save' | 'remove') {
+    setBusy(which);
+    setError('');
+    try {
+      await onSave(id);
+      setSel(id ?? '');
+      setSavedId(id ?? '');
+    } catch (err) {
+      setError((err as Error)?.message || 'Could not update the veterans club.');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div style={{ padding: '6px 0' }}>
+      <select
+        className="field-select"
+        value={sel}
+        disabled={busy !== null}
+        onChange={(e) => setSel(e.target.value)}
+        style={{ width: '100%', fontSize: 14 }}
+      >
+        <option value="">— None —</option>
+        {options.map((c) => (
+          <option key={c.id} value={c.id}>
+            {c.name}
+          </option>
+        ))}
+      </select>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+        <Btn
+          tone="teal"
+          size="sm"
+          disabled={busy !== null || !sel || sel === savedId}
+          onClick={() => run(sel, 'save')}
+        >
+          {busy === 'save' ? 'Saving…' : 'Save'}
+        </Btn>
+        {hasLink && (
+          <Btn tone="ghost" size="sm" disabled={busy !== null} onClick={() => run(null, 'remove')}>
+            {busy === 'remove' ? 'Removing…' : 'Remove'}
+          </Btn>
+        )}
+      </div>
+      {error && (
+        <div style={{ color: 'var(--coral, #c0392b)', fontSize: 12, marginTop: 6 }}>{error}</div>
+      )}
+    </div>
+  );
+}
+
+/**
  * Read-only view of a single player, opened by clicking a roster row on either the admin
  * or club players list. Every field is already in hand from the list fetch — the only
  * network call is the on-demand presign for the ID document. `teamLabel` is the resolved
@@ -209,12 +288,19 @@ export function PlayerDetailModal({
   clubId,
   clubName,
   teamLabel,
+  veteransEdit,
   onClose,
 }: {
   player: PlayerRegistration;
   clubId: string;
   clubName?: string;
   teamLabel?: string;
+  // When present, the "Veterans club" row becomes an inline editor: pick a club (excluding
+  // the player's own) and Save, or Remove the link. Absent ⇒ the field is read-only.
+  veteransEdit?: {
+    clubs: { id: string; name: string }[];
+    onSave: (id: string | null) => Promise<void>;
+  };
   onClose: () => void;
 }) {
   useEscapeClose(onClose);
@@ -297,6 +383,18 @@ export function PlayerDetailModal({
               {player.clearanceRejectedAt ? ` · ${fmtStamp(player.clearanceRejectedAt)}` : ''}
               {player.clearanceRejectedReason ? ` — “${player.clearanceRejectedReason}”` : ''}
             </div>
+          )}
+
+          <SectionTitle>Veterans club</SectionTitle>
+          {veteransEdit ? (
+            <VeteransClubEditor
+              player={player}
+              ownClubId={clubId}
+              clubs={veteransEdit.clubs}
+              onSave={veteransEdit.onSave}
+            />
+          ) : (
+            <Row label="Veterans club" value={player.veteransClub} />
           )}
 
           {player.idDocMeta?.objectKey && (

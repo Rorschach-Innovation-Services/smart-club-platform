@@ -1811,6 +1811,561 @@ describe('POST /register/:clubId (public self-registration body)', () => {
   });
 });
 
+describe('veterans second-club affiliations', () => {
+  // A player may play veterans cricket for ANOTHER on-system club without a second roster row:
+  // the primary player row carries veteransClub/veteransClubId, and a VETAFFIL# record under the
+  // veterans club lets its portal list affiliates. Core invariant (write-on-activation): the
+  // record exists ⇔ the row carrying veteransClubId is `active`. Capture-only — no duplication of
+  // player counts or demographics. NOTE: the prod TransactWriteItems branches of resolve/reject/
+  // reopen are untestable under dynalite (no TransactWriteItems) — same existing limitation as the
+  // rest of the clearance suite; the affiliation hooks live in code shared with the local branch.
+  const mkClub = (id: string, name: string) => ({
+    id,
+    name,
+    district: 'Test District',
+    sub: `sub-${id}`,
+    chair: 'Chair',
+    affiliation: 'not_started' as const,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#654321',
+    ground: {},
+    leagues: [],
+    version: 1,
+  });
+  const REP_VT = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['vt'] }]);
+  const REP_VP = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['vp'] }]);
+  const REP_OTHER = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['vother'] }]);
+  let teamKey: string;
+  let keyVp: string;
+  let keyVpr: string;
+
+  const mintKey = async (clubId: string, token: string) => {
+    const up = await app.request(`/register/${clubId}/id-doc/upload-url?t=${token}`, {
+      method: 'POST',
+      body: JSON.stringify({ contentType: 'image/png' }),
+    });
+    return ((await up.json()) as { objectKey: string }).objectKey;
+  };
+
+  const regBody = (extra: Record<string, unknown> = {}) => ({
+    firstName: 'Vets',
+    lastName: 'Player',
+    idType: 'passport',
+    idNumber: 'VET0001',
+    dob: '1980-05-05',
+    nationality: 'South African',
+    race: 'African',
+    gender: 'Male',
+    cell: '0834445555',
+    team: teamKey,
+    district: 'Ethekwini',
+    idDocMeta: { objectKey: keyVp, size: 100, contentType: 'image/png' },
+    ...extra,
+  });
+
+  const registerAt = (clubId: string, token: string, body: Record<string, unknown>) =>
+    app.request(`/register/${clubId}?t=${token}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  before(async () => {
+    await repo.createClub('dolphins', mkClub('vp', 'Vet Primary CC'));
+    await repo.createClub('dolphins', mkClub('vt', 'Vet Club CC'));
+    await repo.createClub('dolphins', mkClub('vt2', 'Vet Club Two CC'));
+    await repo.createClub('dolphins', mkClub('vpr', 'Vet Previous CC'));
+    await repo.createClub('dolphins', mkClub('vother', 'Vet Other CC'));
+    await repo.putToken('vp-token', 'dolphins', 'vp', '2026-06-01T00:00:00.000Z');
+    await repo.putToken('vpr-token', 'dolphins', 'vpr', '2026-06-01T00:00:00.000Z');
+    teamKey = ((await repo.getTenantConfig('dolphins'))?.leagues ?? [])[0]?.key ?? '';
+    assert.ok(teamKey, 'precondition: tenant has a league catalogue');
+    keyVp = await mintKey('vp', 'vp-token');
+    keyVpr = await mintKey('vpr', 'vpr-token');
+  });
+
+  test('register with a veterans club → row carries both fields; affiliates GET omits naturalKey; no count duplication', async () => {
+    const res = await registerAt('vp', 'vp-token', {
+      ...regBody({ idNumber: 'VET0001', lastName: 'One' }),
+      veteransClubId: 'vt',
+    });
+    assert.equal(res.status, 201);
+
+    const row = (await repo.listPlayers('dolphins', 'vp')).find((p) => p.idNumber === 'VET0001');
+    assert.equal(row?.status, 'active');
+    assert.equal(row?.veteransClubId, 'vt');
+    assert.equal(row?.veteransClub, 'Vet Club CC', 'name derived server-side');
+
+    // The veterans club sees the affiliate via GET — WITHOUT the PII naturalKey.
+    const gr = await app.request('/clubs/vt/veterans-affiliates', { headers: headers(REP_VT) });
+    assert.equal(gr.status, 200);
+    const affiliates = (await gr.json()) as Array<Record<string, unknown>>;
+    const mine = affiliates.find((a) => a.playerName === 'Vets One');
+    assert.ok(mine, 'affiliate listed under the veterans club');
+    assert.equal(mine!.primaryClubId, 'vp');
+    assert.equal(mine!.primaryClubName, 'Vet Primary CC');
+    assert.equal(mine!.source, 'registration');
+    assert.ok(mine!.createdAt, 'createdAt present');
+    assert.ok(
+      !('naturalKey' in mine!),
+      'naturalKey (ID number) projected out — not the player’s club',
+    );
+
+    // No duplication: the veterans club gains no roster row and its count is untouched.
+    assert.equal(
+      (await repo.getClub('dolphins', 'vt'))?.playerCount ?? 0,
+      0,
+      'vets count unchanged',
+    );
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'vt')).length,
+      0,
+      'no roster row at vets club',
+    );
+  });
+
+  test('400s: veterans club cannot be your own club; unknown/off-system id rejected', async () => {
+    const own = await registerAt('vp', 'vp-token', {
+      ...regBody({ idNumber: 'VET0400a', lastName: 'Own' }),
+      veteransClubId: 'vp',
+    });
+    assert.equal(own.status, 400);
+    const unknown = await registerAt('vp', 'vp-token', {
+      ...regBody({ idNumber: 'VET0400b', lastName: 'Unknown' }),
+      veteransClubId: 'no-such-club',
+    });
+    assert.equal(unknown.status, 400);
+  });
+
+  test('clearance-pending declaration writes NO record until resolve, then materializes with the new primary club', async () => {
+    // Seed the player active at the previous club, then register at vp naming it AND a veterans club.
+    const seed = await registerAt('vpr', 'vpr-token', {
+      ...regBody({ idNumber: 'VET0002', lastName: 'Resolve', cell: '0830000010' }),
+      idDocMeta: { objectKey: keyVpr, size: 100, contentType: 'image/png' },
+    });
+    assert.equal(seed.status, 201);
+    const reg = await registerAt('vp', 'vp-token', {
+      ...regBody({ idNumber: 'VET0002', lastName: 'Resolve', cell: '0830000011' }),
+      lastClubId: 'vpr',
+      veteransClubId: 'vt',
+    });
+    assert.equal(reg.status, 201);
+    assert.equal(((await reg.json()) as { clearance?: unknown }).clearance !== undefined, true);
+
+    const pending = (await repo.listPlayers('dolphins', 'vp')).find(
+      (p) => p.idNumber === 'VET0002',
+    );
+    assert.equal(pending?.status, 'clearance-pending');
+    assert.equal(pending?.veteransClubId, 'vt', 'fields ride the pending row');
+    assert.equal(
+      (await repo.listVeteransAffiliations('dolphins', 'vt')).some(
+        (a) => a.playerName === 'Vets Resolve',
+      ),
+      false,
+      'no record while clearance-pending (write-on-activation)',
+    );
+
+    const clr = (await repo.listClearancesForSource('dolphins', 'vpr')).find(
+      (x) => x.idNumber === 'VET0002',
+    )!;
+    const issued = await app.request(`/clubs/vpr/clearances/${clr.id}`, {
+      method: 'PATCH',
+      headers: headers(devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['vpr'] }])),
+      body: JSON.stringify({
+        feesCleared: true,
+        misconductCleared: true,
+        action: 'issue',
+        version: clr.version,
+      }),
+    });
+    assert.equal(issued.status, 200);
+    const rec = (await repo.listVeteransAffiliations('dolphins', 'vt')).find(
+      (a) => a.playerName === 'Vets Resolve',
+    );
+    assert.ok(rec, 'record materialized on resolve');
+    assert.equal(rec!.primaryClubId, 'vp', 'primary club is the destination the player moved to');
+  });
+
+  test('registration-origin resolve re-points the veterans club: old record (source declaration) is dropped, new one materializes under the declared club', async () => {
+    // Player active at the SOURCE club (vpr) already declaring veterans club vt → a VETAFFIL record
+    // exists under vt. A registration-origin clearance then moves them to vp DECLARING A DIFFERENT
+    // veterans club (vt2). Resolve deletes the source row; without old-pointer cleanup the (vt,
+    // naturalKey) record would be orphaned forever. Assert it is dropped and the new (vt2) record
+    // materializes under the destination as the primary club.
+    const seed = await registerAt('vpr', 'vpr-token', {
+      ...regBody({ idNumber: 'VET0009', lastName: 'Repoint', cell: '0830000090' }),
+      idDocMeta: { objectKey: keyVpr, size: 100, contentType: 'image/png' },
+      veteransClubId: 'vt',
+    });
+    assert.equal(seed.status, 201);
+    assert.ok(
+      (await repo.listVeteransAffiliations('dolphins', 'vt')).some(
+        (a) => a.playerName === 'Vets Repoint',
+      ),
+      'precondition: source declaration wrote the VETAFFIL record under vt',
+    );
+
+    const reg = await registerAt('vp', 'vp-token', {
+      ...regBody({ idNumber: 'VET0009', lastName: 'Repoint', cell: '0830000091' }),
+      lastClubId: 'vpr',
+      veteransClubId: 'vt2',
+    });
+    assert.equal(reg.status, 201);
+
+    const clr = (await repo.listClearancesForSource('dolphins', 'vpr')).find(
+      (x) => x.idNumber === 'VET0009',
+    )!;
+    const issued = await app.request(`/clubs/vpr/clearances/${clr.id}`, {
+      method: 'PATCH',
+      headers: headers(devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['vpr'] }])),
+      body: JSON.stringify({
+        feesCleared: true,
+        misconductCleared: true,
+        action: 'issue',
+        version: clr.version,
+      }),
+    });
+    assert.equal(issued.status, 200);
+
+    assert.equal(
+      (await repo.listVeteransAffiliations('dolphins', 'vt')).some(
+        (a) => a.playerName === 'Vets Repoint',
+      ),
+      false,
+      'stale record under the OLD veterans club is gone (no orphan)',
+    );
+    const moved = (await repo.listVeteransAffiliations('dolphins', 'vt2')).find(
+      (a) => a.playerName === 'Vets Repoint',
+    );
+    assert.ok(moved, 'record materialized under the newly declared veterans club');
+    assert.equal(moved!.primaryClubId, 'vp', 'primary club is the destination the player moved to');
+  });
+
+  test('reject of a pending declaration leaves NO orphan record', async () => {
+    const seed = await registerAt('vpr', 'vpr-token', {
+      ...regBody({ idNumber: 'VET0003', lastName: 'Reject', cell: '0830000020' }),
+      idDocMeta: { objectKey: keyVpr, size: 100, contentType: 'image/png' },
+    });
+    assert.equal(seed.status, 201);
+    const reg = await registerAt('vp', 'vp-token', {
+      ...regBody({ idNumber: 'VET0003', lastName: 'Reject', cell: '0830000021' }),
+      lastClubId: 'vpr',
+      veteransClubId: 'vt',
+    });
+    assert.equal(reg.status, 201);
+    const clr = (await repo.listClearancesForSource('dolphins', 'vpr')).find(
+      (x) => x.idNumber === 'VET0003',
+    )!;
+    const rejected = await app.request(`/admin/clearances/${clr.id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'vpr', version: clr.version, reason: 'not our player' }),
+    });
+    assert.equal(rejected.status, 200);
+    // The pending dest row is deleted and no record was ever written — nothing to orphan.
+    assert.equal(
+      (await repo.listVeteransAffiliations('dolphins', 'vt')).some(
+        (a) => a.playerName === 'Vets Reject',
+      ),
+      false,
+      'no orphan VETAFFIL after reject',
+    );
+    assert.equal(
+      (await repo.listPlayers('dolphins', 'vp')).some((p) => p.idNumber === 'VET0003'),
+      false,
+      'pending dest row removed by reject',
+    );
+  });
+
+  test('B″ reject (moved-over-placeholder) with a veterans declaration writes the record under the veterans club', async () => {
+    // The B″ shape: the source club holds only a PLACEHOLDER row, so a reject REPLACES it with the
+    // real registration ACTIVE at the source — which may carry a veteransClubId. Seed it exactly as
+    // the clearance suite's B″ test does, via reallocation: register at vp naming an on-system club
+    // that holds NO row (vother) as the previous club — a sourceless, reassign-eligible clearance —
+    // while DECLARING a veterans club (vt); the admin reallocates it to a real previous club (vph),
+    // which gets the placeholder. The bug this covers: the old per-case reject hooks (C/D only) did
+    // NOT run for B″, so the now-active source row's affiliation record was never written. The
+    // shared reject tail must write it.
+    await repo.createClub('dolphins', mkClub('vph', 'Vet Placeholder Source CC'));
+    const reg = await registerAt('vp', 'vp-token', {
+      ...regBody({ idNumber: 'VET00B2', lastName: 'Placeholder', cell: '0830000030' }),
+      lastClubId: 'vother',
+      veteransClubId: 'vt',
+    });
+    assert.equal(reg.status, 201);
+
+    const clr = (await repo.listClearancesForSource('dolphins', 'vother')).find(
+      (x) => x.idNumber === 'VET00B2',
+    )!;
+    assert.ok(clr, 'sourceless clearance created against the named (empty) club');
+
+    const moved = await app.request(`/admin/clearances/${clr.id}/reassign`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'vother', newFromClubId: 'vph', version: clr.version }),
+    });
+    assert.equal(moved.status, 200);
+    const atReal = (await repo.listClearancesForSource('dolphins', 'vph')).find(
+      (x) => x.idNumber === 'VET00B2',
+    )!;
+    const placeholder = (await repo.listPlayers('dolphins', 'vph')).find(
+      (p) => p.idNumber === 'VET00B2',
+    )!;
+    assert.equal(placeholder.placeholder, true, 'reallocation writes a placeholder source row');
+
+    // No record yet: the declaration rides the pending destination row (write-on-activation).
+    assert.equal(
+      (await repo.listVeteransAffiliations('dolphins', 'vt')).some(
+        (a) => a.playerName === 'Vets Placeholder',
+      ),
+      false,
+      'no record while clearance-pending',
+    );
+
+    const rejected = await app.request(`/admin/clearances/${atReal.id}/reject`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ fromClubId: 'vph', reason: 'not our player after all' }),
+    });
+    assert.equal(rejected.status, 200);
+    assert.equal(
+      ((await rejected.json()) as { rejectOutcome?: string }).rejectOutcome,
+      'moved-to-source',
+    );
+
+    // The real registration now lives ACTIVE at the source (vph), still carrying its declaration…
+    const atSource = (await repo.listPlayers('dolphins', 'vph')).find(
+      (p) => p.idNumber === 'VET00B2',
+    );
+    assert.equal(atSource?.status, 'active');
+    assert.equal(
+      atSource?.veteransClubId,
+      'vt',
+      'declaration survives the placeholder replacement',
+    );
+
+    // …and the shared reject tail wrote the affiliation record under the veterans club, pointing at
+    // the source club as the new primary (the B″ gap the fix closes).
+    const rec = (await repo.listVeteransAffiliations('dolphins', 'vt')).find(
+      (a) => a.playerName === 'Vets Placeholder',
+    );
+    assert.ok(rec, 'B″ reject wrote the VETAFFIL record for the now-active source row');
+    assert.equal(rec!.primaryClubId, 'vph', 'primary club is the source the player landed at');
+  });
+
+  test('PUT sets, re-PUT swaps (old record deleted), DELETE clears; unrelated rep → 403', async () => {
+    // A portal-created active player with no veterans club yet.
+    const created = await app.request('/clubs/vp/players', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        firstName: 'Vets',
+        lastName: 'Put',
+        idType: 'passport',
+        idNumber: 'VET0004',
+        dob: '1979-01-01',
+        nationality: 'South African',
+        race: 'African',
+        gender: 'Male',
+        cell: '0830000030',
+        team: teamKey,
+        district: 'Ethekwini',
+      }),
+    });
+    assert.equal(created.status, 201);
+    const nk = ((await created.json()) as { naturalKey: string }).naturalKey;
+
+    // Unrelated club rep cannot edit this player's veterans club.
+    const forbidden = await app.request(`/clubs/vp/players/${nk}/veterans-club`, {
+      method: 'PUT',
+      headers: headers(REP_OTHER),
+      body: JSON.stringify({ veteransClubId: 'vt' }),
+    });
+    assert.equal(forbidden.status, 403);
+
+    // Set → record under vt.
+    const set = await app.request(`/clubs/vp/players/${nk}/veterans-club`, {
+      method: 'PUT',
+      headers: headers(REP_VP),
+      body: JSON.stringify({ veteransClubId: 'vt' }),
+    });
+    assert.equal(set.status, 200);
+    assert.equal(((await set.json()) as { veteransClubId?: string }).veteransClubId, 'vt');
+    assert.ok(
+      (await repo.listVeteransAffiliations('dolphins', 'vt')).some((a) => a.naturalKey === nk),
+      'record created under vt',
+    );
+
+    // Re-PUT to vt2 → the vt record is deleted, a vt2 record appears.
+    const swap = await app.request(`/clubs/vp/players/${nk}/veterans-club`, {
+      method: 'PUT',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ veteransClubId: 'vt2' }),
+    });
+    assert.equal(swap.status, 200);
+    assert.equal(
+      (await repo.listVeteransAffiliations('dolphins', 'vt')).some((a) => a.naturalKey === nk),
+      false,
+      'old vt record deleted on swap',
+    );
+    assert.ok(
+      (await repo.listVeteransAffiliations('dolphins', 'vt2')).some((a) => a.naturalKey === nk),
+      'new vt2 record written on swap',
+    );
+
+    // DELETE → both fields cleared and the vt2 record removed.
+    const del = await app.request(`/clubs/vp/players/${nk}/veterans-club`, {
+      method: 'DELETE',
+      headers: headers(REP_VP),
+    });
+    assert.equal(del.status, 200);
+    const cleared = (await del.json()) as { veteransClubId?: string; veteransClub?: string };
+    assert.equal(cleared.veteransClubId, undefined);
+    assert.equal(cleared.veteransClub, undefined);
+    assert.equal(
+      (await repo.listVeteransAffiliations('dolphins', 'vt2')).some((a) => a.naturalKey === nk),
+      false,
+      'vt2 record removed on delete',
+    );
+  });
+
+  test('deleting the player removes its affiliation record', async () => {
+    const created = await app.request('/clubs/vp/players', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        firstName: 'Vets',
+        lastName: 'Del',
+        idType: 'passport',
+        idNumber: 'VET0005',
+        dob: '1978-02-02',
+        nationality: 'South African',
+        race: 'African',
+        gender: 'Male',
+        cell: '0830000040',
+        team: teamKey,
+        district: 'Ethekwini',
+        veteransClubId: 'vt',
+      }),
+    });
+    assert.equal(created.status, 201);
+    const nk = ((await created.json()) as { naturalKey: string }).naturalKey;
+    assert.ok(
+      (await repo.listVeteransAffiliations('dolphins', 'vt')).some((a) => a.naturalKey === nk),
+      'record written for portal-created player',
+    );
+    const del = await app.request(`/clubs/vp/players/${nk}`, {
+      method: 'DELETE',
+      headers: headers(ADMIN),
+    });
+    assert.equal(del.status, 200);
+    assert.equal(
+      (await repo.listVeteransAffiliations('dolphins', 'vt')).some((a) => a.naturalKey === nk),
+      false,
+      'deletePlayer removed the VETAFFIL record',
+    );
+  });
+
+  test('eraseClubData scrubs pointing rows / deletes records in both directions', async () => {
+    // Direction A — erase the VETERANS club: the pointing player row (in the primary club) is
+    // scrubbed and the VETAFFIL rows deleted.
+    await repo.createClub('veterase', mkClub('prim', 'Erase Primary CC'));
+    await repo.createClub('veterase', mkClub('vets', 'Erase Vets CC'));
+    await repo.createPlayer('veterase', {
+      naturalKey: 'EA1',
+      clubId: 'prim',
+      firstName: 'A',
+      lastName: 'One',
+      dob: '1980-01-01',
+      isMinor: false,
+      consentAt: '2026-01-01T00:00:00.000Z',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      status: 'active',
+      veteransClub: 'Erase Vets CC',
+      veteransClubId: 'vets',
+      version: 0,
+    });
+    await repo.putVeteransAffiliation('veterase', {
+      naturalKey: 'EA1',
+      playerName: 'A One',
+      veteransClubId: 'vets',
+      primaryClubId: 'prim',
+      primaryClubName: 'Erase Primary CC',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      source: 'registration',
+    });
+    await repo.eraseClubData('veterase', mkClub('vets', 'Erase Vets CC'));
+    assert.equal(
+      (await repo.listVeteransAffiliations('veterase', 'vets')).length,
+      0,
+      'VETAFFIL rows gone after erasing the veterans club',
+    );
+    assert.equal(
+      (await repo.getPlayer('veterase', 'prim', 'EA1'))?.veteransClubId,
+      undefined,
+      'pointing player row scrubbed before the records were deleted',
+    );
+
+    // Direction B — erase the PRIMARY club: its player rows go, and their records under the
+    // veterans club go with them.
+    await repo.createClub('veterase', mkClub('prim2', 'Erase Primary Two CC'));
+    await repo.createClub('veterase', mkClub('vets2', 'Erase Vets Two CC'));
+    await repo.createPlayer('veterase', {
+      naturalKey: 'EB1',
+      clubId: 'prim2',
+      firstName: 'B',
+      lastName: 'Two',
+      dob: '1980-01-01',
+      isMinor: false,
+      consentAt: '2026-01-01T00:00:00.000Z',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      status: 'active',
+      veteransClub: 'Erase Vets Two CC',
+      veteransClubId: 'vets2',
+      version: 0,
+    });
+    await repo.putVeteransAffiliation('veterase', {
+      naturalKey: 'EB1',
+      playerName: 'B Two',
+      veteransClubId: 'vets2',
+      primaryClubId: 'prim2',
+      primaryClubName: 'Erase Primary Two CC',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      source: 'registration',
+    });
+    await repo.eraseClubData('veterase', mkClub('prim2', 'Erase Primary Two CC'));
+    assert.equal(
+      (await repo.listVeteransAffiliations('veterase', 'vets2')).length,
+      0,
+      'record under the veterans club deleted when the primary club is erased',
+    );
+  });
+
+  test('eraseTenantData and clearCohort leave no VETAFFIL rows', async () => {
+    for (const tenant of ['vetten', 'vetcohort']) {
+      await repo.createClub(tenant, mkClub('c1', 'C1 CC'));
+      await repo.putVeteransAffiliation(tenant, {
+        naturalKey: 'T1',
+        playerName: 'T One',
+        veteransClubId: 'c1',
+        primaryClubId: 'c2',
+        primaryClubName: 'C2 CC',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        source: 'registration',
+      });
+    }
+    await repo.eraseTenantData('vetten');
+    assert.equal((await repo.listVeteransAffiliations('vetten', 'c1')).length, 0);
+    await repo.clearCohort('vetcohort');
+    assert.equal((await repo.listVeteransAffiliations('vetcohort', 'c1')).length, 0);
+  });
+});
+
 describe('POST /register — cross-club registrations, off-system alerts, admin ack', () => {
   const mkClub = (id: string, name: string) => ({
     id,
