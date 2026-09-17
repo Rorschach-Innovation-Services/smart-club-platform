@@ -55,8 +55,13 @@ describe('ClubLeaguesEditor — leagues from other districts', () => {
     // Collapsed: the disclosure counts the two EMCU leagues; the chips are not yet rendered.
     const disclosure = screen.getByRole('button', { name: /Leagues from other districts \(2\)/ });
     expect(screen.queryByRole('button', { name: 'Under 11' })).toBeNull();
+    // Collapsed disclosure is wired for assistive tech: not expanded, and it owns its panel.
+    expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+    expect(disclosure).toHaveAttribute('aria-controls', 'admin-other-districts-panel');
 
     await user.click(disclosure);
+    expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+    expect(document.getElementById('admin-other-districts-panel')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Under 11' }));
     await user.click(screen.getByRole('button', { name: /Save leagues/ }));
 

@@ -1015,8 +1015,9 @@ export type VeteransRequestStatus = 'pending' | 'accepted' | 'declined' | 'withd
 
 /**
  * MIRRORS the API's `VeteransRequestPublic` (packages/api/src/types.ts) — a veterans
- * squad-selection request (ADR 0013) as any HTTP response returns it: WITHOUT the PII
- * `playerNaturalKey` (the API projects it out of the canonical, and the mirror never had it).
+ * squad-selection request (ADR 0013) as any HTTP response returns it. Inbound items
+ * (GET /clubs/:id/veterans-requests) carry the PII `playerNaturalKey`; outbound items and
+ * the admin list project it out.
  * A veterans club found a player tenant-wide and asked the player's primary club to confirm the
  * affiliation; accept calls the same `setPlayerVeteransClub` the capture-only paths use, so no
  * roster row / playerCount / demographics change occurs.
@@ -1026,6 +1027,8 @@ export interface VeteransRequestPublic {
   /** Opaque HMAC handle the finder returned (never the natural key) — matches an outbound row. */
   candidateId: string;
   playerName: string;
+  /** The player's natural key — present on INBOUND items only (outbound / admin list omit it). */
+  playerNaturalKey?: string;
   /** The player's OWN club — it confirms the request (inbound in its portal). */
   primaryClubId: string;
   primaryClubName: string;

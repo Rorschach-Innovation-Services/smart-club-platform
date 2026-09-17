@@ -5469,6 +5469,8 @@ export function ClubLeaguesEditor({ club, allLeagues, onSave }) {
           <button
             type="button"
             onClick={() => setShowOutside((v) => !v)}
+            aria-expanded={showOutside}
+            aria-controls="admin-other-districts-panel"
             style={{
               background: 'none',
               border: 'none',
@@ -5487,7 +5489,10 @@ export function ClubLeaguesEditor({ club, allLeagues, onSave }) {
             Leagues from other districts ({outsideFlat.length})
           </button>
           {showOutside && (
-            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div
+              id="admin-other-districts-panel"
+              style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 12 }}
+            >
               {Object.entries(outside).map(([district, groups]) => (
                 <div key={district}>
                   <div
