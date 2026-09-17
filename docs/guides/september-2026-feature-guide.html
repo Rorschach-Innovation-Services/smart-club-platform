@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="en-ZA">
+<head>
+<meta charset="utf-8">
+<title>What shipped in the September 2026 batch — Smart Club Platform</title>
+<style>
+  /* ── Print setup ──────────────────────────────────────────────────────────
+     A4 with generous outer margins. This is read on paper or in a PDF reader,
+     not on a screen at arm's length, so the measure is narrower and the body
+     type is a serif — it holds up over long passages in print in a way a UI
+     sans does not. */
+  @page { size: A4; margin: 20mm 18mm 18mm; }
+
+  :root {
+    --ink:        #14201B;   /* body text — near-black with a green cast */
+    --ink-2:      #3E4C46;   /* secondary */
+    --ink-3:      #6B7A73;   /* muted */
+    --green:      #0E3529;   /* brand primary — structure, headings */
+    --green-mid:  #215F47;
+    --green-tint: #E8F0EB;
+    --gold:       #B89B4A;   /* the single accent. Used only to mean "look here" */
+    --sand:       #E7DDC6;   /* brand neutral */
+    --paper:      #FBFAF7;
+    --rule:       #D8D2C4;
+    --rule-soft:  #EAE5D9;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font: 10.5pt/1.62 "Charter", "Iowan Old Style", Georgia, "Times New Roman", serif;
+    color: var(--ink);
+    background: #fff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Headings, labels and anything structural take the sans — the contrast
+     between the two families is what makes the page scannable. */
+  h1, h2, h3, h4, .ui, .label, .tag, th, .num, figcaption {
+    font-family: "Helvetica Neue", "Avenir Next", Helvetica, Arial, sans-serif;
+  }
+
+  code, .path, .field {
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 0.88em;
+    background: var(--green-tint);
+    padding: 0.5pt 3pt;
+    border-radius: 2px;
+    color: var(--green);
+  }
+
+  /* ── Cover ─────────────────────────────────────────────────────────────── */
+  .cover {
+    height: 247mm;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    break-after: page;
+  }
+  .cover-top { border-top: 3px solid var(--green); padding-top: 10mm; }
+  .cover-eyebrow {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 9pt; font-weight: 700; letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--gold);
+  }
+  .cover h1 {
+    font-size: 34pt; line-height: 1.08; font-weight: 600;
+    letter-spacing: -0.02em; color: var(--green);
+    margin: 8mm 0 0; max-width: 15cm;
+  }
+  .cover .sub {
+    font-size: 13pt; line-height: 1.5; color: var(--ink-2);
+    margin: 6mm 0 0; max-width: 13cm;
+  }
+  .cover-foot {
+    display: flex; justify-content: space-between; align-items: flex-end;
+    border-top: 1px solid var(--rule); padding-top: 4mm;
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8.5pt; color: var(--ink-3);
+  }
+  .cover-foot strong { color: var(--green); font-weight: 600; }
+
+  /* A cover ornament that means something: the stage pipeline this whole
+     document is about, drawn once. */
+  /* Pinned low on the cover rather than tucked under the title: it leaves ONE
+     intentional void between the title block and the furniture, instead of a gap
+     in the middle that reads as unfinished. */
+  .pipeline {
+    display: flex; align-items: center; gap: 0; margin: 0 0 14mm;
+  }
+  .pipeline-cap {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8pt; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--ink-3); margin-bottom: 4mm;
+  }
+  .pipeline .node {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8pt; font-weight: 600; letter-spacing: 0.04em;
+    padding: 3mm 4mm; border: 1px solid var(--green);
+    color: var(--green); background: #fff; white-space: nowrap;
+  }
+  .pipeline .node.fill { background: var(--green); color: var(--sand); }
+  .pipeline .arm { height: 1px; background: var(--green); width: 7mm; }
+
+  /* ── Parts and sections ────────────────────────────────────────────────── */
+  .part { break-before: page; }
+  .part-head { border-top: 3px solid var(--green); padding-top: 5mm; margin-bottom: 8mm; }
+  .part-num {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8.5pt; font-weight: 700; letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--gold);
+  }
+  h2 {
+    font-size: 20pt; font-weight: 600; letter-spacing: -0.015em;
+    color: var(--green); margin: 3mm 0 0; line-height: 1.16;
+  }
+  .part-head .lede {
+    font-size: 11pt; color: var(--ink-2); margin: 4mm 0 0; max-width: 14cm;
+  }
+  h3 {
+    font-size: 12.5pt; font-weight: 600; color: var(--green);
+    margin: 9mm 0 2.5mm; letter-spacing: -0.01em;
+    break-after: avoid;
+  }
+  h4 {
+    font-size: 10pt; font-weight: 700; color: var(--ink);
+    margin: 6mm 0 1.5mm; letter-spacing: 0.01em;
+    break-after: avoid;
+  }
+  p { margin: 0 0 3.5mm; max-width: 15.5cm; }
+  ul, ol { margin: 0 0 3.5mm; padding-left: 5mm; max-width: 15cm; }
+  li { margin-bottom: 1.5mm; }
+  strong { font-weight: 600; }
+
+  /* ── Contents ──────────────────────────────────────────────────────────── */
+  .toc { break-after: page; }
+  .toc ol { list-style: none; padding: 0; max-width: 14cm; counter-reset: toc; }
+  .toc li {
+    display: flex; gap: 4mm; align-items: baseline;
+    padding: 2.5mm 0; border-bottom: 1px solid var(--rule-soft);
+    font-family: "Helvetica Neue", Helvetica, sans-serif; font-size: 10pt;
+  }
+  .toc .n {
+    color: var(--gold); font-weight: 700; font-size: 8.5pt;
+    min-width: 12mm; letter-spacing: 0.1em;
+  }
+  .toc .t { color: var(--ink); font-weight: 500; }
+  .toc .d { color: var(--ink-3); font-size: 9pt; margin-left: auto; text-align: right; max-width: 7cm; }
+
+  /* ── Numbered steps — the spine of the walkthroughs ────────────────────── */
+  .steps { counter-reset: step; margin: 0 0 6mm; }
+  .step {
+    position: relative; padding: 0 0 0 13mm; margin: 0 0 6mm;
+    break-inside: avoid;
+  }
+  .step::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 0; top: -0.5mm;
+    width: 8mm; height: 8mm; border-radius: 50%;
+    background: var(--green); color: var(--sand);
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 9pt; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step h4 { margin-top: 0; }
+  .step p:last-child, .step ul:last-child { margin-bottom: 0; }
+
+  /* ── Callouts. Three kinds, three meanings, no decoration. ─────────────── */
+  .note, .warn, .why {
+    padding: 4mm 5mm; margin: 0 0 4.5mm; break-inside: avoid;
+    font-size: 9.8pt; line-height: 1.55; max-width: 15.5cm;
+  }
+  .note { background: var(--green-tint); border-left: 2.5pt solid var(--green-mid); }
+  .warn { background: #FBF3E0; border-left: 2.5pt solid var(--gold); }
+  .why  { background: var(--paper); border-left: 2.5pt solid var(--rule); color: var(--ink-2); }
+  .note p:last-child, .warn p:last-child, .why p:last-child { margin-bottom: 0; }
+  .callout-label {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8pt; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase; display: block; margin-bottom: 1.5mm;
+  }
+  .note .callout-label { color: var(--green-mid); }
+  .warn .callout-label { color: #8A6D1E; }
+  .why  .callout-label { color: var(--ink-3); }
+
+  /* ── Tables ────────────────────────────────────────────────────────────── */
+  table {
+    width: 100%; border-collapse: collapse; margin: 0 0 5mm;
+    font-size: 9.5pt; break-inside: avoid;
+  }
+  th {
+    text-align: left; font-size: 8pt; font-weight: 700;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3);
+    border-bottom: 1.5px solid var(--green); padding: 0 3mm 2mm 0;
+  }
+  td { padding: 2.5mm 3mm 2.5mm 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  td:last-child, th:last-child { padding-right: 0; }
+  tbody tr:last-child td { border-bottom: none; }
+  .t-narrow td:first-child, .t-narrow th:first-child { width: 32%; }
+
+  /* One table in this document is longer than a page (the message reference). Keeping
+     it whole strands its own part heading on an otherwise empty page, so this one is
+     allowed to break — with the header row repeated on each page it lands on, and rows
+     kept intact. */
+  .t-long { break-inside: auto; }
+  .t-long thead { display: table-header-group; }
+  .t-long tr { break-inside: avoid; }
+
+  /* ── UI chrome references — what the operator actually sees ────────────── */
+  .ui {
+    display: inline-block; font-size: 8.8pt; font-weight: 600;
+    padding: 0.8pt 4pt; border: 1px solid var(--rule);
+    border-radius: 3px; background: #fff; color: var(--ink);
+    white-space: nowrap;
+  }
+  .pill {
+    display: inline-block; font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8pt; font-weight: 700; letter-spacing: 0.04em;
+    padding: 1pt 5pt; border-radius: 9pt; white-space: nowrap;
+  }
+  .pill.teal  { background: var(--green-tint); color: var(--green); }
+  .pill.muted { background: #EFEFEC; color: var(--ink-2); }
+  .pill.coral { background: #F8E4E0; color: #9B3A2A; }
+
+  /* ── The worked-structure diagram ──────────────────────────────────────── */
+  .flow { margin: 0 0 5mm; break-inside: avoid; }
+  .flow-stage {
+    border: 1px solid var(--rule); border-left: 3px solid var(--green-mid);
+    padding: 3mm 4mm; margin-bottom: 2mm; background: #fff;
+  }
+  .flow-stage .st {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 7.5pt; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--gold);
+  }
+  .flow-stage .sn { font-weight: 600; font-size: 10.5pt; color: var(--green); margin-top: 0.5mm; }
+  .flow-stage .sd { font-size: 9.3pt; color: var(--ink-2); margin-top: 1mm; }
+  .flow-down {
+    text-align: center; color: var(--rule); font-size: 11pt;
+    line-height: 1; margin: 0 0 2mm;
+  }
+
+  /* ── Definition list for the glossary ──────────────────────────────────── */
+  .terms { margin: 0; }
+  .terms dt {
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-weight: 700; font-size: 9.5pt; color: var(--green);
+    margin-top: 4mm;
+  }
+  .terms dd { margin: 1mm 0 0; font-size: 10pt; color: var(--ink-2); }
+
+  .lead-in { font-size: 11.5pt; color: var(--ink-2); max-width: 14.5cm; margin-bottom: 6mm; }
+
+  .colophon {
+    margin-top: 10mm; padding-top: 4mm; border-top: 1px solid var(--rule);
+    font-family: "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 8.5pt; color: var(--ink-3);
+  }
+  /* Guide-specific: this document is short, so the type sits a touch smaller than the
+     league tutorial and each part is allowed to run on rather than strand a callout on
+     its own page. */
+  body { font-size: 9.5pt; line-height: 1.5; }
+  table { font-size: 8.9pt; }
+  td { padding: 2mm 3mm 2mm 0; }
+  p, li { max-width: 16.5cm; }
+  .note, .warn, .why { max-width: 16.5cm; padding: 3mm 4.5mm; margin-bottom: 4mm; }
+  h3 { margin-top: 7mm; }
+  .steps .step { margin-bottom: 4.5mm; }
+  .part-head { margin-bottom: 6mm; }
+  /* Six short parts: flow them rather than start each on a fresh page. */
+  .part { break-before: auto; margin-top: 12mm; }
+  .part:first-of-type { margin-top: 0; }
+  .part-head { break-after: avoid; break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<section class="cover">
+  <div class="cover-top">
+    <div class="cover-eyebrow">Smart Club Platform · Internal Feature Guide</div>
+    <h1>What shipped in the September 2026 batch</h1>
+    <p class="sub">
+      Six things the union asked for, what each one does, how it works underneath, who is
+      responsible for it, and what to watch out for. Short on purpose.
+    </p>
+  </div>
+
+  <div class="cover-bottom">
+    <div class="pipeline-cap">The one flow worth memorising</div>
+    <div class="pipeline">
+      <span class="node fill">Veterans club finds player</span><span class="arm"></span>
+      <span class="node">Sends request</span><span class="arm"></span>
+      <span class="node">Player's own club accepts</span><span class="arm"></span>
+      <span class="node">Affiliation recorded</span>
+    </div>
+
+    <div class="cover-foot">
+    <div>
+      <strong>Who this is for</strong><br>
+      Union administrators, club chairpersons and the platform team. Each part says who it is for.
+      No technical knowledge assumed until Part Four.
+    </div>
+    <div style="text-align:right">
+      Branch dolphins-sep17-fixes · 17 Sep 2026<br>
+      Version 1.0
+    </div>
+    </div>
+  </div>
+</section>
+
+<section class="toc">
+  <div class="part-head">
+    <div class="part-num">Contents</div>
+    <h2>What's in this guide</h2>
+  </div>
+  <ol>
+    <li><span class="n">One</span><span class="t">At a glance</span><span class="d">The six items and where they landed</span></li>
+    <li><span class="n">Two</span><span class="t">Club portal</span><span class="d">Your side in fixtures, veterans squad, union-entered leagues</span></li>
+    <li><span class="n">Three</span><span class="t">Admin console</span><span class="d">Other-district leagues, veterans requests, insights, chair changes</span></li>
+    <li><span class="n">Four</span><span class="t">Platform team</span><span class="d">Two command-line tools and one secret</span></li>
+    <li><span class="n">Five</span><span class="t">Who is responsible for what</span><span class="d">Roles, per feature</span></li>
+    <li><span class="n">Six</span><span class="t">Implications and gotchas</span><span class="d">The things that will otherwise surprise you</span></li>
+  </ol>
+</section>
+
+<!-- ══ PART ONE ═══ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part One</div>
+    <h2>At a glance</h2>
+    <p class="lede">
+      The Dolphins (KZNCU) office raised six issues in September. Five are built and reviewed.
+      One is deliberately on hold. Every fix works for every union on the platform, not just Dolphins.
+    </p>
+  </div>
+
+  <table class="t-long">
+    <thead><tr><th>Issue raised</th><th>What we found</th><th>What shipped</th><th>Where</th></tr></thead>
+    <tbody>
+      <tr><td>Clubs with two sides in one league can't tell which side a fixture belongs to</td><td>True. The fixtures table only showed the opponent.</td><td>A <span class="ui">Side</span> column, "playing as" on each series card, and the side named in the next-match banner and in the fixtures message sent to players.</td><td>Club portal → Fixtures</td></tr>
+      <tr><td>Insights shows 0 clubs for Veterans Premier and Veterans Promotion</td><td>The fixtures were imported from the union's spreadsheet, but no club was ever marked as entered in those leagues.</td><td>A sync tool that marks clubs as entered from the fixtures they appear in. The importer now does this itself. Insights flags any league that has fixtures but no entrants.</td><td>Platform team tool + Admin → Insights</td></tr>
+      <tr><td>Dawnheights wants to enter U11 and U13 in the EMCU</td><td>EMCU is a district inside the Dolphins union, not a separate client. The junior leagues exist, but a club from another district could not see them.</td><td>Admins can enter a club into leagues from other districts. The club's own form shows those as "entered by the union" and never drops them.</td><td>Admin → Clubs → Leagues</td></tr>
+      <tr><td>Move the 12/13 December fixtures to 16/17 January</td><td>Confirmed: only Premier Men 50-Over and Veterans Promotion play that weekend. Veterans Promotion already plays on 16 January, so later rounds must shuffle.</td><td><strong>On hold</strong> while the union decides. A preview-only tool shows the resulting calendar.</td><td>Platform team tool</td></tr>
+      <tr><td>Saints Cricket Club has a new chairperson</td><td>Already self-serve. One gap: the old chair's ID number and term dates carried over to the new name.</td><td>Fixed. A name change now clears the previous person's details.</td><td>Admin → Clubs → Edit chairperson</td></tr>
+      <tr><td>Veterans sides want to pick players from any club</td><td>No way to do it. The only building block was a player's own declaration that they play veterans for another club.</td><td>A find-and-request flow. The player's own club must accept. Admins can override.</td><td>Club portal → Veterans squad; Admin → Veterans Requests</td></tr>
+      <tr><td>Export only gives league totals ("34 clubs, 219 teams")</td><td>True. The League breakdown sheet had counts only.</td><td>Two new sheets, <span class="ui">Teams by league</span> and <span class="ui">Clubs by league</span>, list every club and side per division.</td><td>Admin → Insights → Export Excel</td></tr>
+    </tbody>
+  </table>
+
+</section>
+
+<!-- ══ PART TWO ═══ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Two</div>
+    <h2>Club portal</h2>
+    <p class="lede">For club chairpersons and representatives. Three things look different.</p>
+  </div>
+
+  <h3>Fixtures now say which of your sides is playing</h3>
+  <p>
+    Open <span class="ui">Fixtures</span>. Each series card ends with <em>playing as Saints Cricket Club B</em>
+    (one side) or <em>your sides: A, B, C</em> (several). When you field two or more sides in the same series,
+    the table gains a <span class="ui">Side</span> column. A derby between your own sides appears once, with
+    the home side in <span class="ui">Side</span> and the away side under <span class="ui">Opponent</span>.
+  </p>
+  <div class="why">
+    <span class="callout-label">Why it was missing</span>
+    <p>A fixture stores two team identifiers, not names. Each series carries a snapshot mapping identifiers to
+    clubs and side names. The portal always had the mapping; it simply never printed your own side.</p>
+  </div>
+
+  <h3>Veterans squad: find a player, ask their club</h3>
+  <p>
+    A <span class="ui">Veterans squad</span> item appears in the left menu only for clubs the union has fixtured
+    into a veterans league. Nobody is added to your squad without their own club agreeing.
+  </p>
+  <div class="steps">
+    <div class="step"><h4>Find</h4><p>Type at least three letters of a name into <span class="ui">Find a player</span>.
+      You see the player's name and their club, nothing else. Players already affiliated to a veterans club, already
+      registered in a veterans league, or your own players, do not appear.</p></div>
+    <div class="step"><h4>Request</h4><p>Click <span class="ui">Request</span>, optionally with a short note. The row flips
+      to <span class="pill teal">Requested</span> and the request appears under <span class="ui">Pending requests</span>,
+      where you can withdraw it. The other club's chairperson gets an email.</p></div>
+    <div class="step"><h4>The other club decides</h4><p>On their <span class="ui">Players</span> page a card reads
+      <em>Crusaders CC asks to register Thabo Ndlovu for veterans cricket</em>, with <span class="ui">Accept</span> and
+      <span class="ui">Decline</span>. The player's roster row shows a <span class="pill teal">Veterans request</span> pill
+      until they act.</p></div>
+    <div class="step"><h4>Done</h4><p>On accept the player appears in your <span class="ui">Veterans affiliates</span>
+      list and under <span class="ui">Recent outcomes</span>. The player stays on their own club's roster.
+      Your roster count does not change.</p></div>
+  </div>
+  <div class="warn">
+    <span class="callout-label">What accept does not do</span>
+    <p>It does not move the player, change either club's player count, or start a clearance. It records that this
+    person plays veterans cricket for your club, the same record a player creates when they declare it at registration.</p>
+  </div>
+
+  <h3>Leagues the union entered for you</h3>
+  <p>
+    If an administrator enters your club into a league outside your district (an EMCU junior league for an Ilembe club,
+    for example), step three of your affiliation form shows it under <span class="ui">Entered by the union</span>.
+    You cannot untick it, and re-saving the form or changing your district will not drop it. Only the union office can remove it.
+  </p>
+</section>
+
+<!-- ══ PART THREE ═══ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Three</div>
+    <h2>Admin console</h2>
+    <p class="lede">For union administrators. Four screens changed.</p>
+  </div>
+
+  <h3>Entering a club into another district's league</h3>
+  <p>
+    Clubs → the club → <span class="ui">Leagues</span>. Below the district's own chips is a collapsed
+    <span class="ui">Leagues from other districts (N)</span>. Expand it, tick the leagues, <span class="ui">Save leagues</span>.
+    Selected cross-district leagues stay visible with their district as a suffix even when the section is collapsed.
+  </p>
+  <div class="note">
+    <span class="callout-label">Dawnheights</span>
+    <p>Clubs → Dawnheights Cricket Club → Leagues → expand → tick <span class="ui">Under 11</span> and
+    <span class="ui">Under 13</span> under Ethekwini Metro Cricket Union → Save. One side each is the default.</p>
+  </div>
+
+  <h3>Veterans Requests</h3>
+  <p>
+    A new <span class="ui">Veterans Requests</span> menu item with a pending count. It lists every request in the union with
+    filters for pending, accepted, declined and withdrawn. Clubs normally resolve these themselves; use
+    <span class="ui">Accept</span> or <span class="ui">Decline</span> here only as a union override. A decline asks for an
+    optional reason, which the requesting club sees. Overrides are recorded as such and both chairpersons are emailed.
+  </p>
+
+  <h3>Insights and the export</h3>
+  <p>
+    Per-league counts are unchanged in how they work: they count clubs that are <em>entered</em> in a league, not clubs that
+    happen to have fixtures. A league with fixtures but no entrants now shows a small note asking you to have the platform
+    team run the club league sync. <span class="ui">Export Excel</span> gains <span class="ui">Teams by league</span>
+    (one row per side, with club, district and chair contact) and <span class="ui">Clubs by league</span>
+    (one row per club per league, with the number of sides and their names).
+  </p>
+
+  <h3>Changing a chairperson</h3>
+  <p>
+    Clubs → the club → <span class="ui">Edit chairperson</span>. Enter the new name, email and cell. When the name differs
+    from the current chair, a note tells you the previous person's ID number and term dates will be cleared; the club
+    re-enters them on its affiliation form. Notices such as clearance alerts route to the new contact immediately.
+  </p>
+  <div class="warn">
+    <span class="callout-label">This does not change who can log in</span>
+    <p>Portal access is separate. Go to <span class="ui">Team &amp; Access</span>, invite the new chair as a
+    representative of the club, and remove or narrow the previous person's access.</p>
+  </div>
+</section>
+
+<!-- ══ PART FOUR ═══ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Four</div>
+    <h2>Platform team</h2>
+    <p class="lede">Two command-line tools and one secret. Both tools preview by default and write nothing without <code>--confirm</code>.</p>
+  </div>
+
+  <h3>Club league sync</h3>
+  <p>
+    Reads every released series, works out which clubs appear in which league, and marks those clubs as entered
+    (with the right number of sides and their names). It only ever adds; it never removes a league, and it skips a club
+    whose stored side names disagree with the fixtures rather than overwrite them. Safe to run twice.
+  </p>
+  <pre style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:9pt;background:var(--green-tint);padding:3mm 4mm;">npx sst shell --stage prod -- npx tsx packages/api/src/sync-club-leagues-from-series.ts dolphins
+npx sst shell --stage prod -- npx tsx packages/api/src/sync-club-leagues-from-series.ts dolphins --confirm</pre>
+  <p>Expected on Dolphins: about 26 clubs patched; Insights then shows 12 clubs in Veterans Premier and 15 in Veterans Promotion.
+  The fixtures importer now runs this automatically after every import, in both its modes, so the zero should not recur.</p>
+
+  <h3>Shift fixture dates (on hold)</h3>
+  <p>
+    Moves every fixture on one date to another and cascades later rounds so nothing collides. The default cascade takes the
+    next existing playing date, so planned gaps such as Easter are kept. It prints a round-by-round table and refuses to write
+    if the move would introduce a ground clash. Use the preview to show the union what the calendar would become.
+  </p>
+  <pre style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:9pt;background:var(--green-tint);padding:3mm 4mm;">npx sst shell --stage prod -- npm --prefix packages/api run shift-fixture-dates -- \
+  --tenant dolphins \
+  --series s-planb-premier-men-50ov-top6,s-planb-premier-men-50ov-bottom6,\
+s-planb-veterans-promotion-30ov \
+  --from-date 2026-12-12,2026-12-13 --to-date 2027-01-16,2027-01-17</pre>
+  <div class="warn">
+    <span class="callout-label">Do not add --confirm</span>
+    <p>The client is still deciding. Nothing in the platform notifies clubs when fixture dates change, so any real move
+    needs a communication plan alongside it.</p>
+  </div>
+
+  <h3>One new secret before deploying</h3>
+  <p>
+    The veterans finder never sends a player's identity key to another club. It sends an opaque handle derived from a
+    server secret. That secret must exist on each stage or the finder fails closed with an error:
+  </p>
+  <pre style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:9pt;background:var(--green-tint);padding:3mm 4mm;">sst secret set CandidateHandleSecret $(openssl rand -hex 32) --stage dev
+sst secret set CandidateHandleSecret $(openssl rand -hex 32) --stage prod</pre>
+  <p>Order of operations: merge and push, set the secret, deploy dev, run the sync on dev, check Insights, then prod.</p>
+</section>
+
+<!-- ══ PART FIVE ═══ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Five</div>
+    <h2>Who is responsible for what</h2>
+  </div>
+  <table class="t-narrow">
+    <thead><tr><th>Task</th><th>Role</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Request a player for a veterans side</td><td>Veterans club chair or rep</td><td>Only clubs fixtured in a veterans league see the menu item.</td></tr>
+      <tr><td>Accept or decline a veterans request</td><td>The player's own club chair or rep</td><td>The club is the responsible party for its players' data. It decides.</td></tr>
+      <tr><td>Override a stuck request</td><td>Union administrator</td><td>Recorded as a union override; both chairs emailed. Use sparingly.</td></tr>
+      <tr><td>Enter a club into another district's league</td><td>Union administrator</td><td>Clubs cannot do this themselves and cannot undo it.</td></tr>
+      <tr><td>Change a club's chairperson</td><td>Union administrator</td><td>Then swap portal access under Team &amp; Access.</td></tr>
+      <tr><td>Run the club league sync</td><td>Platform team</td><td>Dry-run, read the output, then confirm. Per stage.</td></tr>
+      <tr><td>Move fixture dates in bulk</td><td>Platform team, on the union's written instruction</td><td>Preview only until the client decides. Plan the club communication.</td></tr>
+      <tr><td>Set the candidate-handle secret</td><td>Platform team</td><td>Once per stage, before the deploy that carries this batch.</td></tr>
+      <tr><td>Read fixtures with your side shown</td><td>Everyone at the club</td><td>No action needed.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ══ PART SIX ═══ -->
+<section class="part">
+  <div class="part-head">
+    <div class="part-num">Part Six</div>
+    <h2>Implications and gotchas</h2>
+  </div>
+
+  <h3>Privacy</h3>
+  <p>
+    The finder is the first screen where one club sees another club's players. It shows a name and a club, nothing more.
+    No ID numbers, contact details or dates of birth leave the server, and every search is logged. A club can only search
+    once the union has actually fixtured it into a veterans league; ticking the league on its own form is not enough.
+  </p>
+
+  <h3>Nothing moves</h3>
+  <p>
+    Accepting a veterans request is a note on the player's record, not a transfer. Player counts, demographics and
+    clearances are untouched. If a player later transfers clubs, the affiliation follows the existing transfer rules.
+  </p>
+
+  <h3>Notifications are email only</h3>
+  <p>
+    Request, accept and decline emails go to the club chairperson on record. A club with no chair email simply gets no
+    email; the request still appears in the portal. There are no WhatsApp messages for this feature.
+  </p>
+
+  <h3>Counts follow entries, not fixtures</h3>
+  <p>
+    Insights and the new export sheets count clubs that are entered in a league. Until the sync runs on prod, the two
+    veterans leagues will still read zero and their divisions will be empty in the export. Every other league already populates.
+  </p>
+
+  <h3>Clubs crossing from one league to two</h3>
+  <p>
+    Player demographics attribute a player with no recorded league to their club's only league. A club that gains a second
+    league through the sync loses that shortcut, so the "unattributed" figure can rise. This is the honest number, not a regression.
+  </p>
+
+  <h3>The December move is not done</h3>
+  <p>
+    Only Premier Men 50-Over (both halves) and Veterans Promotion 30-Over play on 12 and 13 December. Veterans Promotion
+    already plays on 16 January, so its later rounds must each move one slot. Premier Men has 17 January free. Nothing changes
+    until the union confirms, and there is no automatic notice to clubs when it does.
+  </p>
+
+  <div class="colophon">
+    Smart Club Platform · September 2026 feature guide · Version 1.0<br>
+    Design record: <span class="path">docs/architecture/0013-veterans-squad-selection.md</span><br>
+    Runbooks: <span class="path">docs/runbooks/sync-club-leagues-from-series.md</span> ·
+    <span class="path">docs/runbooks/shift-fixture-dates.md</span><br>
+    API reference: <span class="path">docs/api/clubs.md</span> (Veterans section)
+  </div>
+</section>
+
+</body>
+</html>
