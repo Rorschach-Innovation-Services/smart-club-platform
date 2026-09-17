@@ -1067,9 +1067,12 @@ export interface VeteransRequest {
 }
 
 /**
- * A veterans request as any HTTP response returns it: the stored row WITHOUT the PII
+ * A veterans request as HTTP responses return it: the stored row WITHOUT the PII
  * `playerNaturalKey`. The mirror already lacks it; the canonical is projected through this before
- * it leaves the API.
+ * it leaves the API — the admin list, the outbound (mirror) array and the single-request replies
+ * are all stripped. The ONE exception is the INBOUND array of `GET /clubs/:id/veterans-requests`:
+ * those canonical rows live in the requesting club's OWN partition (which already receives the
+ * natural key on its roster GET), so they ship with `playerNaturalKey` intact.
  */
 export type VeteransRequestPublic = Omit<VeteransRequest, 'playerNaturalKey'>;
 

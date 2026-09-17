@@ -51,18 +51,27 @@ export function isVeteransLeagueKey(key: string, leagues: League[]): boolean {
  * tenant-wide name search self-grantable. `Series.leagueKey` is loosely typed (the interface has
  * an index signature) but every real series carries it (import-planb-fixtures / season runs).
  */
-export async function clubFixturedInVeterans(tenant: string, clubId: string): Promise<boolean> {
+export async function veteransLeagueKeysForClub(
+  tenant: string,
+  clubId: string,
+): Promise<Set<string>> {
   const [config, series] = await Promise.all([
     repo.getTenantConfig(tenant).catch(() => null),
     repo.listSeries(tenant),
   ]);
   const leagues = config?.leagues ?? [];
-  return series.some(
-    (s: Series) =>
-      s.released === true &&
-      isVeteransLeagueKey(String((s as { leagueKey?: unknown }).leagueKey ?? ''), leagues) &&
-      (s.participants ?? []).some((p) => p.clubId === clubId),
-  );
+  const keys = new Set<string>();
+  for (const s of series as Series[]) {
+    if (s.released !== true) continue;
+    const key = String((s as { leagueKey?: unknown }).leagueKey ?? '');
+    if (!isVeteransLeagueKey(key, leagues)) continue;
+    if ((s.participants ?? []).some((p) => p.clubId === clubId)) keys.add(key);
+  }
+  return keys;
+}
+
+export async function clubFixturedInVeterans(tenant: string, clubId: string): Promise<boolean> {
+  return (await veteransLeagueKeysForClub(tenant, clubId)).size > 0;
 }
 
 /**

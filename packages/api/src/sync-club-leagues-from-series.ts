@@ -100,6 +100,12 @@ export async function syncClubLeaguesFromSeries(
     only?: string[];
     /** Include unreleased (draft) series too; default is released-only. */
     includeDrafts?: boolean;
+    /**
+     * In-memory series to inspect instead of reading the table. The importer passes the series
+     * it just built so a FIRST-TIME import (whose fresh ids aren't stored yet) can still preview
+     * the club patches. When omitted, the tenant's stored series are read as usual.
+     */
+    series?: Series[];
     log?: (line: string) => void;
   } = {},
 ): Promise<ClubLeagueSyncResult> {
@@ -126,7 +132,7 @@ export async function syncClubLeaguesFromSeries(
   // Group participants by club → league → teamId (dedupes ids seen across series
   // sharing a leagueKey, and keeps one representative participant per side).
   const byClub = new Map<string, Map<string, Map<string, SeriesParticipant>>>();
-  const allSeries = await repo.listSeries(tenant);
+  const allSeries = opts.series ?? (await repo.listSeries(tenant));
   for (const s of allSeries) {
     if (onlyIds && !onlyIds.has(String(s.id))) continue;
     const leagueKey = typeof s.leagueKey === 'string' ? s.leagueKey : '';
@@ -166,6 +172,10 @@ export async function syncClubLeaguesFromSeries(
     const groundVenue = club.ground?.venue;
     let changed = false;
     const added: string[] = [];
+    // What actually changed for THIS club, for a summary that reflects roster/count-only
+    // patches (which add no league key and so would otherwise print `+[none]`).
+    const rosterWrites: string[] = [];
+    const countChanges: string[] = [];
 
     for (const [leagueKey, sidesMap] of byLeague) {
       const sides = [...sidesMap.values()];
@@ -205,6 +215,7 @@ export async function syncClubLeaguesFromSeries(
           if (storedCount < sideCount) {
             leagueTeams[leagueKey] = sideCount;
             result.upgrades++;
+            countChanges.push(`${leagueKey} ${storedCount}→${sideCount}`);
             changed = true;
           }
           if (!hasKey) {
@@ -222,9 +233,11 @@ export async function syncClubLeaguesFromSeries(
             added.push(leagueKey);
           } else if (storedCount < sideCount) {
             result.upgrades++;
+            countChanges.push(`${leagueKey} ${storedCount}→${sideCount}`);
           }
           leagueTeams[leagueKey] = sideCount;
           teamRosters[leagueKey] = sides.map((p) => toClubTeam(p, groundVenue));
+          rosterWrites.push(`${leagueKey}(${sideCount})`);
           changed = true;
         }
       } else {
@@ -282,8 +295,12 @@ export async function syncClubLeaguesFromSeries(
       continue;
     }
 
+    const changeParts: string[] = [];
+    if (added.length) changeParts.push(`+[${added.join(', ')}]`);
+    if (rosterWrites.length) changeParts.push(`rosters: ${rosterWrites.join(', ')}`);
+    if (countChanges.length) changeParts.push(`count: ${countChanges.join(', ')}`);
     const summary =
-      `${clubId} (${club.name}): +[${added.join(', ') || 'none'}]` +
+      `${clubId} (${club.name}): ${changeParts.join('; ') || 'no-op'}` +
       ` → ${leagues.length} league(s)` +
       (beforeLeagueCount <= 1 && leagues.length >= 2
         ? ' [now multi-league — its team-less players stop resolving to a single fallback league;' +
@@ -305,7 +322,7 @@ export async function syncClubLeaguesFromSeries(
       result.patched++;
       log(summary);
     } catch (err: unknown) {
-      if ((err as { name?: string }).name === 'VersionConflictError') {
+      if (err instanceof repo.VersionConflictError) {
         result.raced++;
         log(`RACED ${clubId}: version changed mid-pass — left untouched (safe to re-run)`);
       } else {

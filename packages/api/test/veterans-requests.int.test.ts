@@ -241,9 +241,6 @@ describe('finder projection is PII-minimised', () => {
 
 describe('finder exclusions + candidate handle', () => {
   test('excludes own club, non-active, already-affiliated, and veterans-team rows', async () => {
-    const res = await finder('a'); // will 400; use a real query instead
-    assert.equal(res.status, 400);
-
     // Broad-ish surname searches (each ≥3 chars) to probe each excluded row.
     const names = await (async () => {
       const collect = async (q: string) => {
@@ -352,15 +349,27 @@ describe('create request', () => {
     const priList = (await (
       await app.request('/clubs/pri/veterans-requests', { headers: headers(REP_PRI) })
     ).json()) as { inbound: Array<Record<string, unknown>>; outbound: unknown[] };
-    assert.ok(priList.inbound.some((x) => x.id === created.id));
+    const inboundItem = priList.inbound.find((x) => x.id === created.id);
+    assert.ok(inboundItem, 'the primary club sees the request inbound');
+    // Inbound rows are the primary club's OWN canonical rows — they carry the natural key (the
+    // club already receives it on its roster GET; the frontend needs it to deep-link the player).
     assert.ok(
-      !priList.inbound.some((x) => 'playerNaturalKey' in x),
-      'inbound omits the natural key',
+      'playerNaturalKey' in inboundItem!,
+      'inbound carries the natural key (own-partition canonical)',
     );
     const vetsList = (await (
       await app.request('/clubs/vets/veterans-requests', { headers: headers(REP_VETS) })
-    ).json()) as { inbound: unknown[]; outbound: Array<Record<string, unknown>> };
-    assert.ok(vetsList.outbound.some((x) => x.id === created.id));
+    ).json()) as {
+      inbound: unknown[];
+      outbound: Array<Record<string, unknown>>;
+    };
+    const outboundItem = vetsList.outbound.find((x) => x.id === created.id);
+    assert.ok(outboundItem, 'the vets club sees the request outbound');
+    // Outbound (mirror) rows stay stripped — the veterans club never receives the natural key.
+    assert.ok(
+      !('playerNaturalKey' in outboundItem!),
+      'outbound omits the natural key (mirror partition)',
+    );
   });
 
   test('403 when the requesting club is not fixtured in a released veterans series', async () => {
@@ -368,6 +377,24 @@ describe('create request', () => {
     const candidateId = await candidateIdFor('Sipho', 'Sipho Dlamini');
     const res = await createRequest({ primaryClubId: 'pri', candidateId }, REP_THIRD, 'third');
     assert.equal(res.status, 403);
+  });
+
+  test('400 when leagueKey is not a veterans league', async () => {
+    const candidateId = await candidateIdFor('Sipho', 'Sipho Dlamini');
+    const res = await createRequest({ primaryClubId: 'pri', candidateId, leagueKey: 'premier' });
+    assert.equal(res.status, 400);
+  });
+
+  test('400 when primaryClubId is the requesting (veterans) club itself', async () => {
+    const candidateId = await candidateIdFor('Sipho', 'Sipho Dlamini');
+    const res = await createRequest({ primaryClubId: 'vets', candidateId });
+    assert.equal(res.status, 400);
+  });
+
+  test('400 when note exceeds 500 characters', async () => {
+    const candidateId = await candidateIdFor('Sipho', 'Sipho Dlamini');
+    const res = await createRequest({ primaryClubId: 'pri', candidateId, note: 'x'.repeat(501) });
+    assert.equal(res.status, 400);
   });
 });
 
@@ -576,6 +603,47 @@ describe('accept', () => {
       'affiliation persists — not over-cleared while the request is still pending',
     );
   });
+
+  // Fix 1 (race guard): once an accept wins, a losing accept must NOT clear the affiliation the
+  // winner's `accepted` request depends on. A first accept succeeds; a second accept with a stale
+  // expectedVersion 409s, and the player stays affiliated with the VETAFFIL# record intact.
+  test('a losing second accept 409s but leaves the winning affiliation + VETAFFIL# intact', async () => {
+    await repo.createPlayer('dolphins', mkPlayer('pri', 'RACE1008', 'Bongani', 'Khumalo'));
+    const candidateId = await candidateIdFor('Bongani Khumalo', 'Bongani Khumalo');
+    const created = (await (await createRequest({ primaryClubId: 'pri', candidateId })).json()) as {
+      id: string;
+    };
+    const nk = playerNaturalKey({
+      idNumber: 'RACE1008',
+      idType: 'passport',
+      nationality: 'South African',
+    });
+
+    // First accept wins.
+    const first = await app.request(`/clubs/pri/veterans-requests/${created.id}/accept`, {
+      method: 'POST',
+      headers: headers(REP_PRI),
+      body: '{}',
+    });
+    assert.equal(first.status, 200);
+
+    // A second accept carrying the now-stale version 409s.
+    const second = await app.request(`/clubs/pri/veterans-requests/${created.id}/accept`, {
+      method: 'POST',
+      headers: headers(REP_PRI),
+      body: JSON.stringify({ version: 0 }),
+    });
+    assert.equal(second.status, 409);
+
+    // The winner's affiliation survives — the losing accept did not over-clear it.
+    const player = await repo.getPlayer('dolphins', 'pri', nk);
+    assert.equal(player!.veteransClubId, 'vets', 'player still affiliated after the losing accept');
+    const affiliates = await repo.listVeteransAffiliations('dolphins', 'vets');
+    assert.ok(
+      affiliates.some((a) => a.naturalKey === nk && a.primaryClubId === 'pri'),
+      'the VETAFFIL# record is still present',
+    );
+  });
 });
 
 describe('decline / withdraw set a TTL', () => {
@@ -596,6 +664,20 @@ describe('decline / withdraw set a TTL', () => {
     assert.equal(body.declineReason, 'over age');
     assert.equal(typeof body.expiresAt, 'number');
     assert.ok((body.expiresAt as number) > Math.floor(Date.now() / 1000));
+  });
+
+  test('400 when the decline reason exceeds 500 characters', async () => {
+    await repo.createPlayer('dolphins', mkPlayer('pri', 'DECL2003', 'Lerato', 'Molefe'));
+    const candidateId = await candidateIdFor('Lerato Molefe', 'Lerato Molefe');
+    const created = (await (await createRequest({ primaryClubId: 'pri', candidateId })).json()) as {
+      id: string;
+    };
+    const res = await app.request(`/clubs/pri/veterans-requests/${created.id}/decline`, {
+      method: 'POST',
+      headers: headers(REP_PRI),
+      body: JSON.stringify({ reason: 'x'.repeat(501) }),
+    });
+    assert.equal(res.status, 400);
   });
 
   test('withdraw (veterans club) sets status + expiresAt via the mirror', async () => {
@@ -641,6 +723,75 @@ describe('admin override', () => {
     const body = (await res.json()) as Record<string, unknown>;
     assert.equal(body.status, 'accepted');
     assert.equal(body.resolvedVia, 'admin');
+  });
+
+  test('admin decline resolves with resolvedVia=admin and records the reason', async () => {
+    await repo.createPlayer('dolphins', mkPlayer('pri', 'ADMN3002', 'Sizwe', 'Mahlangu'));
+    const candidateId = await candidateIdFor('Sizwe Mahlangu', 'Sizwe Mahlangu');
+    const created = (await (await createRequest({ primaryClubId: 'pri', candidateId })).json()) as {
+      id: string;
+    };
+    const res = await app.request(`/admin/veterans-requests/${created.id}/decline`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ primaryClubId: 'pri', reason: 'not eligible' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.equal(body.status, 'declined');
+    assert.equal(body.resolvedVia, 'admin');
+    assert.equal(body.declineReason, 'not eligible');
+  });
+});
+
+// Fix 4: the mirror update is guarded by attribute_exists(sk), so a missing mirror is never
+// upserted back as a phantom row — the canonical still resolves, and no mirror re-materialises.
+describe('resolve never re-creates a deleted mirror (no phantom)', () => {
+  test('a declined request whose mirror was deleted resolves the canonical and leaves no mirror', async () => {
+    await repo.createPlayer('dolphins', mkPlayer('pri', 'PHAN4001', 'Kagiso', 'Rabada'));
+    const candidateId = await candidateIdFor('Kagiso Rabada', 'Kagiso Rabada');
+    const created = (await (await createRequest({ primaryClubId: 'pri', candidateId })).json()) as {
+      id: string;
+    };
+
+    // Delete the mirror row out from under the resolve (DocumentClient, same key shape as repo).
+    const keys = await import('../src/keys.js');
+    const { DynamoDBClient } = await import('@aws-sdk/client-dynamodb');
+    const { DynamoDBDocumentClient, DeleteCommand } = await import('@aws-sdk/lib-dynamodb');
+    const doc = DynamoDBDocumentClient.from(
+      new DynamoDBClient({
+        endpoint: process.env.DYNAMO_ENDPOINT,
+        region: 'localhost',
+        credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+      }),
+    );
+    await doc.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: keys.outboundVeteransRequestKey('dolphins', 'vets', created.id),
+      }),
+    );
+    assert.equal(
+      await repo.getOutboundVeteransRequest('dolphins', 'vets', created.id),
+      null,
+      'mirror is gone before the resolve',
+    );
+
+    // Decline (a resolve) — the canonical flips, the mirror update is a best-effort no-op.
+    const res = await app.request(`/clubs/pri/veterans-requests/${created.id}/decline`, {
+      method: 'POST',
+      headers: headers(REP_PRI),
+      body: '{}',
+    });
+    assert.equal(res.status, 200);
+    const canonical = await repo.getVeteransRequest('dolphins', 'pri', created.id);
+    assert.equal(canonical!.status, 'declined', 'canonical resolved');
+    // No phantom mirror re-materialised.
+    assert.equal(
+      await repo.getOutboundVeteransRequest('dolphins', 'vets', created.id),
+      null,
+      'no phantom mirror row',
+    );
   });
 });
 

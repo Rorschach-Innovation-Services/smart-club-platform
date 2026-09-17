@@ -112,7 +112,12 @@ import {
   type Channel,
   type SendResult,
 } from './notify/index.js';
-import { clubFixturedInVeterans, candidateHandle, isVeteransLeagueKey } from './veterans.js';
+import {
+  clubFixturedInVeterans,
+  veteransLeagueKeysForClub,
+  candidateHandle,
+  isVeteransLeagueKey,
+} from './veterans.js';
 import type {
   Club,
   ClubCommEvent,
@@ -1202,6 +1207,18 @@ async function findPlayerByIdNumber(
   return roster.find((p) => normalizeId(p.idNumber) === wanted) ?? null;
 }
 
+/**
+ * The chair contact for a club's notices: the `exco.chair` sub-record (name/email/cell), falling
+ * back to the flat `club.chair` name when exco has no chair name. `exco` is loosely typed here
+ * (it also carries governance fields we never notify on) so we read only the three contact fields.
+ */
+function chairContactOf(club: Club): { name: string; email?: string; cell?: string } {
+  const chair = (
+    club.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
+  )?.chair;
+  return { name: chair?.name || club.chair || '', email: chair?.email, cell: chair?.cell };
+}
+
 const CLEARANCE_NOTICES_PER_DAY = 3;
 /**
  * Best-effort heads-up to the FROM-club chairman that a clearance now awaits the club's
@@ -1223,9 +1240,6 @@ async function notifyClearanceOpened(
   opts: { bypassCap?: boolean } = {},
 ): Promise<void> {
   try {
-    const chair = (
-      fromClub.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
-    )?.chair;
     const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
       ? ['email', 'whatsapp']
       : ['email'];
@@ -1246,11 +1260,7 @@ async function notifyClearanceOpened(
           }))
         : (
             await sendClearanceNotice({
-              chair: {
-                name: chair?.name || fromClub.chair || '',
-                email: chair?.email,
-                cell: chair?.cell,
-              },
+              chair: chairContactOf(fromClub),
               fromClubName: fromClub.name,
               playerName: clearance.playerName,
               toClubName: clearance.toClubName,
@@ -1321,16 +1331,9 @@ async function notifyClearanceResolved(
     ]);
     const notifyClub = async (club: Club | null): Promise<void> => {
       if (!club) return; // directory source (or a club since deleted): nothing to notify
-      const chair = (
-        club.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
-      )?.chair;
       const reason = outcome === 'rejected' ? clearance.rejectReason : clearance.overrideReason;
       const { results } = await sendClearanceResolvedNotice({
-        chair: {
-          name: chair?.name || club.chair || '',
-          email: chair?.email,
-          cell: chair?.cell,
-        },
+        chair: chairContactOf(club),
         fromClubName: clearance.fromClubName,
         playerName: clearance.playerName,
         toClubName: clearance.toClubName,
@@ -1391,16 +1394,9 @@ async function notifyClearanceReopened(
     ]);
     const notifyClub = async (club: Club | null, side: 'source' | 'destination'): Promise<void> => {
       if (!club) return; // directory source (or a club since deleted): nothing to notify
-      const chair = (
-        club.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
-      )?.chair;
       const { results } = await sendClearanceReopenedNotice({
         side,
-        chair: {
-          name: chair?.name || club.chair || '',
-          email: chair?.email,
-          cell: chair?.cell,
-        },
+        chair: chairContactOf(club),
         fromClubName: clearance.fromClubName,
         playerName: clearance.playerName,
         toClubName: clearance.toClubName,
@@ -1929,9 +1925,6 @@ async function mintAndDeliverOnboarding(
     return current;
   }
 
-  const chair = (
-    current.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
-  )?.chair;
   const token = current.playerRegLink.token;
   const regLink = `${base}/register/${current.id}?t=${token}`;
   // Best-effort like the rest of this path: a tenant-config read fault must not fail the
@@ -1950,7 +1943,7 @@ async function mintAndDeliverOnboarding(
   const season = seasonLabel(new Date().getFullYear());
 
   const { results } = await sendChairOnboarding({
-    chair: { name: chair?.name || current.chair || '', email: chair?.email, cell: chair?.cell },
+    chair: chairContactOf(current),
     clubName: current.name,
     // WhatsApp rides a shared, dolphins-flavored WABA template — flag-gated (default
     // ON for existing tenants) so a new client can launch email-only.
@@ -2365,12 +2358,8 @@ function normalizeForSearch(s: string): string {
   return s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
-const veteransChairContact = (club: Club): { name: string; email?: string; cell?: string } => {
-  const chair = (
-    club.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
-  )?.chair;
-  return { name: chair?.name || club.chair || '', email: chair?.email, cell: chair?.cell };
-};
+const veteransChairContact = (club: Club): { name: string; email?: string; cell?: string } =>
+  chairContactOf(club);
 
 /** Append the veterans-request comm events to a club's log (idempotency-keyed, version-suffixed). */
 async function appendVeteransCommEvents(
@@ -2476,7 +2465,7 @@ function throwVeteransRequestError(err: unknown): never {
   if (err instanceof VersionConflictError)
     throw new HttpError(409, 'veterans request changed; refetch');
   if (err instanceof repo.VeteransRequestConflictError) throw new HttpError(409, err.message);
-  if (err instanceof Error && err.message === 'veterans request not found')
+  if (err instanceof repo.VeteransRequestNotFoundError)
     throw new HttpError(404, 'veterans request not found');
   throw err;
 }
@@ -2555,7 +2544,11 @@ app.post('/clubs/:id/veterans-requests', async (c) => {
     throw new HttpError(400, 'primaryClubId and candidateId are required');
   if (body.primaryClubId === vetsClubId)
     throw new HttpError(400, 'cannot request your own club’s player');
-  if (!(await clubFixturedInVeterans(ra.tenant, vetsClubId)))
+  if (body.note !== undefined && (typeof body.note !== 'string' || body.note.length > 500)) {
+    throw new HttpError(400, 'note must be a string of at most 500 characters');
+  }
+  const vetLeagueKeys = await veteransLeagueKeysForClub(ra.tenant, vetsClubId);
+  if (vetLeagueKeys.size === 0)
     throw new HttpError(403, 'club is not entered in a released veterans series');
 
   const [primaryClub, vetsClub, config] = await Promise.all([
@@ -2567,6 +2560,9 @@ app.post('/clubs/:id/veterans-requests', async (c) => {
   const leagues = config?.leagues ?? [];
   if (body.leagueKey && !isVeteransLeagueKey(body.leagueKey, leagues))
     throw new HttpError(400, 'leagueKey is not a veterans league');
+  // Not just A veterans league — one THIS club is actually fixtured in (parity with the finder gate).
+  if (body.leagueKey && !vetLeagueKeys.has(body.leagueKey))
+    throw new HttpError(400, 'leagueKey is not a veterans league your club is entered in');
 
   // Resolve the player by matching the HMAC handle over the primary club's projected rows.
   const rows = await repo.listPlayerFinderRows(ra.tenant, [body.primaryClubId]);
@@ -2617,7 +2613,10 @@ app.get('/clubs/:id/veterans-requests', async (c) => {
     repo.listOutboundVeteransRequests(ra.tenant, id),
   ]);
   return c.json({
-    inbound: inbound.map(publicVeteransRequest),
+    // Inbound (canonical) rows keep `playerNaturalKey`: they live in THIS (primary) club's own
+    // partition and the club already receives the natural key on its roster GET — no new exposure.
+    // The frontend needs it to deep-link the accepted player. Outbound (mirror) + admin stay stripped.
+    inbound,
     outbound: outbound.map(publicVeteransRequest),
   });
 });
@@ -2629,14 +2628,17 @@ app.post('/clubs/:id/veterans-requests/:rid/accept', async (c) => {
   const rid = c.req.param('rid');
   assertClubAccess(ra, id);
   const body = await c.req.json<{ version?: number }>().catch(() => ({}) as { version?: number });
+  const via = ra.membership.role === 'admin' ? 'admin' : 'portal';
   try {
     const { request } = await repo.acceptVeteransRequest(ra.tenant, id, rid, {
       at: now(),
       by: ra.email,
-      via: 'portal',
+      via,
       expectedVersion: body.version,
     });
-    await notifyVeteransRequestResolved(ra.tenant, request, 'accepted', ra.email);
+    await notifyVeteransRequestResolved(ra.tenant, request, 'accepted', ra.email, {
+      both: via === 'admin',
+    });
     return c.json(publicVeteransRequest(request));
   } catch (err) {
     throwVeteransRequestError(err);
@@ -2652,6 +2654,10 @@ app.post('/clubs/:id/veterans-requests/:rid/decline', async (c) => {
   const body = await c.req
     .json<{ reason?: string; version?: number }>()
     .catch(() => ({}) as { reason?: string; version?: number });
+  if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 500)) {
+    throw new HttpError(400, 'reason must be a string of at most 500 characters');
+  }
+  const via = ra.membership.role === 'admin' ? 'admin' : 'portal';
   const current = await repo.getVeteransRequest(ra.tenant, id, rid);
   if (!current) throw new HttpError(404, 'veterans request not found');
   if (current.status !== 'pending') throw new HttpError(409, 'veterans request already resolved');
@@ -2660,11 +2666,13 @@ app.post('/clubs/:id/veterans-requests/:rid/decline', async (c) => {
       status: 'declined',
       at: now(),
       by: ra.email,
-      via: 'portal',
+      via,
       ...(body.reason ? { declineReason: body.reason } : {}),
       expectedVersion: body.version,
     });
-    await notifyVeteransRequestResolved(ra.tenant, request, 'declined', ra.email);
+    await notifyVeteransRequestResolved(ra.tenant, request, 'declined', ra.email, {
+      both: via === 'admin',
+    });
     return c.json(publicVeteransRequest(request));
   } catch (err) {
     throwVeteransRequestError(err);
@@ -2678,6 +2686,7 @@ app.post('/clubs/:id/veterans-requests/:rid/withdraw', async (c) => {
   const rid = c.req.param('rid');
   assertClubAccess(ra, id);
   const body = await c.req.json<{ version?: number }>().catch(() => ({}) as { version?: number });
+  const via = ra.membership.role === 'admin' ? 'admin' : 'portal';
   const mirror = await repo.getOutboundVeteransRequest(ra.tenant, id, rid);
   if (!mirror) throw new HttpError(404, 'veterans request not found');
   if (mirror.status !== 'pending') throw new HttpError(409, 'veterans request already resolved');
@@ -2686,7 +2695,7 @@ app.post('/clubs/:id/veterans-requests/:rid/withdraw', async (c) => {
       status: 'withdrawn',
       at: now(),
       by: ra.email,
-      via: 'portal',
+      via,
       expectedVersion: body.version,
     });
     return c.json(publicVeteransRequest(request));
@@ -7454,6 +7463,9 @@ app.post('/admin/veterans-requests/:rid/decline', async (c) => {
   const rid = c.req.param('rid');
   const body = await c.req.json<{ primaryClubId?: string; reason?: string; version?: number }>();
   if (!body.primaryClubId) throw new HttpError(400, 'primaryClubId required');
+  if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 500)) {
+    throw new HttpError(400, 'reason must be a string of at most 500 characters');
+  }
   const current = await repo.getVeteransRequest(ra.tenant, body.primaryClubId, rid);
   if (!current) throw new HttpError(404, 'veterans request not found');
   if (current.status !== 'pending') throw new HttpError(409, 'veterans request already resolved');

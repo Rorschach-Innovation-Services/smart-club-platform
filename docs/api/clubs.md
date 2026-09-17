@@ -154,19 +154,25 @@ veterans league. Capped at 20 with a `truncated` flag. Every call is logged to C
 Body `{ primaryClubId, candidateId, leagueKey?, note? }`. Resolves the opaque `candidateId` back
 to a player over the primary club's projected rows, re-runs the finder exclusions, and 409s a
 duplicate pending request for the same player. `201 → VeteransRequestPublic` (no natural key);
-the primary chair is emailed.
+the primary chair is emailed. `leagueKey`, when given, must be a veterans league **this club is
+actually fixtured in** (else `400`); `note`, when given, must be a string ≤ 500 chars (else `400`).
 
 ### `GET /clubs/:id/veterans-requests` — list a club's requests (own club / admin)
 
-`200 → { inbound: VeteransRequestPublic[]; outbound: VeteransRequestPublic[] }` — `inbound` are
-the requests this club must action (it is the primary club), `outbound` the requests it has sent
-(it is the veterans club).
+`200 → { inbound; outbound: VeteransRequestPublic[] }` — `inbound` are the requests this club must
+action (it is the primary club), `outbound` the requests it has sent (it is the veterans club).
+**Shape difference:** `inbound` items **carry `playerNaturalKey`** — those canonical rows live in
+this club's own partition and it already receives the natural key on its roster GET (no new
+exposure; the frontend uses it to deep-link the player). `outbound` (mirror) items, the admin list,
+and every single-request reply are `VeteransRequestPublic` (natural key stripped).
 
 ### `POST /clubs/:id/veterans-requests/:rid/accept | decline` — primary club resolves
 
-The player's **primary** club confirms or declines. Decline body `{ reason?, version? }`; accept
-body `{ version? }`. Accept re-validates against the live player row and writes the affiliation.
-The veterans chair is emailed the outcome. `resolvedVia: 'portal'`.
+The player's **primary** club confirms or declines. Decline body `{ reason?, version? }` (`reason`,
+when given, must be a string ≤ 500 chars, else `400`); accept body `{ version? }`. Accept
+re-validates against the live player row and writes the affiliation. The veterans chair is emailed
+the outcome. `resolvedVia` is `'portal'`, or `'admin'` when an admin acts through the club route
+(both chairs are then emailed).
 
 ### `POST /clubs/:id/veterans-requests/:rid/withdraw` — veterans club withdraws
 
@@ -177,7 +183,7 @@ id). `200 → VeteransRequestPublic`.
 
 | Status | When                                                                                                                                                                                                                            |
 | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `400`  | Admin route missing `primaryClubId`                                                                                                                                                                                             |
+| `400`  | Admin route missing `primaryClubId`; or a `reason`/`note` that is not a string ≤ 500 chars; or (create) a `leagueKey` that is not a veterans league this club is entered in                                                     |
 | `403`  | A rep acting on a club that is not theirs                                                                                                                                                                                       |
 | `404`  | The request id does not exist (`veterans request not found`)                                                                                                                                                                    |
 | `409`  | Stale `version`, or the request is already resolved (`veterans request already resolved`), or (accept only) the player is no longer registered / not active / already plays veterans for another club — show the server message |

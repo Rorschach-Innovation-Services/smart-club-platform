@@ -214,7 +214,7 @@ export const outboundVeteransRequestsListKey = (tenant: string, vetsClubId: stri
 /** gsi1 attributes that make the canonical veterans request listable tenant-wide (admin). */
 export const veteransRequestGsi1 = (tenant: string, requestedAt: string) => ({
   gsi1pk: `${tenantPrefix(tenant)}#TYPE#VETREQ`,
-  gsi1sk: requestedAt ?? '',
+  gsi1sk: requestedAt,
 });
 
 /** gsi1pk used to query every veterans request in a tenant (admin console). */

@@ -68,6 +68,8 @@ export interface RoundChange {
 export interface ShiftPlan {
   moves: FixtureMove[];
   byRound: RoundChange[];
+  /** Non-fatal notices — e.g. a round that is scheduled across more than one playing date. */
+  warnings: string[];
 }
 
 interface StoredFixtureLike {
@@ -120,71 +122,76 @@ export function buildPairMap(fromDates: string[], toDates: string[]): Map<string
 }
 
 interface ComputedShift extends ShiftPlan {
-  /** round → new date for every round whose date changes (moved + cascaded). */
-  roundNewDate: Map<number, string>;
   /** The series with shifted fixture dates applied. */
   next: Series;
 }
 
 /** Core, pure. Given a series and the shift options, work out the new date for every
- * affected fixture and round without mutating the input. */
+ * affected fixture without mutating the input. The cascade is keyed by DISTINCT PLAYING
+ * DATE (each date is its own slot), so a round scheduled across more than one date has each
+ * of its dates cascaded independently — that case is also surfaced as a warning. */
 export function computeShift(series: Series, opts: ShiftOpts): ComputedShift {
   const pm = buildPairMap(opts.fromDates, opts.toDates);
   const fromSet = new Set(opts.fromDates);
   const fixtures = ((series.fixtures ?? []) as StoredFixtureLike[]) ?? [];
 
-  // Pre-move round → date (first fixture per round) and the series' distinct playing dates.
-  const roundDate = new Map<number, string>();
+  // A round SHOULD play on a single date; when it spans more than one we can't collapse it to a
+  // single slot, so we WARN and let the date-keyed cascade below treat each date as its own slot.
+  const warnings: string[] = [];
+  const datesByRound = new Map<number, Set<string>>();
   for (const f of fixtures) {
-    if (f.round != null && f.date && !roundDate.has(f.round)) roundDate.set(f.round, f.date);
+    if (f.round == null || !f.date) continue;
+    let set = datesByRound.get(f.round);
+    if (!set) datesByRound.set(f.round, (set = new Set()));
+    set.add(f.date);
   }
+  for (const [r, set] of [...datesByRound.entries()].sort((a, b) => a[0] - b[0])) {
+    if (set.size > 1)
+      warnings.push(
+        `round ${r} spans ${set.size} playing dates (${[...set].sort().join(', ')}) — ` +
+          'each is treated as its own cascade slot',
+      );
+  }
+
+  // The series' distinct playing dates (sorted) and the last one — the cascade run-off anchor.
   const allDates = [...new Set(fixtures.map((f) => f.date).filter(Boolean) as string[])].sort();
   const lastDate = allDates.length ? allDates[allDates.length - 1] : undefined;
 
-  // The targeted moves: any fixture dated on a from-date moves to the paired to-date.
-  const roundNewDate = new Map<number, string>();
-  const movedRounds = new Set<number>();
-  for (const f of fixtures) {
-    if (f.date && fromSet.has(f.date) && f.round != null) {
-      roundNewDate.set(f.round, pm.get(f.date)!);
-      movedRounds.add(f.round);
-    }
-  }
+  // Moved targets (each from-date's fixtures move to its paired to-date) and the non-moved
+  // distinct playing dates — the slots the cascade may push.
+  const movedTargets = opts.fromDates.filter((d) => fromSet.has(d) && allDates.includes(d));
+  const targets = movedTargets.map((d) => pm.get(d)!);
+  const nonMovedDates = allDates.filter((d) => !fromSet.has(d));
 
-  const nonMoved = [...roundDate.entries()].filter(([r]) => !movedRounds.has(r));
-
+  // Cascade decisions keyed by each non-moved slot's pre-move DATE.
+  const dateNewDate = new Map<string, string>();
   if (opts.cascade === 'weeks') {
-    const targets = [...roundNewDate.values()].sort();
-    const earliestTo = targets[0];
+    const earliestTo = [...targets].sort()[0];
     if (earliestTo) {
-      for (const [r, d] of nonMoved) {
-        if (d >= earliestTo) roundNewDate.set(r, addDays(d, 7));
-      }
+      for (const d of nonMovedDates) if (d >= earliestTo) dateNewDate.set(d, addDays(d, 7));
     }
   } else if (opts.cascade === 'slot') {
-    const nonMovedDates = new Set(nonMoved.map(([, d]) => d));
+    const nonMovedSet = new Set(nonMovedDates);
     // A cascade triggers only where a moved date lands exactly on an existing later date.
-    const collisions = [...roundNewDate.values()].filter((d) => nonMovedDates.has(d)).sort();
+    const collisions = targets.filter((d) => nonMovedSet.has(d)).sort();
     const trigger = collisions[0];
     if (trigger && lastDate) {
-      const pushed = nonMoved
-        .filter(([, d]) => d >= trigger)
-        .sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
-      pushed.forEach(([r], i) => {
-        // Each pushed round takes the NEXT existing playing date (the next pushed round's
-        // old date); the last one runs off the end and gets old-last + 7 days.
-        roundNewDate.set(r, i < pushed.length - 1 ? pushed[i + 1][1] : addDays(lastDate, 7));
+      const pushed = nonMovedDates.filter((d) => d >= trigger).sort();
+      pushed.forEach((d, i) => {
+        // Each pushed slot takes the NEXT existing playing date; the last runs off the end and
+        // gets old-last + 7 days.
+        dateNewDate.set(d, i < pushed.length - 1 ? pushed[i + 1] : addDays(lastDate, 7));
       });
     }
   }
 
-  // Apply per fixture: an explicitly-moved fixture uses its paired target; otherwise a
-  // round with a cascade date uses that; everything else is untouched.
+  // Apply per fixture BY DATE: a from-date fixture takes its paired target; otherwise a
+  // non-moved date with a cascade decision takes that; everything else is untouched.
   const moves: FixtureMove[] = [];
   const nextFixtures = fixtures.map((f) => {
     let nd = f.date;
     if (f.date && fromSet.has(f.date)) nd = pm.get(f.date)!;
-    else if (f.round != null && roundNewDate.has(f.round)) nd = roundNewDate.get(f.round)!;
+    else if (f.date && dateNewDate.has(f.date)) nd = dateNewDate.get(f.date)!;
     if (nd && nd !== f.date) {
       moves.push({ fixtureId: f.id ?? '', round: f.round, from: f.date, to: nd });
       return { ...f, date: nd };
@@ -192,23 +199,27 @@ export function computeShift(series: Series, opts: ShiftOpts): ComputedShift {
     return f;
   });
 
+  // One RoundChange per (round, old date), so a multi-date round surfaces each slot's move.
   const byRound: RoundChange[] = [];
-  const seen = new Set<number>();
+  const seen = new Set<string>();
   for (const m of moves) {
-    if (m.round == null || seen.has(m.round)) continue;
-    seen.add(m.round);
+    const key = `${m.round ?? '?'}|${m.from ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     byRound.push({ round: m.round, oldDate: m.from, newDate: m.to });
   }
-  byRound.sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
+  byRound.sort(
+    (a, b) => (a.round ?? 0) - (b.round ?? 0) || (a.oldDate ?? '').localeCompare(b.oldDate ?? ''),
+  );
 
   const next: Series = { ...series, fixtures: nextFixtures };
-  return { moves, byRound, roundNewDate, next };
+  return { moves, byRound, warnings, next };
 }
 
 /** Public core for tests: the moves and the per-round date table, no side effects. */
 export function planDateShift(series: Series, opts: ShiftOpts): ShiftPlan {
-  const { moves, byRound } = computeShift(series, opts);
-  return { moves, byRound };
+  const { moves, byRound, warnings } = computeShift(series, opts);
+  return { moves, byRound, warnings };
 }
 
 // ─────────────────────────────── CLI ───────────────────────────────
@@ -294,8 +305,9 @@ async function main() {
   let touched = 0;
   for (const id of args.series) {
     const series = byId.get(id)!;
-    const { moves, byRound, next } = computeShift(series, args);
+    const { moves, byRound, warnings, next } = computeShift(series, args);
     console.log(`── ${id}  (${series.name})`);
+    for (const w of warnings) console.log(`   ⚠ WARNING: ${w}`);
     if (!byRound.length) {
       console.log('   no fixtures on the from-date(s) — unchanged\n');
       continue;

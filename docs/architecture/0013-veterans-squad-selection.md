@@ -91,9 +91,22 @@ A request is stored as two items (see [the data model](data-model.md)):
   opaque handle and must never receive the identity key).
 
 Both partitions are a club's own, so a rep only ever queries their own pk. The public shape
-returned by every route (`VeteransRequestPublic`) strips `playerNaturalKey`; the mirror already
-lacks it, and the canonical is projected through `publicVeteransRequest` before it leaves the
-API.
+returned by routes (`VeteransRequestPublic`) strips `playerNaturalKey`; the mirror already lacks
+it, and the canonical is projected through `publicVeteransRequest` before it leaves the API.
+
+**One deliberate exception:** the **inbound** array of `GET /clubs/:id/veterans-requests` ships
+its canonical rows **with `playerNaturalKey`**. Those rows live in the requesting (primary) club's
+own partition, and that club already receives the natural key on its roster GET — so this exposes
+nothing new, and the frontend needs it to deep-link the accepted player to their roster row. Every
+other surface — the **outbound** (mirror) array, the admin list, and each single-request reply —
+stays stripped.
+
+| Surface                                         | `playerNaturalKey`? | Why                                                           |
+| ----------------------------------------------- | ------------------- | ------------------------------------------------------------- |
+| `GET /clubs/:id/veterans-requests` — `inbound`  | **yes**             | primary club's own canonical rows; already has the key        |
+| `GET /clubs/:id/veterans-requests` — `outbound` | no                  | mirror in the veterans club's partition — must not receive it |
+| `GET /admin/veterans-requests`                  | no                  | admin list is `VeteransRequestPublic`                         |
+| create / accept / decline / withdraw replies    | no                  | single-request replies are `VeteransRequestPublic`            |
 
 ### 5. Accept is player-first and idempotent
 
@@ -148,6 +161,11 @@ are best-effort with an idempotency key and never fail the request.
   CloudWatch audit log narrow it, but a fixtured veterans club can still probe names. This is an
   accepted residual risk for phase 1, logged for review; phase 2's player-OTP consent removes the
   need for the club to search at all.
+- **Finder cost.** Each debounced keystroke past the 3-char minimum runs the gate (`listSeries` +,
+  for the leagueKey-fixtured check, the tenant catalogue) plus a tenant-wide projected `Query`
+  across every other club's roster. This is fine at the current tens-of-clubs scale, but it is
+  per-request work with no cache — if a tenant grows to hundreds of clubs, memoise/cache the gate
+  (released-series participation changes rarely) and the finder rows before this becomes a hot path.
 - **No transaction-critical invariant.** Unlike a clearance, accept flips no player status and
   moves no row — it writes a capture-only affiliation. So the two-item write uses the ordinary
   create/resolve path (a transaction in prod, a single-sourced sequential fallback on dynalite,
