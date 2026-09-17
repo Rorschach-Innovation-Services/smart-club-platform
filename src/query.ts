@@ -37,6 +37,7 @@ export const qk = {
   clearances: (clubId: string) => ['clearances', t(), clubId],
   allClearances: () => ['clearances-all', t()],
   allRegistrationReviews: () => ['registration-reviews-all', t()],
+  allVeteransRequests: () => ['veterans-requests-all', t()],
   demographics: () => ['demographics', t()],
   clubDirectory: () => ['club-directory', t()],
   veteransAffiliates: (clubId: string) => ['veterans-affiliates', t(), clubId],

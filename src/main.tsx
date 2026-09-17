@@ -72,6 +72,7 @@ import {
   AdminTeamAccessView,
   AdminClearances,
   AdminRegistrationReviews,
+  AdminVeteransRequests,
   LeagueForm,
   nextChairContact,
 } from './admin';
@@ -1301,6 +1302,10 @@ function Shell({
     'reject' | 'override' | 'reassign' | 'reopen' | null
   >(null);
   const [busyReviewId, setBusyReviewId] = useStateApp(null);
+  // Which veterans request (id) is mid-action, and which action, so the admin table can label
+  // the busy button (ADR 0013).
+  const [busyVetReqId, setBusyVetReqId] = useStateApp(null);
+  const [busyVetReqAction, setBusyVetReqAction] = useStateApp<'accept' | 'decline' | null>(null);
   // Signup-link share modal, lifted to Shell (which persists across admin views)
   // so empty-state buttons can open it in one click: set true + route to the
   // clubs list, where AdminClubsList renders it.
@@ -1338,6 +1343,12 @@ function Shell({
     queryFn: api.getAllRegistrationReviews,
     enabled: role === 'admin',
   });
+  // Every veterans squad-selection request in the tenant (admin oversight, ADR 0013).
+  const allVeteransRequestsQuery = useQuery({
+    queryKey: qk.allVeteransRequests(),
+    queryFn: api.getAllVeteransRequests,
+    enabled: role === 'admin',
+  });
   // Anonymised player demographics for Insights + the league drill-down (admin only;
   // reps never reach /admin/*). Undefined until loaded — the card is simply skipped.
   const demographicsQuery = useQuery({
@@ -1350,6 +1361,7 @@ function Shell({
   const clubDirectory = clubDirectoryQuery.data ?? [];
   const allClearances = allClearancesQuery.data ?? [];
   const allReviews = allReviewsQuery.data ?? [];
+  const allVeteransRequests = allVeteransRequestsQuery.data ?? [];
   const signupLink = signupLinkQuery.data?.clubSignupLink ?? null;
 
   // ── Derive view from URL ──
@@ -1974,6 +1986,59 @@ function Shell({
       .catch(() => {})
       .finally(() => setBusyReviewId(null));
   }
+  // Admin override accept of a veterans squad-selection request (ADR 0013). Resolves to a
+  // tri-state ('ok' | 'conflict' | 'failed') the confirm dialog reads to know whether to close —
+  // a 409 already refetched the list, so a retry would re-send the stale version and loop.
+  function acceptVeteransReq(req) {
+    setBusyVetReqId(req.id);
+    setBusyVetReqAction('accept');
+    return withToast(
+      () =>
+        api.adminResolveVeteransRequest(req.id, 'accept', {
+          primaryClubId: req.primaryClubId,
+          version: req.version,
+        }),
+      'Could not accept the veterans request',
+      { rawConflict: true, invalidate: [qk.allVeteransRequests(), qk.players(req.primaryClubId)] },
+    )
+      .then(() => {
+        invalidate(qk.allVeteransRequests());
+        invalidate(qk.players(req.primaryClubId));
+        invalidate(qk.veteransAffiliates(req.veteransClubId));
+        toastShow(`${req.playerName} confirmed for ${req.veteransClubName} · Union override`);
+        return 'ok';
+      })
+      .catch((err) => (err instanceof ApiError && err.status === 409 ? 'conflict' : 'failed'))
+      .finally(() => {
+        setBusyVetReqId(null);
+        setBusyVetReqAction(null);
+      });
+  }
+  // Admin override decline of a veterans request. Same tri-state contract as accept.
+  function declineVeteransReq(req, reason) {
+    setBusyVetReqId(req.id);
+    setBusyVetReqAction('decline');
+    return withToast(
+      () =>
+        api.adminResolveVeteransRequest(req.id, 'decline', {
+          primaryClubId: req.primaryClubId,
+          version: req.version,
+          ...(reason ? { reason } : {}),
+        }),
+      'Could not decline the veterans request',
+      { rawConflict: true, invalidate: [qk.allVeteransRequests()] },
+    )
+      .then(() => {
+        invalidate(qk.allVeteransRequests());
+        toastShow(`Declined the veterans request for ${req.playerName} · Union override`);
+        return 'ok';
+      })
+      .catch((err) => (err instanceof ApiError && err.status === 409 ? 'conflict' : 'failed'))
+      .finally(() => {
+        setBusyVetReqId(null);
+        setBusyVetReqAction(null);
+      });
+  }
   function saveExco(members) {
     return withToast(() => api.saveExco(clubId, members), 'Could not save exco')
       .then(() => {
@@ -2113,6 +2178,7 @@ function Shell({
   const myPlayerCount = players.length;
   // Registration-review badge: admin sees every open review (off-system alerts) cohort-wide.
   const adminOpenReviews = allReviews.filter((r) => r.status === 'open').length;
+  const adminPendingVetRequests = allVeteransRequests.filter((r) => r.status === 'pending').length;
 
   // Nav items are listed in their natural journey order here, then sorted alphabetically
   // by label for display (see the `.sort` below) — same for clubNav.
@@ -2159,6 +2225,13 @@ function Shell({
       icon: Icon.Bell,
       num: adminOpenReviews || undefined,
       dot: adminOpenReviews ? 'gold' : 'teal',
+    },
+    {
+      v: 'vet_requests',
+      label: 'Veterans Requests',
+      icon: Icon.Shield,
+      num: adminPendingVetRequests || undefined,
+      dot: adminPendingVetRequests ? 'gold' : 'teal',
     },
     { v: 'team', label: 'Team & Access', icon: Icon.Users, num: users.length || undefined },
   ].sort((a, b) => a.label.localeCompare(b.label));
@@ -2456,6 +2529,17 @@ function Shell({
             reviews={allReviews}
             onAck={ackRegistrationReview}
             busyId={busyReviewId}
+          />
+        );
+      if (view === 'vet_requests')
+        return (
+          <AdminVeteransRequests
+            requests={allVeteransRequests}
+            leagues={allLeagues}
+            onAccept={acceptVeteransReq}
+            onDecline={declineVeteransReq}
+            busyId={busyVetReqId}
+            busyAction={busyVetReqAction}
           />
         );
       if (view === 'team')

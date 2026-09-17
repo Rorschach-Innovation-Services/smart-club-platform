@@ -22,6 +22,7 @@ import type {
   PlayerRegistration,
   PlayerClearance,
   VeteransAffiliatePublic,
+  VeteransRequestPublic,
   RegistrationReview,
   League,
   Series,
@@ -488,6 +489,25 @@ export const changeUserEmail = (sub: string, email: string) =>
 export const getClubSignupLink = () => request('/admin/club-signup-link');
 export const generateClubSignupLink = () => request('/admin/club-signup-link', { method: 'POST' });
 export const revokeClubSignupLink = () => request('/admin/club-signup-link', { method: 'DELETE' });
+
+// ── Veterans squad-selection requests (admin, ADR 0013) ──
+// Every veterans request in the tenant, listed once via the canonical gsi1 (public shape —
+// the PII natural key is stripped server-side). Drives the union-admin oversight console.
+export const getAllVeteransRequests = () =>
+  request<VeteransRequestPublic[]>('/admin/veterans-requests');
+// Admin OVERRIDE of a veterans request. `action` picks the terminal route; the body carries
+// `primaryClubId` (to rebuild the canonical key), an optional `reason` (decline only) and an
+// optional `version` for optimistic-concurrency. Accept re-validates against the live player
+// row and calls `setPlayerVeteransClub`; both surfaces email the two chairs.
+export const adminResolveVeteransRequest = (
+  rid: string,
+  action: 'accept' | 'decline',
+  body: { primaryClubId: string; reason?: string; version?: number },
+) =>
+  request<VeteransRequestPublic>(`/admin/veterans-requests/${rid}/${action}`, {
+    method: 'POST',
+    body,
+  });
 
 // ── Public registration ──
 // `clubs` = sibling clubs for the previous-club dropdown (absent on older backends —
