@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 import { Icon, Btn, useEscapeClose, useNestedEscapeClose, playerStatusPill } from './atoms';
 import { getPlayerIdDocViewUrl } from './api';
 import { docPreviewKind } from './data';
-import type { PlayerRegistration } from './types';
+import type { PlayerRegistration, VeteransRequestPublic } from './types';
 import { formatDayYear, formatStampDay } from './dates';
 
 /** Single human-readable role label, mirroring the admin/club rosters. */
@@ -278,6 +278,81 @@ function VeteransClubEditor({
 }
 
 /**
+ * Accept/Decline banner for a pending veterans squad-selection request on this player, rendered
+ * inside the modal above the veterans-club editor. Same one-click confirm the roster inbox
+ * offers, so a chair who opened the row can act without leaving. Decline reveals an inline
+ * optional reason. Absent ⇒ nothing renders.
+ */
+function VeteransRequestBanner({
+  request,
+  onAccept,
+  onDecline,
+  busy,
+}: {
+  request: VeteransRequestPublic;
+  onAccept: (req: VeteransRequestPublic) => void | Promise<unknown>;
+  onDecline?: (req: VeteransRequestPublic, reason?: string) => void | Promise<unknown>;
+  busy?: boolean;
+}) {
+  const [declining, setDeclining] = useState(false);
+  const [reason, setReason] = useState('');
+  return (
+    <div
+      style={{
+        margin: '4px 0 10px',
+        padding: '10px 12px',
+        borderRadius: 8,
+        background: 'rgba(214, 158, 46, 0.10)',
+        border: '1px solid rgba(214, 158, 46, 0.40)',
+        fontSize: 12.5,
+        color: 'var(--ink)',
+      }}
+    >
+      <div>
+        <strong>{request.veteransClubName}</strong> asks to register this player for veterans
+        cricket.
+      </div>
+      {declining ? (
+        <div style={{ marginTop: 8 }}>
+          <textarea
+            className="field-input"
+            rows={2}
+            placeholder="Reason (optional) — shared with the veterans club"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            style={{ width: '100%', fontSize: 13 }}
+          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <Btn
+              tone="ink"
+              size="sm"
+              disabled={busy}
+              onClick={() => onDecline?.(request, reason.trim() || undefined)}
+            >
+              {busy ? 'Declining…' : 'Confirm decline'}
+            </Btn>
+            <Btn tone="ghost" size="sm" disabled={busy} onClick={() => setDeclining(false)}>
+              Cancel
+            </Btn>
+          </div>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <Btn tone="teal" size="sm" disabled={busy} onClick={() => onAccept(request)}>
+            {busy ? 'Accepting…' : 'Accept'}
+          </Btn>
+          {onDecline && (
+            <Btn tone="outline" size="sm" disabled={busy} onClick={() => setDeclining(true)}>
+              Decline
+            </Btn>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * Read-only view of a single player, opened by clicking a roster row on either the admin
  * or club players list. Every field is already in hand from the list fetch — the only
  * network call is the on-demand presign for the ID document. `teamLabel` is the resolved
@@ -289,6 +364,7 @@ export function PlayerDetailModal({
   clubName,
   teamLabel,
   veteransEdit,
+  veteransRequest,
   onClose,
 }: {
   player: PlayerRegistration;
@@ -300,6 +376,14 @@ export function PlayerDetailModal({
   veteransEdit?: {
     clubs: { id: string; name: string }[];
     onSave: (id: string | null) => Promise<void>;
+  };
+  // A pending veterans squad-selection request on this player: renders the Accept/Decline banner
+  // above the editor. Absent ⇒ nothing extra shows.
+  veteransRequest?: {
+    request: VeteransRequestPublic;
+    onAccept: (req: VeteransRequestPublic) => void | Promise<unknown>;
+    onDecline?: (req: VeteransRequestPublic, reason?: string) => void | Promise<unknown>;
+    busy?: boolean;
   };
   onClose: () => void;
 }) {
@@ -386,6 +470,14 @@ export function PlayerDetailModal({
           )}
 
           <SectionTitle>Veterans club</SectionTitle>
+          {veteransRequest && (
+            <VeteransRequestBanner
+              request={veteransRequest.request}
+              onAccept={veteransRequest.onAccept}
+              onDecline={veteransRequest.onDecline}
+              busy={veteransRequest.busy}
+            />
+          )}
           {veteransEdit ? (
             <VeteransClubEditor
               player={player}

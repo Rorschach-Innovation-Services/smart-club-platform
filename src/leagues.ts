@@ -207,6 +207,47 @@ export function isWomensLeague(league: any): boolean {
 }
 
 /**
+ * A league KEY begins with `veterans` (so `veterans`, `veterans-premier`, `veterans-promotion`
+ * all match — `-` is a word boundary); the LABEL check catches a catalogue entry keyed
+ * differently but labelled "Veterans" / "Vets".
+ *
+ * KEEP IN SYNC with `packages/api/src/veterans.ts` (`isVeteransLeague` / `isVeteransLeagueKey`):
+ * the server uses the SAME key/label regexes for the authoritative finder gate. If the patterns
+ * drift, a club could see the "Veterans squad" nav (this cosmetic client predicate) but 403 on
+ * the finder (the server predicate), or vice-versa.
+ */
+const VETERANS_KEY_RE = /^veterans\b/i;
+const VETERANS_LABEL_RE = /\bveterans?\b|\bvets\b/i;
+
+/** True when a catalogue league is a veterans league (matched on key OR label). */
+export function isVeteransLeague(league: any): boolean {
+  if (!league) return false;
+  return (
+    VETERANS_KEY_RE.test(String(league.key || '')) ||
+    VETERANS_LABEL_RE.test(String(league.label || ''))
+  );
+}
+
+/**
+ * True when a club plays a veterans league — drives the "Veterans squad" nav visibility ONLY
+ * (cosmetic). Resolves each of the club's league keys against the catalogue and checks
+ * {@link isVeteransLeague}; for an orphan key (a key whose catalogue entry was removed) it falls
+ * back to the key pattern alone, mirroring the API's `isVeteransLeagueKey`. The finder itself is
+ * gated server-side on released-series participation, NOT on this — `club.leagues` is
+ * rep-settable, so it must never unlock a tenant-wide name search.
+ */
+export function clubPlaysVeterans(
+  club: { leagues?: string[] } | null | undefined,
+  allLeagues: any[],
+): boolean {
+  const keys = Array.isArray(club?.leagues) ? club!.leagues : [];
+  return keys.some((k) => {
+    const lg = findByKey(allLeagues, k);
+    return lg ? isVeteransLeague(lg) : VETERANS_KEY_RE.test(String(k || ''));
+  });
+}
+
+/**
  * Senior/women/junior team counts derived from a club's selected league keys. A club may
  * field more than one side in a league: `leagueTeams` maps a league key to its team
  * count; a key absent from the map (or no map at all — legacy clubs) counts as 1, so

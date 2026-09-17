@@ -15,7 +15,7 @@ import {
 } from 'react-router-dom';
 import { QueryClientProvider, useQuery, useQueries } from '@tanstack/react-query';
 import { queryClient, qk } from './query';
-import { leagueParticipants } from './leagues';
+import { leagueParticipants, clubPlaysVeterans } from './leagues';
 import { allocateVenues, buildLedger } from './competition/venues';
 import { findBlock } from './competition/calendar';
 import * as api from './api';
@@ -87,6 +87,7 @@ import {
   ClubPlayersView,
   RequestPlayerForm,
   ClubClearancesView,
+  ClubVeteransSquadView,
 } from './club';
 import { Onboarding } from './onboarding';
 
@@ -1306,6 +1307,10 @@ function Shell({
   // the busy button (ADR 0013).
   const [busyVetReqId, setBusyVetReqId] = useStateApp(null);
   const [busyVetReqAction, setBusyVetReqAction] = useStateApp<'accept' | 'decline' | null>(null);
+  // The veterans squad-selection request (accept/decline/withdraw) currently in flight, so the
+  // inbox/squad buttons can show a pending label (ADR 0013). The finder's Request button tracks
+  // its own local busy inside the squad view (it has no request id yet).
+  const [busyVeteransId, setBusyVeteransId] = useStateApp<string | null>(null);
   // Signup-link share modal, lifted to Shell (which persists across admin views)
   // so empty-state buttons can open it in one click: set true + route to the
   // clubs list, where AdminClubsList renders it.
@@ -1325,6 +1330,14 @@ function Shell({
     queryKey: qk.clubDirectory(),
     queryFn: api.getClubDirectory,
     enabled: role === 'club',
+  });
+  // Veterans squad-selection requests for this club (ADR 0013): inbound (it is the primary club,
+  // it must confirm) + outbound (it is the veterans club that asked). Drives the "Veterans squad"
+  // nav badge, the gold dot on Players, and the inbox/squad views.
+  const veteransRequestsQuery = useQuery({
+    queryKey: qk.veteransRequests(clubId),
+    queryFn: () => api.getVeteransRequests(clubId),
+    enabled: role === 'club' && !!clubId,
   });
   const allClearancesQuery = useQuery({
     queryKey: qk.allClearances(),
@@ -1358,6 +1371,7 @@ function Shell({
   });
   const players = playersQuery.data ?? [];
   const clearances = clearancesQuery.data ?? { incoming: [], outbound: [] };
+  const veteransRequests = veteransRequestsQuery.data ?? { inbound: [], outbound: [] };
   const clubDirectory = clubDirectoryQuery.data ?? [];
   const allClearances = allClearancesQuery.data ?? [];
   const allReviews = allReviewsQuery.data ?? [];
@@ -1753,6 +1767,75 @@ function Shell({
       })
       .catch(() => {})
       .finally(() => setBusyClearanceId(null));
+  }
+  // ── Veterans squad-selection (ADR 0013) — club-rep mutations ──
+  // This club is the VETERANS club: open a request for a tenant-wide player the finder returned.
+  // Resolves even on error (withToast owns the toast) so the finder's local busy resets; the
+  // 409 message (ineligible / duplicate pending) is surfaced raw.
+  function requestVeteransPlayer(body) {
+    return withToast(
+      () => api.createVeteransRequest(clubId, body),
+      'Could not send the veterans request',
+      { rawConflict: true },
+    )
+      .then(() => {
+        invalidate(qk.veteransRequests(clubId));
+        toastShow('Veterans request sent — the player’s club will confirm it.');
+      })
+      .catch(() => {});
+  }
+  // This club is the PRIMARY club: confirm a request, which writes the veterans affiliation under
+  // the requesting club (no roster row / player-count change here). Invalidate this club's
+  // requests + roster and the veterans club's affiliates list.
+  function acceptVeteransRequest(req) {
+    setBusyVeteransId(req.id);
+    return withToast(
+      () => api.acceptVeteransRequest(clubId, req.id, { version: req.version }),
+      'Could not accept the veterans request',
+      { rawConflict: true },
+    )
+      .then(() => {
+        invalidate(qk.veteransRequests(clubId));
+        invalidate(qk.players(clubId));
+        invalidate(qk.veteransAffiliates(req.veteransClubId));
+        toastShow(`${req.playerName} registered for veterans cricket with ${req.veteransClubName}`);
+      })
+      .catch(() => {})
+      .finally(() => setBusyVeteransId(null));
+  }
+  // Primary club declines (optional reason, shown to the veterans club).
+  function declineVeteransRequest(req, reason) {
+    setBusyVeteransId(req.id);
+    return withToast(
+      () =>
+        api.declineVeteransRequest(clubId, req.id, {
+          ...(reason ? { reason } : {}),
+          version: req.version,
+        }),
+      'Could not decline the veterans request',
+      { rawConflict: true },
+    )
+      .then(() => {
+        invalidate(qk.veteransRequests(clubId));
+        toastShow('Veterans request declined.');
+      })
+      .catch(() => {})
+      .finally(() => setBusyVeteransId(null));
+  }
+  // This club is the VETERANS club: withdraw its own pending request.
+  function withdrawVeteransRequest(req) {
+    setBusyVeteransId(req.id);
+    return withToast(
+      () => api.withdrawVeteransRequest(clubId, req.id, { version: req.version }),
+      'Could not withdraw the veterans request',
+      { rawConflict: true },
+    )
+      .then(() => {
+        invalidate(qk.veteransRequests(clubId));
+        toastShow('Veterans request withdrawn.');
+      })
+      .catch(() => {})
+      .finally(() => setBusyVeteransId(null));
   }
   // Admin overrides an overdue request, issuing it on the source club's behalf.
   function overrideClearance(req, reason) {
@@ -2176,6 +2259,15 @@ function Shell({
   const myIncomingClearances = (clearances.incoming ?? []).filter((r) => r.status === 'pending');
   const myPendingClearances = myIncomingClearances.length;
   const myPlayerCount = players.length;
+  // Veterans squad-selection (ADR 0013): pending outbound drives the "Veterans squad" badge;
+  // pending inbound (this club is a player's primary club) drives the gold dot on Players.
+  const myPendingVetOutbound = (veteransRequests.outbound ?? []).filter(
+    (r) => r.status === 'pending',
+  ).length;
+  const myPendingVetInbound = (veteransRequests.inbound ?? []).filter(
+    (r) => r.status === 'pending',
+  ).length;
+  const showVeteransNav = role === 'club' && clubPlaysVeterans(activeClub, allLeagues);
   // Registration-review badge: admin sees every open review (off-system alerts) cohort-wide.
   const adminOpenReviews = allReviews.filter((r) => r.status === 'open').length;
   const adminPendingVetRequests = allVeteransRequests.filter((r) => r.status === 'pending').length;
@@ -2270,7 +2362,9 @@ function Shell({
             label: 'Players',
             icon: Icon.Clubs,
             num: myPlayerCount || undefined,
-            dot: myPlayerCount ? 'teal' : 'muted',
+            // A pending inbound veterans request needs the chair's attention, so it outranks the
+            // plain teal "has players" dot.
+            dot: myPendingVetInbound ? 'gold' : myPlayerCount ? 'teal' : 'muted',
           },
           {
             v: 'clearances',
@@ -2279,6 +2373,19 @@ function Shell({
             num: myPendingClearances || undefined,
             dot: myPendingClearances ? 'gold' : 'muted',
           },
+          // Only for a club the union has fixtured into veterans cricket (nav visibility is
+          // cosmetic; the finder is gated server-side on released-series participation).
+          ...(showVeteransNav
+            ? [
+                {
+                  v: 'veterans',
+                  label: 'Veterans squad',
+                  icon: Icon.Users,
+                  num: myPendingVetOutbound || undefined,
+                  dot: myPendingVetOutbound ? 'gold' : 'teal',
+                },
+              ]
+            : []),
           {
             v: 'fixtures',
             label: 'Fixtures',
@@ -2625,6 +2732,22 @@ function Shell({
             leagues={allLeagues}
             onGenerateLink={() => generatePlayerRegLink(activeClub.id)}
             onDeletePlayer={deletePlayer}
+            toast={toastShow}
+            veteransRequests={veteransRequests}
+            onAcceptVeteransRequest={acceptVeteransRequest}
+            onDeclineVeteransRequest={declineVeteransRequest}
+            busyVeteransId={busyVeteransId}
+          />
+        );
+      }
+      if (view === 'veterans') {
+        return (
+          <ClubVeteransSquadView
+            club={activeClub}
+            allLeagues={allLeagues}
+            requests={veteransRequests}
+            onRequest={requestVeteransPlayer}
+            onWithdraw={withdrawVeteransRequest}
             toast={toastShow}
           />
         );

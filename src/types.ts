@@ -1011,6 +1011,55 @@ export interface VeteransAffiliation {
 /** The affiliates GET projection: what a veterans club may see, WITHOUT the PII naturalKey. */
 export type VeteransAffiliatePublic = Omit<VeteransAffiliation, 'naturalKey'>;
 
+export type VeteransRequestStatus = 'pending' | 'accepted' | 'declined' | 'withdrawn';
+
+/**
+ * MIRRORS the API's `VeteransRequestPublic` (packages/api/src/types.ts) — a veterans
+ * squad-selection request (ADR 0013) as any HTTP response returns it: WITHOUT the PII
+ * `playerNaturalKey` (the API projects it out of the canonical, and the mirror never had it).
+ * A veterans club found a player tenant-wide and asked the player's primary club to confirm the
+ * affiliation; accept calls the same `setPlayerVeteransClub` the capture-only paths use, so no
+ * roster row / playerCount / demographics change occurs.
+ */
+export interface VeteransRequestPublic {
+  id: string;
+  /** Opaque HMAC handle the finder returned (never the natural key) — matches an outbound row. */
+  candidateId: string;
+  playerName: string;
+  /** The player's OWN club — it confirms the request (inbound in its portal). */
+  primaryClubId: string;
+  primaryClubName: string;
+  /** The veterans club that made the request (outbound in its portal). */
+  veteransClubId: string;
+  veteransClubName: string;
+  /** Veterans league the request targets, when the veterans club plays more than one. */
+  leagueKey?: string;
+  note?: string;
+  requestedAt: string;
+  requestedBy?: string;
+  status: VeteransRequestStatus;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolvedVia?: 'portal' | 'admin';
+  declineReason?: string;
+  /** TTL (epoch seconds): set on a terminal row so it self-expires after 90 days. */
+  expiresAt?: number;
+  version: number;
+}
+
+/**
+ * MIRRORS the API's `VeteransCandidate` — one finder result row (GET
+ * /clubs/:id/veterans-candidates). Everything a requesting club may see about a tenant-wide
+ * player; NEVER the natural key / ID number / dob / contact — `candidateId` (an HMAC handle) is
+ * the only identifier that leaves the API.
+ */
+export interface VeteransCandidate {
+  candidateId: string;
+  playerName: string;
+  primaryClubId: string;
+  primaryClubName: string;
+}
+
 export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejected';
 
 /**
@@ -1405,44 +1454,4 @@ export interface PlatformDocViewUrlResponse {
   contentType?: string;
   objectKey?: string;
   size?: number;
-}
-
-/** Lifecycle of a veterans squad-selection request (ADR 0013). Mirrors the API's
- *  `VeteransRequestStatus`; kept here so the admin/club UIs can type their views. */
-export type VeteransRequestStatus = 'pending' | 'accepted' | 'declined' | 'withdrawn';
-
-/**
- * A veterans squad-selection request as the API returns it (ADR 0013) — the stored row WITHOUT
- * the PII `playerNaturalKey`, which never leaves the server. A veterans club has found a player
- * tenant-wide and asked the player's PRIMARY club (the POPIA responsible party) to confirm the
- * affiliation; the union admin may accept/decline as an override (`resolvedVia: 'admin'`).
- * The definition is intentionally identical to the API's `VeteransRequestPublic` and to the
- * copy the club-portal code carries, so the two merge cleanly.
- */
-export interface VeteransRequestPublic {
-  id: string;
-  /** Opaque HMAC handle the finder returned; the only player identifier that crosses the wire. */
-  candidateId: string;
-  playerName: string;
-  /** The player's OWN club — who confirms the request. */
-  primaryClubId: string;
-  primaryClubName: string;
-  /** The veterans club that made the request. */
-  veteransClubId: string;
-  veteransClubName: string;
-  /** Veterans league the request targets, when the veterans club plays more than one. */
-  leagueKey?: string;
-  note?: string;
-  requestedAt: string;
-  /** Email of the veterans-club rep (or admin) who made the request. */
-  requestedBy?: string;
-  status: VeteransRequestStatus;
-  resolvedAt?: string;
-  resolvedBy?: string;
-  /** Which surface resolved it — the primary-club portal, or a union-admin override. */
-  resolvedVia?: 'portal' | 'admin';
-  declineReason?: string;
-  /** TTL (epoch seconds): set on a terminal row so it self-expires after 90 days. */
-  expiresAt?: number;
-  version: number;
 }

@@ -63,6 +63,7 @@ import {
   makeTeamId,
   defaultTeamName,
   teamLetter,
+  isVeteransLeague,
 } from './leagues';
 import { isActivated, todayIso } from './competition/calendar';
 import { fixtureVenueCoords } from './competition/venues';
@@ -102,7 +103,9 @@ import {
   getVeteransAffiliates,
   setPlayerVeteransClub,
   removePlayerVeteransClub,
+  searchVeteransCandidates,
 } from './api';
+import type { VeteransRequestPublic, VeteransCandidate } from './types';
 import { qk, queryClient } from './query';
 import { DocPreviewModal } from './DocPreviewModal';
 import { RegLinkModal } from './RegLinkModal';
@@ -5260,6 +5263,13 @@ export function ClubPlayersView({
   onGenerateLink,
   onDeletePlayer,
   toast,
+  // Veterans squad-selection (ADR 0013): requests FROM other clubs asking to register one of
+  // this club's players for veterans cricket. Absent ⇒ the inbox/pills simply don't render, so
+  // a caller that doesn't wire them (e.g. a test) is unaffected.
+  veteransRequests,
+  onAcceptVeteransRequest,
+  onDeclineVeteransRequest,
+  busyVeteransId,
 }) {
   const [showLink, setShowLink] = useStateC(false);
   const [confirmDelete, setConfirmDelete] = useStateC(null); // the player pending confirmation
@@ -5298,6 +5308,18 @@ export function ClubPlayersView({
   // (this club is the destination) AND as pending rows already on this roster.
   const joining = (clearances?.outbound ?? []).filter((r) => r.status === 'pending');
   const joiningFrom = (nk) => joining.find((r) => r.playerNaturalKey === nk);
+
+  // Pending inbound veterans requests (this club is the player's primary club — it must act).
+  // The portal has NO naturalKey↔request link (the finder only ever exposes an opaque handle),
+  // so a request is matched to a roster row by the displayed player name. Homonyms are possible
+  // but harmless: the pill/banner is informational and the Accept still resolves by request id.
+  const pendingVetRequests: VeteransRequestPublic[] = (veteransRequests?.inbound ?? []).filter(
+    (r: VeteransRequestPublic) => r.status === 'pending',
+  );
+  const vetRequestByName = new Map<string, VeteransRequestPublic>(
+    pendingVetRequests.map((r) => [r.playerName, r]),
+  );
+  const vetRequestFor = (p) => vetRequestByName.get(`${p.firstName} ${p.lastName}`.trim());
 
   const allRounders = mine.filter((p) => p.isAllRounder).length;
   const wks = mine.filter((p) => p.isWk).length;
@@ -5420,6 +5442,15 @@ export function ClubPlayersView({
         <FilterResultCount shown={visible.length} total={mine.length} />
       )}
 
+      {pendingVetRequests.length > 0 && onAcceptVeteransRequest && (
+        <VeteransRequestsInbox
+          requests={pendingVetRequests}
+          onAccept={onAcceptVeteransRequest}
+          onDecline={onDeclineVeteransRequest}
+          busyId={busyVeteransId}
+        />
+      )}
+
       <div className="tbl-w" style={{ marginTop: 14 }}>
         <table className="tbl">
           <thead>
@@ -5456,6 +5487,13 @@ export function ClubPlayersView({
                   <td>
                     <div className="rost-name">
                       {p.firstName} {p.lastName}
+                      {vetRequestFor(p) && (
+                        <span style={{ marginLeft: 8 }}>
+                          <Pill tone="gold" dot>
+                            Veterans request
+                          </Pill>
+                        </span>
+                      )}
                     </div>
                     <div className="rost-sub">
                       {p.district || '—'} · {p.gender || '—'} · {p.nationality || '—'}
@@ -5552,6 +5590,19 @@ export function ClubPlayersView({
           clubId={club.id}
           clubName={club.name}
           teamLabel={selectedPlayer.team ? label(selectedPlayer.team) : ''}
+          // A pending inbound veterans request for this player surfaces the same Accept/Decline
+          // banner inside the modal, above the veterans-club editor. Matched by name (see the
+          // vetRequestFor note above) — absent when there's no pending request.
+          veteransRequest={
+            vetRequestFor(selectedPlayer) && onAcceptVeteransRequest
+              ? {
+                  request: vetRequestFor(selectedPlayer),
+                  onAccept: onAcceptVeteransRequest,
+                  onDecline: onDeclineVeteransRequest,
+                  busy: busyVeteransId === vetRequestFor(selectedPlayer).id,
+                }
+              : undefined
+          }
           // Chairs declare/remove a player's veterans second club from their own roster.
           veteransEdit={{
             clubs: vetClubs,
@@ -5957,6 +6008,411 @@ export function ClubClearancesView({
   );
 }
 
+/**
+ * The pending-inbound veterans requests a primary club must act on, shown above its roster (and
+ * reused inside PlayerDetailModal). Each is another club asking to register one of THIS club's
+ * players for veterans cricket; the primary club (the POPIA responsible party) confirms in one
+ * click. Decline reveals an inline optional reason. Accept writes the veterans affiliation — no
+ * roster row, no player-count change.
+ */
+export function VeteransRequestsInbox({
+  requests,
+  onAccept,
+  onDecline,
+  busyId,
+}: {
+  requests: VeteransRequestPublic[];
+  onAccept: (req: VeteransRequestPublic) => void | Promise<unknown>;
+  onDecline?: (req: VeteransRequestPublic, reason?: string) => void | Promise<unknown>;
+  busyId?: string | null;
+}) {
+  // Which request has its decline box open, and the reason typed into it.
+  const [decliningId, setDecliningId] = useStateC<string | null>(null);
+  const [reason, setReason] = useStateC('');
+  if (!requests.length) return null;
+  return (
+    <div style={{ marginTop: 14 }} className="clr-list">
+      {requests.map((req) => {
+        const busy = busyId === req.id;
+        const open = decliningId === req.id;
+        return (
+          <div key={req.id} className="clr-card incoming">
+            <div className="clr-card-head">
+              <div>
+                <div className="clr-eyebrow">Veterans squad request · Union may override</div>
+                <div className="clr-name">
+                  <strong>{req.veteransClubName}</strong> asks to register{' '}
+                  <strong>{req.playerName}</strong> for veterans cricket
+                </div>
+                {req.note && <div className="clr-note">"{req.note}"</div>}
+              </div>
+              <Pill tone="gold" dot>
+                Action needed
+              </Pill>
+            </div>
+            {open ? (
+              <div style={{ marginTop: 8 }}>
+                <textarea
+                  className="field-input"
+                  rows={2}
+                  placeholder="Reason (optional) — shared with the veterans club"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  style={{ width: '100%', fontSize: 13 }}
+                />
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <Btn
+                    tone="ink"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => onDecline?.(req, reason.trim() || undefined)}
+                  >
+                    {busy ? 'Declining…' : 'Confirm decline'}
+                  </Btn>
+                  <Btn
+                    tone="ghost"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => {
+                      setDecliningId(null);
+                      setReason('');
+                    }}
+                  >
+                    Cancel
+                  </Btn>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <Btn tone="teal" size="sm" disabled={busy} onClick={() => onAccept(req)}>
+                  {busy ? 'Accepting…' : 'Accept'}
+                </Btn>
+                {onDecline && (
+                  <Btn
+                    tone="outline"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => {
+                      setDecliningId(req.id);
+                      setReason('');
+                    }}
+                  >
+                    Decline
+                  </Btn>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * The veterans club's squad-selection workspace (ADR 0013). It FINDS a player tenant-wide and
+ * REQUESTS them; the player's primary club confirms. This club can never claim another club's
+ * player unilaterally — the request is a consent step, not a transfer. Reuses the read-only
+ * VeteransAffiliatesCard (this club's confirmed affiliates) at the foot.
+ */
+export function ClubVeteransSquadView({
+  club,
+  allLeagues,
+  requests,
+  onRequest,
+  onWithdraw,
+  toast: _toast,
+}: {
+  club: any;
+  allLeagues: any[];
+  requests: { inbound: VeteransRequestPublic[]; outbound: VeteransRequestPublic[] };
+  onRequest: (body: {
+    primaryClubId: string;
+    candidateId: string;
+    leagueKey?: string;
+  }) => void | Promise<unknown>;
+  onWithdraw: (req: VeteransRequestPublic) => void | Promise<unknown>;
+  toast?: (msg: string, tone?: string) => void;
+}) {
+  // This club's confirmed veterans affiliates — the same view-only list the Players page shows,
+  // fetched here too so the squad workspace is self-contained.
+  const affiliatesQuery = useQuery({
+    queryKey: qk.veteransAffiliates(club.id),
+    queryFn: () => getVeteransAffiliates(club.id),
+    enabled: !!club.id,
+  });
+  const affiliates = affiliatesQuery.data ?? [];
+  const [term, setTerm] = useStateC('');
+  const [debounced, setDebounced] = useStateC('');
+  // 300 ms debounce so a name typed key-by-key fires one search, not one per keystroke.
+  useEffectC(() => {
+    const h = setTimeout(() => setDebounced(term.trim()), 300);
+    return () => clearTimeout(h);
+  }, [term]);
+  const enabled = debounced.length >= 3;
+  const candidatesQuery = useQuery({
+    queryKey: qk.veteransCandidates(club.id, debounced),
+    queryFn: () => searchVeteransCandidates(club.id, debounced),
+    enabled,
+    // A 403 (not fixtured) / 400 (too short) is a definitive answer — never retry it.
+    retry: false,
+  });
+  // Local in-flight key (a candidateId for Request, a request id for Withdraw) so exactly one
+  // button shows its pending label. Handlers resolve even on error (withToast owns the toast).
+  const [busy, setBusy] = useStateC<string | null>(null);
+  async function run(key: string, fn: () => void | Promise<unknown>) {
+    setBusy(key);
+    try {
+      await fn();
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Optional league select: only when this club plays ≥2 veterans leagues (else the request
+  // carries no leagueKey and the server infers nothing).
+  const vetLeagues = (club.leagues ?? [])
+    .map((k: string) => findByKey(allLeagues, k))
+    .filter((l: any) => l && isVeteransLeague(l));
+  const [leagueKey, setLeagueKey] = useStateC('');
+
+  const outbound = requests?.outbound ?? [];
+  const outboundPending = outbound.filter((r) => r.status === 'pending');
+  const outboundResolved = outbound.filter((r) => r.status !== 'pending');
+  // A pending outbound request for a candidate ⇒ show a "Requested" pill instead of the button.
+  const requestedIds = new Set(outboundPending.map((r) => r.candidateId));
+
+  const forbidden = (candidatesQuery.error as { status?: number } | null)?.status === 403;
+  const candidates: VeteransCandidate[] = candidatesQuery.data?.candidates ?? [];
+  const truncated = candidatesQuery.data?.truncated ?? false;
+
+  return (
+    <div>
+      <div className="page-head">
+        <div className="ph-left">
+          <div className="ph-crumb">Club Portal · {club.name} / Veterans squad</div>
+          <h1 className="ph-title">
+            Veterans <em>Squad Selection</em>
+          </h1>
+          <p className="ph-desc">
+            Find a player from any club and ask their club to register them for {club.name}'s
+            veterans cricket. The player's own club confirms — nobody is added to your squad without
+            their club's consent.
+          </p>
+        </div>
+      </div>
+
+      <Card title="Find a player" sub="Search by name across every club in the union.">
+        {vetLeagues.length >= 2 && (
+          <div style={{ marginBottom: 10, maxWidth: 320 }}>
+            <label className="field-label">Veterans league</label>
+            <select
+              className="field-select"
+              value={leagueKey}
+              onChange={(e) => setLeagueKey(e.target.value)}
+              style={{ width: '100%' }}
+            >
+              <option value="">— Any / unspecified —</option>
+              {vetLeagues.map((l: any) => (
+                <option key={l.key} value={l.key}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        <input
+          className="field-input"
+          placeholder="Find a player"
+          aria-label="Find a player"
+          value={term}
+          onChange={(e) => setTerm(e.target.value)}
+          style={{ width: '100%', fontSize: 14 }}
+        />
+        {term.trim().length > 0 && term.trim().length < 3 && (
+          <div className="rost-sub" style={{ marginTop: 6 }}>
+            Type at least 3 characters to search.
+          </div>
+        )}
+
+        {forbidden ? (
+          <div
+            style={{
+              marginTop: 12,
+              padding: '10px 12px',
+              borderRadius: 8,
+              background: 'var(--wash, rgba(10,15,20,0.04))',
+              color: 'var(--muted)',
+              fontSize: 13,
+            }}
+          >
+            Your club isn't fixtured in a veterans league yet. Once the union enters {club.name}{' '}
+            into a released veterans series, you'll be able to search for players here.
+          </div>
+        ) : (
+          enabled && (
+            <div className="tbl-w" style={{ marginTop: 12 }}>
+              <table className="tbl">
+                <tbody>
+                  {candidatesQuery.isLoading && (
+                    <tr>
+                      <td style={{ padding: 20, textAlign: 'center', color: 'var(--muted)' }}>
+                        Searching…
+                      </td>
+                    </tr>
+                  )}
+                  {!candidatesQuery.isLoading &&
+                    candidates.map((cand) => {
+                      const requested = requestedIds.has(cand.candidateId);
+                      return (
+                        <tr key={cand.candidateId}>
+                          <td>
+                            <div className="rost-name">{cand.playerName}</div>
+                            <div className="rost-sub">{cand.primaryClubName}</div>
+                          </td>
+                          <td style={{ textAlign: 'right', paddingRight: 14 }}>
+                            {requested ? (
+                              <Pill tone="gold" dot>
+                                Requested
+                              </Pill>
+                            ) : (
+                              <Btn
+                                tone="teal"
+                                size="sm"
+                                disabled={busy === cand.candidateId}
+                                onClick={() =>
+                                  run(cand.candidateId, () =>
+                                    onRequest({
+                                      primaryClubId: cand.primaryClubId,
+                                      candidateId: cand.candidateId,
+                                      ...(leagueKey ? { leagueKey } : {}),
+                                    }),
+                                  )
+                                }
+                              >
+                                {busy === cand.candidateId ? 'Requesting…' : 'Request'}
+                              </Btn>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  {!candidatesQuery.isLoading && candidates.length === 0 && (
+                    <tr>
+                      <td
+                        style={{
+                          padding: 24,
+                          textAlign: 'center',
+                          color: 'var(--muted)',
+                          fontSize: 13,
+                        }}
+                      >
+                        No players match. The search hides players who already play veterans
+                        cricket, players already entered in a veterans league, and your own members
+                        — set those on your roster.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+              {truncated && (
+                <div className="rost-sub" style={{ marginTop: 8 }}>
+                  Showing first 20 — refine your search.
+                </div>
+              )}
+            </div>
+          )
+        )}
+      </Card>
+
+      {outboundPending.length > 0 && (
+        <Card title="Pending requests" sub="Awaiting confirmation from the player's club.">
+          <div className="tbl-w">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Player</th>
+                  <th>Primary club</th>
+                  <th>Requested</th>
+                  <th style={{ width: 120 }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {outboundPending.map((req) => (
+                  <tr key={req.id}>
+                    <td>
+                      <div className="rost-name">{req.playerName}</div>
+                    </td>
+                    <td>
+                      <span style={{ fontSize: 12.5 }}>{req.primaryClubName}</span>
+                    </td>
+                    <td>
+                      <span className="rost-sub">{fmtDay(req.requestedAt)}</span>
+                    </td>
+                    <td style={{ textAlign: 'right', paddingRight: 14 }}>
+                      <Btn
+                        tone="ghost"
+                        size="sm"
+                        disabled={busy === req.id}
+                        onClick={() => run(req.id, () => onWithdraw(req))}
+                      >
+                        {busy === req.id ? 'Withdrawing…' : 'Withdraw'}
+                      </Btn>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {outboundResolved.length > 0 && (
+        <Card title="Recent outcomes" sub="Requests the player's club has resolved.">
+          <div className="tbl-w">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Player</th>
+                  <th>Primary club</th>
+                  <th>Outcome</th>
+                </tr>
+              </thead>
+              <tbody>
+                {outboundResolved.map((req) => (
+                  <tr key={req.id}>
+                    <td>
+                      <div className="rost-name">{req.playerName}</div>
+                    </td>
+                    <td>
+                      <span style={{ fontSize: 12.5 }}>{req.primaryClubName}</span>
+                    </td>
+                    <td>
+                      {req.status === 'accepted' ? (
+                        <Pill tone="teal" dot>
+                          Accepted
+                        </Pill>
+                      ) : req.status === 'declined' ? (
+                        <Pill tone="coral" dot>
+                          Declined{req.declineReason ? ` — "${req.declineReason}"` : ''}
+                        </Pill>
+                      ) : (
+                        <Pill tone="muted">Withdrawn</Pill>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      <VeteransAffiliatesCard affiliates={affiliates} loading={affiliatesQuery.isLoading} />
+    </div>
+  );
+}
+
 Object.assign(window, {
   ClubHome,
   AffiliationForm,
@@ -5966,4 +6422,5 @@ Object.assign(window, {
   ClubPlayersView,
   RequestPlayerForm,
   ClubClearancesView,
+  ClubVeteransSquadView,
 });
