@@ -3284,6 +3284,7 @@ async function runImport(args: Args) {
         confirm: false,
         only: builtIds,
         includeDrafts: true,
+        series: built.map((b) => b.series),
       });
     }
     return;
@@ -3617,8 +3618,22 @@ async function runRelease(args: Args) {
   console.log(
     `\n${built.length} series to write${args.only.length ? ` (--only ${args.only.join(',')})` : ''}.`,
   );
+  const builtIds = built.map((b) => String(b.series.id));
   if (!args.confirm) {
     console.log('[dry-run] nothing written. Re-run with --confirm to import.');
+    if (!args.noClubSync) {
+      // Preview the club-league sync too (parity with runImport), so the plan shows which
+      // clubs would gain the released leagues. Pass the in-memory built series so a first-time
+      // import previews club patches even though the fresh ids aren't in the table yet.
+      console.log('\n── Club league sync (dry-run preview):');
+      const { syncClubLeaguesFromSeries } = await import('./sync-club-leagues-from-series.js');
+      await syncClubLeaguesFromSeries(TENANT, {
+        confirm: false,
+        only: builtIds,
+        includeDrafts: true,
+        series: built.map((b) => b.series),
+      });
+    }
     return;
   }
 
@@ -3645,6 +3660,18 @@ async function runRelease(args: Args) {
     console.log(
       `wrote ${s.id}  v${s.version}${existing ? ' (overwrote, lifecycle preserved)' : ''}${withheldNote}`,
     );
+  }
+  if (!args.noClubSync) {
+    // Patch each participating club's `leagues` from the series just written (parity with
+    // runImport), so Season Insights counts them. includeDrafts because a brand-new series
+    // is still a draft; the rows are now in the table, so no in-memory series override.
+    console.log('\n── Club league sync (patching club.leagues from the released series):');
+    const { syncClubLeaguesFromSeries } = await import('./sync-club-leagues-from-series.js');
+    await syncClubLeaguesFromSeries(TENANT, {
+      confirm: true,
+      only: builtIds,
+      includeDrafts: true,
+    });
   }
   console.log(
     `Done. Backup: ${backupPath}. New/overwritten series preserve lifecycle; brand-new ones are DRAFTS — approve and release from the admin console.`,

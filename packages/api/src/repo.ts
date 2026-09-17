@@ -1520,6 +1520,14 @@ export class VeteransRequestConflictError extends Error {
   }
 }
 
+/** Raised when the canonical veterans request row cannot be found (→ 404). */
+export class VeteransRequestNotFoundError extends Error {
+  constructor(message = 'veterans request not found') {
+    super(message);
+    this.name = 'VeteransRequestNotFoundError';
+  }
+}
+
 /**
  * The canonical (primary club) + mirror (veterans club) put items for a request. The MIRROR is
  * stripped of `playerNaturalKey`: it lives in the veterans-club partition, and that club must
@@ -1668,7 +1676,7 @@ export async function resolveVeteransRequest(
   },
 ): Promise<VeteransRequest> {
   const current = await getVeteransRequest(tenant, primaryClubId, id);
-  if (!current) throw new Error('veterans request not found');
+  if (!current) throw new VeteransRequestNotFoundError();
   const expectedVersion = opts.expectedVersion ?? current.version ?? 0;
   const expiresAt = veteransExpiresAt(opts.at);
   const setParts = [
@@ -1706,13 +1714,16 @@ export async function resolveVeteransRequest(
       }),
     );
     const updated = stripKeys<VeteransRequest>(res.Attributes)!;
-    // Mirror: same terminal fields, no OCC (the canonical is the gate). Best-effort.
+    // Mirror: same terminal fields, no OCC (the canonical is the gate). Best-effort. The
+    // `attribute_exists(sk)` guard means a missing mirror is never upserted as a phantom row —
+    // a ConditionalCheckFailedException just logs the best-effort miss, same as any other drift.
     try {
       await ddb.send(
         new UpdateCommand({
           TableName: TABLE,
           Key: outboundVeteransRequestKey(tenant, updated.veteransClubId, id),
           UpdateExpression: updateExpression,
+          ConditionExpression: 'attribute_exists(sk)',
           ExpressionAttributeNames: { '#st': 'status' },
           ExpressionAttributeValues: setValues,
         }),
@@ -1744,7 +1755,7 @@ export async function acceptVeteransRequest(
   opts: { at: string; by: string; via: 'portal' | 'admin'; expectedVersion?: number },
 ): Promise<{ request: VeteransRequest; player: PlayerRegistration }> {
   const current = await getVeteransRequest(tenant, primaryClubId, id);
-  if (!current) throw new Error('veterans request not found');
+  if (!current) throw new VeteransRequestNotFoundError();
   if (current.status !== 'pending') {
     throw new VeteransRequestConflictError('veterans request already resolved');
   }
@@ -1782,8 +1793,10 @@ export async function acceptVeteransRequest(
   // TOCTOU: the affiliation is written ABOVE, before resolveVeteransRequest's OCC guard
   // (version = :v AND status = pending). A decline/withdraw landing in between fails the guard —
   // and without compensation a live VETAFFIL# would linger on a request that never accepted while
-  // the caller still gets a 409. On conflict, re-read the canonical: if it is no longer pending
-  // and WE wrote the affiliation, undo it, then rethrow the original conflict unchanged.
+  // the caller still gets a 409. On conflict, re-read the canonical: if WE wrote the affiliation
+  // and the request ended up declined/withdrawn (or vanished), undo it. Critically, if a RACING
+  // accept won (canonical is now `accepted`), that winner's affiliation is exactly the one we would
+  // otherwise clear — so leave it and just rethrow the conflict unchanged.
   let request: VeteransRequest;
   try {
     request = await resolveVeteransRequest(tenant, primaryClubId, id, {
@@ -1799,7 +1812,7 @@ export async function acceptVeteransRequest(
       (err instanceof VersionConflictError || err instanceof VeteransRequestConflictError)
     ) {
       const latest = await getVeteransRequest(tenant, primaryClubId, id);
-      if (!latest || latest.status !== 'pending') {
+      if (!latest || latest.status === 'declined' || latest.status === 'withdrawn') {
         await setPlayerVeteransClub(tenant, primaryClubId, current.playerNaturalKey, null, source);
       }
     }

@@ -2,8 +2,9 @@
 
 **Owner:** runs in the **medicoach AWS account** (`af-south-1`), against the prod
 DynamoDB table. **App code change:** none required — this is a data step. The Plan B
-fixture importer now runs this automatically after `--confirm` (see
-`docs/runbooks/planb-fixtures-import.md`), so this standalone runbook is for the
+fixture importer now runs this automatically after `--confirm` in **both** its modes —
+import (two-workbook) and release (`--release`) — see
+`docs/runbooks/planb-fixtures-import.md`, so this standalone runbook is for the
 one-time catch-up on series that were imported **before** the hook existed.
 
 **Why:** the Plan B importer writes **Series** rows only — it never patched the clubs.

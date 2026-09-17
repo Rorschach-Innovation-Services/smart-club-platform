@@ -605,13 +605,16 @@ undeterminable: N` line. The 4 superseded `DELETE_SLUGS` series are excluded fro
   unresolved clash (fail-closed as usual). West's "Mpumalanga Township Cricket Stadium"
   is currently unused by any fixture (West is re-based to Lahee Park) — nothing to do
   until the union confirms its availability.
-- **Club league sync.** After the `--confirm` write loop the importer runs
+- **Club league sync.** After the `--confirm` write loop **both** import mode (two-workbook)
+  **and** release mode (`--release`) run
   `syncClubLeaguesFromSeries(dolphins, { only: <written ids>, includeDrafts: true })`
   automatically, so each participating club's `leagues` (and, for a multi-side club, its
-  `leagueTeams` / `teamRosters`) gains the leagues just imported — otherwise Season
+  `leagueTeams` / `teamRosters`) gains the leagues just imported/released — otherwise Season
   Insights, which counts `club.leagues`, would show those leagues as "0 clubs / 0 teams"
-  even though the fixtures exist. A dry run prints the same sync as a preview under
-  `── Club league sync (dry-run preview)`. The sync is merge-only, spreads sibling league
+  even though the fixtures exist. A dry run (either mode) prints the same sync as a preview
+  under `── Club league sync (dry-run preview)`, fed the **in-memory built series** so a
+  first-time import previews club patches before the fresh ids are written. The sync is
+  merge-only, spreads sibling league
   data (never wipes it), skips a club whose stored roster ids differ from the series
   (CONFLICT), and is idempotent. Pass `--no-club-sync` to skip it (then run the standalone
   `docs/runbooks/sync-club-leagues-from-series.md` later). Note: a club crossing from one

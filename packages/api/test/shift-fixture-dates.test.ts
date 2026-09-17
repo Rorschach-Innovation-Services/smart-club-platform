@@ -214,4 +214,70 @@ describe('planDateShift — no matching from-date is a no-op', () => {
     assert.equal(plan.moves.length, 0);
     assert.equal(plan.byRound.length, 0);
   });
+
+  test('a single-date-per-round series carries no warnings', () => {
+    const plan = planDateShift(gapSeries(), {
+      fromDates: ['2026-11-07'],
+      toDates: ['2026-11-21'],
+      cascade: 'slot',
+    });
+    assert.deepEqual(plan.warnings, []);
+  });
+});
+
+describe('planDateShift — a round that spans more than one date warns and slots each date', () => {
+  // R1 is played across TWO dates (11-07 and 11-08 — a Sat/Sun split); R2 and R3 are single.
+  const splitSeries: Series = {
+    id: 's-split',
+    name: 'Split Round Series',
+    startDate: '2026-11-07',
+    teams: [],
+    fixtures: [
+      { id: 'f1a', round: 1, date: '2026-11-07', time: '10:00' },
+      { id: 'f1b', round: 1, date: '2026-11-08', time: '10:00' },
+      { id: 'f2', round: 2, date: '2026-11-14', time: '10:00' },
+      { id: 'f3', round: 3, date: '2026-11-21', time: '10:00' },
+    ],
+    released: true,
+    releasedAt: '2026-10-01',
+    version: 1,
+  } as unknown as Series;
+
+  test('warns, naming the round and each of its playing dates', () => {
+    const plan = planDateShift(splitSeries, {
+      fromDates: ['2026-11-07'],
+      toDates: ['2026-11-28'],
+      cascade: 'none',
+    });
+    assert.equal(plan.warnings.length, 1);
+    assert.match(plan.warnings[0], /round 1 spans 2 playing dates/);
+    assert.match(plan.warnings[0], /2026-11-07, 2026-11-08/);
+  });
+
+  test('moves ONLY the from-dated slot of the split round — its other date is untouched', () => {
+    const { moves } = computeShift(splitSeries, {
+      fromDates: ['2026-11-07'],
+      toDates: ['2026-11-28'],
+      cascade: 'none',
+    });
+    const byFixture = new Map(moves.map((m) => [m.fixtureId, m.to]));
+    assert.equal(byFixture.get('f1a'), '2026-11-28'); // the 11-07 slot moved
+    assert.equal(byFixture.has('f1b'), false); // the 11-08 slot stayed put
+  });
+
+  test("the weeks cascade treats the split round's two dates independently", () => {
+    // Move the 11-08 slot to 11-15; every non-moved date ≥ that target shifts +7. R1's OTHER
+    // slot (11-07) is before the target and stays put — the two dates of one round are handled
+    // independently. Only 11-21 (≥ target) slides; 11-14 is earlier and is untouched.
+    const { next } = computeShift(splitSeries, {
+      fromDates: ['2026-11-08'],
+      toDates: ['2026-11-15'],
+      cascade: 'weeks',
+    });
+    const byId = new Map((next.fixtures as Fx[]).map((f) => [f.id, f.date]));
+    assert.equal(byId.get('f1a'), '2026-11-07'); // R1's other slot, before the target → untouched
+    assert.equal(byId.get('f1b'), '2026-11-15'); // the moved slot
+    assert.equal(byId.get('f2'), '2026-11-14'); // before the target → untouched
+    assert.equal(byId.get('f3'), '2026-11-28'); // 11-21 + 7
+  });
 });

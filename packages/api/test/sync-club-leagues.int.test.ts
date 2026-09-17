@@ -332,4 +332,44 @@ describe('syncClubLeaguesFromSeries', () => {
     assert.equal(r.patched, 0);
     assert.deepEqual(await leaguesOf('golf'), []);
   });
+
+  // The importer's release/first-time preview passes the in-memory built series (their fresh
+  // ids aren't in the table yet). This asserts that override patches clubs, and that a
+  // roster/count-only change names what changed in the summary rather than printing `+[none]`.
+  test('an in-memory `series` override patches clubs whose ids are not stored, and the summary names roster/count changes', async () => {
+    await repo.createClub(
+      TENANT,
+      club({
+        id: 'hotel',
+        leagues: ['veterans-promotion'], // key already present, but no stored roster
+        leagueTeams: {},
+        teamRosters: {},
+      }),
+    );
+    const inMem = series('s-inmem-release', 'veterans-promotion', true, [
+      participant('tm_hotel_veterans-promotion_0', 'hotel', 'Hotel A'),
+      participant('tm_hotel_veterans-promotion_1', 'hotel', 'Hotel B'),
+    ]);
+    const logs: string[] = [];
+    const r = await syncClubLeaguesFromSeries(TENANT, {
+      confirm: true,
+      includeDrafts: true,
+      series: [inMem], // NOT written to the table — proves the override drives the pass
+      only: ['s-inmem-release'],
+      log: (l) => logs.push(l),
+    });
+    assert.equal(r.patched, 1);
+    // The roster + count were written from the in-memory series (2 sides), key already present.
+    assert.equal((await leagueTeamsOf('hotel'))['veterans-promotion'], 2);
+    assert.deepEqual(
+      (await rostersOf('hotel'))['veterans-promotion'].map((t) => t.id),
+      ['tm_hotel_veterans-promotion_0', 'tm_hotel_veterans-promotion_1'],
+    );
+    // Summary reflects the actual change (a roster write + a count bump), never `+[none]`.
+    const summary = logs.find((l) => l.includes('hotel'));
+    assert.ok(summary, 'a summary line for hotel');
+    assert.ok(!summary!.includes('+[none]'), 'summary must not print +[none]');
+    assert.match(summary!, /rosters: veterans-promotion\(2\)/);
+    assert.match(summary!, /count: veterans-promotion 1→2/);
+  });
 });
