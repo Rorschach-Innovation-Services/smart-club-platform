@@ -159,7 +159,7 @@ export function computeShift(series: Series, opts: ShiftOpts): ComputedShift {
 
   // Moved targets (each from-date's fixtures move to its paired to-date) and the non-moved
   // distinct playing dates — the slots the cascade may push.
-  const movedTargets = opts.fromDates.filter((d) => fromSet.has(d) && allDates.includes(d));
+  const movedTargets = opts.fromDates.filter((d) => allDates.includes(d));
   const targets = movedTargets.map((d) => pm.get(d)!);
   const nonMovedDates = allDates.filter((d) => !fromSet.has(d));
 
@@ -187,6 +187,8 @@ export function computeShift(series: Series, opts: ShiftOpts): ComputedShift {
 
   // Apply per fixture BY DATE: a from-date fixture takes its paired target; otherwise a
   // non-moved date with a cascade decision takes that; everything else is untouched.
+  // Keyed on date, not round, so a fixture with a date but no `round` (a hand-added
+  // one-off) still moves with the playing day it sits on.
   const moves: FixtureMove[] = [];
   const nextFixtures = fixtures.map((f) => {
     let nd = f.date;
