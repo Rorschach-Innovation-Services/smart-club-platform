@@ -5499,10 +5499,9 @@ export function ClubLeaguesEditor({ club, allLeagues, onSave }) {
                       marginBottom: 6,
                     }}
                   >
-                    {district} ·{' '}
-                    {Object.entries(groups)
-                      .map(([g, ls]) => `${g}: ${ls.map((l) => l.label).join(', ')}`)
-                      .join(' · ')}
+                    {/* District + its group names only — the chips below already list
+                        every league, so repeating the labels here just doubled the text. */}
+                    {[district, ...Object.keys(groups)].join(' · ')}
                   </div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                     {Object.values(groups)
