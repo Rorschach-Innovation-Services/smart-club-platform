@@ -19,6 +19,7 @@
     "normalise-venue-names": "tsx src/normalise-venue-names.ts",
     "resolve-venue-clashes": "tsx src/resolve-venue-clashes.ts",
     "recall-release": "tsx src/recall-fixture-release.ts",
+    "shift-fixture-dates": "tsx src/shift-fixture-dates.ts",
     "bootstrap-admin": "tsx src/bootstrap-admin.ts",
     "bootstrap-operator": "tsx src/bootstrap-operator.ts",
     "request-cert": "tsx src/request-cert.ts",
