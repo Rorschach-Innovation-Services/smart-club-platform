@@ -8645,6 +8645,284 @@ export function AdminRegistrationReviews({ reviews, onAck, busyId }) {
   );
 }
 
+/* ─── AdminVeteransRequests — union oversight of veterans squad selection (ADR 0013) ─── */
+
+// The status → pill tone map, shared by the filter counts and the row pill.
+const VET_REQ_TONE = {
+  pending: 'gold',
+  accepted: 'teal',
+  declined: 'coral',
+  withdrawn: 'muted',
+};
+
+/**
+ * VetDeclineModal — a decline needs an OPTIONAL reason, so ConfirmModal (no input) will not do.
+ * The reason is passed straight to the admin override route (`{ reason }`) and emailed to the
+ * veterans club; leaving it blank declines without one.
+ */
+function VetDeclineModal({ playerName, onConfirm, onClose, busy }) {
+  const [reason, setReason] = useStateA('');
+  return createPortal(
+    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="task-modal narrow" style={{ maxWidth: 440 }}>
+        <div className="task-modal-head">
+          <div className="task-modal-head-text">
+            <div className="task-modal-head-title">Decline this request?</div>
+          </div>
+          <button className="task-modal-close" onClick={onClose} title="Close">
+            <Icon.X />
+          </button>
+        </div>
+        <div className="task-modal-body">
+          <p style={{ fontSize: 13.5, color: 'var(--ink)', lineHeight: 1.55, margin: 0 }}>
+            Decline the veterans-cricket request for <strong>{playerName}</strong> on the club's
+            behalf. The veterans club is emailed the outcome.
+          </p>
+          <label
+            style={{
+              display: 'block',
+              marginTop: 14,
+              fontSize: 12,
+              color: 'var(--muted)',
+              fontFamily: "'Montserrat',sans-serif",
+            }}
+          >
+            Reason (optional)
+            <textarea
+              className="input"
+              rows={3}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Shared with the veterans club"
+              style={{ marginTop: 6, width: '100%', resize: 'vertical' }}
+            />
+          </label>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 18 }}>
+            <Btn tone="outline" size="sm" onClick={onClose} disabled={busy}>
+              Cancel
+            </Btn>
+            <Btn tone="coral" size="sm" onClick={() => onConfirm(reason.trim())} disabled={busy}>
+              {busy ? 'Declining…' : 'Decline request'}
+            </Btn>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/**
+ * The union office's oversight of veterans squad-selection requests (ADR 0013). Requests are
+ * normally resolved by the player's primary club in its portal; the union may accept or decline
+ * as an OVERRIDE here (recorded as `resolvedVia: 'admin'`). Accept re-validates against the live
+ * player row server-side and writes the `VETAFFIL#` affiliation — no roster/playerCount change.
+ * The action handlers resolve to a tri-state ('ok' | 'conflict' | 'failed'); the confirm dialog
+ * closes unless the outcome is 'failed', matching the clearance-override flow.
+ */
+export function AdminVeteransRequests({ requests, leagues, onAccept, onDecline, busyId, busyAction }) {
+  const [filter, setFilter] = useStateA('pending');
+  // { kind: 'accept' | 'decline', req } while a confirm dialog is open.
+  const [confirmFor, setConfirmFor] = useStateA(null);
+  const fmtDay = (iso) => (iso ? formatStampDay(iso) : '');
+  const leagueLabel = labelByKey(leagues ?? []);
+
+  // The gsi1 list arrives requestedAt-ascending; show newest first.
+  const all = [...(requests ?? [])].sort((a, b) =>
+    (b.requestedAt || '').localeCompare(a.requestedAt || ''),
+  );
+  const countOf = (s) => all.filter((r) => r.status === s).length;
+  const pending = countOf('pending');
+  const list = filter === 'all' ? all : all.filter((r) => r.status === filter);
+
+  function runAction(promise) {
+    // Close the dialog unless the handler reports a transient 'failed' (parity with the
+    // clearance override): a 409 already refetched the list, so a retry would loop.
+    return Promise.resolve(promise).then((r) => {
+      if (r !== 'failed') setConfirmFor(null);
+      return r;
+    });
+  }
+
+  const confirmBusy = confirmFor && busyId === confirmFor.req.id;
+
+  return (
+    <div>
+      <div className="page-head">
+        <div className="ph-left">
+          <div className="ph-crumb">Admin Console / Veterans Requests</div>
+          <h1 className="ph-title">
+            Veterans <em>Requests</em>
+          </h1>
+          <p className="ph-desc">
+            A veterans club found a player tenant-wide and asked that player's own club to confirm
+            them for veterans cricket. Clubs normally resolve these in their portal; accept or
+            decline here only as a union override. Accept records the second-club affiliation — it
+            never moves the player or changes any roster count.
+          </p>
+        </div>
+      </div>
+
+      <div className="players-stats">
+        <div className="players-stat">
+          <div className="players-stat-l">All requests</div>
+          <div className="players-stat-n">{all.length}</div>
+        </div>
+        <div className="players-stat">
+          <div className="players-stat-l">Pending</div>
+          <div className="players-stat-n" style={{ color: 'var(--gold)' }}>
+            {pending}
+          </div>
+        </div>
+        <div className="players-stat">
+          <div className="players-stat-l">Accepted</div>
+          <div className="players-stat-n">{countOf('accepted')}</div>
+        </div>
+      </div>
+
+      <div className="filter-row" style={{ marginTop: 14 }}>
+        {[
+          { k: 'pending', l: 'Pending', n: pending },
+          { k: 'accepted', l: 'Accepted', n: countOf('accepted') },
+          { k: 'declined', l: 'Declined', n: countOf('declined') },
+          { k: 'withdrawn', l: 'Withdrawn', n: countOf('withdrawn') },
+          { k: 'all', l: 'All', n: all.length },
+        ].map((b) => (
+          <button
+            key={b.k}
+            className={`filter-pill ${filter === b.k ? 'active' : ''}`}
+            onClick={() => setFilter(b.k)}
+          >
+            {b.l} <span style={{ opacity: 0.7, marginLeft: 4 }}>{b.n}</span>
+          </button>
+        ))}
+      </div>
+
+      {list.length === 0 ? (
+        <div
+          style={{
+            marginTop: 14,
+            padding: '40px 16px',
+            textAlign: 'center',
+            color: 'var(--muted)',
+            fontSize: 13,
+            background: 'var(--white)',
+            border: '1px solid var(--line)',
+            borderRadius: 'var(--radius-lg)',
+          }}
+        >
+          No veterans requests match this filter.
+        </div>
+      ) : (
+        <div className="tbl-w" style={{ marginTop: 14 }}>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Player</th>
+                <th>Primary club → Veterans club</th>
+                <th>League</th>
+                <th>Requested</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((r) => {
+                const busy = busyId === r.id;
+                const isPending = r.status === 'pending';
+                return (
+                  <tr key={r.id}>
+                    <td>
+                      <div className="rost-name">{r.playerName}</div>
+                      {r.note ? <div className="rost-sub">“{r.note}”</div> : null}
+                    </td>
+                    <td>
+                      <div style={{ fontSize: 12.5 }}>
+                        {r.primaryClubName} <span style={{ color: 'var(--muted)' }}>→</span>{' '}
+                        {r.veteransClubName}
+                      </div>
+                    </td>
+                    <td>
+                      {r.leagueKey ? (
+                        <Pill tone="navy">{leagueLabel[r.leagueKey] || r.leagueKey}</Pill>
+                      ) : (
+                        <span className="rost-sub">—</span>
+                      )}
+                    </td>
+                    <td>
+                      <div style={{ fontSize: 12.5 }}>{fmtDay(r.requestedAt)}</div>
+                      {r.requestedBy ? <div className="rost-sub">{r.requestedBy}</div> : null}
+                    </td>
+                    <td>
+                      <Pill tone={VET_REQ_TONE[r.status] || 'muted'} dot>
+                        {r.status[0].toUpperCase() + r.status.slice(1)}
+                      </Pill>
+                      {!isPending && r.resolvedVia === 'admin' ? (
+                        <div className="rost-sub">Union override</div>
+                      ) : null}
+                    </td>
+                    <td>
+                      {isPending ? (
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <Btn
+                            tone="teal"
+                            size="sm"
+                            disabled={busy}
+                            onClick={() => setConfirmFor({ kind: 'accept', req: r })}
+                          >
+                            {busy && busyAction === 'accept' ? 'Accepting…' : 'Accept'}
+                          </Btn>
+                          <Btn
+                            tone="outline"
+                            size="sm"
+                            disabled={busy}
+                            onClick={() => setConfirmFor({ kind: 'decline', req: r })}
+                          >
+                            {busy && busyAction === 'decline' ? 'Declining…' : 'Decline'}
+                          </Btn>
+                        </div>
+                      ) : (
+                        <div className="rost-sub">
+                          {r.resolvedBy ? r.resolvedBy : '—'}
+                          {r.resolvedAt ? ` · ${fmtDay(r.resolvedAt)}` : ''}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {confirmFor?.kind === 'accept' && (
+        <ConfirmModal
+          title="Accept on the club's behalf?"
+          body={`Confirm ${confirmFor.req.playerName} for veterans cricket at ${confirmFor.req.veteransClubName}, overriding the primary club (${confirmFor.req.primaryClubName}). This records the affiliation and emails both chairs.`}
+          confirmLabel="Accept request"
+          onConfirm={() =>
+            runAction(
+              onAccept?.(confirmFor.req) ?? Promise.resolve('ok'),
+            )
+          }
+          onClose={() => (confirmBusy ? undefined : setConfirmFor(null))}
+        />
+      )}
+      {confirmFor?.kind === 'decline' && (
+        <VetDeclineModal
+          playerName={confirmFor.req.playerName}
+          busy={!!confirmBusy}
+          onConfirm={(reason) =>
+            runAction(onDecline?.(confirmFor.req, reason) ?? Promise.resolve('ok'))
+          }
+          onClose={() => (confirmBusy ? undefined : setConfirmFor(null))}
+        />
+      )}
+    </div>
+  );
+}
+
 /* ─── AdminPlayersView — cross-club player register, fanned out over every club ─── */
 
 // Derive a single human-readable role label, mirroring the club-side roster.

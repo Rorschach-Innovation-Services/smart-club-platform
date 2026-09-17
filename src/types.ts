@@ -1406,3 +1406,43 @@ export interface PlatformDocViewUrlResponse {
   objectKey?: string;
   size?: number;
 }
+
+/** Lifecycle of a veterans squad-selection request (ADR 0013). Mirrors the API's
+ *  `VeteransRequestStatus`; kept here so the admin/club UIs can type their views. */
+export type VeteransRequestStatus = 'pending' | 'accepted' | 'declined' | 'withdrawn';
+
+/**
+ * A veterans squad-selection request as the API returns it (ADR 0013) — the stored row WITHOUT
+ * the PII `playerNaturalKey`, which never leaves the server. A veterans club has found a player
+ * tenant-wide and asked the player's PRIMARY club (the POPIA responsible party) to confirm the
+ * affiliation; the union admin may accept/decline as an override (`resolvedVia: 'admin'`).
+ * The definition is intentionally identical to the API's `VeteransRequestPublic` and to the
+ * copy the club-portal code carries, so the two merge cleanly.
+ */
+export interface VeteransRequestPublic {
+  id: string;
+  /** Opaque HMAC handle the finder returned; the only player identifier that crosses the wire. */
+  candidateId: string;
+  playerName: string;
+  /** The player's OWN club — who confirms the request. */
+  primaryClubId: string;
+  primaryClubName: string;
+  /** The veterans club that made the request. */
+  veteransClubId: string;
+  veteransClubName: string;
+  /** Veterans league the request targets, when the veterans club plays more than one. */
+  leagueKey?: string;
+  note?: string;
+  requestedAt: string;
+  /** Email of the veterans-club rep (or admin) who made the request. */
+  requestedBy?: string;
+  status: VeteransRequestStatus;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  /** Which surface resolved it — the primary-club portal, or a union-admin override. */
+  resolvedVia?: 'portal' | 'admin';
+  declineReason?: string;
+  /** TTL (epoch seconds): set on a terminal row so it self-expires after 90 days. */
+  expiresAt?: number;
+  version: number;
+}
