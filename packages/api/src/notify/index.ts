@@ -14,6 +14,8 @@ import {
   sendClearanceResolvedEmail,
   sendClearanceReopenedSourceEmail,
   sendClearanceReopenedDestEmail,
+  sendVeteransRequestEmail,
+  sendVeteransRequestResolvedEmail,
 } from './email.js';
 import type { TutorialLink, RegLinkOrgCopy } from './email.js';
 import {
@@ -614,4 +616,88 @@ export async function sendClubFixtures(args: {
   }
   const results = await runPool(thunks, SEND_CONCURRENCY);
   return { results };
+}
+
+// ───────────────────── Veterans squad-selection requests (ADR 0013) ─────────────────────
+//
+// Email only, by design: this is a low-volume, admin-adjacent flow and the resolved email carries
+// the reason inside the union's own channel (same reasoning as the clearance-resolved notice —
+// no WhatsApp template, no billed Meta conversation per request). Each function is called once per
+// recipient chair by the caller, who owns the comm-log append. Non-throwing: a bad/blank chair
+// email becomes a `skipped`/`failed` result so the comm log still records what happened.
+
+/** Notify the PRIMARY club chairman that a veterans club wants to register one of their players. */
+export async function sendVeteransRequestNotice(args: {
+  chair: { name?: string; email?: string; cell?: string };
+  veteransClubName: string;
+  playerName: string;
+  primaryClubName: string;
+  note?: string;
+}): Promise<{ results: SendResult[] }> {
+  const { chair, veteransClubName, playerName, primaryClubName, note } = args;
+  const email = (chair.email ?? '').trim();
+  if (!EMAIL_RE.test(email)) {
+    return {
+      results: [
+        {
+          channel: 'email',
+          status: 'skipped',
+          ...(email ? { to: email } : {}),
+          error: 'no valid chair email on file',
+        },
+      ],
+    };
+  }
+  try {
+    const { messageId } = await sendVeteransRequestEmail({
+      to: email,
+      chairName: (chair.name ?? '').trim(),
+      veteransClubName,
+      playerName,
+      primaryClubName,
+      ...(note ? { note } : {}),
+    });
+    return { results: [{ channel: 'email', status: 'sent', to: email, messageId }] };
+  } catch (err) {
+    return { results: [{ channel: 'email', status: 'failed', to: email, error: errMessage(err) }] };
+  }
+}
+
+/** Notify a club chairman that a veterans request was resolved (accepted / declined). */
+export async function sendVeteransRequestResolvedNotice(args: {
+  chair: { name?: string; email?: string; cell?: string };
+  veteransClubName: string;
+  playerName: string;
+  primaryClubName: string;
+  outcome: 'accepted' | 'declined';
+  reason?: string;
+}): Promise<{ results: SendResult[] }> {
+  const { chair, veteransClubName, playerName, primaryClubName, outcome, reason } = args;
+  const email = (chair.email ?? '').trim();
+  if (!EMAIL_RE.test(email)) {
+    return {
+      results: [
+        {
+          channel: 'email',
+          status: 'skipped',
+          ...(email ? { to: email } : {}),
+          error: 'no valid chair email on file',
+        },
+      ],
+    };
+  }
+  try {
+    const { messageId } = await sendVeteransRequestResolvedEmail({
+      to: email,
+      chairName: (chair.name ?? '').trim(),
+      veteransClubName,
+      playerName,
+      primaryClubName,
+      outcome,
+      ...(reason ? { reason } : {}),
+    });
+    return { results: [{ channel: 'email', status: 'sent', to: email, messageId }] };
+  } catch (err) {
+    return { results: [{ channel: 'email', status: 'failed', to: email, error: errMessage(err) }] };
+  }
 }

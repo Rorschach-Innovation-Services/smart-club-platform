@@ -31,3 +31,25 @@ export function uploadsBucket(): string {
   if (!v) throw new Error('UPLOADS_BUCKET not set (run under sst shell or set UPLOADS_BUCKET)');
   return v;
 }
+
+/**
+ * The HMAC key for veterans-candidate handles (ADR 0013). The finder never returns a player's
+ * natural key; it returns `HMAC(secret, tenant|clubId|naturalKey)`, so this secret must be a real
+ * value in any real stage or the handle is guessable.
+ *
+ * `sst.Secret('CandidateHandleSecret', '')` defaults to '' (exactly like FromEmail), so an unset
+ * secret arrives here as the EMPTY STRING, not `undefined` — an `if (!v)` check alone wouldn't
+ * distinguish "unset" from a legitimately-set value, but empty is never legitimate for an HMAC
+ * key, so we FAIL CLOSED on empty. The only exception is the offline/local stack (LOCAL_AUTH=1,
+ * never set in AWS), which falls back to a fixed dev constant so tests and `dev:local` work
+ * without a secret. Any real stage with the secret unset throws (→ 500) rather than minting
+ * brute-forceable handles.
+ */
+export function candidateHandleSecret(): string {
+  const v = process.env.CANDIDATE_HANDLE_SECRET;
+  if (v) return v; // a non-empty value is always trusted
+  if (process.env.LOCAL_AUTH === '1') return 'local-dev-candidate-handle-secret';
+  throw new Error(
+    'CANDIDATE_HANDLE_SECRET not set (run: sst secret set CandidateHandleSecret <hex> --stage <stage>)',
+  );
+}
