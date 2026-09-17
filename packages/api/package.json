@@ -15,6 +15,7 @@
     "import-titans-compliance": "tsx src/import-titans-compliance.ts",
     "import-titans-roster": "tsx src/import-titans-roster.ts",
     "bootstrap-fixture-prereqs": "tsx src/bootstrap-fixture-prereqs.ts",
+    "sync-club-leagues": "tsx src/sync-club-leagues-from-series.ts",
     "merge-duplicate-venues": "tsx src/merge-duplicate-venues.ts",
     "normalise-venue-names": "tsx src/normalise-venue-names.ts",
     "resolve-venue-clashes": "tsx src/resolve-venue-clashes.ts",

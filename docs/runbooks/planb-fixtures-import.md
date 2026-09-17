@@ -244,7 +244,7 @@ The union requires every multi-field complex to be named by its exact field numb
 **What the CLI does**
 
 1. **Renames registry rows (ids kept):** `Siripat Road Grounds → Siripat 1`, `Siripat Grounds →
-   Siripat 2`, `Crusaders Sports Club → Crusaders 1`, `Crusaders 2 Field → Crusaders 2`,
+Siripat 2`, `Crusaders Sports Club → Crusaders 1`, `Crusaders 2 Field → Crusaders 2`,
    `Danville → Danville 1`, `Van Riebek Park (Harlequins 1/2) → Harlequins 1/2`. It verifies the
    row's current name against the expected old (or already-new) name and **hard-errors on drift**.
    Every fixture pointing at the row by `venueId` gets the new `venueName`; a fixture that names
@@ -264,7 +264,7 @@ The union requires every multi-field complex to be named by its exact field numb
    implicit fixtures — the CLI prints "N implicit fixtures follow the club record" and writes no
    fixture for them.
 4. **Creates reserved `Commons 1` / `Commons 2`** registry rows (no pin, `note: 'Reserved for
-   Premier Women (union, 31 Aug 2026)'`, `homeClubIds` = the Premier Women participants).
+Premier Women (union, 31 Aug 2026)'`, `homeClubIds` = the Premier Women participants).
    Idempotent — skipped if a row with the same ground key already exists.
 
 **The clash gate (mandatory).** After computing every in-memory change the CLI runs a whole-tenant
@@ -528,6 +528,18 @@ undeterminable: N` line. The 4 superseded `DELETE_SLUGS` series are excluded fro
   unresolved clash (fail-closed as usual). West's "Mpumalanga Township Cricket Stadium"
   is currently unused by any fixture (West is re-based to Lahee Park) — nothing to do
   until the union confirms its availability.
+- **Club league sync.** After the `--confirm` write loop the importer runs
+  `syncClubLeaguesFromSeries(dolphins, { only: <written ids>, includeDrafts: true })`
+  automatically, so each participating club's `leagues` (and, for a multi-side club, its
+  `leagueTeams` / `teamRosters`) gains the leagues just imported — otherwise Season
+  Insights, which counts `club.leagues`, would show those leagues as "0 clubs / 0 teams"
+  even though the fixtures exist. A dry run prints the same sync as a preview under
+  `── Club league sync (dry-run preview)`. The sync is merge-only, spreads sibling league
+  data (never wipes it), skips a club whose stored roster ids differ from the series
+  (CONFLICT), and is idempotent. Pass `--no-club-sync` to skip it (then run the standalone
+  `docs/runbooks/sync-club-leagues-from-series.md` later). Note: a club crossing from one
+  league to two loses the demographics single-league fallback, so the Insights
+  "unattributed" figure can rise — that is expected; see the sync runbook.
 
 ## Reconciliation — what changes on prod
 
