@@ -736,8 +736,8 @@ export function InsightsBreakdown({
                       />
                       {fixturedButEmpty.has(r.key) && (
                         <div className="insights-row-hint">
-                          Fixtures exist for this league but no club has entered it — run the club
-                          league sync.
+                          Fixtures exist for this league but no club has entered it — ask the
+                          platform team to run the club league sync.
                         </div>
                       )}
                     </Fragment>

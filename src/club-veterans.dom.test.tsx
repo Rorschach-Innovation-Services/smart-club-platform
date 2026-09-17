@@ -12,23 +12,25 @@
  * same reason `club-clearances.dom.test.tsx` carries the suffix).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, waitFor } from '@testing-library/react';
+import { act, fireEvent, waitFor } from '@testing-library/react';
 import { renderWithProviders } from './test-utils';
 
-// Mock only the HTTP client. `searchVeteransCandidates` (the finder) and `getVeteransAffiliates`
-// (the foot card) are the only network calls the squad view makes; everything else club.tsx
-// imports from './api' stays real via importActual.
+// Mock only the HTTP client. `searchVeteransCandidates` (the finder), `getVeteransAffiliates`
+// (the foot card) and `getClubDirectory` (the players view's veterans-club picker) are the only
+// network calls these views make; everything else club.tsx imports from './api' stays real via
+// importActual.
 vi.mock('./api', async (importActual) => {
   const actual = await importActual<typeof import('./api')>();
   return {
     ...actual,
     searchVeteransCandidates: vi.fn(),
     getVeteransAffiliates: vi.fn(async () => []),
+    getClubDirectory: vi.fn(async () => []),
   };
 });
 
-import { ClubVeteransSquadView, VeteransRequestsInbox } from './club';
-import { searchVeteransCandidates, getVeteransAffiliates } from './api';
+import { ClubVeteransSquadView, VeteransRequestsInbox, ClubPlayersView } from './club';
+import { searchVeteransCandidates, getVeteransAffiliates, getClubDirectory } from './api';
 
 const club = { id: 'vets-club', name: 'Old Boys CC', leagues: ['veterans-premier'] };
 
@@ -67,7 +69,6 @@ function renderSquad(
       }
       onRequest={props.onRequest ?? vi.fn()}
       onWithdraw={props.onWithdraw ?? vi.fn()}
-      toast={vi.fn()}
     />,
   );
 }
@@ -80,12 +81,19 @@ describe('ClubVeteransSquadView — finder', () => {
 
   it('does not search below 3 characters and shows the minimum-length hint', async () => {
     const { getByLabelText, getByText, queryByText } = renderSquad();
-    fireEvent.change(getByLabelText('Find a player'), { target: { value: 'ab' } });
-    // Give the 300 ms debounce time to (not) fire.
-    await new Promise((r) => setTimeout(r, 350));
-    expect(getByText('Type at least 3 characters to search.')).toBeTruthy();
-    expect(queryByText('Request')).toBeNull();
-    expect(searchVeteransCandidates).not.toHaveBeenCalled();
+    // Drive the 300 ms debounce deterministically instead of sleeping on a real clock.
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(getByLabelText('Find a player'), { target: { value: 'ab' } });
+      act(() => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(getByText('Type at least 3 characters to search.')).toBeTruthy();
+      expect(queryByText('Request')).toBeNull();
+      expect(searchVeteransCandidates).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('renders candidate rows once 3+ characters are typed, with a Requested pill for a pending outbound request', async () => {
@@ -238,5 +246,58 @@ describe('VeteransRequestsInbox', () => {
     });
     fireEvent.click(getByText('Confirm decline'));
     expect(onDecline).toHaveBeenCalledWith(request, 'Not eligible');
+  });
+});
+
+describe('ClubPlayersView — veterans request pill', () => {
+  beforeEach(() => {
+    vi.mocked(getVeteransAffiliates).mockReset().mockResolvedValue([]);
+    vi.mocked(getClubDirectory).mockReset().mockResolvedValue([]);
+  });
+
+  function renderPlayers(over: { players?: unknown[]; inbound?: unknown[] }) {
+    return renderWithProviders(
+      <ClubPlayersView
+        club={{ id: 'alpha', name: 'Alpha CC' } as never}
+        players={(over.players ?? []) as never}
+        clearances={{ incoming: [], outbound: [] } as never}
+        leagues={[] as never}
+        onGenerateLink={vi.fn()}
+        onDeletePlayer={vi.fn()}
+        toast={vi.fn()}
+        veteransRequests={{ inbound: over.inbound ?? [], outbound: [] } as never}
+        onAcceptVeteransRequest={vi.fn()}
+        onDeclineVeteransRequest={vi.fn()}
+        busyVeteransId={undefined}
+      />,
+    );
+  }
+
+  // Two roster rows share the display name; the inbound request carries the matching naturalKey,
+  // so only that row is tagged — the homonym must NOT be cross-tagged.
+  it('tags only the roster row whose naturalKey matches an inbound request', () => {
+    const { getAllByText } = renderPlayers({
+      players: [
+        { naturalKey: 'nk-1', firstName: 'Sipho', lastName: 'Ndlovu', idNumber: 'ID-1' },
+        { naturalKey: 'nk-2', firstName: 'Sipho', lastName: 'Ndlovu', idNumber: 'ID-2' },
+      ],
+      inbound: [req({ playerName: 'Sipho Ndlovu', playerNaturalKey: 'nk-2' })],
+    });
+    const pills = getAllByText('Veterans request');
+    expect(pills).toHaveLength(1);
+    const row = pills[0].closest('tr');
+    expect(row?.textContent).toContain('ID-2');
+    expect(row?.textContent).not.toContain('ID-1');
+  });
+
+  // Older API (no playerNaturalKey on the request) → fall back to the display-name match.
+  it('falls back to a display-name match when the request has no naturalKey', () => {
+    const { getAllByText } = renderPlayers({
+      players: [{ naturalKey: 'nk-1', firstName: 'Sipho', lastName: 'Ndlovu', idNumber: 'ID-1' }],
+      inbound: [req({ playerName: 'Sipho Ndlovu' })],
+    });
+    const pills = getAllByText('Veterans request');
+    expect(pills).toHaveLength(1);
+    expect(pills[0].closest('tr')?.textContent).toContain('ID-1');
   });
 });

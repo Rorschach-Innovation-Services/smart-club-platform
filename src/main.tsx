@@ -2748,7 +2748,6 @@ function Shell({
             requests={veteransRequests}
             onRequest={requestVeteransPlayer}
             onWithdraw={withdrawVeteransRequest}
-            toast={toastShow}
           />
         );
       }

@@ -5309,16 +5309,22 @@ export function ClubPlayersView({
   const joiningFrom = (nk) => joining.find((r) => r.playerNaturalKey === nk);
 
   // Pending inbound veterans requests (this club is the player's primary club — it must act).
-  // The portal has NO naturalKey↔request link (the finder only ever exposes an opaque handle),
-  // so a request is matched to a roster row by the displayed player name. Homonyms are possible
-  // but harmless: the pill/banner is informational and the Accept still resolves by request id.
+  // Inbound items carry playerNaturalKey, so a request is matched to its exact roster row by
+  // natural key — homonyms then can't cross-tag. Older API responses omit it; those fall back
+  // to a display-name match (harmless: the pill/banner is informational and the Accept still
+  // resolves by request id).
   const pendingVetRequests: VeteransRequestPublic[] = (veteransRequests?.inbound ?? []).filter(
     (r: VeteransRequestPublic) => r.status === 'pending',
   );
-  const vetRequestByName = new Map<string, VeteransRequestPublic>(
-    pendingVetRequests.map((r) => [r.playerName, r]),
+  const vetRequestByKey = new Map<string, VeteransRequestPublic>(
+    pendingVetRequests.filter((r) => r.playerNaturalKey).map((r) => [r.playerNaturalKey!, r]),
   );
-  const vetRequestFor = (p) => vetRequestByName.get(`${p.firstName} ${p.lastName}`.trim());
+  const vetRequestByName = new Map<string, VeteransRequestPublic>(
+    pendingVetRequests.filter((r) => !r.playerNaturalKey).map((r) => [r.playerName, r]),
+  );
+  const vetRequestFor = (p) =>
+    vetRequestByKey.get(p.naturalKey) ??
+    vetRequestByName.get(`${p.firstName} ${p.lastName}`.trim());
 
   const allRounders = mine.filter((p) => p.isAllRounder).length;
   const wks = mine.filter((p) => p.isWk).length;
@@ -6120,7 +6126,6 @@ export function ClubVeteransSquadView({
   requests,
   onRequest,
   onWithdraw,
-  toast: _toast,
 }: {
   club: any;
   allLeagues: any[];
@@ -6131,7 +6136,6 @@ export function ClubVeteransSquadView({
     leagueKey?: string;
   }) => void | Promise<unknown>;
   onWithdraw: (req: VeteransRequestPublic) => void | Promise<unknown>;
-  toast?: (msg: string, tone?: string) => void;
 }) {
   // This club's confirmed veterans affiliates — the same view-only list the Players page shows,
   // fetched here too so the squad workspace is self-contained.
