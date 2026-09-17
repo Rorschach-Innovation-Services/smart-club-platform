@@ -1764,6 +1764,10 @@ export async function acceptVeteransRequest(
     );
   }
   const source: VeteransAffiliation['source'] = opts.via === 'admin' ? 'admin' : 'portal';
+  // Did THIS call write the affiliation? Only when the pre-image had none — not the crash-retry
+  // case where the row already points here (a truthy veteransClubId). Compensation below is
+  // gated on this so we never clear an affiliation we didn't create.
+  const wroteAffiliation = !player.veteransClubId;
   let updatedPlayer = player;
   // Skip the write when it already points here — the retry-after-crash case.
   if (player.veteransClubId !== current.veteransClubId) {
@@ -1775,13 +1779,32 @@ export async function acceptVeteransRequest(
       source,
     );
   }
-  const request = await resolveVeteransRequest(tenant, primaryClubId, id, {
-    status: 'accepted',
-    at: opts.at,
-    by: opts.by,
-    via: opts.via,
-    expectedVersion: opts.expectedVersion,
-  });
+  // TOCTOU: the affiliation is written ABOVE, before resolveVeteransRequest's OCC guard
+  // (version = :v AND status = pending). A decline/withdraw landing in between fails the guard —
+  // and without compensation a live VETAFFIL# would linger on a request that never accepted while
+  // the caller still gets a 409. On conflict, re-read the canonical: if it is no longer pending
+  // and WE wrote the affiliation, undo it, then rethrow the original conflict unchanged.
+  let request: VeteransRequest;
+  try {
+    request = await resolveVeteransRequest(tenant, primaryClubId, id, {
+      status: 'accepted',
+      at: opts.at,
+      by: opts.by,
+      via: opts.via,
+      expectedVersion: opts.expectedVersion,
+    });
+  } catch (err) {
+    if (
+      wroteAffiliation &&
+      (err instanceof VersionConflictError || err instanceof VeteransRequestConflictError)
+    ) {
+      const latest = await getVeteransRequest(tenant, primaryClubId, id);
+      if (!latest || latest.status !== 'pending') {
+        await setPlayerVeteransClub(tenant, primaryClubId, current.playerNaturalKey, null, source);
+      }
+    }
+    throw err;
+  }
   return { request, player: updatedPlayer };
 }
 

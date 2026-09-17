@@ -1262,13 +1262,12 @@ export function AffiliationForm({
         return acc;
       }, {});
       const validKeys = new Set(opts.map((o) => o.key));
-      // Union-entered cross-district leagues survive a district change: recompute them
-      // against the NEW district's catalogue from the originally-saved keys, so keys that
-      // are still outside the (new) district stay carried through and reach the payload.
-      const priorSaved = Array.isArray(club.leagues) ? club.leagues : [];
-      const unionLeagues = priorSaved.filter(
-        (k) => !validKeys.has(k) && !!findByKey(allLeagues, k),
-      );
+      // Union-entered cross-district leagues survive a district change UNCHANGED: `d.unionLeagues`
+      // was computed once against the SAVED district at seed time (see the seed at ~line 1073) and
+      // is the ONLY true union-entered set. Recomputing it against the NEW district would relabel
+      // the rep's own former in-district picks as read-only "Entered by the union" keys they could
+      // never remove — so we carry the seeded set through as-is and let the old picks simply drop.
+      const unionLeagues = Array.isArray(d.unionLeagues) ? d.unionLeagues : [];
       // Keep the counts/rosters of the surviving union keys; everything else is wiped —
       // in-district selections reset (the rep re-picks) and truly-invalid keys drop.
       const priorCounts = d.leagueTeams || {};
@@ -6183,6 +6182,12 @@ export function ClubVeteransSquadView({
   const requestedIds = new Set(outboundPending.map((r) => r.candidateId));
 
   const forbidden = (candidatesQuery.error as { status?: number } | null)?.status === 403;
+  // Any NON-403 failure (e.g. the 500 when CANDIDATE_HANDLE_SECRET is unset) must surface as an
+  // error notice — otherwise it falls through to the "No players match" empty state and looks like
+  // a successful-but-empty search, hiding a real server fault.
+  const queryError = candidatesQuery.isError && !forbidden ? candidatesQuery.error : null;
+  const queryErrorMessage =
+    (queryError as { message?: string } | null)?.message || 'unexpected error';
   const candidates: VeteransCandidate[] = candidatesQuery.data?.candidates ?? [];
   const truncated = candidatesQuery.data?.truncated ?? false;
 
@@ -6248,6 +6253,20 @@ export function ClubVeteransSquadView({
           >
             Your club isn't fixtured in a veterans league yet. Once the union enters {club.name}{' '}
             into a released veterans series, you'll be able to search for players here.
+          </div>
+        ) : queryError ? (
+          <div
+            role="alert"
+            style={{
+              marginTop: 12,
+              padding: '10px 12px',
+              borderRadius: 8,
+              background: 'var(--wash, rgba(10,15,20,0.04))',
+              color: 'var(--muted)',
+              fontSize: 13,
+            }}
+          >
+            Search failed: {queryErrorMessage}. Try again or contact the union.
           </div>
         ) : (
           enabled && (

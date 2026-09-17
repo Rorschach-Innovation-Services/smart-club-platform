@@ -165,6 +165,20 @@ describe('ClubVeteransSquadView — finder', () => {
     fireEvent.change(getByLabelText('Find a player'), { target: { value: 'Any' } });
     await waitFor(() => expect(getByText(/isn't fixtured in a veterans league yet/)).toBeTruthy());
   });
+
+  it('surfaces a non-403 finder error instead of the empty "No players match" state', async () => {
+    // The 500 raised when CANDIDATE_HANDLE_SECRET is unset must NOT masquerade as an empty search.
+    const err = Object.assign(new Error('candidate handle secret not configured'), { status: 500 });
+    vi.mocked(searchVeteransCandidates).mockRejectedValue(err);
+    const { getByLabelText, getByText, queryByText } = renderSquad();
+    fireEvent.change(getByLabelText('Find a player'), { target: { value: 'Any' } });
+    await waitFor(() =>
+      expect(getByText(/Search failed: candidate handle secret not configured/)).toBeTruthy(),
+    );
+    expect(getByText(/contact the union/)).toBeTruthy();
+    // The misleading empty-state copy must NOT render for a real server fault.
+    expect(queryByText(/No players match/)).toBeNull();
+  });
 });
 
 describe('ClubVeteransSquadView — pending requests', () => {

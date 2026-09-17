@@ -497,6 +497,85 @@ describe('accept', () => {
     });
     assert.equal(acc.status, 409);
   });
+
+  // TOCTOU compensation (Fix 2): accept writes the affiliation BEFORE resolveVeteransRequest's OCC
+  // guard. If the request is resolved out from under it, accept must not leave a dangling affiliation.
+  test('a decline before accept 409s and leaves no affiliation (no VETAFFIL# lingers)', async () => {
+    await repo.createPlayer('dolphins', mkPlayer('pri', 'TOCT1006', 'Zola', 'Mbeki'));
+    const candidateId = await candidateIdFor('Zola Mbeki', 'Zola Mbeki');
+    const created = (await (await createRequest({ primaryClubId: 'pri', candidateId })).json()) as {
+      id: string;
+    };
+    const nk = playerNaturalKey({
+      idNumber: 'TOCT1006',
+      idType: 'passport',
+      nationality: 'South African',
+    });
+
+    // The player's club declines first — the request is no longer pending.
+    const dec = await app.request(`/clubs/pri/veterans-requests/${created.id}/decline`, {
+      method: 'POST',
+      headers: headers(REP_PRI),
+      body: '{}',
+    });
+    assert.equal(dec.status, 200);
+
+    // The accept now 409s and must NOT leave the player affiliated.
+    const acc = await app.request(`/clubs/pri/veterans-requests/${created.id}/accept`, {
+      method: 'POST',
+      headers: headers(REP_PRI),
+      body: '{}',
+    });
+    assert.equal(acc.status, 409);
+
+    const player = await repo.getPlayer('dolphins', 'pri', nk);
+    assert.equal(
+      player!.veteransClubId,
+      undefined,
+      'player is not affiliated after the failed accept',
+    );
+    const affiliates = await repo.listVeteransAffiliations('dolphins', 'vets');
+    assert.ok(
+      !affiliates.some((a) => a.naturalKey === nk),
+      'no VETAFFIL# record lingers for the declined player',
+    );
+  });
+
+  // The negative branch of the compensation: a version-only OCC conflict while the request is STILL
+  // pending must keep the affiliation (a retry can complete the accept) — accept must not over-clear.
+  test('a version-only conflict on a still-pending request keeps the affiliation', async () => {
+    await repo.createPlayer('dolphins', mkPlayer('pri', 'TOCT1007', 'Ayanda', 'Dube'));
+    const candidateId = await candidateIdFor('Ayanda Dube', 'Ayanda Dube');
+    const created = (await (await createRequest({ primaryClubId: 'pri', candidateId })).json()) as {
+      id: string;
+    };
+    const nk = playerNaturalKey({
+      idNumber: 'TOCT1007',
+      idType: 'passport',
+      nationality: 'South African',
+    });
+
+    // A STALE expectedVersion fails resolve's OCC. The affiliation was written, but the request is
+    // still pending, so compensation must NOT undo it.
+    await assert.rejects(
+      repo.acceptVeteransRequest('dolphins', 'pri', created.id, {
+        at: new Date().toISOString(),
+        by: 'rep@test',
+        via: 'portal',
+        expectedVersion: 99,
+      }),
+      (e: unknown) => e instanceof repo.VersionConflictError,
+    );
+
+    const canonical = await repo.getVeteransRequest('dolphins', 'pri', created.id);
+    assert.equal(canonical!.status, 'pending', 'request stays pending after the version conflict');
+    const player = await repo.getPlayer('dolphins', 'pri', nk);
+    assert.equal(
+      player!.veteransClubId,
+      'vets',
+      'affiliation persists — not over-cleared while the request is still pending',
+    );
+  });
 });
 
 describe('decline / withdraw set a TTL', () => {
