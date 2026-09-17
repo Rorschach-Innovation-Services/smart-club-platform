@@ -40,6 +40,12 @@ export const qk = {
   demographics: () => ['demographics', t()],
   clubDirectory: () => ['club-directory', t()],
   veteransAffiliates: (clubId: string) => ['veterans-affiliates', t(), clubId],
+  // Veterans squad-selection requests (ADR 0013): a club's inbound (it is the primary club) +
+  // outbound (it is the veterans club) requests; and the admin cohort-wide list.
+  veteransRequests: (clubId: string) => ['veterans-requests', t(), clubId],
+  allVeteransRequests: () => ['veterans-requests-all', t()],
+  // The finder search is keyed on the (debounced) query so each term caches independently.
+  veteransCandidates: (clubId: string, q: string) => ['veterans-candidates', t(), clubId, q],
   signupLink: () => ['signup-link', t()],
   // Operator portal keys are deliberately NOT tenant-scoped: /platform/* is
   // tenant-independent (the slug in the key names the MANAGED tenant, not the host's).

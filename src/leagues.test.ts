@@ -9,6 +9,8 @@ import {
   findByKey,
   teamCounts,
   isWomensLeague,
+  isVeteransLeague,
+  clubPlaysVeterans,
   teamLetter,
   defaultTeamName,
   clubTeamsForLeague,
@@ -138,6 +140,47 @@ describe('isWomensLeague', () => {
     expect(isWomensLeague(L('Under 15 Girls', 'Juniors'))).toBe(false);
     expect(isWomensLeague(null)).toBe(false);
     expect(isWomensLeague({ label: undefined })).toBe(false);
+  });
+});
+
+describe('isVeteransLeague', () => {
+  it('matches a veterans KEY regardless of label', () => {
+    expect(isVeteransLeague({ key: 'veterans', label: 'Over-40s' })).toBe(true);
+    expect(isVeteransLeague({ key: 'veterans-premier', label: 'Premier' })).toBe(true);
+    expect(isVeteransLeague({ key: 'veterans-promotion', label: 'Promotion' })).toBe(true);
+  });
+  it('matches a veterans/vets LABEL even when keyed differently', () => {
+    expect(isVeteransLeague({ key: 'over40', label: 'Veterans League' })).toBe(true);
+    expect(isVeteransLeague({ key: 'vt', label: 'Vets T20' })).toBe(true);
+  });
+  it('does not match plain leagues or null', () => {
+    expect(isVeteransLeague({ key: 'premier', label: 'Premier League' })).toBe(false);
+    // "veteransxyz" has no word boundary after "veterans" (s→x are both word chars), and the
+    // label has no veterans/vets word either — so neither pattern fires.
+    expect(isVeteransLeague({ key: 'veteransxyz', label: 'Something' })).toBe(false);
+    expect(isVeteransLeague(null)).toBe(false);
+    expect(isVeteransLeague({ label: undefined })).toBe(false);
+  });
+});
+
+describe('clubPlaysVeterans', () => {
+  const catalogue = [
+    { key: 'premier', label: 'Premier League' },
+    { key: 'vets-cup', label: 'Veterans Cup' }, // matched on label
+  ];
+  it('is true when a club league key resolves to a veterans league in the catalogue', () => {
+    expect(clubPlaysVeterans({ leagues: ['premier', 'vets-cup'] }, catalogue)).toBe(true);
+  });
+  it('falls back to the key pattern for an orphan key (catalogue entry removed)', () => {
+    // 'veterans-premier' is not in the catalogue but its KEY matches — a live series must still
+    // light the nav.
+    expect(clubPlaysVeterans({ leagues: ['veterans-premier'] }, catalogue)).toBe(true);
+  });
+  it('is false for a club with no veterans leagues, and tolerates missing input', () => {
+    expect(clubPlaysVeterans({ leagues: ['premier'] }, catalogue)).toBe(false);
+    expect(clubPlaysVeterans({ leagues: [] }, catalogue)).toBe(false);
+    expect(clubPlaysVeterans(null, catalogue)).toBe(false);
+    expect(clubPlaysVeterans({}, catalogue)).toBe(false);
   });
 });
 

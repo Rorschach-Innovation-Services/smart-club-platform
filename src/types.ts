@@ -1011,6 +1011,55 @@ export interface VeteransAffiliation {
 /** The affiliates GET projection: what a veterans club may see, WITHOUT the PII naturalKey. */
 export type VeteransAffiliatePublic = Omit<VeteransAffiliation, 'naturalKey'>;
 
+export type VeteransRequestStatus = 'pending' | 'accepted' | 'declined' | 'withdrawn';
+
+/**
+ * MIRRORS the API's `VeteransRequestPublic` (packages/api/src/types.ts) — a veterans
+ * squad-selection request (ADR 0013) as any HTTP response returns it: WITHOUT the PII
+ * `playerNaturalKey` (the API projects it out of the canonical, and the mirror never had it).
+ * A veterans club found a player tenant-wide and asked the player's primary club to confirm the
+ * affiliation; accept calls the same `setPlayerVeteransClub` the capture-only paths use, so no
+ * roster row / playerCount / demographics change occurs.
+ */
+export interface VeteransRequestPublic {
+  id: string;
+  /** Opaque HMAC handle the finder returned (never the natural key) — matches an outbound row. */
+  candidateId: string;
+  playerName: string;
+  /** The player's OWN club — it confirms the request (inbound in its portal). */
+  primaryClubId: string;
+  primaryClubName: string;
+  /** The veterans club that made the request (outbound in its portal). */
+  veteransClubId: string;
+  veteransClubName: string;
+  /** Veterans league the request targets, when the veterans club plays more than one. */
+  leagueKey?: string;
+  note?: string;
+  requestedAt: string;
+  requestedBy?: string;
+  status: VeteransRequestStatus;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolvedVia?: 'portal' | 'admin';
+  declineReason?: string;
+  /** TTL (epoch seconds): set on a terminal row so it self-expires after 90 days. */
+  expiresAt?: number;
+  version: number;
+}
+
+/**
+ * MIRRORS the API's `VeteransCandidate` — one finder result row (GET
+ * /clubs/:id/veterans-candidates). Everything a requesting club may see about a tenant-wide
+ * player; NEVER the natural key / ID number / dob / contact — `candidateId` (an HMAC handle) is
+ * the only identifier that leaves the API.
+ */
+export interface VeteransCandidate {
+  candidateId: string;
+  playerName: string;
+  primaryClubId: string;
+  primaryClubName: string;
+}
+
 export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejected';
 
 /**

@@ -562,3 +562,89 @@ async function getAllClearancesForAdmin(request: APIRequestContext): Promise<See
   expect(res.ok(), `GET /admin/clearances → ${res.status()}`).toBeTruthy();
   return (await res.json()) as SeededClearance[];
 }
+
+// ── Veterans squad-selection (ADR 0013) ──
+
+/**
+ * The demo tenant's built-in veterans league key (packages/api/seed-data/dolphins.json:
+ * key `veterans`, label "Veterans League"). Both `isVeteransLeague` (client nav) and
+ * `isVeteransLeagueKey` (server finder gate) match it.
+ */
+export const VETERANS_LEAGUE_KEY = 'veterans';
+
+/** GET /clubs/:id as admin, returning the full stored club (needs leagues + version). */
+async function getClubRaw(
+  request: APIRequestContext,
+  clubId: string,
+): Promise<{ leagues?: string[]; version: number; name: string }> {
+  const res = await request.get(`${API_BASE}/clubs/${clubId}`, {
+    headers: apiHeaders(adminAuthHeader()),
+  });
+  expect(res.ok(), `GET /clubs/${clubId} → ${res.status()}`).toBeTruthy();
+  return (await res.json()) as { leagues?: string[]; version: number; name: string };
+}
+
+/**
+ * Add a catalogue league key to a club's selection (admin PATCH, preserving the existing keys),
+ * so the client `clubPlaysVeterans` predicate lights the "Veterans squad" nav. A no-op when the
+ * club already carries the key. `veterans` is a real catalogue key, so validateClubPatch accepts
+ * it.
+ */
+export async function addClubLeague(
+  request: APIRequestContext,
+  clubId: string,
+  leagueKey: string,
+): Promise<void> {
+  const club = await getClubRaw(request, clubId);
+  const leagues = Array.isArray(club.leagues) ? club.leagues : [];
+  if (leagues.includes(leagueKey)) return;
+  const res = await request.patch(`${API_BASE}/clubs/${clubId}`, {
+    headers: apiHeaders(adminAuthHeader()),
+    data: { leagues: [...leagues, leagueKey], version: club.version },
+  });
+  expect(
+    res.ok(),
+    `PATCH /clubs/${clubId} leagues → ${res.status()} ${await res.text()}`,
+  ).toBeTruthy();
+}
+
+/**
+ * Create a RELEASED veterans series whose participants include `vetsClubId`, so the finder gate
+ * (`clubFixturedInVeterans`) opens for that club. The series carries no fixtures, so the release
+ * clash gate finds nothing to block. Approve then release, threading the OCC version each time.
+ * Returns the released series' id. Harmless residue in the shared demo DB (run-unique id).
+ */
+export async function createReleasedVeteransSeries(
+  request: APIRequestContext,
+  opts: { vetsClubId: string; leagueKey?: string },
+): Promise<string> {
+  const leagueKey = opts.leagueKey ?? VETERANS_LEAGUE_KEY;
+  const id = `s-e2e-vet-${RUN}`;
+  const vetsName = await getClubName(request, opts.vetsClubId);
+  const create = await request.post(`${API_BASE}/series`, {
+    headers: apiHeaders(adminAuthHeader()),
+    data: {
+      id,
+      name: `Veterans E2E ${RUN}`,
+      startDate: '2026-11-01',
+      teams: [],
+      fixtures: [],
+      leagueKey,
+      participants: [{ teamId: opts.vetsClubId, clubId: opts.vetsClubId, name: vetsName }],
+    },
+  });
+  expect(create.ok(), `POST /series → ${create.status()} ${await create.text()}`).toBeTruthy();
+  let series = (await create.json()) as { version: number };
+  const approve = await request.patch(`${API_BASE}/series/${id}`, {
+    headers: apiHeaders(adminAuthHeader()),
+    data: { approved: true, version: series.version },
+  });
+  expect(approve.ok(), `approve series → ${approve.status()} ${await approve.text()}`).toBeTruthy();
+  series = (await approve.json()) as { version: number };
+  const release = await request.patch(`${API_BASE}/series/${id}`, {
+    headers: apiHeaders(adminAuthHeader()),
+    data: { released: true, version: series.version },
+  });
+  expect(release.ok(), `release series → ${release.status()} ${await release.text()}`).toBeTruthy();
+  return id;
+}
