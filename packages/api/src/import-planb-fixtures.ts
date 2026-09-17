@@ -2345,6 +2345,8 @@ interface Args {
   /** Import mode only — restrict the run to these series slugs (compared against
    * seriesSlug(id)). Empty means every built series. */
   only: string[];
+  /** Skip the post-import club-league sync (sync-club-leagues-from-series). */
+  noClubSync: boolean;
 }
 
 export function parseArgs(argv: string[]): Args {
@@ -2360,6 +2362,7 @@ export function parseArgs(argv: string[]): Args {
     parseOnly: false,
     all: false,
     only: [],
+    noClubSync: false,
   };
   let prune = false;
   let revert = false;
@@ -2376,6 +2379,7 @@ export function parseArgs(argv: string[]): Args {
     else if (a === '--prune') prune = true;
     else if (a === '--revert') revert = true;
     else if (a === '--all') args.all = true;
+    else if (a === '--no-club-sync') args.noClubSync = true;
     else if (a === '--only')
       args.only = (argv[++i] ?? '')
         .split(',')
@@ -3119,8 +3123,22 @@ async function runImport(args: Args) {
   console.log(
     `${groundlessClubs.length} club(s) with no usable ground — their home fixtures play at the opponent's ground.`,
   );
+  const builtIds = built.map((b) => String(b.series.id));
+
   if (!args.confirm) {
     console.log('[dry-run] nothing written. Re-run with --confirm to import.');
+    if (!args.noClubSync) {
+      // Preview the club-league sync too, so the plan shows which clubs would gain
+      // the imported leagues (against the currently-stored series — brand-new ids
+      // aren't in the table yet and only appear once written).
+      console.log('\n── Club league sync (dry-run preview):');
+      const { syncClubLeaguesFromSeries } = await import('./sync-club-leagues-from-series.js');
+      await syncClubLeaguesFromSeries(TENANT, {
+        confirm: false,
+        only: builtIds,
+        includeDrafts: true,
+      });
+    }
     return;
   }
 
@@ -3145,6 +3163,18 @@ async function runImport(args: Args) {
     console.log(
       `wrote ${s.id}  v${s.version}${existing ? ' (overwrote, lifecycle preserved)' : ''}${withheldNote}`,
     );
+  }
+  if (!args.noClubSync) {
+    // Patch each participating club's `leagues` from the series just written, so
+    // Season Insights counts them (the importer only writes Series rows otherwise).
+    // Pass the written ids + includeDrafts because the fresh series are still drafts.
+    console.log('\n── Club league sync (patching club.leagues from the imported series):');
+    const { syncClubLeaguesFromSeries } = await import('./sync-club-leagues-from-series.js');
+    await syncClubLeaguesFromSeries(TENANT, {
+      confirm: true,
+      only: builtIds,
+      includeDrafts: true,
+    });
   }
   console.log(
     `Done. Backup: ${backupPath}. New series are DRAFTS — approve and release from the admin console. Run --prune --confirm BEFORE releasing — the release gate counts the superseded series' fixtures until they are gone (see the runbook's Ordering section).`,

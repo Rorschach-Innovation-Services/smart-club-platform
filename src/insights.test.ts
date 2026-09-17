@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { OVERARCHING_DISTRICT } from './leagues';
 import {
   leagueBreakdown,
+  leaguesWithFixturesButNoClub,
   districtRows,
   clearanceCounts,
   affiliationRows,
@@ -58,6 +59,45 @@ describe('leagueBreakdown', () => {
     expect(orphans.keys.sort()).toEqual(['also-gone', 'gone']);
     expect(orphans.clubCount).toBe(2); // distinct clubs, not references
     expect(orphans.teamCount).toBe(4); // 2 + 1 + 1
+  });
+});
+
+describe('leaguesWithFixturesButNoClub', () => {
+  const rows = (over: Record<string, number>) =>
+    leagueBreakdown(
+      Object.entries(over).flatMap(([key, n]) =>
+        Array.from({ length: n }, (_, i) => club({ id: `${key}-${i}`, leagues: [key] })),
+      ),
+      LEAGUES,
+    ).rows;
+
+  it('flags a league with a released series but zero clubs entered', () => {
+    // premier has clubs; womens has none. A released womens series → hint on womens only.
+    const r = rows({ premier: 2 });
+    const hint = leaguesWithFixturesButNoClub(r, [
+      { leagueKey: 'womens', released: true },
+      { leagueKey: 'premier', released: true },
+    ]);
+    expect([...hint]).toEqual(['womens']);
+  });
+
+  it('ignores unreleased series and series for a league that has clubs', () => {
+    const r = rows({ premier: 1 });
+    const hint = leaguesWithFixturesButNoClub(r, [
+      { leagueKey: 'womens', released: false }, // draft — no hint
+      { leagueKey: 'premier', released: true }, // has a club — no hint
+      { leagueKey: 'u13' }, // released undefined — no hint
+    ]);
+    expect(hint.size).toBe(0);
+  });
+
+  it('tolerates a missing/empty series list and non-string league keys', () => {
+    const r = rows({ premier: 0 } as Record<string, number>);
+    expect(leaguesWithFixturesButNoClub(r, undefined as unknown as []).size).toBe(0);
+    expect(
+      leaguesWithFixturesButNoClub(r, [{ leagueKey: 42 as unknown as string, released: true }])
+        .size,
+    ).toBe(0);
   });
 });
 

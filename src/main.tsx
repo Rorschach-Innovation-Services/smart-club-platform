@@ -2385,6 +2385,7 @@ function Shell({
             demographics={demographicsQuery.data}
             toast={toastShow}
             requiredDocs={requiredDocs}
+            series={allSeries}
           />
         );
       if (view === 'insights_league')
