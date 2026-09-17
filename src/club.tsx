@@ -1062,6 +1062,20 @@ export function AffiliationForm({
           return acc;
         }, {});
       })(),
+      // Saved leagues the union entered from ANOTHER district's catalogue (e.g. an EMCU
+      // junior league on an Ilembe-district club — see admin ClubLeaguesEditor's "other
+      // districts" disclosure). The rep's picker only shows their own district, so these
+      // keys aren't toggleable here; carrying them as a read-only set and unioning them
+      // back into the payloads is what stops the rep's next save silently dropping them.
+      unionLeagues: (() => {
+        const prior = Array.isArray(club.leagues) ? club.leagues : [];
+        const inDistrict = new Set(
+          leagueOptionsForDistrict(allLeagues, club.district || districts[0] || '').map(
+            (l) => l.key,
+          ),
+        );
+        return prior.filter((k) => !inDistrict.has(k) && !!findByKey(allLeagues, k));
+      })(),
       // Teams entered per selected league (a club may field >1 side). Seeded from the
       // stored map, defaulting any prior-selected league with no stored count to 1.
       leagueTeams: (() => {
@@ -1245,22 +1259,46 @@ export function AffiliationForm({
         return acc;
       }, {});
       const validKeys = new Set(opts.map((o) => o.key));
+      // Union-entered cross-district leagues survive a district change: recompute them
+      // against the NEW district's catalogue from the originally-saved keys, so keys that
+      // are still outside the (new) district stay carried through and reach the payload.
+      const priorSaved = Array.isArray(club.leagues) ? club.leagues : [];
+      const unionLeagues = priorSaved.filter(
+        (k) => !validKeys.has(k) && !!findByKey(allLeagues, k),
+      );
+      // Keep the counts/rosters of the surviving union keys; everything else is wiped —
+      // in-district selections reset (the rep re-picks) and truly-invalid keys drop.
+      const priorCounts = d.leagueTeams || {};
+      const priorRosters = d.teamRosters || {};
+      const keptTeams: Record<string, any> = {};
+      const keptRosters: Record<string, any> = {};
+      for (const k of unionLeagues) {
+        if (priorCounts[k]) keptTeams[k] = priorCounts[k];
+        if (priorRosters[k]) keptRosters[k] = priorRosters[k];
+      }
       const coaches = d.coaches.map((c) => ({
         ...c,
-        teams: c.teams.filter((t) => validKeys.has(t)),
+        teams: c.teams.filter((t) => validKeys.has(t) || unionLeagues.includes(t)),
       }));
-      // Wipe per-league team counts AND rosters too — cross-district keys are invalid,
-      // so stale counts/rosters would persist as orphaned keys the server now rejects.
-      // Coach team assignments go with them (their sides no longer exist).
+      // Coach side assignments for wiped sides go too (those sides no longer exist).
+      const keptSideIds = new Set(
+        Object.values(keptRosters)
+          .flat()
+          .map((t: any) => t?.id)
+          .filter(Boolean),
+      );
       const wiped = coaches.map((c) =>
-        Array.isArray(c.teamIds) && c.teamIds.length ? { ...c, teamIds: [] } : c,
+        Array.isArray(c.teamIds) && c.teamIds.length
+          ? { ...c, teamIds: c.teamIds.filter((id) => keptSideIds.has(id)) }
+          : c,
       );
       return {
         ...d,
         district: newDistrict,
         leagues: freshLeagues,
-        leagueTeams: {},
-        teamRosters: {},
+        unionLeagues,
+        leagueTeams: keptTeams,
+        teamRosters: keptRosters,
         coaches: wiped,
       };
     });
@@ -1314,9 +1352,12 @@ export function AffiliationForm({
     };
   }
   function getLeaguesPayload() {
-    return Object.entries(data.leagues)
+    const picked = Object.entries(data.leagues)
       .filter(([_, v]) => v)
       .map(([k]) => k);
+    // Union in the read-only cross-district keys the union entered, so a rep's save
+    // never silently drops an admin-added league outside this club's district.
+    return Array.from(new Set([...picked, ...(data.unionLeagues || [])]));
   }
   // Team counts for SELECTED leagues only (keys must stay a subset of getLeaguesPayload()
   // — the server rejects orphaned leagueTeams keys). Each defaults to 1.
@@ -2118,6 +2159,43 @@ export function AffiliationForm({
                         </div>
                       ))}
                     </div>
+
+                    {/* Read-only cross-district leagues the union entered for this club
+                        (outside your district's catalogue). They're not toggleable here,
+                        but they are kept on every save so they can't be lost. */}
+                    {Array.isArray(data.unionLeagues) && data.unionLeagues.length > 0 && (
+                      <div className="field" style={{ marginTop: 4 }}>
+                        <div className="field-label">Entered by the union</div>
+                        <div style={{ fontSize: 11.5, color: 'var(--muted)', marginBottom: 8 }}>
+                          These leagues are outside your district and were entered by the union
+                          office. They stay on your affiliation and can only be changed by the
+                          union.
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                          {data.unionLeagues.map((k) => {
+                            const L = findByKey(allLeagues, k);
+                            return (
+                              <span
+                                key={k}
+                                title={L?.district || ''}
+                                style={{
+                                  padding: '7px 13px',
+                                  borderRadius: 99,
+                                  fontFamily: "'Montserrat',sans-serif",
+                                  fontSize: 12,
+                                  fontWeight: 600,
+                                  border: '1px solid var(--line)',
+                                  background: 'var(--paper, var(--white))',
+                                  color: 'var(--muted)',
+                                }}
+                              >
+                                {(L?.label || k) + (L?.district ? ` · ${L.district}` : '')}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
 
                     {/* Name your sides — shown only for leagues fielding more than one team.
                         Each named team becomes its own fixtures participant (intra-club

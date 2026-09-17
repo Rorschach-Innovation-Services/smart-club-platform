@@ -144,6 +144,32 @@ export function leagueOptionsForDistrict(allLeagues: any[], district: string): a
   return out;
 }
 
+/**
+ * The catalogue leagues that fall OUTSIDE a club's district — everything in `allLeagues`
+ * that `leagueOptionsForDistrict(allLeagues, district)` does NOT already offer (so the
+ * overarching set, shared by every district, is never included). Grouped `district → group
+ * → leagues[]` for a disclosure that lets an admin enter a cross-district league (e.g. an
+ * EMCU junior league for a club whose home district is Ilembe). The server accepts any
+ * catalogue key, so these are valid selections — just not the district-default ones.
+ */
+export function leagueOptionsOutsideDistrict(
+  allLeagues: any[],
+  district: string,
+): Record<string, Record<string, any[]>> {
+  const list = Array.isArray(allLeagues) ? allLeagues : [];
+  const inDistrict = new Set(leagueOptionsForDistrict(list, district).map((l) => l.key));
+  const seen = new Set<string>();
+  const out: Record<string, Record<string, any[]>> = {};
+  for (const l of list) {
+    if (inDistrict.has(l.key) || seen.has(l.key)) continue;
+    seen.add(l.key);
+    const d = l.district || '';
+    const byGroup = (out[d] = out[d] || {});
+    (byGroup[l.group] = byGroup[l.group] || []).push(l);
+  }
+  return out;
+}
+
 /** key -> label map (replaces the static LEAGUE_LABEL_BY_KEY). */
 export function labelByKey(allLeagues: any[]): Record<string, string> {
   const map: Record<string, string> = {};

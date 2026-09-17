@@ -3,6 +3,7 @@ import {
   OVERARCHING_DISTRICT,
   slugifyLeagueKey,
   leagueOptionsForDistrict,
+  leagueOptionsOutsideDistrict,
   labelByKey,
   optionsGroupedByGroup,
   findByKey,
@@ -78,6 +79,33 @@ describe('leagueOptionsForDistrict', () => {
     expect(out.filter((l) => l.key === 'premier')).toHaveLength(1);
     expect(leagueOptionsForDistrict([], 'anything')).toEqual([]);
     expect(leagueOptionsForDistrict(undefined, 'anything')).toEqual([]);
+  });
+});
+
+describe('leagueOptionsOutsideDistrict', () => {
+  it('returns the catalogue minus the district defaults, grouped district → group', () => {
+    // Ethekwini already offers premier/veterans/emcuD1/emcuD2 → only kcSat is "outside".
+    const out = leagueOptionsOutsideDistrict(LEAGUES, 'Ethekwini Metro Cricket Union');
+    expect(Object.keys(out)).toEqual(['Umkhanyakude Cricket District']);
+    expect(out['Umkhanyakude Cricket District']['King Cetshwayo'].map((l) => l.key)).toEqual([
+      'kcSat',
+    ]);
+  });
+  it('excludes the overarching set (shared by every district) for an unknown district', () => {
+    const out = leagueOptionsOutsideDistrict(LEAGUES, 'Ilembe Cricket Union');
+    // premier/veterans are overarching → never "outside"; the district-specific leagues are.
+    expect(Object.keys(out).sort()).toEqual([
+      'Ethekwini Metro Cricket Union',
+      'Umkhanyakude Cricket District',
+    ]);
+    expect(out['Ethekwini Metro Cricket Union']['EMCU Divisions'].map((l) => l.key)).toEqual([
+      'emcuD1',
+      'emcuD2',
+    ]);
+  });
+  it('tolerates empty/garbage input', () => {
+    expect(leagueOptionsOutsideDistrict([], 'anything')).toEqual({});
+    expect(leagueOptionsOutsideDistrict(undefined as never, 'anything')).toEqual({});
   });
 });
 
