@@ -73,6 +73,7 @@ import {
   AdminClearances,
   AdminRegistrationReviews,
   LeagueForm,
+  nextChairContact,
 } from './admin';
 import { AdminInsightsPage, AdminLeagueDetailPage } from './insights';
 import { parseSupport } from './support';
@@ -2291,17 +2292,17 @@ function Shell({
               // (and buried version-conflict failures entirely).
               return updateClub({ leagues: keys, leagueTeams });
             }}
-            onUpdateChair={({ name, email, cell }) =>
-              updateClub({
+            onUpdateChair={({ name, email, cell }) => {
+              // A different name drops the previous chair's governance fields (idNumber,
+              // term dates, gender, race); the same name keeps them (contact correction).
+              const chair = nextChairContact(activeClub?.exco?.chair, { name, email, cell });
+              return updateClub({
                 chair: name,
                 // Shallow-merge on the server replaces the whole exco object, so send the
-                // full exco with siblings preserved and only the chair contact updated.
-                exco: {
-                  ...(activeClub?.exco || {}),
-                  chair: { ...(activeClub?.exco?.chair || {}), name, email, cell },
-                },
-              })
-            }
+                // full exco with siblings preserved and only the chair slot updated.
+                exco: { ...(activeClub?.exco || {}), chair },
+              });
+            }}
             onAddNote={addNote}
             onSaveCqi={({ cqi, cqiAnswers }) => {
               // Auto-note gives the admin correction a visible trace in the comm log —

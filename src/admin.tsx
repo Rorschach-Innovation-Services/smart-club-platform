@@ -61,6 +61,7 @@ import {
 } from './data';
 import {
   leagueOptionsForDistrict,
+  leagueOptionsOutsideDistrict,
   optionsGroupedByGroup,
   findByKey,
   slugifyLeagueKey,
@@ -5207,13 +5208,30 @@ function EditSupportContactModal({ current, onClose, onSave, toast }) {
   );
 }
 
+/**
+ * Build the next `exco.chair` object from the previous one and the edited contact.
+ *
+ * A CHANGED name means a different person, so only name/email/cell are kept — the previous
+ * chair's governance fields (idNumber, term dates, gender, race) are dropped and the club
+ * recaptures them on its affiliation form. The SAME name is a contact-detail correction, so
+ * the existing fields are preserved via the spread. Names are compared trimmed.
+ */
+export function nextChairContact(
+  prevChair: Record<string, any> | undefined | null,
+  contact: { name: string; email: string; cell: string },
+): Record<string, any> {
+  const { name, email, cell } = contact;
+  const nameChanged = (name || '').trim() !== (prevChair?.name || '').trim();
+  return nameChanged ? { name, email, cell } : { ...(prevChair || {}), name, email, cell };
+}
+
 /* ─── ChairContactModal — admin sets/corrects a club's chairperson contact ───
    Writes name/email/cell into exco.chair (the single source every "email the
    chair" surface reads) and syncs the top-level club.chair string. Lets admins
    repair clubs onboarded before chair contact was persisted, and fix typos /
    chair changes later. Mirrors EditSupportContactModal's EMAIL_RE validation so
    an invalid address can't be saved into a broken mailto:. */
-function ChairContactModal({ club, onClose, onSave, toast }) {
+export function ChairContactModal({ club, onClose, onSave, toast }) {
   const seed = club.exco?.chair || {};
   const [name, setName] = useStateA(seed.name || club.chair || '');
   const [email, setEmail] = useStateA(seed.email || '');
@@ -5223,6 +5241,11 @@ function ChairContactModal({ club, onClose, onSave, toast }) {
   const cleanEmail = email.trim();
   const cleanCell = cell.trim();
   const emailOk = EMAIL_RE.test(cleanEmail);
+  // A different name means a new chairperson — the previous person's term dates / ID
+  // details are dropped server-side (see onUpdateChair). Only flag it when there is an
+  // existing chair name to replace (not a first-time capture).
+  const currentChairName = (seed.name || '').trim();
+  const nameChanged = !!currentChairName && !!cleanName && cleanName !== currentChairName;
   const dirty =
     cleanName !== (seed.name || club.chair || '') ||
     cleanEmail !== (seed.email || '') ||
@@ -5275,6 +5298,12 @@ function ChairContactModal({ club, onClose, onSave, toast }) {
               placeholder="Chairperson name"
               autoFocus
             />
+            {nameChanged && (
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6, lineHeight: 1.5 }}>
+                Term dates and ID details of the previous chairperson will be cleared; the club
+                completes them on its affiliation form.
+              </div>
+            )}
           </div>
 
           <div className="field" style={{ marginTop: 12 }}>
@@ -5330,11 +5359,19 @@ function ChairContactModal({ club, onClose, onSave, toast }) {
 }
 
 /* ─── ClubLeaguesEditor — admin assigns a club's leagues; one save, not one-per-toggle ─── */
-function ClubLeaguesEditor({ club, allLeagues, onSave }) {
+export function ClubLeaguesEditor({ club, allLeagues, onSave }) {
   const opts = leagueOptionsForDistrict(allLeagues, club.district);
+  // Leagues from OTHER districts (catalogue minus the district defaults), grouped
+  // district → group. The server accepts any catalogue key, so an admin can enter a
+  // cross-district league (e.g. an EMCU junior league for an Ilembe-district club).
+  const outside = leagueOptionsOutsideDistrict(allLeagues, club.district);
+  const outsideFlat = Object.values(outside).flatMap((g) => Object.values(g).flat());
+  const outsideByKey: Record<string, any> = {};
+  for (const l of outsideFlat) outsideByKey[l.key] = l;
   const initial = Array.isArray(club.leagues) ? club.leagues : [];
   const [sel, setSel] = useStateA(initial);
   const [busy, setBusy] = useStateA(false);
+  const [showOutside, setShowOutside] = useStateA(false);
   // Re-sync local selection when the club's SAVED leagues actually change — keyed on
   // content, not array identity. The club record refetches constantly on this page
   // (phase status, comms log, sibling saves), and every refetch mints a new array with
@@ -5346,7 +5383,11 @@ function ClubLeaguesEditor({ club, allLeagues, onSave }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedKey]);
 
-  const orphans = sel.filter((k) => !opts.some((o) => o.key === k));
+  // A selected key is an orphan only when it is in NEITHER the district defaults NOR the
+  // cross-district catalogue — a genuinely deleted key. Selected cross-district keys stay
+  // visible as their own chips (below), so they must not be flagged for removal here.
+  const orphans = sel.filter((k) => !opts.some((o) => o.key === k) && !outsideByKey[k]);
+  const selectedOutside = sel.filter((k) => !!outsideByKey[k]).map((k) => outsideByKey[k]);
   const dirty = sel.length !== initial.length || sel.some((k) => !initial.includes(k));
   const toggle = (key) =>
     setSel((s) => (s.includes(key) ? s.filter((k) => k !== key) : [...s, key]));
@@ -5367,7 +5408,7 @@ function ClubLeaguesEditor({ club, allLeagues, onSave }) {
     color: orphan ? 'var(--muted)' : on ? 'var(--green)' : 'var(--ink)',
   });
 
-  if (opts.length === 0 && orphans.length === 0)
+  if (opts.length === 0 && orphans.length === 0 && outsideFlat.length === 0)
     return (
       <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5 }}>
         No leagues for {club.district} yet — create them on the Leagues page first.
@@ -5408,7 +5449,81 @@ function ClubLeaguesEditor({ club, allLeagues, onSave }) {
             {k} ✕
           </button>
         ))}
+        {/* Selected cross-district leagues stay visible even while the disclosure is
+            collapsed, tagged with their district so they never read as orphans. */}
+        {!showOutside &&
+          selectedOutside.map((L) => (
+            <button
+              key={L.key}
+              type="button"
+              title={`${L.district} · click to remove`}
+              onClick={() => toggle(L.key)}
+              style={chip(true, false)}
+            >
+              {L.label} · {L.district}
+            </button>
+          ))}
       </div>
+      {outsideFlat.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <button
+            type="button"
+            onClick={() => setShowOutside((v) => !v)}
+            style={{
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontFamily: "'Montserrat',sans-serif",
+              fontSize: 12,
+              fontWeight: 600,
+              color: 'var(--muted)',
+            }}
+          >
+            <span style={{ fontSize: 10 }}>{showOutside ? '▾' : '▸'}</span>
+            Leagues from other districts ({outsideFlat.length})
+          </button>
+          {showOutside && (
+            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {Object.entries(outside).map(([district, groups]) => (
+                <div key={district}>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: 'var(--muted-2)',
+                      fontFamily: "'Montserrat',sans-serif",
+                      fontWeight: 700,
+                      marginBottom: 6,
+                    }}
+                  >
+                    {district} ·{' '}
+                    {Object.entries(groups)
+                      .map(([g, ls]) => `${g}: ${ls.map((l) => l.label).join(', ')}`)
+                      .join(' · ')}
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {Object.values(groups)
+                      .flat()
+                      .map((L) => (
+                        <button
+                          key={L.key}
+                          type="button"
+                          onClick={() => toggle(L.key)}
+                          style={chip(sel.includes(L.key), false)}
+                        >
+                          {L.label}
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {dirty && (
         <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
           <Btn tone="ghost" size="sm" onClick={() => setSel(initial)} disabled={busy}>
