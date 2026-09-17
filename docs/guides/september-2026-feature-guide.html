@@ -279,31 +279,30 @@
 
 <section class="cover">
   <div class="cover-top">
-    <div class="cover-eyebrow">Smart Club Platform · Internal Feature Guide</div>
-    <h1>What shipped in the September 2026 batch</h1>
+    <div class="cover-eyebrow">Smart Club Platform · Product Guide for Client-Facing Staff</div>
+    <h1>What's new for the union and its clubs</h1>
     <p class="sub">
-      Six things the union asked for, what each one does, how it works underneath, who is
-      responsible for it, and what to watch out for. Short on purpose.
+      Six things the union asked for, what each one does, who does what, and what to tell a
+      club when they ask. Short on purpose.
     </p>
   </div>
 
   <div class="cover-bottom">
     <div class="pipeline-cap">The one flow worth memorising</div>
     <div class="pipeline">
-      <span class="node fill">Veterans club finds player</span><span class="arm"></span>
-      <span class="node">Sends request</span><span class="arm"></span>
+      <span class="node fill">Veterans club finds a player</span><span class="arm"></span>
+      <span class="node">Sends a request</span><span class="arm"></span>
       <span class="node">Player's own club accepts</span><span class="arm"></span>
-      <span class="node">Affiliation recorded</span>
+      <span class="node">Player joins the veterans list</span>
     </div>
 
     <div class="cover-foot">
     <div>
       <strong>Who this is for</strong><br>
-      Union administrators, club chairpersons and the platform team. Each part says who it is for.
-      No technical knowledge assumed until Part Four.
+      Anyone who talks to union administrators or club chairpersons. Nothing technical inside.
     </div>
     <div style="text-align:right">
-      Branch dolphins-sep17-fixes · 17 Sep 2026<br>
+      September 2026 release<br>
       Version 1.0
     </div>
     </div>
@@ -316,109 +315,107 @@
     <h2>What's in this guide</h2>
   </div>
   <ol>
-    <li><span class="n">One</span><span class="t">At a glance</span><span class="d">The six items and where they landed</span></li>
-    <li><span class="n">Two</span><span class="t">Club portal</span><span class="d">Your side in fixtures, veterans squad, union-entered leagues</span></li>
-    <li><span class="n">Three</span><span class="t">Admin console</span><span class="d">Other-district leagues, veterans requests, insights, chair changes</span></li>
-    <li><span class="n">Four</span><span class="t">Platform team</span><span class="d">Two command-line tools and one secret</span></li>
-    <li><span class="n">Five</span><span class="t">Who is responsible for what</span><span class="d">Roles, per feature</span></li>
-    <li><span class="n">Six</span><span class="t">Implications and gotchas</span><span class="d">The things that will otherwise surprise you</span></li>
+    <li><span class="n">One</span><span class="t">At a glance</span><span class="d">The six requests and what changed</span></li>
+    <li><span class="n">Two</span><span class="t">What clubs see</span><span class="d">Your side in fixtures, the veterans squad, union-entered leagues</span></li>
+    <li><span class="n">Three</span><span class="t">What the union office sees</span><span class="d">Other-district leagues, veterans requests, insights, chair changes</span></li>
+    <li><span class="n">Four</span><span class="t">Who is responsible for what</span><span class="d">Roles, per task</span></li>
+    <li><span class="n">Five</span><span class="t">Good to know</span><span class="d">The questions clubs will ask, and the answers</span></li>
   </ol>
 </section>
 
-<!-- ══ PART ONE ═══ -->
+<!-- PART ONE -->
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part One</div>
     <h2>At a glance</h2>
     <p class="lede">
-      The Dolphins (KZNCU) office raised six issues in September. Five are built and reviewed.
-      One is deliberately on hold. Every fix works for every union on the platform, not just Dolphins.
+      The Dolphins (KZNCU) office raised six issues in September. Five are live in the next release.
+      One is waiting on a decision from the union. Every improvement applies to every union on the platform.
     </p>
   </div>
 
   <table class="t-long">
-    <thead><tr><th>Issue raised</th><th>What we found</th><th>What shipped</th><th>Where</th></tr></thead>
+    <thead><tr><th>What the union asked</th><th>What we found</th><th>What changed</th><th>Where</th></tr></thead>
     <tbody>
-      <tr><td>Clubs with two sides in one league can't tell which side a fixture belongs to</td><td>True. The fixtures table only showed the opponent.</td><td>A <span class="ui">Side</span> column, "playing as" on each series card, and the side named in the next-match banner and in the fixtures message sent to players.</td><td>Club portal → Fixtures</td></tr>
-      <tr><td>Insights shows 0 clubs for Veterans Premier and Veterans Promotion</td><td>The fixtures were imported from the union's spreadsheet, but no club was ever marked as entered in those leagues.</td><td>A sync tool that marks clubs as entered from the fixtures they appear in. The importer now does this itself. Insights flags any league that has fixtures but no entrants.</td><td>Platform team tool + Admin → Insights</td></tr>
-      <tr><td>Dawnheights wants to enter U11 and U13 in the EMCU</td><td>EMCU is a district inside the Dolphins union, not a separate client. The junior leagues exist, but a club from another district could not see them.</td><td>Admins can enter a club into leagues from other districts. The club's own form shows those as "entered by the union" and never drops them.</td><td>Admin → Clubs → Leagues</td></tr>
-      <tr><td>Move the 12/13 December fixtures to 16/17 January</td><td>Confirmed: only Premier Men 50-Over and Veterans Promotion play that weekend. Veterans Promotion already plays on 16 January, so later rounds must shuffle.</td><td><strong>On hold</strong> while the union decides. A preview-only tool shows the resulting calendar.</td><td>Platform team tool</td></tr>
-      <tr><td>Saints Cricket Club has a new chairperson</td><td>Already self-serve. One gap: the old chair's ID number and term dates carried over to the new name.</td><td>Fixed. A name change now clears the previous person's details.</td><td>Admin → Clubs → Edit chairperson</td></tr>
-      <tr><td>Veterans sides want to pick players from any club</td><td>No way to do it. The only building block was a player's own declaration that they play veterans for another club.</td><td>A find-and-request flow. The player's own club must accept. Admins can override.</td><td>Club portal → Veterans squad; Admin → Veterans Requests</td></tr>
-      <tr><td>Export only gives league totals ("34 clubs, 219 teams")</td><td>True. The League breakdown sheet had counts only.</td><td>Two new sheets, <span class="ui">Teams by league</span> and <span class="ui">Clubs by league</span>, list every club and side per division.</td><td>Admin → Insights → Export Excel</td></tr>
+      <tr><td>Clubs with two sides in one league can't tell which side a fixture belongs to</td><td>True. The fixtures list only showed the opponent.</td><td>Each fixture now names the club's own side. The next-match banner and the fixtures message sent to players do too.</td><td>Club portal → Fixtures</td></tr>
+      <tr><td>Insights shows 0 clubs in Veterans Premier and Veterans Promotion</td><td>The fixtures were loaded from the union's spreadsheet, but no club was ever recorded as entered in those two leagues.</td><td>The platform team runs a one-off correction that records each club's entries from the fixtures it plays in. Future fixture loads do this automatically. Insights now flags any league that has fixtures but no entrants.</td><td>Admin console → Insights</td></tr>
+      <tr><td>Dawnheights wants to enter U11 and U13 in the EMCU</td><td>EMCU is a district inside the Dolphins union, not a separate client. The junior leagues exist, but a club from another district couldn't see them.</td><td>Administrators can now enter a club into leagues from other districts. The club sees these as "entered by the union" and cannot accidentally remove them.</td><td>Admin console → Clubs → Leagues</td></tr>
+      <tr><td>Move the 12/13 December fixtures to 16/17 January</td><td>Confirmed: only Premier Men 50-Over and Veterans Promotion play that weekend. Veterans Promotion already plays on 16 January, so later rounds would need to shuffle.</td><td><strong>Waiting on the union.</strong> The platform team can show the union a preview of the resulting calendar before anything changes.</td><td>Platform team</td></tr>
+      <tr><td>Saints Cricket Club has a new chairperson</td><td>Administrators could already change it. One gap: the previous chair's ID number and term dates stayed attached to the new name.</td><td>Fixed. A name change now clears the previous person's details.</td><td>Admin console → Clubs → Edit chairperson</td></tr>
+      <tr><td>Veterans sides want to pick players from any club</td><td>There was no way to do it.</td><td>A find-and-request flow. The player's own club must agree. The union office can step in if needed.</td><td>Club portal → Veterans squad; Admin console → Veterans Requests</td></tr>
+      <tr><td>The Insights export only gives totals ("34 clubs, 219 teams")</td><td>True. It never listed which teams were in which division.</td><td>Two new sheets in the export list every club and side, division by division.</td><td>Admin console → Insights → Export Excel</td></tr>
     </tbody>
   </table>
-
 </section>
 
-<!-- ══ PART TWO ═══ -->
+<!-- PART TWO -->
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Two</div>
-    <h2>Club portal</h2>
+    <h2>What clubs see</h2>
     <p class="lede">For club chairpersons and representatives. Three things look different.</p>
   </div>
 
   <h3>Fixtures now say which of your sides is playing</h3>
   <p>
     Open <span class="ui">Fixtures</span>. Each series card ends with <em>playing as Saints Cricket Club B</em>
-    (one side) or <em>your sides: A, B, C</em> (several). When you field two or more sides in the same series,
-    the table gains a <span class="ui">Side</span> column. A derby between your own sides appears once, with
-    the home side in <span class="ui">Side</span> and the away side under <span class="ui">Opponent</span>.
+    (one side) or <em>your sides: A, B, C</em> (several). When a club fields two or more sides in the same series,
+    the table gains a <span class="ui">Side</span> column. A match between a club's own sides appears once, with the
+    home side under <span class="ui">Side</span> and the away side under <span class="ui">Opponent</span>.
   </p>
   <div class="why">
-    <span class="callout-label">Why it was missing</span>
-    <p>A fixture stores two team identifiers, not names. Each series carries a snapshot mapping identifiers to
-    clubs and side names. The portal always had the mapping; it simply never printed your own side.</p>
+    <span class="callout-label">If a club asks why it took so long</span>
+    <p>The information was always there. The fixtures page simply never printed the club's own side, because most clubs
+    field one side per league and never noticed.</p>
   </div>
 
   <h3>Veterans squad: find a player, ask their club</h3>
   <p>
-    A <span class="ui">Veterans squad</span> item appears in the left menu only for clubs the union has fixtured
-    into a veterans league. Nobody is added to your squad without their own club agreeing.
+    A <span class="ui">Veterans squad</span> item appears in the left-hand menu, but only for clubs the union has fixtured
+    into a veterans league. Nobody is added to a squad without their own club agreeing.
   </p>
   <div class="steps">
     <div class="step"><h4>Find</h4><p>Type at least three letters of a name into <span class="ui">Find a player</span>.
-      You see the player's name and their club, nothing else. Players already affiliated to a veterans club, already
-      registered in a veterans league, or your own players, do not appear.</p></div>
-    <div class="step"><h4>Request</h4><p>Click <span class="ui">Request</span>, optionally with a short note. The row flips
-      to <span class="pill teal">Requested</span> and the request appears under <span class="ui">Pending requests</span>,
-      where you can withdraw it. The other club's chairperson gets an email.</p></div>
+      The club sees the player's name and their club, nothing else. Players already attached to a veterans club, already
+      registered in a veterans league, or the searching club's own players, do not appear.</p></div>
+    <div class="step"><h4>Request</h4><p>Click <span class="ui">Request</span>, optionally with a short note. The row shows
+      <span class="pill teal">Requested</span> and the request appears under <span class="ui">Pending requests</span>, where it
+      can be withdrawn. The other club's chairperson receives an email.</p></div>
     <div class="step"><h4>The other club decides</h4><p>On their <span class="ui">Players</span> page a card reads
       <em>Crusaders CC asks to register Thabo Ndlovu for veterans cricket</em>, with <span class="ui">Accept</span> and
-      <span class="ui">Decline</span>. The player's roster row shows a <span class="pill teal">Veterans request</span> pill
-      until they act.</p></div>
-    <div class="step"><h4>Done</h4><p>On accept the player appears in your <span class="ui">Veterans affiliates</span>
-      list and under <span class="ui">Recent outcomes</span>. The player stays on their own club's roster.
-      Your roster count does not change.</p></div>
+      <span class="ui">Decline</span>. The player's row on the roster shows a <span class="pill teal">Veterans request</span>
+      badge until they act.</p></div>
+    <div class="step"><h4>Done</h4><p>On accept the player appears in the veterans club's <span class="ui">Veterans affiliates</span>
+      list and under <span class="ui">Recent outcomes</span>. The player stays registered at their own club.
+      Neither club's player count changes.</p></div>
   </div>
   <div class="warn">
-    <span class="callout-label">What accept does not do</span>
-    <p>It does not move the player, change either club's player count, or start a clearance. It records that this
-    person plays veterans cricket for your club, the same record a player creates when they declare it at registration.</p>
+    <span class="callout-label">What accepting does not do</span>
+    <p>It does not move the player, change either club's numbers, or start a transfer. It records that this person plays
+    veterans cricket for that club, the same thing a player records when they declare it at registration.</p>
   </div>
 
   <h3>Leagues the union entered for you</h3>
   <p>
-    If an administrator enters your club into a league outside your district (an EMCU junior league for an Ilembe club,
-    for example), step three of your affiliation form shows it under <span class="ui">Entered by the union</span>.
-    You cannot untick it, and re-saving the form or changing your district will not drop it. Only the union office can remove it.
+    If the union office enters a club into a league outside its district (an EMCU junior league for an Ilembe club, for example),
+    step three of the affiliation form shows it under <span class="ui">Entered by the union</span>. The club cannot untick it,
+    and re-saving the form or changing district will not drop it. Only the union office can remove it.
   </p>
 </section>
 
-<!-- ══ PART THREE ═══ -->
+<!-- PART THREE -->
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Three</div>
-    <h2>Admin console</h2>
+    <h2>What the union office sees</h2>
     <p class="lede">For union administrators. Four screens changed.</p>
   </div>
 
   <h3>Entering a club into another district's league</h3>
   <p>
-    Clubs → the club → <span class="ui">Leagues</span>. Below the district's own chips is a collapsed
-    <span class="ui">Leagues from other districts (N)</span>. Expand it, tick the leagues, <span class="ui">Save leagues</span>.
-    Selected cross-district leagues stay visible with their district as a suffix even when the section is collapsed.
+    Clubs → the club → <span class="ui">Leagues</span>. Below the district's own leagues is a collapsed
+    <span class="ui">Leagues from other districts</span>. Expand it, tick the leagues, <span class="ui">Save leagues</span>.
+    Cross-district leagues stay visible with their district name even when the section is collapsed.
   </p>
   <div class="note">
     <span class="callout-label">Dawnheights</span>
@@ -428,153 +425,104 @@
 
   <h3>Veterans Requests</h3>
   <p>
-    A new <span class="ui">Veterans Requests</span> menu item with a pending count. It lists every request in the union with
-    filters for pending, accepted, declined and withdrawn. Clubs normally resolve these themselves; use
-    <span class="ui">Accept</span> or <span class="ui">Decline</span> here only as a union override. A decline asks for an
-    optional reason, which the requesting club sees. Overrides are recorded as such and both chairpersons are emailed.
+    A new <span class="ui">Veterans Requests</span> menu item with a count of pending requests. It lists every request in the
+    union with filters for pending, accepted, declined and withdrawn. Clubs normally resolve these themselves; the office should
+    <span class="ui">Accept</span> or <span class="ui">Decline</span> here only to unblock a stuck request. A decline asks for an
+    optional reason, which the requesting club sees. Office decisions are marked as such and both chairpersons are emailed.
   </p>
 
-  <h3>Insights and the export</h3>
+  <h3>Insights and the Excel export</h3>
   <p>
-    Per-league counts are unchanged in how they work: they count clubs that are <em>entered</em> in a league, not clubs that
-    happen to have fixtures. A league with fixtures but no entrants now shows a small note asking you to have the platform
-    team run the club league sync. <span class="ui">Export Excel</span> gains <span class="ui">Teams by league</span>
-    (one row per side, with club, district and chair contact) and <span class="ui">Clubs by league</span>
-    (one row per club per league, with the number of sides and their names).
+    Per-league counts still count clubs that are <em>entered</em> in a league, not clubs that happen to have fixtures.
+    A league with fixtures but no entrants now shows a small note asking the office to have the platform team correct it.
+    <span class="ui">Export Excel</span> gains <span class="ui">Teams by league</span> (one row per side, with club, district
+    and chair contact) and <span class="ui">Clubs by league</span> (one row per club per league, with the number of sides and their names).
   </p>
 
   <h3>Changing a chairperson</h3>
   <p>
-    Clubs → the club → <span class="ui">Edit chairperson</span>. Enter the new name, email and cell. When the name differs
-    from the current chair, a note tells you the previous person's ID number and term dates will be cleared; the club
-    re-enters them on its affiliation form. Notices such as clearance alerts route to the new contact immediately.
+    Clubs → the club → <span class="ui">Edit chairperson</span>. Enter the new name, email and cell. When the name differs from
+    the current chair, a note explains that the previous person's ID number and term dates will be cleared; the club re-enters them
+    on its affiliation form. Notices such as clearance alerts go to the new contact immediately.
   </p>
   <div class="warn">
     <span class="callout-label">This does not change who can log in</span>
-    <p>Portal access is separate. Go to <span class="ui">Team &amp; Access</span>, invite the new chair as a
-    representative of the club, and remove or narrow the previous person's access.</p>
+    <p>Portal access is separate. Go to <span class="ui">Team &amp; Access</span>, invite the new chair as a representative of the club,
+    and remove the previous person's access.</p>
   </div>
 </section>
 
-<!-- ══ PART FOUR ═══ -->
+<!-- PART FOUR -->
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Four</div>
-    <h2>Platform team</h2>
-    <p class="lede">Two command-line tools and one secret. Both tools preview by default and write nothing without <code>--confirm</code>.</p>
-  </div>
-
-  <h3>Club league sync</h3>
-  <p>
-    Reads every released series, works out which clubs appear in which league, and marks those clubs as entered
-    (with the right number of sides and their names). It only ever adds; it never removes a league, and it skips a club
-    whose stored side names disagree with the fixtures rather than overwrite them. Safe to run twice.
-  </p>
-  <pre style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:9pt;background:var(--green-tint);padding:3mm 4mm;">npx sst shell --stage prod -- npx tsx packages/api/src/sync-club-leagues-from-series.ts dolphins
-npx sst shell --stage prod -- npx tsx packages/api/src/sync-club-leagues-from-series.ts dolphins --confirm</pre>
-  <p>Expected on Dolphins: about 26 clubs patched; Insights then shows 12 clubs in Veterans Premier and 15 in Veterans Promotion.
-  The fixtures importer now runs this automatically after every import, in both its modes, so the zero should not recur.</p>
-
-  <h3>Shift fixture dates (on hold)</h3>
-  <p>
-    Moves every fixture on one date to another and cascades later rounds so nothing collides. The default cascade takes the
-    next existing playing date, so planned gaps such as Easter are kept. It prints a round-by-round table and refuses to write
-    if the move would introduce a ground clash. Use the preview to show the union what the calendar would become.
-  </p>
-  <pre style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:9pt;background:var(--green-tint);padding:3mm 4mm;">npx sst shell --stage prod -- npm --prefix packages/api run shift-fixture-dates -- \
-  --tenant dolphins \
-  --series s-planb-premier-men-50ov-top6,s-planb-premier-men-50ov-bottom6,\
-s-planb-veterans-promotion-30ov \
-  --from-date 2026-12-12,2026-12-13 --to-date 2027-01-16,2027-01-17</pre>
-  <div class="warn">
-    <span class="callout-label">Do not add --confirm</span>
-    <p>The client is still deciding. Nothing in the platform notifies clubs when fixture dates change, so any real move
-    needs a communication plan alongside it.</p>
-  </div>
-
-  <h3>One new secret before deploying</h3>
-  <p>
-    The veterans finder never sends a player's identity key to another club. It sends an opaque handle derived from a
-    server secret. That secret must exist on each stage or the finder fails closed with an error:
-  </p>
-  <pre style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:9pt;background:var(--green-tint);padding:3mm 4mm;">sst secret set CandidateHandleSecret $(openssl rand -hex 32) --stage dev
-sst secret set CandidateHandleSecret $(openssl rand -hex 32) --stage prod</pre>
-  <p>Order of operations: merge and push, set the secret, deploy dev, run the sync on dev, check Insights, then prod.</p>
-</section>
-
-<!-- ══ PART FIVE ═══ -->
-<section class="part">
-  <div class="part-head">
-    <div class="part-num">Part Five</div>
     <h2>Who is responsible for what</h2>
   </div>
   <table class="t-narrow">
-    <thead><tr><th>Task</th><th>Role</th><th>Notes</th></tr></thead>
+    <thead><tr><th>Task</th><th>Who</th><th>Notes</th></tr></thead>
     <tbody>
-      <tr><td>Request a player for a veterans side</td><td>Veterans club chair or rep</td><td>Only clubs fixtured in a veterans league see the menu item.</td></tr>
-      <tr><td>Accept or decline a veterans request</td><td>The player's own club chair or rep</td><td>The club is the responsible party for its players' data. It decides.</td></tr>
-      <tr><td>Override a stuck request</td><td>Union administrator</td><td>Recorded as a union override; both chairs emailed. Use sparingly.</td></tr>
+      <tr><td>Request a player for a veterans side</td><td>Veterans club chair or representative</td><td>Only clubs the union has fixtured into a veterans league see the menu item.</td></tr>
+      <tr><td>Accept or decline a veterans request</td><td>The player's own club</td><td>The club is responsible for its players' information. It decides.</td></tr>
+      <tr><td>Unblock a stuck request</td><td>Union administrator</td><td>Marked as an office decision; both chairs emailed. Use sparingly.</td></tr>
       <tr><td>Enter a club into another district's league</td><td>Union administrator</td><td>Clubs cannot do this themselves and cannot undo it.</td></tr>
-      <tr><td>Change a club's chairperson</td><td>Union administrator</td><td>Then swap portal access under Team &amp; Access.</td></tr>
-      <tr><td>Run the club league sync</td><td>Platform team</td><td>Dry-run, read the output, then confirm. Per stage.</td></tr>
-      <tr><td>Move fixture dates in bulk</td><td>Platform team, on the union's written instruction</td><td>Preview only until the client decides. Plan the club communication.</td></tr>
-      <tr><td>Set the candidate-handle secret</td><td>Platform team</td><td>Once per stage, before the deploy that carries this batch.</td></tr>
+      <tr><td>Change a club's chairperson</td><td>Union administrator</td><td>Then update portal access under Team &amp; Access.</td></tr>
+      <tr><td>Correct the veterans league counts in Insights</td><td>Platform team, on request from the office</td><td>A one-off correction per union. After that it happens automatically.</td></tr>
+      <tr><td>Move fixture dates in bulk</td><td>Platform team, on the union's written instruction</td><td>The union sees a preview first. Clubs are not notified automatically, so the union must communicate the change.</td></tr>
       <tr><td>Read fixtures with your side shown</td><td>Everyone at the club</td><td>No action needed.</td></tr>
     </tbody>
   </table>
 </section>
 
-<!-- ══ PART SIX ═══ -->
+<!-- PART FIVE -->
 <section class="part">
   <div class="part-head">
-    <div class="part-num">Part Six</div>
-    <h2>Implications and gotchas</h2>
+    <div class="part-num">Part Five</div>
+    <h2>Good to know</h2>
+    <p class="lede">The questions clubs and the office are likely to ask, with the answers.</p>
   </div>
 
-  <h3>Privacy</h3>
+  <h3>"Can another club see my players' details?"</h3>
   <p>
-    The finder is the first screen where one club sees another club's players. It shows a name and a club, nothing more.
-    No ID numbers, contact details or dates of birth leave the server, and every search is logged. A club can only search
-    once the union has actually fixtured it into a veterans league; ticking the league on its own form is not enough.
+    No. The veterans finder shows a player's name and club, nothing more. ID numbers, contact details and dates of birth never
+    leave the union office. Every search is recorded. A club can only search once the union has actually fixtured it into a
+    veterans league; ticking the league on its own form is not enough.
   </p>
 
-  <h3>Nothing moves</h3>
+  <h3>"Does accepting a request move the player?"</h3>
   <p>
-    Accepting a veterans request is a note on the player's record, not a transfer. Player counts, demographics and
-    clearances are untouched. If a player later transfers clubs, the affiliation follows the existing transfer rules.
+    No. It notes that the player plays veterans cricket for the other club. Player counts, demographics and clearances are unchanged.
+    If the player later transfers, the note follows the normal transfer process.
   </p>
 
-  <h3>Notifications are email only</h3>
+  <h3>"We never got the email."</h3>
   <p>
-    Request, accept and decline emails go to the club chairperson on record. A club with no chair email simply gets no
-    email; the request still appears in the portal. There are no WhatsApp messages for this feature.
+    Request, accept and decline emails go to the chairperson's email address on the club's record. A club with no chair email
+    gets no email, but the request still shows in the portal. Check the chairperson details in the admin console. There are no
+    WhatsApp messages for this feature.
   </p>
 
-  <h3>Counts follow entries, not fixtures</h3>
+  <h3>"Insights still shows zero for veterans."</h3>
   <p>
-    Insights and the new export sheets count clubs that are entered in a league. Until the sync runs on prod, the two
-    veterans leagues will still read zero and their divisions will be empty in the export. Every other league already populates.
+    Insights and the export count clubs that are entered in a league. Until the platform team has run the one-off correction for
+    that union, the two veterans leagues read zero and their divisions are empty in the export. Every other league already shows correctly.
   </p>
 
-  <h3>Clubs crossing from one league to two</h3>
+  <h3>"Why did the unattributed player figure go up?"</h3>
   <p>
-    Player demographics attribute a player with no recorded league to their club's only league. A club that gains a second
-    league through the sync loses that shortcut, so the "unattributed" figure can rise. This is the honest number, not a regression.
+    A player with no recorded league is assumed to play in their club's only league. When a club gains a second league through the
+    correction, that assumption no longer applies, so the unattributed figure can rise. It is the honest number, not a fault.
   </p>
 
-  <h3>The December move is not done</h3>
+  <h3>"Have the December fixtures moved yet?"</h3>
   <p>
-    Only Premier Men 50-Over (both halves) and Veterans Promotion 30-Over play on 12 and 13 December. Veterans Promotion
-    already plays on 16 January, so its later rounds must each move one slot. Premier Men has 17 January free. Nothing changes
-    until the union confirms, and there is no automatic notice to clubs when it does.
+    Not yet. Only Premier Men 50-Over (both halves) and Veterans Promotion 30-Over play on 12 and 13 December. Veterans Promotion
+    already plays on 16 January, so its later rounds would each move one week. Nothing changes until the union confirms, and clubs
+    will need to be told directly when it does.
   </p>
 
   <div class="colophon">
-    Smart Club Platform · September 2026 feature guide · Version 1.0<br>
-    Design record: <span class="path">docs/architecture/0013-veterans-squad-selection.md</span><br>
-    Runbooks: <span class="path">docs/runbooks/sync-club-leagues-from-series.md</span> ·
-    <span class="path">docs/runbooks/shift-fixture-dates.md</span><br>
-    API reference: <span class="path">docs/api/clubs.md</span> (Veterans section)
+    Smart Club Platform · September 2026 product guide · Version 1.0<br>
+    Questions about anything here: contact the platform team.
   </div>
 </section>
 
