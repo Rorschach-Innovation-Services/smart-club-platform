@@ -262,6 +262,53 @@ export function insightsExportSheets({
   const teamsTotal = split.senior + split.women + split.junior;
   const playersTotal = clubs.reduce((sum, club) => sum + (club.players || 0), 0);
   const { rows: leagueRows, orphans } = leagueBreakdown(clubs, leagues);
+  const clubById = new Map((clubs || []).map((c) => [c.id, c]));
+  const sidesInLeague = (clubId: string, key: string) => {
+    const club = clubById.get(clubId);
+    return club ? clubTeamsForLeague(club, key).length : 0;
+  };
+  const teamsByLeagueRows: Record<string, unknown>[] = [];
+  const clubsByLeagueRows: Record<string, unknown>[] = [];
+  const pushLeagueTeams = (
+    key: string,
+    label: string,
+    group: string,
+    district: string,
+    withPivot: boolean,
+  ) => {
+    const dir = leagueTeamDirectory(clubs, key);
+    if (!dir.length) return;
+    const byClub = new Map<string, LeagueTeamRow[]>();
+    for (const row of dir) {
+      teamsByLeagueRows.push({
+        League: label,
+        Group: group,
+        District: district,
+        Club: row.clubName,
+        Team: row.teamName,
+        'Club sides in league': sidesInLeague(row.clubId, key),
+        Chair: row.chairName || '',
+        'Chair email': row.chairEmail || '',
+        'Chair cell': row.chairCell || '',
+      });
+      const list = byClub.get(row.clubId) || [];
+      list.push(row);
+      byClub.set(row.clubId, list);
+    }
+    if (!withPivot) return;
+    for (const [clubId, list] of byClub) {
+      clubsByLeagueRows.push({
+        League: label,
+        Group: group,
+        District: district,
+        Club: list[0].clubName,
+        Sides: sidesInLeague(clubId, key),
+        'Side names': list.map((r) => r.teamName).join(', '),
+      });
+    }
+  };
+  for (const l of leagues || []) pushLeagueTeams(l.key, l.label, l.group, l.district, true);
+  for (const key of orphans.keys) pushLeagueTeams(key, key, 'Removed / missing league', '', false);
   const districtBreakdown = districtRows(clubs, leagues, districts);
   const affiliations = affiliationRows(clubs);
   const { bands, submitted, avgCqi } = cqiBandRows(clubs);
@@ -310,6 +357,14 @@ export function insightsExportSheets({
             ]
           : []),
       ],
+    },
+    {
+      name: 'Teams by league',
+      rows: teamsByLeagueRows,
+    },
+    {
+      name: 'Clubs by league',
+      rows: clubsByLeagueRows,
     },
     {
       name: 'District breakdown',
