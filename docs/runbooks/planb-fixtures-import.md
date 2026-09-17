@@ -14,6 +14,83 @@ removes it again when the season machinery takes over.
    Promotion Men); Premier Men T20 keeps its matchups/dates/times from the Dolphins file
    and only borrows venues from this one, matched by unordered team pair.
 
+## 2026-27 Release workbook (single file, release mode)
+
+In Sep 2026 the union replaced the two-workbook supply with **one finished release
+workbook**: `KZNCU League Fixtures 2026-2027 Release.xlsx`. It carries every league _with
+the exact per-fixture venue baked into the sheet_, so there is nothing to allocate — the
+sheet's venue is authoritative. Import it with the new **`--release`** flag (mutually
+exclusive with `--file`/`--t20`; the old two-workbook path is untouched):
+
+```bash
+# Parse only — structural parse of all 5 sheets, per-section count checks, TBC/banner
+# skips, the bottom-10 amendments preview. Touches NOTHING in DynamoDB, needs no sst shell.
+npm run import-planb -- --release "<path>/KZNCU League Fixtures 2026-2027 Release.xlsx" --parse-only
+
+# Dry run — also loads the prod tenant: resolves clubs, splits the combined Promotion Men
+# T20 into g1..g4, resolves venues registry-first, runs the REPORT-ONLY clash pass, prints
+# the admin-edit diff. Writes NOTHING.
+npx sst shell --stage prod -- npm run import-planb -- --release "<path>/…Release.xlsx"
+
+# Import (after reviewing the dry run):
+npx sst shell --stage prod -- npm run import-planb -- --release "<path>/…Release.xlsx" --confirm
+```
+
+The workbook has six sheets: `IMPORTANT DATES` (skipped) plus `PREMIER MEN`,
+`PREMIER WOMEN`, `PROMOTION MEN`, `VETERANS PREMIER`, `VETERANS PROMOTION`. It writes the
+existing **20** `s-planb-*` series (Premier/Veterans T20 + 50/30-over, Promotion Men T20
+g1..g4 + 30-over top10/bottom10). **Promotion Women's three series are NOT in this workbook
+and release mode never touches them** (nor the `promotion-men-50ov-*` keep-list).
+
+What release mode **does**:
+
+- **Sheet venue is authoritative.** Every fixture's venue comes from the sheet, resolved
+  registry-first (`groundKey` + `setVenue`): a registry hit locks it (`venueLocked`), a miss
+  is written as `venueOverride`. Status (`home`/`alternative`/`neutral`) is derived as usual.
+- **Splits the combined Promotion Men T20** (`Promotion Men - T20`, 40 fixtures) into
+  `promotion-men-t20-g1..g4` by finding the prod series whose participants contain both
+  teams (10 per group), then **renumbers each group's rounds densely from 1** by the ordinal
+  of its distinct (date, time) so rounds stay dense per series.
+- **Column layouts.** Default sheets: home=A, `v`=C, time=D, away=E, venue=F. PROMOTION MEN
+  shifts one left: home=A, `v`=B, time=C, away=D, venue=E (col F may carry a stray annotation
+  date, which is ignored). Only cols A–F are read, so the "Team Breakdown" sidebar (cols H+)
+  never leaks. Week headers (`Week N Fixtures`, incl. `– AM + PM` / `– Catch-Up` variants)
+  set the round + date; a blank-home row with a time is a slot-time row; a per-row time
+  overrides the running slot.
+- **Skips** TBC rows (home/away/venue = `TBC`), `T20 Finals Weekend` and `Further 1 round…`
+  banners, and the repeated all-TBC section blocks.
+
+What release mode **does NOT do** (the difference from the two-workbook path):
+
+- **No `VENUE_DIRECTIVES`, no re-bases (`buildReBaseMap`), no auto-relocation.** The sheet
+  already places every fixture, so none of the allocation machinery runs.
+- **The clash pass is REPORT-ONLY.** Ground/date/slot double-bookings (same `groundKey`,
+  same date, overlapping/equal time) are listed and are a **hard stop for `--confirm`** —
+  release mode never writes a known clash and there is **no `--allow-clashes` bypass**.
+
+Notes for this workbook:
+
+- **Kloof CC reinstated (union, Sep 2026).** Removed from `BAD_CONDITION_GROUNDS` and its
+  `premier-men-t20-1` directive deleted from `VENUE_DIRECTIVES` — the release schedules 9
+  Hillary Malvern games at "Kloof Country Club". `venue-clash.ts` aliases `kloofcountry` →
+  `kloof`.
+- **New `VENUE_ALIASES`** (in `venue-clash.ts`) for this sheet's spellings: `gledhow`,
+  `totioval1`/`totioval2`, `commons1wbhs`/`commons2wbhs`, `mpumalanga`, `kloofcountry`.
+- **Collegians** (Tongaat CA's home ground, 23 fixtures) has no registry row. Release mode
+  creates one (`v-collegians`, home of `tongaat-cricket-association`, unpinned, surfaces 1)
+  — printed in the dry run, written on `--confirm`.
+- **Amendments** (hard-coded, `applyBottom10Amendments`, scoped to
+  `promotion-men-30ov-bottom10`, admin decisions 10 Sep 2026): the sheet duplicates
+  `DUT v Simplex` in Week 5 (one row carries a stray "17-Jan-26" note) → drop the duplicate;
+  postpone `DUT v Simplex` to **2027-01-17 09:00 @ Siripat 1**; postpone
+  `DUT v Tongaat Cricket Association` (Week 6) to **2027-01-17 14:00 @ Collegians**; re-add
+  `Meadowridge v Forest Hills` (round 5, **2026-11-29 13:00 @ Forest Hills Sports Club**) that
+  the duplicate displaced. Postponed matches keep their original (sheet week) round.
+
+Lifecycle preservation (`approved`/`released`/`withheld`/`revealedAt`), the version bump,
+the backup file and the `--discard-edits` admin-edit gate all behave exactly as the
+two-workbook path.
+
 ## 25 Aug 2026 revision
 
 The union revised `KZNCU Dolphins Updated Fixtures.xlsx` on 25 Aug 2026 (the REVISED T20
