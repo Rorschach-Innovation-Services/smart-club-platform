@@ -4386,6 +4386,19 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
   const copy = useCopy();
   const clubBy = (id) => clubs.find((c) => c.id === id);
 
+  // Strip the club-name prefix from a resolved side name so a multi-side series lists
+  // "B" / "C" rather than repeating "Saints Cricket Club" on every row. The full name is
+  // still shown on hover (the cell's `title`) and kept whole where stripping would leave
+  // nothing (a side named exactly like the club).
+  const sideShortName = (name) => {
+    const n = (name || '').trim();
+    if (n && n.toLowerCase().startsWith(club.name.toLowerCase())) {
+      const rest = n.slice(club.name.length).trim();
+      if (rest) return rest;
+    }
+    return n;
+  };
+
   // Only series this club is in AND that have been released by the union office.
   // A multi-team club participates under its `tm_…` ids, so match the club's resolved
   // team set rather than its clubId.
@@ -4604,11 +4617,17 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
   const nextMine = nextFixture ? new Set(teamIdsForClub(nextFixture._series, club.id)) : null;
   const nextIsHome = nextFixture ? nextMine.has(nextFixture.home) : false;
   const nextOppId = nextFixture ? (nextIsHome ? nextFixture.away : nextFixture.home) : null;
-  const nextMySide = nextFixture
-    ? resolveTeam(nextFixture._series, nextFixture.home, clubBy)
-    : null;
+  // This club's own side in the next fixture — home OR away, not `f.home` regardless.
+  // When at home it IS the fixture's home team (so venueNameFor still resolves the home
+  // ground); when away it names our travelling side for the hero title.
+  const nextMySideId = nextFixture ? (nextIsHome ? nextFixture.home : nextFixture.away) : null;
+  const nextMySide = nextFixture ? resolveTeam(nextFixture._series, nextMySideId, clubBy) : null;
   const nextOpp = nextFixture ? resolveTeam(nextFixture._series, nextOppId, clubBy) : null;
   const nextOppName = nextOpp?.name || 'TBA';
+  // Name our own side in the title only when the club fields ≥2 sides in that series —
+  // otherwise the club name is redundant against the page's own heading.
+  const nextMyTeamCount = nextMine ? nextMine.size : 0;
+  const nextMySideName = nextMyTeamCount > 1 ? nextMySide?.name : null;
   const nextVenue = nextFixture
     ? venueNameFor(nextFixture, nextIsHome, nextMySide, nextOpp, nextFixture._series)
     : null;
@@ -4729,6 +4748,11 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
             </div>
             <div className="club-fix-next-detail">
               <div className="club-fix-next-title">
+                {nextMySideName ? (
+                  <>
+                    <strong>{nextMySideName}</strong>{' '}
+                  </>
+                ) : null}
                 {nextIsHome ? 'vs' : 'away to'} <strong>{nextOppName}</strong>
               </div>
               <div className="club-fix-next-sub">
@@ -4771,6 +4795,14 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
           {grp.heading && <div className="club-fix-run-head">{grp.heading}</div>}
           {grp.seriesList.map((s) => {
             const myTeamIds = new Set(teamIdsForClub(s, club.id));
+            // The club's own side name(s) in this series, resolved through the series
+            // snapshot so a later roster edit can't rename them. One side → "playing as
+            // <name>"; several → a "Side" column and a "your sides" summary so the rows of
+            // a multi-side series (Simplex A/B/C, Saints B) are no longer indistinguishable.
+            const showSide = myTeamIds.size > 1;
+            const mySideNames = [...myTeamIds]
+              .map((id) => resolveTeam(s, id, clubBy).name)
+              .filter(Boolean);
             // `time` is the tiebreaker: a double-header plays two rounds on the same
             // date, and without it the AM/PM pair would sort in whatever order the
             // series happened to store them, flipping on every re-render.
@@ -4809,6 +4841,11 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                     <div className="club-fix-series-meta">
                       {s.teams.length} teams · {s.maxOvers} overs · {s.seriesType} · {mine.length}{' '}
                       of your matches
+                      {mySideNames.length === 1
+                        ? ` · playing as ${mySideNames[0]}`
+                        : mySideNames.length > 1
+                          ? ` · your sides: ${mySideNames.map(sideShortName).join(', ')}`
+                          : ''}
                     </div>
                   </div>
                   <div className="club-fix-series-tags">
@@ -4825,6 +4862,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                     <thead>
                       <tr>
                         <th style={{ width: 50 }}>Rd</th>
+                        {showSide && <th>Side</th>}
                         <th>Date</th>
                         <th>Opponent</th>
                         <th>H/A</th>
@@ -4840,8 +4878,14 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                         // Resolve through the series snapshot — names/coords survive a later
                         // roster edit, and an intra-club derby names the other side correctly.
                         const opp = resolveTeam(s, oppId, clubBy);
-                        const mySide = resolveTeam(s, f.home, clubBy);
-                        const venueName = venueNameFor(f, isHome, mySide, opp, s);
+                        // The fixture's HOME side, used only for the venue fallback via
+                        // `venueNameFor` (kept named for that role, distinct from the cost
+                        // participants below).
+                        const homeSide = resolveTeam(s, f.home, clubBy);
+                        // THIS club's own side in the fixture — home OR away. Drives the
+                        // "Side" column so a multi-side series is no longer ambiguous.
+                        const mineSide = resolveTeam(s, isHome ? f.home : f.away, clubBy);
+                        const venueName = venueNameFor(f, isHome, homeSide, opp, s);
                         // THIS club's journey, not the fixture's total. `fixtureCost`
                         // sums both sides' legs when the ground is pinned — right for a
                         // union's series total, wrong on a screen a club budgets fuel
@@ -4849,12 +4893,12 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                         // ground is a real trip, so it is no longer skipped.
                         let dist = null,
                           cost = null;
-                        const homeSide = isHome ? club : opp;
-                        const awaySide = isHome ? opp : club;
-                        if (!hideVenue && homeSide?.ground && awaySide?.ground) {
+                        const costHome = isHome ? club : opp;
+                        const costAway = isHome ? opp : club;
+                        if (!hideVenue && costHome?.ground && costAway?.ground) {
                           const c = fixtureCost(
-                            homeSide,
-                            awaySide,
+                            costHome,
+                            costAway,
                             s.costPerKm || DEFAULT_COST_PER_KM,
                             s.carsPerAwayTrip || DEFAULT_CARS,
                             fixtureVenue(f),
@@ -4881,6 +4925,20 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                                 R{f.round}
                               </span>
                             </td>
+                            {showSide && (
+                              <td title={mineSide.name}>
+                                <span
+                                  style={{
+                                    fontFamily: "'Montserrat',sans-serif",
+                                    fontWeight: 700,
+                                    fontSize: 12.5,
+                                    color: 'var(--ink)',
+                                  }}
+                                >
+                                  {sideShortName(mineSide.name)}
+                                </span>
+                              </td>
+                            )}
                             <td>
                               <div
                                 style={{

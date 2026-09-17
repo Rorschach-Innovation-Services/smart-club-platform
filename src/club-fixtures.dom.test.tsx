@@ -75,6 +75,47 @@ function renderView(s: Record<string, unknown>) {
   );
 }
 
+// A series where Home CC fields two sides (A + B) under `tm_…` ids — the case the old
+// table couldn't tell apart. Participant names carry the club-name prefix, which the
+// portal strips to "A"/"B" in the Side column.
+function twoSideSeries(over: Record<string, unknown> = {}) {
+  return {
+    id: 's2',
+    name: 'Veterans Promotion · 2026/27',
+    startDate: '2026-09-01',
+    teams: ['tm_home-club_vets_1', 'tm_home-club_vets_2', 'away-club'],
+    maxOvers: 30,
+    seriesType: 'League',
+    released: true,
+    releasedAt: '2026-08-20T09:00:00.000Z',
+    version: 1,
+    participants: [
+      { teamId: 'tm_home-club_vets_1', clubId: 'home-club', name: 'Home CC A' },
+      { teamId: 'tm_home-club_vets_2', clubId: 'home-club', name: 'Home CC B' },
+      { teamId: 'away-club', clubId: 'away-club', name: 'Away CC' },
+    ],
+    fixtures: [
+      {
+        id: 'f1',
+        home: 'tm_home-club_vets_1',
+        away: 'away-club',
+        round: 1,
+        date: '2026-09-15',
+        venueName: 'Kingsmead Stadium',
+      },
+      {
+        id: 'f2',
+        home: 'away-club',
+        away: 'tm_home-club_vets_2',
+        round: 2,
+        date: '2026-09-22',
+        venueName: 'Away Park',
+      },
+    ],
+    ...over,
+  };
+}
+
 describe('ClubFixturesView — withheld venue and time', () => {
   it('hides venue, distance and time when both are withheld', () => {
     const { queryAllByText, queryByText, getByText } = renderView(
@@ -135,5 +176,50 @@ describe('ClubFixturesView — withheld venue and time', () => {
     // Only the time is masked.
     expect(queryAllByText(/time to be confirmed/i).length).toBeGreaterThan(0);
     expect(queryAllByText(/venue to be confirmed/i)).toHaveLength(0);
+  });
+});
+
+describe("ClubFixturesView — the club's own side", () => {
+  it('single-side series shows no Side column and "playing as" the club', () => {
+    const { queryByText, getByText } = renderView(series());
+    // Legacy single-team series ⇒ one own side ⇒ no extra column, no ambiguity.
+    expect(queryByText('Side')).toBeNull();
+    expect(getByText(/playing as Home CC/i)).toBeTruthy();
+  });
+
+  it('multi-side series adds a Side column with the right name per row', () => {
+    const { getByText, getByTitle } = renderView(twoSideSeries());
+    // The column exists and the meta summarises both sides (stripped to A, B).
+    expect(getByText('Side')).toBeTruthy();
+    expect(getByText(/your sides: A, B/i)).toBeTruthy();
+    // Each row names the side actually playing — A at home, B away — full name on hover.
+    const aCell = getByTitle('Home CC A');
+    const bCell = getByTitle('Home CC B');
+    expect(within(aCell).getByText('A')).toBeTruthy();
+    expect(within(bCell).getByText('B')).toBeTruthy();
+  });
+
+  it('derby row appears once, naming both own sides as Side and Opponent', () => {
+    const { getAllByRole, getByTitle, getByText } = renderView(
+      twoSideSeries({
+        teams: ['tm_home-club_vets_1', 'tm_home-club_vets_2'],
+        fixtures: [
+          {
+            id: 'derby',
+            home: 'tm_home-club_vets_1',
+            away: 'tm_home-club_vets_2',
+            round: 1,
+            date: '2026-09-15',
+            venueName: 'Kingsmead Stadium',
+          },
+        ],
+      }),
+    );
+    // Exactly one body row for the derby (home + away both ours ⇒ not listed twice).
+    const bodyRows = getAllByRole('row').filter((r) => within(r).queryByText('R1'));
+    expect(bodyRows).toHaveLength(1);
+    // Side = the home side (A), Opponent = the away side (B).
+    expect(within(getByTitle('Home CC A')).getByText('A')).toBeTruthy();
+    expect(getByText('Home CC B')).toBeTruthy();
   });
 });
