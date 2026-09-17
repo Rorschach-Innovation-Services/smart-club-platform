@@ -128,7 +128,10 @@ test("a veterans club's portal lists its affiliates with their primary club", as
   const affiliatesTable = page.locator('table.tbl', {
     has: page.getByRole('columnheader', { name: 'Primary club' }),
   });
-  await expect(affiliatesTable.getByText(primaryName)).toBeVisible();
+  // Scope to THIS run's row — a re-run against the same in-memory DB leaves earlier runs' rows.
+  await expect(
+    affiliatesTable.locator('tr', { hasText: `Test ${name}` }).getByText(primaryName),
+  ).toBeVisible();
 });
 
 test('an admin can change then remove a player’s veterans club from the cross-club register', async ({

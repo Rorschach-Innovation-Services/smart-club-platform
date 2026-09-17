@@ -324,6 +324,12 @@ export interface VeteransAffiliate {
  */
 export async function signInAsRep(page: Page, clubId: string): Promise<void> {
   await page.goto('/');
+  // A previous dev identity persists in localStorage and renders the portal/console instead
+  // of the picker — sign it out first so a spec can switch between two reps.
+  const signOut = page.getByRole('button', { name: 'Sign out' });
+  if (await signOut.isVisible().catch(() => false)) {
+    await signOut.click();
+  }
   const role = page.locator('select.field-select').first();
   await expect(role).toBeVisible();
   await role.selectOption('rep');
