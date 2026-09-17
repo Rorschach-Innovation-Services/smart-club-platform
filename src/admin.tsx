@@ -8720,7 +8720,14 @@ function VetDeclineModal({ playerName, onConfirm, onClose, busy }) {
  * The action handlers resolve to a tri-state ('ok' | 'conflict' | 'failed'); the confirm dialog
  * closes unless the outcome is 'failed', matching the clearance-override flow.
  */
-export function AdminVeteransRequests({ requests, leagues, onAccept, onDecline, busyId, busyAction }) {
+export function AdminVeteransRequests({
+  requests,
+  leagues,
+  onAccept,
+  onDecline,
+  busyId,
+  busyAction,
+}) {
   const [filter, setFilter] = useStateA('pending');
   // { kind: 'accept' | 'decline', req } while a confirm dialog is open.
   const [confirmFor, setConfirmFor] = useStateA(null);
@@ -8901,11 +8908,7 @@ export function AdminVeteransRequests({ requests, leagues, onAccept, onDecline, 
           title="Accept on the club's behalf?"
           body={`Confirm ${confirmFor.req.playerName} for veterans cricket at ${confirmFor.req.veteransClubName}, overriding the primary club (${confirmFor.req.primaryClubName}). This records the affiliation and emails both chairs.`}
           confirmLabel="Accept request"
-          onConfirm={() =>
-            runAction(
-              onAccept?.(confirmFor.req) ?? Promise.resolve('ok'),
-            )
-          }
+          onConfirm={() => runAction(onAccept?.(confirmFor.req) ?? Promise.resolve('ok'))}
           onClose={() => (confirmBusy ? undefined : setConfirmFor(null))}
         />
       )}

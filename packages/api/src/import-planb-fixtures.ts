@@ -1118,35 +1118,181 @@ const T20 = { seriesType: 'Twenty20 (16-25 overs)', maxOvers: 20 } as const;
 const OD = (maxOvers: number) => ({ seriesType: 'One-Day (40-50 overs)', maxOvers });
 const RELEASE_SECTIONS: ReleaseSectionSpec[] = [
   // ── PREMIER MEN ──
-  { sheet: 'PREMIER MEN', match: /^t20\s+premier\s+men\s+group\s+1$/i, slug: 'premier-men-t20-1', label: 'T20 · Group 1', leagueKey: 'premier', ...T20, expected: 15 },
-  { sheet: 'PREMIER MEN', match: /^t20\s+premier\s+men\s+group\s+2$/i, slug: 'premier-men-t20-2', label: 'T20 · Group 2', leagueKey: 'premier', ...T20, expected: 15 },
-  { sheet: 'PREMIER MEN', match: /^50\s+over\s+top\s+6$/i, slug: 'premier-men-50ov-top6', label: '50 Over · Top 6', leagueKey: 'premier', ...OD(50), expected: 30 },
-  { sheet: 'PREMIER MEN', match: /^50\s+over\s+bottom\s+6$/i, slug: 'premier-men-50ov-bottom6', label: '50 Over · Bottom 6', leagueKey: 'premier', ...OD(50), expected: 30 },
+  {
+    sheet: 'PREMIER MEN',
+    match: /^t20\s+premier\s+men\s+group\s+1$/i,
+    slug: 'premier-men-t20-1',
+    label: 'T20 · Group 1',
+    leagueKey: 'premier',
+    ...T20,
+    expected: 15,
+  },
+  {
+    sheet: 'PREMIER MEN',
+    match: /^t20\s+premier\s+men\s+group\s+2$/i,
+    slug: 'premier-men-t20-2',
+    label: 'T20 · Group 2',
+    leagueKey: 'premier',
+    ...T20,
+    expected: 15,
+  },
+  {
+    sheet: 'PREMIER MEN',
+    match: /^50\s+over\s+top\s+6$/i,
+    slug: 'premier-men-50ov-top6',
+    label: '50 Over · Top 6',
+    leagueKey: 'premier',
+    ...OD(50),
+    expected: 30,
+  },
+  {
+    sheet: 'PREMIER MEN',
+    match: /^50\s+over\s+bottom\s+6$/i,
+    slug: 'premier-men-50ov-bottom6',
+    label: '50 Over · Bottom 6',
+    leagueKey: 'premier',
+    ...OD(50),
+    expected: 30,
+  },
   // ── PREMIER WOMEN ──
-  { sheet: 'PREMIER WOMEN', match: /^t20\s+premier\s+women\s+group\s+1$/i, slug: 'premier-women-t20-g1', label: 'T20 · Group 1', leagueKey: 'premierWomen', ...T20, expected: 6 },
-  { sheet: 'PREMIER WOMEN', match: /^t20\s+premier\s+women\s+group\s+2$/i, slug: 'premier-women-t20-g2', label: 'T20 · Group 2', leagueKey: 'premierWomen', ...T20, expected: 6 },
-  { sheet: 'PREMIER WOMEN', match: /^30\s+over\s+top\s+4$/i, slug: 'premier-women-30ov-top4', label: '30 Over · Top 4', leagueKey: 'premierWomen', ...OD(30), expected: 12 },
-  { sheet: 'PREMIER WOMEN', match: /^30\s+over\s+bottom\s+4$/i, slug: 'premier-women-30ov-bottom4', label: '30 Over · Bottom 4', leagueKey: 'premierWomen', ...OD(30), expected: 12 },
+  {
+    sheet: 'PREMIER WOMEN',
+    match: /^t20\s+premier\s+women\s+group\s+1$/i,
+    slug: 'premier-women-t20-g1',
+    label: 'T20 · Group 1',
+    leagueKey: 'premierWomen',
+    ...T20,
+    expected: 6,
+  },
+  {
+    sheet: 'PREMIER WOMEN',
+    match: /^t20\s+premier\s+women\s+group\s+2$/i,
+    slug: 'premier-women-t20-g2',
+    label: 'T20 · Group 2',
+    leagueKey: 'premierWomen',
+    ...T20,
+    expected: 6,
+  },
+  {
+    sheet: 'PREMIER WOMEN',
+    match: /^30\s+over\s+top\s+4$/i,
+    slug: 'premier-women-30ov-top4',
+    label: '30 Over · Top 4',
+    leagueKey: 'premierWomen',
+    ...OD(30),
+    expected: 12,
+  },
+  {
+    sheet: 'PREMIER WOMEN',
+    match: /^30\s+over\s+bottom\s+4$/i,
+    slug: 'premier-women-30ov-bottom4',
+    label: '30 Over · Bottom 4',
+    leagueKey: 'premierWomen',
+    ...OD(30),
+    expected: 12,
+  },
   // ── PROMOTION MEN ── the T20 header is a COMBINED block, split into g1..g4 later.
-  { sheet: 'PROMOTION MEN', match: /^promotion\s+men\s*-\s*t20$/i, slug: 'promotion-men-t20', label: 'T20 (combined)', leagueKey: 'promotion', ...T20, expected: 40 },
-  { sheet: 'PROMOTION MEN', match: /^30\s+over\s+promotion\s+top\s+10$/i, slug: 'promotion-men-30ov-top10', label: '30 Over · Top 10', leagueKey: 'promotion', ...OD(30), expected: 45 },
-  { sheet: 'PROMOTION MEN', match: /^30\s+over\s+promotion\s+bottom\s+10$/i, slug: 'promotion-men-30ov-bottom10', label: '30 Over · Bottom 10', leagueKey: 'promotion', ...OD(30), expected: 45 },
+  {
+    sheet: 'PROMOTION MEN',
+    match: /^promotion\s+men\s*-\s*t20$/i,
+    slug: 'promotion-men-t20',
+    label: 'T20 (combined)',
+    leagueKey: 'promotion',
+    ...T20,
+    expected: 40,
+  },
+  {
+    sheet: 'PROMOTION MEN',
+    match: /^30\s+over\s+promotion\s+top\s+10$/i,
+    slug: 'promotion-men-30ov-top10',
+    label: '30 Over · Top 10',
+    leagueKey: 'promotion',
+    ...OD(30),
+    expected: 45,
+  },
+  {
+    sheet: 'PROMOTION MEN',
+    match: /^30\s+over\s+promotion\s+bottom\s+10$/i,
+    slug: 'promotion-men-30ov-bottom10',
+    label: '30 Over · Bottom 10',
+    leagueKey: 'promotion',
+    ...OD(30),
+    expected: 45,
+  },
   // ── VETERANS PREMIER ──
-  { sheet: 'VETERANS PREMIER', match: /^veterans\s+premier\s+t20\s+1$/i, slug: 'veterans-premier-t20-1', label: 'T20 · Group 1', leagueKey: 'veterans-premier', ...T20, expected: 15 },
-  { sheet: 'VETERANS PREMIER', match: /^veterans\s+premier\s+t20\s+2$/i, slug: 'veterans-premier-t20-2', label: 'T20 · Group 2', leagueKey: 'veterans-premier', ...T20, expected: 15 },
-  { sheet: 'VETERANS PREMIER', match: /^30\s+over\s+veterans\s+premier\s+league$/i, slug: 'veterans-premier-30ov', label: '30 Over', leagueKey: 'veterans-premier', ...OD(30), expected: 66 },
+  {
+    sheet: 'VETERANS PREMIER',
+    match: /^veterans\s+premier\s+t20\s+1$/i,
+    slug: 'veterans-premier-t20-1',
+    label: 'T20 · Group 1',
+    leagueKey: 'veterans-premier',
+    ...T20,
+    expected: 15,
+  },
+  {
+    sheet: 'VETERANS PREMIER',
+    match: /^veterans\s+premier\s+t20\s+2$/i,
+    slug: 'veterans-premier-t20-2',
+    label: 'T20 · Group 2',
+    leagueKey: 'veterans-premier',
+    ...T20,
+    expected: 15,
+  },
+  {
+    sheet: 'VETERANS PREMIER',
+    match: /^30\s+over\s+veterans\s+premier\s+league$/i,
+    slug: 'veterans-premier-30ov',
+    label: '30 Over',
+    leagueKey: 'veterans-premier',
+    ...OD(30),
+    expected: 66,
+  },
   // ── VETERANS PROMOTION ──
-  { sheet: 'VETERANS PROMOTION', match: /^veterans\s+promotion\s+t20\s+1$/i, slug: 'veterans-promotion-t20-1', label: 'T20 · Group 1', leagueKey: 'veterans-promotion', ...T20, expected: 21 },
-  { sheet: 'VETERANS PROMOTION', match: /^veterans\s+promotion\s+t20\s+2$/i, slug: 'veterans-promotion-t20-2', label: 'T20 · Group 2', leagueKey: 'veterans-promotion', ...T20, expected: 28 },
-  { sheet: 'VETERANS PROMOTION', match: /^veterans\s+promotion\s+30\s+over$/i, slug: 'veterans-promotion-30ov', label: '30 Over', leagueKey: 'veterans-promotion', ...OD(30), expected: 105 },
+  {
+    sheet: 'VETERANS PROMOTION',
+    match: /^veterans\s+promotion\s+t20\s+1$/i,
+    slug: 'veterans-promotion-t20-1',
+    label: 'T20 · Group 1',
+    leagueKey: 'veterans-promotion',
+    ...T20,
+    expected: 21,
+  },
+  {
+    sheet: 'VETERANS PROMOTION',
+    match: /^veterans\s+promotion\s+t20\s+2$/i,
+    slug: 'veterans-promotion-t20-2',
+    label: 'T20 · Group 2',
+    leagueKey: 'veterans-promotion',
+    ...T20,
+    expected: 28,
+  },
+  {
+    sheet: 'VETERANS PROMOTION',
+    match: /^veterans\s+promotion\s+30\s+over$/i,
+    slug: 'veterans-promotion-30ov',
+    label: '30 Over',
+    leagueKey: 'veterans-promotion',
+    ...OD(30),
+    expected: 105,
+  },
 ];
 
 /** The combined Promotion Men T20 placeholder slug (split into g1..g4 downstream). */
 const PROMOTION_T20_COMBINED_SLUG = 'promotion-men-t20';
 
 const RELEASE_MONTHS: Record<string, number> = {
-  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
-  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+  jan: 1,
+  feb: 2,
+  mar: 3,
+  apr: 4,
+  may: 5,
+  jun: 6,
+  jul: 7,
+  aug: 8,
+  sep: 9,
+  oct: 10,
+  nov: 11,
+  dec: 12,
 };
 
 /** A release-sheet date: an Excel date cell / formula (via isoDate), or a text spelling
@@ -2389,20 +2535,21 @@ export function parseArgs(argv: string[]): Args {
   }
   if (prune && revert) throw new Error('--prune and --revert are mutually exclusive');
   if (prune) {
-    if (args.file || args.t20 || args.release) throw new Error('--prune takes no --file/--t20/--release');
+    if (args.file || args.t20 || args.release)
+      throw new Error('--prune takes no --file/--t20/--release');
     if (args.only.length) throw new Error('--only is an import-mode flag; not valid with --prune');
     args.mode = 'prune';
     return args;
   }
   if (revert) {
-    if (args.file || args.t20 || args.release) throw new Error('--revert takes no --file/--t20/--release');
+    if (args.file || args.t20 || args.release)
+      throw new Error('--revert takes no --file/--t20/--release');
     if (args.only.length) throw new Error('--only is an import-mode flag; not valid with --revert');
     args.mode = 'revert';
     return args;
   }
   if (args.release) {
-    if (args.file || args.t20)
-      throw new Error('--release is mutually exclusive with --file/--t20');
+    if (args.file || args.t20) throw new Error('--release is mutually exclusive with --file/--t20');
     args.mode = 'release';
     return args;
   }
@@ -3225,7 +3372,9 @@ async function runRelease(args: Args) {
   if (hardFailures.length) {
     console.error(`\n✗ Refusing to continue:\n${hardFailures.map((f) => `   ${f}`).join('\n')}`);
     if (!args.allowCountMismatch)
-      console.error('   (pass --allow-count-mismatch to write anyway if this is a deliberate revision)');
+      console.error(
+        '   (pass --allow-count-mismatch to write anyway if this is a deliberate revision)',
+      );
     process.exitCode = 1;
     return;
   }
@@ -3313,7 +3462,16 @@ async function runRelease(args: Args) {
   // ── Build every Series and assign the sheet's authoritative venue (registry-first) ──
   const built: BuiltSeries[] = [];
   for (const sec of releaseSections) {
-    const b = buildSeries(sec.spec, sec.fixtures, clubs, byNorm, usage, unmatched, leagueLabel, resolutions);
+    const b = buildSeries(
+      sec.spec,
+      sec.fixtures,
+      clubs,
+      byNorm,
+      usage,
+      unmatched,
+      leagueLabel,
+      resolutions,
+    );
     if (!b) continue;
     const teamToClub = new Map(b.series.participants!.map((p) => [p.teamId, p.clubId]));
     b.fixtures.forEach((f, i) => {
@@ -3348,20 +3506,27 @@ async function runRelease(args: Args) {
     if (unknown.length) {
       console.error(`\n✗ --only: unknown series slug(s): ${unknown.join(', ')}`);
       console.error(
-        `   available slugs:\n${[...availableSlugs].sort().map((s) => `     ${s}`).join('\n')}`,
+        `   available slugs:\n${[...availableSlugs]
+          .sort()
+          .map((s) => `     ${s}`)
+          .join('\n')}`,
       );
       process.exitCode = 1;
       return;
     }
     const wanted = new Set(args.only);
     built.splice(0, built.length, ...built.filter((b) => wanted.has(slugOf(b))));
-    console.log(`\n── --only: restricting to ${built.length} of the built series: ${args.only.join(', ')}`);
+    console.log(
+      `\n── --only: restricting to ${built.length} of the built series: ${args.only.join(', ')}`,
+    );
   }
 
   printResolutionLog(resolutions, leagueLabel);
 
   if (unmatched.size) {
-    console.error(`\n✗ ${unmatched.size} team name(s) did not resolve to a club — refusing to write:`);
+    console.error(
+      `\n✗ ${unmatched.size} team name(s) did not resolve to a club — refusing to write:`,
+    );
     for (const n of unmatched) console.error(`   "${n}"`);
     process.exitCode = 1;
     return;
@@ -3413,13 +3578,17 @@ async function runRelease(args: Args) {
     for (const n of editNotes) console.log(`  ${n}`);
   }
   if (dateTimeInfoNotes.length) {
-    console.log(`\n── Date/time differences — INFORMATIONAL only (${dateTimeInfoNotes.length} note(s)):`);
+    console.log(
+      `\n── Date/time differences — INFORMATIONAL only (${dateTimeInfoNotes.length} note(s)):`,
+    );
     for (const n of dateTimeInfoNotes) console.log(`  ${n}`);
   }
 
   let abort = false;
   if (suffixNotes.length) {
-    console.error('\n✗ suffixed/unsuffixed team ambiguity (see warnings above) — refusing to write.');
+    console.error(
+      '\n✗ suffixed/unsuffixed team ambiguity (see warnings above) — refusing to write.',
+    );
     abort = true;
   }
   if (clashes.length) {

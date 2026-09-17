@@ -54,8 +54,7 @@ const setup = (
   return { user, onAccept, onDecline };
 };
 
-const row = (name: RegExp = /sipho/i) =>
-  screen.getByText(name).closest('tr') as HTMLElement;
+const row = (name: RegExp = /sipho/i) => screen.getByText(name).closest('tr') as HTMLElement;
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -73,10 +72,7 @@ describe('the pending list', () => {
   });
 
   it('defaults to the Pending filter, hiding resolved requests', () => {
-    setup([
-      request(),
-      request({ id: 'vr-2', playerName: 'Themba Zulu', status: 'accepted' }),
-    ]);
+    setup([request(), request({ id: 'vr-2', playerName: 'Themba Zulu', status: 'accepted' })]);
     expect(screen.getByText('Sipho Ndlovu')).toBeInTheDocument();
     expect(screen.queryByText('Themba Zulu')).not.toBeInTheDocument();
   });
