@@ -598,3 +598,180 @@ export async function sendFixturesEmail(input: FixturesEmailInput): Promise<{ me
   );
   return { messageId: res.MessageId ?? '' };
 }
+
+// ───────────────────────── Veterans squad-selection requests (ADR 0013) ─────────────────────────
+
+export interface VeteransRequestEmailInput {
+  to: string;
+  /** The PRIMARY club's chair — the one who confirms the affiliation. */
+  chairName: string;
+  veteransClubName: string;
+  playerName: string;
+  primaryClubName: string;
+  /** Free note from the requesting club. Appended as "Note: …" when present. */
+  note?: string;
+}
+
+/**
+ * Build the request-opened email to the PRIMARY club's chair: a veterans club wants to register
+ * one of their players for veterans cricket, and the club confirms in its portal. Pure (no SES,
+ * no env) — exported so tests can assert the rendered copy, mirroring
+ * clearanceResolvedEmailContent. Deliberately link-free (the chair may hold no portal login) and
+ * email-only, like the clearance resolved notice.
+ */
+export function veteransRequestEmailContent(input: VeteransRequestEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { chairName, veteransClubName, playerName, primaryClubName, note } = input;
+  const safePlayer = playerName.replace(/\s+/g, ' ').trim();
+  const subject = `Veterans request — ${safePlayer}`;
+  const greetName = chairName || 'there';
+  const body =
+    `${veteransClubName} has asked to register ${playerName} (one of ${primaryClubName}'s ` +
+    `players) for veterans cricket. As their club, you confirm this in your club portal — ` +
+    `Accept adds the affiliation, Decline turns it down. It does not move the player or change ` +
+    `your roster.`;
+  const noteLine = note ? `\n\nNote from ${veteransClubName}: ${note}` : '';
+
+  const text =
+    `Hello ${greetName},\n\n` +
+    `${body}${noteLine}\n\n` +
+    `If you have any questions, please contact your union office.\n\n` +
+    `Thank you,\nThe union office`;
+
+  const safeName = escapeHtml(greetName);
+  const safeBody = escapeHtml(body);
+  const noteHtml = note
+    ? `<p><strong>Note from ${escapeHtml(veteransClubName)}:</strong> ${escapeHtml(note)}</p>`
+    : '';
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hello ${safeName},</p>` +
+    `<p>${safeBody}</p>` +
+    `${noteHtml}` +
+    `<p>If you have any questions, please contact your union office.</p>` +
+    `<p>Thank you,<br/>The union office</p>` +
+    `</div>`;
+
+  return { subject, text, html };
+}
+
+/**
+ * Send the request-opened notice to the primary club chairman. Same dry-run gate + link-free body
+ * as the clearance senders.
+ */
+export async function sendVeteransRequestEmail(
+  input: VeteransRequestEmailInput,
+): Promise<{ messageId: string }> {
+  const { to, playerName } = input;
+  const { subject, text, html } = veteransRequestEmailContent(input);
+
+  if (EMAIL_DRY_RUN) {
+    console.log(
+      `[notify:email dry-run] would send veterans-request notice to ${to} for ${playerName}`,
+    );
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [to] },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}
+
+export interface VeteransRequestResolvedEmailInput {
+  to: string;
+  chairName: string;
+  veteransClubName: string;
+  playerName: string;
+  primaryClubName: string;
+  /** 'accepted' → the affiliation is confirmed; 'declined' → the primary club turned it down. */
+  outcome: 'accepted' | 'declined';
+  /** Decline reason recorded by the primary club / admin. Appended as "Reason: …" when present. */
+  reason?: string;
+}
+
+/**
+ * Build the request-resolved email (to the veterans club chair, and both chairs on an admin
+ * override). Pure (no SES, no env) — exported for tests.
+ */
+export function veteransRequestResolvedEmailContent(input: VeteransRequestResolvedEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { chairName, veteransClubName, playerName, primaryClubName, outcome, reason } = input;
+  const safePlayer = playerName.replace(/\s+/g, ' ').trim();
+  const subject = `Veterans request ${outcome} — ${safePlayer}`;
+  const greetName = chairName || 'there';
+  const body =
+    outcome === 'accepted'
+      ? `${primaryClubName} has confirmed ${playerName}'s affiliation to ${veteransClubName} for ` +
+        `veterans cricket. They stay registered at ${primaryClubName}; the veterans affiliation ` +
+        `is now recorded.`
+      : `${primaryClubName} has declined the request to register ${playerName} for veterans ` +
+        `cricket with ${veteransClubName}.`;
+  const reasonLine = reason ? `\n\nReason: ${reason}` : '';
+
+  const text =
+    `Hello ${greetName},\n\n` +
+    `${body}${reasonLine}\n\n` +
+    `If you have any questions, please contact your union office.\n\n` +
+    `Thank you,\nThe union office`;
+
+  const safeName = escapeHtml(greetName);
+  const safeBody = escapeHtml(body);
+  const reasonHtml = reason ? `<p><strong>Reason:</strong> ${escapeHtml(reason)}</p>` : '';
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hello ${safeName},</p>` +
+    `<p>${safeBody}</p>` +
+    `${reasonHtml}` +
+    `<p>If you have any questions, please contact your union office.</p>` +
+    `<p>Thank you,<br/>The union office</p>` +
+    `</div>`;
+
+  return { subject, text, html };
+}
+
+/** Send the request-resolved notice to a club chairman. Same dry-run gate as the other senders. */
+export async function sendVeteransRequestResolvedEmail(
+  input: VeteransRequestResolvedEmailInput,
+): Promise<{ messageId: string }> {
+  const { to, outcome, playerName } = input;
+  const { subject, text, html } = veteransRequestResolvedEmailContent(input);
+
+  if (EMAIL_DRY_RUN) {
+    console.log(
+      `[notify:email dry-run] would send veterans-request-${outcome} notice to ${to} for ${playerName}`,
+    );
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [to] },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}

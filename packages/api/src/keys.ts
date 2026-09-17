@@ -15,7 +15,8 @@ export type EntityType =
   | 'USER'
   | 'CLEARANCE'
   | 'REGREVIEW'
-  | 'VETAFFIL';
+  | 'VETAFFIL'
+  | 'VETREQ';
 
 const tenantPrefix = (tenant: string) => `TENANT#${tenant}`;
 
@@ -159,10 +160,11 @@ export const playersListKey = (tenant: string, clubId: string) => ({
  * portal can list its affiliates with a single own-partition Query). The pointing player row
  * lives in the player's PRIMARY club and carries `veteransClubId`; this record is a
  * denormalised index off it, written ONLY while that row is `active` (the write-on-activation
- * invariant — see docs/architecture/data-model.md). `naturalKey` is the player's ID number, so
- * this row is PII: the affiliates GET projects it out (the veterans club is not the player's
- * own club). It has no gsi1/META listing, so tenant/cohort/club erasure must enumerate
- * `VETAFFIL#` items explicitly (see listVeteransAffiliations).
+ * invariant — see docs/architecture/data-model.md). `naturalKey` is the player's identity HASH
+ * (a sha256 of their ID/passport identity — see player-identity.ts:playerNaturalKey — NOT the
+ * raw ID number), so it is still PII-adjacent: the affiliates GET projects it out (the veterans
+ * club is not the player's own club). It has no gsi1/META listing, so tenant/cohort/club erasure
+ * must enumerate `VETAFFIL#` items explicitly (see listVeteransAffiliations).
  */
 export const veteransAffiliationKey = (tenant: string, vetsClubId: string, naturalKey: string) => ({
   pk: `${tenantPrefix(tenant)}#CLUB#${vetsClubId}`,
@@ -174,6 +176,49 @@ export const veteransAffiliationsListKey = (tenant: string, vetsClubId: string) 
   pk: `${tenantPrefix(tenant)}#CLUB#${vetsClubId}`,
   skPrefix: 'VETAFFIL#',
 });
+
+/**
+ * A veterans SQUAD-SELECTION request (ADR 0013). Stored as two items, mirroring the clearance
+ * layout:
+ *  - CANONICAL, under the player's PRIMARY club (the POPIA responsible party that confirms):
+ *    carries the gsi1 entry (admin-wide listing) AND the `playerNaturalKey` (so accept can read
+ *    the primary player row). The primary club is the one that must action the request.
+ *  - MIRROR, under the VETERANS club that made the request (`OUTBOUND_VETREQ#`): NO gsi1 (so the
+ *    admin lists each request once) and NO `playerNaturalKey` (the requesting club must never
+ *    see the player's identity key — the finder only ever handed it an opaque HMAC handle).
+ * Both partitions are a club's OWN partition, so a rep only ever queries their own pk.
+ * Neither row has a META listing, so tenant/cohort/club erasure enumerates both prefixes.
+ */
+export const veteransRequestKey = (tenant: string, primaryClubId: string, id: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${primaryClubId}`,
+  sk: `VETREQ#${id}`,
+});
+
+export const outboundVeteransRequestKey = (tenant: string, vetsClubId: string, id: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${vetsClubId}`,
+  sk: `OUTBOUND_VETREQ#${id}`,
+});
+
+/** pk + sk-prefix to query the requests a club must action (it is the primary club). */
+export const veteransRequestsListKey = (tenant: string, primaryClubId: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${primaryClubId}`,
+  skPrefix: 'VETREQ#',
+});
+
+/** pk + sk-prefix to query the requests a club has made (it is the veterans club). */
+export const outboundVeteransRequestsListKey = (tenant: string, vetsClubId: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${vetsClubId}`,
+  skPrefix: 'OUTBOUND_VETREQ#',
+});
+
+/** gsi1 attributes that make the canonical veterans request listable tenant-wide (admin). */
+export const veteransRequestGsi1 = (tenant: string, requestedAt: string) => ({
+  gsi1pk: `${tenantPrefix(tenant)}#TYPE#VETREQ`,
+  gsi1sk: requestedAt ?? '',
+});
+
+/** gsi1pk used to query every veterans request in a tenant (admin console). */
+export const veteransRequestsListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#VETREQ`;
 
 /**
  * Player clearance (inter-club transfer). Stored as two items:
