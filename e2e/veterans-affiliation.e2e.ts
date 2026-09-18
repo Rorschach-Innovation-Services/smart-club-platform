@@ -14,6 +14,9 @@ import {
   seedPendingVeteransRegistration,
   overrideViaApi,
   rejectViaApi,
+  addClubLeague,
+  createReleasedVeteransSeries,
+  VETERANS_LEAGUE_KEY,
   RUN,
 } from './helpers';
 
@@ -42,6 +45,7 @@ const CLUBS = {
   adminEdit: { primary: 'tongaat', vet1: 'verulam', vet2: 'phoenix' }, // test 3
   chair: { primary: 'ukzn', vet: 'tongaat' }, //     test 4: rep = ukzn declares veterans = tongaat
   activation: { prev: 'phoenix', link: 'verulam', vet: 'crusaders' }, // test 5
+  squad: { primary: 'ukzn', vet: 'crusaders' }, // test 6: crusaders requests, ukzn confirms
 };
 
 test('public registration declaring a veterans club records the affiliation without duplicating the player', async ({
@@ -124,7 +128,10 @@ test("a veterans club's portal lists its affiliates with their primary club", as
   const affiliatesTable = page.locator('table.tbl', {
     has: page.getByRole('columnheader', { name: 'Primary club' }),
   });
-  await expect(affiliatesTable.getByText(primaryName)).toBeVisible();
+  // Scope to THIS run's row — a re-run against the same in-memory DB leaves earlier runs' rows.
+  await expect(
+    affiliatesTable.locator('tr', { hasText: `Test ${name}` }).getByText(primaryName),
+  ).toBeVisible();
 });
 
 test('an admin can change then remove a player’s veterans club from the cross-club register', async ({
@@ -278,4 +285,54 @@ test('a veterans declaration on a clearance materializes on approval and never o
   // Leftover (harmless): the approve path leaves a permanent active player at `link` with a
   // materialized affiliate under `vet`; the reject path leaves an active player reverted to
   // `prev`. Both carry run-unique names, so no other test's name searches collide with them.
+});
+
+test('a veterans club finds a player, requests them, and the primary club accepts — no roster row', async ({
+  page,
+  request,
+}) => {
+  // Task F2 request→confirm flow (ADR 0013). The veterans club (crusaders) is entered into a
+  // released veterans series (opening the finder gate) and given the veterans catalogue key
+  // (lighting the "Veterans squad" nav). A tenant-wide candidate is seeded active at the primary
+  // club (ukzn) with a non-veterans team and no veterans club, so the finder returns it.
+  const { primary, vet } = CLUBS.squad;
+  const name = `VetSquad-${RUN}`;
+  await createReleasedVeteransSeries(request, { vetsClubId: vet });
+  await addClubLeague(request, vet, VETERANS_LEAGUE_KEY);
+  await createActivePlayer(request, primary, { name });
+  const vetCountBefore = await getClubPlayerCount(request, vet);
+
+  // ── Veterans club rep: find the player and request them ──
+  await signInAsRep(page, vet);
+  await page.goto(`/club/${vet}/veterans`);
+  await dismissOnboarding(page);
+  await expect(page.getByRole('heading', { name: /Squad Selection/ })).toBeVisible();
+  await page.getByLabel('Find a player').fill(name);
+  const finderRow = page.locator('table.tbl tbody tr', { hasText: `Test ${name}` });
+  await expect(finderRow).toBeVisible();
+  await finderRow.getByRole('button', { name: 'Request' }).click();
+  // The request lands and the finder row flips to a "Requested" pill (pending outbound).
+  await expect(finderRow.getByText('Requested')).toBeVisible();
+
+  // ── Primary club rep: accept from the roster inbox ──
+  await signInAsRep(page, primary);
+  await page.goto(`/club/${primary}/players`);
+  await dismissOnboarding(page);
+  const inboxCard = page.locator('.clr-card', { hasText: `Test ${name}` });
+  await expect(inboxCard).toBeVisible();
+  await expect(inboxCard.getByText(/asks to register/)).toBeVisible();
+  await inboxCard.getByRole('button', { name: 'Accept' }).click();
+
+  // ── API: the affiliation materialized under the veterans club, no roster row moved ──
+  await expect
+    .poll(async () => (await getPlayerByName(request, primary, name))?.veteransClubId)
+    .toBe(vet);
+  const affiliate = (await getVeteransAffiliates(request, vet)).find(
+    (a) => a.playerName === `Test ${name}`,
+  );
+  expect(affiliate, 'affiliate listed under the veterans club after accept').toBeTruthy();
+  expect(affiliate!.primaryClubId).toBe(primary);
+  expect(affiliate!.source).toBe('portal');
+  // Accept never creates a roster row / bumps the veterans club's player count.
+  expect(await getClubPlayerCount(request, vet)).toBe(vetCountBefore);
 });

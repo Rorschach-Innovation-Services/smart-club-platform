@@ -250,6 +250,11 @@ export default $config({
     // ⚠️ POPIA: these route chair PII to SES (Ireland) + Meta (global) — a documented
     // cross-border transfer. See docs/guides/popia-compliance.md.
     const fromEmail = new sst.Secret('FromEmail', '');
+    // Veterans-candidate handle HMAC key (ADR 0013). Defaulted to '' like FromEmail so the stack
+    // deploys before it's set; env.ts:candidateHandleSecret() FAILS CLOSED on empty off-local, so
+    // the finder 500s rather than mint guessable handles. Set before deploy:
+    //   sst secret set CandidateHandleSecret $(openssl rand -hex 32) --stage <stage>
+    const candidateHandleSecret = new sst.Secret('CandidateHandleSecret', '');
     const whatsappAccessToken = new sst.Secret('WhatsappAccessToken', '');
     const whatsappPhoneNumberId = new sst.Secret('WhatsappPhoneNumberId', '');
     const whatsappInviteTemplate = new sst.Secret(
@@ -357,6 +362,7 @@ export default $config({
         userPool,
         userPoolClient,
         fromEmail,
+        candidateHandleSecret,
         whatsappAccessToken,
         whatsappPhoneNumberId,
         whatsappInviteTemplate,
@@ -417,6 +423,8 @@ export default $config({
         // SES exists but is sandboxed: unverified recipients are rejected).
         SES_REGION: 'eu-west-1',
         FROM_EMAIL: fromEmail.value,
+        // Veterans-candidate handle HMAC key (ADR 0013). Empty until set → fails closed off-local.
+        CANDIDATE_HANDLE_SECRET: candidateHandleSecret.value,
         WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
         WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
         WHATSAPP_INVITE_TEMPLATE: whatsappInviteTemplate.value,

@@ -61,6 +61,7 @@ import {
 } from './data';
 import {
   leagueOptionsForDistrict,
+  leagueOptionsOutsideDistrict,
   optionsGroupedByGroup,
   findByKey,
   slugifyLeagueKey,
@@ -5207,13 +5208,30 @@ function EditSupportContactModal({ current, onClose, onSave, toast }) {
   );
 }
 
+/**
+ * Build the next `exco.chair` object from the previous one and the edited contact.
+ *
+ * A CHANGED name means a different person, so only name/email/cell are kept — the previous
+ * chair's governance fields (idNumber, term dates, gender, race) are dropped and the club
+ * recaptures them on its affiliation form. The SAME name is a contact-detail correction, so
+ * the existing fields are preserved via the spread. Names are compared trimmed.
+ */
+export function nextChairContact(
+  prevChair: Record<string, any> | undefined | null,
+  contact: { name: string; email: string; cell: string },
+): Record<string, any> {
+  const { name, email, cell } = contact;
+  const nameChanged = (name || '').trim() !== (prevChair?.name || '').trim();
+  return nameChanged ? { name, email, cell } : { ...(prevChair || {}), name, email, cell };
+}
+
 /* ─── ChairContactModal — admin sets/corrects a club's chairperson contact ───
    Writes name/email/cell into exco.chair (the single source every "email the
    chair" surface reads) and syncs the top-level club.chair string. Lets admins
    repair clubs onboarded before chair contact was persisted, and fix typos /
    chair changes later. Mirrors EditSupportContactModal's EMAIL_RE validation so
    an invalid address can't be saved into a broken mailto:. */
-function ChairContactModal({ club, onClose, onSave, toast }) {
+export function ChairContactModal({ club, onClose, onSave, toast }) {
   const seed = club.exco?.chair || {};
   const [name, setName] = useStateA(seed.name || club.chair || '');
   const [email, setEmail] = useStateA(seed.email || '');
@@ -5223,6 +5241,11 @@ function ChairContactModal({ club, onClose, onSave, toast }) {
   const cleanEmail = email.trim();
   const cleanCell = cell.trim();
   const emailOk = EMAIL_RE.test(cleanEmail);
+  // A different name means a new chairperson — the previous person's term dates / ID
+  // details are dropped server-side (see onUpdateChair). Only flag it when there is an
+  // existing chair name to replace (not a first-time capture).
+  const currentChairName = (seed.name || '').trim();
+  const nameChanged = !!currentChairName && !!cleanName && cleanName !== currentChairName;
   const dirty =
     cleanName !== (seed.name || club.chair || '') ||
     cleanEmail !== (seed.email || '') ||
@@ -5275,6 +5298,12 @@ function ChairContactModal({ club, onClose, onSave, toast }) {
               placeholder="Chairperson name"
               autoFocus
             />
+            {nameChanged && (
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6, lineHeight: 1.5 }}>
+                Term dates and ID details of the previous chairperson will be cleared; the club
+                completes them on its affiliation form.
+              </div>
+            )}
           </div>
 
           <div className="field" style={{ marginTop: 12 }}>
@@ -5330,11 +5359,19 @@ function ChairContactModal({ club, onClose, onSave, toast }) {
 }
 
 /* ─── ClubLeaguesEditor — admin assigns a club's leagues; one save, not one-per-toggle ─── */
-function ClubLeaguesEditor({ club, allLeagues, onSave }) {
+export function ClubLeaguesEditor({ club, allLeagues, onSave }) {
   const opts = leagueOptionsForDistrict(allLeagues, club.district);
+  // Leagues from OTHER districts (catalogue minus the district defaults), grouped
+  // district → group. The server accepts any catalogue key, so an admin can enter a
+  // cross-district league (e.g. an EMCU junior league for an Ilembe-district club).
+  const outside = leagueOptionsOutsideDistrict(allLeagues, club.district);
+  const outsideFlat = Object.values(outside).flatMap((g) => Object.values(g).flat());
+  const outsideByKey: Record<string, any> = {};
+  for (const l of outsideFlat) outsideByKey[l.key] = l;
   const initial = Array.isArray(club.leagues) ? club.leagues : [];
   const [sel, setSel] = useStateA(initial);
   const [busy, setBusy] = useStateA(false);
+  const [showOutside, setShowOutside] = useStateA(false);
   // Re-sync local selection when the club's SAVED leagues actually change — keyed on
   // content, not array identity. The club record refetches constantly on this page
   // (phase status, comms log, sibling saves), and every refetch mints a new array with
@@ -5346,7 +5383,11 @@ function ClubLeaguesEditor({ club, allLeagues, onSave }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedKey]);
 
-  const orphans = sel.filter((k) => !opts.some((o) => o.key === k));
+  // A selected key is an orphan only when it is in NEITHER the district defaults NOR the
+  // cross-district catalogue — a genuinely deleted key. Selected cross-district keys stay
+  // visible as their own chips (below), so they must not be flagged for removal here.
+  const orphans = sel.filter((k) => !opts.some((o) => o.key === k) && !outsideByKey[k]);
+  const selectedOutside = sel.filter((k) => !!outsideByKey[k]).map((k) => outsideByKey[k]);
   const dirty = sel.length !== initial.length || sel.some((k) => !initial.includes(k));
   const toggle = (key) =>
     setSel((s) => (s.includes(key) ? s.filter((k) => k !== key) : [...s, key]));
@@ -5367,7 +5408,7 @@ function ClubLeaguesEditor({ club, allLeagues, onSave }) {
     color: orphan ? 'var(--muted)' : on ? 'var(--green)' : 'var(--ink)',
   });
 
-  if (opts.length === 0 && orphans.length === 0)
+  if (opts.length === 0 && orphans.length === 0 && outsideFlat.length === 0)
     return (
       <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5 }}>
         No leagues for {club.district} yet — create them on the Leagues page first.
@@ -5408,7 +5449,85 @@ function ClubLeaguesEditor({ club, allLeagues, onSave }) {
             {k} ✕
           </button>
         ))}
+        {/* Selected cross-district leagues stay visible even while the disclosure is
+            collapsed, tagged with their district so they never read as orphans. */}
+        {!showOutside &&
+          selectedOutside.map((L) => (
+            <button
+              key={L.key}
+              type="button"
+              title={`${L.district} · click to remove`}
+              onClick={() => toggle(L.key)}
+              style={chip(true, false)}
+            >
+              {L.label} · {L.district}
+            </button>
+          ))}
       </div>
+      {outsideFlat.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <button
+            type="button"
+            onClick={() => setShowOutside((v) => !v)}
+            aria-expanded={showOutside}
+            aria-controls="admin-other-districts-panel"
+            style={{
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              fontFamily: "'Montserrat',sans-serif",
+              fontSize: 12,
+              fontWeight: 600,
+              color: 'var(--muted)',
+            }}
+          >
+            <span style={{ fontSize: 10 }}>{showOutside ? '▾' : '▸'}</span>
+            Leagues from other districts ({outsideFlat.length})
+          </button>
+          {showOutside && (
+            <div
+              id="admin-other-districts-panel"
+              style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 12 }}
+            >
+              {Object.entries(outside).map(([district, groups]) => (
+                <div key={district}>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: 'var(--muted-2)',
+                      fontFamily: "'Montserrat',sans-serif",
+                      fontWeight: 700,
+                      marginBottom: 6,
+                    }}
+                  >
+                    {/* District + its group names only — the chips below already list
+                        every league, so repeating the labels here just doubled the text. */}
+                    {[district, ...Object.keys(groups)].join(' · ')}
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {Object.values(groups)
+                      .flat()
+                      .map((L) => (
+                        <button
+                          key={L.key}
+                          type="button"
+                          onClick={() => toggle(L.key)}
+                          style={chip(sel.includes(L.key), false)}
+                        >
+                          {L.label}
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {dirty && (
         <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
           <Btn tone="ghost" size="sm" onClick={() => setSel(initial)} disabled={busy}>
@@ -8526,6 +8645,287 @@ export function AdminRegistrationReviews({ reviews, onAck, busyId }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/* ─── AdminVeteransRequests — union oversight of veterans squad selection (ADR 0013) ─── */
+
+// The status → pill tone map, shared by the filter counts and the row pill.
+const VET_REQ_TONE = {
+  pending: 'gold',
+  accepted: 'teal',
+  declined: 'coral',
+  withdrawn: 'muted',
+};
+
+/**
+ * VetDeclineModal — a decline needs an OPTIONAL reason, so ConfirmModal (no input) will not do.
+ * The reason is passed straight to the admin override route (`{ reason }`) and emailed to the
+ * veterans club; leaving it blank declines without one.
+ */
+function VetDeclineModal({ playerName, onConfirm, onClose, busy }) {
+  const [reason, setReason] = useStateA('');
+  return createPortal(
+    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="task-modal narrow" style={{ maxWidth: 440 }}>
+        <div className="task-modal-head">
+          <div className="task-modal-head-text">
+            <div className="task-modal-head-title">Decline this request?</div>
+          </div>
+          <button className="task-modal-close" onClick={onClose} title="Close">
+            <Icon.X />
+          </button>
+        </div>
+        <div className="task-modal-body">
+          <p style={{ fontSize: 13.5, color: 'var(--ink)', lineHeight: 1.55, margin: 0 }}>
+            Decline the veterans-cricket request for <strong>{playerName}</strong> on the club's
+            behalf. The veterans club is emailed the outcome.
+          </p>
+          <label
+            style={{
+              display: 'block',
+              marginTop: 14,
+              fontSize: 12,
+              color: 'var(--muted)',
+              fontFamily: "'Montserrat',sans-serif",
+            }}
+          >
+            Reason (optional)
+            <textarea
+              className="input"
+              rows={3}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Shared with the veterans club"
+              style={{ marginTop: 6, width: '100%', resize: 'vertical' }}
+            />
+          </label>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 18 }}>
+            <Btn tone="outline" size="sm" onClick={onClose} disabled={busy}>
+              Cancel
+            </Btn>
+            <Btn tone="coral" size="sm" onClick={() => onConfirm(reason.trim())} disabled={busy}>
+              {busy ? 'Declining…' : 'Decline request'}
+            </Btn>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/**
+ * The union office's oversight of veterans squad-selection requests (ADR 0013). Requests are
+ * normally resolved by the player's primary club in its portal; the union may accept or decline
+ * as an OVERRIDE here (recorded as `resolvedVia: 'admin'`). Accept re-validates against the live
+ * player row server-side and writes the `VETAFFIL#` affiliation — no roster/playerCount change.
+ * The action handlers resolve to a tri-state ('ok' | 'conflict' | 'failed'); the confirm dialog
+ * closes unless the outcome is 'failed', matching the clearance-override flow.
+ */
+export function AdminVeteransRequests({
+  requests,
+  leagues,
+  onAccept,
+  onDecline,
+  busyId,
+  busyAction,
+}) {
+  const [filter, setFilter] = useStateA('pending');
+  // { kind: 'accept' | 'decline', req } while a confirm dialog is open.
+  const [confirmFor, setConfirmFor] = useStateA(null);
+  const fmtDay = (iso) => (iso ? formatStampDay(iso) : '');
+  const leagueLabel = labelByKey(leagues ?? []);
+
+  // The gsi1 list arrives requestedAt-ascending; show newest first.
+  const all = [...(requests ?? [])].sort((a, b) =>
+    (b.requestedAt || '').localeCompare(a.requestedAt || ''),
+  );
+  const countOf = (s) => all.filter((r) => r.status === s).length;
+  const pending = countOf('pending');
+  const list = filter === 'all' ? all : all.filter((r) => r.status === filter);
+
+  function runAction(promise) {
+    // Close the dialog unless the handler reports a transient 'failed' (parity with the
+    // clearance override): a 409 already refetched the list, so a retry would loop.
+    return Promise.resolve(promise).then((r) => {
+      if (r !== 'failed') setConfirmFor(null);
+      return r;
+    });
+  }
+
+  const confirmBusy = confirmFor && busyId === confirmFor.req.id;
+
+  return (
+    <div>
+      <div className="page-head">
+        <div className="ph-left">
+          <div className="ph-crumb">Admin Console / Veterans Requests</div>
+          <h1 className="ph-title">
+            Veterans <em>Requests</em>
+          </h1>
+          <p className="ph-desc">
+            A veterans club found a player tenant-wide and asked that player's own club to confirm
+            them for veterans cricket. Clubs normally resolve these in their portal; accept or
+            decline here only as a union override. Accept records the second-club affiliation — it
+            never moves the player or changes any roster count.
+          </p>
+        </div>
+      </div>
+
+      <div className="players-stats">
+        <div className="players-stat">
+          <div className="players-stat-l">All requests</div>
+          <div className="players-stat-n">{all.length}</div>
+        </div>
+        <div className="players-stat">
+          <div className="players-stat-l">Pending</div>
+          <div className="players-stat-n" style={{ color: 'var(--gold)' }}>
+            {pending}
+          </div>
+        </div>
+        <div className="players-stat">
+          <div className="players-stat-l">Accepted</div>
+          <div className="players-stat-n">{countOf('accepted')}</div>
+        </div>
+      </div>
+
+      <div className="filter-row" style={{ marginTop: 14 }}>
+        {[
+          { k: 'pending', l: 'Pending', n: pending },
+          { k: 'accepted', l: 'Accepted', n: countOf('accepted') },
+          { k: 'declined', l: 'Declined', n: countOf('declined') },
+          { k: 'withdrawn', l: 'Withdrawn', n: countOf('withdrawn') },
+          { k: 'all', l: 'All', n: all.length },
+        ].map((b) => (
+          <button
+            key={b.k}
+            className={`filter-pill ${filter === b.k ? 'active' : ''}`}
+            onClick={() => setFilter(b.k)}
+          >
+            {b.l} <span style={{ opacity: 0.7, marginLeft: 4 }}>{b.n}</span>
+          </button>
+        ))}
+      </div>
+
+      {list.length === 0 ? (
+        <div
+          style={{
+            marginTop: 14,
+            padding: '40px 16px',
+            textAlign: 'center',
+            color: 'var(--muted)',
+            fontSize: 13,
+            background: 'var(--white)',
+            border: '1px solid var(--line)',
+            borderRadius: 'var(--radius-lg)',
+          }}
+        >
+          No veterans requests match this filter.
+        </div>
+      ) : (
+        <div className="tbl-w" style={{ marginTop: 14 }}>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Player</th>
+                <th>Primary club → Veterans club</th>
+                <th>League</th>
+                <th>Requested</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((r) => {
+                const busy = busyId === r.id;
+                const isPending = r.status === 'pending';
+                return (
+                  <tr key={r.id}>
+                    <td>
+                      <div className="rost-name">{r.playerName}</div>
+                      {r.note ? <div className="rost-sub">“{r.note}”</div> : null}
+                    </td>
+                    <td>
+                      <div style={{ fontSize: 12.5 }}>
+                        {r.primaryClubName} <span style={{ color: 'var(--muted)' }}>→</span>{' '}
+                        {r.veteransClubName}
+                      </div>
+                    </td>
+                    <td>
+                      {r.leagueKey ? (
+                        <Pill tone="navy">{leagueLabel[r.leagueKey] || r.leagueKey}</Pill>
+                      ) : (
+                        <span className="rost-sub">—</span>
+                      )}
+                    </td>
+                    <td>
+                      <div style={{ fontSize: 12.5 }}>{fmtDay(r.requestedAt)}</div>
+                      {r.requestedBy ? <div className="rost-sub">{r.requestedBy}</div> : null}
+                    </td>
+                    <td>
+                      <Pill tone={VET_REQ_TONE[r.status] || 'muted'} dot>
+                        {r.status[0].toUpperCase() + r.status.slice(1)}
+                      </Pill>
+                      {!isPending && r.resolvedVia === 'admin' ? (
+                        <div className="rost-sub">Union override</div>
+                      ) : null}
+                    </td>
+                    <td>
+                      {isPending ? (
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <Btn
+                            tone="teal"
+                            size="sm"
+                            disabled={busy}
+                            onClick={() => setConfirmFor({ kind: 'accept', req: r })}
+                          >
+                            {busy && busyAction === 'accept' ? 'Accepting…' : 'Accept'}
+                          </Btn>
+                          <Btn
+                            tone="outline"
+                            size="sm"
+                            disabled={busy}
+                            onClick={() => setConfirmFor({ kind: 'decline', req: r })}
+                          >
+                            {busy && busyAction === 'decline' ? 'Declining…' : 'Decline'}
+                          </Btn>
+                        </div>
+                      ) : (
+                        <div className="rost-sub">
+                          {r.resolvedBy ? r.resolvedBy : '—'}
+                          {r.resolvedAt ? ` · ${fmtDay(r.resolvedAt)}` : ''}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {confirmFor?.kind === 'accept' && (
+        <ConfirmModal
+          title="Accept on the club's behalf?"
+          body={`Confirm ${confirmFor.req.playerName} for veterans cricket at ${confirmFor.req.veteransClubName}, overriding the primary club (${confirmFor.req.primaryClubName}). This records the affiliation and emails both chairs.`}
+          confirmLabel="Accept request"
+          onConfirm={() => runAction(onAccept?.(confirmFor.req) ?? Promise.resolve('ok'))}
+          onClose={() => (confirmBusy ? undefined : setConfirmFor(null))}
+        />
+      )}
+      {confirmFor?.kind === 'decline' && (
+        <VetDeclineModal
+          playerName={confirmFor.req.playerName}
+          busy={!!confirmBusy}
+          onConfirm={(reason) =>
+            runAction(onDecline?.(confirmFor.req, reason) ?? Promise.resolve('ok'))
+          }
+          onClose={() => (confirmBusy ? undefined : setConfirmFor(null))}
+        />
+      )}
     </div>
   );
 }

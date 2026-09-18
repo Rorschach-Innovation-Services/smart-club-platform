@@ -63,6 +63,7 @@ import {
   makeTeamId,
   defaultTeamName,
   teamLetter,
+  isVeteransLeague,
 } from './leagues';
 import { isActivated, todayIso } from './competition/calendar';
 import { fixtureVenueCoords } from './competition/venues';
@@ -102,7 +103,9 @@ import {
   getVeteransAffiliates,
   setPlayerVeteransClub,
   removePlayerVeteransClub,
+  searchVeteransCandidates,
 } from './api';
+import type { VeteransRequestPublic, VeteransCandidate } from './types';
 import { qk, queryClient } from './query';
 import { DocPreviewModal } from './DocPreviewModal';
 import { RegLinkModal } from './RegLinkModal';
@@ -1062,6 +1065,20 @@ export function AffiliationForm({
           return acc;
         }, {});
       })(),
+      // Saved leagues the union entered from ANOTHER district's catalogue (e.g. an EMCU
+      // junior league on an Ilembe-district club — see admin ClubLeaguesEditor's "other
+      // districts" disclosure). The rep's picker only shows their own district, so these
+      // keys aren't toggleable here; carrying them as a read-only set and unioning them
+      // back into the payloads is what stops the rep's next save silently dropping them.
+      unionLeagues: (() => {
+        const prior = Array.isArray(club.leagues) ? club.leagues : [];
+        const inDistrict = new Set(
+          leagueOptionsForDistrict(allLeagues, club.district || districts[0] || '').map(
+            (l) => l.key,
+          ),
+        );
+        return prior.filter((k) => !inDistrict.has(k) && !!findByKey(allLeagues, k));
+      })(),
       // Teams entered per selected league (a club may field >1 side). Seeded from the
       // stored map, defaulting any prior-selected league with no stored count to 1.
       leagueTeams: (() => {
@@ -1245,22 +1262,45 @@ export function AffiliationForm({
         return acc;
       }, {});
       const validKeys = new Set(opts.map((o) => o.key));
+      // Union-entered cross-district leagues survive a district change UNCHANGED: `d.unionLeagues`
+      // was computed once against the SAVED district at seed time (see the seed at ~line 1073) and
+      // is the ONLY true union-entered set. Recomputing it against the NEW district would relabel
+      // the rep's own former in-district picks as read-only "Entered by the union" keys they could
+      // never remove — so we carry the seeded set through as-is and let the old picks simply drop.
+      const unionLeagues = Array.isArray(d.unionLeagues) ? d.unionLeagues : [];
+      // Keep the counts/rosters of the surviving union keys; everything else is wiped —
+      // in-district selections reset (the rep re-picks) and truly-invalid keys drop.
+      const priorCounts = d.leagueTeams || {};
+      const priorRosters = d.teamRosters || {};
+      const keptTeams: Record<string, any> = {};
+      const keptRosters: Record<string, any> = {};
+      for (const k of unionLeagues) {
+        if (priorCounts[k]) keptTeams[k] = priorCounts[k];
+        if (priorRosters[k]) keptRosters[k] = priorRosters[k];
+      }
       const coaches = d.coaches.map((c) => ({
         ...c,
-        teams: c.teams.filter((t) => validKeys.has(t)),
+        teams: c.teams.filter((t) => validKeys.has(t) || unionLeagues.includes(t)),
       }));
-      // Wipe per-league team counts AND rosters too — cross-district keys are invalid,
-      // so stale counts/rosters would persist as orphaned keys the server now rejects.
-      // Coach team assignments go with them (their sides no longer exist).
+      // Coach side assignments for wiped sides go too (those sides no longer exist).
+      const keptSideIds = new Set(
+        Object.values(keptRosters)
+          .flat()
+          .map((t: any) => t?.id)
+          .filter(Boolean),
+      );
       const wiped = coaches.map((c) =>
-        Array.isArray(c.teamIds) && c.teamIds.length ? { ...c, teamIds: [] } : c,
+        Array.isArray(c.teamIds) && c.teamIds.length
+          ? { ...c, teamIds: c.teamIds.filter((id) => keptSideIds.has(id)) }
+          : c,
       );
       return {
         ...d,
         district: newDistrict,
         leagues: freshLeagues,
-        leagueTeams: {},
-        teamRosters: {},
+        unionLeagues,
+        leagueTeams: keptTeams,
+        teamRosters: keptRosters,
         coaches: wiped,
       };
     });
@@ -1314,9 +1354,12 @@ export function AffiliationForm({
     };
   }
   function getLeaguesPayload() {
-    return Object.entries(data.leagues)
+    const picked = Object.entries(data.leagues)
       .filter(([_, v]) => v)
       .map(([k]) => k);
+    // Union in the read-only cross-district keys the union entered, so a rep's save
+    // never silently drops an admin-added league outside this club's district.
+    return Array.from(new Set([...picked, ...(data.unionLeagues || [])]));
   }
   // Team counts for SELECTED leagues only (keys must stay a subset of getLeaguesPayload()
   // — the server rejects orphaned leagueTeams keys). Each defaults to 1.
@@ -2118,6 +2161,43 @@ export function AffiliationForm({
                         </div>
                       ))}
                     </div>
+
+                    {/* Read-only cross-district leagues the union entered for this club
+                        (outside your district's catalogue). They're not toggleable here,
+                        but they are kept on every save so they can't be lost. */}
+                    {Array.isArray(data.unionLeagues) && data.unionLeagues.length > 0 && (
+                      <div className="field" style={{ marginTop: 4 }}>
+                        <div className="field-label">Entered by the union</div>
+                        <div style={{ fontSize: 11.5, color: 'var(--muted)', marginBottom: 8 }}>
+                          These leagues are outside your district and were entered by the union
+                          office. They stay on your affiliation and can only be changed by the
+                          union.
+                        </div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                          {data.unionLeagues.map((k) => {
+                            const L = findByKey(allLeagues, k);
+                            return (
+                              <span
+                                key={k}
+                                title={L?.district || ''}
+                                style={{
+                                  padding: '7px 13px',
+                                  borderRadius: 99,
+                                  fontFamily: "'Montserrat',sans-serif",
+                                  fontSize: 12,
+                                  fontWeight: 600,
+                                  border: '1px solid var(--line)',
+                                  background: 'var(--paper, var(--white))',
+                                  color: 'var(--muted)',
+                                }}
+                              >
+                                {(L?.label || k) + (L?.district ? ` · ${L.district}` : '')}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
 
                     {/* Name your sides — shown only for leagues fielding more than one team.
                         Each named team becomes its own fixtures participant (intra-club
@@ -4386,6 +4466,19 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
   const copy = useCopy();
   const clubBy = (id) => clubs.find((c) => c.id === id);
 
+  // Strip the club-name prefix from a resolved side name so a multi-side series lists
+  // "B" / "C" rather than repeating "Saints Cricket Club" on every row. The full name is
+  // still shown on hover (the cell's `title`) and kept whole where stripping would leave
+  // nothing (a side named exactly like the club).
+  const sideShortName = (name) => {
+    const n = (name || '').trim();
+    if (n && n.toLowerCase().startsWith(club.name.toLowerCase())) {
+      const rest = n.slice(club.name.length).trim();
+      if (rest) return rest;
+    }
+    return n;
+  };
+
   // Only series this club is in AND that have been released by the union office.
   // A multi-team club participates under its `tm_…` ids, so match the club's resolved
   // team set rather than its clubId.
@@ -4604,11 +4697,17 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
   const nextMine = nextFixture ? new Set(teamIdsForClub(nextFixture._series, club.id)) : null;
   const nextIsHome = nextFixture ? nextMine.has(nextFixture.home) : false;
   const nextOppId = nextFixture ? (nextIsHome ? nextFixture.away : nextFixture.home) : null;
-  const nextMySide = nextFixture
-    ? resolveTeam(nextFixture._series, nextFixture.home, clubBy)
-    : null;
+  // This club's own side in the next fixture — home OR away, not `f.home` regardless.
+  // When at home it IS the fixture's home team (so venueNameFor still resolves the home
+  // ground); when away it names our travelling side for the hero title.
+  const nextMySideId = nextFixture ? (nextIsHome ? nextFixture.home : nextFixture.away) : null;
+  const nextMySide = nextFixture ? resolveTeam(nextFixture._series, nextMySideId, clubBy) : null;
   const nextOpp = nextFixture ? resolveTeam(nextFixture._series, nextOppId, clubBy) : null;
   const nextOppName = nextOpp?.name || 'TBA';
+  // Name our own side in the title only when the club fields ≥2 sides in that series —
+  // otherwise the club name is redundant against the page's own heading.
+  const nextMyTeamCount = nextMine ? nextMine.size : 0;
+  const nextMySideName = nextMyTeamCount > 1 ? nextMySide?.name : null;
   const nextVenue = nextFixture
     ? venueNameFor(nextFixture, nextIsHome, nextMySide, nextOpp, nextFixture._series)
     : null;
@@ -4729,6 +4828,11 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
             </div>
             <div className="club-fix-next-detail">
               <div className="club-fix-next-title">
+                {nextMySideName ? (
+                  <>
+                    <strong>{nextMySideName}</strong>{' '}
+                  </>
+                ) : null}
                 {nextIsHome ? 'vs' : 'away to'} <strong>{nextOppName}</strong>
               </div>
               <div className="club-fix-next-sub">
@@ -4771,6 +4875,14 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
           {grp.heading && <div className="club-fix-run-head">{grp.heading}</div>}
           {grp.seriesList.map((s) => {
             const myTeamIds = new Set(teamIdsForClub(s, club.id));
+            // The club's own side name(s) in this series, resolved through the series
+            // snapshot so a later roster edit can't rename them. One side → "playing as
+            // <name>"; several → a "Side" column and a "your sides" summary so the rows of
+            // a multi-side series (Simplex A/B/C, Saints B) are no longer indistinguishable.
+            const showSide = myTeamIds.size > 1;
+            const mySideNames = [...myTeamIds]
+              .map((id) => resolveTeam(s, id, clubBy).name)
+              .filter(Boolean);
             // `time` is the tiebreaker: a double-header plays two rounds on the same
             // date, and without it the AM/PM pair would sort in whatever order the
             // series happened to store them, flipping on every re-render.
@@ -4809,6 +4921,11 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                     <div className="club-fix-series-meta">
                       {s.teams.length} teams · {s.maxOvers} overs · {s.seriesType} · {mine.length}{' '}
                       of your matches
+                      {mySideNames.length === 1
+                        ? ` · playing as ${mySideNames[0]}`
+                        : mySideNames.length > 1
+                          ? ` · your sides: ${mySideNames.map(sideShortName).join(', ')}`
+                          : ''}
                     </div>
                   </div>
                   <div className="club-fix-series-tags">
@@ -4825,6 +4942,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                     <thead>
                       <tr>
                         <th style={{ width: 50 }}>Rd</th>
+                        {showSide && <th>Side</th>}
                         <th>Date</th>
                         <th>Opponent</th>
                         <th>H/A</th>
@@ -4840,8 +4958,14 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                         // Resolve through the series snapshot — names/coords survive a later
                         // roster edit, and an intra-club derby names the other side correctly.
                         const opp = resolveTeam(s, oppId, clubBy);
-                        const mySide = resolveTeam(s, f.home, clubBy);
-                        const venueName = venueNameFor(f, isHome, mySide, opp, s);
+                        // The fixture's HOME side, used only for the venue fallback via
+                        // `venueNameFor` (kept named for that role, distinct from the cost
+                        // participants below).
+                        const homeSide = resolveTeam(s, f.home, clubBy);
+                        // THIS club's own side in the fixture — home OR away. Drives the
+                        // "Side" column so a multi-side series is no longer ambiguous.
+                        const mineSide = resolveTeam(s, isHome ? f.home : f.away, clubBy);
+                        const venueName = venueNameFor(f, isHome, homeSide, opp, s);
                         // THIS club's journey, not the fixture's total. `fixtureCost`
                         // sums both sides' legs when the ground is pinned — right for a
                         // union's series total, wrong on a screen a club budgets fuel
@@ -4849,12 +4973,12 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                         // ground is a real trip, so it is no longer skipped.
                         let dist = null,
                           cost = null;
-                        const homeSide = isHome ? club : opp;
-                        const awaySide = isHome ? opp : club;
-                        if (!hideVenue && homeSide?.ground && awaySide?.ground) {
+                        const costHome = isHome ? club : opp;
+                        const costAway = isHome ? opp : club;
+                        if (!hideVenue && costHome?.ground && costAway?.ground) {
                           const c = fixtureCost(
-                            homeSide,
-                            awaySide,
+                            costHome,
+                            costAway,
                             s.costPerKm || DEFAULT_COST_PER_KM,
                             s.carsPerAwayTrip || DEFAULT_CARS,
                             fixtureVenue(f),
@@ -4881,6 +5005,20 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                                 R{f.round}
                               </span>
                             </td>
+                            {showSide && (
+                              <td title={mineSide.name}>
+                                <span
+                                  style={{
+                                    fontFamily: "'Montserrat',sans-serif",
+                                    fontWeight: 700,
+                                    fontSize: 12.5,
+                                    color: 'var(--ink)',
+                                  }}
+                                >
+                                  {sideShortName(mineSide.name)}
+                                </span>
+                              </td>
+                            )}
                             <td>
                               <div
                                 style={{
@@ -5124,6 +5262,13 @@ export function ClubPlayersView({
   onGenerateLink,
   onDeletePlayer,
   toast,
+  // Veterans squad-selection (ADR 0013): requests FROM other clubs asking to register one of
+  // this club's players for veterans cricket. Absent ⇒ the inbox/pills simply don't render, so
+  // a caller that doesn't wire them (e.g. a test) is unaffected.
+  veteransRequests,
+  onAcceptVeteransRequest,
+  onDeclineVeteransRequest,
+  busyVeteransId,
 }) {
   const [showLink, setShowLink] = useStateC(false);
   const [confirmDelete, setConfirmDelete] = useStateC(null); // the player pending confirmation
@@ -5162,6 +5307,24 @@ export function ClubPlayersView({
   // (this club is the destination) AND as pending rows already on this roster.
   const joining = (clearances?.outbound ?? []).filter((r) => r.status === 'pending');
   const joiningFrom = (nk) => joining.find((r) => r.playerNaturalKey === nk);
+
+  // Pending inbound veterans requests (this club is the player's primary club — it must act).
+  // Inbound items carry playerNaturalKey, so a request is matched to its exact roster row by
+  // natural key — homonyms then can't cross-tag. Older API responses omit it; those fall back
+  // to a display-name match (harmless: the pill/banner is informational and the Accept still
+  // resolves by request id).
+  const pendingVetRequests: VeteransRequestPublic[] = (veteransRequests?.inbound ?? []).filter(
+    (r: VeteransRequestPublic) => r.status === 'pending',
+  );
+  const vetRequestByKey = new Map<string, VeteransRequestPublic>(
+    pendingVetRequests.filter((r) => r.playerNaturalKey).map((r) => [r.playerNaturalKey!, r]),
+  );
+  const vetRequestByName = new Map<string, VeteransRequestPublic>(
+    pendingVetRequests.filter((r) => !r.playerNaturalKey).map((r) => [r.playerName, r]),
+  );
+  const vetRequestFor = (p) =>
+    vetRequestByKey.get(p.naturalKey) ??
+    vetRequestByName.get(`${p.firstName} ${p.lastName}`.trim());
 
   const allRounders = mine.filter((p) => p.isAllRounder).length;
   const wks = mine.filter((p) => p.isWk).length;
@@ -5284,6 +5447,15 @@ export function ClubPlayersView({
         <FilterResultCount shown={visible.length} total={mine.length} />
       )}
 
+      {pendingVetRequests.length > 0 && onAcceptVeteransRequest && (
+        <VeteransRequestsInbox
+          requests={pendingVetRequests}
+          onAccept={onAcceptVeteransRequest}
+          onDecline={onDeclineVeteransRequest}
+          busyId={busyVeteransId}
+        />
+      )}
+
       <div className="tbl-w" style={{ marginTop: 14 }}>
         <table className="tbl">
           <thead>
@@ -5320,6 +5492,13 @@ export function ClubPlayersView({
                   <td>
                     <div className="rost-name">
                       {p.firstName} {p.lastName}
+                      {vetRequestFor(p) && (
+                        <span style={{ marginLeft: 8 }}>
+                          <Pill tone="gold" dot>
+                            Veterans request
+                          </Pill>
+                        </span>
+                      )}
                     </div>
                     <div className="rost-sub">
                       {p.district || '—'} · {p.gender || '—'} · {p.nationality || '—'}
@@ -5416,6 +5595,19 @@ export function ClubPlayersView({
           clubId={club.id}
           clubName={club.name}
           teamLabel={selectedPlayer.team ? label(selectedPlayer.team) : ''}
+          // A pending inbound veterans request for this player surfaces the same Accept/Decline
+          // banner inside the modal, above the veterans-club editor. Matched by name (see the
+          // vetRequestFor note above) — absent when there's no pending request.
+          veteransRequest={
+            vetRequestFor(selectedPlayer) && onAcceptVeteransRequest
+              ? {
+                  request: vetRequestFor(selectedPlayer),
+                  onAccept: onAcceptVeteransRequest,
+                  onDecline: onDeclineVeteransRequest,
+                  busy: busyVeteransId === vetRequestFor(selectedPlayer).id,
+                }
+              : undefined
+          }
           // Chairs declare/remove a player's veterans second club from their own roster.
           veteransEdit={{
             clubs: vetClubs,
@@ -5821,6 +6013,429 @@ export function ClubClearancesView({
   );
 }
 
+/**
+ * The pending-inbound veterans requests a primary club must act on, shown above its roster (and
+ * reused inside PlayerDetailModal). Each is another club asking to register one of THIS club's
+ * players for veterans cricket; the primary club (the POPIA responsible party) confirms in one
+ * click. Decline reveals an inline optional reason. Accept writes the veterans affiliation — no
+ * roster row, no player-count change.
+ */
+export function VeteransRequestsInbox({
+  requests,
+  onAccept,
+  onDecline,
+  busyId,
+}: {
+  requests: VeteransRequestPublic[];
+  onAccept: (req: VeteransRequestPublic) => void | Promise<unknown>;
+  onDecline?: (req: VeteransRequestPublic, reason?: string) => void | Promise<unknown>;
+  busyId?: string | null;
+}) {
+  // Which request has its decline box open, and the reason typed into it.
+  const [decliningId, setDecliningId] = useStateC<string | null>(null);
+  const [reason, setReason] = useStateC('');
+  if (!requests.length) return null;
+  return (
+    <div style={{ marginTop: 14 }} className="clr-list">
+      {requests.map((req) => {
+        const busy = busyId === req.id;
+        const open = decliningId === req.id;
+        return (
+          <div key={req.id} className="clr-card incoming">
+            <div className="clr-card-head">
+              <div>
+                <div className="clr-eyebrow">Veterans squad request · Union may override</div>
+                <div className="clr-name">
+                  <strong>{req.veteransClubName}</strong> asks to register{' '}
+                  <strong>{req.playerName}</strong> for veterans cricket
+                </div>
+                {req.note && <div className="clr-note">"{req.note}"</div>}
+              </div>
+              <Pill tone="gold" dot>
+                Action needed
+              </Pill>
+            </div>
+            {open ? (
+              <div style={{ marginTop: 8 }}>
+                <textarea
+                  className="field-input"
+                  rows={2}
+                  placeholder="Reason (optional) — shared with the veterans club"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  style={{ width: '100%', fontSize: 13 }}
+                />
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <Btn
+                    tone="ink"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => onDecline?.(req, reason.trim() || undefined)}
+                  >
+                    {busy ? 'Declining…' : 'Confirm decline'}
+                  </Btn>
+                  <Btn
+                    tone="ghost"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => {
+                      setDecliningId(null);
+                      setReason('');
+                    }}
+                  >
+                    Cancel
+                  </Btn>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <Btn tone="teal" size="sm" disabled={busy} onClick={() => onAccept(req)}>
+                  {busy ? 'Accepting…' : 'Accept'}
+                </Btn>
+                {onDecline && (
+                  <Btn
+                    tone="outline"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => {
+                      setDecliningId(req.id);
+                      setReason('');
+                    }}
+                  >
+                    Decline
+                  </Btn>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * The veterans club's squad-selection workspace (ADR 0013). It FINDS a player tenant-wide and
+ * REQUESTS them; the player's primary club confirms. This club can never claim another club's
+ * player unilaterally — the request is a consent step, not a transfer. Reuses the read-only
+ * VeteransAffiliatesCard (this club's confirmed affiliates) at the foot.
+ */
+export function ClubVeteransSquadView({
+  club,
+  allLeagues,
+  requests,
+  onRequest,
+  onWithdraw,
+}: {
+  club: any;
+  allLeagues: any[];
+  requests: { inbound: VeteransRequestPublic[]; outbound: VeteransRequestPublic[] };
+  onRequest: (body: {
+    primaryClubId: string;
+    candidateId: string;
+    leagueKey?: string;
+  }) => void | Promise<unknown>;
+  onWithdraw: (req: VeteransRequestPublic) => void | Promise<unknown>;
+}) {
+  // This club's confirmed veterans affiliates — the same view-only list the Players page shows,
+  // fetched here too so the squad workspace is self-contained.
+  const affiliatesQuery = useQuery({
+    queryKey: qk.veteransAffiliates(club.id),
+    queryFn: () => getVeteransAffiliates(club.id),
+    enabled: !!club.id,
+  });
+  const affiliates = affiliatesQuery.data ?? [];
+  const [term, setTerm] = useStateC('');
+  const [debounced, setDebounced] = useStateC('');
+  // 300 ms debounce so a name typed key-by-key fires one search, not one per keystroke.
+  useEffectC(() => {
+    const h = setTimeout(() => setDebounced(term.trim()), 300);
+    return () => clearTimeout(h);
+  }, [term]);
+  const enabled = debounced.length >= 3;
+  const candidatesQuery = useQuery({
+    queryKey: qk.veteransCandidates(club.id, debounced),
+    queryFn: () => searchVeteransCandidates(club.id, debounced),
+    enabled,
+    // A 403 (not fixtured) / 400 (too short) is a definitive answer — never retry it.
+    retry: false,
+  });
+  // Local in-flight key (a candidateId for Request, a request id for Withdraw) so exactly one
+  // button shows its pending label. Handlers resolve even on error (withToast owns the toast).
+  const [busy, setBusy] = useStateC<string | null>(null);
+  async function run(key: string, fn: () => void | Promise<unknown>) {
+    setBusy(key);
+    try {
+      await fn();
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Optional league select: only when this club plays ≥2 veterans leagues (else the request
+  // carries no leagueKey and the server infers nothing).
+  const vetLeagues = (club.leagues ?? [])
+    .map((k: string) => findByKey(allLeagues, k))
+    .filter((l: any) => l && isVeteransLeague(l));
+  const [leagueKey, setLeagueKey] = useStateC('');
+
+  const outbound = requests?.outbound ?? [];
+  const outboundPending = outbound.filter((r) => r.status === 'pending');
+  const outboundResolved = outbound.filter((r) => r.status !== 'pending');
+  // A pending outbound request for a candidate ⇒ show a "Requested" pill instead of the button.
+  const requestedIds = new Set(outboundPending.map((r) => r.candidateId));
+
+  const forbidden = (candidatesQuery.error as { status?: number } | null)?.status === 403;
+  // Any NON-403 failure (e.g. the 500 when CANDIDATE_HANDLE_SECRET is unset) must surface as an
+  // error notice — otherwise it falls through to the "No players match" empty state and looks like
+  // a successful-but-empty search, hiding a real server fault.
+  const queryError = candidatesQuery.isError && !forbidden ? candidatesQuery.error : null;
+  const queryErrorMessage =
+    (queryError as { message?: string } | null)?.message || 'unexpected error';
+  const candidates: VeteransCandidate[] = candidatesQuery.data?.candidates ?? [];
+  const truncated = candidatesQuery.data?.truncated ?? false;
+
+  return (
+    <div>
+      <div className="page-head">
+        <div className="ph-left">
+          <div className="ph-crumb">Club Portal · {club.name} / Veterans squad</div>
+          <h1 className="ph-title">
+            Veterans <em>Squad Selection</em>
+          </h1>
+          <p className="ph-desc">
+            Find a player from any club and ask their club to register them for {club.name}'s
+            veterans cricket. The player's own club confirms — nobody is added to your squad without
+            their club's consent.
+          </p>
+        </div>
+      </div>
+
+      <Card title="Find a player" sub="Search by name across every club in the union.">
+        {vetLeagues.length >= 2 && (
+          <div style={{ marginBottom: 10, maxWidth: 320 }}>
+            <label className="field-label">Veterans league</label>
+            <select
+              className="field-select"
+              value={leagueKey}
+              onChange={(e) => setLeagueKey(e.target.value)}
+              style={{ width: '100%' }}
+            >
+              <option value="">— Any / unspecified —</option>
+              {vetLeagues.map((l: any) => (
+                <option key={l.key} value={l.key}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        <input
+          className="field-input"
+          placeholder="Find a player"
+          aria-label="Find a player"
+          value={term}
+          onChange={(e) => setTerm(e.target.value)}
+          style={{ width: '100%', fontSize: 14 }}
+        />
+        {term.trim().length > 0 && term.trim().length < 3 && (
+          <div className="rost-sub" style={{ marginTop: 6 }}>
+            Type at least 3 characters to search.
+          </div>
+        )}
+
+        {forbidden ? (
+          <div
+            style={{
+              marginTop: 12,
+              padding: '10px 12px',
+              borderRadius: 8,
+              background: 'var(--wash, rgba(10,15,20,0.04))',
+              color: 'var(--muted)',
+              fontSize: 13,
+            }}
+          >
+            Your club isn't fixtured in a veterans league yet. Once the union enters {club.name}{' '}
+            into a released veterans series, you'll be able to search for players here.
+          </div>
+        ) : queryError ? (
+          <div
+            role="alert"
+            style={{
+              marginTop: 12,
+              padding: '10px 12px',
+              borderRadius: 8,
+              background: 'var(--wash, rgba(10,15,20,0.04))',
+              color: 'var(--muted)',
+              fontSize: 13,
+            }}
+          >
+            Search failed: {queryErrorMessage}. Try again or contact the union.
+          </div>
+        ) : (
+          enabled && (
+            <div className="tbl-w" style={{ marginTop: 12 }}>
+              <table className="tbl">
+                <tbody>
+                  {candidatesQuery.isLoading && (
+                    <tr>
+                      <td style={{ padding: 20, textAlign: 'center', color: 'var(--muted)' }}>
+                        Searching…
+                      </td>
+                    </tr>
+                  )}
+                  {!candidatesQuery.isLoading &&
+                    candidates.map((cand) => {
+                      const requested = requestedIds.has(cand.candidateId);
+                      return (
+                        <tr key={cand.candidateId}>
+                          <td>
+                            <div className="rost-name">{cand.playerName}</div>
+                            <div className="rost-sub">{cand.primaryClubName}</div>
+                          </td>
+                          <td style={{ textAlign: 'right', paddingRight: 14 }}>
+                            {requested ? (
+                              <Pill tone="gold" dot>
+                                Requested
+                              </Pill>
+                            ) : (
+                              <Btn
+                                tone="teal"
+                                size="sm"
+                                disabled={busy === cand.candidateId}
+                                onClick={() =>
+                                  run(cand.candidateId, () =>
+                                    onRequest({
+                                      primaryClubId: cand.primaryClubId,
+                                      candidateId: cand.candidateId,
+                                      ...(leagueKey ? { leagueKey } : {}),
+                                    }),
+                                  )
+                                }
+                              >
+                                {busy === cand.candidateId ? 'Requesting…' : 'Request'}
+                              </Btn>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  {!candidatesQuery.isLoading && candidates.length === 0 && (
+                    <tr>
+                      <td
+                        style={{
+                          padding: 24,
+                          textAlign: 'center',
+                          color: 'var(--muted)',
+                          fontSize: 13,
+                        }}
+                      >
+                        No players match. The search hides players who already play veterans
+                        cricket, players already entered in a veterans league, and your own members
+                        — set those on your roster.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+              {truncated && (
+                <div className="rost-sub" style={{ marginTop: 8 }}>
+                  Showing first 20 — refine your search.
+                </div>
+              )}
+            </div>
+          )
+        )}
+      </Card>
+
+      {outboundPending.length > 0 && (
+        <Card title="Pending requests" sub="Awaiting confirmation from the player's club.">
+          <div className="tbl-w">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Player</th>
+                  <th>Primary club</th>
+                  <th>Requested</th>
+                  <th style={{ width: 120 }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {outboundPending.map((req) => (
+                  <tr key={req.id}>
+                    <td>
+                      <div className="rost-name">{req.playerName}</div>
+                    </td>
+                    <td>
+                      <span style={{ fontSize: 12.5 }}>{req.primaryClubName}</span>
+                    </td>
+                    <td>
+                      <span className="rost-sub">{fmtDay(req.requestedAt)}</span>
+                    </td>
+                    <td style={{ textAlign: 'right', paddingRight: 14 }}>
+                      <Btn
+                        tone="ghost"
+                        size="sm"
+                        disabled={busy === req.id}
+                        onClick={() => run(req.id, () => onWithdraw(req))}
+                      >
+                        {busy === req.id ? 'Withdrawing…' : 'Withdraw'}
+                      </Btn>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {outboundResolved.length > 0 && (
+        <Card title="Recent outcomes" sub="Requests the player's club has resolved.">
+          <div className="tbl-w">
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>Player</th>
+                  <th>Primary club</th>
+                  <th>Outcome</th>
+                </tr>
+              </thead>
+              <tbody>
+                {outboundResolved.map((req) => (
+                  <tr key={req.id}>
+                    <td>
+                      <div className="rost-name">{req.playerName}</div>
+                    </td>
+                    <td>
+                      <span style={{ fontSize: 12.5 }}>{req.primaryClubName}</span>
+                    </td>
+                    <td>
+                      {req.status === 'accepted' ? (
+                        <Pill tone="teal" dot>
+                          Accepted
+                        </Pill>
+                      ) : req.status === 'declined' ? (
+                        <Pill tone="coral" dot>
+                          Declined{req.declineReason ? ` — "${req.declineReason}"` : ''}
+                        </Pill>
+                      ) : (
+                        <Pill tone="muted">Withdrawn</Pill>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      <VeteransAffiliatesCard affiliates={affiliates} loading={affiliatesQuery.isLoading} />
+    </div>
+  );
+}
+
 Object.assign(window, {
   ClubHome,
   AffiliationForm,
@@ -5830,4 +6445,5 @@ Object.assign(window, {
   ClubPlayersView,
   RequestPlayerForm,
   ClubClearancesView,
+  ClubVeteransSquadView,
 });

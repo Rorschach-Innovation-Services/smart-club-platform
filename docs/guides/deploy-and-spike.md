@@ -215,6 +215,23 @@ the SPA source maps to `dolphins-web` and deletes the `.map` files before they r
 > production stack traces will be minified. A forced 500 should appear in `dolphins-api`
 > tagged with `tenant`/`role`; a deliberate 4xx should **not** create an event.
 
+## Veterans candidate-handle secret — set BEFORE deploying (required per stage)
+
+The veterans finder ([ADR 0013](../architecture/0013-veterans-squad-selection.md)) returns an
+opaque `candidateId` = `HMAC-SHA256(secret, …)` instead of a player's identity key. The secret is
+`sst.Secret('CandidateHandleSecret')`, exposed as `CANDIDATE_HANDLE_SECRET`, and the API **fails
+closed** when it is unset off-local (the finder throws). So set it **before** the first deploy of
+this feature to a stage — once per stage, a fresh random value:
+
+```bash
+sst secret set CandidateHandleSecret $(openssl rand -hex 32) --stage <stage>
+```
+
+Set it on **dev** before the portal end-to-end test and on **prod** before the prod deploy.
+Rotating it invalidates outstanding finder handles (a new search re-issues them); stored
+requests are unaffected. `LOCAL_AUTH=1` (the offline stack) uses a fixed dev fallback and needs
+no secret.
+
 ## 7. Tear down dev
 
 ```bash

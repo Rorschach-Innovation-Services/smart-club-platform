@@ -107,9 +107,17 @@ import {
   sendClearanceNotice,
   sendClearanceResolvedNotice,
   sendClearanceReopenedNotice,
+  sendVeteransRequestNotice,
+  sendVeteransRequestResolvedNotice,
   type Channel,
   type SendResult,
 } from './notify/index.js';
+import {
+  clubFixturedInVeterans,
+  veteransLeagueKeysForClub,
+  candidateHandle,
+  isVeteransLeagueKey,
+} from './veterans.js';
 import type {
   Club,
   ClubCommEvent,
@@ -128,6 +136,9 @@ import type {
   UserProfile,
   PlayerRegistration,
   VeteransAffiliatePublic,
+  VeteransRequest,
+  VeteransRequestPublic,
+  VeteransCandidate,
   PlayerClearance,
   AdminClearanceView,
   WithheldField,
@@ -1196,6 +1207,18 @@ async function findPlayerByIdNumber(
   return roster.find((p) => normalizeId(p.idNumber) === wanted) ?? null;
 }
 
+/**
+ * The chair contact for a club's notices: the `exco.chair` sub-record (name/email/cell), falling
+ * back to the flat `club.chair` name when exco has no chair name. `exco` is loosely typed here
+ * (it also carries governance fields we never notify on) so we read only the three contact fields.
+ */
+function chairContactOf(club: Club): { name: string; email?: string; cell?: string } {
+  const chair = (
+    club.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
+  )?.chair;
+  return { name: chair?.name || club.chair || '', email: chair?.email, cell: chair?.cell };
+}
+
 const CLEARANCE_NOTICES_PER_DAY = 3;
 /**
  * Best-effort heads-up to the FROM-club chairman that a clearance now awaits the club's
@@ -1217,9 +1240,6 @@ async function notifyClearanceOpened(
   opts: { bypassCap?: boolean } = {},
 ): Promise<void> {
   try {
-    const chair = (
-      fromClub.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
-    )?.chair;
     const channels: Channel[] = hasFeature(tenantConfig, 'whatsappInvites', true)
       ? ['email', 'whatsapp']
       : ['email'];
@@ -1240,11 +1260,7 @@ async function notifyClearanceOpened(
           }))
         : (
             await sendClearanceNotice({
-              chair: {
-                name: chair?.name || fromClub.chair || '',
-                email: chair?.email,
-                cell: chair?.cell,
-              },
+              chair: chairContactOf(fromClub),
               fromClubName: fromClub.name,
               playerName: clearance.playerName,
               toClubName: clearance.toClubName,
@@ -1315,16 +1331,9 @@ async function notifyClearanceResolved(
     ]);
     const notifyClub = async (club: Club | null): Promise<void> => {
       if (!club) return; // directory source (or a club since deleted): nothing to notify
-      const chair = (
-        club.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
-      )?.chair;
       const reason = outcome === 'rejected' ? clearance.rejectReason : clearance.overrideReason;
       const { results } = await sendClearanceResolvedNotice({
-        chair: {
-          name: chair?.name || club.chair || '',
-          email: chair?.email,
-          cell: chair?.cell,
-        },
+        chair: chairContactOf(club),
         fromClubName: clearance.fromClubName,
         playerName: clearance.playerName,
         toClubName: clearance.toClubName,
@@ -1385,16 +1394,9 @@ async function notifyClearanceReopened(
     ]);
     const notifyClub = async (club: Club | null, side: 'source' | 'destination'): Promise<void> => {
       if (!club) return; // directory source (or a club since deleted): nothing to notify
-      const chair = (
-        club.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
-      )?.chair;
       const { results } = await sendClearanceReopenedNotice({
         side,
-        chair: {
-          name: chair?.name || club.chair || '',
-          email: chair?.email,
-          cell: chair?.cell,
-        },
+        chair: chairContactOf(club),
         fromClubName: clearance.fromClubName,
         playerName: clearance.playerName,
         toClubName: clearance.toClubName,
@@ -1923,9 +1925,6 @@ async function mintAndDeliverOnboarding(
     return current;
   }
 
-  const chair = (
-    current.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
-  )?.chair;
   const token = current.playerRegLink.token;
   const regLink = `${base}/register/${current.id}?t=${token}`;
   // Best-effort like the rest of this path: a tenant-config read fault must not fail the
@@ -1944,7 +1943,7 @@ async function mintAndDeliverOnboarding(
   const season = seasonLabel(new Date().getFullYear());
 
   const { results } = await sendChairOnboarding({
-    chair: { name: chair?.name || current.chair || '', email: chair?.email, cell: chair?.cell },
+    chair: chairContactOf(current),
     clubName: current.name,
     // WhatsApp rides a shared, dolphins-flavored WABA template — flag-gated (default
     // ON for existing tenants) so a new client can launch email-only.
@@ -2341,6 +2340,368 @@ app.get('/clubs/:id/veterans-affiliates', async (c) => {
     ({ naturalKey: _naturalKey, ...rest }) => rest,
   );
   return c.json(projected);
+});
+
+// ── Veterans squad-selection requests (ADR 0013) ──
+
+/** Strip the PII `playerNaturalKey` before a veterans request leaves the API (canonical or admin). */
+function publicVeteransRequest(r: VeteransRequest): VeteransRequestPublic {
+  const { playerNaturalKey: _omit, ...rest } = r;
+  return rest;
+}
+
+const VETERANS_FINDER_CAP = 20;
+const VETERANS_QUERY_MIN = 3;
+
+/** Diacritics-insensitive, case-insensitive, whitespace-collapsed form for name matching. */
+function normalizeForSearch(s: string): string {
+  return s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+const veteransChairContact = (club: Club): { name: string; email?: string; cell?: string } =>
+  chairContactOf(club);
+
+/** Append the veterans-request comm events to a club's log (idempotency-keyed, version-suffixed). */
+async function appendVeteransCommEvents(
+  tenant: string,
+  clubId: string,
+  results: SendResult[],
+  by: string,
+  request: VeteransRequest,
+  kind: 'veterans-request' | 'veterans-request-accepted' | 'veterans-request-declined',
+): Promise<void> {
+  await repo.appendClubCommEvents(
+    tenant,
+    clubId,
+    results.map((r) => ({
+      id: randomUUID(),
+      channel: r.channel,
+      ...(r.to ? { to: r.to } : {}),
+      status: r.status,
+      ...(r.messageId ? { messageId: r.messageId } : {}),
+      ...(r.error ? { error: r.error } : {}),
+      at: now(),
+      by,
+      idempotencyKey: `vetreq-${request.id}-${kind}-v${request.version}-email`,
+      kind,
+    })),
+  );
+}
+
+/**
+ * Best-effort heads-up to the PRIMARY club chairman that a veterans club has requested one of
+ * their players. Email only, uncapped, never throws — a notify fault must not fail the request
+ * write that already committed.
+ */
+async function notifyVeteransRequestOpened(
+  tenant: string,
+  request: VeteransRequest,
+  by: string,
+): Promise<void> {
+  try {
+    const primaryClub = await repo.getClub(tenant, request.primaryClubId);
+    if (!primaryClub) return;
+    const { results } = await sendVeteransRequestNotice({
+      chair: veteransChairContact(primaryClub),
+      veteransClubName: request.veteransClubName,
+      playerName: request.playerName,
+      primaryClubName: request.primaryClubName,
+      ...(request.note ? { note: request.note } : {}),
+    });
+    await appendVeteransCommEvents(
+      tenant,
+      primaryClub.id,
+      results,
+      by,
+      request,
+      'veterans-request',
+    );
+  } catch (err) {
+    console.error('veterans request opened notice failed', err);
+  }
+}
+
+/**
+ * Notify a veterans request's outcome — the VETERANS chair (who made the request) always, and the
+ * PRIMARY chair too on an admin override (`opts.both`). Email only, best-effort. Each club's
+ * results append to THAT club's comm log with a version-suffixed idempotency key.
+ */
+async function notifyVeteransRequestResolved(
+  tenant: string,
+  request: VeteransRequest,
+  outcome: 'accepted' | 'declined',
+  by: string,
+  opts: { both?: boolean } = {},
+): Promise<void> {
+  try {
+    const kind = outcome === 'accepted' ? 'veterans-request-accepted' : 'veterans-request-declined';
+    const notifyClubChair = async (club: Club | null): Promise<void> => {
+      if (!club) return;
+      const { results } = await sendVeteransRequestResolvedNotice({
+        chair: veteransChairContact(club),
+        veteransClubName: request.veteransClubName,
+        playerName: request.playerName,
+        primaryClubName: request.primaryClubName,
+        outcome,
+        ...(request.declineReason ? { reason: request.declineReason } : {}),
+      });
+      await appendVeteransCommEvents(tenant, club.id, results, by, request, kind);
+    };
+    const [primaryClub, vetsClub] = await Promise.all([
+      opts.both ? repo.getClub(tenant, request.primaryClubId) : Promise.resolve(null),
+      repo.getClub(tenant, request.veteransClubId),
+    ]);
+    await Promise.all([
+      notifyClubChair(vetsClub),
+      opts.both ? notifyClubChair(primaryClub) : Promise.resolve(),
+    ]);
+  } catch (err) {
+    console.error('veterans request resolved notice failed', err);
+  }
+}
+
+/** Map the veterans-request repo errors to HTTP codes (throws; never returns). */
+function throwVeteransRequestError(err: unknown): never {
+  if (err instanceof VersionConflictError)
+    throw new HttpError(409, 'veterans request changed; refetch');
+  if (err instanceof repo.VeteransRequestConflictError) throw new HttpError(409, err.message);
+  if (err instanceof repo.VeteransRequestNotFoundError)
+    throw new HttpError(404, 'veterans request not found');
+  throw err;
+}
+
+/**
+ * Find players tenant-wide to request for veterans cricket. GATED on the club being fixtured in a
+ * released veterans series (not self-grantable via club.leagues); 400 under 3 chars. Returns ONLY
+ * an opaque `candidateId` HMAC handle + display name + primary club — never the natural key, ID
+ * number, dob or contact. Excludes the club's own players, non-active rows, rows already
+ * affiliated to a veterans club, and rows already registered in a veterans league. Every call is
+ * logged (CloudWatch) for the enumeration-risk audit trail (see ADR 0013).
+ */
+app.get('/clubs/:id/veterans-candidates', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const q = (c.req.query('q') ?? '').trim();
+  const needle = normalizeForSearch(q);
+  if (needle.length < VETERANS_QUERY_MIN)
+    throw new HttpError(400, 'search needs at least 3 characters');
+  if (!(await clubFixturedInVeterans(ra.tenant, id)))
+    throw new HttpError(403, 'club is not entered in a released veterans series');
+
+  const [config, clubs] = await Promise.all([
+    repo.getTenantConfig(ra.tenant),
+    repo.listClubs(ra.tenant),
+  ]);
+  const leagues = config?.leagues ?? [];
+  const clubNameById = new Map(clubs.map((cl) => [cl.id, cl.name]));
+  const otherClubIds = clubs.map((cl) => cl.id).filter((cid) => cid !== id);
+  const rows = await repo.listPlayerFinderRows(ra.tenant, otherClubIds);
+
+  const candidates: VeteransCandidate[] = [];
+  let truncated = false;
+  for (const row of rows) {
+    if (!repo.isActiveRow(row)) continue; // non-active roster row
+    if (row.veteransClubId) continue; // already affiliated to a veterans club
+    if (row.team && isVeteransLeagueKey(row.team, leagues)) continue; // already a veterans player
+    const first = normalizeForSearch(row.firstName ?? '');
+    const last = normalizeForSearch(row.lastName ?? '');
+    if (!`${first} ${last}`.includes(needle) && !`${last} ${first}`.includes(needle)) continue;
+    if (candidates.length >= VETERANS_FINDER_CAP) {
+      truncated = true;
+      break;
+    }
+    candidates.push({
+      candidateId: candidateHandle(ra.tenant, row.clubId, row.naturalKey),
+      playerName: `${row.firstName ?? ''} ${row.lastName ?? ''}`.trim(),
+      primaryClubId: row.clubId,
+      primaryClubName: clubNameById.get(row.clubId) ?? '',
+    });
+  }
+  console.log(
+    `[veterans-finder] tenant=${ra.tenant} club=${id} rep=${ra.email} qlen=${q.length} results=${candidates.length}`,
+  );
+  return c.json({ candidates, truncated });
+});
+
+/**
+ * Open a veterans request (the VETERANS club initiates). Resolves the opaque candidateId back to a
+ * player over the primary club's projected rows, re-runs the finder exclusions, and 409s a
+ * duplicate pending request. 201 returns the public shape (no natural key); the primary chair is
+ * emailed.
+ */
+app.post('/clubs/:id/veterans-requests', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const vetsClubId = c.req.param('id');
+  assertClubAccess(ra, vetsClubId);
+  const body = await c.req.json<{
+    primaryClubId?: string;
+    candidateId?: string;
+    leagueKey?: string;
+    note?: string;
+  }>();
+  if (!body.primaryClubId || !body.candidateId)
+    throw new HttpError(400, 'primaryClubId and candidateId are required');
+  if (body.primaryClubId === vetsClubId)
+    throw new HttpError(400, 'cannot request your own club’s player');
+  if (body.note !== undefined && (typeof body.note !== 'string' || body.note.length > 500)) {
+    throw new HttpError(400, 'note must be a string of at most 500 characters');
+  }
+  const vetLeagueKeys = await veteransLeagueKeysForClub(ra.tenant, vetsClubId);
+  if (vetLeagueKeys.size === 0)
+    throw new HttpError(403, 'club is not entered in a released veterans series');
+
+  const [primaryClub, vetsClub, config] = await Promise.all([
+    repo.getClub(ra.tenant, body.primaryClubId),
+    repo.getClub(ra.tenant, vetsClubId),
+    repo.getTenantConfig(ra.tenant),
+  ]);
+  if (!primaryClub || !vetsClub) throw new HttpError(404, 'club not found');
+  const leagues = config?.leagues ?? [];
+  if (body.leagueKey && !isVeteransLeagueKey(body.leagueKey, leagues))
+    throw new HttpError(400, 'leagueKey is not a veterans league');
+  // Not just A veterans league — one THIS club is actually fixtured in (parity with the finder gate).
+  if (body.leagueKey && !vetLeagueKeys.has(body.leagueKey))
+    throw new HttpError(400, 'leagueKey is not a veterans league your club is entered in');
+
+  // Resolve the player by matching the HMAC handle over the primary club's projected rows.
+  const rows = await repo.listPlayerFinderRows(ra.tenant, [body.primaryClubId]);
+  const primaryClubId = body.primaryClubId;
+  const row = rows.find(
+    (r) => candidateHandle(ra.tenant, primaryClubId, r.naturalKey) === body.candidateId,
+  );
+  if (!row) throw new HttpError(404, 'player not found');
+  if (
+    !repo.isActiveRow(row) ||
+    row.veteransClubId ||
+    (row.team && isVeteransLeagueKey(row.team, leagues))
+  ) {
+    throw new HttpError(409, 'player is not eligible for a veterans request');
+  }
+  const existing = await repo.listVeteransRequestsForPrimary(ra.tenant, primaryClubId);
+  if (existing.some((r) => r.playerNaturalKey === row.naturalKey && r.status === 'pending'))
+    throw new HttpError(409, 'a veterans request for this player is already pending');
+
+  const request: VeteransRequest = {
+    id: randomUUID(),
+    playerNaturalKey: row.naturalKey,
+    candidateId: body.candidateId,
+    playerName: `${row.firstName ?? ''} ${row.lastName ?? ''}`.trim(),
+    primaryClubId,
+    primaryClubName: primaryClub.name,
+    veteransClubId: vetsClubId,
+    veteransClubName: vetsClub.name,
+    ...(body.leagueKey ? { leagueKey: body.leagueKey } : {}),
+    ...(body.note ? { note: body.note } : {}),
+    requestedAt: now(),
+    requestedBy: ra.email,
+    status: 'pending',
+    version: 0,
+  };
+  await repo.createVeteransRequest(ra.tenant, request);
+  await notifyVeteransRequestOpened(ra.tenant, request, ra.email);
+  return c.json(publicVeteransRequest(request), 201);
+});
+
+/** A club's veterans requests: inbound (canonical — it is the primary club) + outbound (mirror). */
+app.get('/clubs/:id/veterans-requests', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const [inbound, outbound] = await Promise.all([
+    repo.listVeteransRequestsForPrimary(ra.tenant, id),
+    repo.listOutboundVeteransRequests(ra.tenant, id),
+  ]);
+  return c.json({
+    // Inbound (canonical) rows keep `playerNaturalKey`: they live in THIS (primary) club's own
+    // partition and the club already receives the natural key on its roster GET — no new exposure.
+    // The frontend needs it to deep-link the accepted player. Outbound (mirror) + admin stay stripped.
+    inbound,
+    outbound: outbound.map(publicVeteransRequest),
+  });
+});
+
+/** The PRIMARY club accepts a request — writes the affiliation, then flips the request. */
+app.post('/clubs/:id/veterans-requests/:rid/accept', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const rid = c.req.param('rid');
+  assertClubAccess(ra, id);
+  const body = await c.req.json<{ version?: number }>().catch(() => ({}) as { version?: number });
+  const via = ra.membership.role === 'admin' ? 'admin' : 'portal';
+  try {
+    const { request } = await repo.acceptVeteransRequest(ra.tenant, id, rid, {
+      at: now(),
+      by: ra.email,
+      via,
+      expectedVersion: body.version,
+    });
+    await notifyVeteransRequestResolved(ra.tenant, request, 'accepted', ra.email, {
+      both: via === 'admin',
+    });
+    return c.json(publicVeteransRequest(request));
+  } catch (err) {
+    throwVeteransRequestError(err);
+  }
+});
+
+/** The PRIMARY club declines a request. */
+app.post('/clubs/:id/veterans-requests/:rid/decline', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const rid = c.req.param('rid');
+  assertClubAccess(ra, id);
+  const body = await c.req
+    .json<{ reason?: string; version?: number }>()
+    .catch(() => ({}) as { reason?: string; version?: number });
+  if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 500)) {
+    throw new HttpError(400, 'reason must be a string of at most 500 characters');
+  }
+  const via = ra.membership.role === 'admin' ? 'admin' : 'portal';
+  const current = await repo.getVeteransRequest(ra.tenant, id, rid);
+  if (!current) throw new HttpError(404, 'veterans request not found');
+  if (current.status !== 'pending') throw new HttpError(409, 'veterans request already resolved');
+  try {
+    const request = await repo.resolveVeteransRequest(ra.tenant, id, rid, {
+      status: 'declined',
+      at: now(),
+      by: ra.email,
+      via,
+      ...(body.reason ? { declineReason: body.reason } : {}),
+      expectedVersion: body.version,
+    });
+    await notifyVeteransRequestResolved(ra.tenant, request, 'declined', ra.email, {
+      both: via === 'admin',
+    });
+    return c.json(publicVeteransRequest(request));
+  } catch (err) {
+    throwVeteransRequestError(err);
+  }
+});
+
+/** The VETERANS club withdraws its own pending request (reads the mirror for the primary club). */
+app.post('/clubs/:id/veterans-requests/:rid/withdraw', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const rid = c.req.param('rid');
+  assertClubAccess(ra, id);
+  const body = await c.req.json<{ version?: number }>().catch(() => ({}) as { version?: number });
+  const via = ra.membership.role === 'admin' ? 'admin' : 'portal';
+  const mirror = await repo.getOutboundVeteransRequest(ra.tenant, id, rid);
+  if (!mirror) throw new HttpError(404, 'veterans request not found');
+  if (mirror.status !== 'pending') throw new HttpError(409, 'veterans request already resolved');
+  try {
+    const request = await repo.resolveVeteransRequest(ra.tenant, mirror.primaryClubId, rid, {
+      status: 'withdrawn',
+      at: now(),
+      by: ra.email,
+      via,
+      expectedVersion: body.version,
+    });
+    return c.json(publicVeteransRequest(request));
+  } catch (err) {
+    throwVeteransRequestError(err);
+  }
 });
 
 // ── Player clearances (inter-club transfers) ──
@@ -7064,6 +7425,66 @@ app.post('/admin/registration-reviews/:rid/ack', async (c) => {
   }
 });
 
+// ───────────────────── Admin: veterans requests (ADR 0013) ─────────────────────
+
+/** Every veterans request in the tenant — one row each via the gsi1 (public shape). */
+app.get('/admin/veterans-requests', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const list = await repo.listAllVeteransRequests(ra.tenant);
+  return c.json(list.map(publicVeteransRequest));
+});
+
+/**
+ * Admin OVERRIDE accept of a veterans request. Carries `primaryClubId` (like the clearance
+ * override route carries fromClubId) to rebuild the canonical key. Emails BOTH chairs.
+ */
+app.post('/admin/veterans-requests/:rid/accept', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const rid = c.req.param('rid');
+  const body = await c.req.json<{ primaryClubId?: string; version?: number }>();
+  if (!body.primaryClubId) throw new HttpError(400, 'primaryClubId required');
+  try {
+    const { request } = await repo.acceptVeteransRequest(ra.tenant, body.primaryClubId, rid, {
+      at: now(),
+      by: ra.email,
+      via: 'admin',
+      expectedVersion: body.version,
+    });
+    await notifyVeteransRequestResolved(ra.tenant, request, 'accepted', ra.email, { both: true });
+    return c.json(publicVeteransRequest(request));
+  } catch (err) {
+    throwVeteransRequestError(err);
+  }
+});
+
+/** Admin OVERRIDE decline of a veterans request. Emails BOTH chairs. */
+app.post('/admin/veterans-requests/:rid/decline', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const rid = c.req.param('rid');
+  const body = await c.req.json<{ primaryClubId?: string; reason?: string; version?: number }>();
+  if (!body.primaryClubId) throw new HttpError(400, 'primaryClubId required');
+  if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 500)) {
+    throw new HttpError(400, 'reason must be a string of at most 500 characters');
+  }
+  const current = await repo.getVeteransRequest(ra.tenant, body.primaryClubId, rid);
+  if (!current) throw new HttpError(404, 'veterans request not found');
+  if (current.status !== 'pending') throw new HttpError(409, 'veterans request already resolved');
+  try {
+    const request = await repo.resolveVeteransRequest(ra.tenant, body.primaryClubId, rid, {
+      status: 'declined',
+      at: now(),
+      by: ra.email,
+      via: 'admin',
+      ...(body.reason ? { declineReason: body.reason } : {}),
+      expectedVersion: body.version,
+    });
+    await notifyVeteransRequestResolved(ra.tenant, request, 'declined', ra.email, { both: true });
+    return c.json(publicVeteransRequest(request));
+  } catch (err) {
+    throwVeteransRequestError(err);
+  }
+});
+
 // ───────────────────── User-management helpers ─────────────────────
 
 /** Reject a channels array that's empty or carries an unknown channel (400). */
@@ -7303,7 +7724,11 @@ export function buildClubSchedule(
             ? me.venue || club.ground?.venue || 'Home ground TBA'
             : opp.venue || 'Opponent ground TBA');
       const timePart = !hideTime && f.time ? ` · ${f.time}` : '';
-      let line = `  R${f.round ?? '?'} · ${fmtFixtureDate(f.date)}${timePart} · ${isHome ? 'Home' : 'Away'} vs ${opp.name} · ${venue}`;
+      // Name our own side when the club fields ≥2 sides in this series, so a multi-side
+      // club (Simplex A/B/C, Saints B) can tell its lines apart. `me` is already this
+      // club's side, resolved above. Single-side series stay unchanged.
+      const sidePart = mine.size >= 2 ? ` · ${me.name}` : '';
+      let line = `  R${f.round ?? '?'} · ${fmtFixtureDate(f.date)}${timePart}${sidePart} · ${isHome ? 'Home' : 'Away'} vs ${opp.name} · ${venue}`;
       // Distance to where the match is actually played; falls back to the opponent's
       // ground for a series that has never been through allocation. Skipped wholesale
       // when the venue is withheld — a round-trip would leak the ground being hidden.

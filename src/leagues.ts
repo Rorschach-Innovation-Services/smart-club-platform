@@ -144,6 +144,32 @@ export function leagueOptionsForDistrict(allLeagues: any[], district: string): a
   return out;
 }
 
+/**
+ * The catalogue leagues that fall OUTSIDE a club's district — everything in `allLeagues`
+ * that `leagueOptionsForDistrict(allLeagues, district)` does NOT already offer (so the
+ * overarching set, shared by every district, is never included). Grouped `district → group
+ * → leagues[]` for a disclosure that lets an admin enter a cross-district league (e.g. an
+ * EMCU junior league for a club whose home district is Ilembe). The server accepts any
+ * catalogue key, so these are valid selections — just not the district-default ones.
+ */
+export function leagueOptionsOutsideDistrict(
+  allLeagues: any[],
+  district: string,
+): Record<string, Record<string, any[]>> {
+  const list = Array.isArray(allLeagues) ? allLeagues : [];
+  const inDistrict = new Set(leagueOptionsForDistrict(list, district).map((l) => l.key));
+  const seen = new Set<string>();
+  const out: Record<string, Record<string, any[]>> = {};
+  for (const l of list) {
+    if (inDistrict.has(l.key) || seen.has(l.key)) continue;
+    seen.add(l.key);
+    const d = l.district || '';
+    const byGroup = (out[d] = out[d] || {});
+    (byGroup[l.group] = byGroup[l.group] || []).push(l);
+  }
+  return out;
+}
+
 /** key -> label map (replaces the static LEAGUE_LABEL_BY_KEY). */
 export function labelByKey(allLeagues: any[]): Record<string, string> {
   const map: Record<string, string> = {};
@@ -178,6 +204,47 @@ const WOMENS_LABEL_RE = /\b(women(?:['’]?s)?|ladies)\b/i;
 /** True when a catalogue league is a women's league (matched on label). */
 export function isWomensLeague(league: any): boolean {
   return !!league && WOMENS_LABEL_RE.test(String(league.label || ''));
+}
+
+/**
+ * A league KEY begins with `veterans` (so `veterans`, `veterans-premier`, `veterans-promotion`
+ * all match — `-` is a word boundary); the LABEL check catches a catalogue entry keyed
+ * differently but labelled "Veterans" / "Vets".
+ *
+ * KEEP IN SYNC with `packages/api/src/veterans.ts` (`isVeteransLeague` / `isVeteransLeagueKey`):
+ * the server uses the SAME key/label regexes for the authoritative finder gate. If the patterns
+ * drift, a club could see the "Veterans squad" nav (this cosmetic client predicate) but 403 on
+ * the finder (the server predicate), or vice-versa.
+ */
+const VETERANS_KEY_RE = /^veterans\b/i;
+const VETERANS_LABEL_RE = /\bveterans?\b|\bvets\b/i;
+
+/** True when a catalogue league is a veterans league (matched on key OR label). */
+export function isVeteransLeague(league: any): boolean {
+  if (!league) return false;
+  return (
+    VETERANS_KEY_RE.test(String(league.key || '')) ||
+    VETERANS_LABEL_RE.test(String(league.label || ''))
+  );
+}
+
+/**
+ * True when a club plays a veterans league — drives the "Veterans squad" nav visibility ONLY
+ * (cosmetic). Resolves each of the club's league keys against the catalogue and checks
+ * {@link isVeteransLeague}; for an orphan key (a key whose catalogue entry was removed) it falls
+ * back to the key pattern alone, mirroring the API's `isVeteransLeagueKey`. The finder itself is
+ * gated server-side on released-series participation, NOT on this — `club.leagues` is
+ * rep-settable, so it must never unlock a tenant-wide name search.
+ */
+export function clubPlaysVeterans(
+  club: { leagues?: string[] } | null | undefined,
+  allLeagues: any[],
+): boolean {
+  const keys = Array.isArray(club?.leagues) ? club!.leagues : [];
+  return keys.some((k) => {
+    const lg = findByKey(allLeagues, k);
+    return lg ? isVeteransLeague(lg) : VETERANS_KEY_RE.test(String(k || ''));
+  });
 }
 
 /**

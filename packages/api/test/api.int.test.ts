@@ -976,6 +976,42 @@ describe('POST /clubs/:id/send-fixtures', () => {
       );
       assert.doesNotMatch(text, /\d\d:\d\d/);
     });
+
+    test('a club fielding two sides prefixes each line with the side name', () => {
+      // Multi-side club (Simplex A/B/C, Saints B): without the side name the two lines
+      // read identically. `me.name` is this club's resolved side, home OR away.
+      const multiClub = club('multiclub');
+      const series = {
+        id: 'multi-series',
+        name: 'Veterans Promotion · 2026/27',
+        startDate: '2026-06-01',
+        teams: ['tm_multiclub_vets_1', 'tm_multiclub_vets_2', 'rivals'],
+        participants: [
+          { teamId: 'tm_multiclub_vets_1', clubId: 'multiclub', name: 'multiclub CC A' },
+          { teamId: 'tm_multiclub_vets_2', clubId: 'multiclub', name: 'multiclub CC B' },
+          { teamId: 'rivals', clubId: 'rivals', name: 'rivals CC' },
+        ],
+        fixtures: [
+          { home: 'tm_multiclub_vets_1', away: 'rivals', date: '2026-06-06', round: 1 },
+          { home: 'rivals', away: 'tm_multiclub_vets_2', date: '2026-06-13', round: 2 },
+        ],
+        released: true,
+        releasedAt: '2026-06-01T00:00:00.000Z',
+        version: 1,
+      };
+      const clubsById = new Map([
+        [multiClub.id, multiClub],
+        ['rivals', club('rivals')],
+      ]);
+      const { text } = buildClubSchedule(
+        multiClub,
+        [series as unknown as Parameters<typeof buildClubSchedule>[1][number]],
+        clubsById as unknown as Parameters<typeof buildClubSchedule>[2],
+      );
+      // A side at home, B side away — each line names its own side before Home/Away.
+      assert.match(text, /multiclub CC A · Home vs/);
+      assert.match(text, /multiclub CC B · Away vs/);
+    });
   });
 });
 

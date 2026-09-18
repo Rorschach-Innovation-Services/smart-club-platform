@@ -34,6 +34,12 @@ import {
   playersListKey,
   veteransAffiliationKey,
   veteransAffiliationsListKey,
+  veteransRequestKey,
+  outboundVeteransRequestKey,
+  veteransRequestsListKey,
+  outboundVeteransRequestsListKey,
+  veteransRequestGsi1,
+  veteransRequestsListGsi1pk,
   clearanceKey,
   inboundClearanceKey,
   clearancesListKey,
@@ -73,6 +79,7 @@ import type {
   PlayerRegistration,
   PlayerStatus,
   VeteransAffiliation,
+  VeteransRequest,
   PlayerClearance,
   RejectOutcome,
   RejectCase,
@@ -1130,6 +1137,56 @@ export async function listPlayerDemographics(
 }
 
 /**
+ * The exact ProjectionExpression the veterans finder reads (ADR 0013). Exported so a test can
+ * assert it NEVER carries idNumber/dob/cell/email — the finder is a tenant-wide name search, so
+ * data minimisation is a correctness property, not an optimisation. `#s` aliases the reserved
+ * word `status`; `sk` carries `PLAYER#<naturalKey>`, the only place the natural key is read from
+ * (to compute the candidate HMAC handle) — it never leaves the API.
+ */
+export const PLAYER_FINDER_PROJECTION = 'sk, firstName, lastName, #s, veteransClubId, team, clubId';
+
+/** One finder row: the projection above, with the natural key parsed off the sk. */
+export type PlayerFinderRow = Pick<
+  PlayerRegistration,
+  'clubId' | 'firstName' | 'lastName' | 'status' | 'veteransClubId' | 'team'
+> & { naturalKey: string };
+
+/**
+ * The veterans-finder projection of every player row across the given clubs — a parallel
+ * per-club fan-out of the listPlayers Query, flattened, mirroring listPlayerDemographics. The
+ * projection ({@link PLAYER_FINDER_PROJECTION}) is a POPIA data-minimisation measure: only the
+ * fields the finder needs to display a name + primary club and apply its exclusions ever enter
+ * Lambda memory — no idNumber/dob/contact. The natural key is parsed off the sk purely to mint
+ * the opaque candidate handle; it is never returned to the caller.
+ */
+export async function listPlayerFinderRows(
+  tenant: string,
+  clubIds: string[],
+): Promise<PlayerFinderRow[]> {
+  const lists = await Promise.all(
+    clubIds.map((clubId) => {
+      const { pk, skPrefix } = playersListKey(tenant, clubId);
+      return queryAll({
+        TableName: TABLE,
+        KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+        ProjectionExpression: PLAYER_FINDER_PROJECTION,
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+      });
+    }),
+  );
+  return lists.flat().map((i) => ({
+    naturalKey: String(i.sk).slice('PLAYER#'.length),
+    clubId: i.clubId as string,
+    firstName: i.firstName as string,
+    lastName: i.lastName as string,
+    status: i.status as PlayerRegistration['status'],
+    veteransClubId: i.veteransClubId as string | undefined,
+    team: i.team as string | undefined,
+  }));
+}
+
+/**
  * Recompute a club's denormalized `playerCount` from the source-of-truth PLAYER# rows and
  * correct any drift with an ATOMIC delta bump (`ADD playerCount :delta`) — never a whole-value
  * SET. The delta is strictly safer than a SET: a registration whose `ADD playerCount` lands
@@ -1447,6 +1504,323 @@ export async function listVeteransAffiliations(
   return items.map((i) => stripKeys<VeteransAffiliation>(i)!);
 }
 
+// ── Veterans squad-selection requests (ADR 0013) ──
+//
+// A request/confirm flow: a veterans club FINDS a player tenant-wide and asks the player's PRIMARY
+// club to confirm. Two rows, mirroring clearances — a canonical under the primary club (gsi1 for
+// the admin listing, carries playerNaturalKey) and a mirror under the veterans club (no gsi1, no
+// playerNaturalKey). Accept rides the existing setPlayerVeteransClub, so the VETAFFIL#
+// write-on-activation invariant is untouched.
+
+/** Raised on an accept whose live player row no longer permits the affiliation (→ 409). */
+export class VeteransRequestConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VeteransRequestConflictError';
+  }
+}
+
+/** Raised when the canonical veterans request row cannot be found (→ 404). */
+export class VeteransRequestNotFoundError extends Error {
+  constructor(message = 'veterans request not found') {
+    super(message);
+    this.name = 'VeteransRequestNotFoundError';
+  }
+}
+
+/**
+ * The canonical (primary club) + mirror (veterans club) put items for a request. The MIRROR is
+ * stripped of `playerNaturalKey`: it lives in the veterans-club partition, and that club must
+ * never receive the player's identity key (the finder only ever handed it the opaque handle).
+ */
+function veteransRequestItems(tenant: string, r: VeteransRequest) {
+  const { playerNaturalKey: _omit, ...mirrorBody } = r;
+  return {
+    canonical: {
+      ...veteransRequestKey(tenant, r.primaryClubId, r.id),
+      ...veteransRequestGsi1(tenant, r.requestedAt),
+      ...r,
+    },
+    mirror: {
+      ...outboundVeteransRequestKey(tenant, r.veteransClubId, r.id),
+      ...mirrorBody,
+    },
+  };
+}
+
+/**
+ * Create a pending veterans request: write the canonical + mirror atomically. No player-status
+ * flip (an affiliation is a second-club pointer, not a transfer), so — unlike createClearance —
+ * there is no dedup guard here; the route's own pending-check is the duplicate gate. The
+ * canonical put's attribute_not_exists stops a replayed id from double-writing. The dynalite
+ * (offline/test) path has no TransactWriteItems → sequential fallback, as createClearance.
+ */
+export async function createVeteransRequest(tenant: string, r: VeteransRequest): Promise<void> {
+  const { canonical, mirror } = veteransRequestItems(tenant, r);
+  if (localEndpoint) {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: canonical,
+        ConditionExpression: 'attribute_not_exists(sk)',
+      }),
+    );
+    await ddb.send(new PutCommand({ TableName: TABLE, Item: mirror }));
+    return;
+  }
+  await ddb.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Put: {
+            TableName: TABLE,
+            Item: canonical,
+            ConditionExpression: 'attribute_not_exists(sk)',
+          },
+        },
+        { Put: { TableName: TABLE, Item: mirror } },
+      ],
+    }),
+  );
+}
+
+/** The canonical request (under the primary club) — carries the playerNaturalKey. */
+export async function getVeteransRequest(
+  tenant: string,
+  primaryClubId: string,
+  id: string,
+): Promise<VeteransRequest | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: veteransRequestKey(tenant, primaryClubId, id) }),
+  );
+  return stripKeys<VeteransRequest>(res.Item);
+}
+
+/** The mirror request (under the veterans club) — no playerNaturalKey. */
+export async function getOutboundVeteransRequest(
+  tenant: string,
+  vetsClubId: string,
+  id: string,
+): Promise<VeteransRequest | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: outboundVeteransRequestKey(tenant, vetsClubId, id) }),
+  );
+  return stripKeys<VeteransRequest>(res.Item);
+}
+
+/** Requests a club must action (it is the primary club) — canonical rows in its own partition. */
+export async function listVeteransRequestsForPrimary(
+  tenant: string,
+  primaryClubId: string,
+): Promise<VeteransRequest[]> {
+  const { pk, skPrefix } = veteransRequestsListKey(tenant, primaryClubId);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<VeteransRequest>(i)!);
+}
+
+/** Requests a club has made (it is the veterans club) — mirror rows in its own partition. */
+export async function listOutboundVeteransRequests(
+  tenant: string,
+  vetsClubId: string,
+): Promise<VeteransRequest[]> {
+  const { pk, skPrefix } = outboundVeteransRequestsListKey(tenant, vetsClubId);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<VeteransRequest>(i)!);
+}
+
+/** Every veterans request in the tenant (admin console) — one row per request via the gsi1. */
+export async function listAllVeteransRequests(tenant: string): Promise<VeteransRequest[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    IndexName: 'gsi1',
+    KeyConditionExpression: 'gsi1pk = :p',
+    ExpressionAttributeValues: { ':p': veteransRequestsListGsi1pk(tenant) },
+  });
+  return items.map((i) => stripKeys<VeteransRequest>(i)!);
+}
+
+/** Terminal fields shared by resolve — 90-day epoch-seconds TTL beyond `at`. */
+const REQUEST_TTL_DAYS = 90;
+function veteransExpiresAt(at: string): number {
+  const ms = Date.parse(at);
+  const base = Number.isNaN(ms) ? Date.now() : ms;
+  return Math.floor(base / 1000) + REQUEST_TTL_DAYS * 24 * 60 * 60;
+}
+
+/**
+ * Flip a pending request to a terminal status (`accepted` | `declined` | `withdrawn`) on BOTH
+ * rows, version-guarded. The canonical is the OCC gate (`version = :v AND status = pending`); the
+ * mirror gets the same terminal fields best-effort (a stale mirror is a cosmetic drift, not a
+ * correctness break — the canonical is the source of truth). Both rows get `expiresAt` (+90d) so
+ * a resolved request self-expires. A double-action loses the guard → VersionConflictError → 409.
+ */
+export async function resolveVeteransRequest(
+  tenant: string,
+  primaryClubId: string,
+  id: string,
+  opts: {
+    status: 'accepted' | 'declined' | 'withdrawn';
+    at: string;
+    by: string;
+    via: 'portal' | 'admin';
+    declineReason?: string;
+    expectedVersion?: number;
+  },
+): Promise<VeteransRequest> {
+  const current = await getVeteransRequest(tenant, primaryClubId, id);
+  if (!current) throw new VeteransRequestNotFoundError();
+  const expectedVersion = opts.expectedVersion ?? current.version ?? 0;
+  const expiresAt = veteransExpiresAt(opts.at);
+  const setParts = [
+    '#st = :status',
+    'resolvedAt = :at',
+    'resolvedBy = :by',
+    'resolvedVia = :via',
+    'expiresAt = :exp',
+    'version = :nv',
+  ];
+  // Only the SET values; the canonical adds the OCC guard values (:v, :pending) on top.
+  const setValues: Record<string, unknown> = {
+    ':status': opts.status,
+    ':at': opts.at,
+    ':by': opts.by,
+    ':via': opts.via,
+    ':exp': expiresAt,
+    ':nv': expectedVersion + 1,
+  };
+  if (opts.declineReason) {
+    setParts.push('declineReason = :reason');
+    setValues[':reason'] = opts.declineReason;
+  }
+  const updateExpression = 'SET ' + setParts.join(', ');
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: veteransRequestKey(tenant, primaryClubId, id),
+        UpdateExpression: updateExpression,
+        ConditionExpression: 'attribute_exists(sk) AND version = :v AND #st = :pending',
+        ExpressionAttributeNames: { '#st': 'status' },
+        ExpressionAttributeValues: { ...setValues, ':v': expectedVersion, ':pending': 'pending' },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    const updated = stripKeys<VeteransRequest>(res.Attributes)!;
+    // Mirror: same terminal fields, no OCC (the canonical is the gate). Best-effort. The
+    // `attribute_exists(sk)` guard means a missing mirror is never upserted as a phantom row —
+    // a ConditionalCheckFailedException just logs the best-effort miss, same as any other drift.
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: outboundVeteransRequestKey(tenant, updated.veteransClubId, id),
+          UpdateExpression: updateExpression,
+          ConditionExpression: 'attribute_exists(sk)',
+          ExpressionAttributeNames: { '#st': 'status' },
+          ExpressionAttributeValues: setValues,
+        }),
+      );
+    } catch (err) {
+      console.warn(`veterans-request mirror resolve failed for ${id}`, err);
+    }
+    return updated;
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      throw new VersionConflictError();
+    }
+    throw err;
+  }
+}
+
+/**
+ * Accept a request (idempotent). Ordering (PLAYER-FIRST so a crash leaves a retryable pending
+ * request): read canonical (must be pending) → read the primary player row → 409 if it is
+ * missing / not active (e.g. clearance-pending) / already affiliated to a DIFFERENT club →
+ * setPlayerVeteransClub (skipped when the row already points at this veterans club — the
+ * post-crash retry case) → resolveVeteransRequest('accepted'). No hooks in the delete/clearance
+ * paths; accept re-validates against the LIVE row (parity with the VETAFFIL pendency transient).
+ */
+export async function acceptVeteransRequest(
+  tenant: string,
+  primaryClubId: string,
+  id: string,
+  opts: { at: string; by: string; via: 'portal' | 'admin'; expectedVersion?: number },
+): Promise<{ request: VeteransRequest; player: PlayerRegistration }> {
+  const current = await getVeteransRequest(tenant, primaryClubId, id);
+  if (!current) throw new VeteransRequestNotFoundError();
+  if (current.status !== 'pending') {
+    throw new VeteransRequestConflictError('veterans request already resolved');
+  }
+  if (!current.playerNaturalKey) {
+    throw new Error('canonical veterans request is missing playerNaturalKey');
+  }
+  const player = await getPlayer(tenant, primaryClubId, current.playerNaturalKey);
+  if (!player) {
+    throw new VeteransRequestConflictError('player is no longer registered at their club');
+  }
+  if (!isActiveRow(player)) {
+    throw new VeteransRequestConflictError('player is not active (a transfer may be pending)');
+  }
+  if (player.veteransClubId && player.veteransClubId !== current.veteransClubId) {
+    throw new VeteransRequestConflictError(
+      'player already plays veterans cricket for another club',
+    );
+  }
+  const source: VeteransAffiliation['source'] = opts.via === 'admin' ? 'admin' : 'portal';
+  // Did THIS call write the affiliation? Only when the pre-image had none — not the crash-retry
+  // case where the row already points here (a truthy veteransClubId). Compensation below is
+  // gated on this so we never clear an affiliation we didn't create.
+  const wroteAffiliation = !player.veteransClubId;
+  let updatedPlayer = player;
+  // Skip the write when it already points here — the retry-after-crash case.
+  if (player.veteransClubId !== current.veteransClubId) {
+    updatedPlayer = await setPlayerVeteransClub(
+      tenant,
+      primaryClubId,
+      current.playerNaturalKey,
+      { id: current.veteransClubId, name: current.veteransClubName },
+      source,
+    );
+  }
+  // TOCTOU: the affiliation is written ABOVE, before resolveVeteransRequest's OCC guard
+  // (version = :v AND status = pending). A decline/withdraw landing in between fails the guard —
+  // and without compensation a live VETAFFIL# would linger on a request that never accepted while
+  // the caller still gets a 409. On conflict, re-read the canonical: if WE wrote the affiliation
+  // and the request ended up declined/withdrawn (or vanished), undo it. Critically, if a RACING
+  // accept won (canonical is now `accepted`), that winner's affiliation is exactly the one we would
+  // otherwise clear — so leave it and just rethrow the conflict unchanged.
+  let request: VeteransRequest;
+  try {
+    request = await resolveVeteransRequest(tenant, primaryClubId, id, {
+      status: 'accepted',
+      at: opts.at,
+      by: opts.by,
+      via: opts.via,
+      expectedVersion: opts.expectedVersion,
+    });
+  } catch (err) {
+    if (
+      wroteAffiliation &&
+      (err instanceof VersionConflictError || err instanceof VeteransRequestConflictError)
+    ) {
+      const latest = await getVeteransRequest(tenant, primaryClubId, id);
+      if (!latest || latest.status === 'declined' || latest.status === 'withdrawn') {
+        await setPlayerVeteransClub(tenant, primaryClubId, current.playerNaturalKey, null, source);
+      }
+    }
+    throw err;
+  }
+  return { request, player: updatedPlayer };
+}
+
 /**
  * Set (or clear, when `vet` is null) a player's veterans club from the admin/portal edit routes.
  *
@@ -1513,7 +1887,7 @@ export async function setPlayerVeteransClub(
 }
 
 /** A row counts as `active` when its status is 'active' or absent (legacy rows default active). */
-function isActiveRow(row: Pick<PlayerRegistration, 'status'>): boolean {
+export function isActiveRow(row: Pick<PlayerRegistration, 'status'>): boolean {
   return row.status === undefined || row.status === 'active';
 }
 
@@ -4589,6 +4963,15 @@ export async function eraseTenantData(tenant: string): Promise<number> {
     for (const a of await listVeteransAffiliations(tenant, club.id)) {
       keys.push(veteransAffiliationKey(tenant, club.id, a.naturalKey));
     }
+    // Veterans requests (ADR 0013): canonical VETREQ# under the primary club + mirror
+    // OUTBOUND_VETREQ# under the veterans club, neither in the gsi1/META listing. Every club is
+    // visited here, so enumerating both prefixes per club deletes both rows of every request.
+    for (const r of await listVeteransRequestsForPrimary(tenant, club.id)) {
+      keys.push(veteransRequestKey(tenant, club.id, r.id));
+    }
+    for (const r of await listOutboundVeteransRequests(tenant, club.id)) {
+      keys.push(outboundVeteransRequestKey(tenant, club.id, r.id));
+    }
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
   // Season runs are cohort data like series; leaving them behind would strand a
@@ -4642,6 +5025,14 @@ export async function clearCohort(tenant: string): Promise<number> {
     // Veterans affiliations (VETAFFIL#) — enumerate per club (no gsi1/META listing).
     for (const a of await listVeteransAffiliations(tenant, club.id)) {
       keys.push(veteransAffiliationKey(tenant, club.id, a.naturalKey));
+    }
+    // Veterans requests (ADR 0013): canonical + mirror, neither in the gsi1/META listing —
+    // enumerate both prefixes per club (every club is visited, so both rows are covered).
+    for (const r of await listVeteransRequestsForPrimary(tenant, club.id)) {
+      keys.push(veteransRequestKey(tenant, club.id, r.id));
+    }
+    for (const r of await listOutboundVeteransRequests(tenant, club.id)) {
+      keys.push(outboundVeteransRequestKey(tenant, club.id, r.id));
     }
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
@@ -4811,6 +5202,19 @@ export async function eraseClubData(
       if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
     }
     keys.push(veteransAffiliationKey(tenant, club.id, a.naturalKey));
+  }
+
+  // Veterans requests (ADR 0013) span two partitions, so each direction also derives its
+  // counterpart key — leaving either behind would point a surviving club at a dead one forever.
+  // This club as PRIMARY: canonical here, mirror under the veterans club.
+  for (const r of await listVeteransRequestsForPrimary(tenant, club.id)) {
+    keys.push(veteransRequestKey(tenant, club.id, r.id));
+    keys.push(outboundVeteransRequestKey(tenant, r.veteransClubId, r.id));
+  }
+  // This club as VETERANS club: mirror here, canonical under the primary club.
+  for (const r of await listOutboundVeteransRequests(tenant, club.id)) {
+    keys.push(outboundVeteransRequestKey(tenant, club.id, r.id));
+    keys.push(veteransRequestKey(tenant, r.primaryClubId, r.id));
   }
 
   await batchDelete(keys);

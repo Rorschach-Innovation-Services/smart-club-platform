@@ -756,7 +756,14 @@ export interface ClubCommEvent {
     | 'clearance'
     | 'clearance-approved'
     | 'clearance-rejected'
-    | 'clearance-reopened';
+    | 'clearance-reopened'
+    // Veterans squad-selection requests (ADR 0013). A `veterans-request` row is the primary
+    // chair's heads-up recorded when a veterans club requests one of the club's players. A
+    // `veterans-request-accepted` / `veterans-request-declined` row is recorded on the veterans
+    // club (both clubs when the union office resolves as an override). Email-only, uncapped.
+    | 'veterans-request'
+    | 'veterans-request-accepted'
+    | 'veterans-request-declined';
   /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
   summary?: string;
 }
@@ -1005,6 +1012,81 @@ export interface VeteransAffiliation {
 
 /** The affiliates GET projection: everything a veterans club may see, WITHOUT the PII naturalKey. */
 export type VeteransAffiliatePublic = Omit<VeteransAffiliation, 'naturalKey'>;
+
+/** Lifecycle of a veterans squad-selection request (ADR 0013). */
+export type VeteransRequestStatus = 'pending' | 'accepted' | 'declined' | 'withdrawn';
+
+/**
+ * A veterans squad-selection request (ADR 0013): a veterans club has FOUND a player tenant-wide
+ * and asks the player's PRIMARY club (the POPIA responsible party) to confirm the affiliation.
+ * Accept calls the same `setPlayerVeteransClub` the capture-only register/edit paths use, so the
+ * `VETAFFIL#` write-on-activation invariant is untouched and no second roster row / playerCount /
+ * demographics change occurs.
+ *
+ * Stored as a CANONICAL row under the primary club (`VETREQ#<id>`, gsi1 for the admin listing,
+ * carrying `playerNaturalKey`) + a MIRROR under the veterans club (`OUTBOUND_VETREQ#<id>`, no
+ * gsi1, no `playerNaturalKey`). See `veteransRequestKey` / `outboundVeteransRequestKey`.
+ */
+export interface VeteransRequest {
+  id: string;
+  /**
+   * The primary player row's identity hash. CANONICAL ROW ONLY — the mirror omits it so the
+   * requesting (veterans) club never receives the player's key (it only ever saw an opaque HMAC
+   * handle from the finder). Present on the canonical for the accept path to read the player row.
+   */
+  playerNaturalKey?: string;
+  /**
+   * HMAC-SHA256(secret, `tenant|primaryClubId|naturalKey`) — the opaque handle the finder returns
+   * and the request carries. Safe to expose (irreversible to the natural key); used to re-match
+   * the player against the primary club's rows at create time.
+   */
+  candidateId: string;
+  /** Denormalized "First Last" for display + audit (survives the affiliation write). */
+  playerName: string;
+  /** The player's OWN club — the partition owner of the canonical row and who confirms. */
+  primaryClubId: string;
+  primaryClubName: string;
+  /** The veterans club that made the request — the partition owner of the mirror row. */
+  veteransClubId: string;
+  veteransClubName: string;
+  /** Veterans league the request targets, when the veterans club plays more than one. */
+  leagueKey?: string;
+  note?: string;
+  requestedAt: string;
+  /** Email of the veterans-club rep (or admin) who made the request. */
+  requestedBy?: string;
+  status: VeteransRequestStatus;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  /** Which surface resolved it — the primary club portal, or a union-admin override. */
+  resolvedVia?: 'portal' | 'admin';
+  declineReason?: string;
+  /** TTL (epoch seconds): set on a terminal (resolved) row so it self-expires after 90 days. */
+  expiresAt?: number;
+  version: number;
+}
+
+/**
+ * A veterans request as HTTP responses return it: the stored row WITHOUT the PII
+ * `playerNaturalKey`. The mirror already lacks it; the canonical is projected through this before
+ * it leaves the API — the admin list, the outbound (mirror) array and the single-request replies
+ * are all stripped. The ONE exception is the INBOUND array of `GET /clubs/:id/veterans-requests`:
+ * those canonical rows live in the requesting club's OWN partition (which already receives the
+ * natural key on its roster GET), so they ship with `playerNaturalKey` intact.
+ */
+export type VeteransRequestPublic = Omit<VeteransRequest, 'playerNaturalKey'>;
+
+/**
+ * The finder response row (GET /clubs/:id/veterans-candidates): everything a requesting club may
+ * see about a tenant-wide player. NEVER carries the natural key / ID number / dob / contact — the
+ * `candidateId` HMAC handle is the only identifier that leaves the API.
+ */
+export interface VeteransCandidate {
+  candidateId: string;
+  playerName: string;
+  primaryClubId: string;
+  primaryClubName: string;
+}
 
 export type ClearanceStatus = 'pending' | 'approved' | 'admin-override' | 'rejected';
 

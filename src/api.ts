@@ -22,6 +22,8 @@ import type {
   PlayerRegistration,
   PlayerClearance,
   VeteransAffiliatePublic,
+  VeteransRequestPublic,
+  VeteransCandidate,
   RegistrationReview,
   League,
   Series,
@@ -364,6 +366,47 @@ export const removePlayerVeteransClub = (clubId: string, naturalKey: string) =>
 export const getVeteransAffiliates = (clubId: string) =>
   request<VeteransAffiliatePublic[]>(`/clubs/${clubId}/veterans-affiliates`);
 
+// ── Veterans squad-selection (ADR 0013) ──
+// The finder: search the tenant-wide roster for players a veterans club may request. 400 under
+// 3 chars, 403 unless the club is fixtured in a released veterans series (server-side gate).
+// `:id` is the requesting veterans club; results carry only an opaque `candidateId` handle.
+export const searchVeteransCandidates = (clubId: string, q: string) =>
+  request<{ candidates: VeteransCandidate[]; truncated: boolean }>(
+    `/clubs/${clubId}/veterans-candidates`,
+    { query: { q } },
+  );
+// A club's requests: inbound (it is the primary club, it must confirm) + outbound (it is the
+// veterans club that asked). `:id` is the club in whose portal these are shown.
+export const getVeteransRequests = (clubId: string) =>
+  request<{ inbound: VeteransRequestPublic[]; outbound: VeteransRequestPublic[] }>(
+    `/clubs/${clubId}/veterans-requests`,
+  );
+// The VETERANS club opens a request for a tenant-wide player it found. 409 = ineligible player
+// or a duplicate pending request (surface the server message).
+export const createVeteransRequest = (vetsClubId: string, body: unknown) =>
+  request<VeteransRequestPublic>(`/clubs/${vetsClubId}/veterans-requests`, {
+    method: 'POST',
+    body,
+  });
+// The PRIMARY club accepts (writes the affiliation) / declines a request; `:id` = primary club.
+export const acceptVeteransRequest = (primaryClubId: string, rid: string, body: unknown) =>
+  request<VeteransRequestPublic>(`/clubs/${primaryClubId}/veterans-requests/${rid}/accept`, {
+    method: 'POST',
+    body,
+  });
+export const declineVeteransRequest = (primaryClubId: string, rid: string, body: unknown) =>
+  request<VeteransRequestPublic>(`/clubs/${primaryClubId}/veterans-requests/${rid}/decline`, {
+    method: 'POST',
+    body,
+  });
+// The VETERANS club withdraws its own pending request; `:id` = veterans club.
+export const withdrawVeteransRequest = (vetsClubId: string, rid: string, body: unknown) =>
+  request<VeteransRequestPublic>(`/clubs/${vetsClubId}/veterans-requests/${rid}/withdraw`, {
+    method: 'POST',
+    body,
+  });
+// Admin (union office) cohort-wide view + override resolve. `action` is 'accept' | 'decline';
+// the body carries `primaryClubId` (rebuilds the canonical key) + optional `reason`/`version`.
 // ── Player clearances (inter-club transfers) ──
 // Returns { incoming, outbound } for a club: incoming = it must action (source),
 // outbound = players moving to it (destination).
@@ -488,6 +531,25 @@ export const changeUserEmail = (sub: string, email: string) =>
 export const getClubSignupLink = () => request('/admin/club-signup-link');
 export const generateClubSignupLink = () => request('/admin/club-signup-link', { method: 'POST' });
 export const revokeClubSignupLink = () => request('/admin/club-signup-link', { method: 'DELETE' });
+
+// ── Veterans squad-selection requests (admin, ADR 0013) ──
+// Every veterans request in the tenant, listed once via the canonical gsi1 (public shape —
+// the PII natural key is stripped server-side). Drives the union-admin oversight console.
+export const getAllVeteransRequests = () =>
+  request<VeteransRequestPublic[]>('/admin/veterans-requests');
+// Admin OVERRIDE of a veterans request. `action` picks the terminal route; the body carries
+// `primaryClubId` (to rebuild the canonical key), an optional `reason` (decline only) and an
+// optional `version` for optimistic-concurrency. Accept re-validates against the live player
+// row and calls `setPlayerVeteransClub`; both surfaces email the two chairs.
+export const adminResolveVeteransRequest = (
+  rid: string,
+  action: 'accept' | 'decline',
+  body: { primaryClubId: string; reason?: string; version?: number },
+) =>
+  request<VeteransRequestPublic>(`/admin/veterans-requests/${rid}/${action}`, {
+    method: 'POST',
+    body,
+  });
 
 // ── Public registration ──
 // `clubs` = sibling clubs for the previous-club dropdown (absent on older backends —

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { OVERARCHING_DISTRICT } from './leagues';
 import {
   leagueBreakdown,
+  leaguesWithFixturesButNoClub,
   districtRows,
   clearanceCounts,
   affiliationRows,
@@ -58,6 +59,45 @@ describe('leagueBreakdown', () => {
     expect(orphans.keys.sort()).toEqual(['also-gone', 'gone']);
     expect(orphans.clubCount).toBe(2); // distinct clubs, not references
     expect(orphans.teamCount).toBe(4); // 2 + 1 + 1
+  });
+});
+
+describe('leaguesWithFixturesButNoClub', () => {
+  const rows = (over: Record<string, number>) =>
+    leagueBreakdown(
+      Object.entries(over).flatMap(([key, n]) =>
+        Array.from({ length: n }, (_, i) => club({ id: `${key}-${i}`, leagues: [key] })),
+      ),
+      LEAGUES,
+    ).rows;
+
+  it('flags a league with a released series but zero clubs entered', () => {
+    // premier has clubs; womens has none. A released womens series → hint on womens only.
+    const r = rows({ premier: 2 });
+    const hint = leaguesWithFixturesButNoClub(r, [
+      { leagueKey: 'womens', released: true },
+      { leagueKey: 'premier', released: true },
+    ]);
+    expect([...hint]).toEqual(['womens']);
+  });
+
+  it('ignores unreleased series and series for a league that has clubs', () => {
+    const r = rows({ premier: 1 });
+    const hint = leaguesWithFixturesButNoClub(r, [
+      { leagueKey: 'womens', released: false }, // draft — no hint
+      { leagueKey: 'premier', released: true }, // has a club — no hint
+      { leagueKey: 'u13' }, // released undefined — no hint
+    ]);
+    expect(hint.size).toBe(0);
+  });
+
+  it('tolerates a missing/empty series list and non-string league keys', () => {
+    const r = rows({ premier: 0 } as Record<string, number>);
+    expect(leaguesWithFixturesButNoClub(r, undefined as unknown as []).size).toBe(0);
+    expect(
+      leaguesWithFixturesButNoClub(r, [{ leagueKey: 42 as unknown as string, released: true }])
+        .size,
+    ).toBe(0);
   });
 });
 
@@ -185,6 +225,8 @@ describe('insightsExportSheets', () => {
     expect(sheets.map((sheet) => sheet.name)).toEqual([
       'Summary',
       'League breakdown',
+      'Teams by league',
+      'Clubs by league',
       'District breakdown',
       'Affiliation',
       'CQI',
@@ -203,12 +245,12 @@ describe('insightsExportSheets', () => {
       Clubs: 1,
       Teams: 3,
     });
-    expect(sheets[6].rows).toContainEqual({
+    expect(sheets[8].rows).toContainEqual({
       Metric: 'Approved (including admin overrides)',
       Count: 2,
       Percentage: '50%',
     });
-    expect(sheets[7].rows).toContainEqual({
+    expect(sheets[9].rows).toContainEqual({
       Category: 'Unattributed',
       Bucket: 'Not attributable to a league',
       Players: 1,
@@ -225,6 +267,128 @@ describe('insightsExportSheets', () => {
       clearances: [],
     });
     expect(sheets.some((sheet) => sheet.name === 'Demographics')).toBe(false);
+  });
+
+  it('breaks a multi-side club into one Teams-by-league row per named side and one Clubs-by-league pivot row', () => {
+    const sheets = insightsExportSheets({
+      clubs: [
+        club({
+          id: 'north',
+          name: 'Northern CC',
+          leagues: ['premier'],
+          leagueTeams: { premier: 2 },
+          teamRosters: {
+            premier: [
+              { id: 'tm_a', name: 'First XI' },
+              { id: 'tm_b', name: 'Second XI' },
+            ],
+          },
+        }),
+      ],
+      leagues: LEAGUES,
+      districts: DISTRICTS,
+      clearances: [],
+    });
+    const teamsSheet = sheets.find((s) => s.name === 'Teams by league')!;
+    const clubsSheet = sheets.find((s) => s.name === 'Clubs by league')!;
+
+    const premierTeamRows = teamsSheet.rows.filter((r) => r.League === 'Premier League');
+    expect(premierTeamRows).toEqual([
+      {
+        League: 'Premier League',
+        Group: 'Seniors',
+        District: OVERARCHING_DISTRICT,
+        Club: 'Northern CC',
+        Team: 'First XI',
+        'Club sides in league': 2,
+        Chair: '',
+        'Chair email': '',
+        'Chair cell': '',
+      },
+      {
+        League: 'Premier League',
+        Group: 'Seniors',
+        District: OVERARCHING_DISTRICT,
+        Club: 'Northern CC',
+        Team: 'Second XI',
+        'Club sides in league': 2,
+        Chair: '',
+        'Chair email': '',
+        'Chair cell': '',
+      },
+    ]);
+    expect(clubsSheet.rows.filter((r) => r.League === 'Premier League')).toEqual([
+      {
+        League: 'Premier League',
+        Group: 'Seniors',
+        District: OVERARCHING_DISTRICT,
+        Club: 'Northern CC',
+        Sides: 2,
+        'Side names': 'First XI, Second XI',
+      },
+    ]);
+  });
+
+  it('gives a single-side club one row named after the club with Sides 1', () => {
+    const sheets = insightsExportSheets({
+      clubs: [club({ id: 'solo', name: 'Solo CC', leagues: ['premier'] })],
+      leagues: LEAGUES,
+      districts: DISTRICTS,
+      clearances: [],
+    });
+    const teamRows = sheets.find((s) => s.name === 'Teams by league')!.rows;
+    const clubRows = sheets.find((s) => s.name === 'Clubs by league')!.rows;
+    expect(teamRows).toEqual([
+      {
+        League: 'Premier League',
+        Group: 'Seniors',
+        District: OVERARCHING_DISTRICT,
+        Club: 'Solo CC',
+        Team: 'Solo CC',
+        'Club sides in league': 1,
+        Chair: '',
+        'Chair email': '',
+        'Chair cell': '',
+      },
+    ]);
+    expect(clubRows).toEqual([
+      {
+        League: 'Premier League',
+        Group: 'Seniors',
+        District: OVERARCHING_DISTRICT,
+        Club: 'Solo CC',
+        Sides: 1,
+        'Side names': 'Solo CC',
+      },
+    ]);
+  });
+
+  it('emits no rows for leagues with no entrants and reconciles Teams-by-league row count with League breakdown', () => {
+    const sheets = insightsExportSheets({
+      clubs: [
+        club({
+          id: 'a',
+          name: 'Alpha',
+          leagues: ['premier', 'gone'],
+          leagueTeams: { premier: 2, gone: 3 },
+        }),
+        club({ id: 'b', name: 'Bravo', leagues: ['premier'] }),
+      ],
+      leagues: LEAGUES,
+      districts: DISTRICTS,
+      clearances: [],
+    });
+    const teamRows = sheets.find((s) => s.name === 'Teams by league')!.rows;
+    // 'Women's League' has no entrants — it produces no rows.
+    expect(teamRows.some((r) => r.League === "Women's League")).toBe(false);
+    // Every Teams-by-league row ties back to the total Teams on League breakdown (incl. orphans).
+    const leagueBreakdownRows = sheets.find((s) => s.name === 'League breakdown')!.rows;
+    const totalTeams = leagueBreakdownRows.reduce((sum, r) => sum + (r.Teams as number), 0);
+    expect(teamRows.length).toBe(totalTeams);
+    // The orphan key surfaces as its own rows so the totals reconcile.
+    expect(
+      teamRows.filter((r) => r.League === 'gone' && r.Group === 'Removed / missing league'),
+    ).toHaveLength(3);
   });
 });
 

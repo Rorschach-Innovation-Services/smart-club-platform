@@ -3,11 +3,14 @@ import {
   OVERARCHING_DISTRICT,
   slugifyLeagueKey,
   leagueOptionsForDistrict,
+  leagueOptionsOutsideDistrict,
   labelByKey,
   optionsGroupedByGroup,
   findByKey,
   teamCounts,
   isWomensLeague,
+  isVeteransLeague,
+  clubPlaysVeterans,
   teamLetter,
   defaultTeamName,
   clubTeamsForLeague,
@@ -81,6 +84,33 @@ describe('leagueOptionsForDistrict', () => {
   });
 });
 
+describe('leagueOptionsOutsideDistrict', () => {
+  it('returns the catalogue minus the district defaults, grouped district → group', () => {
+    // Ethekwini already offers premier/veterans/emcuD1/emcuD2 → only kcSat is "outside".
+    const out = leagueOptionsOutsideDistrict(LEAGUES, 'Ethekwini Metro Cricket Union');
+    expect(Object.keys(out)).toEqual(['Umkhanyakude Cricket District']);
+    expect(out['Umkhanyakude Cricket District']['King Cetshwayo'].map((l) => l.key)).toEqual([
+      'kcSat',
+    ]);
+  });
+  it('excludes the overarching set (shared by every district) for an unknown district', () => {
+    const out = leagueOptionsOutsideDistrict(LEAGUES, 'Ilembe Cricket Union');
+    // premier/veterans are overarching → never "outside"; the district-specific leagues are.
+    expect(Object.keys(out).sort()).toEqual([
+      'Ethekwini Metro Cricket Union',
+      'Umkhanyakude Cricket District',
+    ]);
+    expect(out['Ethekwini Metro Cricket Union']['EMCU Divisions'].map((l) => l.key)).toEqual([
+      'emcuD1',
+      'emcuD2',
+    ]);
+  });
+  it('tolerates empty/garbage input', () => {
+    expect(leagueOptionsOutsideDistrict([], 'anything')).toEqual({});
+    expect(leagueOptionsOutsideDistrict(undefined as never, 'anything')).toEqual({});
+  });
+});
+
 describe('labelByKey / findByKey / optionsGroupedByGroup', () => {
   it('maps keys to labels', () => {
     expect(labelByKey(LEAGUES).emcuD1).toBe('EMCU Division 1');
@@ -110,6 +140,47 @@ describe('isWomensLeague', () => {
     expect(isWomensLeague(L('Under 15 Girls', 'Juniors'))).toBe(false);
     expect(isWomensLeague(null)).toBe(false);
     expect(isWomensLeague({ label: undefined })).toBe(false);
+  });
+});
+
+describe('isVeteransLeague', () => {
+  it('matches a veterans KEY regardless of label', () => {
+    expect(isVeteransLeague({ key: 'veterans', label: 'Over-40s' })).toBe(true);
+    expect(isVeteransLeague({ key: 'veterans-premier', label: 'Premier' })).toBe(true);
+    expect(isVeteransLeague({ key: 'veterans-promotion', label: 'Promotion' })).toBe(true);
+  });
+  it('matches a veterans/vets LABEL even when keyed differently', () => {
+    expect(isVeteransLeague({ key: 'over40', label: 'Veterans League' })).toBe(true);
+    expect(isVeteransLeague({ key: 'vt', label: 'Vets T20' })).toBe(true);
+  });
+  it('does not match plain leagues or null', () => {
+    expect(isVeteransLeague({ key: 'premier', label: 'Premier League' })).toBe(false);
+    // "veteransxyz" has no word boundary after "veterans" (s→x are both word chars), and the
+    // label has no veterans/vets word either — so neither pattern fires.
+    expect(isVeteransLeague({ key: 'veteransxyz', label: 'Something' })).toBe(false);
+    expect(isVeteransLeague(null)).toBe(false);
+    expect(isVeteransLeague({ label: undefined })).toBe(false);
+  });
+});
+
+describe('clubPlaysVeterans', () => {
+  const catalogue = [
+    { key: 'premier', label: 'Premier League' },
+    { key: 'vets-cup', label: 'Veterans Cup' }, // matched on label
+  ];
+  it('is true when a club league key resolves to a veterans league in the catalogue', () => {
+    expect(clubPlaysVeterans({ leagues: ['premier', 'vets-cup'] }, catalogue)).toBe(true);
+  });
+  it('falls back to the key pattern for an orphan key (catalogue entry removed)', () => {
+    // 'veterans-premier' is not in the catalogue but its KEY matches — a live series must still
+    // light the nav.
+    expect(clubPlaysVeterans({ leagues: ['veterans-premier'] }, catalogue)).toBe(true);
+  });
+  it('is false for a club with no veterans leagues, and tolerates missing input', () => {
+    expect(clubPlaysVeterans({ leagues: ['premier'] }, catalogue)).toBe(false);
+    expect(clubPlaysVeterans({ leagues: [] }, catalogue)).toBe(false);
+    expect(clubPlaysVeterans(null, catalogue)).toBe(false);
+    expect(clubPlaysVeterans({}, catalogue)).toBe(false);
   });
 });
 

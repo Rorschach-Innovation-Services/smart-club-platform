@@ -9,7 +9,7 @@
  * The derivation helpers are pure and exported for tests, mirroring src/leagues.ts.
  */
 
-import { useState as useStateA } from 'react';
+import { Fragment, useState as useStateA } from 'react';
 import { useCopy } from './branding';
 import { KPI, CountUp, EmptyState, Icon, Btn } from './atoms';
 import { DEFAULT_REQUIRED_DOCS, activeDocs } from './data';
@@ -82,6 +82,34 @@ export function leagueBreakdown(clubs: InsightsClub[], leagues: League[]) {
     rows,
     orphans: { keys: [...orphanKeys], clubCount: orphanClubs.size, teamCount: orphanTeams },
   };
+}
+
+/** Minimal series shape the honesty hint needs — `allSeries` satisfies it. */
+export interface ReleasedSeriesLike {
+  leagueKey?: unknown;
+  released?: boolean;
+}
+
+/**
+ * League keys that have a RELEASED series but zero clubs entered — the fixtures exist
+ * yet Season Insights counts them as empty because no club carries the key (the Plan B
+ * importer wrote series without patching clubs). Surfaced as a per-row hint so the count
+ * stays truthful while pointing at the fix (run the club league sync). Pure; drives the
+ * hint predicate test.
+ */
+export function leaguesWithFixturesButNoClub(
+  rows: LeagueRow[],
+  series: ReleasedSeriesLike[],
+): Set<string> {
+  const releasedKeys = new Set<string>();
+  for (const s of series || []) {
+    if (s && s.released && typeof s.leagueKey === 'string') releasedKeys.add(s.leagueKey);
+  }
+  const out = new Set<string>();
+  for (const r of rows) {
+    if (r.clubCount === 0 && releasedKeys.has(r.key)) out.add(r.key);
+  }
+  return out;
 }
 
 export interface DistrictRow {
@@ -234,6 +262,53 @@ export function insightsExportSheets({
   const teamsTotal = split.senior + split.women + split.junior;
   const playersTotal = clubs.reduce((sum, club) => sum + (club.players || 0), 0);
   const { rows: leagueRows, orphans } = leagueBreakdown(clubs, leagues);
+  const clubById = new Map((clubs || []).map((c) => [c.id, c]));
+  const sidesInLeague = (clubId: string, key: string) => {
+    const club = clubById.get(clubId);
+    return club ? clubTeamsForLeague(club, key).length : 0;
+  };
+  const teamsByLeagueRows: Record<string, unknown>[] = [];
+  const clubsByLeagueRows: Record<string, unknown>[] = [];
+  const pushLeagueTeams = (
+    key: string,
+    label: string,
+    group: string,
+    district: string,
+    withPivot: boolean,
+  ) => {
+    const dir = leagueTeamDirectory(clubs, key);
+    if (!dir.length) return;
+    const byClub = new Map<string, LeagueTeamRow[]>();
+    for (const row of dir) {
+      teamsByLeagueRows.push({
+        League: label,
+        Group: group,
+        District: district,
+        Club: row.clubName,
+        Team: row.teamName,
+        'Club sides in league': sidesInLeague(row.clubId, key),
+        Chair: row.chairName || '',
+        'Chair email': row.chairEmail || '',
+        'Chair cell': row.chairCell || '',
+      });
+      const list = byClub.get(row.clubId) || [];
+      list.push(row);
+      byClub.set(row.clubId, list);
+    }
+    if (!withPivot) return;
+    for (const [clubId, list] of byClub) {
+      clubsByLeagueRows.push({
+        League: label,
+        Group: group,
+        District: district,
+        Club: list[0].clubName,
+        Sides: sidesInLeague(clubId, key),
+        'Side names': list.map((r) => r.teamName).join(', '),
+      });
+    }
+  };
+  for (const l of leagues || []) pushLeagueTeams(l.key, l.label, l.group, l.district, true);
+  for (const key of orphans.keys) pushLeagueTeams(key, key, 'Removed / missing league', '', false);
   const districtBreakdown = districtRows(clubs, leagues, districts);
   const affiliations = affiliationRows(clubs);
   const { bands, submitted, avgCqi } = cqiBandRows(clubs);
@@ -282,6 +357,14 @@ export function insightsExportSheets({
             ]
           : []),
       ],
+    },
+    {
+      name: 'Teams by league',
+      rows: teamsByLeagueRows,
+    },
+    {
+      name: 'Clubs by league',
+      rows: clubsByLeagueRows,
     },
     {
       name: 'District breakdown',
@@ -532,6 +615,12 @@ interface InsightsBreakdownProps {
    * this on the card).
    */
   requiredDocs?: RequiredDoc[];
+  /**
+   * The tenant's series, for the per-league honesty hint: a league with a released
+   * series but no club entered gets a "fixtures exist but no club has entered it" note.
+   * Absent (e.g. the operator overview) ⇒ no hints, counts unchanged.
+   */
+  series?: ReleasedSeriesLike[];
 }
 
 export function InsightsBreakdown({
@@ -543,6 +632,7 @@ export function InsightsBreakdown({
   onOpenLeague,
   demographics,
   requiredDocs = DEFAULT_REQUIRED_DOCS,
+  series = [],
 }: InsightsBreakdownProps) {
   if (!clubs.length)
     return (
@@ -579,6 +669,7 @@ export function InsightsBreakdown({
 
   const { rows: lgRows, orphans } = leagueBreakdown(clubs, leagues);
   const lgMax = duoMax(lgRows);
+  const fixturedButEmpty = leaguesWithFixturesButNoClub(lgRows, series);
   const grouped = optionsGroupedByGroup(leagues);
   const enteredLeagues = lgRows.filter((r) => r.clubCount > 0).length;
 
@@ -634,15 +725,22 @@ export function InsightsBreakdown({
                 {(ls as League[]).map((l) => {
                   const r = lgRows.find((row) => row.key === l.key)!;
                   return (
-                    <DuoRow
-                      key={r.key}
-                      label={r.label}
-                      title={`${r.label} — ${r.clubCount} clubs (${pct(r.clubCount, clubs.length)} of cohort), ${r.teamCount} teams (${pct(r.teamCount, teamsTotal)} of all teams)`}
-                      clubCount={r.clubCount}
-                      teamCount={r.teamCount}
-                      max={lgMax}
-                      onOpen={onOpenLeague ? () => onOpenLeague(r.key) : undefined}
-                    />
+                    <Fragment key={r.key}>
+                      <DuoRow
+                        label={r.label}
+                        title={`${r.label} — ${r.clubCount} clubs (${pct(r.clubCount, clubs.length)} of cohort), ${r.teamCount} teams (${pct(r.teamCount, teamsTotal)} of all teams)`}
+                        clubCount={r.clubCount}
+                        teamCount={r.teamCount}
+                        max={lgMax}
+                        onOpen={onOpenLeague ? () => onOpenLeague(r.key) : undefined}
+                      />
+                      {fixturedButEmpty.has(r.key) && (
+                        <div className="insights-row-hint">
+                          Fixtures exist for this league but no club has entered it — ask the
+                          platform team to run the club league sync.
+                        </div>
+                      )}
+                    </Fragment>
                   );
                 })}
               </div>
@@ -1091,6 +1189,8 @@ interface AdminInsightsPageProps {
   demographics?: DemographicsResponse;
   toast?: (message: string, tone?: string) => void;
   requiredDocs?: RequiredDoc[];
+  /** Passed through to the per-league honesty hint (see InsightsBreakdownProps.series). */
+  series?: ReleasedSeriesLike[];
 }
 
 export function AdminInsightsPage({
@@ -1102,6 +1202,7 @@ export function AdminInsightsPage({
   demographics,
   toast,
   requiredDocs = DEFAULT_REQUIRED_DOCS,
+  series = [],
 }: AdminInsightsPageProps) {
   const copy = useCopy();
   const [exporting, setExporting] = useStateA(false);
@@ -1154,6 +1255,7 @@ export function AdminInsightsPage({
         onOpenLeague={onOpenLeague}
         demographics={demographics}
         requiredDocs={requiredDocs}
+        series={series}
       />
     </div>
   );

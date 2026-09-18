@@ -96,6 +96,22 @@ debt.
 - Collect the minimum necessary fields. The current set is name, DOB, optional cell/email,
   and (for minors) guardian name.
 
+## Veterans finder — data minimisation & opaque handles
+
+The veterans squad-selection finder ([ADR 0013](../architecture/0013-veterans-squad-selection.md))
+is a tenant-wide name search, so it is minimised by design. The server reads a fixed
+`ProjectionExpression` (`sk, firstName, lastName, status, veteransClubId, team, clubId`) that
+never touches `idNumber`, `dob`, `cell` or `email` — only the fields needed to show a name plus
+primary club and apply the exclusions ever enter Lambda memory, and a test pins the projection so
+it cannot silently grow. The finder returns an opaque `candidateId` =
+`HMAC-SHA256(secret, tenant|primaryClubId|naturalKey)` rather than the player's identity key
+(itself a sha256 identity hash, brute-forceable from a name plus an age guess if handed out): the
+HMAC is irreversible and bound to the (tenant, primary club, player) triple, so it can only be
+redeemed against that club's rows. Access is gated on the requesting club being fixtured in a
+released veterans series (not on the self-settable `club.leagues`), and every finder call is
+logged to CloudWatch (tenant, club, rep, query length, result count) as an enumeration-risk audit
+trail.
+
 ## Tenant isolation
 
 Each union's data is partitioned under `TENANT#<t>#` and access is gated by the caller's
