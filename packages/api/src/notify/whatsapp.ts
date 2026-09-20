@@ -15,39 +15,15 @@
  * Dry-run: NOTIFY_DRY_RUN=1 or missing token/phone-id → log + synthetic id.
  */
 import { randomUUID } from 'node:crypto';
+import { WHATSAPP_TEMPLATES } from './whatsapp-templates.js';
 
 const TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
-// The approved onboarding-invite template survives as the staff-template DEV default
-// only — the chair-invite send itself was removed with admin club onboarding.
-const TEMPLATE = process.env.WHATSAPP_INVITE_TEMPLATE ?? 'club_onboarding_invite';
-const TEMPLATE_LANG = process.env.WHATSAPP_INVITE_TEMPLATE_LANG ?? 'en';
-// Fixtures broadcast uses its own approved Utility template — {{1}} player name,
-// {{2}} club name, {{3}} season. Season is a variable so the template scales each
-// year with no re-approval. See the plan appendix for the template to create.
-const FIXTURES_TEMPLATE = process.env.WHATSAPP_FIXTURES_TEMPLATE ?? 'club_fixtures_released';
-const FIXTURES_TEMPLATE_LANG = process.env.WHATSAPP_FIXTURES_TEMPLATE_LANG ?? 'en';
-// Staff (admin/rep) invite template. The approved invite template's {{2}} is approved
-// by Meta as "club name", so reusing it for an org name is a semantic/policy mismatch;
-// a DEDICATED approved staff template is the correct production step (see runbook). We
-// default to the invite template so dev dry-run works out of the box, and send {{1}}
-// staff name, {{2}} org name, {{3}} the sign-in link (same body slots as the invite).
-const STAFF_TEMPLATE = process.env.WHATSAPP_STAFF_TEMPLATE ?? TEMPLATE;
-const STAFF_TEMPLATE_LANG = process.env.WHATSAPP_STAFF_TEMPLATE_LANG ?? TEMPLATE_LANG;
-// Chair onboarding template, sent the moment affiliation completes — {{1}} chair name,
-// {{2}} club name, {{3}} the player-registration link, {{4}} the tutorials-page URL.
-// A single business-initiated message carries both links (one conversation, not two).
-// Create + approve this Utility template before real sends; see the runbook. Two URL
-// body variables are more scrutinised by Meta — if {{4}} blocks approval, drop it and
-// rely on the email + portal for tutorials (the email already carries every link).
-const REGLINK_TEMPLATE = process.env.WHATSAPP_REGLINK_TEMPLATE ?? 'club_reglink_ready';
-const REGLINK_TEMPLATE_LANG = process.env.WHATSAPP_REGLINK_TEMPLATE_LANG ?? 'en';
-// Clearance-pending heads-up to the from-club chairman — {{1}} chair name, {{2}} from-club
-// name, {{3}} player name, {{4}} to-club name. Body-only Utility template, no buttons/links
-// (the chair may have no portal login — see the softened copy in the plan). Create + approve
-// this template before real sends; see the runbook.
-const CLEARANCE_TEMPLATE = process.env.WHATSAPP_CLEARANCE_TEMPLATE ?? 'club_clearance_pending';
-const CLEARANCE_TEMPLATE_LANG = process.env.WHATSAPP_CLEARANCE_TEMPLATE_LANG ?? 'en';
+// Template NAMES and languages come from the code registry (./whatsapp-templates.ts),
+// not from env/SST secrets: a template name only changes when the template is
+// created/renamed in Meta, which is a code change anyway (the sender's param shape
+// moves with it). The env still carries the real secrets/config — WHATSAPP_ACCESS_TOKEN,
+// WHATSAPP_PHONE_NUMBER_ID, NOTIFY_DRY_RUN — handled below.
 const GRAPH_VERSION = 'v22.0';
 export const WHATSAPP_DRY_RUN = process.env.NOTIFY_DRY_RUN === '1' || !TOKEN || !PHONE_NUMBER_ID;
 
@@ -155,30 +131,42 @@ export interface StaffInviteWhatsAppInput {
   to: string; // already E.164 (see toE164)
   name: string;
   orgName: string;
+  /** The email address the portal expects the recipient to sign in with ({{3}}). */
+  email: string;
   link: string;
 }
 
 /**
- * Staff (admin/rep) invite heads-up. Uses STAFF_TEMPLATE (defaults to the invite
- * template for dev) — {{1}} staff name, {{2}} org name, {{3}} sign-in link. Email is
- * the primary staff channel; WhatsApp is best-effort. See STAFF_TEMPLATE note above
- * re: a dedicated approved template before any real production staff send.
+ * Build the four positional body params for `staff_portal_invite`, in order: {{1}} staff
+ * name (fallback 'there'), {{2}} org name, {{3}} email on file, {{4}} sign-in link. EVERY
+ * param rides through cleanParam — sheet-sourced names/emails (the contact-import CLI)
+ * can carry the leading spaces / double spaces Meta rejects, and relying on callers to
+ * pre-clean would be a silent trap. Exported so the param order/count/cleaning can be
+ * asserted directly (a real send in dev returns only a synthetic id, revealing nothing).
+ */
+export function staffInviteParams(
+  input: Pick<StaffInviteWhatsAppInput, 'name' | 'orgName' | 'email' | 'link'>,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.name || 'there') },
+    { type: 'text', text: cleanParam(input.orgName) },
+    { type: 'text', text: cleanParam(input.email) },
+    { type: 'text', text: cleanParam(input.link) },
+  ];
+}
+
+/**
+ * Staff (admin/rep) invite heads-up. Uses the `staffInvite` registry entry — the
+ * dedicated four-param `staff_portal_invite` in production ({{1}} name, {{2}} org,
+ * {{3}} email, {{4}} sign-in link). Email is the primary staff channel; WhatsApp is
+ * best-effort.
  */
 export async function sendStaffInviteWhatsApp(
   input: StaffInviteWhatsAppInput,
 ): Promise<{ messageId: string }> {
-  const { to, name, orgName, link } = input;
-  return sendTemplate(
-    to,
-    STAFF_TEMPLATE,
-    STAFF_TEMPLATE_LANG,
-    [
-      { type: 'text', text: name || 'there' },
-      { type: 'text', text: orgName },
-      { type: 'text', text: link },
-    ],
-    `staff invite for ${orgName}`,
-  );
+  const { to, orgName } = input;
+  const { name, lang } = WHATSAPP_TEMPLATES.staffInvite;
+  return sendTemplate(to, name, lang, staffInviteParams(input), `staff invite for ${orgName}`);
 }
 
 export interface RegLinkWhatsAppInput {
@@ -190,27 +178,33 @@ export interface RegLinkWhatsAppInput {
 }
 
 /**
+ * Build the four positional body params for `club_reglink_ready`, in order: {{1}} chair
+ * name (fallback 'there'), {{2}} club name, {{3}} reg link, {{4}} tutorials URL. Exported
+ * so the param order/count can be asserted against the registry directly.
+ */
+export function regLinkParams(
+  input: Pick<RegLinkWhatsAppInput, 'chairName' | 'clubName' | 'regLink' | 'tutorialsUrl'>,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.chairName || 'there') },
+    { type: 'text', text: cleanParam(input.clubName) },
+    { type: 'text', text: input.regLink },
+    { type: 'text', text: input.tutorialsUrl },
+  ];
+}
+
+/**
  * Chair onboarding heads-up sent on affiliation-complete: the club's player-registration
  * link to forward to members, plus a link to the how-to-use-the-app tutorial videos. Uses
- * REGLINK_TEMPLATE — {{1}} chair name, {{2}} club name, {{3}} reg link, {{4}} tutorials URL.
- * WhatsApp is best-effort alongside the (primary) email.
+ * the `reglinkReady` registry entry — {{1}} chair name, {{2}} club name, {{3}} reg link,
+ * {{4}} tutorials URL. WhatsApp is best-effort alongside the (primary) email.
  */
 export async function sendRegLinkWhatsApp(
   input: RegLinkWhatsAppInput,
 ): Promise<{ messageId: string }> {
-  const { to, chairName, clubName, regLink, tutorialsUrl } = input;
-  return sendTemplate(
-    to,
-    REGLINK_TEMPLATE,
-    REGLINK_TEMPLATE_LANG,
-    [
-      { type: 'text', text: chairName || 'there' },
-      { type: 'text', text: clubName },
-      { type: 'text', text: regLink },
-      { type: 'text', text: tutorialsUrl },
-    ],
-    `reg link for ${clubName}`,
-  );
+  const { to, clubName } = input;
+  const { name, lang } = WHATSAPP_TEMPLATES.reglinkReady;
+  return sendTemplate(to, name, lang, regLinkParams(input), `reg link for ${clubName}`);
 }
 
 export interface FixturesWhatsAppInput {
@@ -221,25 +215,31 @@ export interface FixturesWhatsAppInput {
 }
 
 /**
+ * Build the three positional body params for `club_fixtures_released`, in order:
+ * {{1}} player name (fallback 'there'), {{2}} club name, {{3}} season. Exported so the
+ * param order/count can be asserted against the registry directly.
+ */
+export function fixturesParams(
+  input: Pick<FixturesWhatsAppInput, 'playerName' | 'clubName' | 'season'>,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.playerName || 'there') },
+    { type: 'text', text: cleanParam(input.clubName) },
+    { type: 'text', text: cleanParam(input.season) },
+  ];
+}
+
+/**
  * Fixtures heads-up to a player. Players aren't portal users and the portal is
  * auth-gated, so the template carries no link — the full schedule rides in the
- * email; this just tells them it's out.
+ * email; this just tells them it's out. Uses the `fixturesReleased` registry entry.
  */
 export async function sendFixturesWhatsApp(
   input: FixturesWhatsAppInput,
 ): Promise<{ messageId: string }> {
-  const { to, playerName, clubName, season } = input;
-  return sendTemplate(
-    to,
-    FIXTURES_TEMPLATE,
-    FIXTURES_TEMPLATE_LANG,
-    [
-      { type: 'text', text: playerName || 'there' },
-      { type: 'text', text: clubName },
-      { type: 'text', text: season },
-    ],
-    `fixtures for ${clubName}`,
-  );
+  const { to, clubName } = input;
+  const { name, lang } = WHATSAPP_TEMPLATES.fixturesReleased;
+  return sendTemplate(to, name, lang, fixturesParams(input), `fixtures for ${clubName}`);
 }
 
 export interface ClearanceWhatsAppInput {
@@ -251,26 +251,40 @@ export interface ClearanceWhatsAppInput {
 }
 
 /**
+ * Build the four positional body params for `club_clearance_pending`, in order:
+ * {{1}} chair name (fallback 'there'), {{2}} from-club, {{3}} player, {{4}} to-club.
+ * Every param rides through cleanParam — the player name arrives from the PUBLIC register
+ * form as free text (Meta rejects newlines/tabs/4+ spaces). Exported so the param
+ * order/count/cleaning can be asserted against the registry directly.
+ */
+export function clearanceParams(
+  input: Pick<ClearanceWhatsAppInput, 'chairName' | 'fromClubName' | 'playerName' | 'toClubName'>,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.chairName || 'there') },
+    { type: 'text', text: cleanParam(input.fromClubName) },
+    { type: 'text', text: cleanParam(input.playerName) },
+    { type: 'text', text: cleanParam(input.toClubName) },
+  ];
+}
+
+/**
  * Clearance-pending heads-up to the FROM-club chairman: a player wants to leave and
  * the club must approve or reject. No link in the body — the chair may hold no portal
  * login (chair invites were removed with admin onboarding), so the copy points at the
- * club portal / union office rather than telling the recipient to sign in. The player
- * name arrives from the public register form, so every param rides through cleanParam.
+ * club portal / union office rather than telling the recipient to sign in. Uses the
+ * `clearancePending` registry entry.
  */
 export async function sendClearanceWhatsApp(
   input: ClearanceWhatsAppInput,
 ): Promise<{ messageId: string }> {
-  const { to, chairName, fromClubName, playerName, toClubName } = input;
+  const { to, fromClubName } = input;
+  const { name, lang } = WHATSAPP_TEMPLATES.clearancePending;
   return sendTemplate(
     to,
-    CLEARANCE_TEMPLATE,
-    CLEARANCE_TEMPLATE_LANG,
-    [
-      { type: 'text', text: cleanParam(chairName || 'there') },
-      { type: 'text', text: cleanParam(fromClubName) },
-      { type: 'text', text: cleanParam(playerName) },
-      { type: 'text', text: cleanParam(toClubName) },
-    ],
+    name,
+    lang,
+    clearanceParams(input),
     `clearance notice for ${fromClubName}`,
   );
 }

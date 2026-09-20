@@ -641,7 +641,7 @@ export async function claimInviteSend(
   clubId: string,
   idempotencyKey: string,
   channels: string[],
-  kind: 'invite' | 'fixtures' = 'invite',
+  kind: 'invite' | 'fixtures' | 'staff-invite' = 'invite',
 ): Promise<InviteSendReplay | null> {
   const startedAt = new Date().toISOString();
   // TTL (epoch seconds): the marker only needs to outlive a lost-response retry window,
@@ -676,7 +676,7 @@ export async function claimInviteSend(
         | undefined;
       // The invite/fixtures markers share the INVITE# keyspace; `kind` disambiguates them.
       // A key reused across kinds must never replay the wrong send's results — refuse it.
-      const priorKind = (item?.kind as 'invite' | 'fixtures') ?? 'invite';
+      const priorKind = (item?.kind as 'invite' | 'fixtures' | 'staff-invite') ?? 'invite';
       if (priorKind !== kind) {
         throw new Error(
           `idempotency key ${idempotencyKey} already used for a ${priorKind} send (got ${kind})`,

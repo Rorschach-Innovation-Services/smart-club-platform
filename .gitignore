@@ -29,6 +29,12 @@ venue-clash-resolve-backup-*.json
 titans-import-backup-*.json
 titans-import-created-clubs.json
 
+# Prod data snapshots (chair/office-bearer name/email/cell) written by
+# import-titans-contacts --confirm — never commit. The revert manifest carries PII
+# (per-person pre-image memberships) too, so both patterns stay out of the repo.
+titans-contacts-import-backup-*.json
+titans-contacts-import-manifest.json
+
 # generated cohort exports (contain PII)
 cohort-export-*.xlsx
 

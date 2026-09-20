@@ -257,25 +257,13 @@ export default $config({
     const candidateHandleSecret = new sst.Secret('CandidateHandleSecret', '');
     const whatsappAccessToken = new sst.Secret('WhatsappAccessToken', '');
     const whatsappPhoneNumberId = new sst.Secret('WhatsappPhoneNumberId', '');
-    const whatsappInviteTemplate = new sst.Secret(
-      'WhatsappInviteTemplate',
-      'club_onboarding_invite',
-    );
-    // Staff (admin/rep) invites reuse the invite template by default until a dedicated
-    // Meta-approved staff template exists. Read by notify/whatsapp.ts (WHATSAPP_STAFF_TEMPLATE).
-    const whatsappStaffTemplate = new sst.Secret('WhatsappStaffTemplate', 'club_onboarding_invite');
-    // Chair onboarding (player-reg link + tutorials), sent on affiliation-complete. Read by
-    // notify/whatsapp.ts (WHATSAPP_REGLINK_TEMPLATE) — create + approve this Utility template
-    // (body vars {{1}} chair, {{2}} club, {{3}} reg link, {{4}} tutorials URL) before real sends.
-    const whatsappReglinkTemplate = new sst.Secret('WhatsappReglinkTemplate', 'club_reglink_ready');
-    // Clearance-pending chairman heads-up, sent when a clearance opens against a club. Read
-    // by notify/whatsapp.ts (WHATSAPP_CLEARANCE_TEMPLATE) — create + approve this Utility
-    // template (body vars {{1}} chair, {{2}} from-club, {{3}} player, {{4}} to-club) before
-    // real sends.
-    const whatsappClearanceTemplate = new sst.Secret(
-      'WhatsappClearanceTemplate',
-      'club_clearance_pending',
-    );
+    // Template NAMES/languages are NOT secrets — they live in the code registry
+    // packages/api/src/notify/whatsapp-templates.ts. A template name only changes when
+    // the template is created/renamed in Meta (a code change, since the sender's param
+    // shape moves with it), so the former WhatsappInviteTemplate/WhatsappStaffTemplate/
+    // WhatsappReglinkTemplate/WhatsappClearanceTemplate secrets were removed. Any values
+    // set for them on a stage are now inert. Only the WhatsApp token + phone-number id
+    // (above) are real secrets.
 
     // ── Error monitoring (Sentry, EU region — medicoach-ap on de.sentry.io) ──
     // DSNs are non-secret but kept out of the repo so they're set per-account without
@@ -365,10 +353,6 @@ export default $config({
         candidateHandleSecret,
         whatsappAccessToken,
         whatsappPhoneNumberId,
-        whatsappInviteTemplate,
-        whatsappStaffTemplate,
-        whatsappReglinkTemplate,
-        whatsappClearanceTemplate,
       ],
       // SES isn't covered by `link` (it's not an SST resource), so grant it directly.
       // SES authorizes by verified identity, not resource ARN, hence resources: ['*'].
@@ -427,10 +411,8 @@ export default $config({
         CANDIDATE_HANDLE_SECRET: candidateHandleSecret.value,
         WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
         WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
-        WHATSAPP_INVITE_TEMPLATE: whatsappInviteTemplate.value,
-        WHATSAPP_STAFF_TEMPLATE: whatsappStaffTemplate.value,
-        WHATSAPP_REGLINK_TEMPLATE: whatsappReglinkTemplate.value,
-        WHATSAPP_CLEARANCE_TEMPLATE: whatsappClearanceTemplate.value,
+        // Template names/languages come from the code registry (whatsapp-templates.ts),
+        // not the Lambda env — see the note by the secrets above.
         // Force dry-run regardless of secrets (set NOTIFY_DRY_RUN=1 in the deploy env)
         // — the verified-only/dry-run gate while awaiting SES production access.
         NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',

@@ -10,9 +10,17 @@ Lambda. It is the ONLY WhatsApp message the clearance flow sends (resolutions ar
 
 This runbook covers the one business-initiated WhatsApp template the clearance flow uses:
 
-| Template purpose      | Default name (secret)                                  | Sent to         | When                                                                   |
-| --------------------- | ------------------------------------------------------ | --------------- | ---------------------------------------------------------------------- |
-| Clearance **pending** | `club_clearance_pending` (`WhatsappClearanceTemplate`) | FROM-club chair | a clearance opens against the club (create / self-register / reassign) |
+| Template purpose      | Registry name (code)     | Sent to         | When                                                                   |
+| --------------------- | ------------------------ | --------------- | ---------------------------------------------------------------------- |
+| Clearance **pending** | `club_clearance_pending` | FROM-club chair | a clearance opens against the club (create / self-register / reassign) |
+
+> **Template names live in code, not secrets.** The name + language for every WhatsApp
+> template are held in the code registry `packages/api/src/notify/whatsapp-templates.ts`
+> (entry `clearancePending` for this one). There is no `sst secret set` for a template name.
+> The four former name secrets (`WhatsappInviteTemplate`, `WhatsappStaffTemplate`,
+> `WhatsappReglinkTemplate`, `WhatsappClearanceTemplate` — there was never a fixtures secret)
+> have been removed; any values previously set for them on a stage are now inert and can be
+> ignored.
 
 It is a **Utility** template, **body-only** (no header, no buttons, no links) — the chair may
 hold no portal login (chair invites were removed with admin onboarding), so the copy points at
@@ -34,8 +42,9 @@ the club portal / union office rather than telling the recipient to sign in.
 > **destination** chair's WhatsApp channel is recorded `skipped` with error
 > `no destination template for reopen` — the destination gets an **email-only** heads-up
 > (there is deliberately no destination reopen template, and the pending copy would wrongly
-> tell the destination its club must act). If you ever add one, wire a new secret and body
-> here; until then the skipped row keeps the comm log honest.
+> tell the destination its club must act). If you ever add one, create it in Meta, add a new
+> entry to the code registry, and wire the sender + body here; until then the skipped row
+> keeps the comm log honest.
 
 > **POPIA — no reason over WhatsApp.** The admin's free-text reject/override note is **never**
 > sent on WhatsApp. Free admin text about a named player crossing to Meta is a
@@ -50,8 +59,8 @@ the club portal / union office rather than telling the recipient to sign in.
 Both clearance dialogs in the union console promise "Both clubs' chairs will be notified by
 email where an address is on file." The pending-clearance heads-up also goes over WhatsApp:
 email is live the moment the API deploys; WhatsApp is best-effort and only delivers once this
-template exists in Meta under the default name (or the secret is pointed at the approved
-name). Each channel records its own `sent`/`skipped`/`failed` outcome in the club's comm log,
+template exists in Meta under the registry name (`club_clearance_pending`). Each channel
+records its own `sent`/`skipped`/`failed` outcome in the club's comm log,
 so a not-yet-created template shows as a dry-run `sent` locally and (once wired to a real
 token) surfaces Meta's rejection as a `failed` row rather than sinking the email.
 
@@ -87,33 +96,24 @@ A player clearance is awaiting {{2}}'s review: {{3}} has applied to join {{4}} a
 Please have this reviewed and approved or rejected in your club portal, or contact your union office if you have any questions.
 ```
 
-Category **Utility**, language **English (`en`)**. If it is ever re-created under
-a different language code, also set the matching `WHATSAPP_CLEARANCE_TEMPLATE_LANG` env
-override — the code defaults the pending-clearance template language to `en`.
+Category **Utility**, language **English (`en`)**. The name and language are held in the code
+registry `packages/api/src/notify/whatsapp-templates.ts` (entry `clearancePending`). If it is
+ever re-created under a different name or language code, edit that entry — there is no env/secret
+override.
 
-## 3 · Deploy — no secrets needed for the default name
+## 3 · Deploy — the code needs no config
 
-The template name is an SST secret **with a default** baked into `sst.config.ts`
-(`new sst.Secret('WhatsappClearanceTemplate', 'club_clearance_pending')`). When no value has
-been set for a stage, SST hands the Lambda the default — this is how the staff, reg-link and
-pending-clearance templates already run on dev and prod: only `WhatsappAccessToken`,
-`WhatsappPhoneNumberId`, `WhatsappInviteTemplate` and `FromEmail` have ever been set
-explicitly.
+The template name + language are in the code registry, not a secret. So the path is simply:
 
-So the normal path is:
+1. Create the template in Meta under the registry name (`club_clearance_pending`) and wait for
+   approval.
+2. `sst deploy --stage dev` / `sst deploy --stage prod` — the same deploy that ships the sender
+   code.
 
-1. Create + get the template approved in Meta **under the default name above**.
-2. `sst deploy --stage dev` / `sst deploy --stage prod`.
-
-**Only if** Meta approves the template under a different name, point the secret at it and
-redeploy:
-
-```sh
-sst secret set WhatsappClearanceTemplate <approved-name> --stage <stage>
-sst deploy --stage <stage>
-```
-
-The secret is wired to `WHATSAPP_CLEARANCE_TEMPLATE` in `sst.config.ts`.
+If Meta only approves it under a **different** name or language, change the `clearancePending`
+entry in `whatsapp-templates.ts` and deploy that change — no `sst secret set` step. The only
+WhatsApp secrets that still exist are `WhatsappAccessToken` and `WhatsappPhoneNumberId`; the
+former per-template name secrets have been removed and any values once set for them are inert.
 
 ## 4 · Dry-run behaviour (until approved + token wired)
 

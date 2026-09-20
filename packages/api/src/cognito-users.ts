@@ -90,6 +90,33 @@ export async function ensurePasswordlessUser(
 }
 
 /**
+ * Read-only resolve of an email to its Cognito sub — returns `null` when no account
+ * exists. UNLIKE {@link ensurePasswordlessUser} this NEVER creates or confirms a user, so
+ * it is safe on a read-only path (the contact-import CLI's dry-run resolves each contact's
+ * existing membership without provisioning anyone). Offline (LOCAL_AUTH=1) mirrors
+ * ensurePasswordlessUser's deterministic sub so the two agree on which USER# record an
+ * email maps to. A UserNotFoundException is the definitive "no account"; other errors
+ * propagate (a dry-run must not silently under-report existing users on a transient fault).
+ */
+export async function getUserSubByEmail(
+  cognito: CognitoIdentityProviderClient,
+  userPoolId: string,
+  email: string,
+): Promise<string | null> {
+  const username = email.trim().toLowerCase();
+  if (LOCAL) return localSub(username);
+  try {
+    const got = await cognito.send(
+      new AdminGetUserCommand({ UserPoolId: userPoolId, Username: username }),
+    );
+    return got.UserAttributes?.find((a) => a.Name === 'sub')?.Value ?? null;
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'UserNotFoundException') return null;
+    throw err;
+  }
+}
+
+/**
  * Relocate a user's sign-in email (the typo-correction flow). The pool uses
  * `usernames: ['email']` (UsernameAttributes), so the email is a RELOCATABLE alias —
  * updating the `email` attribute moves the alias without changing the sub, so every

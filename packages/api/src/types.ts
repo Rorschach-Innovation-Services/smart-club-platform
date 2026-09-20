@@ -751,6 +751,10 @@ export interface ClubCommEvent {
    */
   kind?:
     | 'invite'
+    // A `staff-invite` row is a bulk staff (chair/coach/officer) invite recorded on each of
+    // the person's clubs by the contact-import CLI — labelled distinctly from the self-serve
+    // 'invite' so an admin auditing a club can tell an imported invite from an onboarding one.
+    | 'staff-invite'
     | 'fixtures'
     | 'reglink'
     | 'clearance'

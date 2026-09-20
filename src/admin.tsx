@@ -7,7 +7,7 @@ import {
   useRef as useRefA,
   useId,
 } from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useQueries } from '@tanstack/react-query';
 import * as api from './api';
@@ -95,6 +95,7 @@ import type {
   Cadence,
   Club,
   League,
+  PlayerRegistration,
   SeasonCalendar,
   SeasonRun,
   Series,
@@ -153,6 +154,45 @@ import {
   InfoDot,
   ScrollX,
 } from './atoms';
+
+/* ─── Local view-state shapes — explicit type params for `useState(null)` state that is
+   later set to a non-null value (the IDE's strict-null check flags an untyped `null` state
+   the moment a property is read off it or an object literal is set into it). Types only;
+   no behaviour change. Kept loose (Record<string, unknown> for pass-through objects sourced
+   from untyped props) so no unrelated strict errors are introduced. */
+/** The shared `.fix-confirm` modal state (recall/reveal, delete/regen, league delete, remove-access). */
+type ConfirmDialogState = {
+  title: string;
+  body: ReactNode;
+  onYes: () => void;
+  danger?: boolean;
+  yesLabel?: string;
+};
+/** A series whose ReleaseDialog is open (only `id`/`name` are read; rest passes through). */
+type ReleaseSeriesState = { id: string; name: string; [k: string]: unknown };
+/** The clearance-admin confirm modal (kind-discriminated; onYes may take a note/target). */
+type ClearanceConfirmState = {
+  kind: 'reassign' | 'reject' | 'override' | 'reopen';
+  title: string;
+  body: ReactNode;
+  req: AdminClearanceView;
+  onYes: (arg?: string) => void | Promise<unknown>;
+};
+/** The veterans-request accept/decline confirm. */
+type VeteransConfirmState = { kind: 'accept' | 'decline'; req: Record<string, unknown> };
+/** The open document-preview target (a required-doc key + optional selected file entry). */
+type DocPreviewState = { key: string; entry?: { objectKey?: string } | null };
+/** The result of a staff-invite create (login link + per-channel send results). */
+type InviteResultState = {
+  loginUrl: string;
+  results: Array<{ channel: string; status: string; summary?: string; error?: string }>;
+  email: string;
+};
+/** The user whose role/clubs editor is open. */
+type EditingUserState = { user: Record<string, unknown>; mode: 'role' | 'clubs' };
+/** The player whose read-only detail modal is open — a roster row (the modal takes a
+ * PlayerRegistration; the row additionally carries a resolved clubName for the header). */
+type SelectedPlayerState = PlayerRegistration & { clubName?: string };
 
 /* A compact marker for why a fixture is off its home ground. The full `venueReason`
    already reads in the suburb line; this is the at-a-glance pill (full reason on hover).
@@ -354,8 +394,8 @@ export function AdminFixtures({
   const [viewerOpen, setViewerOpen] = useStateA(false);
   const [activeId, setActiveId] = useStateA(allSeries[0]?.id);
   const active = allSeries.find((s) => s.id === activeId) || allSeries[0];
-  const [confirm, setConfirm] = useStateA(null); // shared confirmation modal state (recall/reveal)
-  const [releaseFor, setReleaseFor] = useStateA(null); // series whose ReleaseDialog is open
+  const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null); // shared confirmation modal state (recall/reveal)
+  const [releaseFor, setReleaseFor] = useStateA<ReleaseSeriesState | null>(null); // series whose ReleaseDialog is open
   const clubBy = (id) => clubs.find((c) => c.id === id);
   // Resolve a fixture id → team (series participant). A single-team club resolves to
   // itself; a multi-team club's `tm_…` id resolves via the series snapshot.
@@ -1055,9 +1095,9 @@ export function FixtureTable({
   const clubBy = (id) => clubs.find((c) => c.id === id);
   // Resolve a fixture id → team for this series (participant snapshot, else clubId).
   const teamBy = (id) => resolveTeam(series, id, clubBy);
-  const [editingId, setEditingId] = useStateA(null);
+  const [editingId, setEditingId] = useStateA<string | null>(null);
   const [filter, setFilter] = useStateA('all');
-  const [confirm, setConfirm] = useStateA(null); // {title, body, onYes} — for delete/regen only; release uses parent's modal
+  const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null); // {title, body, onYes} — for delete/regen only; release uses parent's modal
 
   // Helpers — operate on series.fixtures via onUpdateSeries.
   // FixtureTable's props are untyped destructuring; bind onUpdateSeries to a locally typed
@@ -3347,7 +3387,7 @@ function EmptyCohort({ onShareLink, onInviteAdmin }) {
 /* ─── AdminLeagues — manage the tenant league catalogue clubs opt into ─── */
 export function AdminLeagues({ allLeagues, clubs, onCreate, onEdit, onDeleteLeague, toast }) {
   const copy = useCopy();
-  const [confirm, setConfirm] = useStateA(null);
+  const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null);
   const countFor = (key) =>
     clubs.filter((c) => Array.isArray(c.leagues) && c.leagues.includes(key)).length;
 
@@ -4046,7 +4086,7 @@ export function AdminSettingsView({
   const [savingOrg, setSavingOrg] = useStateA(false);
   const [showEditDeadline, setShowEditDeadline] = useStateA(false);
   const [showEditSupport, setShowEditSupport] = useStateA(false);
-  const [linkBusy, setLinkBusy] = useStateA(null); // null | 'generate' | 'revoke'
+  const [linkBusy, setLinkBusy] = useStateA<'generate' | 'revoke' | null>(null); // null | 'generate' | 'revoke'
   const sup = parseSupport(support);
   const deadlineMid = formatDeadlineMid(submissionDeadline);
   const dirty = (name || '').trim() !== (orgName || '').trim();
@@ -4667,7 +4707,7 @@ function ShareSignupLinkModal({ signupLink, onClose, onGenerate, onRevoke, toast
   const baseUrl = (typeof window !== 'undefined' && window.location.origin) || '';
   const url = signupLink ? `${baseUrl}/signup?t=${signupLink.token}` : '';
   const [copied, setCopied] = useStateA(false);
-  const [busy, setBusy] = useStateA(null); // null | 'generate' | 'revoke'
+  const [busy, setBusy] = useStateA<'generate' | 'revoke' | null>(null); // null | 'generate' | 'revoke'
 
   const activeSince = signupLink ? formatStamp(signupLink.createdAt) : null;
 
@@ -5568,7 +5608,7 @@ export function AdminClubDetail({
   const [showCqi, setShowCqi] = useStateA(false);
   const [showCqiEdit, setShowCqiEdit] = useStateA(false);
   const [showAffiliation, setShowAffiliation] = useStateA(false);
-  const [showDocPreview, setShowDocPreview] = useStateA(null);
+  const [showDocPreview, setShowDocPreview] = useStateA<DocPreviewState | null>(null);
   const [showCompliant, setShowCompliant] = useStateA(false);
   const [showChairEdit, setShowChairEdit] = useStateA(false);
   const [showNameEdit, setShowNameEdit] = useStateA(false);
@@ -6239,11 +6279,15 @@ export function AdminClubDetail({
                 }));
                 const commLabels = {
                   invite: 'Onboarding invite',
+                  'staff-invite': 'Staff invite sent',
                   reglink: 'Registration link',
                   clearance: 'Clearance notice',
                   'clearance-approved': 'Clearance approved notice',
                   'clearance-rejected': 'Clearance rejected notice',
                   'clearance-reopened': 'Clearance reopened notice',
+                  'veterans-request': 'Veterans request notice',
+                  'veterans-request-accepted': 'Veterans request accepted notice',
+                  'veterans-request-declined': 'Veterans request declined notice',
                   fixtures: 'Fixtures shared with players',
                 };
                 const sendItems = (club.commLog || []).map((e) => {
@@ -7214,7 +7258,7 @@ function InviteUserModal({
   const [busy, setBusy] = useStateA(false);
   const [copied, setCopied] = useStateA(false);
   // null until the account is created; then { loginUrl, results, email }.
-  const [result, setResult] = useStateA(null);
+  const [result, setResult] = useStateA<InviteResultState | null>(null);
 
   const emailValid = EMAIL_RE.test(email.trim().toLowerCase());
   const repNeedsClub = role === 'rep' && clubIds.size === 0;
@@ -7622,10 +7666,10 @@ export function AdminTeamAccessView({
   toast,
 }) {
   const [showInvite, setShowInvite] = useStateA(false);
-  const [editing, setEditing] = useStateA(null); // { user, mode }
-  const [editingEmail, setEditingEmail] = useStateA(null); // user being email-corrected
-  const [confirm, setConfirm] = useStateA(null); // { title, body, danger, onYes }
-  const [busySub, setBusySub] = useStateA(null);
+  const [editing, setEditing] = useStateA<EditingUserState | null>(null); // { user, mode }
+  const [editingEmail, setEditingEmail] = useStateA<Record<string, unknown> | null>(null); // user being email-corrected
+  const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null); // { title, body, danger, onYes }
+  const [busySub, setBusySub] = useStateA<string | null>(null);
 
   const clubName = (id) => clubs.find((c) => c.id === id)?.name || id;
   const adminCount = users.filter((u) => u.role === 'admin').length;
@@ -7925,7 +7969,7 @@ export function AdminClearances({
   busyId,
   busyAction,
 }) {
-  const [confirm, setConfirm] = useStateA(null);
+  const [confirm, setConfirm] = useStateA<ClearanceConfirmState | null>(null);
   // Optional note the admin attaches to a rejection (shown to both clubs).
   const [reason, setReason] = useStateA('');
   // Target club for a reallocation (the reassign confirm's picker).
@@ -8734,7 +8778,7 @@ export function AdminVeteransRequests({
 }) {
   const [filter, setFilter] = useStateA('pending');
   // { kind: 'accept' | 'decline', req } while a confirm dialog is open.
-  const [confirmFor, setConfirmFor] = useStateA(null);
+  const [confirmFor, setConfirmFor] = useStateA<VeteransConfirmState | null>(null);
   const fmtDay = (iso) => (iso ? formatStampDay(iso) : '');
   const leagueLabel = labelByKey(leagues ?? []);
 
@@ -9001,10 +9045,10 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
   const [filters, setFilters] = useStateA(emptyPlayerFilters);
   const [page, setPage] = useStateA(1);
   // Row-click opens a read-only detail modal; the row carries the full player + club.
-  const [selectedPlayer, setSelectedPlayer] = useStateA(null);
+  const [selectedPlayer, setSelectedPlayer] = useStateA<SelectedPlayerState | null>(null);
   // Which export (by scope) is in flight, so the button the admin actually pressed shows
   // the busy label; null when idle. Both buttons disable while either runs.
-  const [exportingScope, setExportingScope] = useStateA(null);
+  const [exportingScope, setExportingScope] = useStateA<'filtered' | 'all' | null>(null);
 
   // Any change to the query inputs resets pagination to the first page.
   const onFilters = (f) => {

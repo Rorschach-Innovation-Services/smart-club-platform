@@ -74,6 +74,17 @@ async function sendWhatsAppChannel(
   orgName: string,
   link: string,
 ): Promise<SendResult> {
+  // The template echoes the recipient's email as {{3}}; Meta rejects an empty/invalid param,
+  // so an unusable email skips WhatsApp too (not just the email channel) — a send would only
+  // fail noisily. Reported as skipped, mirroring the email channel's own no-valid-email skip.
+  if (!EMAIL_RE.test(contact.email)) {
+    return {
+      channel: 'whatsapp',
+      status: 'skipped',
+      ...(contact.cell ? { to: contact.cell } : {}),
+      error: 'no valid staff email on file (WhatsApp echoes it as {{3}})',
+    };
+  }
   const e164 = toE164(contact.cell);
   if (!e164) {
     return {
@@ -88,6 +99,9 @@ async function sendWhatsAppChannel(
       to: e164,
       name: contact.name,
       orgName,
+      // The WhatsApp template echoes the (already-validated) email as {{3}} so the recipient
+      // knows which address the portal expects at sign-in.
+      email: contact.email,
       link,
     });
     return { channel: 'whatsapp', status: 'sent', to: e164, messageId };

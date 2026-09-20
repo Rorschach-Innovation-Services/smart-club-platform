@@ -839,12 +839,20 @@ export interface ClubCommEvent {
   idempotencyKey: string;
   kind?:
     | 'invite'
+    // Bulk staff invite recorded by the contact-import CLI (chair/coach/officer) — kept
+    // distinct from 'invite' so the comm log doesn't mislabel it "Onboarding invite".
+    | 'staff-invite'
     | 'fixtures'
     | 'reglink'
     | 'clearance'
     | 'clearance-approved'
     | 'clearance-rejected'
-    | 'clearance-reopened';
+    | 'clearance-reopened'
+    // Veterans squad-selection requests (ADR 0013) — kept in sync with the API union so the
+    // two stop drifting (packages/api/src/types.ts).
+    | 'veterans-request'
+    | 'veterans-request-accepted'
+    | 'veterans-request-declined';
   summary?: string;
 }
 
