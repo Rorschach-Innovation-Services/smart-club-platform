@@ -84,7 +84,6 @@ import {
   Btn,
   Card,
   KPI,
-  ClubNameCell,
   YN,
   Choice,
   Rating,
@@ -4466,10 +4465,9 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
   const copy = useCopy();
   const clubBy = (id) => clubs.find((c) => c.id === id);
 
-  // Strip the club-name prefix from a resolved side name so a multi-side series lists
-  // "B" / "C" rather than repeating "Saints Cricket Club" on every row. The full name is
-  // still shown on hover (the cell's `title`) and kept whole where stripping would leave
-  // nothing (a side named exactly like the club).
+  // Strip the club-name prefix from a resolved side name so the "your sides: A, B" series-meta
+  // line reads "B" / "C" rather than repeating "Saints Cricket Club" for each side. Kept whole
+  // where stripping would leave nothing (a side named exactly like the club).
   const sideShortName = (name) => {
     const n = (name || '').trim();
     if (n && n.toLowerCase().startsWith(club.name.toLowerCase())) {
@@ -4531,6 +4529,27 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
       (isHome
         ? mySide.ground?.venue || club.ground?.venue || 'Home ground TBA'
         : opp.ground?.venue || 'Opponent ground TBA')
+    );
+  }
+
+  /**
+   * One side of a fixture's matchup line: full name in Montserrat 12.5px, identical
+   * across both sides so the grid columns align. This club's own side (`mine`) carries
+   * the extra weight; the other side stays lighter to hold the contrast hierarchy.
+   */
+  function renderMatchupSide(side, mine) {
+    return (
+      <span
+        style={{
+          fontFamily: "'Montserrat',sans-serif",
+          fontWeight: mine ? 700 : 500,
+          fontSize: 12.5,
+          color: 'var(--ink)',
+          overflowWrap: 'anywhere',
+        }}
+      >
+        {side.name}
+      </span>
     );
   }
 
@@ -4704,10 +4723,9 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
   const nextMySide = nextFixture ? resolveTeam(nextFixture._series, nextMySideId, clubBy) : null;
   const nextOpp = nextFixture ? resolveTeam(nextFixture._series, nextOppId, clubBy) : null;
   const nextOppName = nextOpp?.name || 'TBA';
-  // Name our own side in the title only when the club fields ≥2 sides in that series —
-  // otherwise the club name is redundant against the page's own heading.
-  const nextMyTeamCount = nextMine ? nextMine.size : 0;
-  const nextMySideName = nextMyTeamCount > 1 ? nextMySide?.name : null;
+  // Always name our own side in the title, so the hero states which team it is for —
+  // matching the table's matchup cell, which also carries full side names.
+  const nextMySideName = nextMySide?.name ?? null;
   const nextVenue = nextFixture
     ? venueNameFor(nextFixture, nextIsHome, nextMySide, nextOpp, nextFixture._series)
     : null;
@@ -4877,9 +4895,9 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
             const myTeamIds = new Set(teamIdsForClub(s, club.id));
             // The club's own side name(s) in this series, resolved through the series
             // snapshot so a later roster edit can't rename them. One side → "playing as
-            // <name>"; several → a "Side" column and a "your sides" summary so the rows of
-            // a multi-side series (Simplex A/B/C, Saints B) are no longer indistinguishable.
-            const showSide = myTeamIds.size > 1;
+            // <name>"; several → a "your sides" summary so a multi-side series (Simplex
+            // A/B/C, Saints B) states up front which teams are the club's. The per-row
+            // Fixture cell then shows each matchup home-first with the own side in bold.
             const mySideNames = [...myTeamIds]
               .map((id) => resolveTeam(s, id, clubBy).name)
               .filter(Boolean);
@@ -4942,9 +4960,8 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                     <thead>
                       <tr>
                         <th style={{ width: 50 }}>Rd</th>
-                        {showSide && <th>Side</th>}
                         <th>Date</th>
-                        <th>Opponent</th>
+                        <th>Fixture</th>
                         <th>H/A</th>
                         <th>Venue</th>
                         {!hideVenue && <th style={{ textAlign: 'right' }}>Distance</th>}
@@ -4958,13 +4975,12 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                         // Resolve through the series snapshot — names/coords survive a later
                         // roster edit, and an intra-club derby names the other side correctly.
                         const opp = resolveTeam(s, oppId, clubBy);
-                        // The fixture's HOME side, used only for the venue fallback via
-                        // `venueNameFor` (kept named for that role, distinct from the cost
-                        // participants below).
+                        // Both sides of the fixture, resolved through the series snapshot so
+                        // a later roster edit can't rename them. The Fixture cell renders them
+                        // home-first ("<home> vs <away>"); `homeSide` also feeds the venue
+                        // fallback via `venueNameFor`.
                         const homeSide = resolveTeam(s, f.home, clubBy);
-                        // THIS club's own side in the fixture — home OR away. Drives the
-                        // "Side" column so a multi-side series is no longer ambiguous.
-                        const mineSide = resolveTeam(s, isHome ? f.home : f.away, clubBy);
+                        const awaySide = resolveTeam(s, f.away, clubBy);
                         const venueName = venueNameFor(f, isHome, homeSide, opp, s);
                         // THIS club's journey, not the fixture's total. `fixtureCost`
                         // sums both sides' legs when the ground is pinned — right for a
@@ -5005,20 +5021,6 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                                 R{f.round}
                               </span>
                             </td>
-                            {showSide && (
-                              <td title={mineSide.name}>
-                                <span
-                                  style={{
-                                    fontFamily: "'Montserrat',sans-serif",
-                                    fontWeight: 700,
-                                    fontSize: 12.5,
-                                    color: 'var(--ink)',
-                                  }}
-                                >
-                                  {sideShortName(mineSide.name)}
-                                </span>
-                              </td>
-                            )}
                             <td>
                               <div
                                 style={{
@@ -5074,14 +5076,35 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                               })()}
                             </td>
                             <td>
-                              {/* Show the opponent's team name with its club's avatar/short. */}
-                              <ClubNameCell
-                                club={
-                                  opp.club
-                                    ? { ...opp.club, name: opp.name }
-                                    : { name: opp.name, short: 'TBA' }
-                                }
-                              />
+                              {/* Fixed three-column grid — home | vs | away — so the "vs"
+                                  token lands in the same place on every row. The centre
+                                  column is auto-width and the name columns are minmax(0,1fr),
+                                  keeping "vs" centred no matter how long a name grows. */}
+                              <div
+                                style={{
+                                  display: 'grid',
+                                  gridTemplateColumns: 'minmax(0,1fr) auto minmax(0,1fr)',
+                                  alignItems: 'center',
+                                  columnGap: 8,
+                                }}
+                              >
+                                <span style={{ textAlign: 'right', justifySelf: 'end' }}>
+                                  {renderMatchupSide(homeSide, myTeamIds.has(f.home))}
+                                </span>
+                                <span
+                                  style={{
+                                    fontFamily: "'Montserrat',sans-serif",
+                                    fontWeight: 600,
+                                    fontSize: 11,
+                                    color: 'var(--muted)',
+                                  }}
+                                >
+                                  vs
+                                </span>
+                                <span style={{ textAlign: 'left', justifySelf: 'start' }}>
+                                  {renderMatchupSide(awaySide, myTeamIds.has(f.away))}
+                                </span>
+                              </div>
                             </td>
                             <td>
                               {isHome ? (

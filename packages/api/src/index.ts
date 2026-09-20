@@ -7724,10 +7724,10 @@ export function buildClubSchedule(
             ? me.venue || club.ground?.venue || 'Home ground TBA'
             : opp.venue || 'Opponent ground TBA');
       const timePart = !hideTime && f.time ? ` · ${f.time}` : '';
-      // Name our own side when the club fields ≥2 sides in this series, so a multi-side
-      // club (Simplex A/B/C, Saints B) can tell its lines apart. `me` is already this
-      // club's side, resolved above. Single-side series stay unchanged.
-      const sidePart = mine.size >= 2 ? ` · ${me.name}` : '';
+      // Always name our own side, so every line states which team it is for — a multi-side
+      // club (Simplex A/B/C, Saints B) can tell its lines apart, and a single-side club's
+      // line carries the club name. `me` is already this club's side, resolved above.
+      const sidePart = ` · ${me.name}`;
       let line = `  R${f.round ?? '?'} · ${fmtFixtureDate(f.date)}${timePart}${sidePart} · ${isHome ? 'Home' : 'Away'} vs ${opp.name} · ${venue}`;
       // Distance to where the match is actually played; falls back to the opponent's
       // ground for a series that has never been through allocation. Skipped wholesale

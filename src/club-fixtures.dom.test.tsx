@@ -76,8 +76,8 @@ function renderView(s: Record<string, unknown>) {
 }
 
 // A series where Home CC fields two sides (A + B) under `tm_…` ids — the case the old
-// table couldn't tell apart. Participant names carry the club-name prefix, which the
-// portal strips to "A"/"B" in the Side column.
+// table couldn't tell apart. Each side is named in full in the Fixture matchup, and the
+// series meta strips the club-name prefix to "A"/"B" in its "your sides" summary.
 function twoSideSeries(over: Record<string, unknown> = {}) {
   return {
     id: 's2',
@@ -179,28 +179,71 @@ describe('ClubFixturesView — withheld venue and time', () => {
   });
 });
 
-describe("ClubFixturesView — the club's own side", () => {
-  it('single-side series shows no Side column and "playing as" the club', () => {
-    const { queryByText, getByText } = renderView(series());
-    // Legacy single-team series ⇒ one own side ⇒ no extra column, no ambiguity.
+// The index of a substring within an element's text, asserting it is present. Lets the
+// matchup tests prove home-first ordering ("<home> vs <away>") from one row's textContent.
+function orderOf(el: HTMLElement, needle: string) {
+  const i = (el.textContent || '').indexOf(needle);
+  expect(i).toBeGreaterThanOrEqual(0);
+  return i;
+}
+
+describe('ClubFixturesView — the fixture matchup', () => {
+  it('reads home-first with the own side bold; no Side column', () => {
+    // An AWAY fixture (Away CC is the home team) with a future date so the Next Match hero
+    // renders — it demonstrates the opponent coming first, then our own side.
+    const { getByText, queryByText, getAllByRole } = renderView(
+      series({
+        fixtures: [
+          {
+            id: 'f1',
+            home: 'away-club',
+            away: 'home-club',
+            round: 1,
+            date: '2026-12-15',
+            time: '09:00',
+            venueName: 'Kingsmead Stadium',
+            venueLat: -29.83,
+            venueLon: 31.04,
+          },
+        ],
+      }),
+    );
+    // The Side and Opponent columns are gone; a single Fixture column replaces them.
     expect(queryByText('Side')).toBeNull();
+    expect(queryByText('Opponent')).toBeNull();
+    expect(getByText('Fixture')).toBeTruthy();
+    // The series meta still states which side we field.
     expect(getByText(/playing as Home CC/i)).toBeTruthy();
+    // Home-first ordering: on an away fixture the opponent (the home team) is listed first,
+    // our own side after. Full names, no abbreviation.
+    const row = getAllByRole('row').find((r) => within(r).queryByText('R1')) as HTMLElement;
+    expect(orderOf(row, 'Away CC')).toBeLessThan(orderOf(row, 'Home CC'));
+    // The opponent no longer carries an identity chip — no avatar in any fixture cell.
+    expect(row.querySelector('.club-avatar')).toBeNull();
+    // The Next Match hero names our own side in full (a headline, not a column).
+    const hero = document.querySelector('.club-fix-next-title') as HTMLElement;
+    expect(hero.textContent).toMatch(/Home CC/);
   });
 
-  it('multi-side series adds a Side column with the right name per row', () => {
-    const { getByText, getByTitle } = renderView(twoSideSeries());
-    // The column exists and the meta summarises both sides (stripped to A, B).
-    expect(getByText('Side')).toBeTruthy();
+  it('names each side in full per row for a multi-side series', () => {
+    // f2 (round 2) is in the future, so the Next Match hero also names its sides — scope the
+    // per-side assertions to the table rows rather than the whole page.
+    const { getByText, getAllByRole } = renderView(twoSideSeries());
+    expect(getByText('Fixture')).toBeTruthy();
+    // The meta summarises both sides (stripped to A, B).
     expect(getByText(/your sides: A, B/i)).toBeTruthy();
-    // Each row names the side actually playing — A at home, B away — full name on hover.
-    const aCell = getByTitle('Home CC A');
-    const bCell = getByTitle('Home CC B');
-    expect(within(aCell).getByText('A')).toBeTruthy();
-    expect(within(bCell).getByText('B')).toBeTruthy();
+    // Round 1: A is the home side, named in full and listed first; the opponent after.
+    const r1 = getAllByRole('row').find((r) => within(r).queryByText('R1')) as HTMLElement;
+    expect(within(r1).getByText('Home CC A')).toBeTruthy();
+    expect(orderOf(r1, 'Home CC A')).toBeLessThan(orderOf(r1, 'Away CC'));
+    // Round 2: the opponent is at home, so it comes first; B (in full) after.
+    const r2 = getAllByRole('row').find((r) => within(r).queryByText('R2')) as HTMLElement;
+    expect(within(r2).getByText('Home CC B')).toBeTruthy();
+    expect(orderOf(r2, 'Away CC')).toBeLessThan(orderOf(r2, 'Home CC B'));
   });
 
-  it('derby row appears once, naming both own sides as Side and Opponent', () => {
-    const { getAllByRole, getByTitle, getByText } = renderView(
+  it('renders an intra-club derby once, both sides bold, home first', () => {
+    const { getAllByRole, getByText } = renderView(
       twoSideSeries({
         teams: ['tm_home-club_vets_1', 'tm_home-club_vets_2'],
         fixtures: [
@@ -218,8 +261,12 @@ describe("ClubFixturesView — the club's own side", () => {
     // Exactly one body row for the derby (home + away both ours ⇒ not listed twice).
     const bodyRows = getAllByRole('row').filter((r) => within(r).queryByText('R1'));
     expect(bodyRows).toHaveLength(1);
-    // Side = the home side (A), Opponent = the away side (B).
-    expect(within(getByTitle('Home CC A')).getByText('A')).toBeTruthy();
+    const row = bodyRows[0];
+    // Both sides named in full, home (A) before away (B).
+    expect(getByText('Home CC A')).toBeTruthy();
     expect(getByText('Home CC B')).toBeTruthy();
+    expect(orderOf(row, 'Home CC A')).toBeLessThan(orderOf(row, 'Home CC B'));
+    // Cell-wide invariant: no identity chip in any fixture cell — every side is plain text.
+    expect(document.querySelectorAll('.club-avatar')).toHaveLength(0);
   });
 });

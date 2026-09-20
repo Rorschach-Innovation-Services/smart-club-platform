@@ -950,7 +950,34 @@ describe('POST /clubs/:id/send-fixtures', () => {
         [series as unknown as Parameters<typeof buildClubSchedule>[1][number]],
         clubsById as unknown as Parameters<typeof buildClubSchedule>[2],
       );
-      assert.match(text, /R1 · .* · 08:00 · Home vs/);
+      // The own-side name now sits between the time and Home/Away on every line.
+      assert.match(text, /R1 · .* · 08:00 · timedclub CC · Home vs/);
+    });
+
+    test('a single-side club still names its own side on each line', () => {
+      // The side name shows unconditionally now, so a single-side club's line carries the
+      // club name (resolved side) before Home/Away — matching the always-on portal column.
+      const soloClub = club('soloclub');
+      const series = {
+        id: 'solo-series',
+        name: 'League · 2026/27',
+        startDate: '2026-06-01',
+        teams: ['soloclub', 'rivals'],
+        fixtures: [{ home: 'soloclub', away: 'rivals', date: '2026-06-06', round: 1 }],
+        released: true,
+        releasedAt: '2026-06-01T00:00:00.000Z',
+        version: 1,
+      };
+      const clubsById = new Map([
+        [soloClub.id, soloClub],
+        ['rivals', club('rivals')],
+      ]);
+      const { text } = buildClubSchedule(
+        soloClub,
+        [series as unknown as Parameters<typeof buildClubSchedule>[1][number]],
+        clubsById as unknown as Parameters<typeof buildClubSchedule>[2],
+      );
+      assert.match(text, /· soloclub CC · Home vs/);
     });
 
     test('an untimed fixture prints no time segment at all', () => {
