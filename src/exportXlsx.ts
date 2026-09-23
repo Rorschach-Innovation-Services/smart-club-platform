@@ -82,6 +82,10 @@ export function clubExportRow(
 type ExportablePlayer = PlayerRegistration & { clubName?: string };
 
 const ID_TYPE_LABEL: Record<string, string> = { 'sa-id': 'SA ID', passport: 'Passport' };
+const REGISTERED_VIA_LABEL: Record<string, string> = {
+  link: 'Registration link',
+  portal: 'Club portal',
+};
 // Missing status ⇒ 'Active', mirroring playerStatusPill's default (atoms.tsx).
 const STATUS_LABEL: Record<PlayerStatus, string> = {
   active: 'Active',
@@ -122,5 +126,28 @@ export function playerExportRow(
     Bowling: p.bowlingHand || '',
     'Veterans club': p.veteransClub || '',
     Status: p.status ? STATUS_LABEL[p.status] || p.status : 'Active',
+    'Batting type': p.battingType || '',
+    'Bowler type': p.bowlerType || '',
+    Wicketkeeper: p.isWk ? 'Yes' : '',
+    'All-rounder': p.isAllRounder ? 'Yes' : '',
+    Minor: p.isMinor ? 'Yes' : 'No',
+    'Postal address': p.postalAddress || '',
+    'Postal code': p.postalCode || '',
+    'Previous club': p.lastClub || '',
+    'Registered on': p.createdAt?.slice(0, 10) || '',
+    'Registered via': p.registeredVia
+      ? REGISTERED_VIA_LABEL[p.registeredVia] || p.registeredVia
+      : '',
+    'Registered by': p.registeredBy || '',
+    'Consent date': p.consentAt?.slice(0, 10) || '',
+    // Falls back to previousIdDocMeta because a cleared transfer-in carries the vetted
+    // source-club doc there and idDocMeta may be absent.
+    'ID doc uploaded': (p.idDocMeta ?? p.previousIdDocMeta)?.uploadedAt?.slice(0, 10) || '',
+    // Legacy fields meaningful only at that status; unconditional export would attach
+    // phantom rejection data to active players.
+    'Clearance rejected on':
+      p.status === 'clearance-rejected' ? p.clearanceRejectedAt?.slice(0, 10) || '' : '',
+    'Clearance rejected reason':
+      p.status === 'clearance-rejected' ? p.clearanceRejectedReason || '' : '',
   };
 }
