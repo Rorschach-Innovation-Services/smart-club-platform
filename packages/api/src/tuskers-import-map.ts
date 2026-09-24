@@ -19,6 +19,7 @@
  * "AGM 2023.odt" holds 12 Jun 2024 minutes).
  */
 import { clubIdFromName } from './club-id.js';
+import { OVERARCHING_DISTRICT } from './catalogue.js';
 
 // ───────────────────────── Club roster ─────────────────────────
 
@@ -42,7 +43,7 @@ function club(folder: string, name: string, chair: string): ClubMapEntry {
   return { folder, name, id: clubIdFromName(name), chair };
 }
 
-/** The 8 KZN Inland clubs. All sit in the Umgungundlovu district (see the CLI's DISTRICT). */
+/** The 8 KZN Inland clubs. All sit in "uMgungundlovu Cricket District" (the CLI's DISTRICT). */
 export const CLUB_MAP: ClubMapEntry[] = [
   // Union account YOUNGCC. Chair: 2026/27 affiliation form, signed 24 Jun 2026.
   club('Young Natalians CC Club', 'Young Natalians Cricket Club', 'Faiyaz Patel'),
@@ -458,7 +459,7 @@ export const ROSTER_SOURCES: RosterSource[] = [
       // A reduced name-only header variant: every row exceptions out (parsed + reported).
       {
         name: 'WOMEN',
-        leagueKey: 'womens-league',
+        leagueKey: 'women-s-premier-league',
         headerRow: 3,
         header: ['No:', 'Name:', 'Surname:', 'Race:', 'Gender:'],
         colMap: {
@@ -489,7 +490,7 @@ export const ROSTER_SOURCES: RosterSource[] = [
       // Reduced no-ID header on row 2 — every row exceptions out (parsed + reported).
       {
         name: 'Women',
-        leagueKey: 'womens-league',
+        leagueKey: 'women-s-premier-league',
         headerRow: 2,
         header: ['No', 'Name', 'Surname', 'Gender', 'RACE', 'TEAM'],
         colMap: { Name: 'firstName', Surname: 'lastName', Gender: 'gender', RACE: 'race' },
@@ -550,7 +551,7 @@ export const ROSTER_SOURCES: RosterSource[] = [
       // so every row exceptions out.
       {
         name: 'WOMEN',
-        leagueKey: 'womens-league',
+        leagueKey: 'women-s-premier-league',
         headerRow: 3,
         header: [
           'No:',
@@ -593,7 +594,7 @@ export const ROSTER_SOURCES: RosterSource[] = [
       unionSheet('U11', 'u11', HOWICK_COLMAP),
       unionSheet('U13', 'u13', HOWICK_COLMAP),
       unionSheet('U15', 'u15', HOWICK_COLMAP),
-      unionSheet('WOMEN', 'womens-league', HOWICK_COLMAP),
+      unionSheet('WOMEN', 'women-s-premier-league', HOWICK_COLMAP),
     ],
   },
 ];
@@ -642,22 +643,62 @@ export const SKIP_ROSTER: Array<{ clubId: string; reason: string }> = [
 }));
 
 /**
- * Every league key a roster sheet may map to. The tenant has no leagues configured yet:
- * dry-run reports the referenced-and-missing ones, `--confirm --add-missing-leagues`
- * appends exactly those (idempotent, overarching district — the titans EXTRA_LEAGUES
- * shape). A referenced key NOT listed here aborts the run.
+ * Every league key a roster sheet may map to, in the LIVE `tuskers` tenant's shape
+ * (`{ key, label, group, district }`). The tenant pre-exists (operator-created on dev)
+ * with premier-league, promotion-league, women-s-premier-league, women-s-promotion-league,
+ * veterans-league, u11, u13 and u15 — the entries for those keys use its keys exactly, so
+ * nothing is ever duplicated (planLeagueAdditions only appends keys the tenant LACKS, so
+ * their label/group/district here are never written). The keys the tenant lacks, appended
+ * by `--confirm --add-missing-leagues` only when an eligible row references them:
+ *
+ * - div-1/2/3: uMgungundlovu's own district divisions. `district` is the tenant's district
+ *   name, not the 'All districts' sentinel — leagueOptionsForDistrict (src/leagues.ts)
+ *   offers a district-scoped league only to that district's clubs, and the tenant PUT
+ *   validator accepts a configured district name. `group` stays "Overarching Leagues" like
+ *   every live entry (group is a display grouping only; the one group with behaviour is
+ *   'Juniors', which none of the live leagues use).
+ * - u9: shaped like the live u11/u13/u15.
+ * - u16: same shape; appended only if a written row lands in it (today every valid U16
+ *   player also appears on Lancashire's Premier sheet, which wins), so it never dangles.
+ *
+ * The Women sheets map to the operator's `women-s-premier-league` (never a parallel key);
+ * today every Women row is an identity exception, so nothing is written there yet.
  */
-const TUSKERS_LEAGUE_GROUP = 'KZN Inland Leagues';
-export const TUSKERS_LEAGUES: Array<{ key: string; label: string; group: string }> = [
-  { key: 'premier-league', label: 'Premier League', group: TUSKERS_LEAGUE_GROUP },
-  { key: 'div-1', label: 'Umgungundlovu Division 1', group: TUSKERS_LEAGUE_GROUP },
-  { key: 'div-2', label: 'Umgungundlovu Division 2', group: TUSKERS_LEAGUE_GROUP },
-  { key: 'div-3', label: 'Umgungundlovu Division 3', group: TUSKERS_LEAGUE_GROUP },
-  { key: 'womens-league', label: "Women's League", group: TUSKERS_LEAGUE_GROUP },
-  { key: 'veterans-league', label: 'Veterans League', group: TUSKERS_LEAGUE_GROUP },
-  { key: 'u9', label: 'U9 Junior League', group: TUSKERS_LEAGUE_GROUP },
-  { key: 'u11', label: 'U11 Junior League', group: TUSKERS_LEAGUE_GROUP },
-  { key: 'u13', label: 'U13 Junior League', group: TUSKERS_LEAGUE_GROUP },
-  { key: 'u15', label: 'U15 Junior League', group: TUSKERS_LEAGUE_GROUP },
-  { key: 'u16', label: 'U16 Junior League', group: TUSKERS_LEAGUE_GROUP },
+const OVERARCHING_GROUP = 'Overarching Leagues';
+const ALL_DISTRICTS = OVERARCHING_DISTRICT;
+const UMG_DISTRICT = 'uMgungundlovu Cricket District';
+export const TUSKERS_LEAGUES: Array<{
+  key: string;
+  label: string;
+  group: string;
+  district: string;
+}> = [
+  // ── Already on the tenant (never appended) ──
+  {
+    key: 'premier-league',
+    label: 'Premier League',
+    group: OVERARCHING_GROUP,
+    district: ALL_DISTRICTS,
+  },
+  {
+    key: 'women-s-premier-league',
+    label: "Women's Premier League",
+    group: OVERARCHING_GROUP,
+    district: ALL_DISTRICTS,
+  },
+  {
+    key: 'veterans-league',
+    label: 'Veterans League',
+    group: OVERARCHING_GROUP,
+    district: ALL_DISTRICTS,
+  },
+  { key: 'u11', label: 'U11', group: OVERARCHING_GROUP, district: ALL_DISTRICTS },
+  { key: 'u13', label: 'U13', group: OVERARCHING_GROUP, district: ALL_DISTRICTS },
+  { key: 'u15', label: 'U15', group: OVERARCHING_GROUP, district: ALL_DISTRICTS },
+  // ── Missing on the tenant (appended on demand) ──
+  { key: 'div-1', label: 'UMG Division 1', group: OVERARCHING_GROUP, district: UMG_DISTRICT },
+  { key: 'div-2', label: 'UMG Division 2', group: OVERARCHING_GROUP, district: UMG_DISTRICT },
+  { key: 'div-3', label: 'UMG Division 3', group: OVERARCHING_GROUP, district: UMG_DISTRICT },
+  { key: 'u9', label: 'U9', group: OVERARCHING_GROUP, district: ALL_DISTRICTS },
+  { key: 'u16', label: 'U16', group: OVERARCHING_GROUP, district: ALL_DISTRICTS },
 ];

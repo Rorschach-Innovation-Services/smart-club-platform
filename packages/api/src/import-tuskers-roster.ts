@@ -32,7 +32,6 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import ExcelJS from 'exceljs';
-import { OVERARCHING_DISTRICT } from './catalogue.js';
 import {
   CLUB_MAP,
   ROSTER_SOURCES,
@@ -314,7 +313,8 @@ async function ensureLeaguesConfigured(
   }
   const next = [
     ...(config.leagues ?? []),
-    ...addable.map((l) => ({ ...l, district: OVERARCHING_DISTRICT })),
+    // Each entry carries its own district (div-1/2/3 are uMgungundlovu-scoped).
+    ...addable,
   ];
   await repo.putTenantConfig({ ...config, leagues: next });
   console.log(`✓ appended league(s) to ${TENANT}: ${keys}`);

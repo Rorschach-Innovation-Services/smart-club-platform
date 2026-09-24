@@ -37,7 +37,11 @@ undoes cleanly.
 
 1. **The `tuskers` tenant exists.** This CLI does not create tenants. It aborts with
    `tenant "tuskers" has no config` until the tenant has been stood up through the
-   operator portal (or the existing bootstrap path).
+   operator portal (or the existing bootstrap path). **On dev it already exists**,
+   operator-created, with branding name "Tuskers", six districts (the one these clubs
+   use is exactly `uMgungundlovu Cricket District`), eight leagues (see
+   [Leagues](#leagues)) and an operator-set deadline of 2026-08-07. The import aligns to
+   that live config; check the same holds on any other stage before running there.
 2. **The platform build that accepts odt/jpg/jpeg/png is deployed to the target stage.**
    `DOC_FORMAT_MIME` (`catalogue.ts`) gained `odt`, `jpg`, `jpeg` and `png` for this pack.
    Without it, `configure-tenant-docs` fails validation, and chairs can't upload photos
@@ -110,7 +114,9 @@ documents.
 
 ## The 8 clubs
 
-All 8 clubs are in the **Umgungundlovu** district.
+All 8 clubs are in the **uMgungundlovu** district, written as the tenant's configured
+district name exactly: `uMgungundlovu Cricket District` (admin district filters and
+insights match on that string).
 
 | folder                    | club                         | notes                                                                     |
 | ------------------------- | ---------------------------- | ------------------------------------------------------------------------- |
@@ -150,7 +156,7 @@ Several sources are 2024-era. **Have the union confirm each chair at onboarding.
 | Lancashire Cricket Club      | Mike Buckley   | 2024/25 District Teams affiliation form                                         |
 
 **Greytown's district:** one line on its District Teams form reads "Uthukela", but its
-MCA line and its geography both say Umgungundlovu. It imports as Umgungundlovu. Confirm
+MCA line and its geography both say Umgungundlovu. It imports as uMgungundlovu. Confirm
 this with the union if it matters.
 
 ## Misfiled and overridden files
@@ -258,7 +264,8 @@ merge, never clobber" and "Revert semantics". In short:
 
 ## Verification checklist (after `--confirm`)
 
-1. The tenant has the 8 clubs, all in Umgungundlovu, with no leagues.
+1. The tenant has the 8 clubs, all in `uMgungundlovu Cricket District`, with no leagues
+   (the roster import sets them).
 2. Per-club doc counts match the Phase P upload preview. Spot-check UKZN
    (`disciplinaryRecords` = 8), Standard (`unionCorrespondence` = 6) and Masibemunye
    (`playerRegistrations` = 2, including the reassigned `asanda.jpg`).
@@ -383,12 +390,32 @@ numbers for these four clubs.
 
 ### Leagues
 
-The `tuskers` tenant starts with no leagues. `TUSKERS_LEAGUES` (in the map file) lists
-every key a sheet can map to: `premier-league`, `div-1`, `div-2`, `div-3`,
-`womens-league`, `veterans-league`, `u9`, `u11`, `u13`, `u15` and `u16`, all in one group
-(`KZN Inland Leagues`). The dry-run prints which referenced keys are missing.
-`--confirm --add-missing-leagues` appends exactly the ones that eligible rows reference
-and the tenant lacks. It is idempotent, and it never adds a key no written row uses.
+The live `tuskers` tenant (dev) already has eight leagues, all shaped
+`{ key, label, group: "Overarching Leagues", district: "All districts" }`:
+`premier-league`, `promotion-league`, `women-s-premier-league`,
+`women-s-promotion-league`, `veterans-league`, `u11`, `u13` and `u15`. `TUSKERS_LEAGUES`
+(in the map file) uses those keys exactly for the sheets that map to them, so nothing is
+duplicated. The Women sheets map to `women-s-premier-league`, the operator's key, never a
+parallel one. Today no Women row has identity data, so nothing lands there yet.
+
+Keys the roster references that the tenant lacks:
+
+| key     | label          | group               | district                         |
+| ------- | -------------- | ------------------- | -------------------------------- |
+| `div-1` | UMG Division 1 | Overarching Leagues | `uMgungundlovu Cricket District` |
+| `div-2` | UMG Division 2 | Overarching Leagues | `uMgungundlovu Cricket District` |
+| `div-3` | UMG Division 3 | Overarching Leagues | `uMgungundlovu Cricket District` |
+| `u9`    | U9             | Overarching Leagues | All districts                    |
+| `u16`   | U16            | Overarching Leagues | All districts                    |
+
+The divisions are district-scoped, so they carry the district name rather than the
+`All districts` sentinel: the platform offers a district league only to that district's
+clubs. `u16` is appended only if a written row lands in it. Today every valid U16 player
+also appears on Lancashire's Premier sheet, which wins, so it isn't appended.
+
+The dry-run prints which referenced keys are missing. On the dev tenant as configured,
+that is exactly `div-1`, `div-2`, `div-3` and `u9`. `--confirm --add-missing-leagues`
+appends exactly the ones that eligible rows reference and the tenant lacks. It is idempotent, and it never adds a key no written row uses.
 Without the flag, `--confirm` aborts when a key is missing. A referenced key that isn't in
 `TUSKERS_LEAGUES` always aborts.
 

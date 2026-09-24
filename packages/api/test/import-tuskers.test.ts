@@ -526,10 +526,11 @@ describe('CLUB_MAP / buildClub', () => {
     assert.equal(new Set(CLUB_MAP.map((c: { id: string }) => c.id)).size, 8);
   });
 
-  test('a built club is in Umgungundlovu with no leagues, no team plan and no ground', () => {
+  test("a built club is in the tenant's uMgungundlovu district, with no leagues, team plan or ground", () => {
     const club = buildClub(CLUB_MAP[0], ACTIVE, 0);
-    assert.equal(DISTRICT, 'Umgungundlovu');
-    assert.equal(club.district, 'Umgungundlovu');
+    // Must equal the live tenant's configured district name exactly.
+    assert.equal(DISTRICT, 'uMgungundlovu Cricket District');
+    assert.equal(club.district, 'uMgungundlovu Cricket District');
     assert.deepEqual(club.leagues, []);
     assert.deepEqual(club.ground, {});
     assert.equal(club.leagueTeams, undefined);

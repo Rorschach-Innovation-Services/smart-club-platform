@@ -56,8 +56,10 @@ type RepoModule = typeof import('./repo.js');
 
 const TENANT = 'tuskers';
 /** Every club's KZNICU District Teams form says Umgungundlovu (Greytown's has one stray
- * "Uthukela" line; its MCA line and geography say Umgungundlovu — see the runbook). */
-const DISTRICT = 'Umgungundlovu';
+ * "Uthukela" line; its MCA line and geography say Umgungundlovu — see the runbook). The
+ * string is the tenant's CONFIGURED district name exactly (operator-created on dev), so
+ * admin district filters and insights group these clubs correctly. */
+const DISTRICT = 'uMgungundlovu Cricket District';
 /** Audit marker: updateClub actor + note author. */
 const IMPORT_MARKER = 'import:tuskers-compliance-2026';
 const AUDIT_NOTE = `Imported from Tuskers (KZN Inland) compliance pack (${IMPORT_MARKER})`;

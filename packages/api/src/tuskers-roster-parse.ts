@@ -471,10 +471,10 @@ export function dedupeClubRows(rows: SheetRow[]): { kept: SheetRow[]; dupes: Ded
 export function planLeagueAdditions(
   configuredKeys: Set<string>,
   referencedKeys: Set<string>,
-  catalogue: Array<{ key: string; label: string; group: string }>,
+  catalogue: Array<{ key: string; label: string; group: string; district: string }>,
 ): {
   missing: string[];
-  addable: Array<{ key: string; label: string; group: string }>;
+  addable: Array<{ key: string; label: string; group: string; district: string }>;
   unknown: string[];
 } {
   const missing = [...referencedKeys].filter((k) => !configuredKeys.has(k)).sort();

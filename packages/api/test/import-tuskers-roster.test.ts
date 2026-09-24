@@ -117,7 +117,7 @@ describe('ROSTER_SOURCES config', () => {
         U11: 'u11',
         U13: 'u13',
         U15: 'u15',
-        WOMEN: 'womens-league',
+        WOMEN: 'women-s-premier-league',
       },
       [LCC_FILE]: {
         'Premier League 2023': 'premier-league',
@@ -129,7 +129,7 @@ describe('ROSTER_SOURCES config', () => {
         U9: 'u9',
         '3rds': null,
         '4ths': null,
-        Women: 'womens-league',
+        Women: 'women-s-premier-league',
       },
       'Standard CC Club/Standard CSA Generic Team Return Form 2025_26-1.xlsx': {
         '202526': 'premier-league',
@@ -144,7 +144,7 @@ describe('ROSTER_SOURCES config', () => {
         U11: 'u11',
         U13: 'u13',
         U15: 'u15',
-        WOMEN: 'womens-league',
+        WOMEN: 'women-s-premier-league',
       },
       [HOWICK_FILE]: {
         PREM: 'premier-league',
@@ -156,7 +156,7 @@ describe('ROSTER_SOURCES config', () => {
         U11: 'u11',
         U13: 'u13',
         U15: 'u15',
-        WOMEN: 'womens-league',
+        WOMEN: 'women-s-premier-league',
       },
     });
   });
@@ -513,24 +513,69 @@ describe('intra-club dedupe', () => {
 });
 
 describe('TUSKERS_LEAGUES gating', () => {
-  test('the league catalogue is exactly the reviewed key set, one group', () => {
-    assert.deepEqual(
-      TUSKERS_LEAGUES.map((l: { key: string }) => l.key),
-      [
-        'premier-league',
-        'div-1',
-        'div-2',
-        'div-3',
-        'womens-league',
-        'veterans-league',
-        'u9',
-        'u11',
-        'u13',
-        'u15',
-        'u16',
-      ],
-    );
-    assert.equal(new Set(TUSKERS_LEAGUES.map((l: { group: string }) => l.group)).size, 1);
+  // The live tuskers tenant (operator-created on dev) already has these keys.
+  const LIVE_KEYS = new Set([
+    'premier-league',
+    'promotion-league',
+    'women-s-premier-league',
+    'women-s-promotion-league',
+    'veterans-league',
+    'u11',
+    'u13',
+    'u15',
+  ]);
+
+  test('the league catalogue matches the live tenant shape and key set', () => {
+    assert.deepEqual(TUSKERS_LEAGUES.map((l: { key: string }) => l.key).sort(), [
+      'div-1',
+      'div-2',
+      'div-3',
+      'premier-league',
+      'u11',
+      'u13',
+      'u15',
+      'u16',
+      'u9',
+      'veterans-league',
+      'women-s-premier-league',
+    ]);
+    for (const l of TUSKERS_LEAGUES as Array<{ key: string; group: string; district: string }>) {
+      assert.equal(l.group, 'Overarching Leagues', l.key);
+      assert.equal(
+        l.district,
+        l.key.startsWith('div-') ? 'uMgungundlovu Cricket District' : 'All districts',
+        l.key,
+      );
+    }
+  });
+
+  test('every sheet league key is a live key or one of the reviewed additions (no parallel keys)', () => {
+    const additions = new Set(['div-1', 'div-2', 'div-3', 'u9', 'u16']);
+    for (const src of ROSTER_SOURCES)
+      for (const sheet of src.sheets as Spec[])
+        if (sheet.leagueKey)
+          assert.ok(
+            LIVE_KEYS.has(sheet.leagueKey) || additions.has(sheet.leagueKey),
+            `${src.file} [${sheet.name}] → ${sheet.leagueKey}`,
+          );
+  });
+
+  test('against the live tenant, the real referenced set appends exactly div-1/2/3 + u9', () => {
+    // The keys eligible rows reference on the real pack (--parse-only output).
+    const referenced = new Set([
+      'div-1',
+      'div-2',
+      'div-3',
+      'premier-league',
+      'u11',
+      'u13',
+      'u15',
+      'u9',
+      'veterans-league',
+    ]);
+    const plan = planLeagueAdditions(LIVE_KEYS, referenced, TUSKERS_LEAGUES);
+    assert.deepEqual(plan.missing, ['div-1', 'div-2', 'div-3', 'u9']);
+    assert.deepEqual(plan.unknown, []);
   });
 
   test('only referenced-and-missing keys are addable; unreferenced keys never are', () => {
