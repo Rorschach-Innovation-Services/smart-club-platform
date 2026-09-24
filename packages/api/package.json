@@ -15,6 +15,8 @@
     "import-titans-compliance": "tsx src/import-titans-compliance.ts",
     "import-titans-contacts": "tsx src/import-titans-contacts.ts",
     "import-titans-roster": "tsx src/import-titans-roster.ts",
+    "import-tuskers-compliance": "tsx src/import-tuskers-compliance.ts",
+    "import-tuskers-roster": "tsx src/import-tuskers-roster.ts",
     "bootstrap-fixture-prereqs": "tsx src/bootstrap-fixture-prereqs.ts",
     "sync-club-leagues": "tsx src/sync-club-leagues-from-series.ts",
     "merge-duplicate-venues": "tsx src/merge-duplicate-venues.ts",

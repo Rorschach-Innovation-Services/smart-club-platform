@@ -30,6 +30,8 @@ import type { RequiredDoc } from './types.js';
  */
 const OFFICE = ['pdf', 'doc', 'docx'] as const;
 const SHEET = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ods'] as const;
+/** Phone photos / scans of paper forms. jpg before jpeg: acceptedMimes stores `.jpg`. */
+const IMAGE = ['jpg', 'jpeg', 'png'] as const;
 
 const CATALOGUES: Record<string, RequiredDoc[]> = {
   titans: [
@@ -150,6 +152,148 @@ const CATALOGUES: Record<string, RequiredDoc[]> = {
       allowUnavailable: true,
       accepts: [...OFFICE],
       matchHints: ['lease', 'mou', 'facility', 'field agreement', 'field use', 'agreement'],
+    },
+  ],
+
+  /**
+   * Tuskers (KwaZulu-Natal Inland Cricket Union), from the union's 8-club pack — every
+   * one of its 165 files was read before this was written (plans/tuskers-compliance-
+   * import-plan.md). The pack is mostly union-side paperwork per club (invoices, DC
+   * letters, sanction letters), so most keys are multi-file. Requirements a club may
+   * legitimately lack (financials, fees, logo, facility agreement) carry allowUnavailable;
+   * the four archive keys (disciplinaryRecords, unionCorrespondence, playerRegistrations,
+   * clubRecords) are `optional` records instead — kept on file, never counted towards
+   * completion, so a club with no DC history is simply complete. Caps are sized off
+   * the post-dedupe busiest club (UKZN: 8 disciplinary records; Standard: 6 union letters;
+   * Masibemunye: 6 club records) with headroom. Keys must match TUSKERS_DOC_KEYS in
+   * tuskers-import-map.ts — the import asserts it at dry-run.
+   */
+  tuskers: [
+    {
+      key: 'constitution',
+      name: 'Club constitution',
+      desc: 'Your club’s adopted constitution',
+      accepts: [...OFFICE],
+      matchHints: ['constitution', 'consti'],
+    },
+    {
+      key: 'agmMinutes',
+      name: 'AGM minutes',
+      desc: 'Minutes of your most recent annual general meetings',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 6,
+      // Howick's minutes arrived as LibreOffice .odt.
+      accepts: [...OFFICE, 'odt'],
+      matchHints: ['agm', 'annual general', 'minutes'],
+    },
+    {
+      key: 'financials',
+      name: 'Financial statements',
+      desc: 'Annual financial statements or treasurer’s reports',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 6,
+      // Several clubs only report finances inside their AGM minutes.
+      allowUnavailable: true,
+      accepts: [...OFFICE],
+      matchHints: ['financ', 'treasurer', 'income', 'balance sheet'],
+    },
+    {
+      key: 'affiliationForm',
+      name: 'District affiliation form',
+      desc: 'The KZNICU District Teams registration workbook',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 4,
+      accepts: [...SHEET],
+      matchHints: ['affiliation form', 'district teams'],
+    },
+    {
+      key: 'affiliationFees',
+      name: 'Affiliation fees',
+      desc: 'Affiliation fee invoice, statement or proof of payment',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 8,
+      allowUnavailable: true,
+      // Standard's proof of payment is a phone photo (.jpg).
+      accepts: [...SHEET, ...IMAGE],
+      matchHints: ['affiliation fee', 'statement', 'proof of payment', 'payment', 'pop'],
+    },
+    {
+      key: 'nominalRoll',
+      name: 'Nominal roll',
+      desc: 'Player register for the season',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 4,
+      accepts: [...SHEET],
+      matchHints: ['nominal roll', 'team return'],
+      role: 'memberDatabase',
+    },
+    {
+      key: 'clubLogo',
+      name: 'Club logo',
+      desc: 'Your club’s logo as an image',
+      allowUnavailable: true,
+      accepts: [...IMAGE],
+      matchHints: ['logo'],
+    },
+    {
+      key: 'facilityAgreement',
+      name: 'Facility agreement',
+      desc: 'Service level agreement or letter confirming use of your ground',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 6,
+      allowUnavailable: true,
+      accepts: [...OFFICE, ...IMAGE],
+      matchHints: ['sla', 'service level', 'facility', 'agreement'],
+    },
+    {
+      key: 'disciplinaryRecords',
+      name: 'Disciplinary records',
+      desc: 'DC notices and outcomes, incident and umpire reports, arbitration',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 15,
+      optional: true,
+      accepts: [...OFFICE, ...IMAGE],
+      matchHints: ['dc', 'disciplinary', 'incident', 'umpire', 'arbitration', 'unregistered'],
+    },
+    {
+      key: 'unionCorrespondence',
+      name: 'Union correspondence',
+      desc: 'Letters from KZN Inland: requirement notices, sanctions, confirmations',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 10,
+      optional: true,
+      accepts: [...SHEET],
+      matchHints: ['kzn inland letter', 'inland letter', 'thank you', 'verification'],
+    },
+    {
+      key: 'playerRegistrations',
+      name: 'Player registrations & clearances',
+      desc: 'Individual KZNICU registration forms and clearances',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 8,
+      optional: true,
+      accepts: ['pdf', ...IMAGE],
+      matchHints: ['clearance', 'registration', 'reg'],
+    },
+    {
+      key: 'clubRecords',
+      name: 'Other club records',
+      desc: 'Funding requests, transport claims, coaching staff, training records',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 8,
+      optional: true,
+      accepts: [...SHEET, ...IMAGE],
+      matchHints: ['funding', 'funds', 'transport claim', 'coaching staff', 'trial', 'training'],
     },
   ],
 };
