@@ -38,9 +38,19 @@ import {
   ROSTER_NON_SOURCES,
   SKIP_ROSTER,
   TUSKERS_LEAGUES,
+  effectiveClubId,
+  mapTargetsMissing,
+  parseMapClubArgs,
+  materializeTuskersLeagues,
+  resolveTuskersDistrict,
+  UMG_DISTRICT_PLACEHOLDER,
   type RosterSource,
 } from './tuskers-import-map.js';
 import { classifyAll, walkDocs } from './import-tuskers-compliance.js';
+import {
+  resolveDistricts,
+  OVERARCHING_DISTRICT as OVERARCHING_DISTRICT_LABEL,
+} from './catalogue.js';
 import { findCrossClubDuplicates, type RosterRow } from './roster-parse.js';
 import {
   REGISTERED_BY,
@@ -72,9 +82,13 @@ interface Args {
   allowMissingId: boolean;
   addMissingLeagues: boolean;
   revert: boolean;
+  /** `--map-club <clubMapId>=<existingId>` (repeatable) — see parseMapClubArgs. Players,
+   * the club.leagues union, reconcilePlayerCount and revert all use the existing id. */
+  mapping: Map<string, string>;
 }
 
 function parseArgs(argv: string[]): Args {
+  const mapClub: string[] = [];
   const args: Args = {
     dir: '',
     parseOnly: false,
@@ -82,6 +96,7 @@ function parseArgs(argv: string[]): Args {
     allowMissingId: false,
     addMissingLeagues: false,
     revert: false,
+    mapping: new Map(),
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -92,8 +107,10 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--allow-missing-id') args.allowMissingId = true;
     else if (a === '--add-missing-leagues') args.addMissingLeagues = true;
     else if (a === '--revert') args.revert = true;
+    else if (a === '--map-club') mapClub.push(argv[++i] ?? '');
     else throw new Error(`unknown flag ${a}`);
   }
+  args.mapping = parseMapClubArgs(mapClub);
   // Silently-ignored combinations are errors: an operator must never believe a flag
   // took effect when it didn't.
   if (args.parseOnly && args.confirm) {
@@ -280,11 +297,18 @@ async function ensureLeaguesConfigured(
   const config = await repo.getTenantConfig(TENANT);
   if (!config) throw new Error(`tenant "${TENANT}" has no config — create the tenant first.`);
   const configured = new Set((config.leagues ?? []).map((l) => l.key));
+  // District-scoped entries (div-1/2/3) take the tenant's OWN uMgungundlovu district name
+  // (it differs per stage) — resolved fail-closed, exactly as the compliance CLI does.
+  const districtResult = resolveTuskersDistrict(resolveDistricts(config));
+  if (districtResult.kind === 'error')
+    throw new Error(`tenant "${TENANT}" district: ${districtResult.message}`);
   const { missing, addable, unknown } = planLeagueAdditions(
     configured,
     referencedKeys,
-    TUSKERS_LEAGUES,
+    materializeTuskersLeagues(districtResult.district),
   );
+  if (addable.some((l) => l.district === UMG_DISTRICT_PLACEHOLDER))
+    throw new Error('internal: unresolved district placeholder on a league to append');
   if (unknown.length) {
     throw new Error(
       `roster references league key(s) not configured on "${TENANT}" and not in ` +
@@ -295,7 +319,9 @@ async function ensureLeaguesConfigured(
     console.log(`✓ All ${referencedKeys.size} referenced league key(s) are configured.`);
     return;
   }
-  const keys = addable.map((l) => l.key).join(', ');
+  const keys = addable
+    .map((l) => (l.district === OVERARCHING_DISTRICT_LABEL ? l.key : `${l.key} (${l.district})`))
+    .join(', ');
   if (!args.confirm) {
     console.log(
       `· leagues: ${keys} missing from the tenant config — ` +
@@ -322,10 +348,26 @@ async function ensureLeaguesConfigured(
 
 // ───────────────────────── Revert ─────────────────────────
 
-async function runRevert(repo: RepoModule, confirm: boolean): Promise<void> {
+/** Fail-closed: every --map-club target must exist on the tenant (dry-run, confirm and
+ * revert alike). */
+async function assertMapTargetsExist(repo: RepoModule, mapping: Map<string, string>) {
+  if (mapping.size === 0) return;
+  const existing = new Set((await repo.listClubs(TENANT)).map((c) => c.id));
+  const missing = mapTargetsMissing(mapping, existing);
+  if (missing.length) throw new Error(missing.join('\n'));
+  for (const [from, to] of mapping) console.log(`✓ --map-club ${from} → ${to} (exists)`);
+}
+
+async function runRevert(
+  repo: RepoModule,
+  confirm: boolean,
+  mapping: Map<string, string>,
+): Promise<void> {
+  await assertMapTargetsExist(repo, mapping);
   let totalDeleted = 0;
   const touchedClubs = new Set<string>();
-  for (const club of CLUB_MAP) {
+  for (const mapEntry of CLUB_MAP) {
+    const club = { ...mapEntry, id: effectiveClubId(mapEntry.id, mapping) };
     const players = await repo.listPlayers(TENANT, club.id);
     const mine = players.filter((p) => p.registeredBy === REGISTERED_BY);
     if (mine.length === 0) continue;
@@ -353,7 +395,7 @@ async function main(): Promise<void> {
 
   if (args.revert) {
     const repo = await import('./repo.js');
-    await runRevert(repo, args.confirm);
+    await runRevert(repo, args.confirm, args.mapping);
     return;
   }
 
@@ -417,7 +459,12 @@ async function main(): Promise<void> {
     const { kept, dupes } = dedupeClubRows(ordered);
     club.kept = kept;
     club.dupes = dupes;
-    for (const { row } of kept) allRows.push({ clubId: club.clubId, clubName: club.clubName, row });
+    // A --map-club'd club's players are written under the EXISTING tenant club id.
+    const writeClubId = effectiveClubId(club.clubId, args.mapping);
+    for (const { row } of kept) {
+      row.player.clubId = writeClubId;
+      allRows.push({ clubId: writeClubId, clubName: club.clubName, row });
+    }
   }
 
   const reportClubs = [...byClub.values()].filter((c) => !args.club || c.clubId === args.club);
@@ -434,7 +481,9 @@ async function main(): Promise<void> {
     );
     for (const d of dupReport) console.log(`   ${d}`);
   }
-  const candidates = allRows.filter((r) => !args.club || r.clubId === args.club);
+  const candidates = allRows.filter(
+    (r) => !args.club || r.clubId === effectiveClubId(args.club, args.mapping),
+  );
   const writable = candidates.filter(
     (r) => !duplicateNaturalKeys.has(`${r.clubId}::${r.row.player.naturalKey}`),
   );
@@ -460,6 +509,7 @@ async function main(): Promise<void> {
   }
 
   const repo = await import('./repo.js');
+  await assertMapTargetsExist(repo, args.mapping);
   await ensureLeaguesConfigured(repo, args, referenced);
 
   const writeClubs = [...new Set(writable.map((r) => r.clubId))];

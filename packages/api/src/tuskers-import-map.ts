@@ -652,7 +652,10 @@ export const SKIP_ROSTER: Array<{ clubId: string; reason: string }> = [
  * by `--confirm --add-missing-leagues` only when an eligible row references them:
  *
  * - div-1/2/3: uMgungundlovu's own district divisions. `district` is the tenant's district
- *   name, not the 'All districts' sentinel — leagueOptionsForDistrict (src/leagues.ts)
+ *   NAME — which differs per stage (dev "uMgungundlovu Cricket District", prod
+ *   "uMgungundlovu District"), so the entries carry UMG_DISTRICT_PLACEHOLDER and the CLI
+ *   substitutes the resolved name via materializeTuskersLeagues before appending. Not the
+ *   'All districts' sentinel — leagueOptionsForDistrict (src/leagues.ts)
  *   offers a district-scoped league only to that district's clubs, and the tenant PUT
  *   validator accepts a configured district name. `group` stays "Overarching Leagues" like
  *   every live entry (group is a display grouping only; the one group with behaviour is
@@ -666,7 +669,11 @@ export const SKIP_ROSTER: Array<{ clubId: string; reason: string }> = [
  */
 const OVERARCHING_GROUP = 'Overarching Leagues';
 const ALL_DISTRICTS = OVERARCHING_DISTRICT;
-const UMG_DISTRICT = 'uMgungundlovu Cricket District';
+/** Stands in for the tenant's resolved uMgungundlovu district name (resolveTuskersDistrict)
+ * on district-scoped entries — never written as-is (materializeTuskersLeagues replaces it,
+ * and the CLI refuses to append an unresolved placeholder). */
+export const UMG_DISTRICT_PLACEHOLDER = '<uMgungundlovu district>';
+const UMG_DISTRICT = UMG_DISTRICT_PLACEHOLDER;
 export const TUSKERS_LEAGUES: Array<{
   key: string;
   label: string;
@@ -702,3 +709,108 @@ export const TUSKERS_LEAGUES: Array<{
   { key: 'u9', label: 'U9', group: OVERARCHING_GROUP, district: ALL_DISTRICTS },
   { key: 'u16', label: 'U16', group: OVERARCHING_GROUP, district: ALL_DISTRICTS },
 ];
+
+// ───────────────────────── --map-club (pre-existing tenant clubs) ─────────────────────────
+
+/**
+ * Parse repeatable `--map-club <clubMapId>=<existingId>` values into a CLUB_MAP id →
+ * existing-tenant-club id map. Remaps a CLUB_MAP club onto a club that already exists on
+ * the tenant under a different id (prod: Lancashire self-signed-up as
+ * `lancashire-cricket-club-pmb`), so the import merges into it instead of creating a
+ * duplicate. Pure, fail-closed validation: the left side must be a CLUB_MAP id (once),
+ * and the right side must not be another CLUB_MAP club's id (that would merge two clubs)
+ * or the left side itself. Whether the right side EXISTS is a run-time check the CLIs
+ * make against the tenant (see mapTargetsMissing).
+ */
+export function parseMapClubArgs(
+  values: string[],
+  clubMapIds: string[] = CLUB_MAP.map((c) => c.id),
+): Map<string, string> {
+  const known = new Set(clubMapIds);
+  const map = new Map<string, string>();
+  for (const v of values) {
+    const m = /^([^=\s]+)=([^=\s]+)$/.exec(v);
+    if (!m) throw new Error(`--map-club expects <clubMapId>=<existingId>, got "${v}"`);
+    const [, from, to] = m;
+    if (!known.has(from)) throw new Error(`--map-club: "${from}" is not a CLUB_MAP club id`);
+    if (map.has(from)) throw new Error(`--map-club: "${from}" is mapped twice`);
+    if (to === from) throw new Error(`--map-club: "${from}" is mapped onto itself`);
+    if (known.has(to))
+      throw new Error(
+        `--map-club: target "${to}" is another CLUB_MAP club — refusing to merge two clubs`,
+      );
+    if ([...map.values()].includes(to))
+      throw new Error(`--map-club: target "${to}" is the target of two mappings`);
+    map.set(from, to);
+  }
+  return map;
+}
+
+/** The tenant club id a CLUB_MAP club is written to/read from. */
+export function effectiveClubId(clubMapId: string, mapping: Map<string, string>): string {
+  return mapping.get(clubMapId) ?? clubMapId;
+}
+
+/** Mapping targets that don't exist on the tenant — each one aborts the run. */
+export function mapTargetsMissing(
+  mapping: Map<string, string>,
+  existingClubIds: Set<string>,
+): string[] {
+  return [...mapping.entries()]
+    .filter(([, to]) => !existingClubIds.has(to))
+    .map(([from, to]) => `--map-club ${from}=${to}: club "${to}" does not exist on the tenant`);
+}
+
+/**
+ * Create-vs-merge for one CLUB_MAP club. A MAPPED club is never created: its target must
+ * already exist (abort otherwise); an unmapped club is created when absent, else merged.
+ */
+export function clubWriteDecision(
+  clubMapId: string,
+  mapping: Map<string, string>,
+  existingClubIds: Set<string>,
+): { action: 'create' | 'merge'; clubId: string } | { action: 'abort'; reason: string } {
+  const clubId = effectiveClubId(clubMapId, mapping);
+  if (mapping.has(clubMapId)) {
+    return existingClubIds.has(clubId)
+      ? { action: 'merge', clubId }
+      : {
+          action: 'abort',
+          reason: `${clubMapId} is mapped onto "${clubId}", which does not exist on the tenant — a mapped club is never created`,
+        };
+  }
+  return { action: existingClubIds.has(clubId) ? 'merge' : 'create', clubId };
+}
+
+// ───────────────────────── District resolution ─────────────────────────
+
+/**
+ * The tenant's configured district these clubs sit in. Never hardcoded — the district
+ * NAME differs per stage (dev: "uMgungundlovu Cricket District", prod: "uMgungundlovu
+ * District"), and club.district must equal a configured name exactly for admin filters
+ * and insights. Exactly one configured name may match /mgungundlovu/i; zero or several is
+ * fail-closed, with the configured list in the message.
+ */
+export function resolveTuskersDistrict(
+  configuredDistricts: string[],
+): { kind: 'ok'; district: string } | { kind: 'error'; message: string } {
+  const hits = configuredDistricts.filter((d) => /mgungundlovu/i.test(d));
+  if (hits.length === 1) return { kind: 'ok', district: hits[0] };
+  return {
+    kind: 'error',
+    message:
+      `expected exactly one configured district matching /mgungundlovu/i, found ${hits.length} ` +
+      `— configured: ${configuredDistricts.map((d) => JSON.stringify(d)).join(', ') || '(none)'}`,
+  };
+}
+
+/** TUSKERS_LEAGUES with the district placeholder replaced by the tenant's resolved
+ * uMgungundlovu district name — what the roster CLI actually appends. */
+export function materializeTuskersLeagues(
+  district: string,
+  leagues: typeof TUSKERS_LEAGUES = TUSKERS_LEAGUES,
+): typeof TUSKERS_LEAGUES {
+  return leagues.map((l) =>
+    l.district === UMG_DISTRICT_PLACEHOLDER ? { ...l, district } : { ...l },
+  );
+}

@@ -33,6 +33,7 @@ import { pathToFileURL } from 'node:url';
 import type { Club, RequiredDoc } from './types.js';
 import {
   resolveRequiredDocs,
+  resolveDistricts,
   activeRequiredDocs,
   DOC_FORMAT_MIME,
   acceptedMimes,
@@ -49,17 +50,22 @@ import {
   classifyFile,
   TUSKERS_DOC_KEYS,
   MULTI_FILE_DOC_KEYS,
+  parseMapClubArgs,
+  effectiveClubId,
+  mapTargetsMissing,
+  clubWriteDecision,
+  resolveTuskersDistrict,
 } from './tuskers-import-map.js';
 import { deriveTeamPlanCounts } from './team-plan.js';
 
 type RepoModule = typeof import('./repo.js');
 
 const TENANT = 'tuskers';
-/** Every club's KZNICU District Teams form says Umgungundlovu (Greytown's has one stray
- * "Uthukela" line; its MCA line and geography say Umgungundlovu — see the runbook). The
- * string is the tenant's CONFIGURED district name exactly (operator-created on dev), so
- * admin district filters and insights group these clubs correctly. */
-const DISTRICT = 'uMgungundlovu Cricket District';
+// District: every club's KZNICU District Teams form says Umgungundlovu (Greytown's has one
+// stray "Uthukela" line — see the runbook). The NAME is resolved at run time from the
+// tenant config (resolveTuskersDistrict), never hardcoded: dev calls it "uMgungundlovu
+// Cricket District", prod "uMgungundlovu District", and club.district must equal the
+// configured name exactly. It is applied only to clubs this import CREATES.
 /** Audit marker: updateClub actor + note author. */
 const IMPORT_MARKER = 'import:tuskers-compliance-2026';
 const AUDIT_NOTE = `Imported from Tuskers (KZN Inland) compliance pack (${IMPORT_MARKER})`;
@@ -90,7 +96,31 @@ const CLUB_COLORS = ['#0E3529', '#215F47', '#4B8A6C', '#B89B4A', '#E7DDC6', '#8C
  * Persisted INCREMENTALLY (write-before-create, one id at a time — see runConfirm), so an
  * interrupted run never loses the ids it already created.
  */
-const CREATED_CLUBS_MANIFEST_PATH = './tuskers-import-created-clubs.json';
+const LEGACY_CREATED_CLUBS_MANIFEST_PATH = './tuskers-import-created-clubs.json';
+
+/**
+ * Stage-scoped manifest path, so a dev run's evidence can never steer a prod revert (or
+ * vice versa): `./tuskers-import-created-clubs.<stage>.json`. The stage comes from
+ * `SST_STAGE` when set, else from `SST_RESOURCE_App` — the JSON `{"name","stage"}` that
+ * `sst shell` injects for every run (verified in the sst v3.19 binary; it is what the sst
+ * SDK's `Resource.App.stage` reads, and the same SST_RESOURCE_* mechanism env.ts already
+ * relies on for the table and bucket). Outside `sst shell` (neither set) it falls back to
+ * the legacy unsuffixed name. Pure over `env` for testing.
+ */
+function createdClubsManifestPath(env: NodeJS.ProcessEnv = process.env): string {
+  let stage = env.SST_STAGE?.trim();
+  if (!stage && env.SST_RESOURCE_App) {
+    try {
+      const app = JSON.parse(env.SST_RESOURCE_App) as { stage?: unknown };
+      if (typeof app.stage === 'string') stage = app.stage.trim();
+    } catch {
+      throw new Error('SST_RESOURCE_App is set but is not valid JSON — cannot resolve the stage');
+    }
+  }
+  if (!stage) return LEGACY_CREATED_CLUBS_MANIFEST_PATH;
+  if (!/^[A-Za-z0-9_-]+$/.test(stage)) throw new Error(`unsafe stage name "${stage}"`);
+  return `./tuskers-import-created-clubs.${stage}.json`;
+}
 
 /**
  * Three-way read result — "absent" and "corrupt" are NOT interchangeable. Revert may
@@ -105,7 +135,7 @@ type ManifestReadResult =
 async function readCreatedClubsManifest(): Promise<ManifestReadResult> {
   let raw: string;
   try {
-    raw = await readFile(CREATED_CLUBS_MANIFEST_PATH, 'utf8');
+    raw = await readFile(createdClubsManifestPath(), 'utf8');
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' };
     return { kind: 'corrupt', detail: err instanceof Error ? err.message : String(err) };
@@ -126,7 +156,7 @@ async function readCreatedClubsManifest(): Promise<ManifestReadResult> {
 }
 
 async function writeCreatedClubsManifest(ids: Set<string>): Promise<void> {
-  await writeFile(CREATED_CLUBS_MANIFEST_PATH, JSON.stringify([...ids].sort(), null, 2));
+  await writeFile(createdClubsManifestPath(), JSON.stringify([...ids].sort(), null, 2));
 }
 
 // ───────────────────────── File-tree walk + classification ─────────────────────────
@@ -334,9 +364,14 @@ interface Args {
    * into (i.e. one that pre-existed the import) — see runRevert's comment. `--all`
    * alone never touches a pre-existing club's real data. */
   erasePreexisting: boolean;
+  /** `--map-club <clubMapId>=<existingId>` (repeatable): CLUB_MAP club → pre-existing
+   * tenant club id, for every write/read keyed on club id. Validated by parseMapClubArgs;
+   * the targets' existence is checked against the tenant in every repo-touching phase. */
+  mapping: Map<string, string>;
 }
 
 function parseArgs(argv: string[]): Args {
+  const mapClub: string[] = [];
   const args: Args = {
     dir: '',
     parseOnly: false,
@@ -345,6 +380,7 @@ function parseArgs(argv: string[]): Args {
     revert: false,
     all: false,
     erasePreexisting: false,
+    mapping: new Map(),
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -356,8 +392,10 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--revert') args.revert = true;
     else if (a === '--all') args.all = true;
     else if (a === '--erase-preexisting') args.erasePreexisting = true;
+    else if (a === '--map-club') mapClub.push(argv[++i] ?? '');
     else throw new Error(`unknown flag ${a}`);
   }
+  args.mapping = parseMapClubArgs(mapClub);
   if (args.erasePreexisting && !(args.revert && args.all)) {
     throw new Error('--erase-preexisting only makes sense with --revert --all');
   }
@@ -385,12 +423,17 @@ function buildClubDocsSeed(activeDocs: RequiredDoc[]): Record<string, boolean> {
 
 /** No structure workbook exists for this union: no leagues, no team plan, no ground —
  * those are set up later through the season wizard / admin console. */
-function buildClub(club: ClubMapEntry, activeDocs: RequiredDoc[], index: number): Club {
+function buildClub(
+  club: ClubMapEntry,
+  activeDocs: RequiredDoc[],
+  index: number,
+  district: string,
+): Club {
   const { teams, women, juniors } = deriveTeamPlanCounts({});
   return {
     id: club.id,
     name: club.name,
-    district: DISTRICT,
+    district,
     sub: '',
     // Name only, from the club's own documents (see CLUB_MAP). Lands on CREATE only —
     // the merge path fills absent doc-key seeds and never touches chair.
@@ -603,10 +646,13 @@ async function runConfirm(
   args: Args,
   classified: ClassifiedFile[],
   activeDocs: RequiredDoc[],
+  district: string,
 ): Promise<void> {
   const existing = await repo.listClubs(TENANT);
   const existingById = new Map(existing.map((c) => [c.id, c]));
-  const tuskersExisting = existing.filter((c) => CLUB_MAP.some((m) => m.id === c.id));
+  const tuskersExisting = existing.filter((c) =>
+    CLUB_MAP.some((m) => effectiveClubId(m.id, args.mapping) === c.id),
+  );
 
   const backupPath = `./tuskers-import-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
   await writeFile(backupPath, JSON.stringify(tuskersExisting, null, 2));
@@ -620,19 +666,35 @@ async function runConfirm(
   const manifestResult = await readCreatedClubsManifest();
   if (manifestResult.kind === 'corrupt') {
     throw new Error(
-      `${CREATED_CLUBS_MANIFEST_PATH} exists but is unreadable/malformed (${manifestResult.detail}) ` +
+      `${createdClubsManifestPath()} exists but is unreadable/malformed (${manifestResult.detail}) ` +
         '— refusing to continue: writing through it now would silently discard every club id a ' +
         'prior run recorded. Fix the file by hand or move it aside before re-running --confirm.',
     );
   }
   const manifest = manifestResult.kind === 'ok' ? manifestResult.ids : new Set<string>();
 
+  // Every create-vs-merge decision is made (and every mapped target re-checked) BEFORE the
+  // first write: a mapped club is never created.
+  const existingIds = new Set(existingById.keys());
+  const decisions = targets.map((club) => ({
+    club,
+    decision: clubWriteDecision(club.id, args.mapping, existingIds),
+  }));
+  const aborts = decisions.flatMap(({ decision }) =>
+    decision.action === 'abort' ? [decision.reason] : [],
+  );
+  if (aborts.length) throw new Error(`refusing to write:\n  - ${aborts.join('\n  - ')}`);
+  console.log(`· created-clubs manifest: ${createdClubsManifestPath()}`);
+
   let created = 0;
   let merged = 0;
-  for (const [i, club] of targets.entries()) {
-    const built = buildClub(club, activeDocs, i);
+  for (const [i, { club: mapEntry, decision }] of decisions.entries()) {
+    if (decision.action === 'abort') continue; // unreachable — aborted above
+    // A mapped club is written under the EXISTING tenant club's id throughout.
+    const club = { ...mapEntry, id: decision.clubId };
+    const built = buildClub(club, activeDocs, i, district);
     const already = existingById.get(club.id);
-    if (!already) {
+    if (!already && decision.action === 'create') {
       // Write-before-create: the id is durable BEFORE `createClub` is attempted, so a
       // crash mid-create can never leave an unrecorded creation (a false negative that
       // `--revert --all` would mistake for a pre-existing club). A definitive failure
@@ -679,7 +741,7 @@ async function runConfirm(
   }
   console.log(`· clubs: ${created} created, ${merged} merged`);
   console.log(
-    `· created-clubs manifest: ${CREATED_CLUBS_MANIFEST_PATH} has ${manifest.size} club(s) ` +
+    `· created-clubs manifest: ${createdClubsManifestPath()} has ${manifest.size} club(s) ` +
       'recorded as created by this import across all runs (persisted incrementally as each ' +
       'club was created, not batched at the end).',
   );
@@ -785,10 +847,12 @@ async function runDocUploadPhase(
 
   // Group by (clubId, docKey) so a multi-file doc uploads/reports as one unit and a
   // single-file doc's accidental duplicate is caught before any write.
+  // Keyed on the EFFECTIVE club id: a --map-club'd club's docs go to the existing tenant
+  // club (S3 prefix, docMeta, clash checks all follow from this one key).
   const groups = new Map<string, ClassifiedFile[]>();
   for (const f of targets) {
     if (!f.club || !f.docKey) continue;
-    const key = `${f.club.id}::${f.docKey}`;
+    const key = `${effectiveClubId(f.club.id, args.mapping)}::${f.docKey}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(f);
   }
@@ -959,7 +1023,7 @@ export function revertManifestGate(
     return {
       kind: 'refuse',
       message:
-        `--revert --all --erase-preexisting requires a readable ${CREATED_CLUBS_MANIFEST_PATH}, ` +
+        `--revert --all --erase-preexisting requires a readable ${createdClubsManifestPath()}, ` +
         `which ${why}. Without it, every non-pristine CLUB_MAP club would be treated as ` +
         '"pre-existing, force it" and fully deleted — refusing rather than guessing. Restore ' +
         'or fix the manifest, or omit --erase-preexisting to strip import docs only.',
@@ -968,7 +1032,7 @@ export function revertManifestGate(
   return {
     kind: 'warn',
     message:
-      `⚠ --all requested but ${CREATED_CLUBS_MANIFEST_PATH} ${why} — this import cannot ` +
+      `⚠ --all requested but ${createdClubsManifestPath()} ${why} — this import cannot ` +
       'positively tell an import-created club apart from a pre-existing one it only merged ' +
       'into, so --all is falling back to pristine-only deletion (same as no --all).',
   };
@@ -976,7 +1040,15 @@ export function revertManifestGate(
 
 async function runRevert(repo: RepoModule, args: Args): Promise<void> {
   const clubs = await repo.listClubs(TENANT);
-  const mine = clubs.filter((c) => CLUB_MAP.some((m) => m.id === c.id));
+  const missingTargets = mapTargetsMissing(args.mapping, new Set(clubs.map((c) => c.id)));
+  if (missingTargets.length) throw new Error(missingTargets.join('\n'));
+  console.log(`· created-clubs manifest: ${createdClubsManifestPath()}`);
+  // Mapped clubs are reverted under their EXISTING tenant id. They are never in the
+  // created-clubs manifest (a mapped club is never created), so --all never force-deletes
+  // one; only its import-marked docs are stripped.
+  const mine = clubs.filter((c) =>
+    CLUB_MAP.some((m) => effectiveClubId(m.id, args.mapping) === c.id),
+  );
   if (mine.length === 0) {
     console.log('Nothing to revert.');
     return;
@@ -1119,14 +1191,37 @@ async function main(): Promise<void> {
   const targets = args.club ? CLUB_MAP.filter((c) => c.id === args.club) : CLUB_MAP;
   if (args.club && targets.length === 0) throw new Error(`--club "${args.club}" not in CLUB_MAP`);
 
+  // District + mapping targets are resolved against the LIVE tenant in dry-run and
+  // confirm alike (parse-only never needs them), fail-closed.
+  const config = await repo.getTenantConfig(TENANT);
+  const districtResult = resolveTuskersDistrict(resolveDistricts(config));
+  if (districtResult.kind === 'error')
+    throw new Error(`tenant "${TENANT}" district: ${districtResult.message}`);
+  const district = districtResult.district;
+  console.log(`✓ District for created clubs: "${district}"`);
+  const existingIds = new Set((await repo.listClubs(TENANT)).map((c) => c.id));
+  const missingTargets = mapTargetsMissing(args.mapping, existingIds);
+  if (missingTargets.length) throw new Error(missingTargets.join('\n'));
+  for (const [from, to] of args.mapping) console.log(`✓ --map-club ${from} → ${to} (exists)`);
+
   if (!args.confirm) {
-    const existing = await repo.listClubs(TENANT);
-    const existingIds = new Set(existing.map((c) => c.id));
     console.log('\n── Dry-run diff');
     for (const club of targets) {
-      const action = existingIds.has(club.id) ? 'MERGE (fill absent fields only)' : 'CREATE';
-      console.log(`  ${club.name} (${club.id}): ${action}`);
+      const decision = clubWriteDecision(club.id, args.mapping, existingIds);
+      // (An 'abort' can't reach here — missing map targets already threw above.)
+      const action =
+        decision.action === 'abort'
+          ? `ABORT — ${decision.reason}`
+          : decision.action === 'merge'
+            ? 'MERGE (fill absent fields only)'
+            : `CREATE in "${district}"`;
+      const idLabel =
+        args.mapping.has(club.id) && decision.action !== 'abort'
+          ? `${club.id} → ${decision.clubId}`
+          : club.id;
+      console.log(`  ${club.name} (${idLabel}): ${action}`);
     }
+    console.log(`  created-clubs manifest: ${createdClubsManifestPath()}`);
     if (args.skipDocs) {
       console.log('\n· --skip-docs: doc upload phase skipped.');
     } else {
@@ -1140,7 +1235,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  await runConfirm(repo, args, parsed.classified, activeDocs);
+  await runConfirm(repo, args, parsed.classified, activeDocs, district);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -1167,8 +1262,8 @@ export {
   maxFilesNeededPerMultiKey,
   readCreatedClubsManifest,
   writeCreatedClubsManifest,
-  CREATED_CLUBS_MANIFEST_PATH,
-  DISTRICT,
+  createdClubsManifestPath,
+  LEGACY_CREATED_CLUBS_MANIFEST_PATH,
   TENANT,
 };
 export type { ClassifiedFile, FileEntry };

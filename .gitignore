@@ -36,9 +36,11 @@ titans-contacts-import-backup-*.json
 titans-contacts-import-manifest.json
 
 # Prod data snapshots written by import-tuskers-compliance --confirm, plus its
-# created-clubs revert manifest — same reasoning as the titans pair above.
+# created-clubs revert manifests (legacy unsuffixed + stage-scoped .<stage>.json) — same
+# reasoning as the titans pair above.
 tuskers-import-backup-*.json
 tuskers-import-created-clubs.json
+tuskers-import-created-clubs.*.json
 
 # generated cohort exports (contain PII)
 cohort-export-*.xlsx

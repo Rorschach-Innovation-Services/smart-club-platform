@@ -9,8 +9,18 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { CLUB_MAP, classifyFile, FILE_OVERRIDES, TUSKERS_DOC_KEYS, MULTI_FILE_DOC_KEYS } =
-  await import('../src/tuskers-import-map.js');
+const {
+  CLUB_MAP,
+  classifyFile,
+  FILE_OVERRIDES,
+  TUSKERS_DOC_KEYS,
+  MULTI_FILE_DOC_KEYS,
+  parseMapClubArgs,
+  effectiveClubId,
+  mapTargetsMissing,
+  clubWriteDecision,
+  resolveTuskersDistrict,
+} = await import('../src/tuskers-import-map.js');
 const {
   classifyAll,
   buildClub,
@@ -21,8 +31,8 @@ const {
   validateDocMimes,
   parseArgs,
   parseHardFailures,
-  CREATED_CLUBS_MANIFEST_PATH,
-  DISTRICT,
+  createdClubsManifestPath,
+  LEGACY_CREATED_CLUBS_MANIFEST_PATH,
 } = await import('../src/import-tuskers-compliance.js');
 const { CATALOGUES } = await import('../src/configure-tenant-docs.js');
 const { validateRequiredDocs } = await import('../src/config-validation.js');
@@ -526,11 +536,9 @@ describe('CLUB_MAP / buildClub', () => {
     assert.equal(new Set(CLUB_MAP.map((c: { id: string }) => c.id)).size, 8);
   });
 
-  test("a built club is in the tenant's uMgungundlovu district, with no leagues, team plan or ground", () => {
-    const club = buildClub(CLUB_MAP[0], ACTIVE, 0);
-    // Must equal the live tenant's configured district name exactly.
-    assert.equal(DISTRICT, 'uMgungundlovu Cricket District');
-    assert.equal(club.district, 'uMgungundlovu Cricket District');
+  test('a built club carries the RESOLVED district, with no leagues, team plan or ground', () => {
+    const club = buildClub(CLUB_MAP[0], ACTIVE, 0, 'uMgungundlovu District');
+    assert.equal(club.district, 'uMgungundlovu District');
     assert.deepEqual(club.leagues, []);
     assert.deepEqual(club.ground, {});
     assert.equal(club.leagueTeams, undefined);
@@ -552,7 +560,7 @@ describe('CLUB_MAP / buildClub', () => {
       'Lancashire Cricket Club': 'Mike Buckley',
     };
     for (const [i, c] of CLUB_MAP.entries()) {
-      const club = buildClub(c, ACTIVE, i);
+      const club = buildClub(c, ACTIVE, i, 'uMgungundlovu District');
       assert.equal(club.chair, expected[c.name], c.name);
       assert.doesNotMatch(club.chair, /pending/i);
     }
@@ -560,7 +568,10 @@ describe('CLUB_MAP / buildClub', () => {
 
   test('names only: a built club carries no chair phone or email (PII + notifications)', () => {
     for (const [i, c] of CLUB_MAP.entries()) {
-      const club = buildClub(c, ACTIVE, i) as unknown as Record<string, unknown>;
+      const club = buildClub(c, ACTIVE, i, 'uMgungundlovu District') as unknown as Record<
+        string,
+        unknown
+      >;
       // `exco.chair` is where a chair's contact details live — never seeded by this import.
       for (const field of ['exco', 'chairEmail', 'chairPhone', 'email', 'phone', 'cell'])
         assert.equal(club[field], undefined, `${c.name}.${field}`);
@@ -760,8 +771,27 @@ describe('import-authored object keys + revert gate (tuskers copies)', () => {
     );
   });
 
-  test('the created-clubs manifest is tuskers-specific (never shares titans state)', () => {
-    assert.equal(CREATED_CLUBS_MANIFEST_PATH, './tuskers-import-created-clubs.json');
+  test('the created-clubs manifest is tuskers-specific and stage-scoped', () => {
+    assert.equal(LEGACY_CREATED_CLUBS_MANIFEST_PATH, './tuskers-import-created-clubs.json');
+    // Outside sst shell: the legacy name.
+    assert.equal(createdClubsManifestPath({}), LEGACY_CREATED_CLUBS_MANIFEST_PATH);
+    // sst shell injects SST_RESOURCE_App = {"name","stage"}.
+    assert.equal(
+      createdClubsManifestPath({
+        SST_RESOURCE_App: JSON.stringify({ name: 'smart-club-platform', stage: 'prod' }),
+      }),
+      './tuskers-import-created-clubs.prod.json',
+    );
+    // SST_STAGE wins when set.
+    assert.equal(
+      createdClubsManifestPath({
+        SST_STAGE: 'dev',
+        SST_RESOURCE_App: JSON.stringify({ stage: 'prod' }),
+      }),
+      './tuskers-import-created-clubs.dev.json',
+    );
+    assert.throws(() => createdClubsManifestPath({ SST_STAGE: '../x' }), /unsafe stage/);
+    assert.throws(() => createdClubsManifestPath({ SST_RESOURCE_App: '{' }), /not valid JSON/);
   });
 
   test('--all --erase-preexisting refuses without a readable manifest; --all alone warns', () => {
@@ -771,5 +801,83 @@ describe('import-authored object keys + revert gate (tuskers copies)', () => {
     );
     assert.equal(revertManifestGate({ all: true }, { kind: 'absent' }).kind, 'warn');
     assert.equal(revertManifestGate({ all: true }, { kind: 'ok' }).kind, 'proceed');
+  });
+});
+
+describe('district resolution (never hardcoded)', () => {
+  test('dev and prod names both resolve to their own configured string', () => {
+    const dev = resolveTuskersDistrict([
+      'uThukela Cricket District',
+      'uMgungundlovu Cricket District',
+      'uMzinyathi Cricket District',
+    ]);
+    assert.deepEqual(dev, { kind: 'ok', district: 'uMgungundlovu Cricket District' });
+    const prod = resolveTuskersDistrict(['uMzinyathi District', 'uMgungundlovu District']);
+    assert.deepEqual(prod, { kind: 'ok', district: 'uMgungundlovu District' });
+  });
+
+  test('zero or several matches fail closed, listing the configured districts', () => {
+    const none = resolveTuskersDistrict(['uMzinyathi District']);
+    assert.equal(none.kind, 'error');
+    assert.match((none as { message: string }).message, /found 0.*"uMzinyathi District"/);
+    const two = resolveTuskersDistrict(['uMgungundlovu District', 'Umgungundlovu North']);
+    assert.equal(two.kind, 'error');
+    assert.match((two as { message: string }).message, /found 2/);
+  });
+});
+
+describe('--map-club remap decision logic', () => {
+  const LCC = clubIdFromName('Lancashire Cricket Club');
+  const PMB = 'lancashire-cricket-club-pmb';
+
+  test('parses and validates mappings', () => {
+    const m = parseMapClubArgs([`${LCC}=${PMB}`]);
+    assert.equal(m.get(LCC), PMB);
+    assert.equal(effectiveClubId(LCC, m), PMB);
+    assert.equal(effectiveClubId(MASI, m), MASI);
+    assert.equal(parseMapClubArgs([]).size, 0);
+  });
+
+  test('rejects malformed, unknown, duplicate, self, CLUB_MAP-target and shared-target mappings', () => {
+    assert.throws(() => parseMapClubArgs(['nope']), /expects/);
+    assert.throws(() => parseMapClubArgs([`not-a-club=${PMB}`]), /not a CLUB_MAP club id/);
+    assert.throws(() => parseMapClubArgs([`${LCC}=${PMB}`, `${LCC}=x`]), /mapped twice/);
+    assert.throws(() => parseMapClubArgs([`${LCC}=${LCC}`]), /onto itself/);
+    assert.throws(() => parseMapClubArgs([`${LCC}=${MASI}`]), /another CLUB_MAP club/);
+    assert.throws(
+      () => parseMapClubArgs([`${LCC}=${PMB}`, `${MASI}=${PMB}`]),
+      /target of two mappings/,
+    );
+  });
+
+  test('a mapped club is merged into its existing target and NEVER created', () => {
+    const m = parseMapClubArgs([`${LCC}=${PMB}`]);
+    assert.deepEqual(clubWriteDecision(LCC, m, new Set([PMB])), { action: 'merge', clubId: PMB });
+    // Target missing → abort, even though the CLUB_MAP id itself is absent too.
+    assert.equal(clubWriteDecision(LCC, m, new Set()).action, 'abort');
+    // Even if a club with the CLUB_MAP id exists, the mapped target is what counts.
+    assert.equal(clubWriteDecision(LCC, m, new Set([LCC])).action, 'abort');
+  });
+
+  test('unmapped clubs create when absent and merge when present (prod self-signups)', () => {
+    const m = parseMapClubArgs([`${LCC}=${PMB}`]);
+    assert.deepEqual(clubWriteDecision(MASI, m, new Set([MASI])), {
+      action: 'merge',
+      clubId: MASI,
+    });
+    assert.deepEqual(clubWriteDecision(MASI, m, new Set()), { action: 'create', clubId: MASI });
+  });
+
+  test('mapTargetsMissing names every absent target', () => {
+    const m = parseMapClubArgs([`${LCC}=${PMB}`]);
+    assert.deepEqual(mapTargetsMissing(m, new Set([PMB])), []);
+    assert.equal(mapTargetsMissing(m, new Set([LCC])).length, 1);
+  });
+
+  test('the compliance CLI accepts --map-club (repeatable) and validates it at parse time', () => {
+    const a = parseArgs(['--dir', '/x', '--map-club', `${LCC}=${PMB}`]);
+    assert.equal(a.mapping.get(LCC), PMB);
+    assert.equal(parseArgs(['--revert', '--map-club', `${LCC}=${PMB}`]).mapping.size, 1);
+    assert.throws(() => parseArgs(['--dir', '/x', '--map-club', 'bad']), /expects/);
   });
 });

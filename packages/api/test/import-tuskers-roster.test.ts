@@ -9,8 +9,16 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { CLUB_MAP, ROSTER_SOURCES, ROSTER_NON_SOURCES, SKIP_ROSTER, TUSKERS_LEAGUES, classifyFile } =
-  await import('../src/tuskers-import-map.js');
+const {
+  CLUB_MAP,
+  ROSTER_SOURCES,
+  ROSTER_NON_SOURCES,
+  SKIP_ROSTER,
+  TUSKERS_LEAGUES,
+  UMG_DISTRICT_PLACEHOLDER,
+  materializeTuskersLeagues,
+  classifyFile,
+} = await import('../src/tuskers-import-map.js');
 const {
   REGISTERED_BY,
   dedupeClubRows,
@@ -543,10 +551,25 @@ describe('TUSKERS_LEAGUES gating', () => {
       assert.equal(l.group, 'Overarching Leagues', l.key);
       assert.equal(
         l.district,
-        l.key.startsWith('div-') ? 'uMgungundlovu Cricket District' : 'All districts',
+        l.key.startsWith('div-') ? UMG_DISTRICT_PLACEHOLDER : 'All districts',
         l.key,
       );
     }
+  });
+
+  test('district-scoped divisions take the resolved per-stage district name', () => {
+    for (const district of ['uMgungundlovu Cricket District', 'uMgungundlovu District']) {
+      const leagues = materializeTuskersLeagues(district);
+      for (const l of leagues as Array<{ key: string; district: string }>) {
+        assert.notEqual(l.district, UMG_DISTRICT_PLACEHOLDER, l.key);
+        if (l.key.startsWith('div-')) assert.equal(l.district, district);
+        else assert.equal(l.district, 'All districts');
+      }
+    }
+    // Pure: the catalogue itself keeps the placeholder.
+    assert.ok(
+      TUSKERS_LEAGUES.some((l: { district: string }) => l.district === UMG_DISTRICT_PLACEHOLDER),
+    );
   });
 
   test('every sheet league key is a live key or one of the reviewed additions (no parallel keys)', () => {
@@ -620,6 +643,16 @@ describe('roster CLI flags', () => {
     assert.throws(() => parseArgs(['--revert', '--add-missing-leagues']), /--add-missing-leagues/);
     assert.throws(() => parseArgs(['--dir', '/x', '--parse-only', '--confirm']), /--parse-only/);
     assert.throws(() => parseArgs([]), /requires --dir/);
+  });
+
+  test('--map-club is accepted on the roster CLI too, incl. with --revert', () => {
+    const pmb = 'lancashire-cricket-club-pmb';
+    assert.equal(parseArgs(['--dir', '/x', '--map-club', `${LCC}=${pmb}`]).mapping.get(LCC), pmb);
+    assert.equal(parseArgs(['--revert', '--map-club', `${LCC}=${pmb}`]).mapping.get(LCC), pmb);
+    assert.throws(
+      () => parseArgs(['--dir', '/x', '--map-club', `${LCC}=${MCC}`]),
+      /another CLUB_MAP/,
+    );
   });
 
   test('valid combinations parse', () => {

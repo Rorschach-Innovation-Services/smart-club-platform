@@ -39,9 +39,9 @@ undoes cleanly.
    `tenant "tuskers" has no config` until the tenant has been stood up through the
    operator portal (or the existing bootstrap path). **On dev it already exists**,
    operator-created, with branding name "Tuskers", six districts (the one these clubs
-   use is exactly `uMgungundlovu Cricket District`), eight leagues (see
-   [Leagues](#leagues)) and an operator-set deadline of 2026-08-07. The import aligns to
-   that live config; check the same holds on any other stage before running there.
+   use is `uMgungundlovu Cricket District`), eight leagues (see [Leagues](#leagues)) and
+   an operator-set deadline of 2026-08-07. **Prod differs**: see
+   [Prod differences](#prod-differences).
 2. **The platform build that accepts odt/jpg/jpeg/png is deployed to the target stage.**
    `DOC_FORMAT_MIME` (`catalogue.ts`) gained `odt`, `jpg`, `jpeg` and `png` for this pack.
    Without it, `configure-tenant-docs` fails validation, and chairs can't upload photos
@@ -99,12 +99,19 @@ npx sst shell --stage <stage> -- npm --prefix packages/api run import-tuskers-co
 … --confirm --skip-docs            # clubs only, no S3/doc writes
 … --confirm --club howick-cricket-club   # one club only
 
+# Onto a pre-existing tenant club with a different id (repeatable; prod needs this):
+… --confirm --map-club lancashire-cricket-club=lancashire-cricket-club-pmb
+
 # Revert (dry-run / confirm). Same semantics as Titans; see "Revert" below.
+# Pass the SAME --map-club flags the import used, or the mapped club is not visited.
 … --revert
 … --revert --confirm
 … --revert --all --confirm
 … --revert --all --erase-preexisting --confirm
 ```
+
+Dry-run and `--confirm` both resolve the district from the tenant config and check every
+`--map-club` target exists (see below). `--parse-only` needs neither.
 
 Expected Phase P result: 165 files, of which 142 are classified and 23 are deliberate
 skips. That leaves 140 distinct uploads, because 2 byte-identical duplicates dedupe
@@ -114,9 +121,13 @@ documents.
 
 ## The 8 clubs
 
-All 8 clubs are in the **uMgungundlovu** district, written as the tenant's configured
-district name exactly: `uMgungundlovu Cricket District` (admin district filters and
-insights match on that string).
+All 8 clubs belong in the **uMgungundlovu** district. The district string is **not
+hardcoded**: dry-run and `--confirm` read the tenant's configured districts and use the
+single one matching `/mgungundlovu/i` (dev: `uMgungundlovu Cricket District`, prod:
+`uMgungundlovu District`). Admin district filters and insights match on the exact string.
+Zero or several matches abort, printing the configured list. The district is written only
+to clubs this import **creates**; the merge path never changes an existing club's
+district.
 
 | folder                    | club                         | notes                                                                     |
 | ------------------------- | ---------------------------- | ------------------------------------------------------------------------- |
@@ -257,15 +268,23 @@ merge, never clobber" and "Revert semantics". In short:
 - The audit note (`Imported from Tuskers (KZN Inland) compliance pack
 (import:tuskers-compliance-2026)`) is appended once per club. `updateClub` writes carry
   the actor `import:tuskers-compliance-2026`.
-- `./tuskers-import-created-clubs.json` records every club this import **created**,
-  written before each create. `--revert --all` force-deletes only those.
-  `--all --erase-preexisting` refuses outright if the manifest is missing or corrupt.
-  Keep the manifest (gitignored) until the import is signed off.
+- The created-clubs manifest records every club this import **created**, written before
+  each create. `--revert --all` force-deletes only those. `--all --erase-preexisting`
+  refuses outright if the manifest is missing or corrupt. Keep the manifest (gitignored)
+  until the import is signed off. It is **stage-scoped**:
+  `./tuskers-import-created-clubs.<stage>.json` (in `packages/api/`, the npm `--prefix`
+  working directory), so dev evidence can never steer a prod revert. The stage comes from
+  `SST_STAGE` if set, else from the `SST_RESOURCE_App` JSON that `sst shell` injects
+  (`{"name","stage"}`, the same source as the sst SDK's `Resource.App.stage`). Outside
+  `sst shell` it falls back to the legacy unsuffixed `./tuskers-import-created-clubs.json`.
+  `--confirm` and `--revert` print the path they use. The dev run's 8 ids were moved to
+  `tuskers-import-created-clubs.dev.json`.
 
 ## Verification checklist (after `--confirm`)
 
-1. The tenant has the 8 clubs, all in `uMgungundlovu Cricket District`, with no leagues
-   (the roster import sets them).
+1. The tenant has the 8 clubs (7 on prod, plus the mapped `-pmb` club). Every club this
+   import created is in the resolved uMgungundlovu district, with no leagues (the roster
+   import sets them).
 2. Per-club doc counts match the Phase P upload preview. Spot-check UKZN
    (`disciplinaryRecords` = 8), Standard (`unionCorrespondence` = 6) and Masibemunye
    (`playerRegistrations` = 2, including the reassigned `asanda.jpg`).
@@ -400,17 +419,19 @@ parallel one. Today no Women row has identity data, so nothing lands there yet.
 
 Keys the roster references that the tenant lacks:
 
-| key     | label          | group               | district                         |
-| ------- | -------------- | ------------------- | -------------------------------- |
-| `div-1` | UMG Division 1 | Overarching Leagues | `uMgungundlovu Cricket District` |
-| `div-2` | UMG Division 2 | Overarching Leagues | `uMgungundlovu Cricket District` |
-| `div-3` | UMG Division 3 | Overarching Leagues | `uMgungundlovu Cricket District` |
-| `u9`    | U9             | Overarching Leagues | All districts                    |
-| `u16`   | U16            | Overarching Leagues | All districts                    |
+| key     | label          | group               | district                                       |
+| ------- | -------------- | ------------------- | ---------------------------------------------- |
+| `div-1` | UMG Division 1 | Overarching Leagues | the tenant's uMgungundlovu district (resolved) |
+| `div-2` | UMG Division 2 | Overarching Leagues | the tenant's uMgungundlovu district (resolved) |
+| `div-3` | UMG Division 3 | Overarching Leagues | the tenant's uMgungundlovu district (resolved) |
+| `u9`    | U9             | Overarching Leagues | All districts                                  |
+| `u16`   | U16            | Overarching Leagues | All districts                                  |
 
 The divisions are district-scoped, so they carry the district name rather than the
 `All districts` sentinel: the platform offers a district league only to that district's
-clubs. `u16` is appended only if a written row lands in it. Today every valid U16 player
+clubs. That name differs per stage, so the map file holds a placeholder and the roster CLI
+substitutes the tenant's resolved uMgungundlovu district (the same resolver as the
+compliance CLI, fail-closed) before appending. `u16` is appended only if a written row lands in it. Today every valid U16 player
 also appears on Lancashire's Premier sheet, which wins, so it isn't appended.
 
 The dry-run prints which referenced keys are missing. On the dev tenant as configured,
@@ -440,9 +461,13 @@ relevant. No name, date of birth or partial ID is ever printed.
 To revert everything, revert the **roster first**, then the compliance import:
 
 ```bash
-… import-tuskers-roster -- --revert --confirm
-… import-tuskers-compliance -- --revert --all --confirm
+… import-tuskers-roster -- --revert --confirm [--map-club …]
+… import-tuskers-compliance -- --revert --all --confirm [--map-club …]
 ```
+
+Pass the same `--map-club` flags the import used. A mapped club is never in the
+created-clubs manifest (it is never created), so even `--all` only strips its
+import-marked docs and deletes its imported players. It never deletes the club.
 
 The compliance revert treats a club with players as non-pristine. Removing the imported
 players first lets it delete the clubs it created. The roster revert deletes only players
@@ -455,6 +480,60 @@ and leaves appended leagues and `club.leagues` in place.
    ran.
 2. Lancashire's 3rds/4ths players have no team. Hand the list to the union.
 3. Each of MCC, Lancashire, Standard and Howick has `leagues[]` set.
+
+## Prod differences
+
+Checked against the live prod tenant with a read-only script. Prod is **not** a copy of
+dev:
+
+- **Districts are named differently.** Prod uses `uMgungundlovu District`,
+  `uMzinyathi District` and so on, where dev uses `… Cricket District`. The district
+  resolver handles this (see [The 8 clubs](#the-8-clubs)); nothing is hardcoded.
+- **Four clubs already exist from self-signup.**
+
+  | prod club id                  | state                                                                                         | import action          | chair kept  |
+  | ----------------------------- | --------------------------------------------------------------------------------------------- | ---------------------- | ----------- |
+  | `greytown-cricket-club`       | empty, same id as ours                                                                        | merge                  | Sadaf Zaman |
+  | `howick-cricket-club`         | empty, same id as ours                                                                        | merge                  | Seth        |
+  | `masibemunye-cricket-club`    | empty, same id as ours                                                                        | merge                  | S'bonelo    |
+  | `lancashire-cricket-club-pmb` | "Lancashire Cricket Club PMB", affiliation complete, real uploads under the default catalogue | merge via `--map-club` | "Admin"     |
+
+  The merge path fills only absent doc-key seeds and appends the audit note. It never
+  touches chair, name, district or affiliation, so the self-signup values stay.
+
+- **Prod Greytown sits in `uMzinyathi District`.** That was its own signup choice, and
+  the merge keeps it. That is geographically correct, unlike dev, where this import
+  created Greytown and put it in uMgungundlovu with the rest.
+- **Lancashire must be mapped.** Our CLUB_MAP id `lancashire-cricket-club` would create a
+  duplicate of the existing `-pmb` club. On prod, pass the mapping to **both** CLIs, and
+  to their reverts:
+
+  ```bash
+  … import-tuskers-compliance -- --dir "<pack>" --confirm \
+      --map-club lancashire-cricket-club=lancashire-cricket-club-pmb
+  … import-tuskers-roster -- --dir "<pack>" --confirm --add-missing-leagues --allow-missing-id \
+      --map-club lancashire-cricket-club=lancashire-cricket-club-pmb
+  ```
+
+  A mapped club is **never created**. If the target id doesn't exist on the tenant,
+  dry-run, `--confirm` and `--revert` all abort. Every club-keyed read and write follows
+  the target id: the create-vs-merge decision, S3 key prefixes
+  (`tuskers/lancashire-cricket-club-pmb/…`), docMeta, the backup, revert scoping, player
+  `clubId`, the `club.leagues` union and `reconcilePlayerCount`.
+
+- **The `-pmb` club's real uploads stay untouched.** Its default-catalogue docs remain as
+  they are. The single-file clash rule protects its `constitution`: an existing non-import
+  upload is reported as a clash and left in place. Its `agm` and other legacy default keys
+  are archived in the tuskers catalogue, so they keep resolving. Multi-file keys union
+  with anything already there.
+- **League keys differ.** Prod has `premier-league`, `promotion-league`, `womens-league`,
+  `veterans-league`, `u11`, `u13` and `u16`. It has no `u15`, `u9` or `div-*`, so on prod
+  `--add-missing-leagues` appends `div-1`, `div-2`, `div-3` (with prod's uMgungundlovu
+  district name), `u9` and `u15`. Prod's women's key is `womens-league`, not dev's
+  `women-s-premier-league`. No Women row is written today, so this doesn't bite yet.
+  Revisit the Women mapping before any women's roster lands on prod.
+- **Manifests are stage-scoped.** A prod `--confirm` writes
+  `tuskers-import-created-clubs.prod.json`. It never touches the dev file.
 
 ## Other notes
 
