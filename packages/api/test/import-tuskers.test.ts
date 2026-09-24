@@ -574,15 +574,18 @@ describe('tuskers catalogue (configure-tenant-docs.ts)', () => {
     assert.doesNotThrow(() => validateRequiredDocs(TUSKERS_CATALOGUE));
   });
 
-  test('keys are exactly TUSKERS_DOC_KEYS', () => {
+  // ACTIVE, not the raw catalogue: the tuskers entry also carries ARCHIVED legacy
+  // shared-default keys (agm/exco/codeOfConduct/safeguarding — a prod self-signup club
+  // held agm data before this catalogue shipped), which the import never writes.
+  test('active keys are exactly TUSKERS_DOC_KEYS', () => {
     assert.deepEqual(
-      TUSKERS_CATALOGUE.map((d: { key: string }) => d.key).sort(),
+      ACTIVE.map((d: { key: string }) => d.key).sort(),
       [...TUSKERS_DOC_KEYS].sort(),
     );
   });
 
-  test('the catalogue multiFile set equals MULTI_FILE_DOC_KEYS', () => {
-    const multi = TUSKERS_CATALOGUE.filter((d: { multiFile?: boolean }) => d.multiFile).map(
+  test('the active-catalogue multiFile set equals MULTI_FILE_DOC_KEYS', () => {
+    const multi = ACTIVE.filter((d: { multiFile?: boolean }) => d.multiFile).map(
       (d: { key: string }) => d.key,
     );
     assert.deepEqual(multi.sort(), [...MULTI_FILE_DOC_KEYS].sort());

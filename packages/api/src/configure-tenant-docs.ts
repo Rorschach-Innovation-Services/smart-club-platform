@@ -176,6 +176,42 @@ const CATALOGUES: Record<string, RequiredDoc[]> = {
       accepts: [...OFFICE],
       matchHints: ['constitution', 'consti'],
     },
+    // ── Legacy shared-default keys, ARCHIVED not dropped (the titans exco precedent):
+    // the prod tuskers tenant already had a self-signup club holding data under the
+    // default catalogue's `agm` key before this catalogue shipped, and the configure
+    // script (correctly) refuses to drop a key any club still holds data for.
+    // Archiving keeps stored records resolvable, excludes the keys from completion
+    // counts and upload flows, and lets `agmMinutes` (below) take over going forward.
+    // Shapes match DEFAULT_REQUIRED_DOCS so existing records keep resolving as written.
+    {
+      key: 'agm',
+      name: 'AGM pack (retired)',
+      desc: 'Superseded by AGM minutes',
+      archived: true,
+    },
+    {
+      key: 'exco',
+      name: 'Executive committee (retired)',
+      desc: 'Not part of the Tuskers requirements',
+      kind: 'form',
+      archived: true,
+    },
+    {
+      key: 'codeOfConduct',
+      name: 'Code of conduct (retired)',
+      desc: 'Not part of the Tuskers requirements',
+      archived: true,
+    },
+    {
+      key: 'safeguarding',
+      name: 'Safeguarding certificates (retired)',
+      desc: 'Not part of the Tuskers requirements',
+      multiFile: true,
+      minFiles: 2,
+      maxFiles: 10,
+      allowCourseBooked: true,
+      archived: true,
+    },
     {
       key: 'agmMinutes',
       name: 'AGM minutes',
