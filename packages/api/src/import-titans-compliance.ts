@@ -962,9 +962,10 @@ async function runDocUploadPhase(
   let bucket: string | undefined;
   if (args.confirm) {
     const { S3Client } = await import('@aws-sdk/client-s3');
-    bucket = process.env.UPLOADS_BUCKET;
-    if (!bucket)
-      throw new Error('UPLOADS_BUCKET is not set — run under `sst shell` for the target stage.');
+    // env.ts's helper, not bare process.env: under `sst shell` the bucket name arrives
+    // via the SST resource (Resource.Uploads.name), not an exported env var.
+    const { uploadsBucket } = await import('./env.js');
+    bucket = uploadsBucket();
     s3 = new S3Client({});
   }
   const { PutObjectCommand, DeleteObjectCommand } = await import('@aws-sdk/client-s3');
@@ -1204,9 +1205,9 @@ async function runRevert(repo: RepoModule, args: Args): Promise<void> {
   if (args.confirm) {
     const mod = await import('@aws-sdk/client-s3');
     DeleteObjectCommand = mod.DeleteObjectCommand;
-    bucket = process.env.UPLOADS_BUCKET;
-    if (!bucket)
-      throw new Error('UPLOADS_BUCKET is not set — run under `sst shell` for the target stage.');
+    // env.ts's helper, not bare process.env — see runDocUploadPhase.
+    const { uploadsBucket } = await import('./env.js');
+    bucket = uploadsBucket();
     s3 = new mod.S3Client({});
   }
 
