@@ -59,6 +59,20 @@ const CATALOGUE: RequiredDoc[] = [
   { key: 'committee-list', name: 'Committee list', role: 'committee' },
 ];
 const NOROLE_CATALOGUE: RequiredDoc[] = [{ key: 'member-db', name: 'Member database' }];
+// A MULTI-file member database (the tuskers nominal-roll shape): "replace member
+// database" appends, so the stale file sits at files[0].
+const MULTI_TENANT = 'rosterintake-multi';
+const MULTI_CATALOGUE: RequiredDoc[] = [
+  {
+    key: 'roll',
+    name: 'Nominal roll',
+    multiFile: true,
+    minFiles: 1,
+    maxFiles: 4,
+    accepts: ['pdf', 'xlsx'],
+    role: 'memberDatabase',
+  },
+];
 
 const LEAGUES: League[] = [
   { key: 'premier-men', label: 'Premier Men', group: 'Senior', district: 'Test District' },
@@ -317,6 +331,41 @@ before(async () => {
   await repo.createClub(TENANT, baseClub('clubdobvalid'));
   await repo.createClub(NOROLE_TENANT, baseClub('clubnorole'));
 
+  await repo.putTenantConfig({
+    tenant: MULTI_TENANT,
+    branding: { name: 'Multi Union', title: 'Multi', logoUrl: '', colors: {}, copy: {} },
+    submissionDeadline: '2026-12-31',
+    knownClubs: [],
+    leagues: [],
+    districts: ['Test District'],
+    requiredDocs: MULTI_CATALOGUE,
+  });
+  const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  // Old scan first, workbook appended later: the parse must read the workbook.
+  await repo.createClub(
+    MULTI_TENANT,
+    baseClub('clubscanthenxlsx', {
+      roll: {
+        files: [
+          { ...pdfFile, contentType: 'application/pdf', uploadedAt: '2026-01-01T00:00:00.000Z' },
+          { ...seniorFile, contentType: XLSX_MIME, uploadedAt: '2026-02-01T00:00:00.000Z' },
+        ],
+      },
+    }),
+  );
+  // Two workbooks: the replace (newer, senior roster) must win over the stale DOB one.
+  await repo.createClub(
+    MULTI_TENANT,
+    baseClub('clubreplaced', {
+      roll: {
+        files: [
+          { ...dobVariantFile, contentType: XLSX_MIME, uploadedAt: '2026-01-01T00:00:00.000Z' },
+          { ...seniorFile, contentType: XLSX_MIME, uploadedAt: '2026-03-01T00:00:00.000Z' },
+        ],
+      },
+    }),
+  );
+
   (global as unknown as { __fixtureIds: Record<string, string> }).__fixtureIds = {
     idAlice,
     idBob,
@@ -376,6 +425,48 @@ describe('POST /platform/tenants/:slug/roster-intake/parse', () => {
     const body = (await res.json()) as { parseable: boolean; reason: string };
     assert.equal(body.parseable, false);
     assert.match(body.reason, /scan or PDF/);
+  });
+
+  test('multi-file member database: parses the latest workbook, not the stale files[0] scan', async () => {
+    const res = await app.request(`/platform/tenants/${MULTI_TENANT}/roster-intake/parse`, {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ clubId: 'clubscanthenxlsx' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      parseable: boolean;
+      sheets: Array<{ rows: Array<{ firstName: string }> }>;
+    };
+    assert.equal(body.parseable, true, 'files[0] is a PDF — reading it would be unparseable');
+    assert.deepEqual(body.sheets[0].rows.map((r) => r.firstName).sort(), ['Alice', 'Bob']);
+  });
+
+  test('multi-file member database: a replaced (appended) workbook wins over the older one', async () => {
+    const res = await app.request(`/platform/tenants/${MULTI_TENANT}/roster-intake/parse`, {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ clubId: 'clubreplaced' }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      sheets: Array<{ hasIdColumn: boolean; rows: Array<{ firstName: string }> }>;
+    };
+    // The senior roster (with an ID column), not the stale DOB-only workbook.
+    assert.equal(body.sheets[0].hasIdColumn, true);
+    assert.deepEqual(body.sheets[0].rows.map((r) => r.firstName).sort(), ['Alice', 'Bob']);
+  });
+
+  test('overview intake classification reads the same file the parse does', async () => {
+    const res = await app.request(`/platform/tenants/${MULTI_TENANT}/overview`, {
+      headers: platformHeaders(OPERATOR),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      clubs: Array<{ id: string; intake: { memberDatabase: string } }>;
+    };
+    const club = body.clubs.find((c) => c.id === 'clubscanthenxlsx')!;
+    assert.equal(club.intake.memberDatabase, 'parseable');
   });
 
   test('404 for an unknown tenant / unknown club', async () => {

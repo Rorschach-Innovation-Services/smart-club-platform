@@ -115,16 +115,26 @@ export function docKeyForRole(
  * Every uploadable format → its exact MIME type (mirror of DOC_FORMAT_MIME in the
  * frontend's data.ts). Word covers Google Docs (exports .docx/.pdf); the spreadsheet
  * trio exists for catalogues whose docs are filled-in workbooks (league entry forms,
- * asset registers). The presigned PUT is minted with exactly one of these, so S3
- * rejects anything else at upload time.
+ * asset registers). `odt` covers LibreOffice-authored minutes, and the image trio covers
+ * phone photos/scans of paper forms (proofs of payment, registration forms, logos) —
+ * every one opt-in per doc via `accepts`, never part of the legacy default. The
+ * presigned PUT is minted with exactly one of these, so S3 rejects anything else at
+ * upload time.
+ *
+ * `jpg` and `jpeg` share one MIME type; key order matters — `acceptedMimes` keeps the
+ * FIRST format per MIME, so `jpg` (listed first) is the stored extension for both.
  */
 export const DOC_FORMAT_MIME: Record<DocFormat, string> = {
   pdf: 'application/pdf',
   doc: 'application/msword',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  odt: 'application/vnd.oasis.opendocument.text',
   xls: 'application/vnd.ms-excel',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   ods: 'application/vnd.oasis.opendocument.spreadsheet',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
 };
 
 /** The legacy accepted-format set — the default when a doc declares no `accepts`. */
@@ -134,12 +144,20 @@ export const DEFAULT_DOC_FORMATS: DocFormat[] = ['pdf', 'doc', 'docx'];
  * Accepted content types for one doc definition, as mime → stored-extension. Pass
  * undefined (an unknown/retired key) to get the full format map — those keys were
  * valid under some earlier catalogue, so their stored files keep resolving.
+ *
+ * Two formats can share a MIME type (`jpg`/`jpeg` → image/jpeg); the first one in the
+ * list wins, so a doc accepting both stores `.jpg` rather than whichever came last.
  */
 export function acceptedMimes(doc?: RequiredDoc): Record<string, string> {
   const formats = doc
     ? (doc.accepts ?? DEFAULT_DOC_FORMATS)
     : (Object.keys(DOC_FORMAT_MIME) as DocFormat[]);
-  return Object.fromEntries(formats.map((f) => [DOC_FORMAT_MIME[f], f]));
+  const out: Record<string, string> = {};
+  for (const f of formats) {
+    const mime = DOC_FORMAT_MIME[f];
+    if (!(mime in out)) out[mime] = f;
+  }
+  return out;
 }
 
 /**
@@ -199,6 +217,14 @@ export interface NormalizedDocMeta {
   markedCompliant: boolean;
   courseBooked: boolean;
   courseDate: string;
+  /**
+   * The club's "we don't have this" declaration (the `allowUnavailable` escape hatch).
+   * Normalized so every recompute that re-wraps docMeta (append, delete, bulk intake,
+   * the generic PATCH merge, the import CLIs) carries it through docMetaValue instead
+   * of silently erasing it. Whether it still SATISFIES the doc is a catalogue question —
+   * see unavailableDeclared.
+   */
+  unavailable: boolean;
   at?: string;
 }
 
@@ -217,12 +243,14 @@ export function normalizeDocMeta(meta: unknown): NormalizedDocMeta {
   const m = (meta ?? {}) as Record<string, unknown>;
   const courseBooked = !!m.courseBooked;
   const courseDate = (m.courseDate as string | undefined) || '';
+  const unavailable = !!m.unavailable;
   if (Array.isArray(m.files)) {
     return {
       files: m.files as DocFileEntry[],
       markedCompliant: !!m.markedCompliant,
       courseBooked,
       courseDate,
+      unavailable,
       at: m.at as string | undefined,
     };
   }
@@ -232,6 +260,10 @@ export function normalizeDocMeta(meta: unknown): NormalizedDocMeta {
       markedCompliant: !!m.markedCompliant,
       courseBooked,
       courseDate,
+      unavailable,
+      // Only a declaration's stamp is surfaced here (a legacy single upload never
+      // carried a doc-level `at` otherwise, and callers must keep seeing none).
+      ...(unavailable ? { at: m.at as string | undefined } : {}),
     };
   }
   return {
@@ -239,27 +271,115 @@ export function normalizeDocMeta(meta: unknown): NormalizedDocMeta {
     markedCompliant: !!m.markedCompliant,
     courseBooked,
     courseDate,
+    unavailable,
     at: m.at as string | undefined,
   };
 }
 
 /**
+ * Whether a normalized record's "unavailable" declaration SATISFIES its doc: only while
+ * the catalogue still grants the hatch (`def.allowUnavailable`), or for a key retired
+ * from the catalogue (no def — history isn't retro-tightened, the validateClubPatch
+ * rule). A stale sentinel is still carried through (the admin Revert path cleans it up)
+ * but no longer counts. Server twin of the frontend's `unavailableDeclared` (data.ts).
+ */
+export function unavailableDeclared(norm: { unavailable?: boolean }, def?: RequiredDoc): boolean {
+  return !!norm.unavailable && (!def || !!def.allowUnavailable);
+}
+
+/**
+ * Content types / extensions a role's source file must carry for the self-serve wizards
+ * to parse it (both roles parse through ExcelJS workbooks: roster-intake for
+ * `memberDatabase`, committee-extract for `committee`). `text/csv` isn't in
+ * DOC_FORMAT_MIME (compliance uploads never accept csv), but a legacy upload stamped with
+ * it is still attempted, so the parse routes can name the real failure.
+ */
+const ROLE_PARSEABLE: Record<
+  NonNullable<RequiredDoc['role']>,
+  { mimes: ReadonlySet<string>; extensions: ReadonlySet<string> }
+> = (() => {
+  const workbook = {
+    mimes: new Set([DOC_FORMAT_MIME.xlsx, DOC_FORMAT_MIME.xls, 'text/csv']),
+    extensions: new Set(['xlsx', 'xls', 'csv']),
+  };
+  return { memberDatabase: workbook, committee: workbook };
+})();
+
+/**
+ * Whether a stored file's declared type is one the role's parser can attempt.
+ * contentType wins when present; a missing contentType (legacy uploads, some browser
+ * PUTs) falls back to the objectKey's extension — never a guess at the raw bytes.
+ */
+export function roleFileParseable(
+  contentType: string | undefined,
+  objectKey: string,
+  role: NonNullable<RequiredDoc['role']> = 'memberDatabase',
+): boolean {
+  const rule = ROLE_PARSEABLE[role];
+  if (contentType) return rule.mimes.has(contentType);
+  const ext = objectKey.split('.').pop()?.toLowerCase();
+  return !!ext && rule.extensions.has(ext);
+}
+
+/**
+ * The ONE file a role consumer (intake classification, roster parse, committee extract,
+ * the operator committee preview) should read from a role doc's docMeta — whatever
+ * historical shape it's stored in (normalizeDocMeta).
+ *
+ * A role doc can be multi-file, and the operator's "replace member database" flow
+ * APPENDS (bulk-commit semantics), so `files[0]` is the OLDEST file — reading it silently
+ * re-parsed the stale workbook after every replace. Pick instead:
+ *   1. the most recently uploaded file the role can parse (roleFileParseable), else
+ *   2. the most recently uploaded file of any type (so the consumer reports the real
+ *      "not a spreadsheet" reason for what the club actually sent last), else
+ *   3. files[0].
+ * "Most recent" is by `uploadedAt` (ISO strings compare lexically); a tie or a missing
+ * stamp falls back to array order, later entries being later appends. Only files with an
+ * objectKey are candidates. Returns undefined when nothing is stored.
+ */
+export function roleSourceFile(
+  meta: unknown,
+  role: NonNullable<RequiredDoc['role']>,
+): DocFileEntry | undefined {
+  const files = normalizeDocMeta(meta).files;
+  const stored = files
+    .map((f, i) => ({ f, i }))
+    .filter(({ f }) => !!f?.objectKey)
+    .sort((a, b) => {
+      const at = a.f.uploadedAt ?? '';
+      const bt = b.f.uploadedAt ?? '';
+      if (at !== bt) return at < bt ? 1 : -1;
+      return b.i - a.i;
+    })
+    .map(({ f }) => f);
+  return (
+    stored.find((f) => roleFileParseable(f.contentType, f.objectKey, role)) ?? stored[0] ?? files[0]
+  );
+}
+
+/**
  * Re-wrap normalized state as the stored docMeta value. `extra` carries the club-set
- * "course booked" flag + date so a generic merge or an append/delete recompute can't
- * strip it; both ride through only when truthy (the canonical course-booked shape is
- * `{ files, courseBooked: true, courseDate, at }`).
+ * declarations so a generic merge or an append/delete/intake recompute can't strip them:
+ * the "course booked" flag + date, and the "unavailable" declaration. Each rides through
+ * only when truthy (canonical shapes: `{ files, courseBooked: true, courseDate, at }` and
+ * `{ files, unavailable: true, at }`). Call sites pass the NormalizedDocMeta itself as
+ * `extra`, so a new declaration added to the normalized shape is carried everywhere.
  */
 export function docMetaValue(
   files: DocFileEntry[],
   markedCompliant: boolean,
   at?: string,
-  extra?: { courseBooked?: boolean; courseDate?: string },
+  extra?: { courseBooked?: boolean; courseDate?: string; unavailable?: boolean },
 ): Record<string, unknown> {
   const value: Record<string, unknown> = markedCompliant
     ? { files, markedCompliant: true, at }
     : { files };
   if (extra?.courseBooked) value.courseBooked = true;
   if (extra?.courseDate) value.courseDate = extra.courseDate;
+  if (extra?.unavailable) {
+    value.unavailable = true;
+    if (at) value.at = at;
+  }
   return value;
 }
 

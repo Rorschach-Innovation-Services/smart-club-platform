@@ -383,6 +383,7 @@ export function validateRequiredDocs(docs: unknown): asserts docs is RequiredDoc
       'allowMeetingBooked',
       'allowCourseBooked',
       'archived',
+      'optional',
     ]) {
       if (d[flag] !== undefined && typeof d[flag] !== 'boolean')
         throw new HttpError(400, `document "${key}": ${flag} must be a boolean`);

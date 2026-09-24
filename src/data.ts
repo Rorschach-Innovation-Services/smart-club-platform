@@ -562,15 +562,21 @@ export function roleAssigned(docs: RequiredDoc[], role: DocRole): boolean {
 
 // ── Compliance document file types ──
 // Every uploadable format → its exact MIME type. Word covers Google Docs (which exports
-// .docx/.pdf); the spreadsheet trio serves catalogues whose docs are filled-in workbooks.
+// .docx/.pdf); the spreadsheet trio serves catalogues whose docs are filled-in workbooks;
+// odt + the image trio (phone photos/scans of paper forms) are opt-in per doc via
+// `accepts`. jpg precedes jpeg so extFromMime('image/jpeg') resolves to 'jpg'.
 // Mirrored server-side in packages/api/src/catalogue.ts DOC_FORMAT_MIME.
 export const DOC_FORMAT_MIME = {
   pdf: 'application/pdf',
   doc: 'application/msword',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  odt: 'application/vnd.oasis.opendocument.text',
   xls: 'application/vnd.ms-excel',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   ods: 'application/vnd.oasis.opendocument.spreadsheet',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
 };
 // The legacy accepted set — the default when a doc definition declares no `accepts`.
 export const DEFAULT_DOC_FORMATS = ['pdf', 'doc', 'docx'];
@@ -667,10 +673,38 @@ export function docPreviewKind(meta): DocPreviewKind {
 // definition can't drift across call sites. Driven by the tenant's catalogue (default:
 // the shared list), skip archived entries, and tolerate clubs whose `docs` object
 // predates a newly-added key (treated as missing).
+//
+// `optional` records (archive material a tenant wants on file — disciplinary records,
+// correspondence) stay in activeDocs, so every upload/view surface renders them, but are
+// dropped here: they never count towards "N of M", completion %, or any gate.
+/** The active docs that count towards completion — activeDocs minus `optional` records. */
+export const completionDocs = (docs) => activeDocs(docs).filter((d) => !d.optional);
 export const docsUploadedCount = (club, docs = DEFAULT_REQUIRED_DOCS) =>
-  activeDocs(docs).filter((d) => club.docs?.[d.key]).length;
+  completionDocs(docs).filter((d) => club.docs?.[d.key]).length;
 export const docsAllComplete = (club, docs = DEFAULT_REQUIRED_DOCS) =>
-  activeDocs(docs).every((d) => !!club.docs?.[d.key]);
+  completionDocs(docs).every((d) => !!club.docs?.[d.key]);
+
+/**
+ * Whether the tenant's ACTIVE catalogue defines `exco` as an on-platform form doc — the
+ * only case in which submitting the affiliation form (which captures the committee)
+ * satisfies a compliance doc. Mirror of the server's `excoIsFormDoc` gate on POST
+ * /clubs/:id/exco. A tenant with no exco entry must never be sent `docs.exco`: the
+ * server's doc-key allowlist rejects unknown keys, 400ing the whole submit.
+ */
+export const excoIsFormDoc = (docs = DEFAULT_REQUIRED_DOCS) =>
+  activeDocs(docs).some((d) => d.key === 'exco' && d.kind === 'form');
+
+/**
+ * The `docs` patch an affiliation submit should carry: the club's docs with exco flipped
+ * complete when (and only when) exco is a form doc in this catalogue, else `undefined`
+ * (omit `docs` from the patch entirely — nothing on the form satisfies a doc).
+ */
+export function affiliationSubmitDocs(
+  clubDocs: Record<string, boolean> | undefined,
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
+): Record<string, boolean> | undefined {
+  return excoIsFormDoc(requiredDocs) ? { ...(clubDocs ?? {}), exco: true } : undefined;
+}
 
 // ── Safeguarding: multi-file document (one certificate per person, min 2 people) ──
 // Canonical docMeta.safeguarding shape: { files: [{objectKey, size, contentType?,
@@ -685,22 +719,27 @@ export const MIN_SAFEGUARDING_FILES = 2;
  *  - missing/null → empty files, no flag
  */
 export function safeguardingMeta(meta) {
+  // `unavailable` mirrors the server's NormalizedDocMeta: the club's declaration rides
+  // through every re-wrap. Whether it still satisfies the doc is unavailableDeclared's call.
   const base = {
     files: [],
     markedCompliant: false,
     courseBooked: false,
     courseDate: '',
+    unavailable: false,
     at: undefined,
   };
   if (!meta) return base;
   const courseBooked = !!meta.courseBooked;
   const courseDate = meta.courseDate || '';
+  const unavailable = !!meta.unavailable;
   if (Array.isArray(meta.files)) {
     return {
       files: meta.files,
       markedCompliant: !!meta.markedCompliant,
       courseBooked,
       courseDate,
+      unavailable,
       at: meta.at,
     };
   }
@@ -711,12 +750,15 @@ export function safeguardingMeta(meta) {
       markedCompliant: !!meta.markedCompliant,
       courseBooked,
       courseDate,
+      unavailable,
+      ...(unavailable ? { at: meta.at } : {}),
     };
   return {
     files: [],
     markedCompliant: !!meta.markedCompliant,
     courseBooked,
     courseDate,
+    unavailable,
     at: meta.at,
   };
 }
@@ -734,6 +776,11 @@ export function safeguardingSatisfied(meta, minFiles = MIN_SAFEGUARDING_FILES) {
 
 /** Effective file minimum for a multi-file doc definition (legacy default: 2). */
 export const docMinFiles = (doc) => doc?.minFiles ?? MIN_SAFEGUARDING_FILES;
+
+/** Stored-file cap for a multi-file doc absent `maxFiles` (server MAX_SAFEGUARDING_FILES). */
+export const MAX_SAFEGUARDING_FILES = 10;
+/** Effective file cap for a multi-file doc definition — the append route 4xxs past it. */
+export const docMaxFiles = (doc) => doc?.maxFiles ?? MAX_SAFEGUARDING_FILES;
 
 // ── AGM Minutes: "we haven't held our AGM yet" → record a future meeting date ──
 // A club with no minutes to upload declares the date the AGM will be held. Mirrors the
@@ -984,20 +1031,84 @@ export const GOVERNANCE_KEYS = [
   'playerdb',
 ];
 
-/** The seven governance answers derived from a club's documents and records. */
-export function deriveGovernance(club: Partial<Club>): Record<string, boolean> {
+/**
+ * Which compliance doc key backs each document-derived governance check, resolved against
+ * the tenant's ACTIVE catalogue (null ⇒ the catalogue has nothing to back it, so the check
+ * drops out of scoring). `inventory` and `playerdb` have no doc backing and always apply.
+ *
+ * With no catalogue argument this returns the legacy hardwired keys, and for the shared
+ * DEFAULT catalogue it resolves to exactly those same keys — default-tenant scoring is
+ * unchanged.
+ */
+export function governanceBacking(requiredDocs?: RequiredDoc[]): {
+  constitution: string | null;
+  codeOfConduct: string | null;
+  agm: string | null;
+  officers: string | null;
+} {
+  if (!Array.isArray(requiredDocs)) {
+    return {
+      constitution: 'constitution',
+      codeOfConduct: 'codeOfConduct',
+      agm: 'agm',
+      officers: 'exco',
+    };
+  }
+  const active = activeDocs(requiredDocs);
+  const has = (k: string) => active.some((d) => d.key === k);
+  return {
+    constitution: has('constitution') ? 'constitution' : null,
+    codeOfConduct: has('codeOfConduct') ? 'codeOfConduct' : null,
+    agm: has('agm') ? 'agm' : has('agmMinutes') ? 'agmMinutes' : null,
+    // Officers: the on-platform exco form, else a file doc carrying the committee role.
+    officers: excoIsFormDoc(requiredDocs)
+      ? 'exco'
+      : (active.find((d) => d.role === 'committee')?.key ?? null),
+  };
+}
+
+/**
+ * Governance question keys the tenant's catalogue cannot back — excluded from BOTH the
+ * earned and possible points (pass to scoreCQI's `skip`), so a tenant is never penalised
+ * for a document it doesn't ask clubs for. Empty for the default catalogue and for no
+ * catalogue at all.
+ */
+export function governanceSkipKeys(requiredDocs?: RequiredDoc[]): Set<string> {
+  const b = governanceBacking(requiredDocs);
+  const skip = new Set<string>();
+  if (!b.constitution) skip.add('constitution');
+  if (!b.codeOfConduct) skip.add('codeOfConduct');
+  if (!b.agm) {
+    skip.add('agmConducted');
+    skip.add('agmMinutes');
+  }
+  if (!b.officers) skip.add('officers');
+  return skip;
+}
+
+/**
+ * The seven governance answers derived from a club's documents and records. Pass the
+ * tenant's catalogue so each check reads its catalogue-resolved backing key (see
+ * governanceBacking); an unbacked check derives false and is skipped by scoring.
+ */
+export function deriveGovernance(
+  club: Partial<Club>,
+  requiredDocs?: RequiredDoc[],
+): Record<string, boolean> {
   const docs = club?.docs || {};
   const playerCount = club?.players ?? club?.playerCount ?? 0;
+  const b = governanceBacking(requiredDocs);
+  const flag = (key: string | null) => (key ? !!docs[key] : false);
   return {
-    constitution: !!docs.constitution,
-    codeOfConduct: !!docs.codeOfConduct,
+    constitution: flag(b.constitution),
+    codeOfConduct: flag(b.codeOfConduct),
     // No standalone source — admin inventory is maintained on-platform via the affiliation
     // form and roster, so it's treated as in place (editable if a club disagrees).
     inventory: true,
     // docs.agm is satisfied by uploaded minutes OR a booked AGM meeting date.
-    agmConducted: !!docs.agm,
-    officers: !!docs.exco,
-    agmMinutes: !!docs.agm,
+    agmConducted: flag(b.agm),
+    officers: flag(b.officers),
+    agmMinutes: flag(b.agm),
     playerdb: playerCount > 0,
   };
 }
@@ -1029,8 +1140,11 @@ export function genuineCqiAnswers(club: Partial<Club>): Record<string, any> {
  * governanceOverrides), untouched governance answers keep tracking the documents live — so
  * every consumer that scores or renders answers must read through this, not raw cqiAnswers.
  */
-export function effectiveAnswers(club: Partial<Club>): Record<string, any> {
-  return { ...deriveGovernance(club), ...genuineCqiAnswers(club) };
+export function effectiveAnswers(
+  club: Partial<Club>,
+  requiredDocs?: RequiredDoc[],
+): Record<string, any> {
+  return { ...deriveGovernance(club, requiredDocs), ...genuineCqiAnswers(club) };
 }
 
 /**
@@ -1046,8 +1160,9 @@ export function effectiveAnswers(club: Partial<Club>): Record<string, any> {
 export function governanceOverrides(
   answers: Record<string, any>,
   club: Partial<Club>,
+  requiredDocs?: RequiredDoc[],
 ): Record<string, any> {
-  const derived: Record<string, any> = deriveGovernance(club);
+  const derived: Record<string, any> = deriveGovernance(club, requiredDocs);
   const out: Record<string, any> = { ...answers };
   for (const k of GOVERNANCE_KEYS) {
     if (out[k] === derived[k]) delete out[k];
@@ -1071,14 +1186,34 @@ export function cohortStats(clubs, requiredDocs = DEFAULT_REQUIRED_DOCS) {
 }
 
 export function docCompletion(club, docs = DEFAULT_REQUIRED_DOCS) {
-  const active = activeDocs(docs);
-  if (!active.length) return 100; // a tenant with no required docs is trivially complete
-  return Math.round((docsUploadedCount(club, docs) / active.length) * 100);
+  const counted = completionDocs(docs);
+  // A tenant with no required docs (or only optional records) is trivially complete.
+  if (!counted.length) return 100;
+  return Math.round((docsUploadedCount(club, docs) / counted.length) * 100);
 }
 
 // ── Reversible "Mark as compliant" — pure doc/meta computation ──
 // Kept here (UI-free) so the override-safety invariants can be unit-tested.
 // `at` is passed in (not generated) to keep these deterministic.
+
+/**
+ * A club's "we don't have this" declaration (the `allowUnavailable` escape hatch): the
+ * sentinel `docMeta[key].unavailable`, stamped by computeDocUnavailable, which also sets
+ * `docs[key] = true`. It is a CLUB self-declaration, never an admin override.
+ *
+ * Honored only while the catalogue still grants the hatch (`def.allowUnavailable`) — a
+ * key retired from the catalogue (no def) keeps its history, matching validateClubPatch's
+ * "history can't be retro-tightened" rule. A sentinel the catalogue no longer permits is
+ * STALE (see unavailableStale): it no longer justifies the doc, so the admin Revert path
+ * is how it gets cleaned up.
+ */
+export function unavailableDeclared(meta, def?: RequiredDoc): boolean {
+  return !!meta?.unavailable && (!def || !!def.allowUnavailable);
+}
+/** A stored unavailable sentinel on a doc whose catalogue entry no longer allows one. */
+export function unavailableStale(meta, def?: RequiredDoc): boolean {
+  return !!meta?.unavailable && !!def && !def.allowUnavailable;
+}
 
 // Mark `keys` compliant. Sets each doc true and stamps a {markedCompliant}
 // sentinel — EXCEPT docs that already have a real uploaded file (objectKey),
@@ -1091,6 +1226,10 @@ export function computeMarkCompliance(club, keys, at, requiredDocs = DEFAULT_REQ
   const flipped = [];
   for (const k of keys) {
     const def = requiredDocs.find((d) => d.key === k);
+    // A club's own "unavailable" declaration already satisfies the doc — leave it as-is,
+    // like a booked course, so a later Revert has no admin override to unpick and the
+    // declaration survives untouched.
+    if (unavailableDeclared(club.docMeta?.[k], def)) continue;
     // Multi-file behavior comes from the definition, or — for a key retired from the
     // catalogue — from the stored meta shape (a files[] array only ever comes from the
     // multi-file path).
@@ -1170,6 +1309,37 @@ export function computeRevertCompliance(club, keys, requiredDocs = DEFAULT_REQUI
     const m = docMeta[k];
     const def = requiredDocs.find((d) => d.key === k);
     const multi = def ? !!def.multiFile : Array.isArray(m?.files);
+    if (m?.unavailable) {
+      if (unavailableDeclared(m, def)) {
+        // The club's own declaration is not an admin override — Revert never strips it.
+        // Only a markedCompliant stamped alongside it (legacy data: the admin marked the
+        // doc compliant on top of the declaration) is removable; the declaration, its
+        // `at`, and any files ride through, and the doc stays complete.
+        if (!m.markedCompliant) continue;
+        const { markedCompliant: _mc, ...rest } = m;
+        docMeta[k] = rest;
+        docs[k] = true;
+        reverted.push(k);
+        continue;
+      }
+      // Stale sentinel (the catalogue withdrew allowUnavailable): it no longer justifies
+      // the doc, so strip it (and any override beside it) and re-derive from uploads.
+      if (multi) {
+        const norm = safeguardingMeta(m);
+        docs[k] = norm.files.length >= docMinFiles(def);
+        if (norm.files.length) docMeta[k] = { files: norm.files };
+        else delete docMeta[k];
+      } else if (m.objectKey) {
+        const { unavailable: _u, markedCompliant: _mc, at: _at, ...rest } = m;
+        docMeta[k] = rest;
+        docs[k] = true;
+      } else {
+        docs[k] = false;
+        delete docMeta[k];
+      }
+      reverted.push(k);
+      continue;
+    }
     if (multi) {
       const norm = safeguardingMeta(m);
       // A booked course is a club self-declaration, not an admin override —

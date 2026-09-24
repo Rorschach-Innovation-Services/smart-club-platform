@@ -12,7 +12,7 @@
 import { Fragment, useState as useStateA } from 'react';
 import { useCopy } from './branding';
 import { KPI, CountUp, EmptyState, Icon, Btn } from './atoms';
-import { DEFAULT_REQUIRED_DOCS, activeDocs } from './data';
+import { DEFAULT_REQUIRED_DOCS, completionDocs } from './data';
 import { exportSheetsToXlsx } from './exportXlsx';
 import {
   teamCounts,
@@ -210,7 +210,9 @@ export function docComplianceRows(
   clubs: InsightsClub[],
   requiredDocs: RequiredDoc[] = DEFAULT_REQUIRED_DOCS,
 ) {
-  const docStats = activeDocs(requiredDocs).map((d) => {
+  // Only docs that count towards completion: an optional record (archive material) is
+  // never "missing", so it must not surface as the most-missing requirement.
+  const docStats = completionDocs(requiredDocs).map((d) => {
     const uploaded = clubs.filter((c) => c.docs?.[d.key]).length;
     const pct = clubs.length ? Math.round((uploaded / clubs.length) * 100) : 0;
     return { key: d.key, name: d.name, count: uploaded, total: clubs.length, pct };
@@ -602,17 +604,20 @@ interface InsightsBreakdownProps {
   leagues: League[];
   districts: string[];
   clearances: Array<{ status: ClearanceStatus }>;
-  /** 'operator' notes the standard doc set on the compliance card. */
+  /**
+   * 'operator' notes on the compliance card when it is falling back to the standard doc
+   * set (an older backend whose overview payload carries no catalogue).
+   */
   context?: 'admin' | 'operator';
   /** When set, league rows become clickable and open the league drill-down. */
   onOpenLeague?: (key: string) => void;
   /** Anonymised demographics; the card is skipped while undefined (loading/old backend). */
   demographics?: DemographicsResponse;
   /**
-   * The tenant's compliance-doc catalogue (ADR 0009). Absent ⇒ the shared default list —
-   * the operator's cross-tenant overview never has a single tenant's catalogue to hand,
-   * so it keeps rendering the "standard doc set" (context === 'operator' already labels
-   * this on the card).
+   * The tenant's compliance-doc catalogue (ADR 0009). The admin dashboard passes its own
+   * tenant's; the operator per-client overview passes the one its payload now carries
+   * (TenantOverview.requiredDocs). Absent ⇒ the shared default list — only reachable on
+   * deploy skew (an older backend), which the operator card labels "standard doc set".
    */
   requiredDocs?: RequiredDoc[];
   /**
@@ -631,9 +636,10 @@ export function InsightsBreakdown({
   context = 'admin',
   onOpenLeague,
   demographics,
-  requiredDocs = DEFAULT_REQUIRED_DOCS,
+  requiredDocs: requiredDocsProp,
   series = [],
 }: InsightsBreakdownProps) {
+  const requiredDocs = requiredDocsProp ?? DEFAULT_REQUIRED_DOCS;
   if (!clubs.length)
     return (
       <EmptyState
@@ -868,7 +874,8 @@ export function InsightsBreakdown({
           <div className="insights-card-head">
             <div className="insights-card-title">Document Compliance</div>
             <div className="insights-card-meta">
-              of {clubs.length} clubs{context === 'operator' ? ' · standard doc set' : ''}
+              of {clubs.length} clubs
+              {context === 'operator' && !requiredDocsProp ? ' · standard doc set' : ''}
             </div>
           </div>
           {docStats.map((d) => (

@@ -484,3 +484,34 @@ describe('doc routes under a custom catalogue (ADR 0009)', () => {
     });
   });
 });
+
+describe('file-delete recompute keeps a club "unavailable" declaration', () => {
+  const at = '2026-08-01T00:00:00.000Z';
+  before(async () => {
+    await repo.createClub(CUSTOM_TENANT, {
+      ...baseClub('declaredcc'),
+      docs: { facilityAgreement: true },
+      docMeta: {
+        facilityAgreement: {
+          files: [{ objectKey: 'local/declared-1.pdf', size: 10, uploadedAt: at }],
+          unavailable: true,
+          at,
+        },
+      },
+    } as Club);
+  });
+
+  test('deleting the last file leaves the declaration and the doc complete', async () => {
+    const del = await app.request('/clubs/declaredcc/docs/facilityAgreement/file', {
+      method: 'DELETE',
+      headers: headers(ADMIN, CUSTOM_TENANT),
+      body: JSON.stringify({ objectKey: 'local/declared-1.pdf' }),
+    });
+    assert.equal(del.status, 200);
+    const club = (await repo.getClub(CUSTOM_TENANT, 'declaredcc')) as Club & {
+      docMeta: Record<string, { files: unknown[]; unavailable?: boolean; at?: string }>;
+    };
+    assert.deepEqual(club.docMeta.facilityAgreement, { files: [], unavailable: true, at });
+    assert.equal(club.docs.facilityAgreement, true);
+  });
+});

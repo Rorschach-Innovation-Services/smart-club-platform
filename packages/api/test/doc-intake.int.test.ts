@@ -55,6 +55,16 @@ const CATALOGUE: RequiredDoc[] = [
   },
   { key: 'exco', name: 'Executive committee', kind: 'form' },
   { key: 'archivedDoc', name: 'Archived doc', archived: true },
+  // Multi-file with the unavailable escape hatch — a club's declaration must survive an
+  // operator intake commit onto it.
+  {
+    key: 'fees',
+    name: 'Affiliation fees',
+    multiFile: true,
+    minFiles: 2,
+    maxFiles: 4,
+    allowUnavailable: true,
+  },
 ];
 
 const baseClub = (id: string): Club =>
@@ -469,6 +479,47 @@ describe('POST /platform/tenants/:slug/doc-intake/commit', () => {
   });
 });
 
+describe('doc-intake commit onto a club-declared "unavailable" multi-file doc', () => {
+  const at = '2026-08-01T00:00:00.000Z';
+  before(async () => {
+    await repo.createClub(TENANT, {
+      ...baseClub('declaredA'),
+      docs: { fees: true },
+      docMeta: { fees: { files: [], unavailable: true, at } },
+    } as Club);
+  });
+
+  test('keeps the declaration and the completion (below minFiles) while appending the file', async () => {
+    const res = await app.request(`/platform/tenants/${TENANT}/doc-intake/commit`, {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        items: [
+          {
+            clubId: 'declaredA',
+            docKey: 'fees',
+            objectKey: 'local/declaredA/fees-1.pdf',
+            size: 10,
+            contentType: 'application/pdf',
+            sourceName: 'fees1.pdf',
+          },
+        ],
+      }),
+    });
+    assert.equal(res.status, 200);
+    const { clubs } = (await res.json()) as { clubs: Array<{ ok: boolean }> };
+    assert.equal(clubs[0].ok, true);
+    const club = (await repo.getClub(TENANT, 'declaredA')) as Club & {
+      docMeta: Record<string, { files: unknown[]; unavailable?: boolean; at?: string }>;
+    };
+    assert.equal(club.docMeta.fees.files.length, 1);
+    assert.equal(club.docMeta.fees.unavailable, true, 'declaration survives the rebuild');
+    assert.equal(club.docMeta.fees.at, at);
+    // 1 file < minFiles 2 — still complete, because the declaration satisfies it.
+    assert.equal(club.docs.fees, true);
+  });
+});
+
 describe('POST /platform/tenants/:slug/clubs', () => {
   test('happy path creates a club seeded from the tenant catalogue (archived excluded, form key included)', async () => {
     const res = await app.request(`/platform/tenants/${TENANT}/clubs`, {
@@ -481,7 +532,12 @@ describe('POST /platform/tenants/:slug/clubs', () => {
     assert.equal(club.id, 'operator-created-cc');
     assert.equal(club.name, 'Operator Created CC');
     assert.equal(club.district, 'Test District');
-    assert.deepEqual(club.docs, { committee: false, safeguarding: false, exco: false });
+    assert.deepEqual(club.docs, {
+      committee: false,
+      safeguarding: false,
+      exco: false,
+      fees: false,
+    });
     // No chair/membership/Cognito provisioning — the affiliation seed stays empty.
     assert.equal(club.chair, '');
     assert.equal(club.affiliation, 'not_started');

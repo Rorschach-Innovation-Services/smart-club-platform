@@ -2,7 +2,13 @@
 
 import { useState as useStateOb } from 'react';
 import { Icon, Btn, useEscapeClose } from './atoms';
-import { DEFAULT_REQUIRED_DOCS, activeDocs, formatDeadlineLong, formatDeadlineMid } from './data';
+import {
+  DEFAULT_REQUIRED_DOCS,
+  activeDocs,
+  completionDocs,
+  formatDeadlineLong,
+  formatDeadlineMid,
+} from './data';
 import { useCopy } from './branding';
 
 export function Onboarding({
@@ -147,9 +153,15 @@ function StepWelcome({ club, deadlineLong }) {
 function StepSubmissions({ deadlineLong, requiredDocs = DEFAULT_REQUIRED_DOCS }) {
   // The doc list is driven by the tenant's catalogue (ADR 0009) — a legacy tenant (no
   // custom requiredDocs) reproduces the same six names in the same order as before.
-  const docNames = activeDocs(requiredDocs)
+  // Only docs that count towards completion are named; optional records get a generic
+  // trailing note instead, so the walkthrough never implies they are required.
+  const docNames = completionDocs(requiredDocs)
     .map((d) => d.name)
     .join(' · ');
+  const optionalCount = activeDocs(requiredDocs).filter((d) => d.optional).length;
+  const docsCopy =
+    (docNames ? `${docNames} (max 10 MB each).` : 'No documents are required for your club.') +
+    (optionalCount ? ' Optional records can be kept on file too.' : '');
   const items = [
     {
       i: <Icon.Form />,
@@ -160,7 +172,7 @@ function StepSubmissions({ deadlineLong, requiredDocs = DEFAULT_REQUIRED_DOCS })
     {
       i: <Icon.Upload />,
       t: 'Compliance documents',
-      d: `${docNames} (max 10 MB each).`,
+      d: docsCopy,
       tag: '~ 3 min',
     },
     {

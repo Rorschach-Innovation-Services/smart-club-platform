@@ -170,10 +170,12 @@ describe('OnboardingPage', () => {
     renderPage();
     await screen.findByRole('heading', { name: /client onboarding/i });
 
+    // Only the roles the catalogue uses are needed: member database alone completes the
+    // step (no committee demand), and the progress line names what IS assigned.
     const catalogueCard = screen.getByText('Document catalogue').closest('.card')!;
-    expect(catalogueCard).toHaveTextContent(
-      'No document in the catalogue is marked as the committee document — assign the role in Required documents.',
-    );
+    expect(catalogueCard).toHaveTextContent('Done');
+    expect(catalogueCard).toHaveTextContent('1 active document · roles: member database');
+    expect(catalogueCard).not.toHaveTextContent(/committee document — assign/);
 
     // Roster gate reads the member-database role alone, not "both roles assigned".
     const rostersCard = screen.getByText('Rosters in').closest('.card')!;
@@ -184,6 +186,25 @@ describe('OnboardingPage', () => {
       /Assign the committee role in the catalogue step to enable extraction/,
     );
     expect(repsCard.querySelector('button')).not.toBeDisabled();
+  });
+
+  it('completes the catalogue step for a catalogue that uses neither role (N/A)', async () => {
+    const docs: RequiredDoc[] = [
+      { key: 'constitution', name: 'Club constitution' },
+      { key: 'records', name: 'Club records', optional: true },
+    ];
+    vi.mocked(api.platformGetTenant).mockResolvedValue({ ...BASE_CONFIG, requiredDocs: docs });
+    vi.mocked(api.platformTenantOverview).mockResolvedValue(BASE_OVERVIEW);
+    vi.mocked(api.platformTenantReps).mockResolvedValue(EMPTY_REPS);
+
+    renderPage();
+    await screen.findByRole('heading', { name: /client onboarding/i });
+
+    const catalogueCard = screen.getByText('Document catalogue').closest('.card')!;
+    expect(catalogueCard).toHaveTextContent('Done');
+    expect(catalogueCard).toHaveTextContent('2 active documents · roles: none used (N/A)');
+    expect(catalogueCard).not.toHaveTextContent(/assign/i);
+    expect(catalogueCard).not.toHaveTextContent('Up next');
   });
 
   it('shows the shared-defaults copy on the catalogue step when requiredDocs is unset', async () => {
@@ -197,8 +218,8 @@ describe('OnboardingPage', () => {
 
     const catalogueCard = screen.getByText('Document catalogue').closest('.card')!;
     expect(catalogueCard).toHaveTextContent(
-      'Shared defaults are in effect — save the catalogue (customising if needed) and assign ' +
-        'the member-database and committee roles.',
+      'Shared defaults are in effect — save the catalogue (customising if needed), and mark ' +
+        'the member-database and committee documents if this client supplies them.',
     );
     expect(catalogueCard).not.toHaveTextContent(/Nothing in the catalogue yet/);
   });

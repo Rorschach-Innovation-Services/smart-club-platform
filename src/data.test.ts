@@ -145,6 +145,7 @@ describe('safeguardingMeta', () => {
       markedCompliant: false,
       courseBooked: false,
       courseDate: '',
+      unavailable: false,
       at: undefined,
     });
   });
@@ -156,6 +157,7 @@ describe('safeguardingMeta', () => {
       markedCompliant: false,
       courseBooked: false,
       courseDate: '',
+      unavailable: false,
     });
   });
 
@@ -165,6 +167,7 @@ describe('safeguardingMeta', () => {
       markedCompliant: true,
       courseBooked: false,
       courseDate: '',
+      unavailable: false,
       at: '2026-01-01',
     });
   });
@@ -176,6 +179,19 @@ describe('safeguardingMeta', () => {
       markedCompliant: true,
       courseBooked: false,
       courseDate: '',
+      unavailable: false,
+      at: 'T',
+    });
+  });
+
+  it('surfaces a club unavailable declaration alongside any files', () => {
+    const files = [{ objectKey: 'a' }];
+    expect(safeguardingMeta({ files, unavailable: true, at: 'T' })).toEqual({
+      files,
+      markedCompliant: false,
+      courseBooked: false,
+      courseDate: '',
+      unavailable: true,
       at: 'T',
     });
   });
@@ -186,6 +202,7 @@ describe('safeguardingMeta', () => {
       markedCompliant: false,
       courseBooked: true,
       courseDate: '2026-09-01',
+      unavailable: false,
       at: undefined,
     });
     expect(safeguardingSatisfied({ files: [], courseBooked: true, courseDate: '2026-09-01' })).toBe(

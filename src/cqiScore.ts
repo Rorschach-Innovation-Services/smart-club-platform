@@ -17,8 +17,13 @@ export function cqiBand(score: number) {
 /* CQI live scoring — mirrors the spreadsheet weighting model.
    Each question contributes its `pts` value, scaled by yes/no or by num/max.
    Section total = sum of pts (which roughly equals the section weight),
-   we then proportion to the section weight and total to 100. */
-export function scoreCQI(answers: Record<string, any>) {
+   we then proportion to the section weight and total to 100.
+
+   `skip` lists question keys that don't apply to this club's tenant (governance checks
+   its compliance catalogue can't back — see governanceSkipKeys in data.ts). A skipped
+   question leaves BOTH earned and possible, so the section renormalizes over the
+   questions that do apply. Omitted/empty ⇒ every question scores (unchanged). */
+export function scoreCQI(answers: Record<string, any>, skip?: ReadonlySet<string>) {
   let totalScore = 0;
   const byCat: Record<string, { earned: number; possible: number }> = {};
   for (const cat of CQI_STRUCTURE) {
@@ -31,6 +36,7 @@ export function scoreCQI(answers: Record<string, any>) {
       .filter((q) => q.kind === 'count')
       .reduce((s, q) => s + (parseFloat(answers[q.key]) || 0), 0);
     for (const q of cat.questions) {
+      if (skip?.has(q.key)) continue;
       possible += q.pts;
       const v = answers[q.key];
       if (q.kind === 'yn') {

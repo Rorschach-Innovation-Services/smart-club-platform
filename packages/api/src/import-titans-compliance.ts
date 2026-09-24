@@ -37,6 +37,7 @@ import {
   multiFileLimits,
   normalizeDocMeta,
   docMetaValue,
+  unavailableDeclared,
   OVERARCHING_DISTRICT,
   type DocFileEntry,
   type NormalizedDocMeta,
@@ -896,13 +897,14 @@ function buildDocMetaValue(
   norm: NormalizedDocMeta,
 ): unknown {
   if (MULTI_FILE_DOC_KEYS.has(docKey)) {
-    return docMetaValue(files, norm.markedCompliant, norm.at, {
-      courseBooked: norm.courseBooked,
-      courseDate: norm.courseDate,
-    });
+    // `norm` as the extra: course booking AND a club's unavailable declaration ride
+    // through a re-run merge, exactly as on the routes.
+    return docMetaValue(files, norm.markedCompliant, norm.at, norm);
   }
   // Single-file: exactly one entry (dedupeGroup + the clash check below enforce this),
   // still carrying markedCompliant/at forward if an admin had set them.
+  // A club's unavailable declaration is deliberately NOT carried here: a real file
+  // supersedes a single-file declaration (the portal and record route treat it so).
   const only = files[files.length - 1];
   return norm.markedCompliant ? { ...only, markedCompliant: true, at: norm.at } : only;
 }
@@ -1069,7 +1071,11 @@ async function runDocUploadPhase(
       const { min } = multiFileLimits(defByKey.get(docKey));
       const docs = {
         ...club.docs,
-        [docKey]: norm.markedCompliant || norm.courseBooked || merged.length >= min,
+        [docKey]:
+          norm.markedCompliant ||
+          norm.courseBooked ||
+          (MULTI_FILE_DOC_KEYS.has(docKey) && unavailableDeclared(norm, defByKey.get(docKey))) ||
+          merged.length >= min,
       };
       // Single-file re-run with changed bytes: unionDocFiles keeps every distinct
       // objectKey (content-addressed, so a changed pack file mints a new key), but

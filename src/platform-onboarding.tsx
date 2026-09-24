@@ -71,10 +71,16 @@ export function buildOnboardingSteps(
   const activeDocsCount = requiredDocs.filter((d) => !d.archived).length;
   const memberDbAssigned = roleAssigned(requiredDocs, 'memberDatabase');
   const committeeAssigned = roleAssigned(requiredDocs, 'committee');
-  const rolesAssigned = memberDbAssigned && committeeAssigned;
-  const catalogueDone = activeDocsCount > 0 && rolesAssigned;
-  const catalogueState: StepState =
-    activeDocsCount === 0 ? 'todo' : catalogueDone ? 'done' : 'partial';
+  // Roles are only required where the client's catalogue actually uses them: a tenant
+  // whose pack has no member database or committee list (e.g. a union-side compliance
+  // pack) is fully configured once it has documents. The downstream roster/reps steps
+  // carry their own role hints and locks, so nothing here needs to force an assignment.
+  const catalogueDone = activeDocsCount > 0;
+  const catalogueState: StepState = catalogueDone ? 'done' : 'todo';
+  const assignedRoles = [
+    memberDbAssigned ? 'member database' : null,
+    committeeAssigned ? 'committee list' : null,
+  ].filter(Boolean);
 
   // Effective districts: the explicit config value when present (including a deliberate
   // [] on a freshly created client), else the shared defaults — same fallback the rest
@@ -156,19 +162,10 @@ export function buildOnboardingSteps(
   const completeState: StepState = config.setupCompletedAt ? 'done' : 'todo';
 
   const rolesGuidance = !catalogueDone
-    ? activeDocsCount === 0
-      ? config.requiredDocs === undefined
-        ? 'Shared defaults are in effect — save the catalogue (customising if needed) and ' +
-          'assign the member-database and committee roles.'
-        : 'Nothing in the catalogue yet — add at least one document before assigning roles.'
-      : !memberDbAssigned && !committeeAssigned
-        ? 'No document in the catalogue is marked as the member database or the committee ' +
-          'document — assign both roles in Required documents.'
-        : !memberDbAssigned
-          ? 'No document in the catalogue is marked as the member database — assign the role ' +
-            'in Required documents.'
-          : 'No document in the catalogue is marked as the committee document — assign the ' +
-            'role in Required documents.'
+    ? config.requiredDocs === undefined
+      ? 'Shared defaults are in effect — save the catalogue (customising if needed), and mark ' +
+        'the member-database and committee documents if this client supplies them.'
+      : 'Nothing in the catalogue yet — add at least one document before assigning roles.'
     : undefined;
 
   return [
@@ -176,9 +173,17 @@ export function buildOnboardingSteps(
       key: 'catalogue',
       title: 'Document catalogue',
       description:
-        'Decide what this client collects, and mark which document is the member ' +
-        'database and which is the committee list — everything downstream reads those two roles.',
+        'Decide what this client collects and, where it supplies them, mark its member ' +
+        'database and committee list — the roster and reps wizards read those two roles.',
       state: catalogueState,
+      progress: catalogueDone
+        ? {
+            label:
+              `${activeDocsCount} active document${activeDocsCount === 1 ? '' : 's'} · roles: ` +
+              (assignedRoles.length ? assignedRoles.join(', ') : 'none used (N/A)'),
+            pct: 100,
+          }
+        : undefined,
       guidance: rolesGuidance,
       actionLabel: 'Open Required documents',
       onAction: () => navigate(`/platform/tenants/${slug}`),

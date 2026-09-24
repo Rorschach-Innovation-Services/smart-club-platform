@@ -33,6 +33,9 @@ import {
   deriveGovernance,
   effectiveAnswers,
   governanceOverrides,
+  governanceSkipKeys,
+  completionDocs,
+  docMaxFiles,
   docFileMeta,
   resolveDocMime,
   extFromMime,
@@ -793,7 +796,7 @@ export function ClubHome({
                   </div>
                   <div style={{ fontSize: 11.5, color: 'var(--muted)' }}>
                     Upload your compliance documents. (
-                    {activeDocs(requiredDocs).length - docsUploadedCount(club, requiredDocs)}{' '}
+                    {completionDocs(requiredDocs).length - docsUploadedCount(club, requiredDocs)}{' '}
                     remaining)
                   </div>
                 </div>
@@ -3357,6 +3360,12 @@ export function DocumentsView({
   );
   const fileDocs = active.filter((d) => d.kind !== 'form');
   const formDocs = active.filter((d) => d.kind === 'form');
+  // What counts towards completion: optional records are listed (and uploadable) like
+  // every other active doc, but never counted — the header and KPIs say "required".
+  const counted = completionDocs(requiredDocs);
+  const requiredFileCount = counted.filter((d) => d.kind !== 'form').length;
+  const requiredFormCount = counted.filter((d) => d.kind === 'form').length;
+  const optionalCount = active.filter((d) => d.optional).length;
   // The legacy copy names PDF/Word explicitly — keep it verbatim while every active doc
   // is on the default format set; a tenant with any custom `accepts` gets generic wording.
   const defaultFormats = active.every((d) => !d.accepts);
@@ -3422,16 +3431,22 @@ export function DocumentsView({
             Required <em>compliance documents</em>
           </h1>
           <p className="ph-desc">
-            Per the 2026/27 Cricket Services Club Requirements, {fileDocs.length} document
-            {fileDocs.length === 1 ? '' : 's'} must be uploaded
-            {formDocs.length > 0 && (
+            {requiredFileCount} document{requiredFileCount === 1 ? '' : 's'} must be uploaded
+            {requiredFormCount > 0 && (
               <>
                 {' '}
-                and {formDocs.length === 1 ? 'one roster' : `${formDocs.length} rosters`} captured
-                directly on the platform
+                and {requiredFormCount === 1 ? 'one roster' : `${requiredFormCount} rosters`}{' '}
+                captured directly on the platform
               </>
             )}
             .{' '}
+            {optionalCount > 0 && (
+              <>
+                {optionalCount === 1
+                  ? 'One optional record can also be kept on file. '
+                  : `${optionalCount} optional records can also be kept on file. `}
+              </>
+            )}
             {defaultFormats
               ? 'PDF or Word documents — max 10 MB per file.'
               : 'Accepted formats vary by document — max 10 MB per file.'}
@@ -3444,12 +3459,12 @@ export function DocumentsView({
           tone="teal"
           label="Submitted"
           num={docsUploadedCount(club, requiredDocs)}
-          sub={`of ${active.length} required`}
+          sub={`of ${counted.length} required`}
         />
         <KPI
           tone="coral"
           label="Outstanding"
-          num={active.length - docsUploadedCount(club, requiredDocs)}
+          num={counted.length - docsUploadedCount(club, requiredDocs)}
           sub="needs attention"
         />
         <KPI label="Completion" num={dc + '%'} sub="overall" />
@@ -3513,10 +3528,31 @@ export function DocumentsView({
                       On-platform
                     </span>
                   )}
+                  {d.optional && (
+                    <span
+                      style={{
+                        fontSize: 9.5,
+                        marginLeft: 8,
+                        padding: '2px 7px',
+                        borderRadius: 10,
+                        background: 'rgba(10,15,20,0.08)',
+                        color: 'var(--muted)',
+                        fontFamily: "'Montserrat',sans-serif",
+                        letterSpacing: '0.1em',
+                        textTransform: 'uppercase',
+                        fontWeight: 600,
+                      }}
+                    >
+                      Optional
+                    </span>
+                  )}
                 </div>
                 <div className="doc-meta">
                   {multi ? (
-                    unavailable ? (
+                    // Files can land on a declared doc (operator bulk intake keeps the
+                    // declaration), so the declaration-only line is for the no-files case;
+                    // with files, they list first and the declaration follows below them.
+                    unavailable && !sg.files.length ? (
                       <span>
                         Marked unavailable — no document to upload ·{' '}
                         <a
@@ -3569,6 +3605,17 @@ export function DocumentsView({
                           );
                         })}
                         {sg.files.length < minFiles && !up && <span>{d.desc}</span>}
+                        {unavailable && (
+                          <span>
+                            Marked unavailable ·{' '}
+                            <a
+                              style={{ color: 'var(--teal-deep)', cursor: 'pointer' }}
+                              onClick={() => onMarkUnavailable && onMarkUnavailable(d.key, false)}
+                            >
+                              Undo
+                            </a>
+                          </span>
+                        )}
                       </span>
                     ) : sg.courseBooked ? (
                       <span>
@@ -3742,15 +3789,20 @@ export function DocumentsView({
                       is likewise exclusive with uploading — and only ever offered (below)
                       while no certificates are stored, so setting it can never discard a
                       stored file. */}
-                  {!unavailable && !sg.courseBooked && (
+                  {/* At the doc's maxFiles cap the append route would reject another
+                      file, so the add button is withdrawn (Remove frees a slot). */}
+                  {!unavailable && !sg.courseBooked && sg.files.length < docMaxFiles(d) && (
                     <DocUploadButton
                       clubId={club.id}
                       doc={d}
                       label={d.name}
                       onUploaded={onUpload}
                       toast={toast}
-                      buttonLabel="Add certificate"
+                      buttonLabel="Add file"
                     />
+                  )}
+                  {!unavailable && !sg.courseBooked && sg.files.length >= docMaxFiles(d) && (
+                    <Pill dot>Limit of {docMaxFiles(d)} files reached</Pill>
                   )}
                   {d.allowCourseBooked &&
                     !unavailable &&
@@ -4041,76 +4093,44 @@ export function DocumentsView({
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
         <Card title="What we check">
-          <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <li className="row" style={{ gap: 10, fontSize: 13, color: 'var(--ink3)' }}>
-              <span
-                style={{
-                  width: 20,
-                  height: 20,
-                  borderRadius: '50%',
-                  background: 'var(--teal-pale)',
-                  color: 'var(--teal-deep)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <Icon.Check />
-              </span>
-              Constitution is current (signed within the last 2 years)
-            </li>
-            <li className="row" style={{ gap: 10, fontSize: 13, color: 'var(--ink3)' }}>
-              <span
-                style={{
-                  width: 20,
-                  height: 20,
-                  borderRadius: '50%',
-                  background: 'var(--teal-pale)',
-                  color: 'var(--teal-deep)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <Icon.Check />
-              </span>
-              AGM Minutes are signed by Chair &amp; Secretary
-            </li>
-            <li className="row" style={{ gap: 10, fontSize: 13, color: 'var(--ink3)' }}>
-              <span
-                style={{
-                  width: 20,
-                  height: 20,
-                  borderRadius: '50%',
-                  background: 'var(--teal-pale)',
-                  color: 'var(--teal-deep)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <Icon.Check />
-              </span>
-              Financials cover the prior season &amp; show member income
-            </li>
-            <li className="row" style={{ gap: 10, fontSize: 13, color: 'var(--ink3)' }}>
-              <span
-                style={{
-                  width: 20,
-                  height: 20,
-                  borderRadius: '50%',
-                  background: 'var(--teal-pale)',
-                  color: 'var(--teal-deep)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <Icon.Check />
-              </span>
-              Exco list includes Chair, Secretary, Treasurer + Vice-Chair
-            </li>
-          </ul>
+          {/* Driven by the tenant's catalogue: one line per document that counts towards
+              completion (optional records aren't checked), named with the doc's own
+              description so no tenant sees another union's requirements. */}
+          {counted.length === 0 ? (
+            <p style={{ fontSize: 13, color: 'var(--ink3)', lineHeight: 1.6 }}>
+              No compliance documents are required for your club.
+            </p>
+          ) : (
+            <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {counted.map((d) => (
+                <li
+                  key={d.key}
+                  className="row"
+                  style={{ gap: 10, fontSize: 13, color: 'var(--ink3)', alignItems: 'flex-start' }}
+                >
+                  <span
+                    style={{
+                      width: 20,
+                      height: 20,
+                      flexShrink: 0,
+                      borderRadius: '50%',
+                      background: 'var(--teal-pale)',
+                      color: 'var(--teal-deep)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <Icon.Check />
+                  </span>
+                  <span>
+                    <strong style={{ color: 'var(--navy)', fontWeight: 600 }}>{d.name}</strong>
+                    {d.desc ? ` — ${d.desc}` : ''}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </Card>
 
         <Card title="Need help?">
@@ -4155,19 +4175,24 @@ export function CQIView({
   onSaveDraft,
   submissionDeadline,
   allLeagues = [],
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
 }) {
   const copy = useCopy();
   const deadlineLong = formatDeadlineLong(submissionDeadline);
+  // Governance checks this tenant's catalogue can't back (no constitution doc, no AGM doc,
+  // …) drop out of the score AND the form, so a club is never marked down for a document
+  // its union doesn't ask for. Empty for the default catalogue.
+  const govSkip = useMemoC(() => governanceSkipKeys(requiredDocs), [requiredDocs]);
   const [answers, setAnswers] = useStateC(() => {
     // Prefer the real stored answers (persisted on submit). Only fall back to the
     // score-band approximation for legacy clubs that have a score but no answers.
     if (club.cqiAnswers && Object.keys(club.cqiAnswers).length) {
       // Governance answers are auto-filled from compliance docs (only genuine overrides are
       // persisted), so derive them fresh and let stored overrides win.
-      return effectiveAnswers(club);
+      return effectiveAnswers(club, requiredDocs);
     }
     // Governance auto-fills for every club (not just legacy scored ones).
-    const a: Record<string, any> = { ...deriveGovernance(club) };
+    const a: Record<string, any> = { ...deriveGovernance(club, requiredDocs) };
     if (club.cqi > 0) {
       // approximate capability defaults based on the club's score band.
       // Mirror the home-page glance card: team counts derive from leagues entered.
@@ -4209,7 +4234,7 @@ export function CQIView({
       involvement.includes(r) ? involvement.filter((x) => x !== r) : [...involvement, r],
     );
 
-  const { total, byCat } = useMemoC(() => scoreCQI(answers), [answers]);
+  const { total, byCat } = useMemoC(() => scoreCQI(answers, govSkip), [answers, govSkip]);
   const band = cqiBand(total || 0.0001);
   const submitted = club.cqi > 0;
 
@@ -4305,55 +4330,60 @@ export function CQIView({
             <div className="cqi-section-w">Weight · {cat.weight} pts</div>
           </div>
 
-          {cat.questions.map((q) => (
-            <div key={q.key} className="cqi-q">
-              <div>
-                <div className="cqi-q-label">{q.label}</div>
-                <div className="cqi-q-hint">
-                  {q.kind === 'num'
-                    ? `Number · max ${q.max}`
-                    : q.kind === 'count'
-                      ? 'Number of players'
-                      : q.kind === 'choice'
-                        ? 'Select one'
-                        : q.kind === 'money'
-                          ? 'Currency · amount per player'
-                          : q.kind === 'rating'
-                            ? 'Rate 1 (low) – 5 (high)'
-                            : 'Yes / No'}
+          {/* Skipped (catalogue-unbacked) governance checks render nothing. A null return,
+              not .filter: the questions are a union of per-category array types, and
+              .filter on that union narrows away the choice/money fields. */}
+          {cat.questions.map((q) =>
+            govSkip.has(q.key) ? null : (
+              <div key={q.key} className="cqi-q">
+                <div>
+                  <div className="cqi-q-label">{q.label}</div>
+                  <div className="cqi-q-hint">
+                    {q.kind === 'num'
+                      ? `Number · max ${q.max}`
+                      : q.kind === 'count'
+                        ? 'Number of players'
+                        : q.kind === 'choice'
+                          ? 'Select one'
+                          : q.kind === 'money'
+                            ? 'Currency · amount per player'
+                            : q.kind === 'rating'
+                              ? 'Rate 1 (low) – 5 (high)'
+                              : 'Yes / No'}
+                  </div>
                 </div>
+                {q.kind === 'yn' && <YN value={answers[q.key]} onChange={(v) => setA(q.key, v)} />}
+                {q.kind === 'rating' && (
+                  <Rating value={answers[q.key]} onChange={(v) => setA(q.key, v)} />
+                )}
+                {q.kind === 'num' && (
+                  <NumSlider value={answers[q.key]} onChange={(v) => setA(q.key, v)} max={q.max} />
+                )}
+                {q.kind === 'count' && (
+                  <CountInput
+                    value={answers[q.key]}
+                    onChange={(v) => setA(q.key, v)}
+                    label={q.label}
+                  />
+                )}
+                {q.kind === 'choice' && (
+                  <Choice
+                    value={answers[q.key]}
+                    onChange={(v) => setA(q.key, v)}
+                    options={q.options}
+                  />
+                )}
+                {q.kind === 'money' && (
+                  <MoneyInput
+                    value={answers[q.key]}
+                    onChange={(v) => setA(q.key, v)}
+                    currency={q.currency || 'R'}
+                    suffix="/ player"
+                  />
+                )}
               </div>
-              {q.kind === 'yn' && <YN value={answers[q.key]} onChange={(v) => setA(q.key, v)} />}
-              {q.kind === 'rating' && (
-                <Rating value={answers[q.key]} onChange={(v) => setA(q.key, v)} />
-              )}
-              {q.kind === 'num' && (
-                <NumSlider value={answers[q.key]} onChange={(v) => setA(q.key, v)} max={q.max} />
-              )}
-              {q.kind === 'count' && (
-                <CountInput
-                  value={answers[q.key]}
-                  onChange={(v) => setA(q.key, v)}
-                  label={q.label}
-                />
-              )}
-              {q.kind === 'choice' && (
-                <Choice
-                  value={answers[q.key]}
-                  onChange={(v) => setA(q.key, v)}
-                  options={q.options}
-                />
-              )}
-              {q.kind === 'money' && (
-                <MoneyInput
-                  value={answers[q.key]}
-                  onChange={(v) => setA(q.key, v)}
-                  currency={q.currency || 'R'}
-                  suffix="/ player"
-                />
-              )}
-            </div>
-          ))}
+            ),
+          )}
 
           {/* Representation total — informational headcount, no sum constraint */}
           {cat.key === 'representation' && (
@@ -4434,7 +4464,7 @@ export function CQIView({
                 if (!onSaveDraft) return;
                 // updateClub wraps the call in withToast, which already surfaces failures
                 // (incl. the actionable 409 copy) and re-throws — so only toast on success.
-                onSaveDraft(governanceOverrides(answers, club))
+                onSaveDraft(governanceOverrides(answers, club, requiredDocs))
                   .then(() => toast('Draft saved'))
                   .catch(() => {});
               }}
@@ -4447,7 +4477,7 @@ export function CQIView({
               onClick={() => {
                 // Persist only genuine governance overrides — auto-filled answers stay live
                 // against the documents so they don't freeze on the value submitted with.
-                onSubmit(total, governanceOverrides(answers, club));
+                onSubmit(total, governanceOverrides(answers, club, requiredDocs));
                 toast('CQI submitted · score ' + total.toFixed(1));
               }}
             >

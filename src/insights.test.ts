@@ -176,6 +176,18 @@ describe('cqiBandRows / docComplianceRows', () => {
     expect(docStats.find((d) => d.key === 'constitution')!.count).toBe(1);
     expect(docStats.every((d) => d.total === 2)).toBe(true);
   });
+
+  it('counts the passed tenant catalogue, skipping optional records', () => {
+    const clubs = [club({ docs: { agmMinutes: true, records: false } })];
+    const { docStats, mostMissing } = docComplianceRows(clubs, [
+      { key: 'agmMinutes', name: 'AGM minutes' },
+      { key: 'nominalRoll', name: 'Nominal roll' },
+      { key: 'records', name: 'Records', optional: true },
+    ]);
+    expect(docStats.map((d) => d.key)).toEqual(['agmMinutes', 'nominalRoll']);
+    // An optional record is never "most missing" — it isn't a requirement.
+    expect(mostMissing.key).toBe('nominalRoll');
+  });
 });
 
 describe('pct', () => {

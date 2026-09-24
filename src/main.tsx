@@ -32,6 +32,8 @@ import { TutorialsPage } from './TutorialsPage';
 import {
   DEFAULT_REQUIRED_DOCS,
   activeDocs,
+  completionDocs,
+  affiliationSubmitDocs,
   SUBMISSION_DEADLINE_DEFAULT,
   docCompletion,
   docsAllComplete,
@@ -1654,7 +1656,7 @@ function Shell({
     else delete docMeta[key];
     return patchClubAt(club.version, { docs, docMeta })
       .then((updated) => {
-        toastShow('Reset — upload certificates when ready');
+        toastShow('Reset — upload files when ready');
         return updated;
       })
       .catch(() => undefined);
@@ -1699,7 +1701,7 @@ function Shell({
       })
       .catch(() => undefined);
   }
-  // Remove one stored safeguarding certificate (the only multi-file doc).
+  // Remove one stored file from a multi-file doc (or an archived single-file doc).
   function removeDocFile(key, objectKey) {
     return withToast(
       () => retryOnConflict(() => api.deleteDocFile(clubId, key, objectKey)),
@@ -1707,7 +1709,7 @@ function Shell({
     ).then(() => {
       invalidate(qk.club(clubId));
       invalidate(qk.clubs());
-      toastShow('Certificate removed');
+      toastShow('File removed');
     });
   }
   // ── Player roster + clearances (club role) ──
@@ -2504,9 +2506,11 @@ function Shell({
             onReconfirmAffiliation={() => updateClub({ amendmentPending: false })}
             allSeries={allSeries}
             onMarkCompliant={() =>
+              // Optional records are never "compliance" — only the counted docs are
+              // overridden, so an admin can't stamp a sentinel onto archive material.
               markComplianceFor(
                 activeClub,
-                activeDocs(requiredDocs).map((d) => d.key),
+                completionDocs(requiredDocs).map((d) => d.key),
               )
             }
             onRevertDoc={(key) => revertComplianceFor(activeClub, [key])}
@@ -2701,6 +2705,7 @@ function Shell({
             toast={toastShow}
             submissionDeadline={submissionDeadline}
             allLeagues={allLeagues}
+            requiredDocs={requiredDocs}
             onSubmit={(score, answers) => {
               updateClub({ cqi: score, cqiAnswers: answers }).catch(() => {});
               gotoClubView('home');
@@ -2988,6 +2993,7 @@ function Shell({
         <Onboarding
           club={activeClub}
           submissionDeadline={submissionDeadline}
+          requiredDocs={requiredDocs}
           onClose={() => {
             // Dismissing also marks the walkthrough seen (persisted via setOnboarded →
             // patchMe), so it doesn't re-auto-open on every visit. The Home "Walkthrough"
@@ -3042,6 +3048,10 @@ function Shell({
             onSubmit={(payload) => {
               // Affiliation submit marks the club complete. The form is no longer locked
               // — reps may re-edit, which re-flags the club for admin re-confirmation.
+              // docs.exco is flipped only when this tenant's catalogue defines exco as a
+              // form doc: the server 400s unknown doc keys, so sending it unconditionally
+              // failed the whole submit for any catalogue without an exco entry.
+              const submitDocs = affiliationSubmitDocs(activeClub.docs, requiredDocs);
               updateClub({
                 affiliation: 'complete',
                 district: payload.district,
@@ -3050,7 +3060,7 @@ function Shell({
                 ground: payload.ground || {},
                 leagues: payload.leagues || [],
                 leagueTeams: payload.leagueTeams || {},
-                docs: { ...activeClub.docs, exco: true },
+                ...(submitDocs ? { docs: submitDocs } : {}),
               }).catch(() => {});
               gotoClubView('home');
             }}
@@ -3217,7 +3227,10 @@ function AdminFiltered({
         return {
           ...base,
           ...Object.fromEntries(
-            docsCols.map((d) => [d.name, c.docs[d.key] ? 'Uploaded' : 'Missing']),
+            docsCols.map((d) => [
+              d.name,
+              c.docs[d.key] ? 'Uploaded' : d.optional ? 'Optional' : 'Missing',
+            ]),
           ),
           'Progress %': docCompletion(c, requiredDocs),
         };
@@ -3331,6 +3344,9 @@ function AdminFiltered({
                               <Pill tone="teal" dot>
                                 Uploaded
                               </Pill>
+                            ) : d.optional ? (
+                              // An optional record is never "missing" — it isn't required.
+                              <Pill dot>Optional</Pill>
                             ) : (
                               <Pill tone="coral" dot>
                                 Missing

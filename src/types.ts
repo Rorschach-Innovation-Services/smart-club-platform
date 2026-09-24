@@ -439,7 +439,17 @@ export interface SeasonRun {
 }
 
 /** File formats a compliance doc can accept (mirror of packages/api types). */
-export type DocFormat = 'pdf' | 'doc' | 'docx' | 'xls' | 'xlsx' | 'ods';
+export type DocFormat =
+  | 'pdf'
+  | 'doc'
+  | 'docx'
+  | 'odt'
+  | 'xls'
+  | 'xlsx'
+  | 'ods'
+  | 'jpg'
+  | 'jpeg'
+  | 'png';
 
 /**
  * One required compliance document in the tenant's catalogue (ADR 0009). Mirror of
@@ -468,6 +478,11 @@ export interface RequiredDoc {
   matchHints?: string[];
   /** Excluded from completion counts; stored files stay viewable. */
   archived?: boolean;
+  /**
+   * An optional record (archive material, not a requirement): uploadable and visible
+   * like any active doc, but excluded from every completion count and gate.
+   */
+  optional?: boolean;
   /**
    * Which structural role this document satisfies for self-serve onboarding
    * (ADR 0010). The roster/committee-extract wizards gate on THIS, never a literal
@@ -627,6 +642,12 @@ export interface TenantOverview {
   clearances: Array<{ status: ClearanceStatus }>;
   /** Anonymised player demographics; absent while an older backend serves the route. */
   demographics?: DemographicsResponse;
+  /**
+   * This tenant's resolved compliance-doc catalogue (matchHints stripped), so the
+   * breakdown's compliance card counts THIS client's docs. Absent on an older backend —
+   * the card then falls back to the standard set and says so.
+   */
+  requiredDocs?: RequiredDoc[];
 }
 
 /** Presigned-POST grant from POST /platform/tenants/:slug/logo-upload. */

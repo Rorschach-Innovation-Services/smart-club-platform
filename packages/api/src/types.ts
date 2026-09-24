@@ -452,7 +452,17 @@ export interface BrandingCopy {
 }
 
 /** File formats a compliance doc can accept (see DOC_FORMAT_MIME in catalogue.ts). */
-export type DocFormat = 'pdf' | 'doc' | 'docx' | 'xls' | 'xlsx' | 'ods';
+export type DocFormat =
+  | 'pdf'
+  | 'doc'
+  | 'docx'
+  | 'odt'
+  | 'xls'
+  | 'xlsx'
+  | 'ods'
+  | 'jpg'
+  | 'jpeg'
+  | 'png';
 
 /**
  * One required compliance document in a tenant's catalogue (TenantConfig.requiredDocs).
@@ -496,6 +506,14 @@ export interface RequiredDoc {
    * key outright is blocked while any club still holds data under it.
    */
   archived?: boolean;
+  /**
+   * An optional record — archive material the tenant wants on file (disciplinary
+   * records, correspondence), not a requirement. Uploadable and visible exactly like
+   * any active doc (same escape hatches, same upload/view/delete routes), but excluded
+   * from every completion count and gate. The server computes no completion itself;
+   * the flag is honored by the frontend's count helpers (src/data.ts).
+   */
+  optional?: boolean;
   /**
    * Marks this doc as the canonical source for a self-serve wizard to parse (ADR 0009
    * follow-up, self-serve onboarding): the operator required-docs editor slugifies

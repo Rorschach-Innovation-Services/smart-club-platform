@@ -88,6 +88,9 @@ import {
   acceptedMimes,
   multiFileLimits,
   normalizeDocMeta,
+  roleSourceFile,
+  roleFileParseable,
+  unavailableDeclared,
   docMetaValue,
   docKeyForRole,
   OVERARCHING_DISTRICT,
@@ -411,10 +414,12 @@ const LOCAL_UPLOAD_PUT_MAX_BYTES = 12 * 1024 * 1024; // 12 MB
  *  document/spreadsheet/image mime set rather than echoed verbatim, so it can't be used
  *  to make a browser render arbitrary stored bytes as e.g. `text/html`. Anything outside
  *  this set falls back to `application/octet-stream` (forces a download, never inline
- *  script execution). image/jpeg + image/png are ID_DOC_TYPES' own values, spelled out
- *  here (not imported — ID_DOC_TYPES is declared further down this file, after this
- *  route) rather than reordered, so the two lists can still drift-check against each
- *  other in review without a forward-reference. */
+ *  script execution). The DOC_FORMAT_MIME spread already covers image/jpeg + image/png
+ *  (compliance docs accept phone photos/scans via `accepts`), so the explicit pair below
+ *  is redundant today; it stays because those are also ID_DOC_TYPES' values (declared
+ *  further down this file, so not importable here without a forward reference), and ID
+ *  uploads must keep resolving even if a future format edit drops images from the
+ *  compliance map. text/csv is the roster-intake workbook type. */
 const LOCAL_UPLOAD_ALLOWED_CONTENT_TYPES = new Set<string>([
   ...Object.values(DOC_FORMAT_MIME),
   'image/jpeg',
@@ -1801,16 +1806,22 @@ app.patch('/clubs/:id', async (c) => {
         // clear impossible. (Append/delete derive from stored because they mutate one file,
         // not the booking.) All clients spread existing docMeta, so an unrelated patch keeps
         // the booking; re-deriving from files only is what would silently strip it.
+        // `incoming` (the NormalizedDocMeta) is the extra: course booking AND the club's
+        // unavailable declaration ride through, as the patch intends them.
         (patch.docMeta as Record<string, unknown>)[k] = safeguardingValue(
           files,
           incoming.markedCompliant,
           incoming.at,
-          { courseBooked: incoming.courseBooked, courseDate: incoming.courseDate },
+          incoming,
         );
         const docs = patch.docs as Record<string, boolean> | undefined;
-        // The doc stays satisfied at the file minimum OR when a course is booked — don't
-        // let the merge downgrade a course-booked club below the count threshold.
-        if (docs && docs[k] === false && (incoming.courseBooked || files.length >= min)) {
+        // The doc stays satisfied at the file minimum, when a course is booked, or on a
+        // still-permitted unavailable declaration — don't let the merge downgrade it.
+        if (
+          docs &&
+          docs[k] === false &&
+          (incoming.courseBooked || unavailableDeclared(incoming, docDef) || files.length >= min)
+        ) {
           docs[k] = true;
         }
         // The merge is read-modify-write off `current`: without pinning that version,
@@ -2964,15 +2975,17 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
           ...current.docs,
           // A booked course keeps the doc satisfied independently of the file count, so
           // appending a (sub-minimum) file must not undo a course-booked club.
-          [key]: norm.markedCompliant || norm.courseBooked || files.length >= min,
+          [key]:
+            norm.markedCompliant ||
+            norm.courseBooked ||
+            unavailableDeclared(norm, docDef) ||
+            files.length >= min,
         },
-        // Preserve any course-booked flag/date — uploading a certificate must not strip it.
+        // Preserve any course-booked flag/date or unavailable declaration — uploading a
+        // file must not strip the club's own declaration.
         docMeta: {
           ...docMeta,
-          [key]: safeguardingValue(files, norm.markedCompliant, norm.at, {
-            courseBooked: norm.courseBooked,
-            courseDate: norm.courseDate,
-          }),
+          [key]: safeguardingValue(files, norm.markedCompliant, norm.at, norm),
         },
         // Append is read-modify-write: pin the version read above so a parallel
         // upload 409s (client retries) instead of silently dropping a file.
@@ -3062,8 +3075,13 @@ app.delete('/clubs/:id/docs/:key/file', async (c) => {
     const nextMeta = { ...docMeta };
     // Symmetric with the multi-file branch below: an admin override outlives the file it
     // was recorded alongside, so only a fully-empty state drops the key.
-    if (norm1.markedCompliant) {
-      nextMeta[key] = { markedCompliant: true, at: norm1.at };
+    // The club's unavailable declaration outlives it the same way.
+    if (norm1.markedCompliant || norm1.unavailable) {
+      nextMeta[key] = {
+        ...(norm1.markedCompliant ? { markedCompliant: true } : {}),
+        ...(norm1.unavailable ? { unavailable: true } : {}),
+        at: norm1.at,
+      };
     } else {
       delete nextMeta[key];
     }
@@ -3071,7 +3089,10 @@ app.delete('/clubs/:id/docs/:key/file', async (c) => {
       ra.tenant,
       id,
       {
-        docs: { ...current.docs, [key]: norm1.markedCompliant },
+        docs: {
+          ...current.docs,
+          [key]: norm1.markedCompliant || unavailableDeclared(norm1, docDef),
+        },
         docMeta: nextMeta,
         version: current.version,
       },
@@ -3096,11 +3117,8 @@ app.delete('/clubs/:id/docs/:key/file', async (c) => {
   const nextMeta = { ...docMeta };
   // Keep the record (and its course-booked flag/date) whenever any of files / override /
   // course-booked still holds — only a fully-empty state drops the key entirely.
-  if (files.length || norm.markedCompliant || norm.courseBooked) {
-    nextMeta[key] = safeguardingValue(files, norm.markedCompliant, norm.at, {
-      courseBooked: norm.courseBooked,
-      courseDate: norm.courseDate,
-    });
+  if (files.length || norm.markedCompliant || norm.courseBooked || norm.unavailable) {
+    nextMeta[key] = safeguardingValue(files, norm.markedCompliant, norm.at, norm);
   } else {
     delete nextMeta[key];
   }
@@ -3111,7 +3129,10 @@ app.delete('/clubs/:id/docs/:key/file', async (c) => {
       docs: {
         ...current.docs,
         [key]:
-          norm.markedCompliant || norm.courseBooked || files.length >= multiFileLimits(docDef).min,
+          norm.markedCompliant ||
+          norm.courseBooked ||
+          unavailableDeclared(norm, docDef) ||
+          files.length >= multiFileLimits(docDef).min,
       },
       docMeta: nextMeta,
       // Same read-modify-write pinning as the append path.
@@ -4292,9 +4313,11 @@ function clubTeamCount(club: Club): number {
  *   - role unassigned (docKeyForRole returns null), OR the resolved docMeta is a bare
  *     `{markedCompliant}` sentinel with no stored file (normalizeDocMeta's `files` empty)
  *     ⇒ 'absent'
+ *   - the file classified is roleSourceFile's pick (most recent parseable, else most
+ *     recent) — the same one the parse/extract routes read, never blindly files[0]
  *   - contentType missing on the stored file ⇒ classify by the objectKey's extension
  *   - else classify by contentType
- * Reuses `looksLikeSpreadsheet` (roster-intake parse's own gate) as the parseable test —
+ * Reuses `roleFileParseable` (roster-intake parse's own gate) as the parseable test —
  * both this checklist and the roster/committee parsers care about the exact same thing:
  * can the stored file actually be read as a workbook.
  */
@@ -4305,9 +4328,13 @@ function classifyIntakeDoc(
 ): 'absent' | 'parseable' | 'unparseable' {
   const docKey = docKeyForRole(requiredDocs, role);
   if (!docKey) return 'absent';
-  const stored = normalizeDocMeta(club.docMeta?.[docKey]).files[0];
+  // The same file the parse/extract routes will read (roleSourceFile), so the checklist
+  // never promises a parseable file the wizard then doesn't use.
+  const stored = roleSourceFile(club.docMeta?.[docKey], role);
   if (!stored?.objectKey) return 'absent';
-  return looksLikeSpreadsheet(stored.contentType, stored.objectKey) ? 'parseable' : 'unparseable';
+  return roleFileParseable(stored.contentType, stored.objectKey, role)
+    ? 'parseable'
+    : 'unparseable';
 }
 
 /**
@@ -4530,6 +4557,9 @@ app.get('/platform/tenants/:slug/overview', async (c) => {
     clubs: clubs.map((cl) => toInsightsClub(cl, resolveRequiredDocs(config))),
     clearances: clearances.map((r) => ({ status: r.status })),
     demographics: { ...summarizeDemographics(players), perLeague, unattributed },
+    // The tenant's catalogue, so the compliance card counts THIS client's docs rather than
+    // the shared defaults. Names/flags only — the same public projection GET /tenant ships.
+    requiredDocs: publicRequiredDocs(config),
   });
 });
 
@@ -5285,13 +5315,15 @@ function buildDocIntakePatch(
               sourceName: item.sourceName,
             },
           ];
-      // Same completion rule as the append route: a course-booked/marked-compliant
-      // club stays satisfied regardless of file count.
-      docs[item.docKey] = norm.markedCompliant || norm.courseBooked || files.length >= min;
-      docMeta[item.docKey] = safeguardingValue(files, norm.markedCompliant, norm.at, {
-        courseBooked: norm.courseBooked,
-        courseDate: norm.courseDate,
-      });
+      // Same completion rule as the append route: a course-booked/marked-compliant/
+      // declared-unavailable club stays satisfied regardless of file count, and the
+      // declaration itself rides through (norm as the extra).
+      docs[item.docKey] =
+        norm.markedCompliant ||
+        norm.courseBooked ||
+        unavailableDeclared(norm, docDef) ||
+        files.length >= min;
+      docMeta[item.docKey] = safeguardingValue(files, norm.markedCompliant, norm.at, norm);
     } else {
       const prev = docMeta[item.docKey] as { objectKey?: string } | undefined;
       const prevKey = prev?.objectKey;
@@ -5442,24 +5474,12 @@ app.post('/platform/tenants/:slug/doc-intake/commit', async (c) => {
  *  attempt to read back. */
 const MAX_INTAKE_BYTES = 10 * 1024 * 1024; // 10 MB
 
-/** Content types parseRosterSheet can actually read. `text/csv` isn't in DOC_FORMAT_MIME
- *  (compliance uploads never accept csv), so a csv roster only ever reaches this gate via
- *  the extension fallback below — kept here anyway so a legacy upload stamped with it
- *  isn't rejected before ExcelJS even gets a chance to fail more informatively. */
-const ROSTER_SPREADSHEET_MIMES = new Set([
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // xlsx
-  'application/vnd.ms-excel', // xls
-  'text/csv',
-]);
-const ROSTER_SPREADSHEET_EXTENSIONS = new Set(['xlsx', 'xls', 'csv']);
-
-/** Whether a stored file's declared type is one roster parsing can attempt. contentType
- *  wins when present; a missing contentType (legacy uploads, some browser PUTs) falls
- *  back to the objectKey's extension — never a guess at the raw bytes. */
+/** Whether a stored file's declared type is one roster/committee parsing can attempt
+ *  (xlsx/xls/csv; contentType wins, extension fallback). Delegates to the shared
+ *  roleFileParseable in catalogue.ts, which roleSourceFile uses to pick the file — one
+ *  rule, so the file picker and this gate can never disagree. */
 function looksLikeSpreadsheet(contentType: string | undefined, objectKey: string): boolean {
-  if (contentType) return ROSTER_SPREADSHEET_MIMES.has(contentType);
-  const ext = objectKey.split('.').pop()?.toLowerCase();
-  return !!ext && ROSTER_SPREADSHEET_EXTENSIONS.has(ext);
+  return roleFileParseable(contentType, objectKey, 'memberDatabase');
 }
 
 /** True when a stored file's declared type/extension says CSV — same contentType-wins,
@@ -5512,7 +5532,9 @@ app.post('/platform/tenants/:slug/roster-intake/parse', async (c) => {
       'No document in the catalogue is marked as the member database — assign the role in Required documents.',
     );
   }
-  const stored = normalizeDocMeta(club.docMeta?.[docKey]).files[0];
+  // Most recent parseable file, not files[0]: "replace member database" appends, so the
+  // first entry is the stale one (roleSourceFile).
+  const stored = roleSourceFile(club.docMeta?.[docKey], 'memberDatabase');
   if (!stored?.objectKey) {
     throw new HttpError(
       409,
@@ -6423,7 +6445,8 @@ app.post('/platform/tenants/:slug/clubs/:clubId/committee-extract', async (c) =>
       'No document in the catalogue is marked as the committee list — assign the role in Required documents.',
     );
   }
-  const stored = normalizeDocMeta(club.docMeta?.[docKey]).files[0];
+  // Most recent parseable file, not files[0] — see roleSourceFile.
+  const stored = roleSourceFile(club.docMeta?.[docKey], 'committee');
   if (!stored?.objectKey) {
     throw new HttpError(
       409,
@@ -6502,7 +6525,14 @@ app.post('/platform/tenants/:slug/clubs/:clubId/docs/:key/view-url', async (c) =
   let entry: { objectKey?: string; contentType?: string; size?: number } | undefined;
   if (isMultiFileDoc(docDef, docMeta[key])) {
     const norm = safeguardingMeta(docMeta[key]);
-    entry = requested ? norm.files.find((f) => f.objectKey === requested) : norm.files[0];
+    // No objectKey requested (the reps page's committee preview holds no docMeta): for a
+    // role doc, show the file the committee extract actually reads (roleSourceFile — most
+    // recent parseable), not the oldest append; any other doc keeps the files[0] default.
+    entry = requested
+      ? norm.files.find((f) => f.objectKey === requested)
+      : docDef?.role && !docDef.archived
+        ? roleSourceFile(docMeta[key], docDef.role)
+        : norm.files[0];
   } else {
     const meta = docMeta[key] as
       | { objectKey?: string; contentType?: string; size?: number }

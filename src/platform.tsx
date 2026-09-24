@@ -952,6 +952,7 @@ function TenantOverviewPage() {
           navigate(`/platform/tenants/${slug}/overview/leagues/${encodeURIComponent(k)}`)
         }
         demographics={d.demographics}
+        requiredDocs={d.requiredDocs}
       />
     </div>
   );

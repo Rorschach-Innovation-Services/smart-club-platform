@@ -49,6 +49,10 @@ const FORMAT_OPTIONS: Array<{ value: DocFormat; label: string }> = [
   { value: 'xls', label: 'Excel (.xls)' },
   { value: 'xlsx', label: 'Excel (.xlsx)' },
   { value: 'ods', label: 'OpenDocument (.ods)' },
+  { value: 'odt', label: 'OpenDocument text (.odt)' },
+  { value: 'jpg', label: 'JPEG image (.jpg)' },
+  { value: 'jpeg', label: 'JPEG image (.jpeg)' },
+  { value: 'png', label: 'PNG image (.png)' },
 ];
 const DEFAULT_ACCEPTS: DocFormat[] = ['pdf', 'doc', 'docx'];
 
@@ -89,13 +93,17 @@ function slugifyDocKey(name: string): string {
   return s.slice(0, 40);
 }
 
-/** Short accepted-format summary for a row, e.g. "PDF, Word" / "PDF, Word, Excel". */
+/** Short accepted-format summary for a row, e.g. "PDF, Word" / "PDF, Word, Excel". Bucket
+ *  names match the FORMAT_OPTIONS labels — .odt reads "OpenDocument text", as its option
+ *  does, rather than being folded into "Word". */
 function formatSummary(accepts?: DocFormat[]): string {
   const list = accepts && accepts.length ? accepts : DEFAULT_ACCEPTS;
   const parts: string[] = [];
   if (list.includes('pdf')) parts.push('PDF');
   if (list.includes('doc') || list.includes('docx')) parts.push('Word');
+  if (list.includes('odt')) parts.push('OpenDocument text');
   if (list.includes('xls') || list.includes('xlsx') || list.includes('ods')) parts.push('Excel');
+  if (list.includes('jpg') || list.includes('jpeg') || list.includes('png')) parts.push('Image');
   return parts.join(', ') || '—';
 }
 
@@ -146,6 +154,12 @@ function behaviorPills(doc: RequiredDoc): ReactNode[] {
     pills.push(
       <Pill key="unavail" tone="muted">
         May be unavailable
+      </Pill>,
+    );
+  if (doc.optional)
+    pills.push(
+      <Pill key="optional" tone="muted">
+        Optional record
       </Pill>,
     );
   if (doc.archived)
@@ -228,6 +242,7 @@ function DocForm({
   const [allowMeetingBooked, setAllowMeetingBooked] = useState(!!doc?.allowMeetingBooked);
   const [allowCourseBooked, setAllowCourseBooked] = useState(!!doc?.allowCourseBooked);
   const [allowUnavailable, setAllowUnavailable] = useState(!!doc?.allowUnavailable);
+  const [optional, setOptional] = useState(!!doc?.optional);
   const [accepts, setAccepts] = useState<DocFormat[]>(doc?.accepts ?? DEFAULT_ACCEPTS);
   const [matchHints, setMatchHints] = useState<string[]>(doc?.matchHints ?? []);
   const [hintText, setHintText] = useState('');
@@ -333,6 +348,7 @@ function DocForm({
       ...(kind === 'form' ? { kind: 'form' as const } : {}),
       ...(kind !== 'form' && multiFile ? { multiFile: true, minFiles, maxFiles } : {}),
       ...(kind !== 'form' && allowUnavailable ? { allowUnavailable: true } : {}),
+      ...(kind !== 'form' && optional ? { optional: true } : {}),
       ...(kind !== 'form' && !multiFile && allowMeetingBooked ? { allowMeetingBooked: true } : {}),
       ...(kind !== 'form' && multiFile && allowCourseBooked ? { allowCourseBooked: true } : {}),
       ...(kind !== 'form' && !sameFormatSet(accepts, DEFAULT_ACCEPTS) ? { accepts } : {}),
@@ -454,6 +470,21 @@ function DocForm({
                 />
               </div>
             )}
+          </div>
+
+          <div style={{ marginTop: 10 }}>
+            <label style={CHECK_ROW}>
+              <input
+                type="checkbox"
+                checked={optional}
+                onChange={(e) => setOptional(e.target.checked)}
+              />
+              Optional record
+            </label>
+            <p style={HINT}>
+              Kept on file but never required — clubs can upload it, but it doesn&apos;t count
+              towards completion.
+            </p>
           </div>
 
           <div style={{ marginTop: 10, display: 'grid', gap: 6 }}>

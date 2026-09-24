@@ -90,3 +90,50 @@ describe('RequiredDocsCard — Role picker', () => {
     expect(within(dialog).getByLabelText(/why does the role matter/i)).toBeInTheDocument();
   });
 });
+
+describe('RequiredDocsCard — Optional record toggle', () => {
+  it('round-trips the Optional record toggle into the saved payload and shows a row pill', async () => {
+    const { user, save } = setup();
+
+    const dialog = await openEdit(user, 'Committee Document');
+    await user.click(within(dialog).getByLabelText(/optional record/i));
+    await user.click(within(dialog).getByRole('button', { name: /save changes/i }));
+
+    // The catalogue row now flags it at a glance.
+    expect(screen.getByText('Optional record')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /save catalogue/i }));
+    const docs = save.mock.calls[0][0].requiredDocs as RequiredDoc[];
+    expect(docs.find((d) => d.key === 'committee-doc')?.optional).toBe(true);
+    // Untouched rows never carry the flag (absent, not `optional: false`).
+    expect('optional' in (docs.find((d) => d.key === 'member-db') as object)).toBe(false);
+  });
+
+  it('pre-checks the toggle for an already-optional doc and clears it on untick', async () => {
+    const { user, save } = setup([
+      { key: 'records', name: 'Club Records', optional: true, multiFile: true, minFiles: 1 },
+    ]);
+
+    const dialog = await openEdit(user, 'Club Records');
+    const toggle = within(dialog).getByLabelText(/optional record/i) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    await user.click(toggle);
+    await user.click(within(dialog).getByRole('button', { name: /save changes/i }));
+    await user.click(screen.getByRole('button', { name: /save catalogue/i }));
+
+    const docs = save.mock.calls[0][0].requiredDocs as RequiredDoc[];
+    expect('optional' in docs[0]).toBe(false);
+  });
+});
+
+describe('RequiredDocsCard — accepted-format summary', () => {
+  it('labels .odt as OpenDocument text, matching its format option, not as Word', () => {
+    setup([{ key: 'minutes', name: 'AGM Minutes', accepts: ['pdf', 'odt'] }]);
+    expect(screen.getByText('PDF, OpenDocument text')).toBeInTheDocument();
+  });
+
+  it('keeps Word for doc/docx alongside .odt', () => {
+    setup([{ key: 'minutes', name: 'AGM Minutes', accepts: ['pdf', 'docx', 'odt'] }]);
+    expect(screen.getByText('PDF, Word, OpenDocument text')).toBeInTheDocument();
+  });
+});

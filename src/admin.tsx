@@ -31,6 +31,10 @@ import {
   genuineCqiAnswers,
   deriveGovernance,
   governanceOverrides,
+  governanceSkipKeys,
+  completionDocs,
+  unavailableDeclared,
+  unavailableStale,
   SUBMISSION_DEADLINE_DEFAULT,
   cohortStats,
   docFileMeta,
@@ -5709,7 +5713,7 @@ export function AdminClubDetail({
       t: 'Compliance',
       done: dc === 100,
       val: dc,
-      detail: `${docsUploadedCount(club, requiredDocs)} of ${activeDocs(requiredDocs).length} docs uploaded`,
+      detail: `${docsUploadedCount(club, requiredDocs)} of ${completionDocs(requiredDocs).length} docs uploaded`,
     },
   ];
 
@@ -5812,7 +5816,7 @@ export function AdminClubDetail({
         <KPI
           tone="gold"
           label="Documents"
-          num={`${docsUploadedCount(club, requiredDocs)}/${activeDocs(requiredDocs).length}`}
+          num={`${docsUploadedCount(club, requiredDocs)}/${completionDocs(requiredDocs).length}`}
           sub="compliance docs"
         />
         <KPI
@@ -5979,13 +5983,28 @@ export function AdminClubDetail({
               const agm = !multi && d.allowMeetingBooked ? agmMeta(meta) : null;
               const agmBooked = !!agm?.meetingBooked;
               const agmDateLabel = agm?.meetingDate && formatDayYear(agm.meetingDate);
+              // The club's own "we don't have this" declaration (allowUnavailable) is its
+              // own state, like a booked meeting — never an admin "Override". Revert leaves
+              // it alone (computeRevertCompliance), except to peel off an admin
+              // markedCompliant stamped beside it. A STALE sentinel (the catalogue has
+              // since withdrawn allowUnavailable) no longer justifies the doc, so it shows
+              // as such and Revert is how it gets cleaned up.
+              const unavailable = unavailableDeclared(meta, d);
+              const unavailableOld = unavailableStale(meta, d);
+              const unavailableAny = unavailable || unavailableOld;
               // Multi-file "override" = any compliant flag the uploads don't
               // justify: explicit sentinel, legacy flag-only (no docMeta — the
               // seeded demo clubs), or a grandfathered single file. All revert.
-              const override = sg ? up && !sgSatisfied : up && !real && !agmBooked;
+              const override = unavailableAny
+                ? false
+                : sg
+                  ? up && !sgSatisfied
+                  : up && !real && !agmBooked;
               // A lingering sentinel on a club that later met the minimum on its
               // own shows Approved but must stay revertable.
-              const canRevert = override || (sg ? up && sg.markedCompliant : false);
+              const canRevert = unavailableAny
+                ? unavailableOld || !!meta?.markedCompliant
+                : override || (sg ? up && sg.markedCompliant : false);
               return (
                 <div key={d.key} className={`doc-row ${up ? 'uploaded' : ''}`}>
                   <div className="doc-icon">
@@ -5994,12 +6013,28 @@ export function AdminClubDetail({
                   <div className="doc-info">
                     <div className="doc-name">
                       {d.name}
-                      {!up && <span className="doc-required-tag">Required</span>}
+                      {/* An optional record is never "Required", held or not. */}
+                      {!up && !d.optional && <span className="doc-required-tag">Required</span>}
                     </div>
                     <div className="doc-meta">
-                      {sg ? (
+                      {unavailableAny && !sg?.files.length ? (
+                        unavailableOld ? (
+                          'Marked unavailable by club — no longer permitted for this document'
+                        ) : (
+                          'Marked unavailable by club — no document to upload'
+                        )
+                      ) : sg ? (
                         sg.files.length ? (
                           <span style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                            {/* Files can land on a declared doc (bulk intake keeps the
+                                declaration) — list them, then the declaration. */}
+                            {unavailableAny && (
+                              <span>
+                                {unavailableOld
+                                  ? 'Marked unavailable by club — no longer permitted for this document'
+                                  : 'Marked unavailable by club'}
+                              </span>
+                            )}
                             {sg.files.map((f) => (
                               <span key={f.objectKey}>
                                 {docFileMeta(f).metaText || 'Document'} ·{' '}
@@ -6040,14 +6075,21 @@ export function AdminClubDetail({
                   </div>
                   {up || (sg && sg.files.length > 0) ? (
                     <div className="doc-row-actions">
-                      <Pill tone={override || agmBooked || (sg && !up) ? 'gold' : 'teal'} dot>
-                        {sg && !up
-                          ? `${sg.files.length} of ${docMinFiles(d)} minimum`
-                          : agmBooked
-                            ? `Meeting booked · ${agmDateLabel}`
-                            : override
-                              ? 'Override'
-                              : 'Approved'}
+                      <Pill
+                        tone={
+                          override || agmBooked || unavailableAny || (sg && !up) ? 'gold' : 'teal'
+                        }
+                        dot
+                      >
+                        {unavailableAny
+                          ? 'Unavailable'
+                          : sg && !up
+                            ? `${sg.files.length} of ${docMinFiles(d)} minimum`
+                            : agmBooked
+                              ? `Meeting booked · ${agmDateLabel}`
+                              : override
+                                ? 'Override'
+                                : 'Approved'}
                       </Pill>
                       {/* Only real uploads (with a stored file) can be previewed;
                           overrides have no file on record. Safeguarding previews
@@ -6069,12 +6111,18 @@ export function AdminClubDetail({
                           tone="ghost"
                           size="sm"
                           onClick={() => onRevertDoc(d.key)}
-                          title="Remove this override — compliance re-derives from uploads"
+                          title={
+                            unavailable
+                              ? 'Remove the admin override — the club’s unavailable declaration stays'
+                              : 'Remove this override — compliance re-derives from uploads'
+                          }
                         >
                           Revert
                         </Btn>
                       )}
                     </div>
+                  ) : d.optional ? (
+                    <Pill dot>Optional</Pill>
                   ) : (
                     <Pill tone="coral" dot>
                       Missing
@@ -6104,7 +6152,12 @@ export function AdminClubDetail({
                   // auto-filled from docs + stored overlays, so score the merged view, not raw
                   // cqiAnswers). Falls back to a proportional estimate only for legacy clubs
                   // that have a score but no persisted answers.
-                  const byCat = club.cqiAnswers ? scoreCQI(effectiveAnswers(club)).byCat : null;
+                  const byCat = club.cqiAnswers
+                    ? scoreCQI(
+                        effectiveAnswers(club, requiredDocs),
+                        governanceSkipKeys(requiredDocs),
+                      ).byCat
+                    : null;
                   const score = byCat
                     ? byCat[cat.key].earned
                     : Math.min(cat.weight, cat.weight * Math.min(1, club.cqi / 100));
@@ -6136,7 +6189,8 @@ export function AdminClubDetail({
               (() => {
                 const gov = CQI_STRUCTURE.find((c) => c.key === 'governance');
                 if (!gov) return null;
-                const eff = effectiveAnswers(club);
+                const eff = effectiveAnswers(club, requiredDocs);
+                const govSkip = governanceSkipKeys(requiredDocs);
                 // A genuine club override (not a legacy approximation) — drives the provenance tag.
                 const genuine = genuineCqiAnswers(club);
                 return (
@@ -6153,34 +6207,36 @@ export function AdminClubDetail({
                       Governance &amp; Compliance · auto-filled
                     </div>
                     <div className="stack" style={{ gap: 6 }}>
-                      {gov.questions.map((q) => {
-                        const yes = eff[q.key] === true;
-                        const edited = q.key in genuine;
-                        return (
-                          <div
-                            key={q.key}
-                            className="row"
-                            style={{ justifyContent: 'space-between', gap: 12 }}
-                          >
-                            <span style={{ fontSize: 13, color: 'var(--ink)' }}>{q.label}</span>
-                            <span className="row" style={{ gap: 8 }}>
-                              <span
-                                style={{
-                                  fontSize: 10,
-                                  textTransform: 'uppercase',
-                                  letterSpacing: '0.08em',
-                                  color: 'var(--muted-2)',
-                                }}
-                              >
-                                {edited ? 'Edited' : 'Auto'}
+                      {gov.questions
+                        .filter((q) => !govSkip.has(q.key))
+                        .map((q) => {
+                          const yes = eff[q.key] === true;
+                          const edited = q.key in genuine;
+                          return (
+                            <div
+                              key={q.key}
+                              className="row"
+                              style={{ justifyContent: 'space-between', gap: 12 }}
+                            >
+                              <span style={{ fontSize: 13, color: 'var(--ink)' }}>{q.label}</span>
+                              <span className="row" style={{ gap: 8 }}>
+                                <span
+                                  style={{
+                                    fontSize: 10,
+                                    textTransform: 'uppercase',
+                                    letterSpacing: '0.08em',
+                                    color: 'var(--muted-2)',
+                                  }}
+                                >
+                                  {edited ? 'Edited' : 'Auto'}
+                                </span>
+                                <Pill tone={yes ? 'teal' : 'gold'} dot>
+                                  {yes ? 'Yes' : 'No'}
+                                </Pill>
                               </span>
-                              <Pill tone={yes ? 'teal' : 'gold'} dot>
-                                {yes ? 'Yes' : 'No'}
-                              </Pill>
-                            </span>
-                          </div>
-                        );
-                      })}
+                            </div>
+                          );
+                        })}
                     </div>
                   </div>
                 );
@@ -6443,6 +6499,7 @@ export function AdminClubDetail({
           club={club}
           toast={toast}
           onSave={onSaveCqi}
+          requiredDocs={requiredDocs}
           initialEditing={club.cqi === 0}
           onClose={() => setShowCqi(false)}
         />
@@ -6452,6 +6509,7 @@ export function AdminClubDetail({
           club={club}
           toast={toast}
           onSave={onSaveCqi}
+          requiredDocs={requiredDocs}
           initialEditing={true}
           onClose={() => setShowCqiEdit(false)}
         />
@@ -6576,7 +6634,9 @@ function RemoveClubModal({
       teamIdsForClub(s, club.id).some((tid) => s.teams.includes(tid)),
   );
   const playerCount = club.players || 0;
-  const docCount = docsUploadedCount(club, requiredDocs);
+  // Every held active doc, optional records included — this counts what the delete
+  // destroys, not completion progress (so not docsUploadedCount, which skips optional).
+  const docCount = activeDocs(requiredDocs).filter((d) => club.docs?.[d.key]).length;
   function confirm() {
     if (!match || busy) return;
     setBusy(true);
@@ -6650,13 +6710,22 @@ function RemoveClubModal({
 }
 
 /* ─── CqiViewModal — view (and, for admins, correct) a club's CQI self-assessment ─── */
-function CqiViewModal({ club, onClose, onSave, toast, initialEditing = false }) {
+function CqiViewModal({
+  club,
+  onClose,
+  onSave,
+  toast,
+  initialEditing = false,
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
+}) {
+  // Governance checks the tenant's catalogue can't back drop out of scoring and display.
+  const govSkip = useMemoA(() => governanceSkipKeys(requiredDocs), [requiredDocs]);
   // Seed once from effectiveAnswers so the auto-filled Governance & Compliance answers
   // render/edit (they're not persisted in cqiAnswers — only genuine overrides are), and so
   // the cache reseed a save triggers can't clobber in-progress edits. The empty-state gate
   // still keys off the raw stored answers, so a legacy club with a bare score isn't shown a
   // grid built purely from derived governance values.
-  const [seed] = useStateA(() => effectiveAnswers(club));
+  const [seed] = useStateA(() => effectiveAnswers(club, requiredDocs));
   const [answers, setAnswers] = useStateA(seed);
   const [editing, setEditing] = useStateA(!!onSave && initialEditing);
   const [busy, setBusy] = useStateA(false);
@@ -6677,9 +6746,9 @@ function CqiViewModal({ club, onClose, onSave, toast, initialEditing = false }) 
     if (!(editing && dirty)) onClose();
   };
   useEscapeClose(guardedClose);
-  const liveScore = scoreCQI(answers).total;
+  const liveScore = scoreCQI(answers, govSkip).total;
   const band = cqiBand(editing ? liveScore : club.cqi);
-  const derived = deriveGovernance(club);
+  const derived = deriveGovernance(club, requiredDocs);
   const setA = (key, v) => setAnswers((a) => ({ ...a, [key]: v }));
 
   function save() {
@@ -6687,7 +6756,12 @@ function CqiViewModal({ club, onClose, onSave, toast, initialEditing = false }) 
     setBusy(true);
     // Resolve(onSave) so a rejected save (e.g. a 409 version conflict surfaced by the
     // parent's withToast) keeps the modal open for retry rather than closing.
-    Promise.resolve(onSave({ cqi: liveScore, cqiAnswers: governanceOverrides(answers, club) }))
+    Promise.resolve(
+      onSave({
+        cqi: liveScore,
+        cqiAnswers: governanceOverrides(answers, club, requiredDocs),
+      }),
+    )
       .then(() => {
         toast && toast(`CQI ${recordMode ? 'recorded' : 'updated'} · ${cqiBand(liveScore).label}`);
         onClose();
@@ -6791,49 +6865,51 @@ function CqiViewModal({ club, onClose, onSave, toast, initialEditing = false }) 
                     {cat.title}
                   </div>
                   <div className="stack" style={{ gap: 4 }}>
-                    {cat.questions.map((q) => (
-                      <div
-                        key={q.key}
-                        style={{
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          flexWrap: 'wrap',
-                          gap: 12,
-                          fontSize: 12.5,
-                          padding: '4px 0',
-                          borderBottom: '1px solid var(--line2)',
-                        }}
-                      >
-                        <span style={{ color: 'var(--muted)', flex: '1 1 220px' }}>
-                          {q.label}
-                          {/* Governance provenance — untouched answers keep tracking the
+                    {cat.questions
+                      .filter((q) => !govSkip.has(q.key))
+                      .map((q) => (
+                        <div
+                          key={q.key}
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            flexWrap: 'wrap',
+                            gap: 12,
+                            fontSize: 12.5,
+                            padding: '4px 0',
+                            borderBottom: '1px solid var(--line2)',
+                          }}
+                        >
+                          <span style={{ color: 'var(--muted)', flex: '1 1 220px' }}>
+                            {q.label}
+                            {/* Governance provenance — untouched answers keep tracking the
                               documents live; only a real disagreement persists. */}
-                          {editing && q.key in derived && (
+                            {editing && q.key in derived && (
+                              <span
+                                style={{
+                                  marginLeft: 8,
+                                  fontSize: 10,
+                                  textTransform: 'uppercase',
+                                  letterSpacing: '0.08em',
+                                  color: 'var(--muted-2)',
+                                }}
+                              >
+                                {answers[q.key] === derived[q.key] ? 'Auto' : 'Edited'}
+                              </span>
+                            )}
+                          </span>
+                          {editing ? (
+                            input(q)
+                          ) : (
                             <span
-                              style={{
-                                marginLeft: 8,
-                                fontSize: 10,
-                                textTransform: 'uppercase',
-                                letterSpacing: '0.08em',
-                                color: 'var(--muted-2)',
-                              }}
+                              style={{ color: 'var(--ink)', fontWeight: 600, whiteSpace: 'nowrap' }}
                             >
-                              {answers[q.key] === derived[q.key] ? 'Auto' : 'Edited'}
+                              {fmt(q)}
                             </span>
                           )}
-                        </span>
-                        {editing ? (
-                          input(q)
-                        ) : (
-                          <span
-                            style={{ color: 'var(--ink)', fontWeight: 600, whiteSpace: 'nowrap' }}
-                          >
-                            {fmt(q)}
-                          </span>
-                        )}
-                      </div>
-                    ))}
+                        </div>
+                      ))}
                   </div>
                 </div>
               ))}

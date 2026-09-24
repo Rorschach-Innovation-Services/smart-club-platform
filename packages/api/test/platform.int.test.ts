@@ -23,7 +23,7 @@ import {
   DeleteObjectsCommand,
 } from '@aws-sdk/client-s3';
 // Pure module (no env reads at load) — safe to import before the env block below.
-import { DEFAULT_REQUIRED_DOCS } from '../src/catalogue.js';
+import { DEFAULT_REQUIRED_DOCS, resolveRequiredDocs } from '../src/catalogue.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load,
 // index.ts reads TUTORIALS_BASE_URL / TUTORIALS_BUCKET at module load.
@@ -380,6 +380,16 @@ describe('tenant create → list → get → patch', () => {
         ],
       });
       assert.ok(Array.isArray(body.clearances));
+
+      // The tenant's own compliance catalogue rides along (so the operator compliance
+      // card counts THIS client's docs, not the shared defaults), public projection
+      // only — operator-tooling matchHints never cross.
+      const cfg = await repo.getTenantConfig('sharks');
+      const expectedDocs = resolveRequiredDocs(cfg).map(({ matchHints: _h, ...rest }) => rest);
+      const overviewDocs = (body as unknown as { requiredDocs: Array<Record<string, unknown>> })
+        .requiredDocs;
+      assert.deepEqual(overviewDocs, expectedDocs);
+      assert.ok(overviewDocs.every((d) => !('matchHints' in d)));
 
       // Demographics ride the overview payload: buckets only, counted from REAL
       // player rows (1) — expected to drift from the denormalized `players` (8).
