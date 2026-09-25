@@ -54,6 +54,16 @@ describe('describeStructure', () => {
     );
   });
 
+  it('reads the one-off tournament as a hand-picked seeded knockout spread over its dates', () => {
+    const st = instantiateTemplate(
+      STRUCTURE_TEMPLATES.find((t) => t.id === 'one-off-tournament')!,
+      ONE_BLOCK,
+    );
+    expect(describeStructure(st, ONE_BLOCK, 8)).toEqual([
+      'Stage 1 · Knockout stage · chosen by the admin · a seeded knockout: quarter-finals, semi-finals, then a final · spread across the block in Block 1, 13 Sep – 13 Dec 2026.',
+    ]);
+  });
+
   it('omits dates when there is no calendar', () => {
     const st = instantiateTemplate(STRUCTURE_TEMPLATES[0], undefined);
     expect(describeStructure(st, undefined, 12)).toEqual([

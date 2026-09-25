@@ -316,15 +316,70 @@ export function teamCounts(
  * runtime ignored, which is worse than not having the field at all.
  *
  * It filters on teamId, not clubId, so a club can enter one side and hold another back.
+ *
+ * ── The affiliation gate ──
+ * A club that has not submitted its affiliation form is not yet in the season. The engine
+ * cannot know what "affiliated" means for a tenant (and must not import the web app's
+ * `affiliationSubmitted`), so the CALLER supplies the predicate:
+ *
+ * - `isAffiliated` given, `includeUnaffiliated` false/absent → sides of clubs failing the
+ *   predicate are dropped. This is what the admin console does.
+ * - `isAffiliated` given, `includeUnaffiliated: true` → everyone, predicate ignored.
+ * - **No `isAffiliated` → no gate at all: every registered side is returned.** Callers
+ *   that pass no predicate (the API, `seed-cohort`, older call sites) keep their exact
+ *   previous behaviour. `includeUnaffiliated` defaults to false but only means something
+ *   once a predicate is supplied.
+ *
+ * Use {@link leagueParticipantsWithStatus} when the caller also needs to SHOW the sides
+ * the gate held back.
  */
 export function leagueParticipants<C extends ClubSidesSource & { leagues?: string[] }>(
   clubs: C[],
   leagueKey: string,
   exclude: string[] = [],
+  options: ParticipantGateOptions<C> = {},
 ): (TeamParticipant & { club: C })[] {
   const dropped = new Set(exclude);
+  const gate =
+    options.isAffiliated && !options.includeUnaffiliated ? options.isAffiliated : undefined;
   return (clubs || [])
     .filter((c) => Array.isArray(c.leagues) && c.leagues.includes(leagueKey))
+    .filter((c) => !gate || gate(c))
     .flatMap((c) => clubTeamsForLeague(c, leagueKey).map((p) => ({ ...p, club: c })))
     .filter((p) => !dropped.has(p.teamId));
+}
+
+/** Options for {@link leagueParticipants}' affiliation gate. */
+export interface ParticipantGateOptions<C> {
+  /**
+   * Return every registered side even when `isAffiliated` is supplied. Default false.
+   * Has no effect without a predicate — without one there is no gate to lift.
+   */
+  includeUnaffiliated?: boolean;
+  /** Whether a club counts as affiliated. Absent ⇒ no gate (every side is included). */
+  isAffiliated?: (club: C) => boolean;
+}
+
+/**
+ * The gated pool plus the sides the gate held back, so a console can list them greyed
+ * with an "Include anyway". `excludeTeamIds` is honoured on both lists: a side the
+ * competition excludes is not "held back by affiliation", it is not entered at all.
+ *
+ * `isAffiliated` is required here — without it nothing is ever held back, and the caller
+ * wants {@link leagueParticipants}.
+ */
+export function leagueParticipantsWithStatus<C extends ClubSidesSource & { leagues?: string[] }>(
+  clubs: C[],
+  leagueKey: string,
+  exclude: string[] = [],
+  isAffiliated: (club: C) => boolean,
+): {
+  participants: (TeamParticipant & { club: C })[];
+  unaffiliated: (TeamParticipant & { club: C })[];
+} {
+  const all = leagueParticipants(clubs, leagueKey, exclude);
+  return {
+    participants: all.filter((p) => isAffiliated(p.club)),
+    unaffiliated: all.filter((p) => !isAffiliated(p.club)),
+  };
 }

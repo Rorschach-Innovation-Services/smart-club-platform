@@ -4711,6 +4711,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
       // so any distance would be a guess off the home-ground snapshot the server left
       // intact (see `venueWithheld`).
       if (!venueWithheld(s) && homeSide?.ground && awaySide?.ground) {
+        // TODO(phase-4): read competitionDefaults.travel
         const c = fixtureCost(
           homeSide,
           awaySide,
@@ -4857,6 +4858,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
               'shown once venues are confirmed'
             ) : (
               <>
+                {/* TODO(phase-4): read competitionDefaults.travel */}
                 est · {myReleased[0]?.carsPerAwayTrip || DEFAULT_CARS} cars × R{' '}
                 {myReleased[0]?.costPerKm || DEFAULT_COST_PER_KM}
                 /km
@@ -5024,6 +5026,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                         const costHome = isHome ? club : opp;
                         const costAway = isHome ? opp : club;
                         if (!hideVenue && costHome?.ground && costAway?.ground) {
+                          // TODO(phase-4): read competitionDefaults.travel
                           const c = fixtureCost(
                             costHome,
                             costAway,
@@ -5224,6 +5227,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
           figures it explains are themselves standing down until grounds are public. */}
       {!anyVenueWithheld && (
         <div className="club-fix-foot">
+          {/* TODO(phase-4): read competitionDefaults.travel */}
           Travel cost is estimated at R {myReleased[0]?.costPerKm || DEFAULT_COST_PER_KM}/km ×{' '}
           {myReleased[0]?.carsPerAwayTrip || 3} cars per away trip — published with the fixture
           release. Adjustments to schedule require a {copy.office} sign-off.

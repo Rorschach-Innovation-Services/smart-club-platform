@@ -111,6 +111,12 @@ Walk the whole path once:
    it → confirm the PUT response's toast names the affected series count, and the save is
    **not** blocked.
 
+> **"Create a series" is gone (ADR 0014).** The admin console has no create-series form and
+> no series-level Regenerate. A one-off cup or festival is started through **Start a season**
+> with the **One-off tournament** template (quick start). Imported schedules and stand-alone
+> series stay on the Fixtures list and remain editable (add, edit, delete fixtures, allocate
+> venues), but they cannot be regenerated: there is no season stage to rebuild them from.
+
 ## 2. Deploy
 
 ```bash

@@ -1,11 +1,6 @@
 /* ─── Sample data ─── */
 
 import type { Club, RequiredDoc } from './types';
-import {
-  fixturesFromDates,
-  legacyRoundDates,
-  roundRobinPairings,
-} from '../packages/engine/src/fixtures';
 import { slotRefLabel } from '../packages/engine/src/formats';
 import { haversineKm } from '../packages/engine/src/geo';
 import {
@@ -1545,31 +1540,4 @@ export function resolveTeam(series, teamId, clubBy) {
     name: club?.name ?? 'Removed club',
     ground: (club && club.ground) || {},
   };
-}
-
-// Resolve whether an end date should drive scheduling. Empty/absent `dateMode`
-// falls back to a format-based default: tournaments are bounded events (spread),
-// series run weekly (reference). Shared by the create form and `regenerate` so
-// the two paths can never interpret a stored series differently.
-export function resolveSpread({ dateMode, kind }: { dateMode?: string; kind?: string } = {}) {
-  return (dateMode || (kind === 'tournament' ? 'spread' : 'reference')) === 'spread';
-}
-
-/**
- * Round-robin: each team plays every other team once. Home/away alternates fairly.
- *
- * Now a thin wrapper over packages/engine/src/fixtures.ts, which owns the pairing rotation
- * and both date strategies (ADR 0008). Behaviour is unchanged and must stay that way —
- * the create/regenerate parity test in data.test.ts is the gate.
- *
- * For a series scheduled against a season calendar, callers use `fixturesFromPlan` with
- * dates from `planRoundDates` instead; this signature stays for the legacy path.
- */
-export function generateRoundRobin(
-  teamIds: (string | null)[],
-  startDateISO: string,
-  options: { endDateISO?: string; spread?: boolean } = {},
-) {
-  const rounds = roundRobinPairings(teamIds);
-  return fixturesFromDates(rounds, legacyRoundDates(rounds.length, startDateISO, options));
 }

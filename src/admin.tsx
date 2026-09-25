@@ -48,8 +48,6 @@ import {
   fixtureCost,
   DEFAULT_COST_PER_KM,
   DEFAULT_CARS,
-  generateRoundRobin,
-  resolveSpread,
   resolveTeam,
   teamIdsForClub,
   distinctClubCount,
@@ -66,46 +64,26 @@ import {
 import {
   leagueOptionsForDistrict,
   leagueOptionsOutsideDistrict,
-  optionsGroupedByGroup,
-  findByKey,
   slugifyLeagueKey,
   labelByKey,
   teamCounts,
-  clubTeamsForLeague,
   OVERARCHING_DISTRICT,
 } from '../packages/engine/src/leagues';
 import {
-  CADENCE_LABELS,
-  T20_SLOTS,
-  WEEKDAY_LABELS,
-  cadenceFromLabel,
-  calendarSpan,
-  describeCadence,
   formatIsoDate,
   isActivated,
-  isValidIsoDate,
   planRoundDates,
   todayIso,
 } from '../packages/engine/src/calendar';
-import {
-  fixturesFromPlan,
-  legacyRoundDates,
-  roundsForTeamCount,
-} from '../packages/engine/src/fixtures';
+import { legacyRoundDates } from '../packages/engine/src/fixtures';
 import {
   fixtureVenueCoords as fixtureVenue,
   isLocked,
   VENUE_REASON_PREFIX,
 } from '../packages/engine/src/venues';
-import {
-  DEFAULT_SERIES_OVERS,
-  isSlotRef,
-  SERIES_TYPES,
-  slotRefLabel,
-} from '../packages/engine/src/formats';
+import { isSlotRef, slotRefLabel } from '../packages/engine/src/formats';
 import type {
   AdminClearanceView,
-  Cadence,
   Club,
   League,
   PlayerRegistration,
@@ -113,9 +91,7 @@ import type {
   SeasonRun,
   Series,
   Clash,
-  TimeSlot,
   Venue,
-  Weekday,
   WithheldField,
 } from './types';
 import {
@@ -257,14 +233,14 @@ interface AdminFixturesProps {
   // `Series.fixtures` is `unknown[]` (frontend strict ratchet, deferred) and this
   // long-standing function accesses fixture fields freely with no casts — typing this
   // `Series[]` cascades unrelated fallout across the whole file. Left loose, like the
-  // rest of AdminFixtures' pre-existing untyped props; only the seam this change
-  // actually touches (`onSubmitSeries`) is deliberately typed below.
+  // rest of AdminFixtures' pre-existing untyped props.
   allSeries;
-  /** The real POST handler (with toast) — the launcher's series step awaits this before
-   *  closing, so a rejection leaves the embedded form open with inputs intact. Renamed
-   *  (not just re-typed) from `onCreateSeries` so a stale call site still passing the old
-   *  `(leagueKey) => void` routing shape fails to compile instead of silently no-oping. */
-  onSubmitSeries: (series) => Promise<void>;
+  /**
+   * @deprecated Unread since the create-series form was retired (ADR 0014) — every new
+   * schedule starts through "Start a season". Still accepted so an existing host keeps
+   * compiling; remove once no caller passes it.
+   */
+  onSubmitSeries?: (series) => Promise<void>;
   /** Persist an edited series. Every caller awaits the returned promise — EditFixtureRow
    *  closes the row only on resolve so a clash-gate 409 keeps it open with the reason
    *  inline. Typed as returning a promise so that contract is enforced, not by convention. */
@@ -326,7 +302,8 @@ export function seriesScheduleRows(s: Series, clubs: Club[]) {
       away?.ground?.lon != null;
     const cost =
       home && away
-        ? fixtureCost(home, away, (s as any).costPerKm, (s as any).carsPerAwayTrip, fixtureVenue(f))
+        ? // TODO(phase-4): read competitionDefaults.travel
+          fixtureCost(home, away, (s as any).costPerKm, (s as any).carsPerAwayTrip, fixtureVenue(f))
         : null;
     // The slot label ('Morning'/'Afternoon') alongside the raw kickoff time when the
     // series' schedule carries named slots — trivially available off `schedule.slots`,
@@ -411,7 +388,6 @@ function SeriesStatusPills({ series: s }: { series: Series }) {
 export function AdminFixtures({
   clubs,
   allSeries,
-  onSubmitSeries,
   onUpdateSeries,
   onDeleteSeries,
   onDuplicateSeries,
@@ -441,9 +417,9 @@ export function AdminFixtures({
   onGenerateStageSeries,
 }: AdminFixturesProps) {
   const copy = useCopy();
-  // The single "Generate fixtures" entry point — the league picked here decides whether
-  // the admin lands in StartSeasonForm or the flat CreateSeriesForm. Owned here, not in
-  // SeasonRunsPanel, so its own "Start a season" button and the header button can share it.
+  // The single "Start a season" entry point — the league picked here decides whether the
+  // admin lands in StartSeasonForm (a competition the operator set up) or Quick start.
+  // Owned here, not in SeasonRunsPanel, so its own button and the header button share it.
   const [launcherOpen, setLauncherOpen] = useStateA(false);
   const [viewerOpen, setViewerOpen] = useStateA(false);
   const [activeId, setActiveId] = useStateA(allSeries[0]?.id);
@@ -463,6 +439,7 @@ export function AdminFixtures({
       const home = teamBy(s, f.home),
         away = teamBy(s, f.away);
       if (!home.clubId || !away.clubId) return;
+      // TODO(phase-4): read competitionDefaults.travel
       const c = fixtureCost(home, away, s.costPerKm, s.carsPerAwayTrip, fixtureVenue(f));
       totalKm += c.roundTripKm;
       totalCost += c.fuelR;
@@ -572,11 +549,10 @@ export function AdminFixtures({
             Fixtures &amp; <em>Venues</em>
           </h1>
           <p className="ph-desc">
-            Every league runs a season — structured stage by stage once your platform operator has
-            bound a competition (operator console → Season setup, or the Structures card), a flat
-            round robin otherwise — plus ad-hoc series for one-off fixtures. Home venues flow from
-            the affiliation form. Travel distance and fuel cost are calculated for every away
-            fixture.
+            Every league runs a season, stage by stage — on a competition your platform operator set
+            up, or one you quick-start from a template. A one-off cup or festival is a season too:
+            start it from the One-off tournament template. Home venues flow from the affiliation
+            form. Travel distance and fuel cost are calculated for every away fixture.
           </p>
         </div>
         <div className="ph-actions">
@@ -586,8 +562,8 @@ export function AdminFixtures({
               are in the release bar under its fixtures.
             </p>
             <p>
-              <strong>Generate fixtures</strong> — build a season’s schedule stage by stage, or a
-              flat/ad-hoc series.
+              <strong>Start a season</strong> — build a season’s schedule stage by stage, including
+              a one-off tournament.
             </p>
             <p>
               <strong>Approve</strong> — sign the active series off internally. Nothing is published
@@ -611,7 +587,7 @@ export function AdminFixtures({
             View season
           </Btn>
           <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={() => setLauncherOpen(true)}>
-            Generate fixtures
+            Start a season
           </Btn>
           {/* Status only. Approve, release, reveal and recall live in ONE place — the
               release bar under the active series' fixtures — so the page never offers the
@@ -680,10 +656,10 @@ export function AdminFixtures({
           <EmptyState
             icon={Icon.Field}
             title="No series yet"
-            sub="Generate fixtures to work through a structured competition stage by stage (bound by your platform operator via operator console → Season setup, or the Structures card), run a flat season for any other league, or create an ad-hoc series for a one-off."
+            sub="Start a season to work through a league’s competition stage by stage — one your platform operator set up, or one you quick-start from a template. A one-off cup or festival uses the One-off tournament template."
             action={
               <Btn tone="teal" icon={Icon.Plus} onClick={() => setLauncherOpen(true)}>
-                Generate fixtures
+                Start a season
               </Btn>
             }
           />
@@ -861,19 +837,6 @@ export function AdminFixtures({
             (() => Promise.reject(new Error('season-run creation is not wired for this host')))
           }
           onSeasonSetupChanged={onSeasonSetupChanged}
-          // No league prefill — every real league now starts a season (structured or
-          // flat) through the launcher's own forms above. This embedded form is reached
-          // ONLY via the ad-hoc option, where there is no league to prefill at all.
-          renderSeriesForm={({ onBack }) => (
-            <CreateSeriesForm
-              clubs={clubs}
-              allLeagues={allLeagues}
-              allCalendars={allCalendars}
-              onBack={onBack}
-              onCreate={onSubmitSeries}
-              onClose={() => setLauncherOpen(false)}
-            />
-          )}
           onClose={() => setLauncherOpen(false)}
           toast={toast}
         />
@@ -1106,7 +1069,7 @@ export function FixtureTable({
   const teamBy = (id) => resolveTeam(series, id, clubBy);
   const [editingId, setEditingId] = useStateA<string | null>(null);
   const [filter, setFilter] = useStateA('all');
-  const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null); // {title, body, onYes} — for delete/regen only; release uses parent's modal
+  const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null); // {title, body, onYes} — for delete/allocate only; release uses parent's modal
 
   // Helpers — operate on series.fixtures via onUpdateSeries.
   // FixtureTable's props are untyped destructuring; bind onUpdateSeries to a locally typed
@@ -1140,10 +1103,10 @@ export function FixtureTable({
     // "+7 days from the last fixture" would step straight into the mid-season break —
     // the exact defect season calendars exist to remove — and it parsed with a lenient
     // `new Date()` in a module that otherwise went strict-dayjs everywhere.
-    // A season-run series is bound to its run's frozen `calendarSnapshot`, which may exist
-    // nowhere in tenant config (a flat season with custom dates synthesises
-    // `cal-flat-<league>`), so resolve it from the run; only a run-less series looks in
-    // the tenant's calendars.
+    // A season-run series is bound to its run's frozen `calendarSnapshot`, which may differ
+    // from (or no longer exist in) tenant config, so resolve it from the run; only a
+    // run-less series — an imported schedule or a stand-alone series — looks in the
+    // tenant's calendars.
     const run = series.seasonRunId
       ? allSeasonRuns.find((r) => r.id === series.seasonRunId)
       : undefined;
@@ -1202,83 +1165,6 @@ export function FixtureTable({
       })
       .catch(() => {});
   }
-  /**
-   * Rebuild fixtures from the series' own stored schedule.
-   *
-   * A calendar-scheduled series MUST regenerate through the calendar, not the legacy
-   * weekly stepping — otherwise a regenerate would quietly move a whole league's fixtures
-   * into the mid-season break, which is precisely the defect calendars exist to prevent.
-   * A calendar deleted or re-blocked since creation makes the plan unfittable; we refuse
-   * and say so rather than silently falling back to a different schedule.
-   */
-  function regenerate() {
-    const sched = series.schedule;
-    const calendar = sched && allCalendars.find((c) => c.id === sched.calendarId);
-    if (sched && !calendar) {
-      setConfirm(null);
-      toast?.('That season calendar no longer exists — pick a new schedule first', 'warn');
-      return;
-    }
-    // The write promise from whichever branch runs, so the success toast can wait on it.
-    let write: Promise<unknown>;
-    if (sched && calendar) {
-      // Regenerate only knows how to rebuild a SINGLE-LEG ROUND ROBIN. A season-run
-      // series carries its schedule but not its format, so regenerating a double round
-      // would silently halve it and regenerating a knockout would replace the bracket
-      // with a league. Refuse rather than reshape someone's season.
-      if (series.seasonRunId) {
-        setConfirm(null);
-        toast?.(
-          'This series belongs to a season — regenerate it from the season stage so its format is preserved',
-          'warn',
-        );
-        return;
-      }
-      const rounds = roundsForTeamCount(series.teams.length);
-      if (rounds < 1) {
-        setConfirm(null);
-        toast?.('At least two teams are needed to regenerate fixtures', 'warn');
-        return;
-      }
-      const plan = planRoundDates({
-        calendar,
-        blockId: sched.blockId,
-        cadence: sched.cadence,
-        rounds,
-        startDate: series.startDate,
-        roundsPerDay: sched.roundsPerDay,
-      });
-      // `fits` is trivially true for zero rounds, and `plan.dates[0]` would then be
-      // undefined — which `removeUndefinedValues` strips, dropping the gsi1sk and making
-      // the series vanish from listSeries permanently. Guarded above and again here.
-      if (!plan.fits || !plan.dates.length) {
-        setConfirm(null);
-        toast?.(plan.summary, 'warn');
-        return;
-      }
-      write = update(series.id, (s) => ({
-        ...s,
-        startDate: plan.dates[0],
-        fixtures: fixturesFromPlan(s.teams, plan.dates, sched.slots, {
-          roundsPerDay: sched.roundsPerDay,
-        }),
-      }));
-    } else {
-      write = update(series.id, (s) => ({
-        ...s,
-        fixtures: generateRoundRobin(s.teams, s.startDate, {
-          endDateISO: s.endDate,
-          spread: resolveSpread(s),
-        }),
-      }));
-    }
-    setConfirm(null);
-    // Regenerate mints all-new fixture ids, so on a released series carrying a residual
-    // clash the gate refuses it until those are fixed — announce success only once the
-    // write actually lands, never before.
-    write.then(() => toast?.(`${series.name} · fixtures regenerated`)).catch(() => {});
-  }
-
   // "Time TBC" is only meaningful once the series has at least one timed fixture —
   // computed once here rather than per row, and only shown on untimed rows when true,
   // so series that never use times (most of them) stay silent rather than noisy.
@@ -1288,6 +1174,7 @@ export function FixtureTable({
   const allRows = series.fixtures.map((f) => {
     const home = teamBy(f.home),
       away = teamBy(f.away);
+    // TODO(phase-4): read competitionDefaults.travel
     const c = fixtureCost(home, away, series.costPerKm, series.carsPerAwayTrip, fixtureVenue(f));
     return { f, home, away, c };
   });
@@ -1345,7 +1232,8 @@ export function FixtureTable({
           <div className="fix-header-agg">
             <div className="fix-header-agg-l">@ R / km</div>
             <div className="fix-header-agg-n">
-              R {(series.costPerKm ?? DEFAULT_COST_PER_KM).toFixed(2)}
+              {/* TODO(phase-4): read competitionDefaults.travel */}R{' '}
+              {(series.costPerKm ?? DEFAULT_COST_PER_KM).toFixed(2)}
               <span className="unit">× {series.carsPerAwayTrip ?? DEFAULT_CARS} cars</span>
             </div>
           </div>
@@ -1378,8 +1266,9 @@ export function FixtureTable({
               <strong>Add fixture</strong> — insert a single match into this series by hand.
             </p>
             <p>
-              <strong>Regenerate</strong> — rebuild the whole series as a fresh round-robin.
-              Replaces every fixture and loses manual edits.
+              A season stage&apos;s series is regenerated from its stage on the Seasons card. An{' '}
+              <strong>Imported schedule</strong> or <strong>Stand-alone series</strong> belongs to
+              no stage, so it cannot be regenerated — edit, add or delete its fixtures here.
             </p>
             <p>
               <strong>Allocate venues</strong> — assign a ground to every fixture. Ranks by travel
@@ -1393,20 +1282,6 @@ export function FixtureTable({
           </InfoDot>
           <Btn tone="outline" size="sm" icon={Icon.Plus} onClick={addFixture}>
             Add fixture
-          </Btn>
-          <Btn
-            tone="outline"
-            size="sm"
-            onClick={() =>
-              setConfirm({
-                title: 'Regenerate all fixtures?',
-                body: 'This will replace every fixture in this series with a fresh round-robin based on the current teams + start date. All manual edits, dates, and status changes will be lost. This cannot be undone.',
-                onYes: regenerate,
-                danger: true,
-              })
-            }
-          >
-            ↻ Regenerate
           </Btn>
           {onAllocateVenues && (
             <Btn
@@ -2322,1051 +2197,6 @@ function EditFixtureRow({
         </div>
       </td>
     </tr>
-  );
-}
-
-/* ─── CreateSeriesForm — automated league flow + advanced overrides ─── */
-interface CreateSeriesFormProps {
-  clubs: Club[];
-  // The submitted draft omits server-assigned fields (`released`, `version`…), so this is
-  // deliberately left untyped rather than widened to `Series` — the seam this guards is
-  // the CALLBACK SHAPE (one series argument, a Promise the busy idiom awaits), not the
-  // draft's exact fields.
-  onCreate: (series) => Promise<void>;
-  onClose: () => void;
-  allLeagues?: League[];
-  allCalendars?: SeasonCalendar[];
-  /** Present when embedded in the "Generate fixtures" launcher — Back returns to the
-   *  league picker instead of closing the whole flow. */
-  onBack?: () => void;
-}
-
-export function CreateSeriesForm({
-  clubs,
-  onCreate,
-  onClose,
-  allLeagues = [],
-  allCalendars = [] as SeasonCalendar[],
-  onBack,
-}: CreateSeriesFormProps) {
-  const [d, setD] = useStateA({
-    leagueKey: '', // dropdown: pick a league → auto-fills name + teams
-    name: '',
-    startDate: '',
-    endDate: '', // optional; blank keeps the original weekly schedule
-    dateMode: '', // '' = smart default by kind · 'spread' | 'reference'
-    // ─ Season-calendar scheduling (ADR 0008). Empty calendarId ⇒ the legacy
-    //   start/end window above drives the dates, exactly as before.
-    calendarId: '',
-    blockId: '',
-    // Annotated so the discriminated union survives useState's inference —
-    // without it every cadence widens to `{ kind: string }`.
-    cadence: { kind: 'weekly' } as Cadence,
-    slots: [] as TimeSlot[],
-    activateFrom: '', // delayed visibility (juniors); blank ⇒ visible on release
-    kind: 'series', // "series" or "tournament"
-    bulkSend: true, // tick to bulk-send fixtures to stakeholders on create
-    divisions: false,
-    groups: 1,
-    maxOvers: DEFAULT_SERIES_OVERS,
-    maxPlayers: 11,
-    rosterLimit: 'No Limit',
-    ballType: 'Hard Tennis Ball',
-    seriesType: SERIES_TYPES[0],
-    powerPlay: false,
-    category: 'Men',
-    level: 'Club',
-    winPoints: 2,
-    bonusPoints: 0,
-    lossPoints: 0,
-    tiePoints: 1,
-    abandonedPoints: 1,
-    ballsPerOver: 0,
-    maxBallsPerOver: 0,
-    minLeagueMatches: 0,
-    configureExtras: false,
-    lockAfterLive: false,
-    lockAfterManual: false,
-    preventTeamSwitch: false,
-    umpireReportsMandatory: false,
-    captainReportsMandatory: false,
-    sendReportEmails: false,
-    rankCalculator: 'New',
-    hideSeriesDetails: false,
-    allowLockedRegistration: false,
-    pointsTableOrder: ['Most Points', 'NRR', 'Head To Head', 'Number of Wins', 'Win Percentage'],
-    tags: '',
-    teams: [],
-    costPerKm: 4.5,
-    carsPerAwayTrip: 3,
-  });
-  const [showAdvanced, setShowAdvanced] = useStateA(false);
-  const [showScheduling, setShowScheduling] = useStateA(false);
-  // Set on the first user-driven edit. Back only confirms once there is actual admin
-  // work to lose.
-  const [dirty, setDirty] = useStateA(false);
-  const [busy, setBusy] = useStateA(false);
-
-  function u(k, v) {
-    setDirty(true);
-    setD((prev) => ({ ...prev, [k]: v }));
-  }
-  function toggleTeam(id) {
-    setDirty(true);
-    setD((prev) => ({
-      ...prev,
-      teams: prev.teams.includes(id) ? prev.teams.filter((t) => t !== id) : [...prev.teams, id],
-    }));
-  }
-  function moveOrder(idx, dir) {
-    setDirty(true);
-    setD((prev) => {
-      const arr = [...prev.pointsTableOrder];
-      const j = idx + dir;
-      if (j < 0 || j >= arr.length) return prev;
-      [arr[idx], arr[j]] = [arr[j], arr[idx]];
-      return { ...prev, pointsTableOrder: arr };
-    });
-  }
-  function handleBack() {
-    if (dirty && !window.confirm('Discard this series setup and go back?')) return;
-    onBack?.();
-  }
-
-  // Teams eligible = each club past the phase-1 gate that registered for the selected
-  // league, expanded into its sides: a club fielding ≥2 teams contributes one
-  // participant per named side (so two sides of one club can be drawn against each
-  // other); otherwise the club is a single team (teamId === clubId).
-  const registeredClubs = d.leagueKey
-    ? clubs.filter(
-        (c) =>
-          affiliationSubmitted(c) && Array.isArray(c.leagues) && c.leagues.includes(d.leagueKey),
-      )
-    : [];
-  const teamCandidates = registeredClubs.flatMap((c) =>
-    clubTeamsForLeague(c, d.leagueKey).map((p) => ({ ...p, club: c })),
-  );
-
-  // When the admin picks a league, auto-fill the name and bulk-select all registered sides.
-  function pickLeague(key) {
-    const L = findByKey(allLeagues, key);
-    const candidates = clubs
-      .filter((c) => affiliationSubmitted(c) && Array.isArray(c.leagues) && c.leagues.includes(key))
-      .flatMap((c) => clubTeamsForLeague(c, key));
-    setD((prev) => ({
-      ...prev,
-      leagueKey: key,
-      name: L ? `${L.label} · 2026/27` : prev.name,
-      teams: candidates.map((p) => p.teamId),
-      tags: L ? `${L.group}, ${L.label}` : prev.tags,
-    }));
-  }
-
-  // End date is optional. When set, the admin picks whether it drives the
-  // schedule ('spread') or is reference-only; with no explicit pick we default
-  // by format (see resolveSpread — shared with regenerate so they never drift).
-  const spread = resolveSpread(d);
-  const roundsNeeded = roundsForTeamCount(d.teams.length);
-  const windowDays = d.endDate
-    ? Math.round((new Date(d.endDate).getTime() - new Date(d.startDate).getTime()) / 86400000)
-    : null;
-  const endBeforeStart = !!d.endDate && d.endDate < d.startDate;
-  // Spreading needs at least one day per round after the first.
-  const windowTooShort = !!d.endDate && spread && windowDays < roundsNeeded - 1;
-
-  /* ─── Season-calendar scheduling (ADR 0008) ───
-     Two mutually exclusive modes. Picking a calendar hands dating to the engine, which
-     knows about blocks, breaks, excluded dates and cadence; with none picked (or none
-     configured for the tenant) the legacy start/end window runs exactly as before.
-     `plan` is recomputed on every keystroke so the preview and the create button always
-     agree with what would actually be generated. */
-  const calendar = allCalendars.find((c) => c.id === d.calendarId) || null;
-  // Narrowed once here — `d.cadence.days` inside JSX doesn't narrow through the
-  // property chain, and reading it unguarded is a runtime error on other cadences.
-  const selectedDays: Weekday[] = d.cadence.kind === 'weekdays' ? d.cadence.days : [];
-  const plan =
-    calendar && roundsNeeded > 0
-      ? planRoundDates({
-          calendar,
-          blockId: d.blockId,
-          cadence: d.cadence,
-          rounds: roundsNeeded,
-          startDate: d.startDate || undefined,
-        })
-      : null;
-
-  const canCreate =
-    d.name &&
-    d.teams.length >= 2 &&
-    (calendar
-      ? // The calendar owns the dates, so startDate isn't required — but a plan that
-        // doesn't fit its block must never be generated into a silently short season.
-        !!plan?.fits
-      : d.startDate && !endBeforeStart && !windowTooShort);
-
-  function submit() {
-    if (!canCreate || busy) return;
-    // Self-contained snapshot of the selected sides — authoritative for resolving
-    // fixture names/coords, so a later roster edit never orphans this series.
-    const participants = teamCandidates
-      .filter((p) => d.teams.includes(p.teamId))
-      .map((p) => ({
-        teamId: p.teamId,
-        clubId: p.clubId,
-        name: p.name,
-        ...(p.venue ? { venue: p.venue } : {}),
-        ...(Number.isFinite(p.lat) ? { lat: p.lat } : {}),
-        ...(Number.isFinite(p.lon) ? { lon: p.lon } : {}),
-      }));
-    const scheduled = !!(calendar && plan);
-    // The form model's own scheduling fields are DROPPED here — `calendarId`, `blockId`,
-    // `cadence` and `slots` are the inputs that produce `schedule` below, and spreading
-    // them too stored the same binding twice on every calendar-scheduled series. Nothing
-    // reads the strays today, which is exactly how a second source of truth survives
-    // until something does.
-    const { calendarId: _cid, blockId: _bid, cadence: _cad, slots: _slots, ...seriesFields } = d;
-    const series = {
-      id: 's-' + Date.now(),
-      ...seriesFields,
-      participants,
-      // Persist the *resolved* mode (not the raw '' default) only when an end
-      // date exists, so regenerate reproduces the schedule the admin confirmed.
-      dateMode: d.endDate ? (spread ? 'spread' : 'reference') : undefined,
-      // The calendar binding, so `regenerate` reproduces these dates rather than
-      // falling back to legacy weekly stepping. Same parity guarantee as dateMode.
-      schedule: scheduled
-        ? {
-            calendarId: calendar.id,
-            blockId: d.blockId,
-            cadence: d.cadence,
-            ...(d.slots.length ? { slots: d.slots } : {}),
-          }
-        : undefined,
-      // The generated first-round date becomes the series start, so every existing
-      // consumer (list sort, gsi1sk, headers) keeps reading one field.
-      startDate: scheduled ? plan.dates[0] : d.startDate,
-      activateFrom: d.activateFrom || undefined,
-      tags: d.tags
-        ? d.tags
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean)
-        : [],
-      fixtures: scheduled
-        ? fixturesFromPlan(d.teams, plan.dates, d.slots.length ? d.slots : undefined)
-        : generateRoundRobin(d.teams, d.startDate, { endDateISO: d.endDate, spread }),
-    };
-    // Await the POST — closing only on success keeps a failed create from silently
-    // discarding the admin's work (see StartSeasonForm's identical busy idiom).
-    setBusy(true);
-    onCreate(series)
-      .then(onClose)
-      .catch(() => setBusy(false));
-  }
-
-  return (
-    <div className="cs-form">
-      {/* ─── Streamlined basics — dropdown · date · toggle · auto-teams ─── */}
-      <div className="cs-row">
-        <div className="cs-row-label">
-          Series Name<span className="req">*</span>
-        </div>
-        <div className="cs-row-input">
-          <select
-            className="field-select"
-            aria-label="League"
-            value={d.leagueKey}
-            onChange={(e) => {
-              setDirty(true);
-              pickLeague(e.target.value);
-            }}
-            style={{ minWidth: 280 }}
-          >
-            <option value="">Select a league / division…</option>
-            {(() => {
-              const groups = optionsGroupedByGroup(allLeagues);
-              return Object.entries(groups).map(([group, opts]) => (
-                <optgroup key={group} label={group}>
-                  {opts.map((L) => (
-                    <option key={L.key} value={L.key}>
-                      {L.label} · 2026/27
-                    </option>
-                  ))}
-                </optgroup>
-              ));
-            })()}
-          </select>
-        </div>
-      </div>
-      {/* ─── Dates ───
-          With a season calendar configured the operator's playing blocks and breaks
-          drive the dates; without one this collapses to the original start/end window. */}
-      {allCalendars.length > 0 && (
-        <div className="cs-row">
-          <div className="cs-row-label">Dates</div>
-          <div className="cs-row-input">
-            <select
-              className="field-select"
-              aria-label="Dates"
-              value={d.calendarId}
-              onChange={(e) => {
-                const cal = allCalendars.find((c) => c.id === e.target.value);
-                // Default to the first block so the preview has something to say
-                // immediately rather than starting on an error.
-                setD((prev) => ({
-                  ...prev,
-                  calendarId: e.target.value,
-                  blockId: cal?.blocks?.[0]?.id || '',
-                }));
-              }}
-              style={{ minWidth: 280 }}
-            >
-              <option value="">Custom dates — pick start / end</option>
-              {allCalendars.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {`${c.label} season · ${calendarSpan(c)}`}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-      )}
-
-      {calendar ? (
-        <>
-          {/* A single-block calendar has already auto-picked its only option — showing
-              a one-item select would just be a decoy control. */}
-          {calendar.blocks.length > 1 && (
-            <div className="cs-row">
-              <div className="cs-row-label">
-                Playing block<span className="req">*</span>
-              </div>
-              <div className="cs-row-input">
-                <select
-                  className="field-select"
-                  aria-label="Playing block"
-                  value={d.blockId}
-                  onChange={(e) => u('blockId', e.target.value)}
-                  style={{ minWidth: 280 }}
-                >
-                  {calendar.blocks.map((b) => (
-                    <option key={b.id} value={b.id}>
-                      {b.label} · {formatIsoDate(b.start)} → {formatIsoDate(b.end)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          )}
-          {/* The preview rail: what will actually be generated, recomputed live. This is
-              where an overflowing block is caught, before anyone clicks create. */}
-          {plan && (
-            <div className="cs-row">
-              <div className="cs-row-label" />
-              <div className="cs-row-input">
-                <div
-                  style={{
-                    padding: '10px 12px',
-                    borderRadius: 8,
-                    fontSize: 12.5,
-                    lineHeight: 1.5,
-                    border: '1px solid var(--line)',
-                    background: plan.fits ? 'var(--paper)' : 'var(--coral-pale, #FDECEA)',
-                    color: plan.fits ? 'var(--muted)' : 'var(--coral)',
-                  }}
-                >
-                  <strong style={{ color: plan.fits ? 'var(--ink)' : 'var(--coral)' }}>
-                    {plan.fits ? 'Ready' : 'Does not fit'}
-                  </strong>{' '}
-                  · {plan.summary}
-                </div>
-              </div>
-            </div>
-          )}
-        </>
-      ) : (
-        <>
-          <div className="cs-row">
-            <div className="cs-row-label">
-              Start Date<span className="req">*</span>
-            </div>
-            <div className="cs-row-input">
-              <input
-                type="date"
-                value={d.startDate}
-                onChange={(e) => u('startDate', e.target.value)}
-              />
-            </div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">End Date</div>
-            <div className="cs-row-input">
-              <input
-                type="date"
-                value={d.endDate}
-                min={d.startDate}
-                onChange={(e) => u('endDate', e.target.value)}
-              />
-              {d.endDate ? (
-                <div style={{ marginTop: 8 }}>
-                  <Choice
-                    value={spread ? 'Spread fixtures across window' : 'Reference only'}
-                    onChange={(v) =>
-                      u('dateMode', v === 'Spread fixtures across window' ? 'spread' : 'reference')
-                    }
-                    options={['Spread fixtures across window', 'Reference only']}
-                  />
-                  <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
-                    {spread
-                      ? 'Rounds are distributed evenly between the start and end date — best for a tournament that runs over a fixed period.'
-                      : 'Fixtures keep the weekly cadence; the end date is saved for display only.'}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          </div>
-        </>
-      )}
-      <div className="cs-row">
-        <div className="cs-row-label">Bulk-send to stakeholders</div>
-        <div className="cs-row-input">
-          <YN value={d.bulkSend} onChange={(v) => u('bulkSend', v)} />
-          <span style={{ fontSize: 11.5, color: 'var(--muted)', marginLeft: 10 }}>
-            Emails fixture list to chairpersons &amp; coaches once created.
-          </span>
-        </div>
-      </div>
-
-      {/* ─── Auto-populated teams — visible right under the basics ─── */}
-      <div className="cs-section">
-        <div className="cs-section-title">— Teams (auto-populated from registrations)</div>
-      </div>
-      {d.leagueKey ? (
-        <div className="cs-row">
-          <div className="cs-row-label">
-            {registeredClubs.length} club{registeredClubs.length === 1 ? '' : 's'} ·{' '}
-            {teamCandidates.length} team{teamCandidates.length === 1 ? '' : 's'} registered for{' '}
-            <strong>{findByKey(allLeagues, d.leagueKey)?.label ?? d.leagueKey}</strong>
-          </div>
-          <div className="cs-row-input">
-            <div style={{ fontSize: 11.5, color: 'var(--muted)', marginBottom: 8 }}>
-              Every side registered for this league is pre-included — clubs fielding more than one
-              team show each side separately. Tap a chip to opt one out.
-            </div>
-            <div className="cs-teams-grid">
-              {teamCandidates.length === 0 ? (
-                <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-                  No registered clubs yet — once clubs affiliate for this league they'll appear here
-                  automatically.
-                </span>
-              ) : (
-                teamCandidates.map((p) => {
-                  const on = d.teams.includes(p.teamId);
-                  return (
-                    <button
-                      key={p.teamId}
-                      className={`cs-team-chip ${on ? 'on' : ''}`}
-                      onClick={() => toggleTeam(p.teamId)}
-                    >
-                      {on && <Icon.Check />}
-                      {p.name}
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="cs-row">
-          <div className="cs-row-label">Pick a league above</div>
-          <div className="cs-row-input">
-            <div style={{ fontSize: 12, color: 'var(--muted)', padding: '10px 0' }}>
-              Once a league is selected, every affiliated club that registered for it will be added
-              automatically.
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ─── Scheduling options (collapsed by default) ───
-          Cadence, first round, time slots and activation are engine knobs with sane
-          defaults — most admins never touch them, so they live behind a toggle
-          rather than sprouting inline the moment a calendar is picked. */}
-      <button
-        type="button"
-        className="cs-section"
-        aria-label="Scheduling options"
-        aria-expanded={showScheduling}
-        style={{
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          width: '100%',
-          textAlign: 'left',
-          background: 'none',
-          border: 'none',
-          borderTop: '1px solid var(--line)',
-          padding: 0,
-          paddingTop: 14,
-          marginTop: 16,
-          font: 'inherit',
-          color: 'inherit',
-        }}
-        onClick={() => setShowScheduling((v) => !v)}
-      >
-        <span className="cs-section-title">— Scheduling options</span>
-        <span
-          style={{
-            fontSize: 11,
-            color: 'var(--muted)',
-            letterSpacing: '0.08em',
-            textTransform: 'uppercase',
-            fontWeight: 700,
-          }}
-        >
-          {showScheduling ? 'Hide' : 'Defaults applied · click to edit'}
-        </span>
-      </button>
-      {showScheduling && (
-        <>
-          {calendar && (
-            <>
-              <div className="cs-row">
-                <div className="cs-row-label">Cadence</div>
-                <div className="cs-row-input">
-                  <Choice
-                    value={CADENCE_LABELS[d.cadence.kind] || CADENCE_LABELS.weekly}
-                    onChange={(v) => u('cadence', cadenceFromLabel(v))}
-                    options={Object.values(CADENCE_LABELS)}
-                  />
-                  {d.cadence.kind === 'weekdays' && (
-                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
-                      {WEEKDAY_LABELS.map((label, day) => {
-                        const on = selectedDays.includes(day as Weekday);
-                        return (
-                          <button
-                            key={label}
-                            type="button"
-                            onClick={() =>
-                              u('cadence', {
-                                kind: 'weekdays',
-                                days: on
-                                  ? selectedDays.filter((x) => x !== day)
-                                  : [...selectedDays, day as Weekday].sort((a, b) => a - b),
-                              })
-                            }
-                            style={{
-                              padding: '4px 10px',
-                              borderRadius: 999,
-                              fontSize: 11.5,
-                              fontWeight: 700,
-                              cursor: 'pointer',
-                              border: '1px solid var(--line)',
-                              background: on ? 'var(--green-pale)' : 'var(--paper)',
-                              color: on ? 'var(--green)' : 'var(--muted-2)',
-                            }}
-                          >
-                            {label.slice(0, 3)}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div className="cs-row">
-                <div className="cs-row-label">First round</div>
-                <div className="cs-row-input">
-                  <input
-                    type="date"
-                    aria-label="First round"
-                    value={d.startDate}
-                    min={calendar.blocks.find((b) => b.id === d.blockId)?.start}
-                    max={calendar.blocks.find((b) => b.id === d.blockId)?.end}
-                    onChange={(e) => u('startDate', e.target.value)}
-                  />
-                  <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
-                    Optional — leave blank to start on the first day of the block.
-                  </div>
-                </div>
-              </div>
-              <div className="cs-row">
-                <div className="cs-row-label">Time slots</div>
-                <div className="cs-row-input">
-                  <Choice
-                    value={d.slots.length ? 'Morning & afternoon' : 'No set times'}
-                    onChange={(v) => u('slots', v === 'No set times' ? [] : T20_SLOTS)}
-                    options={['No set times', 'Morning & afternoon']}
-                  />
-                  <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
-                    {d.slots.length
-                      ? 'Fixtures in a round alternate between 08:00 and 13:30 starts.'
-                      : 'Fixtures carry a date only; start times are set later.'}
-                  </div>
-                </div>
-              </div>
-              <div className="cs-row">
-                <div className="cs-row-label">Activate from</div>
-                <div className="cs-row-input">
-                  <input
-                    type="date"
-                    aria-label="Activate from"
-                    value={d.activateFrom}
-                    onChange={(e) => u('activateFrom', e.target.value)}
-                  />
-                  <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
-                    Optional — fixtures generate now but stay hidden from clubs until this date.
-                    Used for junior leagues that only start in the second half of the season.
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
-          <div className="cs-row">
-            <div className="cs-row-label">Format</div>
-            <div className="cs-row-input">
-              <Choice
-                value={d.kind === 'series' ? 'Series' : 'Standalone tournament'}
-                onChange={(v) => u('kind', v === 'Series' ? 'series' : 'tournament')}
-                options={['Series', 'Standalone tournament']}
-              />
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* ─── Advanced overrides (collapsed by default) ─── */}
-      <div
-        className="cs-section"
-        style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}
-        onClick={() => setShowAdvanced((v) => !v)}
-      >
-        <div className="cs-section-title">— Advanced match &amp; scoring settings</div>
-        <span
-          style={{
-            fontSize: 11,
-            color: 'var(--muted)',
-            letterSpacing: '0.08em',
-            textTransform: 'uppercase',
-            fontWeight: 700,
-          }}
-        >
-          {showAdvanced ? 'Hide' : 'Defaults applied · click to edit'}
-        </span>
-      </div>
-      {showAdvanced && (
-        <>
-          <div className="cs-row">
-            <div className="cs-row-label">Series has Divisions?</div>
-            <div className="cs-row-input">
-              <YN value={d.divisions} onChange={(v) => u('divisions', v)} />
-            </div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">Groups</div>
-            <div className="cs-row-input">
-              <input
-                className="field-input"
-                type="number"
-                min="1"
-                max="8"
-                value={d.groups}
-                onChange={(e) => u('groups', parseInt(e.target.value) || 1)}
-                style={{ width: 90 }}
-              />
-            </div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">Maximum Overs</div>
-            <div className="cs-row-input">
-              <select
-                className="field-select"
-                value={d.maxOvers}
-                onChange={(e) => u('maxOvers', parseInt(e.target.value))}
-                style={{ width: 120 }}
-              >
-                {[10, 15, 20, 25, 30, 40, 45, 50].map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">Max Players per Team in a Match</div>
-            <div className="cs-row-input">
-              <select
-                className="field-select"
-                value={d.maxPlayers}
-                onChange={(e) => u('maxPlayers', parseInt(e.target.value))}
-                style={{ width: 90 }}
-              >
-                {[7, 8, 9, 10, 11, 12, 13].map((v) => (
-                  <option key={v}>{v}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">Max Player Limit for Roster</div>
-            <div className="cs-row-input">
-              <select
-                className="field-select"
-                value={d.rosterLimit}
-                onChange={(e) => u('rosterLimit', e.target.value)}
-                style={{ width: 130 }}
-              >
-                <option>No Limit</option>
-                <option>15</option>
-                <option>18</option>
-                <option>20</option>
-                <option>25</option>
-              </select>
-            </div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">Ball Type</div>
-            <div className="cs-row-input">
-              <select
-                className="field-select"
-                value={d.ballType}
-                onChange={(e) => u('ballType', e.target.value)}
-                style={{ width: 200 }}
-              >
-                <option>Cricket Ball</option>
-                <option>Hard Tennis Ball</option>
-                <option>Tape Ball</option>
-              </select>
-            </div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">Series Type</div>
-            <div className="cs-row-input">
-              <select
-                className="field-select"
-                value={d.seriesType}
-                onChange={(e) => u('seriesType', e.target.value)}
-                style={{ width: 220 }}
-              >
-                {SERIES_TYPES.map((t) => (
-                  <option key={t}>{t}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">Power Play Applicable?</div>
-            <div className="cs-row-input">
-              <YN value={d.powerPlay} onChange={(v) => u('powerPlay', v)} />
-            </div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">Category</div>
-            <div className="cs-row-input">
-              <select
-                className="field-select"
-                value={d.category}
-                onChange={(e) => u('category', e.target.value)}
-                style={{ width: 120 }}
-              >
-                <option>Men</option>
-                <option>Women</option>
-                <option>Mixed</option>
-                <option>U19</option>
-              </select>
-            </div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">Level</div>
-            <div className="cs-row-input">
-              <select
-                className="field-select"
-                value={d.level}
-                onChange={(e) => u('level', e.target.value)}
-                style={{ width: 140 }}
-              >
-                <option>Club</option>
-                <option>School</option>
-                <option>Veterans</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Points */}
-          <div className="cs-section">
-            <div className="cs-section-title">— Points Awards</div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">
-              Match outcomes<span className="req">*</span>
-            </div>
-            <div className="cs-row-input cs-row-multi">
-              <div className="cs-row-multi-item">
-                <label>Win</label>
-                <input
-                  type="number"
-                  value={d.winPoints}
-                  onChange={(e) => u('winPoints', parseInt(e.target.value) || 0)}
-                />
-              </div>
-              <div className="cs-row-multi-item">
-                <label>Bonus</label>
-                <input
-                  type="number"
-                  value={d.bonusPoints}
-                  onChange={(e) => u('bonusPoints', parseInt(e.target.value) || 0)}
-                />
-              </div>
-              <div className="cs-row-multi-item">
-                <label>Loss</label>
-                <input
-                  type="number"
-                  value={d.lossPoints}
-                  onChange={(e) => u('lossPoints', parseInt(e.target.value) || 0)}
-                />
-              </div>
-              <div className="cs-row-multi-item">
-                <label>Tie</label>
-                <input
-                  type="number"
-                  value={d.tiePoints}
-                  onChange={(e) => u('tiePoints', parseInt(e.target.value) || 0)}
-                />
-              </div>
-              <div className="cs-row-multi-item">
-                <label>Abandoned</label>
-                <input
-                  type="number"
-                  value={d.abandonedPoints}
-                  onChange={(e) => u('abandonedPoints', parseInt(e.target.value) || 0)}
-                />
-              </div>
-            </div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">Balls per over / Max</div>
-            <div className="cs-row-input cs-row-multi">
-              <div className="cs-row-multi-item">
-                <label>Standard</label>
-                <input
-                  type="number"
-                  value={d.ballsPerOver}
-                  onChange={(e) => u('ballsPerOver', parseInt(e.target.value) || 0)}
-                />
-              </div>
-              <div className="cs-row-multi-item">
-                <label>Max</label>
-                <input
-                  type="number"
-                  value={d.maxBallsPerOver}
-                  onChange={(e) => u('maxBallsPerOver', parseInt(e.target.value) || 0)}
-                />
-              </div>
-            </div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">Minimum league matches (player playoff eligibility)</div>
-            <div className="cs-row-input">
-              <input
-                className="field-input"
-                type="number"
-                value={d.minLeagueMatches}
-                onChange={(e) => u('minLeagueMatches', parseInt(e.target.value) || 0)}
-                style={{ width: 90 }}
-              />
-            </div>
-          </div>
-
-          {/* Yes / No config */}
-          <div className="cs-section">
-            <div className="cs-section-title">— Match &amp; Scorecard Configuration</div>
-          </div>
-          {[
-            ['configureExtras', 'Configure extras as good balls?'],
-            ['lockAfterLive', 'Lock scorecard after live scoring?'],
-            ['lockAfterManual', 'Lock scorecard after manual update?'],
-            ['preventTeamSwitch', 'Prevent players switching teams after playing?'],
-            ['umpireReportsMandatory', 'Umpire reports mandatory?'],
-            ['captainReportsMandatory', 'Captain reports mandatory?'],
-            ['sendReportEmails', 'Email captain/umpires for end-of-match reports?'],
-            ['hideSeriesDetails', 'Hide series details?'],
-            ['allowLockedRegistration', 'Allow player registration when team is locked?'],
-          ].map(([key, label]) => (
-            <div key={key} className="cs-row">
-              <div className="cs-row-label">{label}</div>
-              <div className="cs-row-input">
-                <YN value={d[key]} onChange={(v) => u(key, v)} />
-              </div>
-            </div>
-          ))}
-          <div className="cs-row">
-            <div className="cs-row-label">Rank Calculator</div>
-            <div className="cs-row-input">
-              <Choice
-                value={d.rankCalculator}
-                onChange={(v) => u('rankCalculator', v)}
-                options={['Old', 'New']}
-              />
-            </div>
-          </div>
-
-          {/* Travel cost defaults */}
-          <div className="cs-section">
-            <div className="cs-section-title">— Travel &amp; Logistics</div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">Default cost per km / Cars per away trip</div>
-            <div className="cs-row-input cs-row-multi">
-              <div className="cs-row-multi-item">
-                <label>R / km</label>
-                <input
-                  type="number"
-                  step="0.10"
-                  value={d.costPerKm}
-                  onChange={(e) => u('costPerKm', parseFloat(e.target.value) || 0)}
-                />
-              </div>
-              <div className="cs-row-multi-item">
-                <label>Cars</label>
-                <input
-                  type="number"
-                  value={d.carsPerAwayTrip}
-                  onChange={(e) => u('carsPerAwayTrip', parseInt(e.target.value) || 1)}
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Points Table Order */}
-          <div className="cs-section">
-            <div className="cs-section-title">— Points Table Order</div>
-          </div>
-          <div className="cs-row">
-            <div className="cs-row-label">Tie-break sequence (top wins first)</div>
-            <div className="cs-row-input">
-              <div className="cs-points-list">
-                {d.pointsTableOrder.map((rule, idx) => (
-                  <div key={rule} className="cs-points-row">
-                    <span className="order-num">{idx + 1}</span>
-                    {rule}
-                    <span className="cs-points-grip" style={{ display: 'flex', gap: 4 }}>
-                      <button
-                        onClick={() => moveOrder(idx, -1)}
-                        disabled={idx === 0}
-                        style={{
-                          background: 'transparent',
-                          border: 0,
-                          color: 'var(--muted)',
-                          cursor: idx === 0 ? 'not-allowed' : 'pointer',
-                          padding: 2,
-                        }}
-                      >
-                        ↑
-                      </button>
-                      <button
-                        onClick={() => moveOrder(idx, 1)}
-                        disabled={idx === d.pointsTableOrder.length - 1}
-                        style={{
-                          background: 'transparent',
-                          border: 0,
-                          color: 'var(--muted)',
-                          cursor: idx === d.pointsTableOrder.length - 1 ? 'not-allowed' : 'pointer',
-                          padding: 2,
-                        }}
-                      >
-                        ↓
-                      </button>
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Tags */}
-          <div className="cs-row">
-            <div className="cs-row-label">
-              Tags{' '}
-              <span style={{ color: 'var(--muted)', fontSize: 11, marginLeft: 4 }}>
-                (comma-separated)
-              </span>
-            </div>
-            <div className="cs-row-input">
-              <input
-                className="field-input"
-                placeholder="Premier, Men, Round-robin"
-                value={d.tags}
-                onChange={(e) => u('tags', e.target.value)}
-              />
-            </div>
-          </div>
-        </>
-      )}
-
-      <div
-        className="row"
-        style={{ marginTop: 22, justifyContent: 'space-between', gap: 10, padding: '12px 0' }}
-      >
-        <div
-          style={{
-            fontSize: 11.5,
-            color: 'var(--muted)',
-            fontFamily: "'Montserrat',sans-serif",
-            fontWeight: 500,
-          }}
-        >
-          {canCreate
-            ? `Ready · ${d.kind === 'tournament' ? 'tournament' : 'series'} · ${(d.teams.length * (d.teams.length - 1)) / 2} round-robin fixtures · ${
-                calendar && plan
-                  ? // Calendar mode: report what was actually planned — cadence, real span,
-                    // and any slots — rather than the old hardcoded "weekly from …".
-                    `${describeCadence(d.cadence)} in ${
-                      calendar.blocks.find((b) => b.id === d.blockId)?.label ?? 'the block'
-                    } · ${formatIsoDate(plan.dates[0])} → ${formatIsoDate(
-                      plan.dates[plan.dates.length - 1],
-                    )}${d.slots.length ? ` · ${d.slots.length} time slots` : ''}${
-                      d.activateFrom ? ` · hidden until ${formatIsoDate(d.activateFrom)}` : ''
-                    }`
-                  : d.endDate && spread
-                    ? `spread from ${d.startDate} to ${d.endDate}`
-                    : d.endDate
-                      ? `weekly from ${d.startDate} · ends ${d.endDate}`
-                      : `weekly from ${d.startDate}`
-              }${d.bulkSend ? ' · fixtures will be bulk-sent to stakeholders' : ''}`
-            : !d.leagueKey || !d.name
-              ? 'Pick a league / division to auto-populate teams'
-              : d.teams.length < 2
-                ? 'At least 2 registered teams are required'
-                : // In calendar mode the plan's own summary is the most specific thing we
-                  // can say — it names the block, the shortfall and the way out.
-                  calendar
-                  ? (plan?.summary ?? 'Pick a playing block')
-                  : !d.startDate
-                    ? 'Add a start date'
-                    : endBeforeStart
-                      ? 'End date must be on or after the start date'
-                      : windowTooShort
-                        ? `Window too short — ${roundsNeeded} rounds need at least ${roundsNeeded - 1} days between start and end (your window is ${windowDays})`
-                        : 'Complete the form to continue'}
-        </div>
-        <div className="row" style={{ gap: 8 }}>
-          {onBack && (
-            <Btn tone="ghost" onClick={handleBack} disabled={busy}>
-              Back
-            </Btn>
-          )}
-          <Btn tone="outline" onClick={onClose} disabled={busy}>
-            Cancel
-          </Btn>
-          <Btn tone="teal" icon={Icon.Check} disabled={!canCreate || busy} onClick={submit}>
-            {busy ? 'Creating…' : d.bulkSend ? `Create ${d.kind} & send` : `Create ${d.kind}`}
-          </Btn>
-        </div>
-      </div>
-    </div>
   );
 }
 

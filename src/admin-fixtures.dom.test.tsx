@@ -478,9 +478,9 @@ describe('adding a fixture', () => {
   });
 
   it('dates through the season run snapshot when the calendar exists only there', async () => {
-    // A flat season with custom dates synthesises `cal-flat-<league>` inside the run and
-    // never in tenant config, so looking only at `allCalendars` fell back to the legacy
-    // +7-day step (29 Aug) instead of the snapshot block.
+    // A run's frozen calendar snapshot may exist nowhere in tenant config (a migrated flat
+    // run's `cal-flat-<league>`), so looking only at `allCalendars` fell back to the
+    // legacy +7-day step (29 Aug) instead of the snapshot block.
     const flatCalendar: SeasonCalendar = {
       id: 'cal-flat-friendlies',
       label: '2026/27',
@@ -499,6 +499,15 @@ describe('adding a fixture', () => {
     // Block opens 3 Oct; round 4 weekly is 24 Oct.
     const added = resultingFixtures(onUpdateSeries, s).at(-1)!;
     expect(added.date).toBe('2026-10-24');
+  });
+
+  // ADR 0014: a series is only ever rebuilt from its season stage. Adding, editing and
+  // deleting fixtures by hand stays, including on an imported or stand-alone series.
+  it('offers no series-level Regenerate, only the hand-editing tools', () => {
+    setup(series());
+    expect(screen.queryByRole('button', { name: /regenerate/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /add fixture/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /allocate venues/i })).toBeTruthy();
   });
 
   it('never proposes a side against itself', async () => {
@@ -591,22 +600,37 @@ describe('a tenant with no series still gets the season machinery', () => {
     renderPage();
     expect(screen.getByRole('heading', { name: /venues/i })).toBeTruthy();
     expect(screen.getByText(/no season running/i)).toBeTruthy();
-    expect(screen.getByRole('button', { name: /start a season/i })).toBeTruthy();
+    // The header action, the Seasons card's CTA and the series empty state.
+    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(3);
     expect(screen.getByText(/no series yet/i)).toBeTruthy();
   });
 
+  // The page header's button is always there; what must not appear is the Seasons card's
+  // own Start CTA over a runs list that never loaded.
   it('holds the space while the season setup is loading instead of offering Start', () => {
     // An unloaded runs list rendered as "No season running" offers a Start CTA whose
     // duplicate guard is checking a list that never arrived.
     renderPage({ seasonSetupLoading: true });
-    expect(screen.queryByRole('button', { name: /start a season/i })).toBeNull();
+    expect(screen.queryByText(/no season running/i)).toBeNull();
+    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(1);
     expect(screen.getByText(/loading the season setup/i)).toBeTruthy();
   });
 
   it('reports a failed season-setup fetch rather than rendering it as an empty season list', () => {
     renderPage({ structuresFailed: true });
-    expect(screen.queryByRole('button', { name: /start a season/i })).toBeNull();
+    expect(screen.queryByText(/no season running/i)).toBeNull();
+    // Header + the series empty state; the Seasons card offers none.
+    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(2);
     expect(screen.getByText(/couldn.t load the season setup/i)).toBeTruthy();
+  });
+
+  // ADR 0014: the header action is named for what it does, and nothing on the page opens
+  // the retired create-series form.
+  it('names the header action "Start a season" and has no create-series path', () => {
+    renderPage();
+    expect(screen.queryByRole('button', { name: /generate fixtures/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /create (a )?series/i })).toBeNull();
+    expect(screen.queryByText(/one-off series/i)).toBeNull();
   });
 });
 
@@ -652,19 +676,13 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     { id: 'c2', name: 'Club 2', affiliation: 'complete', leagues: ['premier', 'friendlies'] },
   ] as unknown as Club[];
 
-  // `onSubmitSeries` is the real POST handler — CreateSeriesForm now renders IN-MODAL via
-  // a render prop, not a level up in main.tsx, so what belongs to THIS boundary is the
-  // routing decision (which league gets the season form vs the embedded series form) and
-  // the wiring of that embedded form (prefilled + locked league, hint text). A full
-  // submit-through test would duplicate admin-create-series.dom.test.tsx, so it's skipped
-  // here.
-  const renderPage = (onSubmitSeries = vi.fn().mockResolvedValue(undefined)) => ({
-    onSubmitSeries,
+  // What belongs to THIS boundary is the routing decision: a league with a competition
+  // gets the season form, one without gets Quick start. There is no third path.
+  const renderPage = () => ({
     ...renderWithProviders(
       <AdminFixtures
         clubs={registeredClubs}
         allSeries={[]}
-        onSubmitSeries={onSubmitSeries}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -689,14 +707,14 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
   // Two buttons open the same launcher with no series yet (the header action and the
   // empty-state CTA) — either proves the wiring, so the first one found is enough.
   const openLauncher = async (user: ReturnType<typeof userEvent.setup>) =>
-    user.click(screen.getAllByRole('button', { name: /generate fixtures/i })[0]);
+    user.click(screen.getAllByRole('button', { name: /^start a season$/i })[0]);
 
   const launcher = () => screen.getByRole('dialog', { name: /^start a season$/i });
   const continueBtn = () => within(launcher()).getByRole('button', { name: /continue/i });
 
   it('routes a season-capable league straight to the season form, in the same modal', async () => {
     const user = userEvent.setup();
-    const { onSubmitSeries } = renderPage();
+    renderPage();
     await openLauncher(user);
 
     await user.selectOptions(
@@ -707,7 +725,6 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
 
     expect(screen.getByRole('button', { name: /^start season$/i })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /continue/i })).toBeNull();
-    expect(onSubmitSeries).not.toHaveBeenCalled();
   });
 
   it('offers Quick start in place for a league with no competition', async () => {
@@ -731,20 +748,21 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     expect(screen.queryByRole('dialog', { name: /create.*series/i })).toBeNull();
   });
 
-  it('opens the embedded series form with no prefill and a free league select for ad-hoc', async () => {
+  it('has exactly two paths — the one-off option is gone, the template replaces it', async () => {
     const user = userEvent.setup();
     renderPage();
     await openLauncher(user);
 
+    const options = within(within(launcher()).getByRole('combobox', { name: 'League' }))
+      .getAllByRole('option')
+      .map((o) => o.getAttribute('value'));
+    expect(options).toEqual(['premier', 'friendlies']);
+
     await user.selectOptions(
       within(launcher()).getByRole('combobox', { name: 'League' }),
-      within(launcher()).getByRole('option', { name: /one-off series/i }),
+      'friendlies',
     );
-    await user.click(continueBtn());
-
-    const seriesDialog = screen.getByRole('dialog', { name: /create.*series/i });
-    // Ad-hoc keeps the free select, unset — no league, no hint box.
-    expect(within(seriesDialog).getByLabelText('League')).toHaveValue('');
+    expect(within(launcher()).getByRole('radio', { name: /^one-off tournament/i })).toBeTruthy();
   });
 
   it('groups the league select by whether the operator set up a competition', async () => {
@@ -1092,7 +1110,7 @@ describe('series outside every season stage are labelled for what they are', () 
     const pill = within(cardNamed('Hand-made cup')).getByText('Stand-alone series');
     expect(pill.closest('[title]')).toHaveAttribute(
       'title',
-      'Not part of a season stage; cannot be regenerated.',
+      'Not part of a season stage; cannot be regenerated. Its fixtures can still be added, edited and deleted.',
     );
     // Each pill carries its explainer (a plain guide link outside the help drawer).
     expect(

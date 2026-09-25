@@ -15,6 +15,7 @@ import {
   defaultTeamName,
   clubTeamsForLeague,
   leagueParticipants,
+  leagueParticipantsWithStatus,
 } from './leagues';
 
 const LEAGUES = [
@@ -406,5 +407,55 @@ describe('leagueParticipants', () => {
       'ukzn',
     ]);
     expect(leagueParticipants(undefined as any, 'premier')).toEqual([]);
+  });
+});
+
+describe('the affiliation gate', () => {
+  type GatedClub = { id: string; name: string; leagues: string[]; affiliation: string };
+  const clubs: GatedClub[] = [
+    { id: 'glenwood', name: 'Glenwood', leagues: ['premier'], affiliation: 'complete' },
+    { id: 'berea', name: 'Berea', leagues: ['premier'], affiliation: 'in_progress' },
+    { id: 'delta', name: 'Delta', leagues: ['premier'], affiliation: 'complete' },
+  ];
+  const isAffiliated = (c: GatedClub) => c.affiliation === 'complete';
+  const ids = (ps: Array<{ teamId: string }>) => ps.map((p) => p.teamId);
+
+  // seed-cohort and the API pass no predicate; their pool must not shrink.
+  it('applies no gate when the caller supplies no predicate', () => {
+    expect(ids(leagueParticipants(clubs, 'premier'))).toEqual(['glenwood', 'berea', 'delta']);
+    expect(ids(leagueParticipants(clubs, 'premier', [], { includeUnaffiliated: false }))).toEqual([
+      'glenwood',
+      'berea',
+      'delta',
+    ]);
+  });
+
+  it('drops unaffiliated clubs once a predicate is supplied', () => {
+    expect(ids(leagueParticipants(clubs, 'premier', [], { isAffiliated }))).toEqual([
+      'glenwood',
+      'delta',
+    ]);
+  });
+
+  it('lifts the gate with includeUnaffiliated', () => {
+    expect(
+      ids(
+        leagueParticipants(clubs, 'premier', [], {
+          isAffiliated,
+          includeUnaffiliated: true,
+        }),
+      ),
+    ).toEqual(['glenwood', 'berea', 'delta']);
+  });
+
+  it('reports the held-back sides separately, honouring exclusions on both lists', () => {
+    const { participants, unaffiliated } = leagueParticipantsWithStatus(
+      clubs,
+      'premier',
+      ['delta'],
+      isAffiliated,
+    );
+    expect(ids(participants)).toEqual(['glenwood']);
+    expect(ids(unaffiliated)).toEqual(['berea']);
   });
 });

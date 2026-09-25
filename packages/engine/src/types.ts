@@ -382,9 +382,9 @@ export interface SeasonRun {
   createdBy?: string;
   version: number;
   /**
-   * Only set when `competitionId` is the flat sentinel: there is no config competition
-   * to read format from, so the admin's series-type/overs choice is persisted here and
-   * the panel synthesizes a Competition from it (regenerate must preserve the choice).
+   * @deprecated Flat seasons are retired (ADR 0014); `scripts/migrate-flat-runs.ts` moves
+   * each flat run onto a real competition whose `matchFormat` holds this choice. Migrated
+   * data may still carry the field briefly. No code reads it — do not start.
    */
   flatFormat?: { seriesType: string; overs: number };
 }

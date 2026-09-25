@@ -19,13 +19,7 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { currentSeasonLabel } from './data';
 import { ApiError, quickStartSeason } from './api';
-import { T20_SLOTS } from '../packages/engine/src/calendar';
-import {
-  buildFlatSeasonRun,
-  FLAT_COMPETITION_ID,
-  GenerateFixturesLauncher,
-  SeasonRunsPanel,
-} from './season-run';
+import { GenerateFixturesLauncher, SeasonRunsPanel } from './season-run';
 import type {
   Club,
   CompetitionStructure,
@@ -55,11 +49,12 @@ const calendar: SeasonCalendar = {
   excludeDates: [],
 };
 
-/** Twelve single-side clubs, enough for a 6/6 split. */
+/** Twelve single-side clubs, enough for a 6/6 split — all affiliated, so the gate passes. */
 const clubs = Array.from({ length: 12 }, (_, i) => ({
   id: `c${i + 1}`,
   name: `Club ${i + 1}`,
   leagues: ['premier'],
+  affiliation: 'complete',
   ground: { venue: `Ground ${i + 1}`, lat: -29.8 - i / 100, lon: 31 + i / 100 },
 })) as unknown as Club[];
 
@@ -109,7 +104,7 @@ const SPLIT_LEAGUE: CompetitionStructure = {
 /** Premier Men T20: two seeded pools of six, then a cross-pool knockout. */
 const POOLS_THEN_CROSS: CompetitionStructure = {
   id: 'pools',
-  name: 'Seeded pools → cross-pool semis → final',
+  name: 'Seeded groups → cross-group semis → final',
   version: 1,
   stages: [
     stage({
@@ -1728,31 +1723,12 @@ describe('two groups may share a name', () => {
    ───────────────────────────────────────────────────────────────────────────── */
 
 describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
-  // `renderSeriesForm` stands in for the real CreateSeriesForm here (that form's own
-  // behaviour is covered by admin-create-series.dom.test.tsx) — this boundary only cares
-  // that the launcher hands it the right args and mounts it in place. It is reached ONLY
-  // via the ad-hoc option now — every real league routes to a season form instead.
-  // A named function, not an arrow: it is a render prop, and the name keeps it
-  // identifiable (react/display-name).
-  const stubRenderSeriesForm = (spy: ReturnType<typeof vi.fn>) =>
-    function StubSeriesForm({ onBack }: { onBack: () => void }) {
-      spy({ onBack });
-      return (
-        <div>
-          <span>stub series form</span>
-          <button onClick={onBack}>Back to picker</button>
-        </div>
-      );
-    };
-
   const launcherProps = (over: Partial<Parameters<typeof GenerateFixturesLauncher>[0]> = {}) => ({
     clubs,
     allLeagues: [league(SPLIT_LEAGUE.id)],
     config: { structures: [SPLIT_LEAGUE], calendars: [calendar] } as unknown as TenantConfig,
     existingRuns: [],
     onCreateRun: vi.fn().mockResolvedValue(undefined),
-    onGenerateStage: vi.fn().mockResolvedValue(undefined),
-    renderSeriesForm: stubRenderSeriesForm(vi.fn()),
     onClose: vi.fn(),
     toast: vi.fn(),
     ...over,
@@ -1823,329 +1799,25 @@ describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('only reaches the embedded series form via the ad-hoc option', async () => {
-    const user = userEvent.setup();
-    const spy = vi.fn();
-
-    render(
-      <GenerateFixturesLauncher
-        {...launcherProps({ renderSeriesForm: stubRenderSeriesForm(spy) })}
-      />,
-    );
-
-    await user.selectOptions(
-      screen.getByRole('combobox'),
-      screen.getByRole('option', { name: /one-off series/i }),
-    );
-    await user.click(screen.getByRole('button', { name: /^continue$/i }));
-
-    expect(screen.getByText('stub series form')).toBeInTheDocument();
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ onBack: expect.any(Function) }));
-
-    await user.click(screen.getByRole('button', { name: /back to picker/i }));
-    expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
-    expect(screen.queryByText('stub series form')).toBeNull();
-  });
-});
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   SeasonRunsPanel — a flat run's persisted format survives a regenerate.
-
-   A flat run has no config competition to read a Series Type/overs from (there is no
-   `league.competitions` entry for the `__flat__` sentinel) — `flatFormat` on the run is
-   the only place that choice lives, so the panel must synthesize the Competition it hands
-   to `onGenerate` FROM `flatFormat`, not from a lookup that was always going to come back
-   empty.
-   ───────────────────────────────────────────────────────────────────────────── */
-
-describe('SeasonRunsPanel — a flat run regenerating preserves its persisted format', () => {
-  const flatLeague = {
-    key: 'flatty',
-    label: 'Flat League',
-    group: 'Senior',
-    district: 'All districts',
-  } as unknown as League;
-
-  // A separate roster registered for 'flatty' — the top-of-file `clubs` fixture is
-  // registered for 'premier'.
-  const flatClubs = clubs.map((c) => ({ ...c, leagues: ['flatty'] })) as Club[];
-
-  it('carries flatFormat’s seriesType/overs into the regenerate payload, not a re-derived default', async () => {
-    const teamIds = flatClubs.map((c) => c.id);
-    const flatStage: StageSpec = {
-      id: 'stage-1',
-      name: '2026/27',
-      format: { kind: 'round-robin', legs: 1 },
-      entrants: { kind: 'all-registered' },
-      schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
-    } as unknown as StageSpec;
-    const flatRun = {
-      id: 'run-flat-1',
-      leagueKey: 'flatty',
-      competitionId: FLAT_COMPETITION_ID,
-      seasonLabel: '2026/27',
-      structureSnapshot: {
-        id: 'st-flat-default',
-        name: 'Flat season',
-        version: 1,
-        stages: [flatStage],
-      },
-      calendarSnapshot: calendar,
-      stages: [
-        {
-          specId: 'stage-1',
-          // 'ready' (not 'generated') with a `seriesId` already on its one group is what
-          // makes the stage STALE — entrants re-confirmed after an earlier generate — so
-          // the button reads "Regenerate", exactly the path the fix targets.
-          status: 'ready',
-          groups: [{ id: 'g1', label: 'Group A', entrants: teamIds, seriesId: 'existing-series' }],
-        },
-      ],
-      version: 1,
-      // NOT the defaults (Twenty20 / 20 overs) — chosen precisely so a coincidental
-      // default couldn't make this assertion pass by accident.
-      flatFormat: { seriesType: 'Multi-Day', overs: 35 },
-    } as unknown as SeasonRun;
-
-    const onGenerate = vi.fn().mockResolvedValue(undefined);
-    const user = userEvent.setup();
-    render(
-      <SeasonRunsPanel
-        clubs={flatClubs}
-        allLeagues={[flatLeague]}
-        allSeries={[]}
-        runs={[flatRun]}
-        onOpenLauncher={vi.fn()}
-        onPatchRun={vi.fn().mockResolvedValue(undefined)}
-        onGenerate={onGenerate}
-        onDeleteRun={vi.fn()}
-      />,
-    );
-
-    await user.click(screen.getByRole('button', { name: /^regenerate \d+ fixtures$/i }));
-
-    expect(onGenerate).toHaveBeenCalled();
-    const [payloads] = onGenerate.mock.calls[0];
-    expect(payloads[0].competition).toMatchObject({
-      id: FLAT_COMPETITION_ID,
-      label: 'Multi-Day',
-      matchFormat: { overs: 35 },
-    });
-  });
-});
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   buildFlatSeasonRun — the pure synthesis a flat season starts from.
-   ───────────────────────────────────────────────────────────────────────────── */
-
-describe('buildFlatSeasonRun', () => {
-  const flatLeague = {
-    key: 'friendlies',
-    label: 'Friendlies',
-    group: 'Senior',
-    district: 'All districts',
-  } as unknown as League;
-
-  it('synthesizes a single-block calendar from custom dates', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      custom: { start: '2026-09-01', end: '2026-12-01' },
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-
-    expect(run.calendarSnapshot.id).toBe('cal-flat-friendlies');
-    expect(run.calendarSnapshot.label).toBe('2026/27');
-    expect(run.calendarSnapshot.blocks).toEqual([
-      { id: 'b1', label: 'Season', start: '2026-09-01', end: '2026-12-01' },
-    ]);
+  // ADR 0014: exactly two paths. A one-off event is the One-off tournament template in
+  // quick start, not a third, league-less option.
+  it('offers only leagues — no one-off series option', () => {
+    render(<GenerateFixturesLauncher {...launcherProps()} />);
+    const options = within(screen.getByRole('combobox', { name: 'League' }))
+      .getAllByRole('option')
+      .map((o) => o.textContent);
+    expect(options).toEqual(['Premier League']);
+    expect(screen.queryByRole('option', { name: /one-off/i })).toBeNull();
   });
 
-  it('passes an operator calendar through verbatim, with the given blockIndex', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      blockIndex: 1,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-
-    expect(run.calendarSnapshot).toBe(calendar);
-    expect(run.structureSnapshot.stages[0].schedule.blockIndex).toBe(1);
-  });
-
-  it('defaults blockIndex to 0 when not given', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-    expect(run.structureSnapshot.stages[0].schedule.blockIndex).toBe(0);
-  });
-
-  it('places activateFrom on the stage schedule when given, and omits it otherwise', () => {
-    const withDate = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      activateFrom: '2026-08-01',
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-    expect(withDate.structureSnapshot.stages[0].schedule.activateFrom).toBe('2026-08-01');
-
-    const without = buildFlatSeasonRun({
-      id: 'run-y',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-    expect(without.structureSnapshot.stages[0].schedule.activateFrom).toBeUndefined();
-  });
-
-  it('stamps the flat sentinel competitionId, version 1 and one awaiting stage', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-
-    expect(run.competitionId).toBe(FLAT_COMPETITION_ID);
-    expect(run.version).toBe(1);
-    expect(run.structureSnapshot.version).toBe(1);
-    expect(run.stages).toEqual([{ specId: 'stage-1', status: 'awaiting-entrants', groups: [] }]);
-    expect(run.structureSnapshot.stages).toHaveLength(1);
-    expect(run.structureSnapshot.stages[0].entrants).toEqual({ kind: 'all-registered' });
-    // The stage takes the SEASON's name, not the league's — parity with the old flat
-    // naming ("Promotion League · 2026/27") via generateStageSeriesInner's template.
-    expect(run.structureSnapshot.stages[0].name).toBe('2026/27');
-  });
-
-  it('persists the chosen series type and overs as flatFormat — the single source of truth a regenerate reads back', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      seriesType: 'Multi-Day',
-      overs: 35,
-    });
-
-    expect(run.flatFormat).toEqual({ seriesType: 'Multi-Day', overs: 35 });
-  });
-
-  it('passes cadence and slots through onto the synthesized stage schedule', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-      cadence: { kind: 'weekdays', days: [6] },
-      slots: T20_SLOTS,
-    });
-
-    expect(run.structureSnapshot.stages[0].schedule.cadence).toEqual({
-      kind: 'weekdays',
-      days: [6],
-    });
-    expect(run.structureSnapshot.stages[0].schedule.slots).toEqual(T20_SLOTS);
-  });
-
-  it('clamps the chosen block’s start to firstRound when it falls inside the block', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      blockIndex: 1,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-      firstRound: '2027-02-01',
-    });
-
-    expect(run.calendarSnapshot.blocks[1].start).toBe('2027-02-01');
-    // The other block is untouched.
-    expect(run.calendarSnapshot.blocks[0].start).toBe(calendar.blocks[0].start);
-  });
-
-  it('defaults cadence to weekly and omits the slots key entirely when both are omitted', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      blockIndex: 1,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-
-    const schedule = run.structureSnapshot.stages[0].schedule;
-    expect(schedule.cadence).toEqual({ kind: 'weekly' });
-    expect('slots' in schedule).toBe(false);
-    // Block start is left exactly as the operator calendar had it — no firstRound given.
-    expect(run.calendarSnapshot.blocks[1].start).toBe(calendar.blocks[1].start);
-  });
-
-  it('ignores a firstRound before the block starts, leaving the block unchanged', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      blockIndex: 1,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-      // Before block 2's start (2027-01-16) — outside its range.
-      firstRound: '2026-12-01',
-    });
-
-    expect(run.calendarSnapshot.blocks[1].start).toBe(calendar.blocks[1].start);
-  });
-
-  it('ignores a firstRound after the block ends, leaving the block unchanged', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      blockIndex: 1,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-      // After block 2's end (2027-03-27) — outside its range.
-      firstRound: '2027-04-01',
-    });
-
-    expect(run.calendarSnapshot.blocks[1].start).toBe(calendar.blocks[1].start);
-  });
-
-  it('ignores a malformed, non-ISO firstRound string, leaving the block unchanged', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      blockIndex: 1,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-      firstRound: '16 January 2027',
-    });
-
-    expect(run.calendarSnapshot.blocks[1].start).toBe(calendar.blocks[1].start);
+  it('counts the registered sides and says how many are not yet affiliated', () => {
+    const mixed = clubs.map((c, i) =>
+      i < 2 ? { ...c, affiliation: 'in_progress' } : c,
+    ) as unknown as Club[];
+    render(<GenerateFixturesLauncher {...launcherProps({ clubs: mixed })} />);
+    expect(
+      screen.getByText(/12 sides \(2 not yet affiliated\) registered for Premier League/),
+    ).toBeVisible();
   });
 });
 
@@ -2180,7 +1852,6 @@ describe('Quick start', () => {
         existingRuns={[]}
         onCreateRun={vi.fn()}
         onSeasonSetupChanged={onSeasonSetupChanged}
-        renderSeriesForm={() => <div>stub series form</div>}
         onClose={onClose}
         toast={vi.fn()}
         {...over}
@@ -2211,7 +1882,7 @@ describe('Quick start', () => {
       ),
     ).toBeVisible();
     const cards = within(shapes()).getAllByRole('radio');
-    expect(cards).toHaveLength(5);
+    expect(cards).toHaveLength(6);
     expect(within(shapes()).getByRole('radio', { name: /^flat round robin/i })).toBeChecked();
     // Each card carries its first stage's example from the stage-kind registry.
     expect(within(shapes()).getAllByText(/^e\.g\. /).length).toBeGreaterThan(0);
@@ -2225,7 +1896,7 @@ describe('Quick start', () => {
     ).toBeVisible();
 
     await user.click(
-      within(shapes()).getByRole('radio', { name: /^seeded pools → cross-pool semis/i }),
+      within(shapes()).getByRole('radio', { name: /^seeded groups → cross-group semis/i }),
     );
     expect(
       screen.getByText(/Stage 1 · Round-robin stage · 12 sides seeded into 2 groups/),
@@ -2240,7 +1911,7 @@ describe('Quick start', () => {
     const { user, onSeasonSetupChanged } = setup();
 
     await user.click(
-      within(shapes()).getByRole('radio', { name: /^seeded pools → cross-pool semis/i }),
+      within(shapes()).getByRole('radio', { name: /^seeded groups → cross-group semis/i }),
     );
     // Keep the knockout in the first block, straight after the groups.
     await user.selectOptions(screen.getByRole('combobox', { name: 'Stage 2 plays in' }), '0');
@@ -2304,7 +1975,163 @@ describe('Quick start', () => {
 
   it('refuses to start with fewer than two registered sides', () => {
     setup({ clubs: [] });
-    expect(screen.getByText(/at least two sides must be registered/i)).toBeVisible();
+    expect(screen.getByText(/at least two affiliated sides must be registered/i)).toBeVisible();
     expect(startBtn()).toBeDisabled();
+  });
+
+  // The affiliation gate: the preview counts only affiliated sides.
+  it('previews against the affiliated sides only', () => {
+    setup({
+      clubs: friendliesClubs.map((c, i) => (i < 2 ? { ...c, affiliation: 'in_progress' } : c)),
+    });
+    expect(screen.getByText(/with the 10 sides registered for Friendlies/)).toBeVisible();
+    expect(screen.getByText(/all 10 sides in one group/)).toBeVisible();
+  });
+
+  // What the retired create-series form did for a cup weekend, as a template.
+  it('starts a one-off tournament from its template', async () => {
+    const { user } = setup();
+
+    await user.click(within(shapes()).getByRole('radio', { name: /^one-off tournament/i }));
+    expect(
+      screen.getByText(/Stage 1 · Knockout stage · chosen by the admin · a seeded knockout/),
+    ).toBeVisible();
+    await user.click(startBtn());
+
+    expect(mockedQuickStart).toHaveBeenCalledWith(
+      expect.objectContaining({ leagueKey: 'friendlies', templateId: 'one-off-tournament' }),
+    );
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Dropping a side from an all-registered stage — what the retired create-series form's
+   team opt-out chips did, re-homed as Edit entrants (ADR 0014).
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('Edit entrants on an all-registered stage', () => {
+  const FLAT: CompetitionStructure = {
+    id: 'flat',
+    name: 'Flat round robin',
+    version: 1,
+    stages: [stage({ id: 'season', name: 'League season' })],
+  } as unknown as CompetitionStructure;
+
+  it('opens with every registered side in, and confirming without one writes the groups', async () => {
+    const { user, onPatchRun } = setup(FLAT, [run(FLAT)]);
+
+    await openConfirm(user, /^League season · /);
+    expect(
+      within(dialog()).getByText(
+        'Every registered side is in by default. Remove a side here if it is not playing this season.',
+      ),
+    ).toBeVisible();
+    // Every side starts in the one group.
+    expect(groupPickers()).toHaveLength(12);
+    for (const picker of groupPickers()) expect(picker).toHaveValue('0');
+
+    // Club 3 is not playing this season.
+    await user.selectOptions(groupPickers()[2], 'Not playing');
+    expect(within(dialog()).getByText('1 not playing')).toBeVisible();
+    await user.click(confirmBtn());
+
+    expect(onPatchRun).toHaveBeenCalledTimes(1);
+    const [, patch] = onPatchRun.mock.calls[0];
+    const [stageRun] = patch.stages;
+    expect(stageRun.specId).toBe('season');
+    expect(stageRun.status).toBe('ready');
+    expect(stageRun.groups).toHaveLength(1);
+    expect(stageRun.groups[0].entrants).toHaveLength(11);
+    expect(stageRun.groups[0].entrants).not.toContain('c3');
+    // Recorded like any other confirmation: the suggestion, and that it was overridden.
+    expect(stageRun.audit).toEqual([
+      expect.objectContaining({ accepted: false, prefill: [clubs.map((c) => c.id)] }),
+    ]);
+  });
+
+  it('marks the generated stage stale once a side is dropped', () => {
+    const all = clubs.map((c) => c.id);
+    // What confirmEntrants writes after a drop on a generated stage: back to 'ready',
+    // the series back-pointer kept.
+    const dropped = run(FLAT, {
+      stages: [
+        {
+          specId: 'season',
+          status: 'ready',
+          groups: [
+            { id: 'g1', label: 'Group A', entrants: all.filter((t) => t !== 'c3'), seriesId: 's1' },
+          ],
+        },
+      ],
+    } as Partial<SeasonRun>);
+    const series = [
+      { id: 's1', name: 'Premier · League season', released: false, fixtures: [] },
+    ] as unknown as Series[];
+    setup(FLAT, [dropped], { series });
+    expect(screen.getByText(/needs regenerating/i)).toBeVisible();
+    expect(screen.getByRole('button', { name: /regenerate \d+ fixtures/i })).toBeVisible();
+  });
+});
+
+describe('the affiliation gate on Confirm entrants', () => {
+  const FLAT: CompetitionStructure = {
+    id: 'flat',
+    name: 'Flat round robin',
+    version: 1,
+    stages: [stage({ id: 'season', name: 'League season' })],
+  } as unknown as CompetitionStructure;
+  // Club 1 and Club 2 have not submitted their affiliation form.
+  const mixed = clubs.map((c, i) =>
+    i < 2 ? { ...c, affiliation: 'in_progress' } : c,
+  ) as unknown as Club[];
+
+  const renderMixed = () => {
+    const onPatchRun = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <SeasonRunsPanel
+        clubs={mixed}
+        allLeagues={[league(FLAT.id)]}
+        allSeries={[]}
+        runs={[run(FLAT)]}
+        onOpenLauncher={vi.fn()}
+        onPatchRun={onPatchRun}
+        onGenerate={vi.fn().mockResolvedValue(undefined)}
+        onDeleteRun={vi.fn()}
+      />,
+    );
+    return { user, onPatchRun };
+  };
+
+  it('keeps unaffiliated sides out of the pool and says how many there are', () => {
+    renderMixed();
+    expect(screen.getByText(/12 sides \(2 not yet affiliated\) registered/)).toBeVisible();
+    // The group line's <strong> is the label; its parent reads "Group A · 10 sides · …".
+    expect(screen.getByText('Group A', { selector: 'strong' }).parentElement).toHaveTextContent(
+      /^Group A · 10 sides/,
+    );
+  });
+
+  it('lists them greyed with a one-click "Include anyway"', async () => {
+    const { user, onPatchRun } = renderMixed();
+    await openConfirm(user, /^League season · /);
+
+    expect(groupPickers()).toHaveLength(10);
+    const held = within(dialog())
+      .getAllByText('Not yet affiliated')
+      .map((el) => el.closest('tr')!);
+    expect(held).toHaveLength(2);
+    for (const row of held) expect(row).toHaveClass('sr-held-back');
+
+    await user.click(within(dialog()).getByRole('button', { name: 'Include Club 1 anyway' }));
+    // Included straight into the only group; the other stays held back.
+    expect(groupPickers()).toHaveLength(11);
+    expect(within(dialog()).getAllByText('Not yet affiliated')).toHaveLength(1);
+    await user.click(confirmBtn());
+
+    const [, patch] = onPatchRun.mock.calls[0];
+    expect(patch.stages[0].groups[0].entrants).toHaveLength(11);
+    expect(patch.stages[0].groups[0].entrants).toContain('c1');
+    expect(patch.stages[0].groups[0].entrants).not.toContain('c2');
   });
 });

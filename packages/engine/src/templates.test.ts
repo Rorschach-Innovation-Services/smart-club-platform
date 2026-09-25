@@ -28,16 +28,66 @@ const CAL: SeasonCalendar = {
 const team = (n: number) => Array.from({ length: n }, (_, i) => `t${i + 1}`);
 
 describe('starter templates', () => {
-  // Four shapes, with the pools shape shipped once per semi-final pairing — unions go
-  // either way season to season, so neither should be a hand-edit of the other.
-  it('ships the four shapes that cover every documented league', () => {
+  // Four shapes, with the groups shape shipped once per semi-final pairing — unions go
+  // either way season to season, so neither should be a hand-edit of the other — plus
+  // the one-off tournament that replaced the retired create-series form.
+  it('ships the four league shapes and the one-off tournament', () => {
     expect(STRUCTURE_TEMPLATES.map((t) => t.id)).toEqual([
       'flat-round-robin',
       'split-league-swap',
       'pools-to-knockout',
       'pools-to-knockout-within',
       'stream-and-cup',
+      'one-off-tournament',
     ]);
+  });
+
+  // Ids stay `pools-…` (stored as provenance on cloned structures); what people read
+  // says "groups", like the rest of the console.
+  it('names the groups shapes in groups, not pools', () => {
+    expect(findTemplate('pools-to-knockout')!.name).toBe(
+      'Seeded groups → cross-group semis → final',
+    );
+    expect(findTemplate('pools-to-knockout-within')!.name).toBe(
+      'Seeded groups → within-group semis → final',
+    );
+    for (const t of STRUCTURE_TEMPLATES) {
+      expect(`${t.name} ${t.whenToUse}`, t.id).not.toMatch(/\bpools?\b/i);
+    }
+  });
+
+  it('offers a one-off tournament: one seeded knockout of hand-picked sides, spread over its dates', () => {
+    const t = findTemplate('one-off-tournament')!;
+    expect(t.name).toBe('One-off tournament');
+    expect(t.whenToUse).toBe(
+      'A cup or festival outside the league season: pick the sides, get a seeded knockout.',
+    );
+    expect(t.stages).toEqual([
+      {
+        id: 'tournament',
+        name: 'Tournament',
+        format: { kind: 'knockout', pairing: 'seeded' },
+        entrants: { kind: 'manual' },
+        schedule: { blockIndex: 0, cadence: { kind: 'spread' } },
+      },
+    ]);
+  });
+
+  it('waits for the admin to pick the sides, then draws a knockout inside the block', () => {
+    const st = instantiateTemplate(findTemplate('one-off-tournament')!, CAL);
+    expect(materialiseStage({ stage: st.stages[0], calendar: CAL }).status).toBe(
+      'awaiting-entrants',
+    );
+    const m = materialiseStage({
+      stage: st.stages[0],
+      calendar: CAL,
+      context: { registered: team(8), seedOrder: team(8), confirmed: [team(8)] },
+    });
+    expect(m.status).toBe('ready');
+    if (m.status !== 'ready') return;
+    // Eight sides: quarter-finals, semi-finals, final.
+    expect(m.totalFixtures).toBe(7);
+    expect(m.fits).toBe(true);
   });
 
   // The count is what makes the preview exact ("4 entrants") instead of "up to N rounds".

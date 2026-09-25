@@ -12,6 +12,18 @@ exports[`describeStructure > tells the flat-round-robin template on a two-block 
 ]
 `;
 
+exports[`describeStructure > tells the one-off-tournament template on a one-block calendar 1`] = `
+[
+  "Stage 1 · Knockout stage · chosen by the admin · a seeded knockout: a preliminary round, quarter-finals, semi-finals, then a final · spread across the block in Block 1, 13 Sep – 13 Dec 2026.",
+]
+`;
+
+exports[`describeStructure > tells the one-off-tournament template on a two-block calendar 1`] = `
+[
+  "Stage 1 · Knockout stage · chosen by the admin · a seeded knockout: a preliminary round, quarter-finals, semi-finals, then a final · spread across the block in Block 1, 13 Sep – 13 Dec 2026.",
+]
+`;
+
 exports[`describeStructure > tells the pools-to-knockout template on a one-block calendar 1`] = `
 [
   "Stage 1 · Round-robin stage · 12 sides seeded into 2 groups of 6 (snake) · everyone plays everyone once · weekly in Block 1, 13 Sep – 11 Oct 2026.",

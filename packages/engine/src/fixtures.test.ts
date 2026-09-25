@@ -187,6 +187,38 @@ describe('fixturesFromPlan — calendar-scheduled generation end to end', () => 
     breaks: [{ label: 'the mid-season break', start: '2026-12-14', end: '2027-01-17' }],
   };
 
+  // Moved here from src/data.test.ts when the legacy `generateRoundRobin` wrapper was
+  // retired (ADR 0014). The guarded bug: the create path and the regenerate path read
+  // the stored schedule differently and produced different fixtures. The engine is now
+  // the one implementation, so the gate is that generating from the stored schedule — a
+  // JSON round-trip of what the first generate persisted — reproduces it exactly.
+  it('produces identical fixtures on generate then regenerate from the stored schedule', () => {
+    const generate = (s: {
+      teams: string[];
+      calendar: SeasonCalendar;
+      blockId: string;
+      cadence: { kind: 'spread' };
+    }) => {
+      const plan = planRoundDates({
+        calendar: s.calendar,
+        blockId: s.blockId,
+        cadence: s.cadence,
+        rounds: roundsForTeamCount(s.teams.length),
+      });
+      return fixturesFromPlan(s.teams, plan.dates);
+    };
+    const draft = {
+      teams: ['a', 'b', 'c', 'd', 'e', 'f'],
+      calendar: KZNCU,
+      blockId: 'b1',
+      cadence: { kind: 'spread' as const },
+    };
+    const created = generate(draft);
+    const stored = JSON.parse(JSON.stringify(draft)) as typeof draft;
+    expect(created.length).toBe(15);
+    expect(generate(stored)).toEqual(created);
+  });
+
   it('dates a six-team round robin off the season calendar', () => {
     const plan = planRoundDates({
       calendar: KZNCU,

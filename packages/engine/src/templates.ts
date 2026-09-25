@@ -1,8 +1,10 @@
 /**
  * Starter structure templates.
  *
- * Four shapes cover all thirteen structures in the KZNCU and EMCU documents; the pools
- * shape ships twice, once per semi-final pairing, so there are five blueprints. An
+ * Four shapes cover all thirteen structures in the KZNCU and EMCU documents; the groups
+ * shape ships twice, once per semi-final pairing, and a one-off tournament covers the cup
+ * or festival outside the league season (it replaced the retired create-series form, ADR
+ * 0014), so there are six blueprints. An
  * operator clones one and tunes the parameters, or builds from scratch — a template is a
  * starting point, never a constraint (ADR 0008). `templateId` survives on the clone as
  * provenance only; nothing reads it back to constrain editing.
@@ -90,14 +92,14 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
   },
   {
     id: 'pools-to-knockout',
-    name: 'Seeded pools → cross-pool semis → final',
+    name: 'Seeded groups → cross-group semis → final',
     whenToUse:
-      'Seeded pools play a round robin, then the top finishers cross over into a knockout.',
+      'Seeded groups play a round robin, then the top finishers cross over into a knockout.',
     examples: 'Every T20 Pink Ball competition — Premier Men, Premier Women, Promotion Men',
     stages: [
       {
         id: 'pools',
-        name: 'Pool stage',
+        name: 'Group stage',
         format: { kind: 'round-robin', legs: 1 },
         entrants: { kind: 'seeded-split', groups: { kind: 'even', count: 2 }, method: 'snake' },
         // Every T20 Pink Ball competition plays a morning and an afternoon match per day.
@@ -112,7 +114,7 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
           derivedFrom: {
             rule: 'from-standings',
             fromStage: 'pools',
-            detail: 'Top two from each pool, paired across pools',
+            detail: 'Top two from each group, paired across groups',
             qualifiersPerGroup: 2,
           },
         },
@@ -126,14 +128,14 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
     // season (EMCU Division 1 30 Over), so both are one click from the picker rather than
     // one being a hand-edit of the other.
     id: 'pools-to-knockout-within',
-    name: 'Seeded pools → within-group semis → final',
+    name: 'Seeded groups → within-group semis → final',
     whenToUse:
-      'Seeded pools play a round robin, then each pool’s top two play their own semi-final and the winners meet in the final.',
-    examples: 'EMCU Division 1 30 Over — ten teams in two pools of five',
+      'Seeded groups play a round robin, then each group’s top two play their own semi-final and the winners meet in the final.',
+    examples: 'EMCU Division 1 30 Over — ten teams in two groups of five',
     stages: [
       {
         id: 'pools',
-        name: 'Pool stage',
+        name: 'Group stage',
         format: { kind: 'round-robin', legs: 1 },
         entrants: { kind: 'seeded-split', groups: { kind: 'even', count: 2 }, method: 'snake' },
         schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
@@ -147,7 +149,8 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
           derivedFrom: {
             rule: 'from-standings',
             fromStage: 'pools',
-            detail: 'Top two from each pool; each pool plays its own semi-final (A1 v A2, B1 v B2)',
+            detail:
+              'Top two from each group; each group plays its own semi-final (A1 v A2, B1 v B2)',
             qualifiersPerGroup: 2,
           },
         },
@@ -185,6 +188,26 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
         },
         schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
         outcome: { champion: [1] },
+      },
+    ],
+  },
+  {
+    // The one-off event that used to go through the retired create-series form. Sides are
+    // picked by the admin on Confirm entrants; the seeded knockout takes their order as
+    // the seed line, and `spread` places the rounds evenly across whatever dates the
+    // admin gives it (a weekend, a fortnight).
+    id: 'one-off-tournament',
+    name: 'One-off tournament',
+    whenToUse:
+      'A cup or festival outside the league season: pick the sides, get a seeded knockout.',
+    examples: 'A club’s invitation weekend, a mid-season cup day',
+    stages: [
+      {
+        id: 'tournament',
+        name: 'Tournament',
+        format: { kind: 'knockout', pairing: 'seeded' },
+        entrants: { kind: 'manual' },
+        schedule: { blockIndex: 0, cadence: { kind: 'spread' } },
       },
     ],
   },

@@ -22,7 +22,6 @@ import {
   BoundedNumber,
   Btn,
   Card,
-  Choice,
   EmptyState,
   FieldGuide,
   HowSeasonsWork,
@@ -37,22 +36,13 @@ import {
 } from './atoms';
 import { ApiError, quickStartSeason, type QuickStartSeasonRequest } from './api';
 import { HelpLink } from './help/HelpDrawer';
-import {
-  CADENCE_LABELS,
-  T20_SLOTS,
-  WEEKDAY_LABELS,
-  cadenceFromLabel,
-  findBlock,
-  formatIsoDate,
-  todayIso,
-} from '../packages/engine/src/calendar';
+import { findBlock, formatIsoDate, todayIso } from '../packages/engine/src/calendar';
 import { describeEntrants, groupSizes, labelFor } from '../packages/engine/src/entrants';
 import { formatStampDay } from './dates';
 import {
   chainFeeder,
   crossPoolSourceStage,
   feedsPoolKnockout,
-  materialiseStage,
   poolQualifiersFor,
   type StageMaterialisation,
 } from '../packages/engine/src/structure';
@@ -71,10 +61,13 @@ import {
   poolPairings,
   roundsForFormat,
 } from '../packages/engine/src/formats';
-import { findByKey, leagueParticipants } from '../packages/engine/src/leagues';
-import { currentSeasonLabel } from './data';
+import {
+  findByKey,
+  leagueParticipants,
+  leagueParticipantsWithStatus,
+} from '../packages/engine/src/leagues';
+import { affiliationSubmitted, currentSeasonLabel } from './data';
 import type {
-  Cadence,
   Club,
   Competition,
   CompetitionStructure,
@@ -85,8 +78,6 @@ import type {
   StageRun,
   StageSpec,
   TenantConfig,
-  TimeSlot,
-  Weekday,
 } from './types';
 
 type Toast = (m: string, t?: string) => void;
@@ -195,7 +186,9 @@ function whatYouWillBeAsked(stage: StageSpec): string {
  *
  * "Imported schedule" is a bulk import: the Plan B importer's `s-planb-` ids, or a series
  * that names its league but carries neither a calendar binding nor a season run. Anything
- * else was made by hand through Create series.
+ * else was made by hand through the retired Create series form (ADR 0014). Neither can be
+ * regenerated — there is no stage to rebuild them from — but their fixtures stay editable
+ * (add, edit, delete) on the Fixtures list.
  */
 export function seriesOrigin(s: Series): 'imported' | 'stand-alone' | null {
   if (s.seasonRunId) return null;
@@ -209,7 +202,10 @@ export function SeriesOriginPill({ series }: { series: Series }) {
   const origin = seriesOrigin(series);
   if (!origin) return null;
   return (
-    <span className="series-origin" title="Not part of a season stage; cannot be regenerated.">
+    <span
+      className="series-origin"
+      title="Not part of a season stage; cannot be regenerated. Its fixtures can still be added, edited and deleted."
+    >
       <Pill tone="muted">{origin === 'imported' ? 'Imported schedule' : 'Stand-alone series'}</Pill>
       <HelpLink topic="legacy-series">What is this?</HelpLink>
     </span>
@@ -302,7 +298,11 @@ function StartSeasonForm({
   const competition = league?.competitions?.find((c) => c.id === competitionId);
   const structure = (config.structures ?? []).find((s) => s.id === competition?.structureId);
   const calendar = (config.calendars ?? []).find((c) => c.id === competition?.calendarId);
-  const teams = league ? leagueParticipants(clubs, league.key, competition?.excludeTeamIds) : [];
+  const teams = league
+    ? leagueParticipants(clubs, league.key, competition?.excludeTeamIds, {
+        isAffiliated: affiliationSubmitted,
+      })
+    : [];
   const duplicate = existingRuns.some(
     (r) =>
       r.leagueKey === leagueKey &&
@@ -316,7 +316,8 @@ function StartSeasonForm({
   if (!structure) problems.push('That competition points at a structure that no longer exists.');
   if (!calendar) problems.push('That competition points at a calendar that no longer exists.');
   if (!seasonLabel.trim()) problems.push('Give the season a label.');
-  if (teams.length < 2) problems.push('At least two sides must be registered for this league.');
+  if (teams.length < 2)
+    problems.push('At least two affiliated sides must be registered for this league.');
   if (duplicate) problems.push('That season is already running for this competition.');
 
   async function submit() {
@@ -518,787 +519,9 @@ function StartSeasonForm({
   );
 }
 
-/* ─── Start a flat season ───
- *
- * A league with no bound competition still needs somewhere to run its fixtures — the
- * platform used to hand it straight to the ad-hoc CreateSeriesForm, indistinguishable
- * from a one-off tournament. That conflated two different things: a LEAGUE'S season
- * (recurring, one per league per year, wants the same stage-card tracking every other
- * season gets) and a genuinely one-off series (a friendly, a cup weekend). This gives
- * the league case a SeasonRun too — synthesized as the smallest structure that's
- * honestly true of an unbound league: one stage, one group, everyone registered.
- */
-
-/** Shares CreateSeriesForm's own defaults and Series Type options (packages/engine/src/formats.ts)
- *  so a flat season's synthetic competition reads the same as the ad-hoc form's
- *  out-of-the-box series would, and stays coherent with whatever overs the admin actually
- *  sets. */
-const FLAT_DEFAULT_SERIES_TYPE = SERIES_TYPES[0];
-
-/** Sentinel `competitionId` for a flat season — parallels `AD_HOC` below, but persisted
- *  (a real SeasonRun is stored under it), so `SeasonRunsPanel` and the duplicate guard
- *  need a stable value to recognise it by. */
-export const FLAT_COMPETITION_ID = '__flat__';
-
-/** `YYYY-MM-DD` — the shape a `<input type="date">` produces, and the only shape the
- *  synthesized calendar can honestly turn into a block. A half-typed date must never
- *  reach `materialiseStage`, which has no concept of "still being typed". */
+/** `YYYY-MM-DD` — the shape a `<input type="date">` produces. A half-typed date must
+ *  never reach the engine, which has no concept of "still being typed". */
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-/**
- * Clamp `firstRound` into a COPY of `calendar`'s block at `blockIndex`; return `calendar`
- * unchanged when `firstRound` is absent, malformed, or outside that block's date range.
- *
- * This needs no model change: the calendar this is called with is already a per-run (or
- * per-preview) frozen copy — never the shared operator calendar `config.calendars` holds
- * — so overwriting the COPY's block `start` is exactly as safe as an admin choosing a
- * different start date would have been. The planner's `every-n-weeks`/`weekdays` cadence
- * strides are computed from the block's `start`, so clamping it here is all that's needed
- * for every downstream date calculation to anchor from the new first round. Shared by
- * `buildFlatSeasonRun` and `StartFlatSeasonForm`'s live preview so both agree on the same
- * anchored calendar before submit.
- */
-function withClampedBlockStart(
-  calendar: SeasonCalendar,
-  blockIndex: number,
-  firstRound: string | undefined,
-): SeasonCalendar {
-  if (!firstRound || !ISO_DATE_RE.test(firstRound)) return calendar;
-  const block = calendar.blocks[blockIndex];
-  if (!block || firstRound < block.start || firstRound > block.end) return calendar;
-  return {
-    ...calendar,
-    blocks: calendar.blocks.map((b, i) => (i === blockIndex ? { ...b, start: firstRound } : b)),
-  };
-}
-
-/**
- * Synthesize the smallest CompetitionStructure + SeasonCalendar that's true of a league
- * with no bound competition: one stage, everyone registered, one flat round robin. Pure
- * and deterministic (the caller supplies `id`) so it's exercised directly by tests rather
- * than only through the form that calls it.
- */
-export function buildFlatSeasonRun(args: {
-  id: string;
-  league: League;
-  seasonLabel: string;
-  /** An operator calendar, snapshotted verbatim — takes priority over `custom`. */
-  calendar?: SeasonCalendar;
-  /** A hand-picked start/end, synthesized into a single-block calendar. Ignored when
-   *  `calendar` is set. */
-  custom?: { start: string; end: string };
-  /** Which block of the (operator or synthesized) calendar the stage plays in. Required
-   *  as an INTEGER — `validateStructures` 400s the whole season on `undefined`. */
-  blockIndex?: number;
-  activateFrom?: string;
-  /** The admin's chosen Series Type — persisted as `flatFormat` so a later regenerate
-   *  reads back the SAME choice rather than re-deriving a default. */
-  seriesType: string;
-  /** The admin's chosen overs — persisted alongside `seriesType` for the same reason. */
-  overs: number;
-  /** Cadence for the synthesized stage's schedule. Defaults to weekly when omitted. */
-  cadence?: Cadence;
-  /** Time slots for the synthesized stage's schedule. Omitted entirely (not an empty
-   *  array) when empty/undefined — mirrors main.tsx's `...(stage.schedule.slots?.length
-   *  ? { slots } : {})` idiom, so the server never receives an empty `slots` array. */
-  slots?: TimeSlot[];
-  /** A full ISO date anchoring the first round. Clamped into the chosen block's `start`
-   *  inside the per-run calendar snapshot copy — see `withClampedBlockStart`. Ignored,
-   *  never thrown, when malformed or outside the block's range. */
-  firstRound?: string;
-}): SeasonRun {
-  const {
-    id,
-    league,
-    seasonLabel,
-    calendar,
-    custom,
-    blockIndex,
-    activateFrom,
-    seriesType,
-    overs,
-    cadence,
-    slots,
-    firstRound,
-  } = args;
-  const resolvedBlockIndex = blockIndex ?? 0;
-  const baseCalendarSnapshot: SeasonCalendar = calendar ?? {
-    id: 'cal-flat-' + league.key,
-    label: seasonLabel,
-    // `custom` is guaranteed by the caller whenever `calendar` is absent — the form
-    // never lets dates through to here otherwise (see `datesValid` below).
-    blocks: [{ id: 'b1', label: 'Season', start: custom!.start, end: custom!.end }],
-  };
-  // A fresh copy per run — `withClampedBlockStart` never mutates `calendar`/
-  // `baseCalendarSnapshot` in place, so a shared operator calendar is untouched even
-  // when this run clamps its own snapshot's block start.
-  const calendarSnapshot = withClampedBlockStart(
-    baseCalendarSnapshot,
-    resolvedBlockIndex,
-    firstRound,
-  );
-  const structureSnapshot: CompetitionStructure = {
-    id: 'st-flat-default',
-    name: 'Flat season',
-    version: 1,
-    stages: [
-      {
-        id: 'stage-1',
-        // Deliberately the SEASON's name, not the league's — `generateStageSeriesInner`
-        // builds each series as `${league.label} · ${stage.name}`, so this is what gives
-        // a flat season's fixtures the same "Promotion League · 2026/27" naming the old
-        // flat path produced.
-        name: seasonLabel,
-        format: { kind: 'round-robin', legs: 1 },
-        entrants: { kind: 'all-registered' },
-        schedule: {
-          blockIndex: resolvedBlockIndex,
-          cadence: cadence ?? { kind: 'weekly' },
-          ...(slots?.length ? { slots } : {}),
-          ...(activateFrom ? { activateFrom } : {}),
-        },
-      },
-    ],
-  };
-  return {
-    id,
-    leagueKey: league.key,
-    competitionId: FLAT_COMPETITION_ID,
-    seasonLabel,
-    structureSnapshot,
-    calendarSnapshot,
-    stages: [{ specId: 'stage-1', status: 'awaiting-entrants', groups: [] }],
-    version: 1,
-    flatFormat: { seriesType, overs },
-  };
-}
-
-// Unreachable from the launcher since Quick start replaced it; the server phase deletes it.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function StartFlatSeasonForm({
-  clubs,
-  league,
-  config,
-  existingRuns,
-  onCreate,
-  onGenerateStage,
-  onClose,
-  onBack,
-  toast,
-}: {
-  clubs: Club[];
-  league: League;
-  config: TenantConfig;
-  existingRuns: SeasonRun[];
-  onCreate: (run: SeasonRun) => Promise<SeasonRun | void>;
-  onGenerateStage: (
-    payloads: GenerateGroupPayload[],
-    run: SeasonRun,
-    stage: StageSpec,
-  ) => Promise<void>;
-  onClose: () => void;
-  onBack: () => void;
-  toast: Toast;
-}) {
-  const calendars = config.calendars ?? [];
-  const [seasonLabel, setSeasonLabel] = useState(currentSeasonLabel());
-  const [calendarId, setCalendarId] = useState('');
-  const [blockId, setBlockId] = useState('');
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
-  const [activateFrom, setActivateFrom] = useState('');
-  const [overs, setOvers] = useState(DEFAULT_SERIES_OVERS);
-  const [seriesType, setSeriesType] = useState<string>(FLAT_DEFAULT_SERIES_TYPE);
-  // Scheduling options — collapsed by default (see the toggle below). Defaults stay
-  // exactly the previous behaviour when the section is never opened: weekly cadence, no
-  // first-round anchor, no slots.
-  const [showScheduling, setShowScheduling] = useState(false);
-  const [cadence, setCadence] = useState<Cadence>({ kind: 'weekly' });
-  const [firstRound, setFirstRound] = useState('');
-  const [slots, setSlots] = useState<TimeSlot[]>([]);
-  const [err, setErr] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const trimmedLabel = seasonLabel.trim();
-  const calendar = calendars.find((c) => c.id === calendarId);
-  const teams = leagueParticipants(clubs, league.key);
-
-  const customValid =
-    ISO_DATE_RE.test(startDate) && ISO_DATE_RE.test(endDate) && endDate >= startDate;
-  const datesValid = calendar ? true : customValid;
-  const blockIndex =
-    calendar && calendar.blocks.length > 1
-      ? Math.max(
-          0,
-          calendar.blocks.findIndex((b) => b.id === blockId),
-        )
-      : 0;
-
-  const duplicate = existingRuns.some(
-    (r) =>
-      r.leagueKey === league.key &&
-      r.competitionId === FLAT_COMPETITION_ID &&
-      r.seasonLabel === trimmedLabel,
-  );
-
-  // Same idiom as admin.tsx's own Scheduling options: narrow the weekday list once here
-  // rather than inline in the JSX.
-  const selectedDays: Weekday[] = cadence.kind === 'weekdays' ? cadence.days : [];
-  // The chosen block, for bounding the "First round" date input — only meaningful once a
-  // calendar (not custom dates) is picked.
-  const currentBlock = calendar?.blocks[blockIndex];
-
-  // Recomputed on every keystroke, same idiom as CreateSeriesForm's own preview rail —
-  // this is what catches an overrunning block before anyone clicks Start.
-  const materialisation = useMemo(() => {
-    if (!datesValid) return undefined;
-    const baseCalendar: SeasonCalendar = calendar ?? {
-      id: 'cal-flat-preview',
-      label: trimmedLabel || seasonLabel,
-      blocks: [{ id: 'b1', label: 'Season', start: startDate, end: endDate }],
-    };
-    // The SAME clamping logic `buildFlatSeasonRun` uses at submit — so the "Ready" preview
-    // line reflects the anchored first-round date rather than a slightly different
-    // approximation of it.
-    const previewCalendar = withClampedBlockStart(
-      baseCalendar,
-      blockIndex,
-      calendar ? firstRound || undefined : undefined,
-    );
-    const stage: StageSpec = {
-      id: 'stage-1',
-      name: trimmedLabel || seasonLabel,
-      format: { kind: 'round-robin', legs: 1 },
-      entrants: { kind: 'all-registered' },
-      schedule: {
-        blockIndex,
-        cadence,
-        ...(slots.length ? { slots } : {}),
-        ...(activateFrom ? { activateFrom } : {}),
-      },
-    };
-    return materialiseStage({
-      stage,
-      calendar: previewCalendar,
-      context: {
-        registered: teams.map((t) => t.teamId),
-        seedOrder: teams.map((t) => t.teamId),
-      },
-    });
-  }, [
-    datesValid,
-    calendar,
-    trimmedLabel,
-    seasonLabel,
-    startDate,
-    endDate,
-    blockIndex,
-    activateFrom,
-    cadence,
-    firstRound,
-    slots,
-    teams,
-  ]);
-
-  const ready = materialisation?.status === 'ready';
-  const fits = ready && materialisation.fits;
-
-  const problems: string[] = [];
-  if (!trimmedLabel) problems.push('Give the season a label.');
-  if (teams.length < 2) problems.push('At least two sides must be registered for this league.');
-  if (!datesValid)
-    problems.push(
-      calendar
-        ? 'Pick a playing block.'
-        : 'Give the season a start date and an end date, with the end on or after the start.',
-    );
-  if (duplicate) problems.push('A flat season with that label is already running for this league.');
-  if (datesValid && materialisation && !fits) problems.push(materialisation.summary);
-
-  async function submit() {
-    if (problems.length || busy || !materialisation || materialisation.status !== 'ready') return;
-    setErr('');
-    setBusy(true);
-    const run = buildFlatSeasonRun({
-      id: 'run-' + Date.now(),
-      league,
-      seasonLabel: trimmedLabel,
-      calendar,
-      custom: calendar ? undefined : { start: startDate, end: endDate },
-      blockIndex,
-      activateFrom: activateFrom || undefined,
-      seriesType,
-      overs,
-      cadence,
-      slots,
-      firstRound: calendar ? firstRound || undefined : undefined,
-    });
-    let created: SeasonRun;
-    try {
-      // The server stamps its own fields (createdAt, version…) onto the run it returns —
-      // fall back to the locally-built one only for a host that resolves with nothing.
-      created = ((await onCreate(run)) as SeasonRun | undefined) ?? run;
-    } catch (e) {
-      if (!(e as { alreadyToasted?: boolean })?.alreadyToasted) {
-        setErr(e instanceof ApiError ? e.message : 'Could not start the season — try again');
-      }
-      setBusy(false);
-      return;
-    }
-    const stage = created.structureSnapshot.stages[0];
-    // Read the format back from the SAVED run, not the local `seriesType`/`overs` state —
-    // `flatFormat` is the single source of truth (there is no config competition to read),
-    // and this is what lets a later regenerate reproduce the admin's exact choice rather
-    // than whatever this form's fields happened to hold at submit time.
-    const format = created.flatFormat ?? { seriesType, overs };
-    const payloads: GenerateGroupPayload[] = materialisation.groups.map((g) => ({
-      run: created,
-      stage,
-      groupId: g.id,
-      groupLabel: g.label,
-      entrants: g.entrants,
-      fixtures: g.fixtures,
-      startDate:
-        g.plan.dates[0] ??
-        findBlock(created.calendarSnapshot, stage.schedule.blockIndex)?.start ??
-        todayIso(),
-      league,
-      // `structureId`/`calendarId` are never read by `generateStageSeriesInner` (it uses
-      // `run.calendarSnapshot`, not the competition record) — set to the run's own
-      // synthesized ids purely to satisfy `Competition`'s shape.
-      competition: {
-        id: FLAT_COMPETITION_ID,
-        label: format.seriesType,
-        matchFormat: { overs: format.overs },
-        structureId: created.structureSnapshot.id,
-        calendarId: created.calendarSnapshot.id,
-      },
-    }));
-    // The run exists either way past this point — a failed generate isn't a failed
-    // start, so the modal still closes and points the admin at where to retry, rather
-    // than leaving them staring at a form for a season that already saved.
-    let generateFailed = false;
-    try {
-      await onGenerateStage(payloads, created, stage);
-    } catch {
-      generateFailed = true;
-    }
-    setBusy(false);
-    onClose();
-    if (generateFailed) toast('Season started — generate the fixtures from the Seasons panel');
-  }
-
-  return (
-    <div style={{ display: 'grid', gap: 14 }}>
-      <div
-        style={{
-          border: '1px solid var(--line)',
-          borderLeft: '3px solid var(--brand-primary, #16332B)',
-          borderRadius: 8,
-          padding: '10px 12px',
-          fontSize: 13,
-          lineHeight: 1.55,
-        }}
-      >
-        <strong>Flat season.</strong> {league.label} has no competition bound to it, so this season
-        runs as a single flat round-robin — every registered side, one group. You can drop a side
-        after creating via Edit entrants on the season. For stages, groups or promotion/relegation,
-        ask your platform operator to bind a competition (operator console → Season setup, or the
-        Structures card).
-      </div>
-
-      <div className="field">
-        <div className="field-label">
-          Season <span className="req">*</span>
-        </div>
-        <input
-          className="field-input"
-          value={seasonLabel}
-          onChange={(e) => setSeasonLabel(e.target.value)}
-          maxLength={80}
-          placeholder="2026/27"
-          style={{ maxWidth: 200 }}
-        />
-      </div>
-
-      {calendars.length > 0 ? (
-        <div className="field">
-          <div className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            Dates <span className="req">*</span>
-            <InfoDot
-              title="Dates — where the season's timeline comes from"
-              options={[
-                {
-                  label: 'A season calendar',
-                  desc: 'Use one the operator set up, so this season shares its playing blocks, breaks and excluded dates. Pick the block to play in.',
-                  eg: 'the 2026/27 season calendar, First half block',
-                },
-                {
-                  label: 'Custom dates',
-                  desc: 'Set a plain start and end date yourself, with no shared breaks. Best for a one-off or a league with no calendar.',
-                  eg: 'a knockout cup run over one weekend',
-                },
-              ]}
-            />
-          </div>
-          <select
-            className="field-select"
-            aria-label="Dates"
-            value={calendarId}
-            onChange={(e) => {
-              const next = calendars.find((c) => c.id === e.target.value);
-              setCalendarId(e.target.value);
-              // Default to the first block rather than leaving the select on an unpicked
-              // placeholder — `blockIndex` already treats "no selection" as block 0, so
-              // an empty value here would show a control that looked unset while behaving
-              // as if it wasn't.
-              setBlockId(next?.blocks[0]?.id ?? '');
-              // Switching to custom dates leaves no block to anchor within — a stale
-              // firstRound from a previous calendar selection would otherwise clamp
-              // against the synthesized single-block calendar below instead of being
-              // dropped outright.
-              if (!next) setFirstRound('');
-            }}
-          >
-            <option value="">Custom dates — pick start / end</option>
-            {calendars.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.label} season ·{' '}
-                {c.blocks.length
-                  ? `${formatIsoDate(c.blocks[0].start)} → ${formatIsoDate(c.blocks[c.blocks.length - 1].end)}`
-                  : 'no playing blocks'}
-              </option>
-            ))}
-          </select>
-          {calendar && calendar.blocks.length > 1 && (
-            <div style={{ marginTop: 8 }}>
-              <div className="field-label">
-                Playing block <span className="req">*</span>
-              </div>
-              <select
-                className="field-select"
-                aria-label="Playing block"
-                value={blockId}
-                onChange={(e) => setBlockId(e.target.value)}
-              >
-                {calendar.blocks.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.label} · {formatIsoDate(b.start)} → {formatIsoDate(b.end)}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-          {!calendar && (
-            <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
-              <div>
-                <div className="field-label">
-                  Start Date <span className="req">*</span>
-                </div>
-                <input
-                  type="date"
-                  className="field-input"
-                  aria-label="Start Date"
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
-                />
-              </div>
-              <div>
-                <div className="field-label">
-                  End Date <span className="req">*</span>
-                </div>
-                <input
-                  type="date"
-                  className="field-input"
-                  aria-label="End Date"
-                  value={endDate}
-                  min={startDate}
-                  onChange={(e) => setEndDate(e.target.value)}
-                />
-              </div>
-            </div>
-          )}
-        </div>
-      ) : (
-        <div style={{ display: 'flex', gap: 12 }}>
-          <div className="field">
-            <div className="field-label">
-              Start Date <span className="req">*</span>
-            </div>
-            <input
-              type="date"
-              className="field-input"
-              aria-label="Start Date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <div className="field-label">
-              End Date <span className="req">*</span>
-            </div>
-            <input
-              type="date"
-              className="field-input"
-              aria-label="End Date"
-              value={endDate}
-              min={startDate}
-              onChange={(e) => setEndDate(e.target.value)}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* ─── Scheduling options (collapsed by default) ───
-          Cadence, first round and time slots are engine knobs with sane defaults — weekly,
-          no anchor, no set times — so they live behind a toggle rather than sprouting
-          inline the moment dates are picked. Same idiom as admin.tsx's own Scheduling
-          options toggle (CreateSeriesForm). */}
-      <button
-        type="button"
-        className="cs-section"
-        aria-label="Scheduling options"
-        aria-expanded={showScheduling}
-        style={{
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          width: '100%',
-          textAlign: 'left',
-          background: 'none',
-          border: 'none',
-          borderTop: '1px solid var(--line)',
-          padding: 0,
-          paddingTop: 14,
-          font: 'inherit',
-          color: 'inherit',
-        }}
-        onClick={() => setShowScheduling((v) => !v)}
-      >
-        <span className="cs-section-title">— Scheduling options</span>
-        <span
-          style={{
-            fontSize: 11,
-            color: 'var(--muted)',
-            letterSpacing: '0.08em',
-            textTransform: 'uppercase',
-            fontWeight: 700,
-          }}
-        >
-          {showScheduling ? 'Hide' : 'Defaults applied · click to edit'}
-        </span>
-      </button>
-      {showScheduling && (
-        <>
-          <div className="cs-row">
-            <div className="cs-row-label" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-              Cadence
-              <InfoDot
-                title="Cadence — how often rounds are played"
-                options={[
-                  { label: 'Weekly', desc: 'One round every week.', eg: 'a Saturday league' },
-                  {
-                    label: 'Every N weeks',
-                    desc: 'One round every few weeks — set the gap.',
-                    eg: 'a fortnightly midweek league',
-                  },
-                  {
-                    label: 'Set days only',
-                    desc: 'Only on the weekdays you pick.',
-                    eg: 'a weekend festival on Sat & Sun',
-                  },
-                  {
-                    label: 'Spread across block',
-                    desc: 'Rounds spaced evenly across the whole block.',
-                    eg: 'six rounds over a 12-week block',
-                  },
-                ]}
-              />
-            </div>
-            <div className="cs-row-input">
-              <Choice
-                value={CADENCE_LABELS[cadence.kind] || CADENCE_LABELS.weekly}
-                onChange={(v) => setCadence(cadenceFromLabel(v))}
-                options={Object.values(CADENCE_LABELS)}
-              />
-              {cadence.kind === 'weekdays' && (
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
-                  {WEEKDAY_LABELS.map((label, day) => {
-                    const on = selectedDays.includes(day as Weekday);
-                    return (
-                      <button
-                        key={label}
-                        type="button"
-                        onClick={() =>
-                          setCadence({
-                            kind: 'weekdays',
-                            days: on
-                              ? selectedDays.filter((x) => x !== day)
-                              : [...selectedDays, day as Weekday].sort((a, b) => a - b),
-                          })
-                        }
-                        style={{
-                          padding: '4px 10px',
-                          borderRadius: 999,
-                          fontSize: 11.5,
-                          fontWeight: 700,
-                          cursor: 'pointer',
-                          border: '1px solid var(--line)',
-                          background: on ? 'var(--green-pale)' : 'var(--paper)',
-                          color: on ? 'var(--green)' : 'var(--muted-2)',
-                        }}
-                      >
-                        {label.slice(0, 3)}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </div>
-          {/* Only meaningful against a calendar's real block — a custom start/end pair
-              IS the first round, so there is nothing to anchor within it. */}
-          {calendar && (
-            <div className="cs-row">
-              <div className="cs-row-label">First round</div>
-              <div className="cs-row-input">
-                <input
-                  type="date"
-                  aria-label="First round"
-                  value={firstRound}
-                  min={currentBlock?.start}
-                  max={currentBlock?.end}
-                  onChange={(e) => setFirstRound(e.target.value)}
-                />
-                {firstRound &&
-                  currentBlock &&
-                  (firstRound < currentBlock.start || firstRound > currentBlock.end) && (
-                    <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
-                      outside {currentBlock.label} — ignored
-                    </div>
-                  )}
-                <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
-                  Optional — leave blank to start on the first day of the block. Without it,
-                  every-n-weeks cadences stride from the block&apos;s first day.
-                </div>
-              </div>
-            </div>
-          )}
-          <div className="cs-row">
-            <div className="cs-row-label">Time slots</div>
-            <div className="cs-row-input">
-              <Choice
-                value={slots.length ? 'Morning & afternoon' : 'No set times'}
-                onChange={(v) => setSlots(v === 'No set times' ? [] : T20_SLOTS)}
-                options={['No set times', 'Morning & afternoon']}
-              />
-              <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 6 }}>
-                {slots.length
-                  ? 'Fixtures in a round alternate between 08:00 and 13:30 starts.'
-                  : 'Fixtures carry a date only; start times are set later.'}
-              </div>
-            </div>
-          </div>
-        </>
-      )}
-
-      <div className="field">
-        <div className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          Match format
-          <InfoDot title="Match format">
-            <p>
-              <strong>Overs</strong> — overs per side for these matches.
-            </p>
-            <p>
-              <strong>Series type</strong> — the format’s name (e.g. One-Day, T20). It labels the
-              series; it isn’t inferred from the overs, so set it to match.
-            </p>
-          </InfoDot>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <BoundedNumber
-            ariaLabel="Overs"
-            min={1}
-            max={100}
-            style={{ width: 80 }}
-            value={overs}
-            onChange={setOvers}
-          />
-          <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>overs</span>
-          {/* Independent of the overs count — a select, not derived, because nothing
-              here can honestly infer "One-Day" from "50 overs" (a T20 union might still
-              call its 20-over game something else). Mirrors CreateSeriesForm's own
-              Series Type options (admin.tsx) so the two forms don't drift. */}
-          <select
-            className="field-select"
-            aria-label="Series Type"
-            value={seriesType}
-            onChange={(e) => setSeriesType(e.target.value)}
-            style={{ width: 200 }}
-          >
-            {SERIES_TYPES.map((t) => (
-              <option key={t}>{t}</option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      <div className="field">
-        <div className="field-label">Activate from</div>
-        <input
-          type="date"
-          className="field-input"
-          aria-label="Activate from"
-          value={activateFrom}
-          onChange={(e) => setActivateFrom(e.target.value)}
-          style={{ maxWidth: 200 }}
-        />
-        <p style={HINT}>
-          Optional — fixtures generate now but stay hidden from clubs until this date.
-        </p>
-      </div>
-
-      {materialisation && datesValid && (
-        <div
-          style={{
-            border: '1px solid var(--line)',
-            borderRadius: 8,
-            padding: '10px 12px',
-            fontSize: 12.5,
-            lineHeight: 1.5,
-            background: fits ? 'var(--paper)' : 'var(--coral-pale, #FDECEA)',
-            color: fits ? 'var(--muted)' : 'var(--coral)',
-          }}
-        >
-          <strong style={{ color: fits ? 'var(--ink)' : 'var(--coral)' }}>
-            {fits ? 'Ready' : 'Does not fit'}
-          </strong>{' '}
-          · {materialisation.summary}
-        </div>
-      )}
-
-      {problems.map((p, i) => (
-        <div key={i} style={ERR}>
-          {p}
-        </div>
-      ))}
-      {err && <div style={ERR}>{err}</div>}
-
-      <div style={{ display: 'flex', gap: 8 }}>
-        <Btn tone="ghost" onClick={onBack} disabled={busy}>
-          Back
-        </Btn>
-        <Btn tone="teal" onClick={submit} disabled={!!problems.length || busy}>
-          {busy ? 'Starting…' : 'Start season'}
-        </Btn>
-        <Btn tone="outline" onClick={onClose} disabled={busy}>
-          Cancel
-        </Btn>
-      </div>
-    </div>
-  );
-}
 
 /* ─── Quick start — a season for a league with no competition yet ───
  *
@@ -1360,7 +583,9 @@ function QuickStartForm({
       : undefined);
   const blockCount = calendar?.blocks.length ?? 0;
   const placement = defaultPlacement(template, blockCount).map((b, i) => placementEdits[i] ?? b);
-  const teams = leagueParticipants(clubs, league.key);
+  // Gated: an unaffiliated club's side is not counted into the preview. It can still be
+  // included per side when entrants are confirmed.
+  const teams = leagueParticipants(clubs, league.key, [], { isAffiliated: affiliationSubmitted });
   const narrative = describeStructure(
     instantiateTemplate(template, calendar, undefined, placement),
     calendar,
@@ -1373,7 +598,8 @@ function QuickStartForm({
     problems.push(
       'Give the season a start date and an end date, with the end on or after the start.',
     );
-  if (teams.length < 2) problems.push('At least two sides must be registered for this league.');
+  if (teams.length < 2)
+    problems.push('At least two affiliated sides must be registered for this league.');
 
   async function submit() {
     if (problems.length || busy) return;
@@ -1614,14 +840,22 @@ function QuickStartForm({
 
 /* ─── Start a season — the single entry point, routed by league ─── */
 
-/** The select's sentinel for "no particular league" — a hand-picked, ad-hoc series. */
-const AD_HOC = '__ad-hoc__';
+/**
+ * "12 sides (2 not yet affiliated)" — every side registered for the league, with the ones
+ * the affiliation gate holds back called out. `affiliated` + `unaffiliated` is the total.
+ */
+export function registeredSidesLabel(affiliated: number, unaffiliated: number): string {
+  const total = affiliated + unaffiliated;
+  return `${total} side${total === 1 ? '' : 's'}${
+    unaffiliated ? ` (${unaffiliated} not yet affiliated)` : ''
+  }`;
+}
 
 /**
- * One button, routed by LEAGUE. A league with a competition its operator set up continues
- * to `StartSeasonForm`; a league without one gets Quick start in place, under a plain
- * statement of which case it is. Only "one-off" (no league at all) reaches the embedded
- * Create-series flow.
+ * One button, routed by LEAGUE, with exactly two paths (ADR 0014). A league with a
+ * competition its operator set up continues to `StartSeasonForm`; a league without one
+ * gets Quick start in place, under a plain statement of which case it is. A one-off cup
+ * or festival is not a third path: it is the One-off tournament template in Quick start.
  */
 export function GenerateFixturesLauncher({
   clubs,
@@ -1630,7 +864,6 @@ export function GenerateFixturesLauncher({
   existingRuns,
   onCreateRun,
   onSeasonSetupChanged,
-  renderSeriesForm,
   onClose,
   toast,
 }: {
@@ -1639,26 +872,15 @@ export function GenerateFixturesLauncher({
   config: TenantConfig;
   existingRuns: SeasonRun[];
   onCreateRun: (run: SeasonRun) => Promise<SeasonRun | void>;
-  /** Unused since Quick start replaced the flat-season form; kept until that form is
-   *  deleted with the server phase. */
-  onGenerateStage?: (
-    payloads: GenerateGroupPayload[],
-    run: SeasonRun,
-    stage: StageSpec,
-  ) => Promise<void>;
   /** Refetch the runs list and tenant config after a quick start made a new season. */
   onSeasonSetupChanged?: () => Promise<unknown> | void;
-  /** Rendered in place for the ad-hoc path ONLY — a render prop, not an import, because
-   *  admin.tsx (which owns CreateSeriesForm) imports FROM season-run.tsx, not the other
-   *  way around. There is no league to prefill: ad-hoc means the admin picks by hand. */
-  renderSeriesForm: (args: { onBack: () => void }) => ReactNode;
   onClose: () => void;
   toast: Toast;
 }) {
   const capable = seasonCapableLeagues(allLeagues);
   const isCapable = (key: string) => capable.some((l) => l.key === key);
-  const [leagueKey, setLeagueKey] = useState(allLeagues[0]?.key ?? AD_HOC);
-  const [step, setStep] = useState<'pick' | 'season' | 'series'>('pick');
+  const [leagueKey, setLeagueKey] = useState(allLeagues[0]?.key ?? '');
+  const [step, setStep] = useState<'pick' | 'season'>('pick');
 
   if (step === 'season') {
     return (
@@ -1685,32 +907,19 @@ export function GenerateFixturesLauncher({
     );
   }
 
-  if (step === 'series') {
-    return (
-      <Modal
-        eyebrow="Fixtures"
-        title={
-          <>
-            Create a <em>series</em>
-          </>
-        }
-        onClose={onClose}
-      >
-        {renderSeriesForm({ onBack: () => setStep('pick') })}
-      </Modal>
-    );
-  }
-
   // The picked league can vanish while the modal is open — deleted in another tab, then
   // this console's own config refetch drops it — which simply reads as "pick again".
-  const league =
-    leagueKey === AD_HOC ? undefined : (findByKey(allLeagues, leagueKey) as League | undefined);
+  const league = findByKey(allLeagues, leagueKey) as League | undefined;
   const bound = !!league && isCapable(league.key);
   const structureName = (id: string) =>
     (config.structures ?? []).find((s) => s.id === id)?.name ?? 'structure missing';
+  // The sides a season would draw on, and how many the affiliation gate holds back — the
+  // admin can still include those per side on Confirm entrants.
+  const pool = league
+    ? leagueParticipantsWithStatus(clubs, league.key, [], affiliationSubmitted)
+    : undefined;
 
   function submit() {
-    if (leagueKey === AD_HOC) return setStep('series');
     if (bound) setStep('season');
   }
 
@@ -1724,10 +933,10 @@ export function GenerateFixturesLauncher({
           <select
             className="field-select"
             aria-label="League"
-            value={league || leagueKey === AD_HOC ? leagueKey : ''}
+            value={league ? leagueKey : ''}
             onChange={(e) => setLeagueKey(e.target.value)}
           >
-            {!league && leagueKey !== AD_HOC && (
+            {!league && (
               <option value="" disabled>
                 Pick a league
               </option>
@@ -1754,7 +963,6 @@ export function GenerateFixturesLauncher({
                   ))}
               </optgroup>
             )}
-            <option value={AD_HOC}>One-off series or tournament — pick the sides by hand</option>
           </select>
         </div>
 
@@ -1774,6 +982,12 @@ export function GenerateFixturesLauncher({
                 your operator to set one up in the season wizard.
               </p>
             )}
+            {pool && (
+              <p className="sr-callout-sub">
+                {registeredSidesLabel(pool.participants.length, pool.unaffiliated.length)}{' '}
+                registered for {league.label}.
+              </p>
+            )}
             <HelpLink topic="blocks-vs-stages" />
           </div>
         )}
@@ -1789,7 +1003,7 @@ export function GenerateFixturesLauncher({
           />
         ) : (
           <div style={{ display: 'flex', gap: 8 }}>
-            <Btn tone="teal" onClick={submit} disabled={!league && leagueKey !== AD_HOC}>
+            <Btn tone="teal" onClick={submit} disabled={!league}>
               Continue
             </Btn>
             <Btn tone="ghost" onClick={onClose}>
@@ -1817,6 +1031,7 @@ function EntrantConfirmForm({
   stageRun,
   materialisation,
   participants,
+  unaffiliated = [],
   ranked: rankedByStructure,
   rankedReason,
   pairing,
@@ -1827,6 +1042,12 @@ function EntrantConfirmForm({
   stageRun: StageRun | undefined;
   materialisation: StageMaterialisation;
   participants: Array<{ teamId: string; name: string }>;
+  /**
+   * Sides registered for the league whose club has not submitted its affiliation. They
+   * are not in the derived pool, so they are listed greyed with a one-click "Include
+   * anyway"; one already in a stored confirmation starts included.
+   */
+  unaffiliated?: Array<{ teamId: string; name: string }>;
   /**
    * Ask for a finishing position within each group, not just membership.
    *
@@ -1926,6 +1147,14 @@ function EntrantConfirmForm({
     return map;
   };
   const [assignment, setAssignment] = useState<Record<string, number>>(seed);
+  // Held-back sides the admin chose to include — seeded from any already confirmed.
+  const [included, setIncluded] = useState<string[]>(() => {
+    const confirmed = new Set(seedGroups().flat());
+    return unaffiliated.filter((p) => confirmed.has(p.teamId)).map((p) => p.teamId);
+  });
+  /** Every side the form can place: the pool plus the held-back sides included so far. */
+  const rows = [...participants, ...unaffiliated.filter((p) => included.includes(p.teamId))];
+  const heldBack = unaffiliated.filter((p) => !included.includes(p.teamId));
   const [ranks, setRanks] = useState<Record<string, number>>(seedRanks);
   const [points, setPoints] = useState<Record<string, number>>(stageRun?.carriedPoints ?? {});
   const [busy, setBusy] = useState(false);
@@ -1950,7 +1179,7 @@ function EntrantConfirmForm({
   // Sorted by the admin's position when the order matters downstream, otherwise left in
   // participant order — which is what it always was, and fine for a round robin.
   const groups: string[][] = labels.map((_, gi) => {
-    const inGroup = participants.filter((p) => assignment[p.teamId] === gi);
+    const inGroup = rows.filter((p) => assignment[p.teamId] === gi);
     if (!ranked) return inGroup.map((p) => p.teamId);
     return [...inGroup]
       .sort(
@@ -1960,7 +1189,7 @@ function EntrantConfirmForm({
       )
       .map((p) => p.teamId);
   });
-  const unassigned = participants.filter((p) => assignment[p.teamId] === undefined);
+  const unassigned = rows.filter((p) => assignment[p.teamId] === undefined);
 
   // "Not playing" is a legitimate answer — a side registered for the league but sitting
   // this competition out. Blocking on it made the option a trap: choosing it disabled
@@ -2016,7 +1245,7 @@ function EntrantConfirmForm({
     const stages = pairing.stages.map((s) => (s.id === stage.id ? candidate : s));
     const qualifiers = poolQualifiersFor(candidate, stages, hypothetical);
     const fellBack = isPoolKnockout(format) && poolPairings(format, entrants, qualifiers) === null;
-    const nameOf = (id: string) => participants.find((p) => p.teamId === id)?.name ?? id;
+    const nameOf = (id: string) => rows.find((p) => p.teamId === id)?.name ?? id;
     const first = (roundsForFormat(format, entrants, qualifiers)[0] ?? []).map(
       ([home, away]) => `${nameOf(home)} v ${nameOf(away)}`,
     );
@@ -2059,8 +1288,23 @@ function EntrantConfirmForm({
     </p>
   );
 
+  /** Bring a held-back side into the form — straight into the group when there is one. */
+  function includeAnyway(teamId: string) {
+    setIncluded((xs) => [...xs, teamId]);
+    if (groupCount === 1) setAssignment((a) => ({ ...a, [teamId]: 0 }));
+  }
+
   return (
     <div>
+      {stage.entrants.kind === 'all-registered' && (
+        <div className="sr-callout" style={{ marginBottom: 16 }}>
+          <p>
+            Every registered side is in by default. Remove a side here if it is not playing this
+            season.
+          </p>
+        </div>
+      )}
+
       {note && (
         <div className="sr-callout" style={{ marginBottom: 16 }}>
           <p>
@@ -2204,7 +1448,7 @@ function EntrantConfirmForm({
             </tr>
           </thead>
           <tbody>
-            {participants.map((p) => (
+            {rows.map((p) => (
               <tr key={p.teamId}>
                 <td>{p.name}</td>
                 <td>
@@ -2262,6 +1506,26 @@ function EntrantConfirmForm({
                     />
                   </td>
                 )}
+              </tr>
+            ))}
+            {/* Held back by the affiliation gate: shown, greyed, never silently missing —
+                the admin may know the form is on its way and include the side anyway. */}
+            {heldBack.map((p) => (
+              <tr key={p.teamId} className="sr-held-back">
+                <td>
+                  {p.name}
+                  <div style={HINT}>Not yet affiliated</div>
+                </td>
+                <td colSpan={1 + (ranked ? 1 : 0) + (wantsPoints ? 1 : 0)}>
+                  <Btn
+                    tone="ghost"
+                    size="sm"
+                    aria-label={`Include ${p.name} anyway`}
+                    onClick={() => includeAnyway(p.teamId)}
+                  >
+                    Include anyway
+                  </Btn>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -2325,6 +1589,7 @@ function StageCard({
   stageSeries,
   feederSeries,
   registered,
+  heldBack = [],
   calendar,
   narrative,
   onConfirm,
@@ -2357,6 +1622,12 @@ function StageCard({
   feederSeries: Series[] | undefined;
   /** Every side currently registered for the league — for the drift check below. */
   registered: string[];
+  /**
+   * Registered sides the affiliation gate holds back. Not "missing" from a group (they
+   * are not in the pool), and not "departed" from one either (an admin may have included
+   * one anyway): they are still registered.
+   */
+  heldBack?: string[];
   onConfirm: () => void;
   onGenerate: () => void;
   busy: boolean;
@@ -2443,7 +1714,8 @@ function StageCard({
   const drift = stageRun?.groups.length
     ? {
         missing: registered.filter((t) => !grouped.has(t)).length,
-        departed: [...grouped].filter((t) => !registered.includes(t)).length,
+        departed: [...grouped].filter((t) => !registered.includes(t) && !heldBack.includes(t))
+          .length,
       }
     : null;
 
@@ -3117,28 +2389,22 @@ export function SeasonRunsPanel({
   const runContext = useMemo(() => {
     if (!active) return null;
     const league = findByKey(allLeagues, active.leagueKey) as League | undefined;
-    // A flat run has no config competition to find — its sentinel `competitionId` never
-    // appears in `league.competitions`, so that lookup always resolved to `undefined` and
-    // silently discarded whatever Series Type/overs the admin actually picked at Start. The
-    // run persists that choice as `flatFormat` (there is no other source of truth for it),
-    // so a flat run synthesizes its Competition from there instead — regenerate then reads
-    // back the SAME format rather than a re-derived default.
-    const competition =
-      active.competitionId === FLAT_COMPETITION_ID
-        ? {
-            id: FLAT_COMPETITION_ID,
-            label: active.flatFormat?.seriesType ?? 'Flat season',
-            matchFormat: { overs: active.flatFormat?.overs ?? 50 },
-            structureId: active.structureSnapshot.id,
-            calendarId: active.calendarSnapshot.id,
-          }
-        : league?.competitions?.find((c) => c.id === active.competitionId);
+    const competition = league?.competitions?.find((c) => c.id === active.competitionId);
     /*
      * `excludeTeamIds` is read live rather than snapshotted: it only feeds the prefill for
      * stages nobody has confirmed yet, and a side excluded mid-season (a withdrawal) should
      * stop being offered. Stages already confirmed keep their stored entrants either way.
+     *
+     * The affiliation gate works the same way: an unaffiliated club's sides are not in the
+     * derived pool, but the confirm form lists them with "Include anyway", and a side the
+     * admin included stays in its confirmed group.
      */
-    const participants = leagueParticipants(clubs, active.leagueKey, competition?.excludeTeamIds);
+    const { participants, unaffiliated } = leagueParticipantsWithStatus(
+      clubs,
+      active.leagueKey,
+      competition?.excludeTeamIds,
+      affiliationSubmitted,
+    );
     const structure: CompetitionStructure = active.structureSnapshot;
     const calendar: SeasonCalendar = active.calendarSnapshot;
     // `stages` are the EFFECTIVE specs (pairing overrides applied), index-aligned with
@@ -3150,6 +2416,7 @@ export function SeasonRunsPanel({
       league,
       competition,
       participants,
+      unaffiliated,
       structure,
       calendar,
       stages,
@@ -3447,15 +2714,13 @@ export function SeasonRunsPanel({
               style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 12, lineHeight: 1.6 }}
             >
               <strong style={{ color: 'var(--ink)' }}>
-                {/* A flat run's `competition` is synthesized above with its own
-                    'Flat season' fallback baked in, so this no longer needs its own
-                    special case for the sentinel — only a genuinely unbound (non-flat)
-                    competitionId falls through to ''. */}
                 {runContext.league?.label ?? active.leagueKey} ·{' '}
                 {runContext.competition?.label ?? ''}
               </strong>{' '}
               · {active.seasonLabel} · {runContext.structure.name} (v{runContext.structure.version})
-              · {runContext.participants.length} sides registered
+              ·{' '}
+              {registeredSidesLabel(runContext.participants.length, runContext.unaffiliated.length)}{' '}
+              registered
             </div>
 
             {skew && (
@@ -3500,6 +2765,7 @@ export function SeasonRunsPanel({
                   stageSeries={seriesOfStage(active.id, spec.id)}
                   feederSeries={feeder ? seriesOfStage(active.id, feeder.id) : undefined}
                   registered={runContext.participants.map((p) => p.teamId)}
+                  heldBack={runContext.unaffiliated.map((p) => p.teamId)}
                   calendar={runContext.calendar}
                   narrative={runContext.narratives[i]}
                   busy={busyStage === spec.id}
@@ -3599,6 +2865,7 @@ export function SeasonRunsPanel({
               ]
             }
             participants={runContext.participants}
+            unaffiliated={runContext.unaffiliated}
             // Ask for finishing positions when the stage AFTER this one draws a
             // cross-pool bracket from it, OR when this stage is itself a seeded
             // knockout — there the position IS the seed line, not a downstream draw.
