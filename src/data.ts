@@ -3,6 +3,7 @@
 import type { Club, RequiredDoc } from './types';
 import { slotRefLabel } from '../packages/engine/src/formats';
 import { haversineKm } from '../packages/engine/src/geo';
+import { isAffiliated } from '../packages/engine/src/leagues';
 import {
   daysSince,
   daysUntilDate,
@@ -139,7 +140,7 @@ export const DISTRICTS = [
 ];
 
 /* Leagues are admin-managed per-tenant config now (TenantConfig.leagues), read on the
-   client via src/leagues.js helpers. The former static catalogue was removed from this
+   client via packages/engine/src/leagues.ts helpers. The former static catalogue was removed from this
    client bundle; its content lives in packages/api/seed-data/<tenant>.json as the demo
    seed (see git history for the original arrays). DISTRICTS above stays live. */
 
@@ -1372,10 +1373,9 @@ export function computeRevertCompliance(club, keys, requiredDocs = DEFAULT_REQUI
   return { docs, docMeta, reverted };
 }
 
-// Canonical "did the club submit its affiliation form" — the form fact.
-export function affiliationSubmitted(club) {
-  return club.affiliation === 'complete';
-}
+// Canonical "did the club submit its affiliation form" — the form fact. Lives in the
+// engine so the season preview here and the server generate route gate on one predicate.
+export const affiliationSubmitted = isAffiliated;
 
 export function overallProgress(club, requiredDocs = DEFAULT_REQUIRED_DOCS) {
   // 5 weighted phases: 20% each

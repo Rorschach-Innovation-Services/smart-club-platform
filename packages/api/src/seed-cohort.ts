@@ -15,10 +15,11 @@
  * calendars, structures or season runs, and there is no admin "create club" endpoint at
  * all — so there was no way to stand up a cohort that exercises the competition feature.
  *
- * WHY IT WRITES THROUGH `repo` RATHER THAN HTTP: fixture generation runs in the browser
- * (ADR 0004) — the API has no generate endpoint, it only stores finished objects. So the
- * CLI imports the SAME generation engine the SPA uses (src/competition/*) and persists
- * the result directly. The cost of bypassing the routes is bypassing their validation,
+ * WHY IT WRITES THROUGH `repo` RATHER THAN HTTP: the server generate route
+ * (`POST /season-runs/:id/stages/:specId/generate`, ADR 0014) writes through the release
+ * gates, and pre-released seeds would 409 on home-ground collisions. So the CLI imports
+ * the SAME engine that route uses (packages/engine/src/*) and persists the result
+ * directly. The cost of bypassing the routes is bypassing their validation,
  * which is why `config-validation.ts` was extracted: we run the operator route's exact
  * assertions before writing.
  *
@@ -626,9 +627,9 @@ function buildVenues(clubs: Club[]): Venue[] {
 /**
  * Materialise the flat round-robin structure and persist one Series per stage-group.
  *
- * The series is built by the engine's `buildStageSeries` — the same builder
- * `generateStageSeriesInner` (src/main.tsx) uses — so its id `s-${runId}-${stageId}-${groupId}`
- * is byte-identical to the admin UI's, which is what lets a re-seed overwrite the same rows
+ * The series is built by the engine's `buildStageSeries` — the same builder the server
+ * generate route (`POST /season-runs/:id/stages/:specId/generate`) uses — so its id
+ * `s-${runId}-${stageId}-${groupId}` is byte-identical to the admin UI's, which is what lets a re-seed overwrite the same rows
  * rather than stacking duplicates.
  */
 async function seedSeason(

@@ -18,7 +18,7 @@ import { queryClient, qk } from './query';
 import * as api from './api';
 import { ApiError, EMAIL_RE } from './api';
 import { resolveCopy } from './branding';
-import { Icon, Pill, Btn, Card, EmptyState, useToast, useEscapeClose } from './atoms';
+import { Icon, Pill, Btn, Card, EmptyState, Modal, useToast } from './atoms';
 import { LeagueForm } from './admin';
 import { DISTRICTS } from './data';
 import { OVERARCHING_DISTRICT } from '../packages/engine/src/leagues';
@@ -1713,37 +1713,6 @@ function ClubDirectoryCard({
   );
 }
 
-/** Modal host for LeagueForm — main.tsx's TaskModal is private (and importing it
- *  would create a cycle), so this reuses the same global task-modal classes. */
-function LeagueModal({
-  title,
-  onClose,
-  children,
-}: {
-  title: ReactNode;
-  onClose: () => void;
-  children?: ReactNode;
-}) {
-  useEscapeClose(onClose);
-  return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="task-modal narrow">
-        <div className="task-modal-head">
-          <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Platform · League catalogue</div>
-            <div className="task-modal-head-title">{title}</div>
-          </div>
-          <button className="task-modal-close" onClick={onClose} title="Close">
-            <Icon.X />
-          </button>
-        </div>
-        <div className="task-modal-body">{children}</div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
 function LeaguesCard({
   slug,
   config,
@@ -1895,7 +1864,9 @@ function LeaguesCard({
       )}
 
       {form && (
-        <LeagueModal
+        <Modal
+          eyebrow="Platform · League catalogue"
+          maxWidth={820}
           title={
             form !== 'new' ? (
               <>
@@ -1920,7 +1891,7 @@ function LeaguesCard({
             onClose={() => setForm(null)}
             toast={toast}
           />
-        </LeagueModal>
+        </Modal>
       )}
 
       {competitionsFor && (

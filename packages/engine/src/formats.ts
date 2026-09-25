@@ -24,9 +24,8 @@ import { roundRobinPairings, type Pairing } from './fixtures';
 import type { FormatSpec } from './types';
 
 /**
- * The Series Type options offered wherever an admin picks a match format — the ad-hoc
- * CreateSeriesForm (admin.tsx) and a flat season's synthesized competition
- * (StartFlatSeasonForm, season-run.tsx). One list so the two forms can't drift apart.
+ * The Series Type options offered where an admin picks a match format — the quick start
+ * (QuickStartForm, season-run.tsx).
  */
 export const SERIES_TYPES = [
   'Twenty20 (16-25 overs)',

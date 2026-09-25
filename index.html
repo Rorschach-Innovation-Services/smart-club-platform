@@ -546,6 +546,11 @@
     animation:slideUp .45s cubic-bezier(0.16,1,0.3,1);
   }
   .task-modal.narrow{width:820px}
+  .task-modal:focus{outline:none}  /* focused programmatically on open (tabIndex -1) */
+  .task-modal-foot{
+    padding:14px 28px;background:var(--white);border-top:1px solid var(--line);
+    display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;
+  }
   .task-modal-head{
     padding:18px 26px;
     background:var(--white);

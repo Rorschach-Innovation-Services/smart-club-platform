@@ -24,7 +24,7 @@ import * as repo from './repo.js';
 import type { Club, TenantConfig } from './types.js';
 
 // Scoring + catalogue from the frontend tree (pure TS — no React, no DOM). Same import
-// mechanism seed-cohort.ts uses for src/competition/*.
+// mechanism seed-cohort.ts uses for packages/engine/src/*.
 import { CQI_STRUCTURE, effectiveAnswers } from '../../../src/data.js';
 import { scoreCQI, cqiBand } from '../../../src/cqiScore.js';
 

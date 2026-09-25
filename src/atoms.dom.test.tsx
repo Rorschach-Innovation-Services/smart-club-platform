@@ -20,6 +20,7 @@ import {
   FieldGuide,
   HowSeasonsWork,
   InfoDot,
+  Modal,
   NextSteps,
   OptionCards,
   StatusTimeline,
@@ -347,5 +348,61 @@ describe('InfoTip is InfoDot', () => {
       'aria-expanded',
       'false',
     );
+  });
+});
+
+describe('Modal — the one dialog shell', () => {
+  /** An opener button toggling a modal, so focus return can be observed. */
+  function Opener({ dismissable }: { dismissable?: boolean }) {
+    const [open, setOpen] = useState(false);
+    return (
+      <>
+        <button onClick={() => setOpen(true)}>Open</button>
+        {open && (
+          <Modal
+            eyebrow="Fixtures · Season"
+            title="Delete this season?"
+            onClose={() => setOpen(false)}
+            dismissable={dismissable}
+            footer={<button>Confirm</button>}
+          >
+            <p>Body</p>
+          </Modal>
+        )}
+      </>
+    );
+  }
+
+  it('is a labelled modal dialog with eyebrow, body and footer', async () => {
+    render(<Opener />);
+    await userEvent.click(screen.getByRole('button', { name: 'Open' }));
+    const dialog = screen.getByRole('dialog', { name: 'Delete this season?' });
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(within(dialog).getByText('Fixtures · Season')).toBeInTheDocument();
+    expect(within(dialog).getByText('Body')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Confirm' })).toBeInTheDocument();
+  });
+
+  it('moves focus in on open and back to the opener when Escape closes it', async () => {
+    render(<Opener />);
+    const opener = screen.getByRole('button', { name: 'Open' });
+    await userEvent.click(opener);
+    expect(screen.getByRole('dialog')).toHaveFocus();
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(opener).toHaveFocus();
+  });
+
+  it('closes on a backdrop click unless dismissable is false', async () => {
+    const { unmount } = render(<Opener />);
+    await userEvent.click(screen.getByRole('button', { name: 'Open' }));
+    await userEvent.click(document.querySelector('.task-modal-backdrop') as HTMLElement);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    unmount();
+
+    render(<Opener dismissable={false} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Open' }));
+    await userEvent.click(document.querySelector('.task-modal-backdrop') as HTMLElement);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 });

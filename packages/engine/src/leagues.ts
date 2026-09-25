@@ -318,17 +318,17 @@ export function teamCounts(
  * It filters on teamId, not clubId, so a club can enter one side and hold another back.
  *
  * ── The affiliation gate ──
- * A club that has not submitted its affiliation form is not yet in the season. The engine
- * cannot know what "affiliated" means for a tenant (and must not import the web app's
- * `affiliationSubmitted`), so the CALLER supplies the predicate:
+ * A club that has not submitted its affiliation form is not yet in the season. The CALLER
+ * supplies the predicate — normally {@link isAffiliated}, which both the admin console
+ * preview and the server generate route pass, so the two agree on who is in:
  *
  * - `isAffiliated` given, `includeUnaffiliated` false/absent → sides of clubs failing the
- *   predicate are dropped. This is what the admin console does.
+ *   predicate are dropped.
  * - `isAffiliated` given, `includeUnaffiliated: true` → everyone, predicate ignored.
  * - **No `isAffiliated` → no gate at all: every registered side is returned.** Callers
- *   that pass no predicate (the API, `seed-cohort`, older call sites) keep their exact
- *   previous behaviour. `includeUnaffiliated` defaults to false but only means something
- *   once a predicate is supplied.
+ *   that pass no predicate (`seed-cohort`, name resolution for sides an admin chose to
+ *   "Include anyway") keep that behaviour. `includeUnaffiliated` defaults to false but
+ *   only means something once a predicate is supplied.
  *
  * Use {@link leagueParticipantsWithStatus} when the caller also needs to SHOW the sides
  * the gate held back.
@@ -347,6 +347,14 @@ export function leagueParticipants<C extends ClubSidesSource & { leagues?: strin
     .filter((c) => !gate || gate(c))
     .flatMap((c) => clubTeamsForLeague(c, leagueKey).map((p) => ({ ...p, club: c })))
     .filter((p) => !dropped.has(p.teamId));
+}
+
+/**
+ * Canonical "did the club submit its affiliation form" — the form fact. The one predicate
+ * the admin console preview and the server generate route both gate participants on.
+ */
+export function isAffiliated(club: { affiliation?: string }): boolean {
+  return club.affiliation === 'complete';
 }
 
 /** Options for {@link leagueParticipants}' affiliation gate. */

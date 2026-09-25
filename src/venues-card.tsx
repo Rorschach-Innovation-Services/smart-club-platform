@@ -10,19 +10,9 @@
  * distance ranking below a threshold. Saying so here is the difference between "the
  * allocator ignored travel" and "the allocator seems to pick odd grounds".
  */
-import { useState, useId, type CSSProperties, type ReactNode } from 'react';
+import { useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import {
-  BoundedNumber,
-  Btn,
-  Card,
-  EmptyState,
-  Field,
-  Icon,
-  InfoDot,
-  Pill,
-  useEscapeClose,
-} from './atoms';
+import { BoundedNumber, Btn, Card, EmptyState, Field, Icon, InfoDot, Modal, Pill } from './atoms';
 import { ApiError } from './api';
 import { WEEKDAY_LABELS, isValidIsoDate } from '../packages/engine/src/calendar';
 import { MIN_GEO_COVERAGE, geoCoverage } from '../packages/engine/src/venues';
@@ -52,41 +42,6 @@ function venueId(name: string): string {
       ? crypto.randomUUID().slice(0, 6)
       : Math.random().toString(36).slice(2, 8);
   return `${slug || 'venue'}-${rand}`;
-}
-
-function Modal({
-  title,
-  onClose,
-  children,
-}: {
-  title: ReactNode;
-  onClose: () => void;
-  children?: ReactNode;
-}) {
-  useEscapeClose(onClose);
-  // A dialog with no role is, to assistive tech, an ordinary div: nothing announces that
-  // a modal opened, nothing scopes the reading order to it, and Escape is the only thing
-  // that behaves. `aria-labelledby` points at the visible heading so it gets a name too.
-  const titleId = useId();
-  return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="task-modal" role="dialog" aria-modal="true" aria-labelledby={titleId}>
-        <div className="task-modal-head">
-          <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Fixtures · Venues</div>
-            <div className="task-modal-head-title" id={titleId}>
-              {title}
-            </div>
-          </div>
-          <button className="task-modal-close" onClick={onClose} title="Close">
-            <Icon.X />
-          </button>
-        </div>
-        <div className="task-modal-body">{children}</div>
-      </div>
-    </div>,
-    document.body,
-  );
 }
 
 function VenueForm({
@@ -714,6 +669,7 @@ export function VenuesCard({
 
       {form && (
         <Modal
+          eyebrow="Fixtures · Venues"
           title={
             form !== 'new' ? (
               <>

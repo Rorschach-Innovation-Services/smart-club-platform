@@ -837,6 +837,100 @@ export function useNestedEscapeClose(onClose: () => void) {
 }
 
 /**
+ * The one modal shell. Every console dialog renders through it so they share the
+ * `.task-modal*` look and the same accessibility behaviour:
+ * - `role="dialog"` + `aria-modal`, named by the visible title (or `labelledBy`, when the
+ *   caller renders its own heading) — without a role a dialog is an ordinary div to
+ *   assistive tech: nothing announces it opened and nothing scopes the reading order;
+ * - Escape closes;
+ * - focus moves into the dialog on open (unless a child already took it, e.g. `autoFocus`)
+ *   and returns to whatever had it when the dialog closes;
+ * - a click on the backdrop closes, unless `dismissable={false}` (a form that must not lose
+ *   its input to a stray click).
+ *
+ * Portalled to document.body so the fixed backdrop centres on the viewport, not on the
+ * residual transform the fadeUp animation leaves on `.main > *`. The help drawer's
+ * backdrop sits above it (z-index 1100 vs 900), so help opens over any modal.
+ */
+export function Modal({
+  eyebrow,
+  title,
+  onClose,
+  maxWidth,
+  children,
+  footer,
+  labelledBy,
+  dismissable = true,
+  closeLabel = 'Close',
+}: {
+  eyebrow?: ReactNode;
+  title: ReactNode;
+  onClose: () => void;
+  /** Caps the dialog's width in px; absent ⇒ the stylesheet's full width. */
+  maxWidth?: number;
+  children?: ReactNode;
+  /** Pinned below the scrolling body — for actions that must stay in view. */
+  footer?: ReactNode;
+  /** Id of an element that names the dialog, in place of the built-in title. */
+  labelledBy?: string;
+  /** False ⇒ a backdrop click does not close. Escape and the close button still do. */
+  dismissable?: boolean;
+  /** Tooltip on the close button. */
+  closeLabel?: string;
+}) {
+  useEscapeClose(onClose);
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // Read during the first render, before any child's autoFocus runs, so it is the element
+  // that opened the dialog rather than something inside it.
+  const restoreTo = useRef<Element | null>(
+    typeof document !== 'undefined' ? document.activeElement : null,
+  );
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.contains(document.activeElement)) dialog.focus();
+    const opener = restoreTo.current;
+    return () => {
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+    };
+  }, []);
+  const style: CSSProperties = {};
+  if (maxWidth) style.maxWidth = maxWidth;
+  if (footer) style.gridTemplateRows = 'auto 1fr auto';
+  return createPortal(
+    <div
+      className="task-modal-backdrop"
+      onClick={(e) => dismissable && e.target === e.currentTarget && onClose()}
+    >
+      <div
+        ref={dialogRef}
+        className="task-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={labelledBy ?? titleId}
+        tabIndex={-1}
+        style={style}
+      >
+        <div className="task-modal-head">
+          <div className="task-modal-head-text">
+            {eyebrow && <div className="task-modal-head-eyebrow">{eyebrow}</div>}
+            <div className="task-modal-head-title" id={titleId}>
+              {title}
+            </div>
+          </div>
+          <button className="task-modal-close" onClick={onClose} title={closeLabel}>
+            <Icon.X />
+          </button>
+        </div>
+        <div className="task-modal-body">{children}</div>
+        {footer && <div className="task-modal-foot">{footer}</div>}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/**
  * Horizontal-scroll wrapper with an edge fade + "scroll for more" affordance, shown only
  * while columns are off-screen. Wrap a `<table>` INSIDE its `.tbl-w` so wide tables — the
  * compliance docs tracker, the season viewer's 11-column schedule — scroll with a visible

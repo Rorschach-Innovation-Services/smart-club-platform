@@ -14,17 +14,16 @@
  * Modeled on `CreateTenantWizard` (platform.tsx): pill stepper, per-step body, a footRow
  * with Back/Continue, errors routed to the step that owns them, a terminal Done summary.
  */
-import { useId, useState, type CSSProperties, type ReactNode } from 'react';
-import { createPortal } from 'react-dom';
+import { useState, type CSSProperties } from 'react';
 import {
   Btn,
   EmptyState,
   HowSeasonsWork,
   Icon,
   InfoDot,
+  Modal,
   NextSteps,
   OptionCards,
-  useEscapeClose,
   type OptionCard,
 } from './atoms';
 import * as api from './api';
@@ -94,37 +93,12 @@ interface LeagueChoice {
 
 const SKIP: LeagueChoice = { mode: 'skip', label: '' };
 
-function Host({ onClose, children }: { onClose: () => void; children?: ReactNode }) {
-  useEscapeClose(onClose);
-  // A dialog with no role is, to assistive tech, an ordinary div — see CalendarModal /
-  // StructuresCard's Modal for the same pattern this mirrors.
-  const titleId = useId();
-  return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div
-        className="task-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        style={{ maxWidth: 1040 }}
-      >
-        <div className="task-modal-head">
-          <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Platform · Season setup</div>
-            <div className="task-modal-head-title" id={titleId}>
-              Set up the season calendar &amp; <em>competitions</em>
-            </div>
-          </div>
-          <button className="task-modal-close" onClick={onClose} title="Close">
-            <Icon.X />
-          </button>
-        </div>
-        <div className="task-modal-body">{children}</div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
+const WIZARD_EYEBROW = 'Platform · Season setup';
+const WIZARD_TITLE = (
+  <>
+    Set up the season calendar &amp; <em>competitions</em>
+  </>
+);
 
 /**
  * Whether every stage of a structure fits the draft calendar, previewed at a plausible size.
@@ -864,7 +838,7 @@ export function SeasonSetupWizard({
 
   if (done) {
     return (
-      <Host onClose={onDone}>
+      <Modal eyebrow={WIZARD_EYEBROW} title={WIZARD_TITLE} maxWidth={1040} onClose={onDone}>
         <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.6 }}>
           <strong>{done.calendarLabel}</strong> is {done.calendarCreated ? 'created' : 'updated'}.
         </p>
@@ -885,12 +859,12 @@ export function SeasonSetupWizard({
             Done
           </Btn>
         </div>
-      </Host>
+      </Modal>
     );
   }
 
   return (
-    <Host onClose={onClose}>
+    <Modal eyebrow={WIZARD_EYEBROW} title={WIZARD_TITLE} maxWidth={1040} onClose={onClose}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 18 }}>
         {STEPS.map((label, i) => (
           <span
@@ -1240,6 +1214,6 @@ export function SeasonSetupWizard({
           </div>
         </>
       )}
-    </Host>
+    </Modal>
   );
 }

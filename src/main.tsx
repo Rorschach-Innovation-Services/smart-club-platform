@@ -43,17 +43,18 @@ import {
   computeDocUnavailable,
   MIN_SAFEGUARDING_FILES,
   teamIdsForClub,
-  distinctClubCount,
   DISTRICTS,
   resolveTeam,
 } from './data';
 import { exportRowsToXlsx } from './exportXlsx';
+import { generateConflictMessage } from './generate-feedback';
 import { openBccReminder } from './mailto';
 import {
   Icon,
   Pill,
   Btn,
   EmptyState,
+  Modal,
   ProgChip,
   ClubNameCell,
   affPill,
@@ -250,46 +251,6 @@ function HelpModal({ onClose, support }) {
             quickly.
           </div>
         </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
-/* ─── TaskModal — wraps the affiliation form & documents view ─── */
-function TaskModal({
-  eyebrow,
-  title,
-  onClose,
-  narrow,
-  children,
-}: {
-  eyebrow?: ReactNode;
-  title?: ReactNode;
-  onClose: () => void;
-  narrow?: boolean;
-  children?: ReactNode;
-}) {
-  useEscapeClose(onClose);
-  // Portal to document.body so the fixed backdrop centers against the viewport, not the
-  // residual transform left on `.main > *` by the fadeUp animation (see admin.jsx fix-confirm).
-  return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`task-modal ${narrow ? 'narrow' : ''}`}>
-        <div className="task-modal-head">
-          <div className="task-modal-head-text">
-            {eyebrow && <div className="task-modal-head-eyebrow">{eyebrow}</div>}
-            <div className="task-modal-head-title">{title}</div>
-          </div>
-          <button
-            className="task-modal-close"
-            onClick={onClose}
-            title="Close (your inputs are saved)"
-          >
-            <Icon.X />
-          </button>
-        </div>
-        <div className="task-modal-body">{children}</div>
       </div>
     </div>,
     document.body,
@@ -619,7 +580,13 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   async function withToast(
     fn: () => Promise<any>,
     errMsg?: string,
-    opts: { rawConflict?: boolean; rawClientError?: boolean; invalidate?: any[] } = {},
+    opts: {
+      rawConflict?: boolean;
+      rawClientError?: boolean;
+      invalidate?: any[];
+      /** Actionable copy for a structured 409; `null` falls back to the generic line. */
+      conflictMessage?: (err: unknown) => string | null;
+    } = {},
   ) {
     try {
       return await fn();
@@ -642,12 +609,14 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       // 401s carry the session-expired copy from api.js — more useful than errMsg.
       // (When auth is truly lost the app flips to Login anyway; this covers the rest.)
       const authError = err instanceof ApiError && err.status === 401;
+      const structured = conflict ? (opts.conflictMessage?.(err) ?? null) : null;
       toastShow(
-        rawConflict || rawClientError || authError
-          ? err.message
-          : conflict
-            ? SERIES_CONFLICT_FRIENDLY
-            : errMsg || err.message,
+        structured ??
+          (rawConflict || rawClientError || authError
+            ? err.message
+            : conflict
+              ? SERIES_CONFLICT_FRIENDLY
+              : errMsg || err.message),
         'warn',
       );
       if (conflict) {
@@ -747,7 +716,9 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     return withToast(
       () => generateStageSeriesInner(payloads, run, stage),
       'Could not generate the fixtures',
-      { invalidate: [qk.series(), qk.seasonRuns()] },
+      // A clash-gate or released-overwrite refusal names what to do; any other 409 is a
+      // version race and keeps the generic refresh line. Both refetch (below).
+      { invalidate: [qk.series(), qk.seasonRuns()], conflictMessage: generateConflictMessage },
     ).catch((e) => {
       // Partial progress is possible — some groups may already have series. Refresh so
       // the stage card reflects what actually landed rather than the pre-click state.
@@ -929,12 +900,6 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       .then(() => invalidate(qk.me()))
       .catch(() => {});
   }
-  function onCreateSeries(s) {
-    return withToast(() => api.createSeries(s), 'Could not create series').then((created) => {
-      invalidate(qk.series());
-      return created;
-    });
-  }
   // ── League mutations: leagues are a config array, written whole via PUT /tenant/config. ──
   function onCreateLeague(league) {
     if (allLeagues.some((l) => l.key === league.key)) {
@@ -1028,7 +993,6 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   setReleased,
                   revealSeries,
                   setApproved,
-                  onCreateSeries,
                   onCreateLeague,
                   updateLeague,
                   deleteLeague,
@@ -1099,7 +1063,6 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   setReleased,
                   revealSeries,
                   setApproved,
-                  onCreateSeries,
                   onCreateLeague,
                   updateLeague,
                   deleteLeague,
@@ -1179,7 +1142,6 @@ function Shell({
   setReleased,
   revealSeries,
   setApproved,
-  onCreateSeries,
   onCreateLeague,
   updateLeague,
   deleteLeague,
@@ -2341,17 +2303,6 @@ function Shell({
   const orgName = branding?.name ?? 'Smart Club';
   const orgFooter = branding?.copy?.footer ?? 'Powered by Medicoach';
 
-  // The launcher's series step passes this straight through as `onSubmitSeries` — the
-  // busy idiom in CreateSeriesForm awaits it and stays open on rejection, so this must
-  // NOT swallow a failure the way the old TaskModal's `.catch(() => {})` did.
-  function createSeriesWithToast(s) {
-    return onCreateSeries(s).then(() => {
-      const clubN = distinctClubCount(s);
-      const tail = s.bulkSend ? ` · bulk-sent to ${clubN} club${clubN === 1 ? '' : 's'}` : '';
-      toastShow(`${s.name} created · ${s.fixtures.length} fixtures generated${tail}`);
-    });
-  }
-
   function renderMain() {
     if (role === 'admin') {
       const gotoList = () => gotoAdminView('clubs_list');
@@ -2526,7 +2477,6 @@ function Shell({
           <AdminFixtures
             clubs={clubs}
             allSeries={allSeries}
-            onSubmitSeries={createSeriesWithToast}
             onUpdateSeries={updateSeries}
             onDeleteSeries={deleteSeries}
             onDuplicateSeries={duplicateSeries}
@@ -2966,7 +2916,8 @@ function Shell({
       )}
 
       {role === 'club' && view === 'affiliation' && (
-        <TaskModal
+        <Modal
+          closeLabel="Close (your inputs are saved)"
           eyebrow={`Phase 01 · ${activeClub.name}`}
           title={
             <>
@@ -3011,12 +2962,13 @@ function Shell({
               gotoClubView('home');
             }}
           />
-        </TaskModal>
+        </Modal>
       )}
 
       {role === 'club' && view === 'documents' && (
-        <TaskModal
-          narrow
+        <Modal
+          closeLabel="Close (your inputs are saved)"
+          maxWidth={820}
           eyebrow={`Compliance · ${activeClub.name}`}
           title={
             <>
@@ -3041,12 +2993,13 @@ function Shell({
             submissionDeadline={submissionDeadline}
             unionEmail={unionEmail}
           />
-        </TaskModal>
+        </Modal>
       )}
 
       {role === 'club' && showRequestPlayer && activeClub && (
-        <TaskModal
-          narrow
+        <Modal
+          closeLabel="Close (your inputs are saved)"
+          maxWidth={820}
           eyebrow={`Clearances · ${activeClub.name}`}
           title={
             <>
@@ -3062,13 +3015,14 @@ function Shell({
             onSubmit={requestClearance}
             onCancel={() => setShowRequestPlayer(false)}
           />
-        </TaskModal>
+        </Modal>
       )}
 
       {role === 'admin' && showLeagueForm && (
-        <TaskModal
+        <Modal
+          closeLabel="Close (your inputs are saved)"
           eyebrow="Catalogue · Cricket Services"
-          narrow
+          maxWidth={820}
           title={
             showLeagueForm.key ? (
               <>
@@ -3091,7 +3045,7 @@ function Shell({
             onClose={() => setShowLeagueForm(null)}
             toast={toastShow}
           />
-        </TaskModal>
+        </Modal>
       )}
     </div>
   );

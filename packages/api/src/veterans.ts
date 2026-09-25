@@ -2,7 +2,7 @@
  * Veterans squad-selection helpers (ADR 0013) — league detection, the finder gate, and the
  * candidate-handle HMAC.
  *
- * KEEP IN SYNC with `src/leagues.ts` (`isVeteransLeague` / `clubPlaysVeterans`): the frontend
+ * KEEP IN SYNC with `packages/engine/src/leagues.ts` (`isVeteransLeague` / `clubPlaysVeterans`): the frontend
  * uses the SAME key/label regexes to decide nav visibility. If the patterns drift, a club could
  * see the "Veterans squad" nav (client predicate) but 403 on the finder (this server predicate),
  * or vice-versa. The server predicate here is the authoritative gate; the client one is cosmetic.

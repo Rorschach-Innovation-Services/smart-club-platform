@@ -81,7 +81,7 @@ import {
   KNOCKOUT_PAIRINGS,
 } from './config-validation.js';
 import { findTemplate, instantiateTemplate, newStructureId } from '../../engine/src/templates.js';
-import { leagueParticipants } from '../../engine/src/leagues.js';
+import { isAffiliated, leagueParticipants } from '../../engine/src/leagues.js';
 import { generateStage, stagesAfterGenerate } from '../../engine/src/generate.js';
 import { demographicsByLeague, summarizeDemographics } from './demographics.js';
 import {
@@ -4139,9 +4139,9 @@ interface GenerateStageBody {
  * on the server and write one series per group (ADR 0014, amending ADR 0004).
  *
  * The engine decides WHAT: the run is materialised exactly as the Seasons panel does it
- * (`leagueParticipants` over the tenant's clubs minus the competition's `excludeTeamIds`,
- * then `materialiseRun` — pairing overrides, confirmed groups, pool qualifiers, chaining
- * floors) and each group is built by `buildStageSeries`. This route decides HOW, through
+ * (`leagueParticipants` over the tenant's affiliated clubs minus the competition's
+ * `excludeTeamIds`, then `materialiseRun` — pairing overrides, confirmed groups, pool
+ * qualifiers, chaining floors) and each group is built by `buildStageSeries`. This route decides HOW, through
  * the existing write paths only:
  * - a group whose series doesn't exist yet goes through `createSeries` (POST /series: a
  *   draft, whatever the builder said);
@@ -4183,20 +4183,25 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
   const [config, clubs] = await Promise.all([repo.getTenantConfig(tenant), repo.listClubs(tenant)]);
   if (!config) throw new HttpError(404, 'tenant not found');
   const league = (config.leagues ?? []).find((l) => l.key === run.leagueKey);
-  // A legacy flat run (pre-migration) has no config competition; its format lives on the
-  // run, exactly as the console synthesises it.
-  const competition: Pick<Competition, 'label' | 'matchFormat' | 'excludeTeamIds'> | undefined =
-    run.competitionId === FLAT_COMPETITION_ID
-      ? {
-          label: run.flatFormat?.seriesType ?? 'Flat season',
-          matchFormat: { overs: run.flatFormat?.overs ?? 50 },
-        }
-      : league?.competitions?.find((cm) => cm.id === run.competitionId);
+  // Flat runs are migrated onto real competitions (scripts/migrate-flat-runs.ts) and the
+  // sentinel is refused at POST /season-runs, so a missing competition means an operator
+  // unbound it from the league after the season started — not a format to synthesise.
+  const competition = league?.competitions?.find((cm) => cm.id === run.competitionId);
+  if (!competition)
+    throw new HttpError(409, 'competition no longer bound to this league', {
+      code: 'competition_unbound',
+    });
 
   const result = generateStage({
     run,
     specId,
-    participants: leagueParticipants(clubs, run.leagueKey, competition?.excludeTeamIds),
+    // Gated on the same `isAffiliated` the console preview passes, so the server generates
+    // exactly the field the admin was shown.
+    participants: leagueParticipants(clubs, run.leagueKey, competition.excludeTeamIds, {
+      isAffiliated,
+    }),
+    // Ungated: resolves names for any side in a confirmed group, including one the admin
+    // chose to "Include anyway".
     leagueTeams: leagueParticipants(clubs, run.leagueKey),
     league,
     competition,

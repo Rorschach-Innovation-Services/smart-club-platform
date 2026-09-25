@@ -655,7 +655,7 @@ export const SKIP_ROSTER: Array<{ clubId: string; reason: string }> = [
  *   NAME — which differs per stage (dev "uMgungundlovu Cricket District", prod
  *   "uMgungundlovu District"), so the entries carry UMG_DISTRICT_PLACEHOLDER and the CLI
  *   substitutes the resolved name via materializeTuskersLeagues before appending. Not the
- *   'All districts' sentinel — leagueOptionsForDistrict (src/leagues.ts)
+ *   'All districts' sentinel — leagueOptionsForDistrict (packages/engine/src/leagues.ts)
  *   offers a district-scoped league only to that district's clubs, and the tenant PUT
  *   validator accepts a configured district name. `group` stays "Overarching Leagues" like
  *   every live entry (group is a display grouping only; the one group with behaviour is

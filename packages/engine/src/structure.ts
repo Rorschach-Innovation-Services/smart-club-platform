@@ -166,8 +166,8 @@ export function materialiseStage(args: MaterialiseArgs): StageMaterialisation {
   // a within-group draw also refuses shapes that line up perfectly but would need a bye.
   const withinPool = stage.format.kind === 'knockout' && stage.format.pairing === 'within-pool';
   const fallbackNotice = withinPool
-    ? 'Paired as a seeded bracket, not within-group — the qualifying pools don’t line up with this stage’s entrants, or can’t be drawn without a bye (it needs 2, 4, 8… pools, each sending the same 2, 4, 8… sides). Confirm the pool stage’s finishing positions.'
-    : 'Paired as a seeded bracket, not cross-pool — the qualifying pools don’t line up with this stage’s entrants, or qualify unevenly. Confirm the pool stage’s finishing positions.';
+    ? 'Paired as a seeded bracket, not within-group — the qualifying groups don’t line up with this stage’s entrants, or can’t be drawn without a bye (it needs 2, 4, 8… groups, each sending the same 2, 4, 8… sides). Confirm the group stage’s finishing positions.'
+    : 'Paired as a seeded bracket, not cross-group — the qualifying groups don’t line up with this stage’s entrants, or qualify unevenly. Confirm the group stage’s finishing positions.';
   const crossPoolFallback =
     isPoolKnockout(stage.format) &&
     groups.length > 0 &&

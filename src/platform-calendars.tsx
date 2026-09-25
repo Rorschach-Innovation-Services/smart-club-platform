@@ -9,9 +9,9 @@
  * Lives outside platform.tsx (already 3,300 lines) and imports only from atoms/api/types,
  * so there is no import cycle back into the console shell.
  */
-import { useState, useEffect, useId, type CSSProperties, type ReactNode } from 'react';
+import { useState, useEffect, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import { Btn, Card, EmptyState, FieldGuide, Icon, InfoDot, Pill, useEscapeClose } from './atoms';
+import { Btn, Card, EmptyState, FieldGuide, Icon, InfoDot, Modal, Pill } from './atoms';
 import * as api from './api';
 import { ApiError } from './api';
 import {
@@ -232,41 +232,6 @@ function validate(draft: SeasonCalendar): { errors: string[]; warnings: string[]
   if (badExcluded.length) errors.push(`Not a valid date: ${badExcluded.join(', ')}.`);
 
   return { errors, warnings };
-}
-
-function CalendarModal({
-  title,
-  onClose,
-  children,
-}: {
-  title: ReactNode;
-  onClose: () => void;
-  children?: ReactNode;
-}) {
-  useEscapeClose(onClose);
-  // A dialog with no role is, to assistive tech, an ordinary div: nothing announces that
-  // a modal opened, nothing scopes the reading order to it, and Escape is the only thing
-  // that behaves. `aria-labelledby` points at the visible heading so it gets a name too.
-  const titleId = useId();
-  return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="task-modal" role="dialog" aria-modal="true" aria-labelledby={titleId}>
-        <div className="task-modal-head">
-          <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Platform · Season calendars</div>
-            <div className="task-modal-head-title" id={titleId}>
-              {title}
-            </div>
-          </div>
-          <button className="task-modal-close" onClick={onClose} title="Close">
-            <Icon.X />
-          </button>
-        </div>
-        <div className="task-modal-body">{children}</div>
-      </div>
-    </div>,
-    document.body,
-  );
 }
 
 /** One editable date range — shared by the blocks and breaks lists. */
@@ -825,7 +790,8 @@ export function CalendarsCard({
       )}
 
       {form && (
-        <CalendarModal
+        <Modal
+          eyebrow="Platform · Season calendars"
           title={
             form !== 'new' ? (
               <>
@@ -846,7 +812,7 @@ export function CalendarsCard({
             onClose={() => setForm(null)}
             toast={toast}
           />
-        </CalendarModal>
+        </Modal>
       )}
 
       {confirm &&

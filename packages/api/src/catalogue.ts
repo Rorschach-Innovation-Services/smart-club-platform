@@ -22,7 +22,7 @@ export const DEFAULT_DISTRICTS: string[] = [
 ];
 
 /**
- * Server mirror of OVERARCHING_DISTRICT in the frontend's src/leagues.ts — the
+ * Server mirror of OVERARCHING_DISTRICT in the frontend's packages/engine/src/leagues.ts — the
  * sentinel a league uses to appear in every district's picker. Never a valid
  * tenant district (validateDistricts reserves it) but always a valid league.district.
  */

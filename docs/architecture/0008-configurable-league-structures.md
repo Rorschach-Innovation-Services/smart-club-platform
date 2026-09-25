@@ -220,7 +220,7 @@ edits mint a new one; a `SeasonRun` stores `structureSnapshot` and `calendarSnap
 start.
 
 This is the same defensive pattern the codebase already applies to `series.participants`
-(`src/leagues.ts`), where a snapshot keeps a released series resolving correctly after a club
+(`packages/engine/src/leagues.ts`), where a snapshot keeps a released series resolving correctly after a club
 edits its roster. [Score7](https://kb.score7.io/docs/getting-started/multi-stage-tournament/)
 solves the same problem by forbidding format changes after creation; a tenant-configured
 platform cannot take that option, so it pays for it with snapshots.

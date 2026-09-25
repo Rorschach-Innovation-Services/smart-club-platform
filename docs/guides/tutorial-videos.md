@@ -101,7 +101,7 @@ work or deploy needed. Under the hood:
   (`tutorials/<file>.mp4`), so a tenant's own uploads can never collide with, shadow,
   or (via the cleanup below) get confused with the shared set.
 - **Save**: `PUT /platform/tenants/:slug` with a `tutorials` array of `{title, url,
-  poster?}` (https URLs only — normally the `publicUrl` the upload step returned).
+poster?}` (https URLs only — normally the `publicUrl` the upload step returned).
   Optionally set `tutorialsNoFallback: true` so an empty/absent override serves **no**
   videos instead of quietly falling back to `DEFAULT_TUTORIALS` — for a client whose
   own onboarding flow has diverged enough that the shared clips would mislead.

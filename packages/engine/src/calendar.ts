@@ -2,7 +2,7 @@
  * Season-calendar engine — turns "N rounds, this cadence, that block" into concrete
  * match dates that respect the union's real playing calendar.
  *
- * The problem this replaces: `generateRoundRobin` schedules from a single start date at
+ * The problem this replaces: `legacyRoundDates` (fixtures.ts) schedules from a single start date at
  * a hardcoded weekly step (or spreads evenly to an end date). Both KZNCU and EMCU run
  * TWO playing blocks with a mid-season break between them, and their divisions play
  * weekly, every two weeks, or Saturdays-only. A continuous weekly cadence puts matches
@@ -279,7 +279,7 @@ function* candidateDates(block: SeasonBlock, from: IsoDate, cadence: Cadence): G
 
 /**
  * Evenly-spaced dates across `[from, block.end]`, then nudged forward off any blocked
- * day. This is the pre-calendar `spread` behaviour (see `resolveSpread` in data.ts) with
+ * day. This is the pre-calendar `spread` behaviour (see `legacyRoundDates` in fixtures.ts) with
  * break-awareness added.
  *
  * Monotonic by construction: each nudged date is pushed to at least the day after the
@@ -481,7 +481,7 @@ function uniqueReasons(skipped: SkippedDate[]): string {
  * The slot for the i-th fixture within a round, cycling through the configured slots.
  * A round with three fixtures across morning/afternoon slots plays 1st and 3rd in the
  * morning, 2nd in the afternoon — a reasonable default that venue allocation
- * (`src/competition/venues.ts`, ADR 0008) refines with real ground availability.
+ * (`venues.ts`, ADR 0008) refines with real ground availability.
  */
 export function slotForIndex(
   slots: TimeSlot[] | undefined,

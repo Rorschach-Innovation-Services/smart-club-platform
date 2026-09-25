@@ -16,8 +16,7 @@
  * One stage-group becomes one Series, so everything downstream (approval, release, the
  * player broadcast, travel cost) is the existing, tested path.
  */
-import { useMemo, useState, useId, type CSSProperties, type ReactNode } from 'react';
-import { createPortal } from 'react-dom';
+import { useMemo, useState, useId, type CSSProperties } from 'react';
 import {
   BoundedNumber,
   Btn,
@@ -27,11 +26,11 @@ import {
   HowSeasonsWork,
   Icon,
   InfoDot,
+  Modal,
   NextSteps,
   OptionCards,
   Pill,
   StatusTimeline,
-  useEscapeClose,
   type StatusStep,
 } from './atoms';
 import { ApiError, quickStartSeason, type QuickStartSeasonRequest } from './api';
@@ -84,51 +83,6 @@ type Toast = (m: string, t?: string) => void;
 
 const ERR: CSSProperties = { color: 'var(--coral, #C0392B)', fontSize: 12, marginTop: 6 };
 const HINT: CSSProperties = { fontSize: 11.5, color: 'var(--muted-2)', margin: '6px 0 0' };
-
-function Modal({
-  title,
-  eyebrow = 'Fixtures · Season',
-  wide,
-  onClose,
-  children,
-}: {
-  title: ReactNode;
-  eyebrow?: string;
-  wide?: boolean;
-  onClose: () => void;
-  children?: ReactNode;
-}) {
-  useEscapeClose(onClose);
-  // A dialog with no role is, to assistive tech, an ordinary div: nothing announces that
-  // a modal opened, nothing scopes the reading order to it, and Escape is the only thing
-  // that behaves. `aria-labelledby` points at the visible heading so it gets a name too.
-  const titleId = useId();
-  return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div
-        className="task-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        style={wide ? { maxWidth: 900 } : undefined}
-      >
-        <div className="task-modal-head">
-          <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">{eyebrow}</div>
-            <div className="task-modal-head-title" id={titleId}>
-              {title}
-            </div>
-          </div>
-          <button className="task-modal-close" onClick={onClose} title="Close">
-            <Icon.X />
-          </button>
-        </div>
-        <div className="task-modal-body">{children}</div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
 
 type KnockoutPairing = 'seeded' | 'cross-pool' | 'within-pool';
 
@@ -885,6 +839,7 @@ export function GenerateFixturesLauncher({
   if (step === 'season') {
     return (
       <Modal
+        eyebrow="Fixtures · Season"
         title={
           <>
             Start a <em>season</em>
@@ -924,7 +879,12 @@ export function GenerateFixturesLauncher({
   }
 
   return (
-    <Modal eyebrow="Fixtures" title="Start a season" wide={!!league && !bound} onClose={onClose}>
+    <Modal
+      eyebrow="Fixtures"
+      title="Start a season"
+      maxWidth={league && !bound ? 900 : undefined}
+      onClose={onClose}
+    >
       <div style={{ display: 'grid', gap: 16 }}>
         <div className="field">
           <div className="field-label">
@@ -1974,7 +1934,11 @@ function StageCard({
       })()}
 
       {confirmRegen && (
-        <Modal title="Regenerate a released schedule?" onClose={() => setConfirmRegen(false)}>
+        <Modal
+          eyebrow="Fixtures · Season"
+          title="Regenerate a released schedule?"
+          onClose={() => setConfirmRegen(false)}
+        >
           <p style={{ fontSize: 13, lineHeight: 1.6, margin: '0 0 10px' }}>
             {releasedLinked.length === 1
               ? `“${releasedLinked[0].name}” has been RELEASED`
@@ -2166,7 +2130,8 @@ function StructureReviewModal({
 
   return (
     <Modal
-      wide
+      eyebrow="Fixtures · Season"
+      maxWidth={900}
       title={
         <>
           Review changes · <em>{live.name}</em>
@@ -2806,7 +2771,11 @@ export function SeasonRunsPanel({
       </Card>
 
       {confirmDelete && active && (
-        <Modal title="Delete this season?" onClose={() => setConfirmDelete(false)}>
+        <Modal
+          eyebrow="Fixtures · Season"
+          title="Delete this season?"
+          onClose={() => setConfirmDelete(false)}
+        >
           <p style={{ fontSize: 13, lineHeight: 1.6, margin: '0 0 10px' }}>
             This removes <strong>{active.seasonLabel}</strong> and everything tracked against it:
             each stage&apos;s confirmed entrants, any carried points, and the record of who
@@ -2848,7 +2817,8 @@ export function SeasonRunsPanel({
 
       {confirming && runContext && (
         <Modal
-          wide
+          eyebrow="Fixtures · Season"
+          maxWidth={900}
           title={
             <>
               Confirm entrants · <em>{confirming.stage.name}</em>

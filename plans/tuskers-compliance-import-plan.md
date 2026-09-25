@@ -24,16 +24,16 @@ content-verified, not filename-guessed.
 
 ## The 8 clubs (CLUB_MAP)
 
-| folder (exact) | canonical name (from their own docs) | notes |
-| --- | --- | --- |
-| `Young Natalians CC Club` | Young Natalians Cricket Club | union account YOUNGCC |
-| `Howick CC Club` | Howick Cricket Club | |
-| `Standard CC Club` | Standard Cricket Club | est. 1886, plays at Collegians |
-| `Masibemunye CC Club` | Masibemunye Cricket Club | Imbali Hub; no constitution, no logo in pack |
-| `Greytown CC Club` | Greytown Cricket Club | form declares "Have a Club Constitution: NO" |
-| `UKZN CC Club` | UKZN Cricket Club | union bills it as "Varsity CC" (INU000150) — same club |
-| `MCC Club` | Maritzburg Cricket Club | est. 1884; folder says "MCC" |
-| `Lancashire CC Club` | Lancashire Cricket Club | NPO constitution; sponsored style "Hollywoodbets Lancashire CC" |
+| folder (exact)            | canonical name (from their own docs) | notes                                                           |
+| ------------------------- | ------------------------------------ | --------------------------------------------------------------- |
+| `Young Natalians CC Club` | Young Natalians Cricket Club         | union account YOUNGCC                                           |
+| `Howick CC Club`          | Howick Cricket Club                  |                                                                 |
+| `Standard CC Club`        | Standard Cricket Club                | est. 1886, plays at Collegians                                  |
+| `Masibemunye CC Club`     | Masibemunye Cricket Club             | Imbali Hub; no constitution, no logo in pack                    |
+| `Greytown CC Club`        | Greytown Cricket Club                | form declares "Have a Club Constitution: NO"                    |
+| `UKZN CC Club`            | UKZN Cricket Club                    | union bills it as "Varsity CC" (INU000150) — same club          |
+| `MCC Club`                | Maritzburg Cricket Club              | est. 1884; folder says "MCC"                                    |
+| `Lancashire CC Club`      | Lancashire Cricket Club              | NPO constitution; sponsored style "Hollywoodbets Lancashire CC" |
 
 Ids via `clubIdFromName(name)` as always (never hand-typed).
 
@@ -41,20 +41,20 @@ Ids via `clubIdFromName(name)` as always (never hand-typed).
 
 `OFFICE = pdf/doc/docx`; `SHEET = OFFICE + xls/xlsx/ods`; new format additions below.
 
-| key | name | shape | accepts | notes |
-| --- | --- | --- | --- | --- |
-| `constitution` | Club constitution | single | OFFICE | mostly scanned PDFs; Greytown/Masi have none → stays outstanding (correct signal) |
-| `agmMinutes` | AGM minutes | multiFile, min 1, max 6 | OFFICE + **odt** | clubs supplied 2–3 years each; Howick's is .odt |
-| `financials` | Financial statements | multiFile, min 1, max 6, allowUnavailable | OFFICE | LCC has 2 years of treasurer reports; some clubs only have it embedded in AGM minutes |
-| `affiliationForm` | District affiliation form | multiFile, min 1, max 4 | SHEET | the KZNICU "District Teams" registration workbook; year variants both kept |
-| `affiliationFees` | Affiliation fees (invoice / statement / proof of payment) | multiFile, min 1, max 8, allowUnavailable | pdf + SHEET + **jpg/png** | Standard's POP is a phone photo (.jpg) |
-| `nominalRoll` | Nominal roll (player register) | multiFile, min 1, max 4, `role: 'memberDatabase'` | SHEET | 2–3 workbooks per club; Standard's CSA team return also lands here |
-| `clubLogo` | Club logo | single, allowUnavailable | **jpg/png** | Masi + Greytown + YN have none |
-| `facilityAgreement` | Facility agreement / SLA | multiFile, min 1, max 6, allowUnavailable | OFFICE + **jpg/png** | MCC Lynwood + Linpark letters, UKZN SLA letters, Howick facility code-of-conduct |
-| `disciplinaryRecords` | Disciplinary records | multiFile, min 1, max 15, allowUnavailable | OFFICE + **jpg/png** | DC notices/outcomes, incident + umpire reports, arbitration, unregistered-player notices; Standard/UKZN have ~8–10 each after dedupe |
-| `unionCorrespondence` | Union correspondence | multiFile, min 1, max 10, allowUnavailable | OFFICE + SHEET | KZN Inland letters (Clause 18.1 notices, sanction letters, affiliation confirmations, thank-you), the union's multi-club verification workbooks |
-| `playerRegistrations` | Player registrations & clearances | multiFile, min 1, max 8, allowUnavailable | pdf + **jpg/png** | individual KZNICU registration forms + clearance scans; PII-heavy (full RSA IDs) |
-| `clubRecords` | Other club records | multiFile, min 1, max 8, allowUnavailable | OFFICE + SHEET + **jpg/png** | funding docs, transport claims, coaching staff list, safeguarding-training screenshot, women's-trial scan, unidentifiable SKM scan |
+| key                   | name                                                      | shape                                             | accepts                      | notes                                                                                                                                           |
+| --------------------- | --------------------------------------------------------- | ------------------------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `constitution`        | Club constitution                                         | single                                            | OFFICE                       | mostly scanned PDFs; Greytown/Masi have none → stays outstanding (correct signal)                                                               |
+| `agmMinutes`          | AGM minutes                                               | multiFile, min 1, max 6                           | OFFICE + **odt**             | clubs supplied 2–3 years each; Howick's is .odt                                                                                                 |
+| `financials`          | Financial statements                                      | multiFile, min 1, max 6, allowUnavailable         | OFFICE                       | LCC has 2 years of treasurer reports; some clubs only have it embedded in AGM minutes                                                           |
+| `affiliationForm`     | District affiliation form                                 | multiFile, min 1, max 4                           | SHEET                        | the KZNICU "District Teams" registration workbook; year variants both kept                                                                      |
+| `affiliationFees`     | Affiliation fees (invoice / statement / proof of payment) | multiFile, min 1, max 8, allowUnavailable         | pdf + SHEET + **jpg/png**    | Standard's POP is a phone photo (.jpg)                                                                                                          |
+| `nominalRoll`         | Nominal roll (player register)                            | multiFile, min 1, max 4, `role: 'memberDatabase'` | SHEET                        | 2–3 workbooks per club; Standard's CSA team return also lands here                                                                              |
+| `clubLogo`            | Club logo                                                 | single, allowUnavailable                          | **jpg/png**                  | Masi + Greytown + YN have none                                                                                                                  |
+| `facilityAgreement`   | Facility agreement / SLA                                  | multiFile, min 1, max 6, allowUnavailable         | OFFICE + **jpg/png**         | MCC Lynwood + Linpark letters, UKZN SLA letters, Howick facility code-of-conduct                                                                |
+| `disciplinaryRecords` | Disciplinary records                                      | multiFile, min 1, max 15, allowUnavailable        | OFFICE + **jpg/png**         | DC notices/outcomes, incident + umpire reports, arbitration, unregistered-player notices; Standard/UKZN have ~8–10 each after dedupe            |
+| `unionCorrespondence` | Union correspondence                                      | multiFile, min 1, max 10, allowUnavailable        | OFFICE + SHEET               | KZN Inland letters (Clause 18.1 notices, sanction letters, affiliation confirmations, thank-you), the union's multi-club verification workbooks |
+| `playerRegistrations` | Player registrations & clearances                         | multiFile, min 1, max 8, allowUnavailable         | pdf + **jpg/png**            | individual KZNICU registration forms + clearance scans; PII-heavy (full RSA IDs)                                                                |
+| `clubRecords`         | Other club records                                        | multiFile, min 1, max 8, allowUnavailable         | OFFICE + SHEET + **jpg/png** | funding docs, transport claims, coaching staff list, safeguarding-training screenshot, women's-trial scan, unidentifiable SKM scan              |
 
 **Platform precondition — new accepted formats.** `DOC_FORMAT_MIME` in `catalogue.ts`
 currently maps pdf/doc/docx/xls/xlsx/ods only. Add `odt`
@@ -119,6 +119,7 @@ one-line reason (Titans convention) over a cleverer regex.
 ### FILE_OVERRIDES that MUST exist (reviewed decisions, with reasons)
 
 Skips:
+
 - `MCC Club/virat-kohli-4k-ap-1920x1080.jpg` — downloaded wallpaper, not a document.
 - `MCC Club/Lynwood Club.jpg` — the VENUE's logo, not MCC's (MCC's own is `MCC logo.jpg`).
 - `Standard CC Club/Appeals Letter Standard CC.docx` — misnamed: a KZNICU letter about
@@ -131,7 +132,7 @@ Skips:
   letter 24 nov 2025 (≙ `Howick CC Letter 2025.pdf`), Standard KZN Inland 14 March
   2024, Standard Regional Final 2024 (≙ Franchise Final pdf), Standard DC 19-Feb notice
   (`Standard DC Letter Chad Potgieter.docx` AND `Standard DC letter Chad Potgieter
-  2024.docx` are the same notice; the `.pdf` sibling is a re-scheduled variant — keep
+2024.docx` are the same notice; the `.pdf` sibling is a re-scheduled variant — keep
   pdf(s)), Standard DC 21-Feb notice docx, Masi Affiliation Letter docx, Masi KZN
   Inland 07 March docx, Masi Revised Funding docx, UKZN DC letter Ashok Bharath docx,
   UKZN DC Letter Ashok.docx (28-Feb outcome; the 29-Feb pdf is the fuller final), UKZN
@@ -142,6 +143,7 @@ Skips:
   traps); anything byte-identical dedupes automatically and needs no override.
 
 Reassignments (the `{club, docKey}` extension):
+
 - `MCC Club/asanda.jpg` → `{ club: masibemunye-cricket-club, docKey: playerRegistrations }`
   — it's Asanda Khumalo's (Masibemunye) registration form, misfiled in MCC's folder.
 - `Standard CC Club/KZN Inland Letter Lancashire Ground Booking 26 March 2024.pdf` →
@@ -149,6 +151,7 @@ Reassignments (the `{club, docKey}` extension):
   Lancashire's chairman (Michael Patricks Oval usage), misfiled in Standard's folder.
 
 Forced docKeys (regexes won't catch these):
+
 - `MCC Club/D Fynn.pdf` → `playerRegistrations` (scanned registration form, no keyword).
 - `UKZN CC Club/Cian Fortman .jpg` → `playerRegistrations` (photo of a filled
   registration/clearance form — full RSA ID, PII; note trailing space in filename).
@@ -212,7 +215,7 @@ Importable, via a per-club `ROSTER_SOURCES` config in `tuskers-import-map.ts` �
    padded with a fake all-zeros tail — `cleanIdCell` + Luhn decides; never hand-fix.
 2. **Lancashire** — `Lancashire CC Club/Lancashire CC Nominal Roll.xlsx`. CSA-export
    header row 1: `Name|Surname|PlayerType|BattingHand|BowlingHand|BowlingAction|Gender|
-   Race|Team|BirthDate|Status` (+`ServerPlayerID|Organisation|Region` on junior sheets).
+Race|Team|BirthDate|Status` (+`ServerPlayerID|Organisation|Region` on junior sheets).
    **The `BirthDate` column holds identity values, NOT dates**: 13-digit RSA IDs
    (→ id-based row), a couple of 8-digit `yyyymmdd` dates (→ dob-only rows, need
    `--allow-missing-id`), Zimbabwean national IDs (`NN-NNNNNNNaNN` shape; no DOB
@@ -263,7 +266,7 @@ Exception reasons reuse the Titans vocabulary (`bad-id`, `bad-id-checksum`,
   `premier-league`, `div-1`, `div-2`, `div-3`, `womens-league`, `veterans-league`, `u9`,
   `u11`, `u13`, `u15`, `u16` — with labels + a single group, mirroring the EXTRA_LEAGUES
   shape. Dry-run prints which referenced keys are missing; `--confirm
-  --add-missing-leagues` appends exactly the referenced-and-missing ones (idempotent);
+--add-missing-leagues` appends exactly the referenced-and-missing ones (idempotent);
   a referenced key NOT in `TUSKERS_LEAGUES` aborts. Keys never referenced by a written
   row are not appended.
 - After confirm, union each touched club's `leagues[]` with the league keys its written
@@ -302,6 +305,7 @@ exclusions) — paste the table in the report.
 ## Tests
 
 Mirror `test/import-titans.test.ts`'s approach against the NEW map file:
+
 - classifier: embed the real 165 relative paths (generate from the pack listing) and
   assert zero unclassified, zero unmapped folders, and the exact override outcomes above
   (spot-check the reassignments and the Greytown docx/pdf split).
@@ -323,7 +327,7 @@ classified from filename + visual inspection.
 ## Acceptance for this pass
 
 1. `npx tsx packages/api/src/import-tuskers-compliance.ts --parse-only --dir
-   "/Users/carlton/Downloads/Tuskers"` runs CLEAN (zero unclassified, zero unmapped
+"/Users/carlton/Downloads/Tuskers"` runs CLEAN (zero unclassified, zero unmapped
    folders, every club has docs) and its classification table matches this spec.
 2. `configure-tenant-docs.ts` has the tuskers catalogue and validates.
 3. tsc + prettier + full api test suite pass.

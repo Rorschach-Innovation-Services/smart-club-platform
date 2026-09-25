@@ -339,7 +339,7 @@ export interface StageRun {
   /**
    * Set by `POST /season-runs/:id/rebase` when the stage's schedule spec changed: the
    * pairing-only divergence check never fires for date/cadence edits, so the server marks
-   * the stage "Needs regenerating" explicitly. Cleared by the client on regeneration.
+   * the stage "Needs regenerating" explicitly. Cleared by the generate route on regeneration.
    */
   staleSchedule?: boolean;
   /**

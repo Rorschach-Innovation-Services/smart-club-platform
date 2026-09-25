@@ -574,7 +574,6 @@ describe('a tenant with no series still gets the season machinery', () => {
       <AdminFixtures
         clubs={clubs}
         allSeries={[]}
-        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -801,7 +800,6 @@ describe('the season viewer — every schedule on screen, downloads inside it', 
       <AdminFixtures
         clubs={clubs}
         allSeries={allSeries}
-        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -935,7 +933,6 @@ describe('progressive release — withhold at release, reveal later (ADR 0011)',
       <AdminFixtures
         clubs={clubs}
         allSeries={[s]}
-        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -1005,7 +1002,6 @@ describe('one release bar — the header and the cards show status only', () => 
       <AdminFixtures
         clubs={clubs}
         allSeries={all}
-        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -1059,6 +1055,16 @@ describe('one release bar — the header and the cards show status only', () => 
     expect(within(header()).getByText('Withheld times')).toBeTruthy();
     // The cards carry no action buttons of their own any more.
     expect(document.querySelector('.series-card-cta')).toBeNull();
+    // Released has no next lifecycle step, so no button on the bar is filled: the reveals
+    // are outline actions, like Recall.
+    expect(bar().querySelectorAll('.btn:not(.btn-outline)')).toHaveLength(0);
+  });
+
+  it('fills only the next lifecycle step on the bar', () => {
+    renderPage([series({ approved: true } as Partial<Series>)]);
+    const filled = bar().querySelectorAll('.btn:not(.btn-outline)');
+    expect(filled).toHaveLength(1);
+    expect(filled[0].textContent).toMatch(/release to clubs/i);
   });
 
   it('says when a released series activates for clubs', () => {
@@ -1075,7 +1081,6 @@ describe('series outside every season stage are labelled for what they are', () 
       <AdminFixtures
         clubs={clubs}
         allSeries={all}
-        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -1127,7 +1132,6 @@ describe('release fires exactly one success toast', () => {
       <AdminFixtures
         clubs={clubs}
         allSeries={[s]}
-        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -1177,7 +1181,6 @@ describe('recall fires no false success toast when the recall fails', () => {
       <AdminFixtures
         clubs={clubs}
         allSeries={[s]}
-        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}

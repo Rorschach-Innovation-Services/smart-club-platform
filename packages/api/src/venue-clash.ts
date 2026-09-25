@@ -4,7 +4,7 @@
  * must not reach club portals; ADR: releasing a known double-booking is publishing a
  * schedule the union will have to retract).
  *
- * Semantics mirror the frontend allocator's ledger (src/competition/venues.ts): per
+ * Semantics mirror the frontend allocator's ledger (packages/engine/src/venues.ts): per
  * ground-and-date, bookings count per slot with an untimed fixture owning every slot
  * that day; a slot is full when its load reaches the ground's surface capacity
  * (max(1, surfaces ?? 1)). Registry-resolved grounds share one ledger row by venue id,
@@ -309,7 +309,7 @@ export function formatClashForHumans(c: Clash): string {
  *
  * `fixtureId` is safe as a key component even though `f.id ?? ''` allows an empty string:
  * every fixture producer assigns a non-empty id — the client generator (`fixturesFromDates`
- * in src/competition/fixtures.ts, `id: 'f' + fixtureId++`), the union importer
+ * in packages/engine/src/fixtures.ts, `id: 'f' + fixtureId++`), the union importer
  * (import-planb-fixtures.ts, `id: \`f${i + 1}\``) and the seeder (seed-cohort.ts, which
  * emits generator fixtures). So id-less fixtures collapsing to one key is not a real state
  * for first-party data; the `?? ''` is only a type-level fallback for the optional field.

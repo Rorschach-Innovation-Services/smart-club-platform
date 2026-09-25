@@ -28,9 +28,9 @@ import {
   HowSeasonsWork,
   Icon,
   InfoDot,
+  Modal,
   OptionCards,
   Pill,
-  useEscapeClose,
   type OptionCard,
 } from './atoms';
 import { HelpLink } from './help/HelpDrawer';
@@ -174,49 +174,6 @@ const SECTION: CSSProperties = {
 
 /** The team count the preview reasons about while a structure has no teams in it. */
 export const DEFAULT_PREVIEW_TEAMS = 12;
-
-function Modal({
-  title,
-  wide,
-  onClose,
-  children,
-}: {
-  title: ReactNode;
-  wide?: boolean;
-  onClose: () => void;
-  children?: ReactNode;
-}) {
-  useEscapeClose(onClose);
-  // A dialog with no role is, to assistive tech, an ordinary div: nothing announces that
-  // a modal opened, nothing scopes the reading order to it, and Escape is the only thing
-  // that behaves. `aria-labelledby` points at the visible heading so it gets a name too.
-  const titleId = useId();
-  return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div
-        className="task-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        style={wide ? { maxWidth: 1040 } : undefined}
-      >
-        <div className="task-modal-head">
-          <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Platform · Competition structures</div>
-            <div className="task-modal-head-title" id={titleId}>
-              {title}
-            </div>
-          </div>
-          <button className="task-modal-close" onClick={onClose} title="Close">
-            <Icon.X />
-          </button>
-        </div>
-        <div className="task-modal-body">{children}</div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
 
 /* ─── Stage editor ─── */
 
@@ -2406,6 +2363,7 @@ export function StructuresCard({
 
       {picking && (
         <Modal
+          eyebrow="Platform · Competition structures"
           title={
             <>
               Start a <em>structure</em>
@@ -2427,7 +2385,8 @@ export function StructuresCard({
 
       {editing && (
         <Modal
-          wide
+          eyebrow="Platform · Competition structures"
+          maxWidth={1040}
           title={
             <>
               Edit <em>structure</em>
@@ -2725,6 +2684,7 @@ export function CompetitionsModal({
 }) {
   return (
     <Modal
+      eyebrow="Platform · Competition structures"
       title={
         <>
           Competitions · <em>{league.label}</em>

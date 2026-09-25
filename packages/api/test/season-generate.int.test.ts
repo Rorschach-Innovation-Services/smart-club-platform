@@ -12,7 +12,10 @@
  *   series keeps its name) and a repeat is idempotent;
  * - a released series is never overwritten without `confirmReleasedOverwrite` (409
  *   `released_overwrite` naming it, nothing written), and with it the overwrite runs
- *   through the SAME in-season clash gate as PATCH /series (structured `venue_clash` 409).
+ *   through the SAME in-season clash gate as PATCH /series (structured `venue_clash` 409);
+ * - a run whose competition was unbound from the league is a 409 `competition_unbound`;
+ * - the participant field is gated on the engine's `isAffiliated` (the console preview's
+ *   predicate), while a side confirmed into the groups via "Include anyway" is generated.
  *
  * Same harness as season-quick-start.int.test.ts: in-process dynalite + the REAL Hono app.
  *
@@ -203,6 +206,7 @@ before(async () => {
       name: `Club ${id.slice(4).toUpperCase()}`,
       leagues: [LEAGUE_KEY],
       ground: { venue: `${id.slice(4).toUpperCase()} Gen Oval` },
+      affiliation: 'complete',
     } as unknown as Club);
 });
 
@@ -231,6 +235,17 @@ describe('POST /season-runs/:id/stages/:specId/generate — guards', () => {
     assert.equal(stale.status, 409);
     assert.equal(((await stale.json()) as ErrorBody).error, 'season run changed; refetch');
     assert.equal(await repo.getSeries(TENANT, 's-run-guard-version-pools-g1'), null);
+  });
+
+  test('a run whose competition is no longer bound to the league is a 409', async () => {
+    const run = await seedRun('run-guard-unbound');
+    await repo.putSeasonRun(TENANT, { ...run, competitionId: 'cmp-gone' });
+    const res = await generate('run-guard-unbound', 'pools', { version: 1 });
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as ErrorBody;
+    assert.equal(body.code, 'competition_unbound');
+    assert.equal(body.error, 'competition no longer bound to this league');
+    assert.equal(await repo.getSeries(TENANT, 's-run-guard-unbound-pools-g1'), null);
   });
 
   test('a stage with no confirmed or derivable entrants is a 409', async () => {
@@ -404,5 +419,65 @@ describe('POST /season-runs/:id/stages/:specId/generate — writes', () => {
     assert.equal(s1.releasedAt, '2026-09-01T00:00:00.000Z', 'releasedAt is not re-stamped');
     assert.deepEqual(s1.fixtures, first.series[0].fixtures);
     assert.equal(out.run.version, 5);
+  });
+});
+
+describe('POST /season-runs/:id/stages/:specId/generate — affiliation gate', () => {
+  // A single all-registered stage: the field is every registered side, gated on the same
+  // `isAffiliated` the console preview uses.
+  const ALL: StageSpec = {
+    id: 'all',
+    name: 'League stage',
+    format: { kind: 'round-robin', legs: 1 },
+    entrants: { kind: 'all-registered' },
+    schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+  };
+  const PENDING = 'gen-pending';
+
+  // Last describe in the file, so the extra club it seeds affects no other test.
+  async function seedAllRun(id: string, groups: SeasonRun['stages'][number]['groups']) {
+    const run: SeasonRun = {
+      id,
+      leagueKey: LEAGUE_KEY,
+      competitionId: 'cmp-gen',
+      seasonLabel: `Season ${id}`,
+      structureSnapshot: { id: 'st-gen', name: 'One stage', version: 1, stages: [ALL] },
+      calendarSnapshot: CALENDAR,
+      stages: [{ specId: 'all', status: 'ready', groups }],
+      version: 1,
+    };
+    await repo.putSeasonRun(TENANT, run);
+  }
+
+  before(async () => {
+    // Registered for the league, affiliation form still in progress.
+    await repo.putClub(TENANT, {
+      id: PENDING,
+      name: 'Club PENDING',
+      leagues: [LEAGUE_KEY],
+      ground: { venue: 'PENDING Gen Oval' },
+      affiliation: 'in_progress',
+    } as unknown as Club);
+  });
+
+  test('an unaffiliated club is left out of an all-registered stage', async () => {
+    await seedAllRun('run-aff-gated', []);
+    const res = await generate('run-aff-gated', 'all', { version: 1 });
+    assert.equal(res.status, 200);
+    const out = (await res.json()) as GenerateResponse;
+    assert.equal(out.series.length, 1);
+    assert.deepEqual([...out.series[0].teams].sort(), [...CLUB_IDS].sort());
+    assert.ok(!out.series[0].teams.includes(PENDING));
+  });
+
+  test('the same club confirmed into the groups (Include anyway) is generated', async () => {
+    const entrants = [...CLUB_IDS, PENDING];
+    await seedAllRun('run-aff-included', [{ id: 'g1', label: 'Group A', entrants }]);
+    const res = await generate('run-aff-included', 'all', { version: 1 });
+    assert.equal(res.status, 200);
+    const out = (await res.json()) as GenerateResponse;
+    assert.equal(out.series.length, 1);
+    assert.ok(out.series[0].teams.includes(PENDING));
+    assert.equal(out.series[0].teams.length, CLUB_IDS.length + 1);
   });
 });

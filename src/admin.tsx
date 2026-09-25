@@ -235,12 +235,6 @@ interface AdminFixturesProps {
   // `Series[]` cascades unrelated fallout across the whole file. Left loose, like the
   // rest of AdminFixtures' pre-existing untyped props.
   allSeries;
-  /**
-   * @deprecated Unread since the create-series form was retired (ADR 0014) — every new
-   * schedule starts through "Start a season". Still accepted so an existing host keeps
-   * compiling; remove once no caller passes it.
-   */
-  onSubmitSeries?: (series) => Promise<void>;
   /** Persist an edited series. Every caller awaits the returned promise — EditFixtureRow
    *  closes the row only on resolve so a clash-gate 409 keeps it open with the reason
    *  inline. Typed as returning a promise so that contract is enforced, not by convention. */
@@ -1593,13 +1587,16 @@ export function FixtureTable({
         <div className="fix-release-actions">
           {series.released ? (
             <>
+              {/* Once released there is no next lifecycle step, so nothing here is filled:
+                  reveals are secondary actions, like Recall. The only filled button on the
+                  bar is ever the next step (Approve → Release). */}
               {onAskReveal && series.withheld?.venue && (
-                <Btn tone="teal" onClick={() => onAskReveal(series, 'venue')}>
+                <Btn tone="outline" onClick={() => onAskReveal(series, 'venue')}>
                   Reveal venues
                 </Btn>
               )}
               {onAskReveal && series.withheld?.time && (
-                <Btn tone="teal" onClick={() => onAskReveal(series, 'time')}>
+                <Btn tone="outline" onClick={() => onAskReveal(series, 'time')}>
                   Reveal times
                 </Btn>
               )}
