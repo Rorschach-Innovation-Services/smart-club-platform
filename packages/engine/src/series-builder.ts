@@ -1,10 +1,11 @@
 /**
  * One stage-group of a season run → one Series (ADR 0008).
  *
- * The single definition of the series object a generated stage persists. The admin
- * console (`generateStageSeriesInner` in src/main.tsx) and the cohort seeder
+ * The single definition of the series object a generated stage persists. The stage
+ * generate route (`generateStage` in ./generate.ts, called by
+ * `POST /season-runs/:id/stages/:specId/generate`) and the cohort seeder
  * (packages/api/src/seed-cohort.ts) both build through here, so the id a re-seed writes is
- * byte-identical to the one the console would write, and both carry the same schedule
+ * byte-identical to the one the console's generate writes, and both carry the same schedule
  * binding (`roundsPerDay`, `activateFrom`) rather than two hand-kept copies drifting.
  */
 import type { TeamParticipant } from './leagues';

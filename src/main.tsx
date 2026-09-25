@@ -15,10 +15,8 @@ import {
 } from 'react-router-dom';
 import { QueryClientProvider, useQuery, useQueries } from '@tanstack/react-query';
 import { queryClient, qk } from './query';
-import { leagueParticipants, clubPlaysVeterans } from '../packages/engine/src/leagues';
+import { clubPlaysVeterans } from '../packages/engine/src/leagues';
 import { allocateVenues, buildLedger } from '../packages/engine/src/venues';
-import { findBlock } from '../packages/engine/src/calendar';
-import { buildStageSeries } from '../packages/engine/src/series-builder';
 import * as api from './api';
 import { ApiError, SERIES_CONFLICT_MESSAGE, SERIES_CONFLICT_FRIENDLY } from './api';
 import { resolveTenantSlug, applyTheme, redirectToCanonicalOrigin } from './config';
@@ -740,9 +738,10 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   }
   /**
    * Materialise one stage into Series — one per group (ADR 0008), so every downstream
-   * path (approval, release, broadcast, travel cost) is the existing tested one. The run
-   * is patched with each group's seriesId afterwards, so a re-generate replaces rather
-   * than duplicates.
+   * path (approval, release, broadcast, travel cost) is the existing tested one. The
+   * server does the writing (`POST /season-runs/:id/stages/:specId/generate`, ADR 0014):
+   * it records each group's seriesId on the run, so a re-generate replaces rather than
+   * duplicates.
    */
   async function generateStageSeries(payloads, run, stage) {
     return withToast(
@@ -757,92 +756,30 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       throw e;
     });
   }
-  async function generateStageSeriesInner(payloads, run, stage) {
-    // The stage names a POSITION into the run's bound calendar, not a block id — resolve
-    // it once against the snapshot before building any series.
-    const resolvedBlock = findBlock(run.calendarSnapshot, stage.schedule.blockIndex);
-    if (!resolvedBlock) {
-      throw new Error(
-        `${stage.name} points at a playing block that no longer exists on this calendar`,
-      );
-    }
-    const created = [];
-    const leagueTeams = leagueParticipants(clubs, run.leagueKey);
-    for (const p of payloads) {
-      const series = buildStageSeries({
-        run,
-        stage,
-        blockId: resolvedBlock.id,
-        group: p,
-        multi: payloads.length > 1,
-        leagueTeams,
-      });
-      // A re-generate replaces the group's series rather than stacking a second one.
-      //
-      // NEVER carry `released`/`releasedAt` into a re-generate: `series` is built fresh
-      // with `released: false`, so patching it wholesale would silently recall a
-      // schedule clubs and players have already been sent. Regeneration changes the
-      // fixtures; whether they are published stays the admin's separate decision.
-      //
-      // `name` is dropped for the same reason: it is rebuilt from the template every
-      // time, so a series the admin renamed would revert on any regenerate.
-      const { released: _r, releasedAt: _ra, name: _n, ...fixturesAndConfig } = series;
-      const patchOver = async (version) =>
-        api.patchSeries(series.id, { ...fixturesAndConfig, version });
-
-      // Which branch is correct is decided by the SERVER, not by this cache. A tab whose
-      // series query hasn't refetched since another admin released this schedule would
-      // otherwise take the create branch and clobber it — POST now 409s in that case, and
-      // we recover by refetching for the real version and patching.
-      const existing = allSeries.find((x) => x.id === series.id);
-      if (existing) {
-        await patchOver(existing.version);
-      } else {
-        try {
-          await api.createSeries(series);
-        } catch (e) {
-          if (!(e instanceof ApiError) || e.status !== 409) throw e;
-          const fresh = (await api.getSeriesList()).find((x) => x.id === series.id);
-          if (!fresh) throw e;
-          await patchOver(fresh.version);
-        }
-      }
-      created.push({ groupId: p.groupId, seriesId: series.id });
-    }
-    const nextStages = run.structureSnapshot.stages.map((sp) => {
-      const cur = run.stages.find((x) => x.specId === sp.id) ?? {
-        specId: sp.id,
-        status: 'awaiting-entrants',
-        groups: [],
-      };
-      if (sp.id !== stage.id) return cur;
-      // A `seeded-split` or `all-registered` stage is ready on sight, so the admin can
-      // generate without ever opening "Confirm entrants" and `cur.groups` is []. Mapping
-      // over that recorded NO seriesId, which cost three things downstream: the
-      // Released/Draft pill never resolved, the stage could never report itself stale,
-      // and — worst — the released-schedule confirmation was skipped, so a regenerate
-      // silently overwrote a published schedule. So seed the groups from what was
-      // actually generated when there is nothing stored.
-      const base = cur.groups.length
-        ? cur.groups
-        : payloads.map((p) => ({ id: p.groupId, label: p.groupLabel, entrants: p.entrants }));
-      // Regenerating IS the catch-up a rebase's `staleSchedule` marker asks for, so the
-      // marker goes with it — carried along by the spread, it would pin the stage on
-      // "Needs regenerating" over fixtures that were just rebuilt on the new schedule.
-      const { staleSchedule: _stale, ...rest } = cur;
-      return {
-        ...rest,
-        status: 'generated',
-        groups: base.map((g) => ({
-          ...g,
-          seriesId: created.find((c) => c.groupId === g.id)?.seriesId ?? g.seriesId,
-        })),
-      };
+  // `payloads` is no longer read: the server materialises the stage itself with the shared
+  // engine (ADR 0014). Kept so the Seasons panel and the launcher call this unchanged.
+  async function generateStageSeriesInner(_payloads, run, stage) {
+    // The Seasons panel asks "Regenerate a released schedule?" before calling here whenever
+    // this cache shows any of the stage's series released — so a released series in the
+    // cache means the admin has already confirmed. When the cache is stale (released
+    // elsewhere since it loaded) this sends no confirmation, the server refuses with
+    // `ReleasedOverwriteError` (a 409), withToast refreshes the queries, and the next click
+    // prompts. The server, not this cache, decides what is released.
+    const linked = new Set(
+      (run.stages.find((x) => x.specId === stage.id)?.groups ?? []).map((g) => g.seriesId),
+    );
+    const confirmed = allSeries.some(
+      (s) =>
+        s.released &&
+        ((s.seasonRunId === run.id && s.stageSpecId === stage.id) || linked.has(s.id)),
+    );
+    const { series } = await api.generateStage(run.id, stage.id, {
+      version: run.version,
+      ...(confirmed ? { confirmReleasedOverwrite: true as const } : {}),
     });
-    await api.patchSeasonRun(run.id, { stages: nextStages, version: run.version });
     invalidate(qk.series());
     invalidate(qk.seasonRuns());
-    toastShow(`${stage.name} · ${payloads.length} series generated`);
+    toastShow(`${stage.name} · ${series.length} series generated`);
   }
 
   /**

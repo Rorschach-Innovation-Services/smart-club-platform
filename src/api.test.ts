@@ -18,6 +18,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   ApiError,
+  ReleasedOverwriteError,
+  generateStage,
   getMe,
   getTenant,
   quickStartSeason,
@@ -142,5 +144,48 @@ describe('quickStartSeason', () => {
     expect(init.method).toBe('POST');
     expect(JSON.parse(init.body)).toEqual(body);
     expect(res).toEqual(payload);
+  });
+});
+
+describe('generateStage', () => {
+  it('POSTs the version (and confirmation) to the stage generate route and returns the payload', async () => {
+    const payload = { run: { id: 'run-1', version: 4 }, series: [{ id: 's-run-1-pools-g1' }] };
+    (fetch as any).mockResolvedValueOnce(okResponse(payload));
+    const body = { version: 3, confirmReleasedOverwrite: true as const };
+    const res = await generateStage('run-1', 'pools', body);
+    const [url, init] = (fetch as any).mock.calls[0];
+    expect(new URL(url).pathname).toBe('/season-runs/run-1/stages/pools/generate');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual(body);
+    expect(res).toEqual(payload);
+  });
+
+  it('a released_overwrite 409 rejects as ReleasedOverwriteError naming the series', async () => {
+    (fetch as any).mockResolvedValueOnce(
+      errResponse(409, {
+        error:
+          "1 of this stage's series has been released — confirm to replace the published fixtures",
+        code: 'released_overwrite',
+        seriesIds: ['s-run-1-pools-g1'],
+      }),
+    );
+    const err = await generateStage('run-1', 'pools', { version: 3 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ReleasedOverwriteError);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(409);
+    expect(err.seriesIds).toEqual(['s-run-1-pools-g1']);
+  });
+
+  it('any other 409 (a clash-gate refusal) stays a plain ApiError with its details', async () => {
+    const clashes = [
+      { fixtureId: 'f1', ground: 'A Oval', date: '2026-09-12', with: { seriesId: 'x' } },
+    ];
+    (fetch as any).mockResolvedValueOnce(
+      errResponse(409, { error: 'Change blocked — 1 venue clash', code: 'venue_clash', clashes }),
+    );
+    const err = await generateStage('run-1', 'pools', { version: 3 }).catch((e) => e);
+    expect(err).not.toBeInstanceOf(ReleasedOverwriteError);
+    expect(err.code).toBe('venue_clash');
+    expect(err.details?.clashes).toEqual(clashes);
   });
 });

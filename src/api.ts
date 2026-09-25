@@ -521,6 +521,44 @@ export const rebaseSeasonRun = (id: string, body: { structureVersion: number; ve
     method: 'POST',
     body,
   });
+/**
+ * Generate one stage of a season run ON THE SERVER (ADR 0014): it materialises the stage
+ * with the shared engine and writes one series per group through the same gates as
+ * `POST`/`PATCH /series`, then records the series on the run. `version` is the run version
+ * the caller read. Overwriting a released series needs `confirmReleasedOverwrite: true`;
+ * without it the server answers 409 `released_overwrite`, surfaced here as
+ * `ReleasedOverwriteError` naming the series. A clash-gate refusal stays an `ApiError`
+ * with `code: 'venue_clash'` and the clashes on `details`.
+ */
+export interface GenerateStageRequest {
+  version: number;
+  confirmReleasedOverwrite?: true;
+}
+export interface GenerateStageResponse {
+  run: SeasonRun;
+  series: Series[];
+}
+/** The generate would replace released series and the caller did not confirm it. */
+export class ReleasedOverwriteError extends ApiError {
+  seriesIds: string[];
+  constructor(err: ApiError) {
+    super(err.status, err.message, err.code, err.details);
+    this.name = 'ReleasedOverwriteError';
+    const ids = err.details?.seriesIds;
+    this.seriesIds = Array.isArray(ids)
+      ? ids.filter((x): x is string => typeof x === 'string')
+      : [];
+  }
+}
+export const generateStage = (runId: string, specId: string, body: GenerateStageRequest) =>
+  request<GenerateStageResponse>(`/season-runs/${runId}/stages/${specId}/generate`, {
+    method: 'POST',
+    body,
+  }).catch((err) => {
+    if (err instanceof ApiError && err.status === 409 && err.code === 'released_overwrite')
+      throw new ReleasedOverwriteError(err);
+    throw err;
+  });
 
 // ── Venues (ADR 0008 phase 2) ──
 // The master ground list fixture allocation draws on. Admin-managed: ground availability

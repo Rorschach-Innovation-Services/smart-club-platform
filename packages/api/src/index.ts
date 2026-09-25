@@ -81,6 +81,8 @@ import {
   KNOCKOUT_PAIRINGS,
 } from './config-validation.js';
 import { findTemplate, instantiateTemplate, newStructureId } from '../../engine/src/templates.js';
+import { leagueParticipants } from '../../engine/src/leagues.js';
+import { generateStage, stagesAfterGenerate } from '../../engine/src/generate.js';
 import { demographicsByLeague, summarizeDemographics } from './demographics.js';
 import {
   validateClubPatch,
@@ -3408,7 +3410,15 @@ app.get('/series', async (c) => {
 
 app.post('/series', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
-  const series = await c.req.json<Series>();
+  return c.json(await createSeries(tenant, await c.req.json<Series>()), 201);
+});
+
+/**
+ * The whole of `POST /series`: validate, force the server-owned draft state, store. Shared
+ * with `POST /season-runs/:id/stages/:specId/generate`, so a generated group's new series
+ * passes exactly the checks (and draft forcing) a client-POSTed one does.
+ */
+async function createSeries(tenant: string, series: Series): Promise<Series> {
   // `startDate` is the gsi1 SORT KEY. An empty string is rejected outright by DynamoDB
   // for a key attribute — but dynalite accepts it, so this can only be caught here, and
   // a client that sent one would 500 mid-way through a multi-group generate having
@@ -3451,17 +3461,35 @@ app.post('/series', requireAdmin, async (c) => {
   delete series.withheld;
   delete series.revealedAt;
   await repo.putSeries(tenant, series);
-  return c.json(series, 201);
-});
+  return series;
+}
 
 /** A series PATCH may also carry the `reveal` ACTION key — not a stored field. */
 type SeriesPatch = Partial<Series> & { reveal?: unknown };
 
 app.patch('/series/:id', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
-  const id = c.req.param('id');
   const patch = (await c.req.json()) as SeriesPatch;
-  const current = await repo.getSeries(ra.tenant, id);
+  return c.json(await applySeriesPatch(ra.tenant, c.req.param('id'), patch, ra.email ?? 'unknown'));
+});
+
+/**
+ * The whole of `PATCH /series/:id` — version pre-check, approval gate (a fixtures edit on a
+ * draft recalls approval), release clash gate, in-season subset clash gate, server-owned
+ * `releasedAt`/`withheld`/`revealedAt` — as one function, so the season-stage generate route
+ * writes an existing series through the IDENTICAL gates rather than a copy of them. Throws
+ * the same `HttpError`s (structured `venue_clash` bodies included) the route answers with.
+ *
+ * `actor` names who is writing; the series record keeps no per-write audit today, so it is
+ * accepted for parity with the other shared write paths and not yet stored.
+ */
+async function applySeriesPatch(
+  tenant: string,
+  id: string,
+  patch: SeriesPatch,
+  _actor: string,
+): Promise<Series> {
+  const current = await repo.getSeries(tenant, id);
   if (!current) throw new HttpError(404, 'series not found');
   // Same gsi1-sort-key guard as POST. `updateSeries` rewrites `gsi1sk` from the patched
   // `startDate` on every write, so a blank one here is the identical DynamoDB failure,
@@ -3483,7 +3511,7 @@ app.patch('/series/:id', requireAdmin, async (c) => {
     // Validate against the series as it will be STORED: the patch may carry its own
     // `seasonRunId`, otherwise the stored one decides snapshot-vs-config.
     const seasonRunId = 'seasonRunId' in patch ? patch.seasonRunId : current.seasonRunId;
-    validateSeriesSchedule(patch.schedule, await seriesScheduleCalendars(ra.tenant, seasonRunId));
+    validateSeriesSchedule(patch.schedule, await seriesScheduleCalendars(tenant, seasonRunId));
   }
   // ── Progressive release (ADR 0011) ──
   // `revealedAt` is server-owned audit; never accept it off the wire.
@@ -3517,13 +3545,11 @@ app.patch('/series/:id', requireAdmin, async (c) => {
     // of the reveal intent, so they are ignored rather than persisted through this action.
     const revealWithheld = Object.keys(withheld).length ? withheld : undefined;
     try {
-      return c.json(
-        await repo.updateSeries(ra.tenant, id, {
-          withheld: revealWithheld,
-          revealedAt,
-          version: patch.version,
-        }),
-      );
+      return await repo.updateSeries(tenant, id, {
+        withheld: revealWithheld,
+        revealedAt,
+        version: patch.version,
+      });
     } catch (err) {
       if (err instanceof VersionConflictError) throw new HttpError(409, 'series changed; refetch');
       throw err;
@@ -3545,9 +3571,9 @@ app.patch('/series/:id', requireAdmin, async (c) => {
   let clashInputs: Promise<[Series[], Club[], Venue[]]> | undefined;
   const loadClashInputs = () =>
     (clashInputs ??= Promise.all([
-      repo.listSeries(ra.tenant),
-      repo.listClubs(ra.tenant),
-      repo.listVenues(ra.tenant),
+      repo.listSeries(tenant),
+      repo.listClubs(tenant),
+      repo.listVenues(tenant),
     ]));
 
   // Withheld fields are chosen ONLY on the false→true release transition, and only when
@@ -3647,12 +3673,12 @@ app.patch('/series/:id', requireAdmin, async (c) => {
   else if (patch.released === false) patch.releasedAt = null;
   else delete patch.releasedAt;
   try {
-    return c.json(await repo.updateSeries(ra.tenant, id, patch));
+    return await repo.updateSeries(tenant, id, patch);
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'series changed; refetch');
     throw err;
   }
-});
+}
 
 /**
  * Admin-only clash pre-check for the fixture editor: given candidate fixtures, report which
@@ -4022,9 +4048,22 @@ app.get('/season-runs/:id', requireAdmin, async (c) => {
 });
 
 app.patch('/season-runs/:id', requireAdmin, async (c) => {
-  const { tenant } = c.get('requestAuth')!;
-  const id = c.req.param('id');
+  const { tenant, email } = c.get('requestAuth')!;
   const patch = await c.req.json<Partial<SeasonRun>>();
+  return c.json(await applySeasonRunPatch(tenant, c.req.param('id'), patch, email ?? 'unknown'));
+});
+
+/**
+ * The whole of `PATCH /season-runs/:id` — snapshot/created stripping, stage guards, the
+ * append-only audit replay, the season-label guard and the optimistic-concurrency write —
+ * shared with the stage generate route so its run update goes through the same path.
+ */
+async function applySeasonRunPatch(
+  tenant: string,
+  id: string,
+  patch: Partial<SeasonRun>,
+  actor: string,
+): Promise<SeasonRun> {
   const current = await repo.getSeasonRun(tenant, id);
   if (!current) throw new HttpError(404, 'season run not found');
   // The snapshots are immutable for the life of the run — that is what makes them
@@ -4051,7 +4090,6 @@ app.patch('/season-runs/:id', requireAdmin, async (c) => {
   // Stored entries are therefore replayed verbatim and only the appended tail is
   // stamped. A client that echoes back a truncated or reordered history cannot shorten
   // it: the stored prefix always wins.
-  const actor = c.get('requestAuth')!.email ?? 'unknown';
   const at = now();
   if (patch.stages !== undefined) {
     // POST's guards apply here too — a run can gain stages through a PATCH, so checking
@@ -4082,12 +4120,130 @@ app.patch('/season-runs/:id', requireAdmin, async (c) => {
   )
     throw new HttpError(400, 'season run needs a season label');
   try {
-    return c.json(await repo.updateSeasonRun(tenant, id, patch));
+    return await repo.updateSeasonRun(tenant, id, patch);
   } catch (err) {
     if (err instanceof VersionConflictError)
       throw new HttpError(409, 'season run changed; refetch');
     throw err;
   }
+}
+
+/** Body of `POST /season-runs/:id/stages/:specId/generate` — mirrors `GenerateStageRequest` in src/api.ts. */
+interface GenerateStageBody {
+  version?: unknown;
+  confirmReleasedOverwrite?: unknown;
+}
+
+/**
+ * POST /season-runs/:id/stages/:specId/generate — materialise one stage of a running season
+ * on the server and write one series per group (ADR 0014, amending ADR 0004).
+ *
+ * The engine decides WHAT: the run is materialised exactly as the Seasons panel does it
+ * (`leagueParticipants` over the tenant's clubs minus the competition's `excludeTeamIds`,
+ * then `materialiseRun` — pairing overrides, confirmed groups, pool qualifiers, chaining
+ * floors) and each group is built by `buildStageSeries`. This route decides HOW, through
+ * the existing write paths only:
+ * - a group whose series doesn't exist yet goes through `createSeries` (POST /series: a
+ *   draft, whatever the builder said);
+ * - one that exists is overwritten through `applySeriesPatch` (PATCH /series/:id) with its
+ *   stored version, so the approval recall on drafts and the in-season clash gate on
+ *   released series run unchanged — their 409s propagate with their structured bodies.
+ *   `released`/`releasedAt`/`name` are stripped first: regenerating changes the fixtures,
+ *   never whether they are published, and never a name the admin chose;
+ * - the run is then updated through `applySeasonRunPatch` (PATCH /season-runs/:id) with
+ *   the version the caller read.
+ *
+ * Overwriting a RELEASED series needs `confirmReleasedOverwrite: true`. Every group is
+ * checked before anything is written, so a refusal (409 `released_overwrite`, naming every
+ * released series in `seriesIds`) writes nothing. Past that point writes are sequential and
+ * not transactional: a clash-gate 409 on a later group leaves earlier groups written, as the
+ * client-side loop this replaces did — the response to retry is to fix the clash and
+ * generate again, which is idempotent (same ids, same content).
+ */
+app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => {
+  const { tenant, email } = c.get('requestAuth')!;
+  const actor = email ?? 'unknown';
+  const id = c.req.param('id');
+  const specId = c.req.param('specId');
+  const body = await c.req.json<GenerateStageBody>();
+  if (!body || typeof body !== 'object') throw new HttpError(400, 'generate needs a body');
+  if (!Number.isInteger(body.version))
+    throw new HttpError(400, 'generate needs the season run version you read');
+  if (body.confirmReleasedOverwrite !== undefined && body.confirmReleasedOverwrite !== true)
+    throw new HttpError(400, 'confirmReleasedOverwrite must be true when present');
+
+  const run = await repo.getSeasonRun(tenant, id);
+  if (!run) throw new HttpError(404, 'season run not found');
+  if (!run.structureSnapshot.stages.some((s) => s.id === specId))
+    throw new HttpError(404, 'stage not found');
+  // Checked before any series is written: the run write at the end is conditional too, but
+  // by then the series would already carry fixtures generated from a stale view of the run.
+  if (run.version !== body.version) throw new HttpError(409, 'season run changed; refetch');
+
+  const [config, clubs] = await Promise.all([repo.getTenantConfig(tenant), repo.listClubs(tenant)]);
+  if (!config) throw new HttpError(404, 'tenant not found');
+  const league = (config.leagues ?? []).find((l) => l.key === run.leagueKey);
+  // A legacy flat run (pre-migration) has no config competition; its format lives on the
+  // run, exactly as the console synthesises it.
+  const competition: Pick<Competition, 'label' | 'matchFormat' | 'excludeTeamIds'> | undefined =
+    run.competitionId === FLAT_COMPETITION_ID
+      ? {
+          label: run.flatFormat?.seriesType ?? 'Flat season',
+          matchFormat: { overs: run.flatFormat?.overs ?? 50 },
+        }
+      : league?.competitions?.find((cm) => cm.id === run.competitionId);
+
+  const result = generateStage({
+    run,
+    specId,
+    participants: leagueParticipants(clubs, run.leagueKey, competition?.excludeTeamIds),
+    leagueTeams: leagueParticipants(clubs, run.leagueKey),
+    league,
+    competition,
+  });
+  if (result.status === 'unknown-stage') throw new HttpError(404, 'stage not found');
+  if (result.status === 'awaiting-entrants')
+    throw new HttpError(409, 'stage is awaiting entrants', {
+      code: 'awaiting_entrants',
+      reason: result.reason,
+    });
+  if (result.status === 'does-not-fit')
+    throw new HttpError(409, result.summary, { code: 'does_not_fit' });
+  if (result.status === 'no-block') throw new HttpError(409, result.message, { code: 'no_block' });
+
+  const existing = await Promise.all(result.series.map((s) => repo.getSeries(tenant, s.id)));
+  const released = existing.filter((s): s is Series => !!s?.released).map((s) => s.id);
+  if (released.length && body.confirmReleasedOverwrite !== true)
+    throw new HttpError(
+      409,
+      `${released.length} of this stage's series ${released.length === 1 ? 'has' : 'have'} been released — confirm to replace the published fixtures`,
+      { code: 'released_overwrite', seriesIds: released },
+    );
+
+  const written: Series[] = [];
+  for (const [i, series] of result.series.entries()) {
+    const stored = existing[i];
+    if (!stored) {
+      written.push(await createSeries(tenant, series));
+      continue;
+    }
+    const { released: _r, releasedAt: _ra, name: _n, ...fixturesAndConfig } = series;
+    written.push(
+      await applySeriesPatch(
+        tenant,
+        series.id,
+        { ...fixturesAndConfig, version: stored.version },
+        actor,
+      ),
+    );
+  }
+  const nextRun = await applySeasonRunPatch(
+    tenant,
+    id,
+    { stages: stagesAfterGenerate(run, specId, result.groups), version: run.version },
+    actor,
+  );
+  return c.json({ run: nextRun, series: written });
 });
 
 /**
