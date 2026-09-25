@@ -3637,7 +3637,10 @@ async function applySeriesPatch(
   // A series can only be released once approved (in this patch or already on record).
   if (patch.released === true) {
     const approved = patch.approved ?? current.approved ?? false;
-    if (!approved) throw new HttpError(400, 'fixtures must be approved before release');
+    if (!approved)
+      throw new HttpError(400, 'fixtures must be approved before release', {
+        code: 'not_approved',
+      });
   }
   // Releasing publishes the schedule to clubs — a series carrying a known
   // ground/date/time double-booking must not go out. Checked against EVERY series in
@@ -3964,8 +3967,11 @@ app.post('/season-runs/quick-start', requireAdmin, async (c) => {
     if (typeof cal.label !== 'string' || !cal.label.trim())
       throw new HttpError(400, 'a new calendar needs a label');
     if (!isDate(cal.start) || !isDate(cal.end))
-      throw new HttpError(400, 'a new calendar needs valid start and end dates (YYYY-MM-DD)');
-    if (cal.end < cal.start) throw new HttpError(400, 'the season ends before it starts');
+      throw new HttpError(400, 'a new calendar needs valid start and end dates (YYYY-MM-DD)', {
+        code: 'invalid_dates',
+      });
+    if (cal.end < cal.start)
+      throw new HttpError(400, 'the season ends before it starts', { code: 'invalid_dates' });
     newDates = { label: cal.label.trim(), start: cal.start, end: cal.end };
   }
 
@@ -4017,6 +4023,7 @@ app.post('/season-runs/quick-start', requireAdmin, async (c) => {
       throw new HttpError(
         400,
         `placement must name a block for each of the ${template.stages.length} stage${template.stages.length === 1 ? '' : 's'}: each stage's block must be between 0 and ${calendar.blocks.length - 1} (0 = first block)`,
+        { code: 'bad_placement' },
       );
     placement = p as number[];
   }
@@ -4025,10 +4032,13 @@ app.post('/season-runs/quick-start', requireAdmin, async (c) => {
     throw new HttpError(
       409,
       `"${league.label}" already has a competition on "${calendar.label}" — start the season from it instead`,
+      { code: 'competition_exists' },
     );
   const runs = await repo.listSeasonRuns(tenant);
   if (runs.some((r) => r.leagueKey === league.key && r.seasonLabel === seasonLabel))
-    throw new HttpError(409, `"${seasonLabel}" is already running for "${league.label}"`);
+    throw new HttpError(409, `"${seasonLabel}" is already running for "${league.label}"`, {
+      code: 'season_exists',
+    });
 
   // Structure names are capped at 80 by `validateStructures`; a long league label must
   // not turn a valid quick start into a 400 the admin cannot do anything about.
@@ -4452,7 +4462,9 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
   const live = (config?.structures ?? []).find((st) => st.id === current.structureSnapshot.id);
   if (!live) throw new HttpError(404, 'the structure this season runs no longer exists');
   if (live.version !== body.structureVersion)
-    throw new HttpError(409, 'the structure changed since you reviewed it; refetch');
+    throw new HttpError(409, 'the structure changed since you reviewed it; refetch', {
+      code: 'structure_changed',
+    });
   // Already on it — nothing to adopt, and no audit noise for a double-click.
   if (live.version === current.structureSnapshot.version) return c.json(current);
 

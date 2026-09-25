@@ -36,7 +36,7 @@ import {
 import { HelpLink } from './help/HelpDrawer';
 import type { HelpTopicId } from './help/topics';
 import * as api from './api';
-import { ApiError } from './api';
+import { describeError } from './error-copy';
 import {
   WEEKDAY_LABELS,
   calendarSpan,
@@ -1807,7 +1807,7 @@ function StructureEditor({
       toast(`${draft.name.trim()} · saved`);
       onClose();
     } catch (e) {
-      setSaveErr(e instanceof ApiError ? e.message : 'Could not save — try again');
+      setSaveErr(describeError(e, 'Could not save — try again'));
     } finally {
       setBusy(false);
     }
@@ -2211,6 +2211,13 @@ export function StructuresCard({
   const [picking, setPicking] = useState(false);
   const [editing, setEditing] = useState<CompetitionStructure | null>(null);
   const [confirm, setConfirm] = useState<CompetitionStructure | null>(null);
+  // A refused delete (e.g. series still scheduled against it) is shown inside the confirm
+  // box, where the operator is looking, and the box stays open.
+  const [deleteErr, setDeleteErr] = useState('');
+  const askDelete = (target: CompetitionStructure | null) => {
+    setDeleteErr('');
+    setConfirm(target);
+  };
   const structures = config.structures ?? [];
   const calendars = config.calendars ?? [];
   const defaults = resolveCompetitionDefaults(config);
@@ -2224,7 +2231,7 @@ export function StructuresCard({
       const current = await api.platformGetTenant(slug);
       await save({ structures: build(current.structures ?? []) });
     } catch (e) {
-      toast(e instanceof ApiError ? e.message : fallback, 'warn');
+      toast(describeError(e, fallback), 'warn');
       throw e;
     }
   }
@@ -2245,7 +2252,7 @@ export function StructuresCard({
     }, 'Could not save structure');
 
   async function onDelete(structure: CompetitionStructure) {
-    setConfirm(null);
+    setDeleteErr('');
     try {
       // Cascade: the server 409s a delete while any league still binds the structure, so
       // the bindings come off in the SAME PUT. A RUNNING season is unaffected either
@@ -2267,9 +2274,10 @@ export function StructuresCard({
             : l,
         );
       await save(patch);
+      setConfirm(null);
       toast(`${structure.name} · deleted`);
     } catch (e) {
-      toast(e instanceof ApiError ? e.message : 'Could not delete', 'warn');
+      setDeleteErr(describeError(e, 'Could not delete — try again'));
     }
   }
 
@@ -2383,7 +2391,7 @@ export function StructuresCard({
                           <Btn tone="outline" size="sm" onClick={() => setEditing(s)}>
                             Edit
                           </Btn>
-                          <Btn tone="ghost" size="sm" onClick={() => setConfirm(s)}>
+                          <Btn tone="ghost" size="sm" onClick={() => askDelete(s)}>
                             Delete
                           </Btn>
                         </div>
@@ -2452,7 +2460,7 @@ export function StructuresCard({
         createPortal(
           <div
             className="fix-confirm"
-            onClick={(e) => e.target === e.currentTarget && setConfirm(null)}
+            onClick={(e) => e.target === e.currentTarget && askDelete(null)}
           >
             <div className="fix-confirm-box">
               <div className="fix-confirm-icon danger">
@@ -2486,8 +2494,13 @@ export function StructuresCard({
                 )}
                 Seasons already running keep their own copy and are unaffected.
               </div>
+              {deleteErr && (
+                <div className="field-error" role="alert" style={{ marginTop: 10 }}>
+                  {deleteErr}
+                </div>
+              )}
               <div className="fix-confirm-actions">
-                <Btn tone="outline" onClick={() => setConfirm(null)}>
+                <Btn tone="outline" onClick={() => askDelete(null)}>
                   Cancel
                 </Btn>
                 <Btn tone="ink" onClick={() => onDelete(confirm)}>
@@ -2564,7 +2577,7 @@ export function CompetitionsEditor({
       toast(`${league.label} · competitions saved`);
       onClose();
     } catch (e) {
-      setErr(e instanceof ApiError ? e.message : 'Could not save — try again');
+      setErr(describeError(e, 'Could not save — try again'));
     } finally {
       setBusy(false);
     }

@@ -34,6 +34,7 @@ import {
   type StatusStep,
 } from './atoms';
 import { ApiError, quickStartSeason, type QuickStartSeasonRequest } from './api';
+import { describeError, quickStartErrorMessage, seasonRunErrorMessage } from './error-copy';
 import { HelpLink } from './help/HelpDrawer';
 import { Sentry } from './sentry';
 import { daysBetween, findBlock, formatIsoDate, todayIso } from '../packages/engine/src/calendar';
@@ -316,7 +317,7 @@ function StartSeasonForm({
       onClose();
     } catch (e) {
       if (!(e as { alreadyToasted?: boolean })?.alreadyToasted) {
-        setErr(e instanceof ApiError ? e.message : 'Could not start the season — try again');
+        setErr(describeError(e, 'Could not start the season — try again'));
       }
     } finally {
       setBusy(false);
@@ -606,7 +607,8 @@ function QuickStartForm({
     } catch (e) {
       if (e instanceof ApiError) {
         // The competition was written but its season was not: refetch first, so the
-        // recovery copy ("start it from Start a season") finds the competition there.
+        // recovery copy ("pick this league again and start it from its competition")
+        // finds the competition there.
         if (e.status === 500 && e.code === 'run_not_started') {
           try {
             await onStarted?.();
@@ -614,12 +616,11 @@ function QuickStartForm({
             /* the next refetch catches up */
           }
         }
-        setErr(e.message);
       } else {
         // Not the server's answer (offline, a TypeError): nothing else would report it.
         Sentry.captureException(e, { tags: { where: 'quick-start' } });
-        setErr('Could not start the season — try again');
       }
+      setErr(quickStartErrorMessage(e));
       setBusy(false);
       return;
     }
@@ -1279,7 +1280,9 @@ function EntrantConfirmForm({
     try {
       await onConfirm(groups, wantsPoints ? points : {}, pairing ? pairingChoice : undefined);
     } catch (e) {
-      setErr(e instanceof ApiError ? e.message : 'Could not confirm — try again');
+      // A version race or network failure gets its own line, not "season run changed;
+      // refetch" (the server's boilerplate).
+      setErr(seasonRunErrorMessage(e, 'Could not confirm — try again'));
     } finally {
       setBusy(false);
     }
@@ -2177,9 +2180,9 @@ function StructureReviewModal({
     try {
       setOutcome(await onApply(regenIds));
     } catch (e) {
-      if (!(e as { alreadyToasted?: boolean })?.alreadyToasted) {
-        setErr(e instanceof ApiError ? e.message : 'Could not apply the structure — try again');
-      }
+      // Shown inline even when the toast has fired: the admin is reading this modal, and
+      // the line says which thing moved (the structure, or the season) and what to do.
+      setErr(seasonRunErrorMessage(e, 'Could not apply the structure — try again'));
     } finally {
       setBusy(false);
     }

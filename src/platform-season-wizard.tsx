@@ -28,6 +28,7 @@ import {
 } from './atoms';
 import * as api from './api';
 import { ApiError } from './api';
+import { describeError } from './error-copy';
 import { HelpLink } from './help/HelpDrawer';
 import { CalendarForm } from './platform-calendars';
 import {
@@ -849,7 +850,7 @@ export function SeasonSetupWizard({
       toast(`${calDraft.label} · season set up`);
       setDone({ calendarLabel: calDraft.label, calendarCreated: calMode === 'new', created });
     } catch (e) {
-      setCommitErr(e instanceof ApiError ? e.message : 'Could not save — try again');
+      setCommitErr(describeError(e, 'Could not save — try again'));
     } finally {
       setCommitting(false);
     }

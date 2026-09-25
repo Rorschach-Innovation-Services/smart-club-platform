@@ -2976,7 +2976,7 @@ describe('competition structures (ADR 0008)', () => {
         ],
       });
       assert.equal(res.status, 400);
-      assert.match(await errorOf(res), /roundsPerDay must be 1 or 2/);
+      assert.match(await errorOf(res), /can play 1 or 2 rounds per day/);
     });
   });
 

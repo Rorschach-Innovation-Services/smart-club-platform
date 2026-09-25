@@ -1,13 +1,23 @@
 import { useState, useId } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon, Btn, FieldGuide, useEscapeClose } from './atoms';
-import { SERIES_CONFLICT_MESSAGE, SERIES_CONFLICT_FRIENDLY } from './api';
-import type { WithheldField } from './types';
+import { ApiError, SERIES_CONFLICT_MESSAGE, SERIES_CONFLICT_FRIENDLY } from './api';
+import { ClashPanel } from './ClashPanel';
+import { releaseErrorMessage } from './error-copy';
+import type { Clash, WithheldField } from './types';
 
 // A plain optimistic-concurrency race surfaces as exactly this server boilerplate; the
-// clash gate, by contrast, returns a long actionable "Release blocked — …" message. We
-// show the clash text verbatim and swap the boilerplate for the app's friendly line —
-// the same distinction withToast (main.tsx) makes for the toast (ADR 0011).
+// clash gate, by contrast, refuses with `code: 'venue_clash'` and the clash list. We
+// render the clashes as the same per-fixture panel the fixture editor uses, and swap the
+// boilerplate for the app's friendly line — the same distinction withToast (main.tsx)
+// makes for the toast (ADR 0011).
+
+/** The clash list off a release-gate 409, or `null` when the refusal carries none. */
+function releaseClashes(e: unknown): Clash[] | null {
+  if (!(e instanceof ApiError) || e.status !== 409 || e.code !== 'venue_clash') return null;
+  const clashes = e.details?.clashes;
+  return Array.isArray(clashes) && clashes.length ? (clashes as Clash[]) : null;
+}
 
 /* ─── ReleaseDialog — publish a series' schedule to clubs, optionally withholding
    venues and/or start times (ADR 0011) ───
@@ -43,6 +53,7 @@ export function ReleaseDialog({
   // inline so the admin's withhold choices survive the error and can be retried.
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [clashes, setClashes] = useState<Clash[] | null>(null);
   const toggle = (f: WithheldField) => setWithheld((w) => ({ ...w, [f]: !w[f] }));
   // While the PATCH is in flight the dialog must not close out from under it — every
   // dismissal path (Escape, backdrop, the X, Cancel) routes through this guard so an
@@ -59,16 +70,21 @@ export function ReleaseDialog({
     if (withheld.venue) mask.venue = true;
     if (withheld.time) mask.time = true;
     setError(null);
+    setClashes(null);
     setBusy(true);
     try {
       await Promise.resolve(onConfirm(mask));
       onClose(); // close only once the release has actually landed
     } catch (e) {
       const raw = (e instanceof Error && e.message) || '';
+      const listed = releaseClashes(e);
+      setClashes(listed);
       setError(
-        raw === SERIES_CONFLICT_MESSAGE
-          ? SERIES_CONFLICT_FRIENDLY
-          : raw || 'Release failed — please try again.',
+        listed
+          ? null
+          : raw === SERIES_CONFLICT_MESSAGE
+            ? SERIES_CONFLICT_FRIENDLY
+            : releaseErrorMessage(e),
       );
       setBusy(false); // stay open, re-enable, keep the withhold choices
     }
@@ -144,6 +160,14 @@ export function ReleaseDialog({
             <span className="release-preview-k">Clubs will see:</span> {clubsWillSee}
           </p>
           <FieldGuide id="withhold" />
+          {clashes && (
+            <div style={{ marginTop: 16 }}>
+              <ClashPanel
+                heading={`Release blocked — ${clashes.length} venue clash${clashes.length === 1 ? '' : 'es'}. Fix these, then release again.`}
+                clashes={clashes}
+              />
+            </div>
+          )}
           {error && (
             <div
               className="field-error"

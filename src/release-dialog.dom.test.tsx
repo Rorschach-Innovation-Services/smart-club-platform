@@ -10,6 +10,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ReleaseDialog } from './ReleaseDialog';
+import { ApiError } from './api';
 import { renderWithProviders } from './test-utils';
 
 const setup = () => {
@@ -126,9 +127,69 @@ describe('ReleaseDialog — failure stays open (ADR 0011)', () => {
     const { user, onClose } = renderWith(onConfirm);
     await user.click(releaseBtn());
 
-    expect(await screen.findByText(/someone else just changed this — refreshing\./i)).toBeTruthy();
+    expect(
+      await screen.findByText(
+        'Someone else changed this at the same time. It has been refreshed — try again.',
+      ),
+    ).toBeTruthy();
     expect(screen.queryByText(/series changed; refetch/i)).toBeNull();
     // A failed release must NOT close over the error.
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('says to approve first when the series is not approved', async () => {
+    const onConfirm = vi
+      .fn()
+      .mockRejectedValue(
+        new ApiError(400, 'fixtures must be approved before release', 'not_approved'),
+      );
+    const { user, onClose } = renderWith(onConfirm);
+    await user.click(releaseBtn());
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      "These fixtures haven't been approved yet. Approve them, then release.",
+    );
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('lists every clash from a coded release refusal, with how to fix them', async () => {
+    const clash = (round: number, ground: string) => ({
+      fixtureId: `f${round}`,
+      round,
+      ground,
+      date: '2026-10-03',
+      home: 'Home XI',
+      away: 'Away XI',
+      with: {
+        seriesId: 's-other',
+        seriesName: 'Premier T20',
+        fixtureId: `x${round}`,
+        home: 'Kloof',
+        away: 'Crusaders',
+        round: 2,
+      },
+    });
+    const onConfirm = vi.fn().mockRejectedValue(
+      new ApiError(409, 'Release blocked — 2 venue clash(es): …', 'venue_clash', {
+        clashes: [clash(3, 'Kingsmead'), clash(4, 'Chatsworth')],
+      }),
+    );
+    const { user, onClose } = renderWith(onConfirm);
+    await user.click(releaseBtn());
+
+    const panel = await screen.findByRole('alert');
+    expect(panel).toHaveTextContent(
+      'Release blocked — 2 venue clashes. Fix these, then release again.',
+    );
+    const items = panel.querySelectorAll('li');
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent(
+      /^Kingsmead on .* is already booked by Premier T20 R2 · Kloof v Crusaders$/,
+    );
+    expect(items[1]).toHaveTextContent(/^Chatsworth on /);
+    expect(panel).toHaveTextContent(/How to fix:/);
+    // The raw server string is not repeated under the list.
+    expect(screen.queryByText(/venue clash\(es\)/)).toBeNull();
     expect(onClose).not.toHaveBeenCalled();
   });
 

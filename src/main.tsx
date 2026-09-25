@@ -20,7 +20,7 @@ import { queryClient, qk } from './query';
 import { clubPlaysVeterans } from '../packages/engine/src/leagues';
 import { allocateVenues, buildLedger } from '../packages/engine/src/venues';
 import * as api from './api';
-import { ApiError, SERIES_CONFLICT_MESSAGE, SERIES_CONFLICT_FRIENDLY } from './api';
+import { ApiError } from './api';
 import { resolveTenantSlug, applyTheme, redirectToCanonicalOrigin } from './config';
 import { setActiveTenant } from './api';
 import { AuthProvider, useAuth, membershipFor } from './auth';
@@ -49,7 +49,13 @@ import {
   resolveTeam,
 } from './data';
 import { exportRowsToXlsx } from './exportXlsx';
-import { generateConflictMessage } from './generate-feedback';
+import { seasonConflictMessage } from './generate-feedback';
+import {
+  releaseErrorMessage,
+  seasonRunConflictMessage,
+  toastCopy,
+  type ToastCopyOptions,
+} from './error-copy';
 import { openBccReminder } from './mailto';
 import {
   Icon,
@@ -588,45 +594,15 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   async function withToast(
     fn: () => Promise<any>,
     errMsg?: string,
-    opts: {
-      rawConflict?: boolean;
-      rawClientError?: boolean;
-      invalidate?: any[];
-      /** Actionable copy for a structured 409; `null` falls back to the generic line. */
-      conflictMessage?: (err: unknown) => string | null;
-    } = {},
+    // Which copy the toast shows is `toastCopy`'s call (error-copy.ts); `invalidate` names
+    // the queries a 409 refetches.
+    opts: ToastCopyOptions & { invalidate?: any[] } = {},
   ) {
     try {
       return await fn();
     } catch (err) {
       const conflict = err instanceof ApiError && err.status === 409;
-      // Most 409s are optimistic-concurrency clashes → generic refresh copy. But user-mgmt
-      // 409s ("user already active…", "cannot remove the last admin") carry actionable copy
-      // the admin must see, so those callers pass `rawConflict` to surface err.message.
-      // Exception: a plain optimistic-concurrency race carries exactly "series changed;
-      // refetch" — server boilerplate, not admin-facing copy — so it always gets the
-      // friendly refresh line even when the caller asked for rawConflict (the flag is
-      // there for the actionable clash-gate/reveal text, not this).
-      const plainConcurrency = conflict && err.message === SERIES_CONFLICT_MESSAGE;
-      const rawConflict = conflict && opts.rawConflict && !plainConcurrency;
-      // `rawClientError` surfaces the server's message for ANY 4xx (not just 409) — used where
-      // every client-error carries actionable recovery copy (e.g. email correction's 404
-      // "sign-in account is missing — remove and re-invite"), which a generic errMsg would mask.
-      const rawClientError =
-        opts.rawClientError && err instanceof ApiError && err.status >= 400 && err.status < 500;
-      // 401s carry the session-expired copy from api.js — more useful than errMsg.
-      // (When auth is truly lost the app flips to Login anyway; this covers the rest.)
-      const authError = err instanceof ApiError && err.status === 401;
-      const structured = conflict ? (opts.conflictMessage?.(err) ?? null) : null;
-      toastShow(
-        structured ??
-          (rawConflict || rawClientError || authError
-            ? err.message
-            : conflict
-              ? SERIES_CONFLICT_FRIENDLY
-              : errMsg || err.message),
-        'warn',
-      );
+      toastShow(toastCopy(err, errMsg, opts), 'warn');
       if (conflict) {
         (opts.invalidate ?? [qk.clubs(), qk.series(), qk.tenant()]).forEach(invalidate);
       }
@@ -685,6 +661,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   function patchSeasonRun(id, patch) {
     return withToast(() => api.patchSeasonRun(id, patch), 'Could not save the season', {
       invalidate: [qk.seasonRuns()],
+      conflictMessage: seasonRunConflictMessage,
     }).then((r) => {
       invalidate(qk.seasonRuns());
       return r;
@@ -695,13 +672,14 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       .then(() => invalidate(qk.seasonRuns()))
       .catch(() => {});
   }
-  // Adopt the live structure version (POST /season-runs/:id/rebase). `rawConflict` so a
-  // 409 reads as the server's own "the structure changed since you reviewed it" rather
-  // than the generic series-conflict line.
+  // Adopt the live structure version (POST /season-runs/:id/rebase). A 409 names which
+  // thing moved — the structure (reopen Review changes) or the run (refreshed) — rather
+  // than the generic series-conflict line; any other 409 is shown as the server worded it.
   function rebaseSeasonRun(id, body) {
     return withToast(() => api.rebaseSeasonRun(id, body), 'Could not apply the structure', {
       invalidate: [qk.seasonRuns()],
       rawConflict: true,
+      conflictMessage: seasonRunConflictMessage,
     }).then((r) => {
       invalidate(qk.seasonRuns());
       return r;
@@ -724,9 +702,10 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     return withToast(
       () => generateStageSeriesInner(run, stage),
       'Could not generate the fixtures',
-      // A clash-gate or released-overwrite refusal names what to do; any other 409 is a
+      // A structured refusal (clash gate, released overwrite, awaiting entrants, does not
+      // fit, missing block, unbound competition) names what to do; any other 409 is a
       // version race and keeps the generic refresh line. Both refetch (below).
-      { invalidate: [qk.series(), qk.seasonRuns()], conflictMessage: generateConflictMessage },
+      { invalidate: [qk.series(), qk.seasonRuns()], conflictMessage: seasonConflictMessage },
     ).catch((e) => {
       // Partial progress is possible — some groups may already have series. Refresh so
       // the stage card reflects what actually landed rather than the pre-click state.
@@ -777,7 +756,10 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
    */
   function allocateSeriesVenues(series) {
     if (!allVenues.length) {
-      toastShow('Add some grounds first — there is nowhere to allocate to', 'warn');
+      toastShow(
+        'There are no grounds to allocate yet. Add them in the Venues card on this page, then allocate again.',
+        'warn',
+      );
       return;
     }
     const ledger = buildLedger(allSeries, { excludeSeriesIds: [series.id] });
@@ -852,7 +834,13 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
           version: cur?.version,
         }),
       'Could not update release',
-      { rawConflict: true },
+      {
+        rawConflict: true,
+        // An unapproved series is a 400 with a code; say what to do rather than
+        // "Could not update release".
+        errorMessage: (e) =>
+          e instanceof ApiError && e.code === 'not_approved' ? releaseErrorMessage(e) : null,
+      },
     ).then(() => invalidate(qk.series()));
   }
   // Reveal one or more withheld fields on a released series (per-field, whole series).

@@ -704,6 +704,22 @@ describe('order-sensitive staleness — a pure reorder on a knockout invalidates
   });
 });
 
+describe('a write that loses a race says so in words, inline', () => {
+  it('a confirm refused by a version race shows the refreshed-season line, not the boilerplate', async () => {
+    const { user, onPatchRun } = setup(POOLS_THEN_CROSS, [run(POOLS_THEN_CROSS)]);
+    onPatchRun.mockRejectedValueOnce(new ApiError(409, 'season run changed; refetch'));
+    await openConfirm(user, /^Pools · /);
+    await user.click(confirmBtn());
+
+    expect(
+      await within(dialog()).findByText(
+        'Someone else changed this season at the same time. It has been refreshed — check it and try again.',
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/refetch/)).toBeNull();
+  });
+});
+
 describe('the audit trail — who decided the relegation', () => {
   it('records an accepted suggestion as accepted', async () => {
     const { user, onPatchRun } = setup(POOLS_THEN_CROSS, [run(POOLS_THEN_CROSS)]);
@@ -1389,6 +1405,33 @@ describe('rebase — review and apply a newer structure version', () => {
     expect(secondStage.id).toBe('cup');
 
     expect(within(dialog()).getByRole('status')).toHaveTextContent(/regenerated: league, cup/i);
+  });
+
+  it('a rebase refused because the structure moved again says to reopen Review changes', async () => {
+    const onRebaseRun = vi
+      .fn()
+      .mockRejectedValue(
+        new ApiError(
+          409,
+          'the structure changed since you reviewed it; refetch',
+          'structure_changed',
+        ),
+      );
+    const { user, onGenerate } = setup(TWO_STAGES_V1, [v1Run()], {
+      series: [draft('league'), draft('cup')],
+      structures: [TWO_STAGES_V2],
+      onRebaseRun,
+    });
+
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+    await user.click(within(dialog()).getByRole('button', { name: /apply structure v2/i }));
+
+    expect(
+      await within(dialog()).findByText(
+        'The operator changed this structure again while you were reviewing it. Close this and open Review changes again to see the latest version.',
+      ),
+    ).toBeVisible();
+    expect(onGenerate).not.toHaveBeenCalled();
   });
 
   it('leaves an unticked stage’s drafts alone and shows the server’s warnings', async () => {
@@ -2111,10 +2154,49 @@ describe('Quick start', () => {
 
     await user.click(startBtn());
 
-    expect(await screen.findByText(/start it from "Start a season"/)).toBeVisible();
+    expect(
+      await screen.findByText(
+        "The competition was created but the season didn't start. Pick this league again and start it from its competition.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/run_not_started/)).toBeNull();
     // The competition now exists, so the config must be refetched for "Start a season"
     // to find it.
     expect(onSeasonSetupChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('turns a coded date refusal into how to type a date', async () => {
+    mockedQuickStart.mockRejectedValue(
+      new ApiError(
+        400,
+        'a new calendar needs valid start and end dates (YYYY-MM-DD)',
+        'invalid_dates',
+      ),
+    );
+    const { user } = setup();
+
+    await user.click(startBtn());
+
+    expect(
+      await screen.findByText(
+        'Enter the dates as year-month-day (for example 2026-10-03), with the end on or after the start.',
+      ),
+    ).toBeVisible();
+  });
+
+  it('says how to carry on when the season label is already taken', async () => {
+    mockedQuickStart.mockRejectedValue(
+      new ApiError(409, '"2026/27" is already running for "Premier Men"', 'season_exists'),
+    );
+    const { user } = setup();
+
+    await user.click(startBtn());
+
+    expect(
+      await screen.findByText(
+        '"2026/27" is already running for "Premier Men". Give the new season a different label, or carry on with the existing one under Seasons.',
+      ),
+    ).toBeVisible();
   });
 
   it('reports a failure that never reached the server, and says to try again', async () => {
@@ -2124,7 +2206,7 @@ describe('Quick start', () => {
 
     await user.click(startBtn());
 
-    expect(await screen.findByText('Could not start the season — try again')).toBeVisible();
+    expect(await screen.findByText(/^Couldn't reach the (local API|server)\./)).toBeVisible();
     expect(vi.mocked(Sentry.captureException)).toHaveBeenCalledWith(offline, {
       tags: { where: 'quick-start' },
     });

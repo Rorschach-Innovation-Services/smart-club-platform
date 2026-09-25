@@ -13,6 +13,7 @@ import { useState, useEffect, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { Btn, Card, EmptyState, FieldGuide, Icon, InfoDot, Modal, Pill } from './atoms';
 import * as api from './api';
+import { describeError } from './error-copy';
 import { ApiError } from './api';
 import {
   addDays,
@@ -384,7 +385,7 @@ export function CalendarForm({
       toast(editing ? `${draft.label.trim()} · updated` : `${draft.label.trim()} · created`);
       onClose();
     } catch (e) {
-      setSaveErr(e instanceof ApiError ? e.message : 'Could not save — try again');
+      setSaveErr(describeError(e, 'Could not save — try again'));
     } finally {
       setBusy(false);
     }
@@ -625,6 +626,13 @@ export function CalendarsCard({
 }) {
   const [form, setForm] = useState<SeasonCalendar | 'new' | null>(null);
   const [confirm, setConfirm] = useState<SeasonCalendar | null>(null);
+  // A refused delete (e.g. series still scheduled against it) is shown inside the confirm
+  // box, where the operator is looking, and the box stays open.
+  const [deleteErr, setDeleteErr] = useState('');
+  const askDelete = (target: SeasonCalendar | null) => {
+    setDeleteErr('');
+    setConfirm(target);
+  };
   const calendars = config.calendars ?? [];
 
   /**
@@ -640,7 +648,7 @@ export function CalendarsCard({
       const current = await api.platformGetTenant(slug);
       await save({ calendars: build(current.calendars ?? []) });
     } catch (e) {
-      toast(e instanceof ApiError ? e.message : fallback, 'warn');
+      toast(describeError(e, fallback), 'warn');
       throw e; // keeps the modal open so the operator doesn't lose their edits
     }
   }
@@ -664,7 +672,7 @@ export function CalendarsCard({
     );
 
   async function onDelete(cal: SeasonCalendar) {
-    setConfirm(null);
+    setDeleteErr('');
     try {
       // Cascade: a competition pointing at a deleted calendar would fail the server's
       // cross-check, so the bindings go in the SAME PUT. Series scheduled against the
@@ -684,9 +692,10 @@ export function CalendarsCard({
             : l,
         );
       await save(patch);
+      setConfirm(null);
       toast(`${cal.label} · deleted`);
     } catch (e) {
-      toast(e instanceof ApiError ? e.message : 'Could not delete calendar', 'warn');
+      setDeleteErr(describeError(e, 'Could not delete calendar — try again'));
     }
   }
 
@@ -771,7 +780,7 @@ export function CalendarsCard({
                           <Btn tone="outline" size="sm" onClick={() => setForm(cal)}>
                             Edit
                           </Btn>
-                          <Btn tone="ghost" size="sm" onClick={() => setConfirm(cal)}>
+                          <Btn tone="ghost" size="sm" onClick={() => askDelete(cal)}>
                             Delete
                           </Btn>
                         </div>
@@ -819,7 +828,7 @@ export function CalendarsCard({
         createPortal(
           <div
             className="fix-confirm"
-            onClick={(e) => e.target === e.currentTarget && setConfirm(null)}
+            onClick={(e) => e.target === e.currentTarget && askDelete(null)}
           >
             <div className="fix-confirm-box">
               <div className="fix-confirm-icon danger">
@@ -854,8 +863,13 @@ export function CalendarsCard({
                 New series can no longer be scheduled against it. If a series already uses this
                 calendar, the delete is blocked.
               </div>
+              {deleteErr && (
+                <div className="field-error" role="alert" style={{ marginTop: 10 }}>
+                  {deleteErr}
+                </div>
+              )}
               <div className="fix-confirm-actions">
-                <Btn tone="outline" onClick={() => setConfirm(null)}>
+                <Btn tone="outline" onClick={() => askDelete(null)}>
                   Cancel
                 </Btn>
                 <Btn tone="ink" onClick={() => onDelete(confirm)}>

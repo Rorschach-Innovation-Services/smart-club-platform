@@ -261,7 +261,7 @@ export function validateStructures(
       )
         throw new HttpError(
           400,
-          `stage "${sName}" needs a playing block position between 0 and 19`,
+          `stage "${sName}" must play in one of the calendar's first 20 playing blocks`,
         );
       assertValidCadence(stage.schedule.cadence, `stage "${sName}"`);
       if (stage.schedule.slots !== undefined)
@@ -270,7 +270,7 @@ export function validateStructures(
         stage.schedule.roundsPerDay !== undefined &&
         ![1, 2].includes(stage.schedule.roundsPerDay)
       )
-        throw new HttpError(400, `stage "${sName}" roundsPerDay must be 1 or 2`);
+        throw new HttpError(400, `stage "${sName}" can play 1 or 2 rounds per day`);
       if (stage.schedule.roundsPerDay === 2 && (stage.schedule.slots ?? []).length !== 2)
         throw new HttpError(400, `stage "${sName}" needs exactly two slots for two rounds per day`);
       // Chaining needs something to chain ONTO: the nearest earlier stage in the same
@@ -282,7 +282,7 @@ export function validateStructures(
         if (!blocksSeen.has(stage.schedule.blockIndex))
           throw new HttpError(
             400,
-            `stage "${sName}" starts after the previous stage, but no earlier stage plays in block ${stage.schedule.blockIndex + 1}`,
+            `stage "${sName}" starts after the previous stage, but no earlier stage plays in block ${stage.schedule.blockIndex + 1} — untick "Start after the previous stage in this block", or move it into an earlier stage's block`,
           );
       }
       if (stage.format.kind === 'knockout' && !KNOCKOUT_PAIRINGS.has(stage.format.pairing))
@@ -411,7 +411,7 @@ export function validateCompetitions(
       if (overrun)
         throw new HttpError(
           400,
-          `competition "${comp.label}": stage "${overrun.name}" plays in block ${overrun.schedule.blockIndex + 1} but calendar ${calendar.label} has only ${calendar.blocks.length} block${calendar.blocks.length === 1 ? '' : 's'}`,
+          `competition "${comp.label}": stage "${overrun.name}" plays in block ${overrun.schedule.blockIndex + 1} but calendar ${calendar.label} has only ${calendar.blocks.length} block${calendar.blocks.length === 1 ? '' : 's'} — add a block to the calendar, or change the stage's "Plays in" block`,
         );
     }
   }
