@@ -78,6 +78,7 @@ import {
   validateRequiredDocs,
   assertValidCadence,
   assertValidTimeSlots,
+  KNOCKOUT_PAIRINGS,
 } from './config-validation.js';
 import { demographicsByLeague, summarizeDemographics } from './demographics.js';
 import {
@@ -131,6 +132,7 @@ import type {
   Membership,
   SeasonRun,
   StageRun,
+  StageSpec,
   Series,
   SeriesSchedule,
   Venue,
@@ -3709,6 +3711,23 @@ app.delete('/series/:id', requireAdmin, async (c) => {
    the Series each stage-group materialises into. Admin-only to write, reps read (their
    club's fixtures resolve through it). Same optimistic concurrency as series. */
 
+/**
+ * A stage's run-time `pairingOverride` must be a pairing the structure itself could
+ * declare. Materialisation dispatches on it, so an unknown value would silently draw a
+ * seeded bracket where the admin believes they chose a pool-based one.
+ *
+ * Whitelist only, deliberately. Whether a known pairing can actually be drawn depends on
+ * the pools' shape (e.g. within-pool needs a power-of-two number of equal, power-of-two
+ * pools), which this route cannot see without re-running the pool stage. That shape is
+ * enforced by the structure editor and the confirm-entrants UI (which disables an
+ * undrawable Within-group choice); should one get through anyway, the generator falls
+ * back to a seeded bracket over the full field and says so in the preview.
+ */
+function assertValidStageRunFields(stage: StageRun): void {
+  if (stage.pairingOverride !== undefined && !KNOCKOUT_PAIRINGS.has(stage.pairingOverride))
+    throw new HttpError(400, `stage "${stage.specId}" has an unknown pairing override`);
+}
+
 // Admin-only: the frozen `structureSnapshot` embeds each stage's `schedule.slots` (the
 // kick-off times a series may withhold under ADR 0011), and the only caller is the
 // admin-gated console query (`enabled: role === 'admin'`). Reps read their fixtures
@@ -3743,6 +3762,7 @@ app.post('/season-runs', requireAdmin, async (c) => {
     throw new HttpError(400, 'season run stages must be an array');
   if ((run.stages?.length ?? 0) > 20)
     throw new HttpError(400, 'a season run is limited to 20 stages');
+  for (const stage of run.stages ?? []) if (stage) assertValidStageRunFields(stage);
   if (await repo.getSeasonRun(tenant, run.id))
     throw new HttpError(409, 'a season run with that id already exists');
   run.version = 1;
@@ -3769,6 +3789,10 @@ app.patch('/season-runs/:id', requireAdmin, async (c) => {
   // The snapshots are immutable for the life of the run — that is what makes them
   // snapshots. Strip rather than reject so an admin round-tripping a whole run object
   // (the obvious client implementation) doesn't get a confusing 400.
+  //
+  // The ONE sanctioned way a structure snapshot changes is `POST /season-runs/:id/rebase`,
+  // which adopts the SERVER-fetched live structure and writes an audit entry per affected
+  // stage. A client-supplied snapshot is never trusted, here or there.
   delete (patch as { structureSnapshot?: unknown }).structureSnapshot;
   delete (patch as { calendarSnapshot?: unknown }).calendarSnapshot;
   delete (patch as { createdAt?: unknown }).createdAt;
@@ -3796,6 +3820,7 @@ app.patch('/season-runs/:id', requireAdmin, async (c) => {
     if (patch.stages.length > 20) throw new HttpError(400, 'a season run is limited to 20 stages');
     for (const stage of patch.stages) {
       if (!stage) continue;
+      assertValidStageRunFields(stage);
       // BOTH sides normalised to arrays. A stage arriving with a non-array `audit` and no
       // stored counterpart would otherwise be persisted raw, and the next PATCH would
       // read `prior.length` off a string (its character count) — silently dropping the
@@ -3817,6 +3842,143 @@ app.patch('/season-runs/:id', requireAdmin, async (c) => {
     throw new HttpError(400, 'season run needs a season label');
   try {
     return c.json(await repo.updateSeasonRun(tenant, id, patch));
+  } catch (err) {
+    if (err instanceof VersionConflictError)
+      throw new HttpError(409, 'season run changed; refetch');
+    throw err;
+  }
+});
+
+/**
+ * The parts of a stage's schedule that the generated series embed: its fixture dates, and
+ * `activateFrom` (the reveal date is copied onto each series, so changing it alone still
+ * needs a regenerate).
+ */
+function scheduleShape(stage: StageSpec): unknown {
+  const s = stage.schedule;
+  return {
+    blockIndex: s.blockIndex,
+    cadence: s.cadence,
+    slots: s.slots,
+    roundsPerDay: s.roundsPerDay,
+    startAfter: s.startAfter,
+    activateFrom: s.activateFrom,
+  };
+}
+
+/**
+ * POST /season-runs/:id/rebase — adopt the live version of the run's structure.
+ *
+ * The one audited exception to snapshot immutability (see the PATCH strip above). The
+ * new snapshot is the structure the SERVER reads from tenant config — the body only names
+ * which version the admin reviewed (`structureVersion`) and which run version they read
+ * (`version`), so a structure edited again after the review 409s rather than silently
+ * adopting something nobody looked at, and a run changed under them 409s the same way
+ * PATCH does.
+ *
+ * Series are never touched here. StageRuns are reconciled against the new stage list:
+ * - a spec that survives keeps its StageRun (series back-pointers and audit intact);
+ * - a new spec gains an `awaiting-entrants` StageRun;
+ * - a removed spec's StageRun is dropped — its series survive, exactly as with DELETE.
+ * A surviving stage whose spec changed gets a server-stamped `event: 'rebase'` audit
+ * entry, plus these, because the client's divergence check compares PAIRINGS only and
+ * confirmed groups shadow the spec:
+ * - entrant spec / group labels changed ⇒ groups cleared back to `awaiting-entrants`
+ *   (the old grouping goes into the audit entry's `prefill` so the confirm form can
+ *   pre-fill from it). Left in place, the old groups would win at materialisation and
+ *   one Regenerate would dismiss the change without ever adopting the new spec.
+ * - schedule changed ⇒ `staleSchedule: true`, surfaced as "Needs regenerating".
+ * - format changed ⇒ `pairingOverride` cleared (recorded in the audit entry): an
+ *   override chosen against the old format must not silently win over the new one.
+ * A `derivedFrom.fromStage` naming no live stage is reported in `warnings` — the client
+ * engine silently falls back to the adjacent earlier stage, which is plausible but wrong.
+ */
+app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const body = await c.req.json<{ structureVersion?: unknown; version?: unknown }>();
+  if (!Number.isInteger(body?.structureVersion))
+    throw new HttpError(400, 'rebase needs the structure version you reviewed');
+  if (!Number.isInteger(body?.version))
+    throw new HttpError(400, 'rebase needs the season run version you read');
+  const current = await repo.getSeasonRun(tenant, id);
+  if (!current) throw new HttpError(404, 'season run not found');
+  // Checked up front, not only by the conditional write below: the no-op return further
+  // down would otherwise answer 200 to a caller whose view of the run is stale.
+  if (current.version !== body.version) throw new HttpError(409, 'season run changed; refetch');
+  const config = await repo.getTenantConfig(tenant);
+  const live = (config?.structures ?? []).find((st) => st.id === current.structureSnapshot.id);
+  if (!live) throw new HttpError(404, 'the structure this season runs no longer exists');
+  if (live.version !== body.structureVersion)
+    throw new HttpError(409, 'the structure changed since you reviewed it; refetch');
+  // Already on it — nothing to adopt, and no audit noise for a double-click.
+  if (live.version === current.structureSnapshot.version) return c.json(current);
+
+  const actor = c.get('requestAuth')!.email ?? 'unknown';
+  const at = now();
+  const oldSpecs = new Map(current.structureSnapshot.stages.map((s) => [s.id, s]));
+  const liveIds = new Set(live.stages.map((s) => s.id));
+
+  const kept: StageRun[] = (current.stages ?? [])
+    .filter((run) => run && liveIds.has(run.specId))
+    .map((run) => {
+      const next = live.stages.find((s) => s.id === run.specId)!;
+      const prev = oldSpecs.get(run.specId);
+      // No old spec to diff against (a StageRun the snapshot never described): nothing
+      // to reconcile, keep it as it is.
+      if (!prev || stableStringify(prev) === stableStringify(next)) return run;
+
+      const entrantsChanged =
+        stableStringify(prev.entrants) !== stableStringify(next.entrants) ||
+        stableStringify(prev.groupLabels) !== stableStringify(next.groupLabels);
+      const scheduleChanged =
+        stableStringify(scheduleShape(prev)) !== stableStringify(scheduleShape(next));
+      const formatChanged = stableStringify(prev.format) !== stableStringify(next.format);
+
+      const out: StageRun = { ...run };
+      const entry: NonNullable<StageRun['audit']>[number] = {
+        at,
+        by: actor,
+        prefill: [],
+        accepted: false,
+        event: 'rebase',
+      };
+      if (entrantsChanged) {
+        entry.prefill = (run.groups ?? []).map((g) => [...(g.entrants ?? [])]);
+        out.groups = [];
+        out.status = 'awaiting-entrants';
+      }
+      if (scheduleChanged) out.staleSchedule = true;
+      if (formatChanged && out.pairingOverride !== undefined) {
+        entry.pairing = out.pairingOverride;
+        delete out.pairingOverride;
+      }
+      out.audit = [...(Array.isArray(run.audit) ? run.audit : []), entry];
+      return out;
+    });
+
+  const hasRun = new Set(kept.map((run) => run.specId));
+  const added: StageRun[] = live.stages
+    .filter((s) => !oldSpecs.has(s.id) && !hasRun.has(s.id))
+    .map((s) => ({ specId: s.id, status: 'awaiting-entrants', groups: [], audit: [] }));
+
+  const warnings: string[] = [];
+  for (const stage of live.stages) {
+    const from = stage.entrants.kind === 'manual' ? stage.entrants.derivedFrom?.fromStage : '';
+    if (from && !liveIds.has(from))
+      warnings.push(
+        `"${stage.name}" derives from a stage that no longer exists; it will draw from the stage before it instead`,
+      );
+  }
+
+  try {
+    const next = await repo.updateSeasonRun(tenant, id, {
+      version: body.version as number,
+      structureSnapshot: live,
+      stages: [...kept, ...added],
+    });
+    // Same additive shape as PUT /platform/tenants: `warnings` only when non-empty.
+    return c.json(warnings.length > 0 ? { ...next, warnings } : next);
   } catch (err) {
     if (err instanceof VersionConflictError)
       throw new HttpError(409, 'season run changed; refetch');

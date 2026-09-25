@@ -39,15 +39,30 @@ import {
   formatIsoDate,
   todayIso,
 } from './competition/calendar';
-import { describeEntrants, groupSizes, labelFor } from './competition/entrants';
+import {
+  describeEntrants,
+  groupSizes,
+  labelFor,
+  type ResolveContext,
+} from './competition/entrants';
 import { formatStampDay } from './dates';
 import {
-  crossPoolQualifiersFor,
-  feedsCrossPool,
+  chainFeeder,
+  crossPoolSourceStage,
+  describeStage,
+  feedsPoolKnockout,
   materialiseStage,
+  materialiseStructure,
+  poolQualifiersFor,
   type StageMaterialisation,
 } from './competition/structure';
-import { DEFAULT_SERIES_OVERS, SERIES_TYPES } from './competition/formats';
+import {
+  DEFAULT_SERIES_OVERS,
+  SERIES_TYPES,
+  isPoolKnockout,
+  poolPairings,
+  roundsForFormat,
+} from './competition/formats';
 import { findByKey, leagueParticipants } from './leagues';
 import { currentSeasonLabel } from './data';
 import type {
@@ -129,6 +144,120 @@ function derivedFromGroups(stage: StageSpec, run: SeasonRun): string[][] | undef
   const groups = run.stages.find((s) => s.specId === from)?.groups ?? [];
   return groups.length ? groups.map((g) => g.entrants) : undefined;
 }
+
+type KnockoutPairing = 'seeded' | 'cross-pool' | 'within-pool';
+
+/** How a pairing reads in a sentence — the console says "group", never "pool". */
+const PAIRING_LABELS: Record<KnockoutPairing, string> = {
+  seeded: 'seeded',
+  'cross-pool': 'cross-group',
+  'within-pool': 'within-group',
+};
+
+/**
+ * The stage as THIS season plays it: the structure's spec with the run's
+ * `pairingOverride` laid over a knockout's pairing. The union decides within- or
+ * cross-group semis at qualifier confirmation, so the snapshot's pairing is only the
+ * default — every place that materialises, derives qualifiers or asks for positions has
+ * to read the overlaid spec, or the console would show one bracket and generate another.
+ */
+export function effectiveStage(stage: StageSpec, stageRun: StageRun | undefined): StageSpec {
+  const override = stageRun?.pairingOverride;
+  if (!override || stage.format.kind !== 'knockout' || stage.format.pairing === override)
+    return stage;
+  return { ...stage, format: { ...stage.format, pairing: override } };
+}
+
+/**
+ * Materialise a whole run the way the console shows it: effective stages (overrides
+ * applied), each stage's confirmed groups and pool qualifiers, and the sequential walk
+ * that dates a `startAfter` stage behind its feeder. Pure over its inputs so the rebase
+ * flow can re-run it against a freshly fetched run between regenerations, rather than
+ * against whatever this render's props happened to hold.
+ */
+function materialiseRun(
+  run: SeasonRun,
+  participants: Array<{ teamId: string }>,
+): { stages: StageSpec[]; materialisations: StageMaterialisation[] } {
+  const stages = run.structureSnapshot.stages.map((s) =>
+    effectiveStage(
+      s,
+      run.stages.find((x) => x.specId === s.id),
+    ),
+  );
+  const contexts: Record<string, ResolveContext> = {};
+  const crossPoolQualifiers: Record<string, string[][]> = {};
+  for (const stage of stages) {
+    const stageRun = run.stages.find((s) => s.specId === stage.id);
+    contexts[stage.id] = {
+      registered: participants.map((p) => p.teamId),
+      seedOrder: participants.map((p) => p.teamId),
+      confirmed: stageRun?.groups.length ? stageRun.groups.map((g) => g.entrants) : undefined,
+      /*
+       * The groups of the stage this one's rule DRAWS FROM — the whole point of
+       * recording `fromStage`. A swap moves one side between two groups, so the
+       * suggestion has to start from where those groups actually ended up. Without
+       * it the prefill blocks the registered list into the right SIZES and calls
+       * that a proposal, which for a swap proposes relegating the entire top group.
+       */
+      priorGroups: derivedFromGroups(stage, run),
+    };
+    const qualifiers = poolQualifiersFor(stage, stages, run);
+    if (qualifiers) crossPoolQualifiers[stage.id] = qualifiers;
+  }
+  const materialisations = materialiseStructure({
+    structure: { ...run.structureSnapshot, stages },
+    calendar: run.calendarSnapshot,
+    contexts,
+    crossPoolQualifiers,
+  });
+  return { stages, materialisations };
+}
+
+/**
+ * The grouping a rebase cleared, from the most recent rebase entry that carries one.
+ *
+ * An entrant-spec change drops the stage back to `awaiting-entrants` and moves its old
+ * groups into the rebase entry's `prefill`, so the confirm form can start from where the
+ * season actually was instead of from the registered list. A later schedule- or
+ * wording-only rebase appends an entry with an empty `prefill`; it must not hide the
+ * earlier one, so the scan walks back past rebase entries until it finds a non-empty
+ * prefill. Any confirmation in between supersedes it.
+ */
+function rebasePrefill(stageRun: StageRun | undefined): string[][] | undefined {
+  const audit = stageRun?.audit ?? [];
+  for (let i = audit.length - 1; i >= 0; i--) {
+    const entry = audit[i];
+    if (entry?.event !== 'rebase') return undefined;
+    if (entry.prefill.length) return entry.prefill;
+  }
+  return undefined;
+}
+
+/** Key-order-independent JSON — the same comparison the rebase route diffs specs with. */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value as Record<string, unknown>).sort();
+    return `{${keys
+      .map((k) => `${JSON.stringify(k)}:${stableStringify((value as Record<string, unknown>)[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * The parts of a stage's schedule the generated series embed (dates plus the
+ * `activateFrom` reveal date) — mirrors the rebase route.
+ */
+const scheduleShape = (s: StageSpec) => ({
+  blockIndex: s.schedule.blockIndex,
+  cadence: s.schedule.cadence,
+  slots: s.schedule.slots,
+  roundsPerDay: s.schedule.roundsPerDay,
+  startAfter: s.schedule.startAfter,
+  activateFrom: s.schedule.activateFrom,
+});
 
 /** A league is season-capable only once the operator has bound a competition to it. */
 export function seasonCapableLeagues(allLeagues: League[]): League[] {
@@ -1367,8 +1496,9 @@ function EntrantConfirmForm({
   stageRun,
   materialisation,
   participants,
-  ranked,
+  ranked: rankedByStructure,
   rankedReason,
+  pairing,
   onConfirm,
   onCancel,
 }: {
@@ -1392,7 +1522,22 @@ function EntrantConfirmForm({
   ranked?: boolean;
   /** Why `ranked` is set — decides which banner copy explains the Position column. */
   rankedReason?: 'cross-pool' | 'seeding';
-  onConfirm: (groups: string[][], carriedPoints: Record<string, number>) => Promise<void>;
+  /**
+   * Set for a knockout fed by pools: the union picks within- or cross-group semis here,
+   * per season, over the structure's default. `run` and `stages` let the form preview
+   * the first round live from the groups being confirmed, before anything is saved.
+   */
+  pairing?: {
+    structureDefault: KnockoutPairing;
+    override: KnockoutPairing | undefined;
+    run: SeasonRun;
+    stages: StageSpec[];
+  };
+  onConfirm: (
+    groups: string[][],
+    carriedPoints: Record<string, number>,
+    pairing?: KnockoutPairing | 'default',
+  ) => Promise<void>;
   onCancel: () => void;
 }) {
   /**
@@ -1430,16 +1575,27 @@ function EntrantConfirmForm({
       ? stage.entrants.groups.sizes
       : null;
 
-  /** The groups to seed from — the stored confirmation if there is one, else the suggestion. */
+  /**
+   * The groups to seed from — the stored confirmation if there is one, else the grouping
+   * a structure rebase cleared (so re-confirming starts from where the season actually
+   * was), else the suggestion.
+   */
   const seedGroups = () =>
     stageRun?.groups?.length
       ? stageRun.groups.map((g) => g.entrants)
-      : suggested.map((g) => g.entrants);
+      : (rebasePrefill(stageRun) ?? suggested.map((g) => g.entrants));
 
-  /** teamId → group index. Seeded from the prefill so "accept the suggestion" is one click. */
+  /**
+   * teamId → group index. Seeded from the prefill so "accept the suggestion" is one click.
+   * An index past the groups this stage now has (a rebase that cut a group) is left
+   * unassigned — shown as "not playing" and counted — rather than stored against a group
+   * with no option in the dropdown, which would silently drop the side on confirm.
+   */
   const seed = () => {
     const map: Record<string, number> = {};
-    seedGroups().forEach((entrants, gi) => entrants.forEach((t) => (map[t] = gi)));
+    seedGroups().forEach((entrants, gi) => {
+      if (gi < groupCount) entrants.forEach((t) => (map[t] = gi));
+    });
     return map;
   };
   /** teamId → 1-based position within its group, seeded from the stored/suggested order. */
@@ -1453,6 +1609,19 @@ function EntrantConfirmForm({
   const [points, setPoints] = useState<Record<string, number>>(stageRun?.carriedPoints ?? {});
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [pairingChoice, setPairingChoice] = useState<KnockoutPairing | 'default'>(
+    pairing?.override ?? 'default',
+  );
+  const pairingName = useId();
+  /** The pairing this confirmation would play, with the radio's choice applied. */
+  const chosenPairing: KnockoutPairing | undefined = pairing
+    ? pairingChoice === 'default'
+      ? pairing.structureDefault
+      : pairingChoice
+    : undefined;
+  // "Seeded over the full field" turns this stage's OWN order into the seed line, so it
+  // needs the Position column exactly as a structure-seeded knockout does.
+  const ranked = rankedByStructure || chosenPairing === 'seeded';
 
   const note = stage.entrants.kind === 'manual' ? stage.entrants.derivedFrom : undefined;
   const wantsPoints = !!note?.carryPoints;
@@ -1500,12 +1669,51 @@ function EntrantConfirmForm({
     }
   });
 
+  /*
+   * The first round the chosen pairing would actually draw, from the groups on screen —
+   * not from what is stored, so flipping the radio or moving a side updates it at once.
+   * Built with the same `poolQualifiersFor` → `roundsForFormat` path generation uses, so
+   * a shape the pool generators refuse shows here as the seeded fallback it will become.
+   */
+  const drawWith = (chosen: KnockoutPairing | undefined) => {
+    if (!pairing || !chosen || stage.format.kind !== 'knockout') return null;
+    const format = { ...stage.format, pairing: chosen };
+    const candidate: StageSpec = { ...stage, format };
+    const entrants = groups.flat();
+    if (entrants.length < 2) return null;
+    const hypothetical: SeasonRun = {
+      ...pairing.run,
+      stages: [
+        ...pairing.run.stages.filter((s) => s.specId !== stage.id),
+        {
+          specId: stage.id,
+          status: 'ready',
+          groups: groups.map((g, i) => ({ id: `g${i + 1}`, label: labels[i], entrants: g })),
+        },
+      ],
+    };
+    const stages = pairing.stages.map((s) => (s.id === stage.id ? candidate : s));
+    const qualifiers = poolQualifiersFor(candidate, stages, hypothetical);
+    const fellBack = isPoolKnockout(format) && poolPairings(format, entrants, qualifiers) === null;
+    const nameOf = (id: string) => participants.find((p) => p.teamId === id)?.name ?? id;
+    const first = (roundsForFormat(format, entrants, qualifiers)[0] ?? []).map(
+      ([home, away]) => `${nameOf(home)} v ${nameOf(away)}`,
+    );
+    return { first, fellBack };
+  };
+  const pairingPreview = drawWith(chosenPairing);
+  // Within-group only draws for a power-of-two number of pools with equal, power-of-two
+  // qualifiers each (`withinPoolRounds`). When the groups on screen can't be drawn that
+  // way, the option is disabled rather than offered and silently turned into the seeded
+  // fallback — the server accepts any whitelisted pairing, so this is where shape is held.
+  const withinRefused = !!drawWith('within-pool')?.fellBack;
+
   async function submit() {
     if (problems.length || busy) return;
     setErr('');
     setBusy(true);
     try {
-      await onConfirm(groups, wantsPoints ? points : {});
+      await onConfirm(groups, wantsPoints ? points : {}, pairing ? pairingChoice : undefined);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'Could not confirm — try again');
     } finally {
@@ -1561,6 +1769,76 @@ function EntrantConfirmForm({
             </>
           )}
         </div>
+      )}
+
+      {pairing && (
+        <fieldset
+          style={{
+            border: '1px solid var(--line)',
+            borderRadius: 8,
+            padding: '10px 12px',
+            margin: '0 0 14px',
+          }}
+        >
+          <legend style={{ fontSize: 12.5, fontWeight: 700, padding: '0 4px' }}>
+            Semi-final pairing
+          </legend>
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5 }}>
+            {(
+              [
+                ['default', `Structure default (${PAIRING_LABELS[pairing.structureDefault]})`],
+                ['cross-pool', 'Cross-group'],
+                ['within-pool', 'Within-group'],
+                ['seeded', 'Seeded over the full field'],
+              ] as const
+            ).map(([value, label]) => {
+              const disabled = value === 'within-pool' && withinRefused;
+              return (
+                <label
+                  key={value}
+                  title={
+                    disabled
+                      ? 'Within-group needs 2, 4, 8… groups, each sending the same number (2, 4, 8…) of qualifiers'
+                      : undefined
+                  }
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    cursor: disabled ? 'not-allowed' : 'pointer',
+                    opacity: disabled ? 0.55 : 1,
+                  }}
+                >
+                  <input
+                    type="radio"
+                    name={pairingName}
+                    checked={pairingChoice === value}
+                    disabled={disabled}
+                    onChange={() => setPairingChoice(value)}
+                  />
+                  {label}
+                </label>
+              );
+            })}
+          </div>
+          <p style={HINT}>
+            Applies to this season only — the structure keeps its default for the next one.
+            {withinRefused &&
+              ' Within-group is unavailable: these groups can’t be paired inside each group.'}
+          </p>
+          {pairingPreview && (
+            <div style={{ fontSize: 12.5, marginTop: 8, lineHeight: 1.55 }}>
+              <strong>First round:</strong> {pairingPreview.first.join(' · ') || '—'}
+              {pairingPreview.fellBack && (
+                <div style={{ ...HINT, color: 'var(--coral)' }}>
+                  These groups can’t be drawn {PAIRING_LABELS[chosenPairing!]} — it would be paired
+                  as a seeded bracket over the full field. Check the pool stage’s finishing
+                  positions and who qualified.
+                </div>
+              )}
+            </div>
+          )}
+        </fieldset>
       )}
 
       <div className="tbl-w" style={{ maxHeight: 420, overflowY: 'auto' }}>
@@ -1727,16 +2005,33 @@ function StageCard({
   stageRun,
   materialisation,
   seriesById,
+  stageSeries,
+  feederSeries,
   registered,
   onConfirm,
   onGenerate,
   busy,
 }: {
+  /** The EFFECTIVE stage — the run's `pairingOverride` already applied. */
   stage: StageSpec;
   index: number;
   stageRun: StageRun | undefined;
   materialisation: StageMaterialisation;
   seriesById: (id: string) => Series | undefined;
+  /**
+   * Every series this run generated for this stage, found by its own `seasonRunId` /
+   * `stageSpecId` rather than through the run's `groups[].seriesId`. A rebase that
+   * changes a stage's entrant spec clears its groups — and the back-pointers with them —
+   * but the series survive under their deterministic ids, and the next generate
+   * overwrites them in place. Without this the released-schedule prompt never fired for
+   * exactly that stage.
+   */
+  stageSeries: Series[];
+  /**
+   * For a stage dated behind a feeder in the same block (`startAfter: 'previous-stage'`),
+   * the series that feeder generated; undefined when the stage is not chained.
+   */
+  feederSeries: Series[] | undefined;
   /** Every side currently registered for the league — for the drift check below. */
   registered: string[];
   onConfirm: () => void;
@@ -1747,10 +2042,25 @@ function StageCard({
   const generated = stageRun?.status === 'generated';
   const ready = materialisation.status === 'ready';
   const fits = ready && materialisation.fits;
+  /** The series a group generated: its stored back-pointer, else the run/stage lookup. */
+  const linkedFor = (groupId: string) => {
+    const sid = stageRun?.groups.find((x) => x.id === groupId)?.seriesId;
+    return (sid ? seriesById(sid) : undefined) ?? stageSeries.find((s) => s.groupId === groupId);
+  };
+  const allLinked = [
+    ...(stageRun?.groups ?? [])
+      .map((g) => (g.seriesId ? seriesById(g.seriesId) : undefined))
+      .filter((s): s is Series => !!s),
+    ...stageSeries,
+  ].filter((s, i, arr) => arr.findIndex((x) => x.id === s.id) === i);
   // Entrants were re-confirmed after generation, so the linked series still hold the old
-  // groups. Say so rather than showing the new counts beside a "Released" pill.
+  // groups. Say so rather than showing the new counts beside a "Released" pill. A stored
+  // back-pointer isn't required: a rebase-cleared stage has none, and its series are
+  // every bit as stale.
   const staleEntrants =
-    stageRun?.status === 'ready' && stageRun.groups.some((g) => g.seriesId !== undefined);
+    !!stageRun &&
+    stageRun.status !== 'generated' &&
+    (stageRun.groups.some((g) => g.seriesId !== undefined) || stageSeries.length > 0);
 
   // …and the same question asked of the FIXTURES, which catches what the entrants check
   // structurally cannot: re-confirming the POOL stage's finishing positions changes this
@@ -1765,14 +2075,41 @@ function StageCard({
   // effect was to destroy the reschedule.
   const fixtureKey = (fx: Array<{ round?: number; home?: string; away?: string }>) =>
     JSON.stringify((fx ?? []).map((f) => [f?.round, f?.home, f?.away]));
+  // The pairing includes the run's `pairingOverride`: `materialisation` is built from the
+  // effective stage, so flipping within-/cross-group after generation diverges here.
   const diverged =
     ready &&
     materialisation.groups.some((g) => {
-      const sid = stageRun?.groups.find((x) => x.id === g.id)?.seriesId;
-      const linked = sid ? seriesById(sid) : undefined;
+      const linked = linkedFor(g.id);
       return !!linked && fixtureKey(g.fixtures) !== fixtureKey(linked.fixtures as never);
     });
-  const stale = staleEntrants || diverged;
+  // A rebase that changed this stage's schedule marks it explicitly — the pairing-only
+  // check above can't see a date change. The server sets the marker whether or not the
+  // stage has fixtures yet, but it only means something once there are series to rebuild;
+  // before that, generating simply uses the new schedule.
+  const staleSchedule = !!stageRun?.staleSchedule && allLinked.length > 0;
+  // A CHAINED stage must start after its feeder's last round, so a feeder regenerate that
+  // pushed the feeder later can run it into this stage — while pairings, and so
+  // `diverged`, stay put. Asked of the ACTUAL series on both sides: this stage's earliest
+  // fixture against the feeder's latest. Only an overlap flags, so moving one of this
+  // stage's own fixtures later (a rained-off opener) stays the routine edit it is above;
+  // comparing against the plan instead pinned such a stage on "Needs regenerating".
+  const fixtureDates = (series: Series[]) =>
+    series
+      .flatMap((s) => (s.fixtures ?? []) as Array<{ date?: string }>)
+      .map((f) => f?.date)
+      .filter((d): d is string => !!d)
+      .sort();
+  const ownDates = fixtureDates(allLinked);
+  const feederDates = feederSeries ? fixtureDates(feederSeries) : [];
+  const chainMoved =
+    !!feederSeries &&
+    ready &&
+    ownDates.length > 0 &&
+    feederDates.length > 0 &&
+    ownDates[0] <= feederDates[feederDates.length - 1];
+  const needsRegen = diverged || staleSchedule || chainMoved;
+  const stale = staleEntrants || needsRegen;
 
   // A confirmed grouping is frozen — deliberately, it is a human decision about this
   // season — so it stops tracking the league's registration list. A club that joins
@@ -1790,13 +2127,15 @@ function StageCard({
   // Regenerating rewrites the linked series IN PLACE, and `released` is deliberately not
   // reset — so a published schedule would change under clubs and players with no prompt.
   // Every comparable action in the console asks first; this one must too.
-  const releasedLinked = (stageRun?.groups ?? [])
-    .map((g) => (g.seriesId ? seriesById(g.seriesId) : undefined))
-    .filter((s): s is Series => !!s?.released);
+  const releasedLinked = allLinked.filter((s) => s.released);
   const totalFixtures = materialisation.status === 'ready' ? materialisation.totalFixtures : 0;
 
+  // Any released series this generate would overwrite asks first — whether or not the
+  // stage reads as stale. The generate button is only on offer when there is something to
+  // (re)build, so in the ordinary flow this is the same as before; it additionally catches
+  // a rebase-cleared stage, whose series ids are deterministic and get rewritten in place.
   function requestGenerate() {
-    if (stale && releasedLinked.length) setConfirmRegen(true);
+    if (releasedLinked.length) setConfirmRegen(true);
     else onGenerate();
   }
 
@@ -1817,10 +2156,13 @@ function StageCard({
         {/* A heading, not a styled span: this is the title of a section a screen reader
             should be able to jump to, and the season is a list of these. */}
         <h3 style={{ fontWeight: 700, fontSize: 14, margin: 0 }}>{stage.name}</h3>
-        {generated ? (
-          <Pill tone="teal">Generated</Pill>
-        ) : stale ? (
+        {/* Stale before Generated: a generated stage whose pairing, schedule or feeder
+            moved is still 'generated' in the run, and a teal pill there contradicted the
+            coral line and the Regenerate button right below it. */}
+        {stale ? (
           <Pill tone="coral">Needs regenerating</Pill>
+        ) : generated ? (
+          <Pill tone="teal">Generated</Pill>
         ) : ready && fits ? (
           <Pill tone="muted">Ready to generate</Pill>
         ) : ready ? (
@@ -1851,7 +2193,7 @@ function StageCard({
             },
             {
               label: 'Needs regenerating',
-              desc: 'Entrants or pairings changed since the fixtures were built — regenerate to catch up.',
+              desc: 'Entrants, pairings or the schedule changed since the fixtures were built — regenerate to catch up.',
               eg: 'a side withdrew after the fixtures were made',
             },
           ]}
@@ -1895,8 +2237,7 @@ function StageCard({
           )}
           <div style={{ display: 'grid', gap: 6, marginTop: 4 }}>
             {materialisation.groups.map((g) => {
-              const series = g.id && stageRun?.groups.find((x) => x.id === g.id)?.seriesId;
-              const linked = series ? seriesById(series) : undefined;
+              const linked = g.id ? linkedFor(g.id) : undefined;
               return (
                 <div key={g.id} style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.6 }}>
                   <strong style={{ color: 'var(--ink)' }}>{g.label}</strong> · {g.entrants.length}{' '}
@@ -1924,8 +2265,12 @@ function StageCard({
           </div>
           {stale && (
             <p style={{ ...HINT, color: 'var(--coral)' }}>
-              The entrants changed after these fixtures were generated — regenerate to bring the
-              series into line.
+              {staleEntrants || diverged
+                ? 'The entrants or pairing changed after these fixtures were generated'
+                : staleSchedule
+                  ? 'The structure’s schedule for this stage changed after these fixtures were generated'
+                  : 'The stage this one follows now runs into these fixtures, so they no longer start after it'}{' '}
+              — regenerate to bring the series into line.
             </p>
           )}
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
@@ -1933,7 +2278,7 @@ function StageCard({
                 from the series they produced — otherwise an upstream change leaves the
                 card showing one bracket and the clubs holding another, with no way back.
                 The released-schedule confirmation covers the danger. */}
-            {(!generated || diverged) && (
+            {(!generated || needsRegen) && (
               <Btn tone="teal" size="sm" onClick={requestGenerate} disabled={!fits || busy}>
                 {busy
                   ? 'Generating…'
@@ -1959,7 +2304,10 @@ function StageCard({
       )}
 
       {(() => {
-        const last = stageRun?.audit?.[stageRun.audit.length - 1];
+        // The last CONFIRMATION — a rebase appends its own entry (`event: 'rebase'`), and
+        // reporting that as "confirmed by … (overrode the suggestion)" would misstate who
+        // decided the entrants.
+        const last = [...(stageRun?.audit ?? [])].reverse().find((e) => !e.event);
         // `by`/`at` are stamped server-side, so both are blank on the optimistic entry
         // this client just pushed — showing "confirmed by  on " until the round trip
         // lands is worse than showing nothing.
@@ -2007,6 +2355,300 @@ function StageCard({
   );
 }
 
+/* ─── Adopting a newer structure version ─── */
+
+interface RebaseOutcome {
+  /** From the server — e.g. a `derivedFrom.fromStage` that no longer resolves. */
+  warnings: string[];
+  regenerated: string[];
+  /** Opted in, but not generatable after the rebase (awaiting entrants / doesn't fit). */
+  skipped: string[];
+  failed: string[];
+}
+
+/** What adopting the live structure would do to one stage of this season. */
+interface StageChange {
+  id: string;
+  name: string;
+  kind: 'unchanged' | 'changed' | 'added' | 'removed';
+  before?: string;
+  after?: string;
+  /** Which parts of the spec moved — entrants, format, schedule, or just the wording. */
+  parts: string[];
+  consequence: string;
+  /** Every linked series is a draft, and the change moves fixtures ⇒ offer auto-regen. */
+  regenEligible: boolean;
+}
+
+/**
+ * Diff the run's frozen structure against the live one, stage by stage, with the
+ * consequence the rebase route's reconciliation will have for each. Mirrors that route's
+ * rules (entrant spec or group labels ⇒ back to confirmation; schedule ⇒ marked stale;
+ * format ⇒ override cleared) so what the admin reviews is what the server will do.
+ */
+function stageChanges(
+  run: SeasonRun,
+  live: CompetitionStructure,
+  seriesOf: (specId: string) => Series[],
+): StageChange[] {
+  const old = new Map(run.structureSnapshot.stages.map((s) => [s.id, s]));
+  const liveIds = new Set(live.stages.map((s) => s.id));
+  const cal = run.calendarSnapshot;
+  const changes: StageChange[] = live.stages.map((next) => {
+    const prev = old.get(next.id);
+    if (!prev)
+      return {
+        id: next.id,
+        name: next.name,
+        kind: 'added',
+        after: describeStage(next, cal),
+        parts: [],
+        consequence: 'New stage — it waits for its entrants like any other.',
+        regenEligible: false,
+      };
+    if (stableStringify(prev) === stableStringify(next))
+      return {
+        id: next.id,
+        name: next.name,
+        kind: 'unchanged',
+        parts: [],
+        consequence: 'No change.',
+        regenEligible: false,
+      };
+    const entrants =
+      stableStringify(prev.entrants) !== stableStringify(next.entrants) ||
+      stableStringify(prev.groupLabels) !== stableStringify(next.groupLabels);
+    const format = stableStringify(prev.format) !== stableStringify(next.format);
+    const schedule = stableStringify(scheduleShape(prev)) !== stableStringify(scheduleShape(next));
+    const parts = [
+      entrants && 'entrants',
+      format && 'format',
+      schedule && 'schedule',
+      !entrants && !format && !schedule && 'wording',
+    ].filter((p): p is string => !!p);
+    const series = seriesOf(next.id);
+    const released = series.some((s) => s.released);
+    let consequence: string;
+    let regenEligible = false;
+    if (entrants) {
+      consequence = `Entrants go back to confirmation, pre-filled from the current groups.${
+        released ? ' Its series are released — you’ll confirm before fixtures are replaced.' : ''
+      }`;
+    } else if (!series.length || (!format && !schedule)) {
+      consequence = 'Adopts the new version.';
+    } else if (released) {
+      consequence = 'Released — you’ll confirm before fixtures are replaced.';
+    } else {
+      consequence = 'Drafts will be regenerated.';
+      regenEligible = true;
+    }
+    return {
+      id: next.id,
+      name: next.name,
+      kind: 'changed',
+      before: describeStage(prev, cal),
+      after: describeStage(next, cal),
+      parts,
+      consequence,
+      regenEligible,
+    };
+  });
+  for (const prev of run.structureSnapshot.stages) {
+    if (liveIds.has(prev.id)) continue;
+    changes.push({
+      id: prev.id,
+      name: prev.name,
+      kind: 'removed',
+      before: describeStage(prev, cal),
+      parts: [],
+      consequence: seriesOf(prev.id).length
+        ? 'Removed — its tracking is dropped; the series it generated stay (see below).'
+        : 'Removed.',
+      regenEligible: false,
+    });
+  }
+  return changes;
+}
+
+function StructureReviewModal({
+  run,
+  live,
+  seriesOf,
+  canApply,
+  onApply,
+  onClose,
+}: {
+  run: SeasonRun;
+  live: CompetitionStructure;
+  seriesOf: (specId: string) => Series[];
+  canApply: boolean;
+  onApply: (regenIds: string[]) => Promise<RebaseOutcome>;
+  onClose: () => void;
+}) {
+  // Frozen when the modal opens: once applied, `run` re-renders onto the new snapshot and
+  // a live diff would collapse to "No change" under the outcome the admin is reading.
+  const [changes] = useState(() => stageChanges(run, live, (id) => seriesOf(id)));
+  const [fromVersion] = useState(run.structureSnapshot.version);
+  const [optIn, setOptIn] = useState<Record<string, boolean>>({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [outcome, setOutcome] = useState<RebaseOutcome | null>(null);
+  const regenIds = changes.filter((c) => c.regenEligible && optIn[c.id] !== false).map((c) => c.id);
+
+  async function apply() {
+    if (busy) return;
+    setErr('');
+    setBusy(true);
+    try {
+      setOutcome(await onApply(regenIds));
+    } catch (e) {
+      if (!(e as { alreadyToasted?: boolean })?.alreadyToasted) {
+        setErr(e instanceof ApiError ? e.message : 'Could not apply the structure — try again');
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      wide
+      title={
+        <>
+          Review changes · <em>{live.name}</em>
+        </>
+      }
+      onClose={onClose}
+    >
+      <p style={{ fontSize: 13, lineHeight: 1.6, margin: '0 0 12px' }}>
+        This season runs v{fromVersion}; the structure is now v{live.version}. Applying it changes
+        how this season&apos;s stages are set up — the fixtures only change where you regenerate
+        them.
+      </p>
+      <div style={{ display: 'grid', gap: 8 }}>
+        {changes.map((c) => (
+          <div
+            key={c.id}
+            style={{
+              border: '1px solid var(--line)',
+              borderRadius: 8,
+              padding: '10px 12px',
+              fontSize: 12.5,
+              lineHeight: 1.55,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <strong style={{ color: 'var(--ink)' }}>{c.name}</strong>
+              <Pill
+                tone={c.kind === 'unchanged' ? 'muted' : c.kind === 'removed' ? 'coral' : 'teal'}
+              >
+                {c.kind === 'unchanged'
+                  ? 'Unchanged'
+                  : c.kind === 'added'
+                    ? 'Added'
+                    : c.kind === 'removed'
+                      ? 'Removed'
+                      : `Changed · ${c.parts.join(', ')}`}
+              </Pill>
+            </div>
+            {c.kind === 'changed' && c.before !== c.after && (
+              <div style={{ color: 'var(--muted)', marginTop: 4 }}>
+                <div>Was: {c.before}</div>
+                <div>Now: {c.after}</div>
+              </div>
+            )}
+            {c.kind === 'added' && (
+              <div style={{ color: 'var(--muted)', marginTop: 4 }}>{c.after}</div>
+            )}
+            <div style={{ marginTop: 4 }}>{c.consequence}</div>
+            {c.regenEligible && (
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={optIn[c.id] !== false}
+                  disabled={busy || !!outcome}
+                  onChange={(e) => setOptIn((o) => ({ ...o, [c.id]: e.target.checked }))}
+                />
+                Regenerate {c.name}&apos;s draft fixtures after applying
+              </label>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {changes.some((c) => c.regenEligible) && (
+        <p style={HINT}>
+          Regenerating rebuilds a stage&apos;s fixtures from scratch — allocated venues and any
+          dates you changed by hand are lost. Untick a stage to keep its drafts and regenerate it
+          yourself later.
+        </p>
+      )}
+      <p style={HINT}>
+        Series from a stage or group that no longer exists — including groups cleared because a
+        stage&apos;s entrants changed — are not deleted. They keep occupying their grounds on their
+        dates in the venue-clash check, so releasing their replacements can be blocked until you
+        delete the old series from the fixtures list on this page.
+      </p>
+
+      {outcome && (
+        <div
+          role="status"
+          style={{
+            border: '1px solid var(--line)',
+            borderRadius: 8,
+            padding: '10px 12px',
+            marginTop: 12,
+            fontSize: 12.5,
+            lineHeight: 1.6,
+          }}
+        >
+          <strong>Structure v{live.version} applied.</strong>
+          {outcome.regenerated.length > 0 && (
+            <div>Regenerated: {outcome.regenerated.join(', ')}.</div>
+          )}
+          {outcome.skipped.length > 0 && (
+            <div>
+              Not regenerated — {outcome.skipped.join(', ')} can&apos;t generate as it stands; its
+              card says why.
+            </div>
+          )}
+          {outcome.failed.length > 0 && (
+            <div style={{ color: 'var(--coral)' }}>
+              Couldn&apos;t regenerate {outcome.failed.join(', ')} — try again from its card.
+            </div>
+          )}
+          {outcome.warnings.map((w, i) => (
+            <div key={i} style={{ color: 'var(--coral)' }}>
+              {w}
+            </div>
+          ))}
+        </div>
+      )}
+      {err && <div style={ERR}>{err}</div>}
+      {!canApply && !outcome && (
+        <p style={ERR}>Applying a structure isn&apos;t available from here.</p>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
+        {outcome ? (
+          <Btn tone="teal" size="sm" onClick={onClose}>
+            Done
+          </Btn>
+        ) : (
+          <>
+            <Btn tone="outline" size="sm" onClick={onClose} disabled={busy}>
+              Cancel
+            </Btn>
+            <Btn tone="teal" size="sm" onClick={apply} disabled={busy || !canApply}>
+              {busy ? 'Applying…' : `Apply structure v${live.version}`}
+            </Btn>
+          </>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 /* ─── Season run view ─── */
 
 export interface GenerateGroupPayload {
@@ -2031,11 +2673,27 @@ export function SeasonRunsPanel({
   onPatchRun,
   onGenerate,
   onDeleteRun,
+  structures = [],
+  onRebaseRun,
+  onFetchRun,
 }: {
   clubs: Club[];
   allLeagues: League[];
   allSeries: Series[];
   runs: SeasonRun[];
+  /**
+   * The LIVE structures from tenant config. A run plays its frozen snapshot; comparing
+   * against these is how the panel notices the operator has since published a newer
+   * version and offers to adopt it. Absent ⇒ no banner (nothing to compare against).
+   */
+  structures?: CompetitionStructure[];
+  /** POST /season-runs/:id/rebase. Absent ⇒ the banner explains but can't apply. */
+  onRebaseRun?: (
+    id: string,
+    body: { structureVersion: number; version: number },
+  ) => Promise<SeasonRun & { warnings?: string[] }>;
+  /** A fresh read of one run — the rebase flow refetches between stage regenerations. */
+  onFetchRun?: (id: string) => Promise<SeasonRun | undefined>;
   /**
    * The structures or season-runs fetch failed. Without this a loading failure renders as
    * "No season running" beside a Start CTA whose duplicate guard is checking an empty
@@ -2055,8 +2713,24 @@ export function SeasonRunsPanel({
   const [busyStage, setBusyStage] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  // The live structure under review, captured when the modal opens — once applied, the
+  // refetched run no longer shows a skew, and the outcome must stay on screen regardless.
+  const [reviewing, setReviewing] = useState<CompetitionStructure | null>(null);
+
   const active = runs.find((r) => r.id === activeId) ?? runs[0];
   const seriesById = (id: string) => allSeries.find((s) => s.id === id);
+  /** Every series a run generated for one stage, by the series' own back-reference. */
+  const seriesOfStage = (runId: string, specId: string) =>
+    allSeries.filter((s) => s.seasonRunId === runId && s.stageSpecId === specId);
+  // The operator has published a newer version of the structure this season froze.
+  // Newer only: an older live version (a restore?) is not something to "adopt".
+  const liveStructure = active
+    ? structures.find((s) => s.id === active.structureSnapshot.id)
+    : undefined;
+  const skew =
+    active && liveStructure && liveStructure.version > active.structureSnapshot.version
+      ? liveStructure
+      : undefined;
 
   const runContext = useMemo(() => {
     if (!active) return null;
@@ -2085,29 +2759,85 @@ export function SeasonRunsPanel({
     const participants = leagueParticipants(clubs, active.leagueKey, competition?.excludeTeamIds);
     const structure: CompetitionStructure = active.structureSnapshot;
     const calendar: SeasonCalendar = active.calendarSnapshot;
-    const materialisations = structure.stages.map((stage) => {
-      const stageRun = active.stages.find((s) => s.specId === stage.id);
-      return materialiseStage({
-        stage,
-        calendar,
-        context: {
-          registered: participants.map((p) => p.teamId),
-          seedOrder: participants.map((p) => p.teamId),
-          confirmed: stageRun?.groups.length ? stageRun.groups.map((g) => g.entrants) : undefined,
-          /*
-           * The groups of the stage this one's rule DRAWS FROM — the whole point of
-           * recording `fromStage`. A swap moves one side between two groups, so the
-           * suggestion has to start from where those groups actually ended up. Without
-           * it the prefill blocks the registered list into the right SIZES and calls
-           * that a proposal, which for a swap proposes relegating the entire top group.
-           */
-          priorGroups: derivedFromGroups(stage, active),
-        },
-        crossPoolQualifiers: crossPoolQualifiersFor(stage, structure.stages, active),
-      });
-    });
-    return { league, competition, participants, structure, calendar, materialisations };
+    // `stages` are the EFFECTIVE specs (pairing overrides applied), index-aligned with
+    // `structure.stages` and `materialisations`.
+    const { stages, materialisations } = materialiseRun(active, participants);
+    return { league, competition, participants, structure, calendar, stages, materialisations };
   }, [active, allLeagues, clubs]);
+
+  /** One generate payload per materialised group of `stage`, against `run`. */
+  function payloadsFor(
+    run: SeasonRun,
+    stage: StageSpec,
+    m: Extract<StageMaterialisation, { status: 'ready' }>,
+  ): GenerateGroupPayload[] {
+    return m.groups.map((g) => ({
+      run,
+      stage,
+      groupId: g.id,
+      groupLabel: g.label,
+      entrants: g.entrants,
+      fixtures: g.fixtures,
+      // A `manual` stage plans no rounds by design, so it has no first date — fall back
+      // to the block it plays in rather than sending '', which becomes an empty `gsi1sk`
+      // that real DynamoDB rejects (dynalite accepts it, so no test would catch it)
+      // part-way through a loop that has already written the earlier groups.
+      startDate:
+        g.plan.dates[0] ??
+        findBlock(run.calendarSnapshot, stage.schedule.blockIndex)?.start ??
+        todayIso(),
+      league: runContext?.league,
+      competition: runContext?.competition,
+    }));
+  }
+
+  /**
+   * Adopt the live structure, then regenerate the draft stages the admin opted in to.
+   *
+   * ONE STAGE AT A TIME, with a fresh read of the run before each. `onGenerate` patches
+   * the run with the version it is handed, so a loop over the snapshot the rebase
+   * returned would 409 on the second stage and leave the season half-regenerated. Each
+   * stage is also re-materialised from that fresh run — the one on screen still describes
+   * the OLD structure until the refetch lands.
+   */
+  async function applyRebase(
+    run: SeasonRun,
+    live: CompetitionStructure,
+    regenIds: string[],
+  ): Promise<RebaseOutcome> {
+    if (!onRebaseRun) throw new Error('Applying a structure is not available here');
+    const { warnings = [], ...rebased } = await onRebaseRun(run.id, {
+      structureVersion: live.version,
+      version: run.version,
+    });
+    const outcome: RebaseOutcome = { warnings, regenerated: [], skipped: [], failed: [] };
+    const participants = runContext?.participants ?? [];
+    let fresh: SeasonRun | undefined = rebased as SeasonRun;
+    for (const [k, id] of regenIds.entries()) {
+      if (k > 0) fresh = onFetchRun ? await onFetchRun(run.id).catch(() => undefined) : undefined;
+      const index = fresh?.structureSnapshot.stages.findIndex((s) => s.id === id) ?? -1;
+      const spec = fresh?.structureSnapshot.stages[index];
+      const name = spec?.name ?? live.stages.find((s) => s.id === id)?.name ?? id;
+      if (!fresh || !spec) {
+        outcome.failed.push(name);
+        continue;
+      }
+      const m = materialiseRun(fresh, participants).materialisations[index];
+      // Not generatable as it stands (waiting on entrants, or no longer fits its block):
+      // left for the admin on its card, where the pill says why.
+      if (m.status !== 'ready' || !m.fits) {
+        outcome.skipped.push(name);
+        continue;
+      }
+      try {
+        await onGenerate(payloadsFor(fresh, spec, m), fresh, spec);
+        outcome.regenerated.push(name);
+      } catch {
+        outcome.failed.push(name);
+      }
+    }
+    return outcome;
+  }
 
   async function confirmEntrants(
     run: SeasonRun,
@@ -2115,8 +2845,17 @@ export function SeasonRunsPanel({
     groups: string[][],
     carriedPoints: Record<string, number>,
     prefill: string[][],
+    pairing?: KnockoutPairing | 'default',
   ) {
     const accepted = JSON.stringify(prefill) === JSON.stringify(groups);
+    // The structure's own pairing needs no override — storing it would only pin this
+    // season to a value a later structure edit might change. `pairing` undefined means
+    // the form never offered the choice, so whatever is stored stands.
+    const structurePairing = stage.format.kind === 'knockout' ? stage.format.pairing : undefined;
+    const override =
+      pairing === undefined || pairing === 'default' || pairing === structurePairing
+        ? undefined
+        : pairing;
     const nextStages: StageRun[] = run.structureSnapshot.stages.map((s) => {
       const existing = run.stages.find((x) => x.specId === s.id);
       if (s.id !== stage.id)
@@ -2155,10 +2894,37 @@ export function SeasonRunsPanel({
           seriesId: existing?.groups?.[i]?.seriesId,
         })),
         ...(Object.keys(carriedPoints).length ? { carriedPoints } : {}),
+        // A pairing flip is NOT an entrant change, so it leaves `status` alone: the
+        // stage's materialisation now carries the new bracket, `diverged` sees it differ
+        // from the generated series, and the card says "Needs regenerating".
+        ...(pairing === undefined
+          ? existing?.pairingOverride
+            ? { pairingOverride: existing.pairingOverride }
+            : {}
+          : override
+            ? { pairingOverride: override }
+            : {}),
+        // Re-confirming entrants is not regenerating — a rebase's schedule marker stays
+        // until the fixtures are actually rebuilt (main.tsx clears it there).
+        ...(existing?.staleSchedule ? { staleSchedule: true } : {}),
         // `by` and `at` are OVERWRITTEN server-side from the authenticated caller — a
         // client-supplied actor is worthless as a governance record. Only `prefill` and
         // `accepted` are genuinely ours to report: the server never saw the suggestion.
-        audit: [...(existing?.audit ?? []), { at: '', by: '', prefill, accepted }],
+        // `pairing` is the bracket the union chose here, recorded whenever it was asked.
+        audit: [
+          ...(existing?.audit ?? []),
+          {
+            at: '',
+            by: '',
+            prefill,
+            accepted,
+            ...(pairing !== undefined
+              ? {
+                  pairing: pairing === 'default' ? (structurePairing ?? 'default') : pairing,
+                }
+              : {}),
+          },
+        ],
       };
     });
     // The version comes from the CURRENT run in props, not the one captured when the
@@ -2207,7 +2973,34 @@ export function SeasonRunsPanel({
   // the two calls always agreed since they share the exact same arguments, so the second
   // was pure waste, not a second opinion.
   const confirmingFeedsCrossPool =
-    confirming && feedsCrossPool(confirming.stage, runContext?.structure.stages ?? []);
+    !!confirming && feedsPoolKnockout(confirming.stage, runContext?.stages ?? []);
+  // The confirming stage as this season plays it (its pairing override applied).
+  const confirmingEffective =
+    confirming && runContext
+      ? runContext.stages.find((s) => s.id === confirming.stage.id)
+      : undefined;
+  /*
+   * Offer the semi-final pairing choice on a knockout fed by pools: one whose structure
+   * already names a pool pairing, or a seeded one whose source stage was confirmed as two
+   * or more groups (the union may still want those drawn by group this season).
+   */
+  const confirmingPairing = (() => {
+    if (!confirming || !runContext) return undefined;
+    const spec = confirming.stage;
+    const format = spec.format;
+    if (format.kind !== 'knockout') return undefined;
+    const source = crossPoolSourceStage(spec, runContext.structure.stages);
+    const pools = source
+      ? (confirming.run.stages.find((s) => s.specId === source.id)?.groups.length ?? 0)
+      : 0;
+    if (!isPoolKnockout(format) && pools < 2) return undefined;
+    return {
+      structureDefault: format.pairing,
+      override: confirming.run.stages.find((s) => s.specId === spec.id)?.pairingOverride,
+      run: confirming.run,
+      stages: runContext.structure.stages,
+    };
+  })();
 
   return (
     <>
@@ -2265,55 +3058,67 @@ export function SeasonRunsPanel({
               · {runContext.participants.length} sides registered
             </div>
 
-            {runContext.structure.stages.map((stage, i) => (
-              <StageCard
-                key={stage.id}
-                stage={stage}
-                index={i}
-                stageRun={active.stages.find((s) => s.specId === stage.id)}
-                materialisation={runContext.materialisations[i]}
-                seriesById={seriesById}
-                registered={runContext.participants.map((p) => p.teamId)}
-                busy={busyStage === stage.id}
-                onConfirm={() => setConfirming({ run: active, stage })}
-                onGenerate={async () => {
-                  const m = runContext.materialisations[i];
-                  // `fits` covers the empty-group case (see materialiseStage); re-check
-                  // it here so a stale render can't push a dateless series through.
-                  if (m.status !== 'ready' || !m.fits) return;
-                  setBusyStage(stage.id);
-                  try {
-                    // withToast in the caller has already surfaced the failure; swallow
-                    // the rejection here so it doesn't reach the console as unhandled.
-                    await onGenerate(
-                      m.groups.map((g) => ({
-                        run: active,
-                        stage,
-                        groupId: g.id,
-                        groupLabel: g.label,
-                        entrants: g.entrants,
-                        fixtures: g.fixtures,
-                        // A `manual` stage plans no rounds by design, so it has no first
-                        // date — fall back to the block it plays in rather than sending
-                        // '', which becomes an empty `gsi1sk` that real DynamoDB rejects
-                        // (dynalite accepts it, so no test would catch it) part-way
-                        // through a loop that has already written the earlier groups.
-                        startDate:
-                          g.plan.dates[0] ??
-                          findBlock(active.calendarSnapshot, stage.schedule.blockIndex)?.start ??
-                          todayIso(),
-                        league: runContext.league,
-                        competition: runContext.competition,
-                      })),
-                      active,
-                      stage,
-                    ).catch(() => {});
-                  } finally {
-                    setBusyStage(null);
-                  }
+            {skew && (
+              <div
+                style={{
+                  border: '1px solid var(--line)',
+                  borderLeft: '3px solid var(--accent, #C9A227)',
+                  borderRadius: 8,
+                  padding: '10px 12px',
+                  marginBottom: 12,
+                  fontSize: 13,
+                  lineHeight: 1.55,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 12,
+                  flexWrap: 'wrap',
                 }}
-              />
-            ))}
+              >
+                <span style={{ flex: 1, minWidth: 220 }}>
+                  This season runs structure v{active.structureSnapshot.version}; the template is
+                  now v{skew.version}.
+                </span>
+                <Btn tone="outline" size="sm" onClick={() => setReviewing(skew)}>
+                  Review changes
+                </Btn>
+              </div>
+            )}
+
+            {runContext.structure.stages.map((spec, i) => {
+              // The card shows the EFFECTIVE stage (pairing override applied), so its
+              // bracket, staleness and button agree with what generation will build.
+              const stage = runContext.stages[i];
+              const feeder = chainFeeder(stage, runContext.stages);
+              return (
+                <StageCard
+                  key={spec.id}
+                  stage={stage}
+                  index={i}
+                  stageRun={active.stages.find((s) => s.specId === spec.id)}
+                  materialisation={runContext.materialisations[i]}
+                  seriesById={seriesById}
+                  stageSeries={seriesOfStage(active.id, spec.id)}
+                  feederSeries={feeder ? seriesOfStage(active.id, feeder.id) : undefined}
+                  registered={runContext.participants.map((p) => p.teamId)}
+                  busy={busyStage === spec.id}
+                  onConfirm={() => setConfirming({ run: active, stage: spec })}
+                  onGenerate={async () => {
+                    const m = runContext.materialisations[i];
+                    // `fits` covers the empty-group case (see materialiseStage); re-check
+                    // it here so a stale render can't push a dateless series through.
+                    if (m.status !== 'ready' || !m.fits) return;
+                    setBusyStage(spec.id);
+                    try {
+                      // withToast in the caller has already surfaced the failure; swallow
+                      // the rejection here so it doesn't reach the console as unhandled.
+                      await onGenerate(payloadsFor(active, spec, m), active, spec).catch(() => {});
+                    } finally {
+                      setBusyStage(null);
+                    }
+                  }}
+                />
+              );
+            })}
 
             <div style={{ marginTop: 12 }}>
               {/* Confirmed, like every other delete in the console. This removes every
@@ -2362,6 +3167,17 @@ export function SeasonRunsPanel({
         </Modal>
       )}
 
+      {reviewing && active && (
+        <StructureReviewModal
+          run={active}
+          live={reviewing}
+          seriesOf={(specId) => seriesOfStage(active.id, specId)}
+          canApply={!!onRebaseRun}
+          onApply={(regenIds) => applyRebase(active, reviewing, regenIds)}
+          onClose={() => setReviewing(null)}
+        />
+      )}
+
       {confirming && runContext && (
         <Modal
           wide
@@ -2384,14 +3200,17 @@ export function SeasonRunsPanel({
             // Ask for finishing positions when the stage AFTER this one draws a
             // cross-pool bracket from it, OR when this stage is itself a seeded
             // knockout — there the position IS the seed line, not a downstream draw.
+            // Read off the EFFECTIVE stage: a pool knockout this season overrode to
+            // "seeded" takes its seed line from these positions too.
             ranked={
               confirmingFeedsCrossPool ||
-              (confirming.stage.format.kind === 'knockout' &&
-                confirming.stage.format.pairing === 'seeded')
+              (confirmingEffective?.format.kind === 'knockout' &&
+                confirmingEffective.format.pairing === 'seeded')
             }
             rankedReason={confirmingFeedsCrossPool ? 'cross-pool' : 'seeding'}
+            pairing={confirmingPairing}
             onCancel={() => setConfirming(null)}
-            onConfirm={(groups, carriedPoints) => {
+            onConfirm={(groups, carriedPoints, pairing) => {
               const m =
                 runContext.materialisations[
                   runContext.structure.stages.findIndex((s) => s.id === confirming.stage.id)
@@ -2412,6 +3231,7 @@ export function SeasonRunsPanel({
                 groups,
                 carriedPoints,
                 prefill,
+                pairing,
               );
             }}
           />

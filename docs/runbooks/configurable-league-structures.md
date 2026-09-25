@@ -128,6 +128,7 @@ New routes, all tenant-scoped and behind the usual membership middleware:
 | `PUT /venues/:id` · `DELETE /venues/:id`    | admin       |
 | `GET /season-runs` · `GET /season-runs/:id` | rep + admin |
 | `POST`/`PATCH`/`DELETE /season-runs[/:id]`  | admin       |
+| `POST /season-runs/:id/rebase`              | admin       |
 | `GET /tenant/config`                        | any member  |
 
 `GET /tenant/config` is new and is an explicit field allowlist, not the raw row — any tenant
@@ -206,11 +207,100 @@ Redeploy the previous build. **No data cleanup is required or wanted:**
 The one thing to know: a rolled-back console can still edit and release those series, so a
 partially-run season stays usable rather than stranded.
 
+## 7. Pool semis and structure rebase (added 2026-09-25)
+
+Within-group semis, `qualifiersPerGroup`, same-block chaining and the rebase route — see the
+[2026-09-25 ADR addendum](../architecture/0008-configurable-league-structures.md#addendum-2026-09-25-within-group-semis-counted-qualifiers-chained-stages-and-rebase).
+Every new field is optional; no migration. The rebase route is new, so **restart the local
+API** before walking this.
+
+### 7a. Walkthrough: ten teams, two pools, semis either way
+
+The EMCU Division 1 30 Over shape. Use real club names.
+
+1. **Structure.** Start from _Seeded pools → within-group semis → final_ or _Seeded pools →
+   cross-pool semis → final_ — it only sets the default pairing, and the union can switch
+   it per season at step 5. Pool stage: round robin, two groups (snake-seeded 10 ⇒ 5 + 5).
+2. **Knockout stage.** Entrants derive from the pool stage with **Qualifiers per group = 2**.
+   The preview now reads an exact 4 entrants and 2 rounds + final, not "up to".
+   Within-group accepts only 2 groups × 2 qualifiers in this version; anything else 400s
+   on save with that message.
+3. **Same block?** On a single-block calendar, a structure created from a template already
+   chains the knockout behind the pools (`startAfter: 'previous-stage'`) — nothing to
+   tick. On a two-block calendar the template puts the knockout in the second block
+   instead, unchained. A structure built by hand, or with both stages moved into one
+   block, needs **Start after the previous stage in this block** ticked on the knockout
+   stage, or it dates from the block start and overlaps the pools. Chained semis land on
+   the first playing date after the pools' last round, on the same weekday. If the
+   combined span doesn't fit the block, the fit verdict says so.
+4. **Run it.** Start the season, confirm pool entrants, generate, release as usual.
+5. **Confirm qualifiers.** Once the pools finish, record the finishing order in the pool
+   stage's **Position** column — that order is what A1/A2/B1/B2 mean. The knockout stage's
+   _Confirm entrants_ then prefills the top two of each pool in that order (non-qualifiers
+   are not re-added as late entries). Pick the **Semi-final pairing**:
+
+   | Choice                     | Semis                            |
+   | -------------------------- | -------------------------------- |
+   | Within-group               | A1 v A2, B1 v B2                 |
+   | Cross-group                | A1 v B2, B1 v A2                 |
+   | Structure default          | whichever the structure declares |
+   | Seeded over the full field | ignores pools                    |
+
+   The choice is stored on the season run (`pairingOverride`) and in the stage audit.
+   Changing it after generating flips the stage to **Needs regenerating**.
+
+6. **Generate.** Semis plus a final reading "Winner of Semi-final 1 v Winner of Semi-final
+   2" in the admin console **and** the club portal. If the stage card shows _Paired as a
+   seeded bracket, not within-group_, the confirmed positions don't line up with the
+   stage's entrants — fix them and regenerate.
+
+### 7b. Rebase: adopting a structure edit mid-season
+
+Editing a structure mints a new version; running seasons stay on their snapshot. The
+season console shows **This season runs structure v{old}; the template is now v{new}.**
+
+1. **Review changes.** Lists each stage as unchanged or changed, with the consequence: adopts
+   the new version, drafts will be regenerated, or released — you'll confirm before
+   fixtures are replaced. Any server warning (a knockout deriving from a stage that no
+   longer exists) shows here — fix the structure first rather than applying over it.
+2. **Draft regeneration is opt-in per stage** (default on). It rebuilds fixtures from
+   scratch: **allocated venues and hand-edited dates are lost.** Untick any draft stage
+   whose venues you've already worked on and regenerate it later, deliberately.
+3. **Apply structure v{new}.** On the server:
+   - entrant or group-label change ⇒ stage drops to _awaiting entrants_; confirm again (the
+     form prefills from the old grouping, kept in the audit);
+   - schedule change ⇒ **Needs regenerating**;
+   - format change ⇒ any per-season pairing choice is cleared (it's in the audit);
+   - stage removed ⇒ its run entry goes, **its series stay**;
+   - stage added ⇒ appears awaiting entrants.
+4. **Released stages** keep their pill and go through the normal released-schedule
+   confirm, then the server clash gate. Nothing released is replaced without a click.
+
+A 409 on apply means the structure changed again after you opened the review, or someone
+else changed the season. Refetch and review again.
+
+### 7c. Operational notes
+
+- **Regenerating a released series with residual venue clashes 409s** until those clashes
+  are fixed. A regenerate mints new fixture ids, so the in-season gate can't tell old
+  clashes from new ones. Fix the clashing fixtures (or the other series) first. By
+  design — there is no override.
+- **Orphaned series still hold their grounds.** A series left behind by a dropped stage or
+  group is no longer part of the season's plan but still occupies its ground-days in the tenant
+  clash ledger, and will 409 the release of its replacement. Delete it (after recalling,
+  if it was released) before releasing the new one — same ordering rule as
+  [Plan B's "prune before release"](planb-fixtures-import.md#ordering-consequence--prune-before-release).
+- **A stage reset to awaiting entrants keeps its series.** They stay under the same ids,
+  the stage card still finds them, and regenerating over the same groups replaces them
+  in place. If any are released, generate asks first, as it does anywhere else.
+- **Calendars are not rebased.** A calendar edit still doesn't reach a running season's
+  `calendarSnapshot`. Only standalone series follow a calendar edit on regenerate.
+
 ## Known limitations to communicate
 
 - **Standings are typed by a human.** There is no results model, so a stage that depends on
   finishing order asks an admin to confirm it, quoting the operator's own rule back at them.
-  Cross-pool draws need the pool stage's Position column filled in before the bracket means
-  anything.
+  Cross-pool and within-group draws need the pool stage's Position column filled in before
+  the bracket means anything. `qualifiersPerGroup` sets how many go through, not who.
 - **Scoring-platform sync is not built.** It is the client's stated P0 and remains blocked on
   which platform, what API, what auth, and how team identities map across the two systems.

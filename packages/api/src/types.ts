@@ -160,8 +160,10 @@ export type FormatSpec =
       /**
        * `seeded` = standard bracket from the entrant order (1 v n, 2 v n-1 …).
        * `cross-pool` = pool winners/runners-up paired across pools (A1 v B2, B1 v A2).
+       * `within-pool` = each pool's qualifiers meet each other first (A1 v A2, B1 v B2),
+       *   pool winners meet in the next round. v1: exactly 2 pools × 2 qualifiers.
        */
-      pairing: 'seeded' | 'cross-pool';
+      pairing: 'seeded' | 'cross-pool' | 'within-pool';
       thirdPlace?: boolean;
     }
   | { kind: 'single-match' }
@@ -188,6 +190,11 @@ export interface DerivationNote {
    * this, so it is an admin-entered handover value, never computed.
    */
   carryPoints?: boolean;
+  /**
+   * "Top q per group" of `fromStage`. Counted so the preview is exact and the confirm
+   * form can pre-fill — qualification itself is still admin-confirmed (no results model).
+   */
+  qualifiersPerGroup?: number;
 }
 
 /** How a stage's entrants divide into groups. */
@@ -233,6 +240,11 @@ export interface StageSchedule {
   roundsPerDay?: 1 | 2;
   /** Generate now, surface to clubs from this date (junior leagues). */
   activateFrom?: IsoDate;
+  /**
+   * Chain after the nearest earlier stage in the same block instead of starting at the
+   * block's start. Absent ⇒ block start (the pre-existing behaviour).
+   */
+  startAfter?: 'previous-stage';
 }
 
 /** What finishing where in this stage means — display and next-season carry. */
@@ -348,15 +360,32 @@ export interface StageRun {
    */
   carriedPoints?: Record<string, number>;
   /**
+   * Run-time knockout pairing chosen at qualifier confirmation, overriding the stage
+   * spec's `format.pairing`. Absent ⇒ the structure default.
+   */
+  pairingOverride?: 'seeded' | 'cross-pool' | 'within-pool';
+  /**
+   * Set by `POST /season-runs/:id/rebase` when the stage's schedule spec changed: the
+   * pairing-only divergence check never fires for date/cadence edits, so the server marks
+   * the stage "Needs regenerating" explicitly. Cleared by the client on regeneration.
+   */
+  staleSchedule?: boolean;
+  /**
    * Who confirmed this stage's entrants, when, what was proposed and whether they took
    * it. Relegation and points carry ride on these decisions, so the trail is a
    * governance requirement rather than a nicety.
+   *
+   * `event: 'rebase'` entries are written by the rebase route: `prefill` then holds the
+   * grouping the rebase cleared (so the confirm form can pre-fill from it) and `pairing`
+   * the run-time override it dropped, if any.
    */
   audit?: Array<{
     at: string;
     by: string;
     prefill: string[][];
     accepted: boolean;
+    event?: 'rebase';
+    pairing?: string;
   }>;
 }
 

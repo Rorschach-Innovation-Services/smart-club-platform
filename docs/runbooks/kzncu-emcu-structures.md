@@ -114,7 +114,7 @@ To author it in the Structures editor:
    named — the Cup stage still reads as a cross-pool knockout either way.
 
 What the admin sees at season time: because a later stage (the Cup) draws a cross-pool
-bracket from Pools, `feedsCrossPool` marks Pools as `ranked` — **Pools' own confirm
+bracket from Pools, `feedsPoolKnockout` marks Pools as `ranked` — **Pools' own confirm
 step**, not Streams' and not the Cup's, gets the **Position** column asking for each
 side's finishing position within its pool. That position is what the Cup's bracket reads
 (pool winner against another pool's runner-up) once the admin confirms the Cup stage

@@ -24,13 +24,28 @@ const CAL: SeasonCalendar = {
 const team = (n: number) => Array.from({ length: n }, (_, i) => `t${i + 1}`);
 
 describe('starter templates', () => {
+  // Four shapes, with the pools shape shipped once per semi-final pairing — unions go
+  // either way season to season, so neither should be a hand-edit of the other.
   it('ships the four shapes that cover every documented league', () => {
     expect(STRUCTURE_TEMPLATES.map((t) => t.id)).toEqual([
       'flat-round-robin',
       'split-league-swap',
       'pools-to-knockout',
+      'pools-to-knockout-within',
       'stream-and-cup',
     ]);
+  });
+
+  // The count is what makes the preview exact ("4 entrants") instead of "up to N rounds".
+  it('counts two qualifiers per pool on both pools-to-knockout variants', () => {
+    for (const id of ['pools-to-knockout', 'pools-to-knockout-within']) {
+      const finals = findTemplate(id)!.stages[1];
+      expect(finals.entrants.kind, id).toBe('manual');
+      if (finals.entrants.kind !== 'manual') continue;
+      expect(finals.entrants.derivedFrom?.qualifiersPerGroup, id).toBe(2);
+    }
+    const within = findTemplate('pools-to-knockout-within')!.stages[1];
+    expect(within.format).toEqual({ kind: 'knockout', pairing: 'within-pool' });
   });
 
   it('names real leagues so the choice is recognisable', () => {

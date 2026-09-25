@@ -906,3 +906,170 @@ describe('StructuresCard — deleting a bound structure cascades to its competit
     expect(screen.getByRole('row', { name: /flat one/i })).toBeInTheDocument();
   });
 });
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Pools → within-group semis → final (EMCU Division 1 30 Over).
+
+   Ten teams in two pools of five, the top two of each into semi-finals paired inside
+   their own pool (A1 v A2, B1 v B2), then a final — both stages sharing one block, the
+   semis chained after the pools. Three things the editor must get right: the new fields
+   survive a save, a declared qualifier count makes the preview EXACT (4 sides, 2 rounds,
+   3 fixtures — no "up to"), and the v1 2 × 2 shape rule shows inline before the server
+   400s it.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('pools → within-group semis', () => {
+  /** The rail's own "teams entered" box — the expanded pool stage's group-count box is
+      also a spinbutton, and comes first in the document. */
+  const railTeams = () => within(preview()).getByRole('spinbutton');
+  const pools = {
+    id: 'pools',
+    name: 'Pool stage',
+    format: { kind: 'round-robin', legs: 1 },
+    entrants: { kind: 'seeded-split', method: 'blocks', groups: { kind: 'even', count: 2 } },
+    schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+  };
+  /** `q: null` declares no qualifier count at all. */
+  const finals = (over: Record<string, unknown> = {}, q: number | null = 2) => ({
+    id: 'finals',
+    name: 'Semi-finals & final',
+    format: { kind: 'knockout', pairing: 'within-pool' },
+    entrants: {
+      kind: 'manual',
+      derivedFrom: {
+        rule: 'from-standings',
+        fromStage: 'pools',
+        detail: 'Top two from each pool',
+        ...(q === null ? {} : { qualifiersPerGroup: q }),
+      },
+    },
+    schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, startAfter: 'previous-stage' },
+    ...over,
+  });
+  const poolsStructure = (finalsStage = finals()) =>
+    structure({
+      id: 'pools-ko',
+      name: 'Pools to knockout',
+      stages: [pools, finalsStage],
+    } as unknown as Partial<CompetitionStructure>);
+
+  const dialog = () => screen.getByRole('dialog');
+  /** Expands the second stage — the first opens expanded, so it's the only "Edit". */
+  const editFinals = (user: ReturnType<typeof userEvent.setup>) =>
+    user.click(within(dialog()).getByRole('button', { name: /^edit$/i }));
+
+  it('previews the knockout at exactly the declared qualifiers, with no "up to"', async () => {
+    const { user } = setup([poolsStructure()]);
+    await openEditor(user, /pools to knockout/i);
+
+    await user.clear(railTeams());
+    await user.type(railTeams(), '10');
+
+    // 10 teams → 2 pools of 5 → top 2 each ⇒ one bracket of 4: two semis and a final.
+    expect(within(preview()).getByText(/2 groups of 5, 5 · 20 fixtures/)).toBeVisible();
+    expect(within(preview()).getByText(/1 group of 4 · 3 fixtures/)).toBeVisible();
+    expect(within(preview()).getByText(/exactly 4 sides/i)).toBeVisible();
+    expect(within(preview()).getByText(/2 rounds × weekly/i)).toBeVisible();
+    expect(within(preview()).queryByText(/up to/i)).toBeNull();
+    expect(within(preview()).queryByText(/sized by how many qualify/i)).toBeNull();
+    // The semis are placed after the pools, not on top of them — and both still fit.
+    expect(within(preview()).getByText(/after Pool stage/i)).toBeVisible();
+    expect(within(preview()).getByText(/✓ Fits · 23 fixtures across 2 stages/)).toBeVisible();
+  });
+
+  it('keeps the "up to" hedge, and flags the 2 × 2 rule, once the count is cleared', async () => {
+    const { user, save } = setup([poolsStructure()]);
+    await openEditor(user, /pools to knockout/i);
+    await editFinals(user);
+
+    await user.clear(screen.getByRole('spinbutton', { name: /qualifiers per group/i }));
+
+    expect(within(preview()).getByText(/sized by how many qualify/i)).toBeVisible();
+    expect(within(preview()).getByText(/up to/i)).toBeInTheDocument();
+    // Inline, before the server's 400 — in the rail and as a save-blocking error.
+    expect(
+      within(preview()).getByText(/within-group semi-finals need 2 groups × 2 qualifiers/i),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        '"Semi-finals & final": within-group semi-finals need 2 groups × 2 qualifiers in this version.',
+      ),
+    ).toBeVisible();
+    expect(saveBtn()).toBeDisabled();
+    await user.click(saveBtn());
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('round-trips within-group pairing, qualifiers per group and start-after through save', async () => {
+    // Start from a plain seeded knockout: no count, no chaining.
+    const { user, save } = setup([
+      poolsStructure(
+        finals(
+          {
+            format: { kind: 'knockout', pairing: 'seeded' },
+            schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+          },
+          null,
+        ),
+      ),
+    ]);
+    await openEditor(user, /pools to knockout/i);
+    await editFinals(user);
+
+    await user.selectOptions(
+      within(dialog()).getByRole('combobox', { name: /^format$/i }),
+      'Knockout — within-group',
+    );
+    // No count yet — the v1 shape rule says so straight away.
+    expect(saveBtn()).toBeDisabled();
+
+    await user.type(screen.getByRole('spinbutton', { name: /qualifiers per group/i }), '2');
+    const chain = screen.getByRole('checkbox', { name: /start after the previous stage/i });
+    expect(chain).toBeEnabled();
+    await user.click(chain);
+
+    expect(saveBtn()).toBeEnabled();
+    await user.click(saveBtn());
+
+    expect(save).toHaveBeenCalledTimes(1);
+    const saved = save.mock.calls[0][0].structures[0].stages[1];
+    expect(saved.format).toEqual({ kind: 'knockout', pairing: 'within-pool' });
+    expect(saved.entrants.derivedFrom.qualifiersPerGroup).toBe(2);
+    expect(saved.schedule.startAfter).toBe('previous-stage');
+  });
+
+  it('unticking start-after removes the key rather than writing a falsy value', async () => {
+    const { user, save } = setup([poolsStructure()]);
+    await openEditor(user, /pools to knockout/i);
+    await editFinals(user);
+
+    await user.click(screen.getByRole('checkbox', { name: /start after the previous stage/i }));
+    await user.click(saveBtn());
+
+    const saved = save.mock.calls[0][0].structures[0].stages[1];
+    expect('startAfter' in saved.schedule).toBe(false);
+  });
+
+  it('offers start-after only when an earlier stage shares the block', async () => {
+    const { user } = setup([
+      poolsStructure(finals({ schedule: { blockIndex: 1, cadence: { kind: 'weekly' } } })),
+    ]);
+    await openEditor(user, /pools to knockout/i);
+    await editFinals(user);
+
+    expect(
+      screen.getByRole('checkbox', { name: /start after the previous stage/i }),
+    ).toBeDisabled();
+    expect(screen.getByText(/no earlier stage plays this block/i)).toBeVisible();
+  });
+
+  it('counts a chained stage’s weeks on top of its feeder’s when checking the block', async () => {
+    // `otherCalendar`'s first block has six Sundays. 12 teams in two pools of 6 is 5
+    // rounds, and the chained 4-side bracket 2 more: each fits alone, together they don't.
+    const { user } = setup([poolsStructure()], { calendars: [otherCalendar] });
+    await openEditor(user, /pools to knockout/i);
+
+    expect(previewPicker()).toHaveValue('other');
+    expect(within(preview()).getByText(/don’t fit their block/i)).toBeVisible();
+  });
+});

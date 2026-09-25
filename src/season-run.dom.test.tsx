@@ -31,6 +31,7 @@ import type {
   League,
   SeasonCalendar,
   SeasonRun,
+  Series,
   StageSpec,
   TenantConfig,
 } from './types';
@@ -148,28 +149,46 @@ const run = (structure: CompetitionStructure, over: Partial<SeasonRun> = {}): Se
     ...over,
   }) as unknown as SeasonRun;
 
-const setup = (structure: CompetitionStructure, runs: SeasonRun[]) => {
+const setup = (
+  structure: CompetitionStructure,
+  runs: SeasonRun[],
+  opts: {
+    series?: Series[];
+    /** The LIVE structures — a newer version than the run's snapshot shows the banner. */
+    structures?: CompetitionStructure[];
+    onRebaseRun?: ReturnType<typeof vi.fn>;
+    onFetchRun?: ReturnType<typeof vi.fn>;
+  } = {},
+) => {
   const onPatchRun = vi.fn().mockResolvedValue(undefined);
   const onGenerate = vi.fn().mockResolvedValue(undefined);
   const onOpenLauncher = vi.fn();
   const onDeleteRun = vi.fn();
   const user = userEvent.setup();
-  const panel = (r: SeasonRun[]) => (
+  const panel = (r: SeasonRun[], series: Series[]) => (
     <SeasonRunsPanel
       clubs={clubs}
       allLeagues={[league(structure.id)]}
-      allSeries={[]}
+      allSeries={series}
       runs={r}
       onOpenLauncher={onOpenLauncher}
       onPatchRun={onPatchRun}
       onGenerate={onGenerate}
       onDeleteRun={onDeleteRun}
+      structures={opts.structures}
+      onRebaseRun={opts.onRebaseRun}
+      onFetchRun={opts.onFetchRun}
     />
   );
-  const { rerender } = render(panel(runs));
+  let currentSeries = opts.series ?? [];
+  const { rerender } = render(panel(runs, currentSeries));
   /** Re-render with a new `runs` array — same props otherwise — to see what the admin
-   *  sees after a PATCH actually lands, rather than only inspecting the call args. */
-  const rerenderRuns = (r: SeasonRun[]) => rerender(panel(r));
+   *  sees after a PATCH actually lands, rather than only inspecting the call args. Pass
+   *  `series` to also swap the series list (e.g. after a generate). */
+  const rerenderRuns = (r: SeasonRun[], series?: Series[]) => {
+    if (series) currentSeries = series;
+    rerender(panel(r, currentSeries));
+  };
   return { user, onPatchRun, onGenerate, onOpenLauncher, onDeleteRun, rerenderRuns };
 };
 
@@ -420,7 +439,7 @@ describe('cross-pool — the order inside a pool is load-bearing', () => {
    Seeded knockouts and non-adjacent cross-pool derivation (the Kingsmead shape) also
    get the Position column and ranked ordering — `ranked` in season-run.tsx is set for
    BOTH a stage that feeds a cross-pool draw AND a seeded knockout in its own right, and
-   `feedsCrossPool`/`crossPoolSourceStage` (structure.ts) resolve via
+   `feedsPoolKnockout`/`crossPoolSourceStage` (structure.ts) resolve via
    `derivedFrom.fromStage` past an intervening stage, not just the adjacent one.
    ───────────────────────────────────────────────────────────────────────────── */
 
@@ -733,6 +752,658 @@ describe('the audit trail — who decided the relegation', () => {
     const audit = onPatchRun.mock.calls[0][1].stages[0].audit;
     expect(audit).toHaveLength(2);
     expect(audit[0]).toMatchObject(prior);
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Semi-final pairing, chosen per season. The structure names a default (cross- or
+   within-group); the union may decide the other way when the qualifiers are confirmed.
+   The choice is stored on the StageRun as `pairingOverride` (omitted when it matches
+   the structure), recorded on the audit entry, and — because the stage's materialised
+   bracket now differs from the generated series — flips a generated stage to
+   "Needs regenerating".
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/** Two pools of six, top two from each into cross-group semis in the next block. */
+const POOLS_TOP_TWO: CompetitionStructure = {
+  id: 'pools-q2',
+  name: 'Pools → semis → final',
+  version: 1,
+  stages: [
+    stage({
+      id: 'pools',
+      name: 'Pools',
+      entrants: { kind: 'seeded-split', method: 'snake', groups: { kind: 'even', count: 2 } },
+      groupLabels: ['Pool A', 'Pool B'],
+    }),
+    stage({
+      id: 'semis',
+      name: 'Semi-finals',
+      format: { kind: 'knockout', pairing: 'cross-pool' },
+      entrants: {
+        kind: 'manual',
+        derivedFrom: {
+          rule: 'from-standings',
+          fromStage: 'pools',
+          detail: 'Top two from each pool',
+          qualifiersPerGroup: 2,
+        },
+      },
+      schedule: { blockIndex: 1, cadence: { kind: 'weekly' } },
+    }),
+  ],
+} as unknown as CompetitionStructure;
+
+const poolsConfirmed = {
+  specId: 'pools',
+  status: 'generated' as const,
+  groups: [
+    { id: 'g0', label: 'Pool A', entrants: ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'] },
+    { id: 'g1', label: 'Pool B', entrants: ['c7', 'c8', 'c9', 'c10', 'c11', 'c12'] },
+  ],
+  audit: [],
+};
+
+/** The card for one stage, found by its heading. */
+const cardFor = (name: RegExp) =>
+  screen.getByRole('heading', { name }).closest('div')!.parentElement!;
+
+/** The series a generate call would have written, from the payloads it was handed. */
+const seriesFromGenerate = (
+  call: unknown[],
+  over: Partial<Series> = {},
+): { series: Series[]; groups: Array<{ id: string; seriesId: string }> } => {
+  const [payloads, run, stageSpec] = call as [
+    Array<{ groupId: string; fixtures: unknown[]; entrants: string[] }>,
+    SeasonRun,
+    StageSpec,
+  ];
+  const series = payloads.map(
+    (p) =>
+      ({
+        id: `s-${run.id}-${stageSpec.id}-${p.groupId}`,
+        name: stageSpec.name,
+        fixtures: p.fixtures,
+        teams: p.entrants,
+        released: false,
+        seasonRunId: run.id,
+        stageSpecId: stageSpec.id,
+        groupId: p.groupId,
+        version: 1,
+        ...over,
+      }) as unknown as Series,
+  );
+  return {
+    series,
+    groups: payloads.map((p) => ({
+      id: p.groupId,
+      seriesId: `s-${run.id}-${stageSpec.id}-${p.groupId}`,
+    })),
+  };
+};
+
+describe('semi-final pairing — the union decides within- or cross-group per season', () => {
+  it('previews the first round live and stores the choice as a pairing override', async () => {
+    const { user, onPatchRun } = setup(POOLS_TOP_TWO, [
+      run(POOLS_TOP_TWO, { stages: [poolsConfirmed] }),
+    ]);
+    await openConfirm(user, /^Semi-finals$/);
+
+    // The structure's default is pre-selected, and its bracket is previewed: A1 v B2.
+    expect(within(dialog()).getByRole('radio', { name: /structure default/i })).toBeChecked();
+    expect(within(dialog()).getByText(/first round:/i).parentElement).toHaveTextContent(
+      /Club 1 v Club 8/,
+    );
+
+    await user.click(within(dialog()).getByRole('radio', { name: /^within-group$/i }));
+    // Now each pool's qualifiers meet each other first: A1 v A2, B1 v B2.
+    const preview = within(dialog()).getByText(/first round:/i).parentElement!;
+    expect(preview).toHaveTextContent(/Club 1 v Club 2/);
+    expect(preview).toHaveTextContent(/Club 7 v Club 8/);
+
+    await user.click(confirmBtn());
+    const semis = onPatchRun.mock.calls[0][1].stages.find(
+      (s: { specId: string }) => s.specId === 'semis',
+    );
+    expect(semis.pairingOverride).toBe('within-pool');
+    expect(semis.audit.at(-1).pairing).toBe('within-pool');
+  });
+
+  it('stores no override when the admin keeps the structure default', async () => {
+    const { user, onPatchRun } = setup(POOLS_TOP_TWO, [
+      run(POOLS_TOP_TWO, { stages: [poolsConfirmed] }),
+    ]);
+    await openConfirm(user, /^Semi-finals$/);
+    await user.click(confirmBtn());
+
+    const semis = onPatchRun.mock.calls[0][1].stages.find(
+      (s: { specId: string }) => s.specId === 'semis',
+    );
+    expect(semis).not.toHaveProperty('pairingOverride');
+    // Still recorded: the union was asked, and chose the default.
+    expect(semis.audit.at(-1).pairing).toBe('cross-pool');
+  });
+
+  it('flipping the pairing after generation marks the stage "Needs regenerating"', async () => {
+    const semisReady = {
+      specId: 'semis',
+      status: 'ready' as const,
+      groups: [{ id: 'g1', label: 'Group A', entrants: ['c1', 'c2', 'c7', 'c8'] }],
+      audit: [],
+    };
+    const { user, onGenerate, onPatchRun, rerenderRuns } = setup(POOLS_TOP_TWO, [
+      run(POOLS_TOP_TWO, { stages: [poolsConfirmed, semisReady] }),
+    ]);
+
+    // Generate the cross-group semis, then land them the way a real generate would.
+    await user.click(
+      within(cardFor(/^Semi-finals$/)).getByRole('button', { name: /generate \d+ fixtures/i }),
+    );
+    const { series, groups } = seriesFromGenerate(onGenerate.mock.calls[0]);
+    const generated = {
+      ...semisReady,
+      status: 'generated' as const,
+      groups: semisReady.groups.map((g) => ({
+        ...g,
+        seriesId: groups.find((x) => x.id === g.id)?.seriesId ?? groups[0].seriesId,
+      })),
+    };
+    rerenderRuns([run(POOLS_TOP_TWO, { stages: [poolsConfirmed, generated] })], series);
+    expect(within(cardFor(/^Semi-finals$/)).getByText('Generated')).toBeVisible();
+    expect(within(cardFor(/^Semi-finals$/)).queryByText(/needs regenerating/i)).toBeNull();
+
+    // Same qualifiers, different pairing — no entrant changed, so only the bracket moved.
+    await openConfirm(user, /^Semi-finals$/);
+    await user.click(within(dialog()).getByRole('radio', { name: /^within-group$/i }));
+    await user.click(confirmBtn());
+    const patch = onPatchRun.mock.calls[0][1];
+    expect(patch.stages.find((s: { specId: string }) => s.specId === 'semis').status).toBe(
+      'generated',
+    );
+
+    rerenderRuns([run(POOLS_TOP_TWO, { stages: patch.stages })]);
+    const card = cardFor(/^Semi-finals$/);
+    expect(within(card).getByText(/needs regenerating/i)).toBeVisible();
+    expect(within(card).getByRole('button', { name: /regenerate \d+ fixtures/i })).toBeVisible();
+  });
+
+  it('disables Within-group when the pools on screen cannot be drawn that way', async () => {
+    // Three pools: within-group needs a power-of-two number of them.
+    const THREE_POOLS = {
+      ...POOLS_TOP_TWO,
+      id: 'pools-3',
+      stages: [
+        {
+          ...POOLS_TOP_TWO.stages[0],
+          entrants: { kind: 'seeded-split', method: 'snake', groups: { kind: 'even', count: 3 } },
+          groupLabels: ['Pool A', 'Pool B', 'Pool C'],
+        },
+        POOLS_TOP_TWO.stages[1],
+      ],
+    } as unknown as CompetitionStructure;
+    const threeConfirmed = {
+      specId: 'pools',
+      status: 'generated' as const,
+      groups: [
+        { id: 'g0', label: 'Pool A', entrants: ['c1', 'c2', 'c3', 'c4'] },
+        { id: 'g1', label: 'Pool B', entrants: ['c5', 'c6', 'c7', 'c8'] },
+        { id: 'g2', label: 'Pool C', entrants: ['c9', 'c10', 'c11', 'c12'] },
+      ],
+      audit: [],
+    };
+    const semisReady = {
+      specId: 'semis',
+      status: 'ready' as const,
+      groups: [{ id: 'g1', label: 'Group A', entrants: ['c1', 'c2', 'c5', 'c6', 'c9', 'c10'] }],
+      audit: [],
+    };
+    const { user } = setup(THREE_POOLS, [
+      run(THREE_POOLS, { stages: [threeConfirmed, semisReady] }),
+    ]);
+    await openConfirm(user, /^Semi-finals$/);
+
+    expect(within(dialog()).getByRole('radio', { name: /^within-group$/i })).toBeDisabled();
+    expect(within(dialog()).getByRole('radio', { name: /^cross-group$/i })).toBeEnabled();
+    expect(within(dialog()).getByText(/within-group is unavailable/i)).toBeVisible();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Schedule staleness from a structure rebase. The server marks `staleSchedule` on any
+   stage whose schedule spec changed — even one with nothing generated yet — so the card
+   only surfaces it once there are series to rebuild.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+const ONE_STAGE: CompetitionStructure = {
+  id: 'flat',
+  name: 'One round robin',
+  version: 1,
+  stages: [stage({ id: 'league', name: 'League' })],
+} as unknown as CompetitionStructure;
+
+describe('a rebase-changed schedule — "Needs regenerating" only once there are fixtures', () => {
+  it('ignores the marker before generation, then shows it over generated series', async () => {
+    const readyStage = { specId: 'league', status: 'ready' as const, groups: [], audit: [] };
+    const { user, onGenerate, rerenderRuns } = setup(ONE_STAGE, [
+      run(ONE_STAGE, { stages: [{ ...readyStage, staleSchedule: true }] }),
+    ]);
+
+    // Nothing generated: generating simply uses the new schedule, nothing is stale.
+    expect(screen.queryByText(/needs regenerating/i)).toBeNull();
+    expect(screen.getByText(/ready to generate/i)).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: /generate \d+ fixtures/i }));
+    const { series, groups } = seriesFromGenerate(onGenerate.mock.calls[0]);
+    const generated = {
+      specId: 'league',
+      status: 'generated' as const,
+      groups: groups.map((g) => ({
+        id: g.id,
+        label: 'Group A',
+        entrants: [],
+        seriesId: g.seriesId,
+      })),
+      audit: [],
+    };
+
+    // Generated, same pairings, no marker: plain "Generated".
+    rerenderRuns([run(ONE_STAGE, { stages: [generated] })], series);
+    expect(screen.getByText('Generated')).toBeVisible();
+    expect(screen.queryByText(/needs regenerating/i)).toBeNull();
+
+    // Generated AND marked: the pairings still match, so only the marker can say so.
+    rerenderRuns([run(ONE_STAGE, { stages: [{ ...generated, staleSchedule: true }] })]);
+    expect(screen.getByText(/needs regenerating/i)).toBeVisible();
+    expect(screen.getByText(/schedule for this stage changed/i)).toBeVisible();
+    expect(screen.getByRole('button', { name: /regenerate \d+ fixtures/i })).toBeVisible();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   A chained stage (`startAfter: 'previous-stage'`) must start after its feeder, so a
+   feeder regenerate that pushes the feeder later can run into it while every pairing
+   stays put. The check is an ACTUAL overlap — the chained stage's earliest fixture on or
+   before the feeder's latest — so a hand-rescheduled fixture never flags on its own.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('a chained stage notices when its feeder now runs into its fixtures', () => {
+  const chainedStructure = (startAfter: boolean): CompetitionStructure =>
+    ({
+      id: 'chain',
+      name: 'League then play-off',
+      version: 1,
+      stages: [
+        stage({ id: 'league', name: 'League' }),
+        stage({
+          id: 'playoff',
+          name: 'Play-off',
+          entrants: { kind: 'manual' },
+          schedule: {
+            blockIndex: 0,
+            cadence: { kind: 'weekly' },
+            ...(startAfter ? { startAfter: 'previous-stage' } : {}),
+          },
+        }),
+      ],
+    }) as unknown as CompetitionStructure;
+
+  const playoffReady = {
+    specId: 'playoff',
+    status: 'ready' as const,
+    groups: [{ id: 'g1', label: 'Group A', entrants: ['c1', 'c2'] }],
+    audit: [],
+  };
+
+  /**
+   * Generate the play-off, then land its series — every fixture moved to `playoffDate`
+   * when given — alongside a feeder (league) series whose last round is `feederLast`
+   * (`'playoff-start'` puts it on the play-off's own opening date).
+   */
+  const generateThenLand = async (
+    startAfter: boolean,
+    { playoffDate, feederLast }: { playoffDate?: string; feederLast: string | 'playoff-start' },
+  ) => {
+    const structure = chainedStructure(startAfter);
+    const { user, onGenerate, rerenderRuns } = setup(structure, [
+      run(structure, { stages: [playoffReady] }),
+    ]);
+    await user.click(
+      within(cardFor(/^Play-off$/)).getByRole('button', { name: /generate \d+ fixtures/i }),
+    );
+    const { series, groups } = seriesFromGenerate(onGenerate.mock.calls[0]);
+    const playoff = series.map(
+      (s) =>
+        ({
+          ...s,
+          fixtures: (s.fixtures as Array<Record<string, unknown>>).map((f) =>
+            playoffDate ? { ...f, date: playoffDate } : f,
+          ),
+        }) as unknown as Series,
+    );
+    const playoffStart = playoff
+      .flatMap((s) => (s.fixtures as Array<{ date?: string }>).map((f) => f.date!))
+      .sort()[0];
+    const feeder = {
+      id: 's-run-1-league-g-league',
+      name: 'League',
+      teams: ['c1', 'c2', 'c3', 'c4'],
+      fixtures: [
+        { round: 1, home: 'c1', away: 'c2', date: '2026-09-12' },
+        {
+          round: 2,
+          home: 'c3',
+          away: 'c4',
+          date: feederLast === 'playoff-start' ? playoffStart : feederLast,
+        },
+      ],
+      released: false,
+      seasonRunId: 'run-1',
+      stageSpecId: 'league',
+      groupId: 'g-league',
+      version: 1,
+    } as unknown as Series;
+    rerenderRuns(
+      [
+        run(structure, {
+          stages: [
+            {
+              ...playoffReady,
+              status: 'generated',
+              groups: playoffReady.groups.map((g) => ({ ...g, seriesId: groups[0].seriesId })),
+            },
+          ],
+        }),
+      ],
+      [feeder, ...playoff],
+    );
+  };
+
+  it('flags a chained stage once its regenerated feeder runs into its fixtures', async () => {
+    // The feeder's last round now lands on the play-off's opening date.
+    await generateThenLand(true, { feederLast: 'playoff-start' });
+    const card = cardFor(/^Play-off$/);
+    expect(within(card).getByText(/needs regenerating/i)).toBeVisible();
+    expect(
+      within(card).getByText(/the stage this one follows now runs into these fixtures/i),
+    ).toBeVisible();
+  });
+
+  it('leaves a chained stage alone when its own opener is merely rescheduled later', async () => {
+    // A rained-off play-off pushed into December, well clear of the feeder's last round.
+    await generateThenLand(true, { playoffDate: '2026-12-05', feederLast: '2026-09-19' });
+    const card = cardFor(/^Play-off$/);
+    expect(within(card).queryByText(/needs regenerating/i)).toBeNull();
+    expect(within(card).getByText('Generated')).toBeVisible();
+  });
+
+  it('never flags an unchained stage, even when it overlaps the stage before it', async () => {
+    await generateThenLand(false, { feederLast: 'playoff-start' });
+    const card = cardFor(/^Play-off$/);
+    expect(within(card).queryByText(/needs regenerating/i)).toBeNull();
+    expect(within(card).getByText('Generated')).toBeVisible();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Rebase — adopting a newer structure version. The run keeps its snapshot until an admin
+   reviews the diff and applies it; drafts regenerate one stage at a time, with a fresh
+   read of the run between stages (each generate patches the run with the version it was
+   handed, so a loop over one snapshot would 409 on the second stage).
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('rebase — review and apply a newer structure version', () => {
+  const TWO_STAGES_V1: CompetitionStructure = {
+    id: 'two',
+    name: 'League and cup',
+    version: 1,
+    stages: [
+      stage({ id: 'league', name: 'League' }),
+      stage({ id: 'cup', name: 'Cup', schedule: { blockIndex: 1, cadence: { kind: 'weekly' } } }),
+    ],
+  } as unknown as CompetitionStructure;
+  /** v2: both stages move to Saturday + Sunday — a schedule change, fixtures must move. */
+  const TWO_STAGES_V2: CompetitionStructure = {
+    ...TWO_STAGES_V1,
+    version: 2,
+    stages: TWO_STAGES_V1.stages.map((s) => ({
+      ...s,
+      schedule: { ...s.schedule, cadence: { kind: 'weekdays', days: [0, 6] } },
+    })),
+  } as unknown as CompetitionStructure;
+
+  const generatedStage = (specId: string) => ({
+    specId,
+    status: 'generated' as const,
+    groups: [{ id: 'g1', label: 'Group A', entrants: [], seriesId: `ser-${specId}` }],
+    audit: [],
+  });
+  const draft = (specId: string, over: Partial<Series> = {}) =>
+    ({
+      id: `ser-${specId}`,
+      name: specId,
+      fixtures: [],
+      released: false,
+      seasonRunId: 'run-1',
+      stageSpecId: specId,
+      groupId: 'g1',
+      version: 1,
+      ...over,
+    }) as unknown as Series;
+  const v1Run = () =>
+    run(TWO_STAGES_V1, { stages: [generatedStage('league'), generatedStage('cup')] });
+  const rebased = (version: number) =>
+    run(TWO_STAGES_V2, {
+      version,
+      stages: [
+        { ...generatedStage('league'), staleSchedule: true },
+        { ...generatedStage('cup'), staleSchedule: true },
+      ],
+    });
+
+  it('shows no banner while the run is on the live version', () => {
+    setup(TWO_STAGES_V1, [v1Run()], { structures: [TWO_STAGES_V1] });
+    expect(screen.queryByText(/the template is now/i)).toBeNull();
+  });
+
+  it('applies v2 and regenerates each draft stage against a freshly read run', async () => {
+    const onRebaseRun = vi.fn().mockResolvedValue(rebased(2));
+    const onFetchRun = vi.fn().mockResolvedValue(rebased(3));
+    const { user, onGenerate } = setup(TWO_STAGES_V1, [v1Run()], {
+      series: [draft('league'), draft('cup')],
+      structures: [TWO_STAGES_V2],
+      onRebaseRun,
+      onFetchRun,
+    });
+
+    expect(screen.getByText(/runs structure v1; the template is now v2/i)).toBeVisible();
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+
+    // Both stages changed their schedule, and every series is a draft: offered, ticked.
+    expect(within(dialog()).getAllByText(/changed · schedule/i)).toHaveLength(2);
+    expect(within(dialog()).getAllByText(/drafts will be regenerated/i)).toHaveLength(2);
+    expect(within(dialog()).getByRole('checkbox', { name: /league/i })).toBeChecked();
+    expect(within(dialog()).getByText(/venues and any dates you changed by hand are lost/i));
+    expect(within(dialog()).getByText(/keep occupying their grounds/i)).toBeVisible();
+
+    await user.click(within(dialog()).getByRole('button', { name: /apply structure v2/i }));
+
+    expect(onRebaseRun).toHaveBeenCalledWith('run-1', { structureVersion: 2, version: 1 });
+    expect(onGenerate).toHaveBeenCalledTimes(2);
+    // Stage one generates against the run the rebase returned…
+    const [, firstRun, firstStage] = onGenerate.mock.calls[0];
+    expect(firstRun.version).toBe(2);
+    expect(firstStage.id).toBe('league');
+    expect(firstStage.schedule.cadence.kind).toBe('weekdays');
+    // …stage two against a FRESH read, not the snapshot stage one already moved on.
+    expect(onFetchRun).toHaveBeenCalledTimes(1);
+    const [, secondRun, secondStage] = onGenerate.mock.calls[1];
+    expect(secondRun.version).toBe(3);
+    expect(secondStage.id).toBe('cup');
+
+    expect(within(dialog()).getByRole('status')).toHaveTextContent(/regenerated: league, cup/i);
+  });
+
+  it('leaves an unticked stage’s drafts alone and shows the server’s warnings', async () => {
+    const onRebaseRun = vi.fn().mockResolvedValue({
+      ...rebased(2),
+      warnings: ['"Cup" derives from a stage that no longer exists'],
+    });
+    const { user, onGenerate } = setup(TWO_STAGES_V1, [v1Run()], {
+      series: [draft('league'), draft('cup')],
+      structures: [TWO_STAGES_V2],
+      onRebaseRun,
+      onFetchRun: vi.fn(),
+    });
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+    await user.click(within(dialog()).getByRole('checkbox', { name: /cup/i }));
+    await user.click(within(dialog()).getByRole('button', { name: /apply structure v2/i }));
+
+    expect(onGenerate).toHaveBeenCalledTimes(1);
+    expect(onGenerate.mock.calls[0][2].id).toBe('league');
+    expect(within(dialog()).getByText(/derives from a stage that no longer exists/i)).toBeVisible();
+  });
+
+  it('never offers to auto-regenerate a released stage — it keeps the confirm path', async () => {
+    const onRebaseRun = vi.fn();
+    const { user } = setup(TWO_STAGES_V1, [v1Run()], {
+      // The released series is found by its own run/stage back-reference.
+      series: [draft('league', { released: true }), draft('cup')],
+      structures: [TWO_STAGES_V2],
+      onRebaseRun,
+    });
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+    expect(
+      within(dialog()).getByText(/released — you’ll confirm before fixtures are replaced/i),
+    ).toBeVisible();
+    expect(within(dialog()).queryByRole('checkbox', { name: /league/i })).toBeNull();
+    expect(within(dialog()).getByRole('checkbox', { name: /cup/i })).toBeChecked();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   A rebase that changes a stage's entrant spec clears its groups — and the seriesId
+   back-pointers with them. The series survive under deterministic ids, so the next
+   generate rewrites them in place. The released-schedule prompt must still fire: the
+   card finds the series by their own `seasonRunId` / `stageSpecId`.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('a rebase-cleared stage re-confirms from where the season actually was', () => {
+  const entrantRebase = {
+    at: '2026-09-20T09:00:00.000Z',
+    by: 'admin@union',
+    // Deliberately not registration order — the registered list would put
+    // Club 1 in the Top Six.
+    prefill: [
+      ['c7', 'c8', 'c9', 'c10', 'c11', 'c12'],
+      ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'],
+    ],
+    accepted: false,
+    event: 'rebase' as const,
+  };
+  // A later schedule- or wording-only rebase appends an entry with nothing to prefill.
+  const scheduleRebase = {
+    at: '2026-09-22T09:00:00.000Z',
+    by: 'admin@union',
+    prefill: [],
+    accepted: false,
+    event: 'rebase' as const,
+  };
+
+  it.each([
+    ['a single rebase entry', [entrantRebase]],
+    ['a later rebase with an empty prefill', [entrantRebase, scheduleRebase]],
+  ])('pre-fills the confirm form from the grouping the rebase cleared (%s)', async (_, audit) => {
+    const { user } = setup(SPLIT_LEAGUE, [
+      run(SPLIT_LEAGUE, {
+        stages: [
+          {
+            specId: 'double-round',
+            status: 'awaiting-entrants',
+            groups: [],
+            audit,
+          },
+        ],
+      }),
+    ]);
+    await openConfirm(user, /^Double round$/);
+
+    const pickerFor = (side: string) => {
+      const row = within(dialog())
+        .getAllByRole('row')
+        .find((r) => r.textContent?.startsWith(side));
+      const sel = within(row!).getByRole('combobox') as HTMLSelectElement;
+      return sel.options[sel.selectedIndex].text;
+    };
+    expect(pickerFor('Club 7')).toBe('Top Six');
+    expect(pickerFor('Club 1')).toBe('Bottom Six');
+    // The rebase entry is not a confirmation, and must not read as one.
+    expect(screen.queryByText(/entrants confirmed by admin@union/i)).toBeNull();
+  });
+});
+
+describe('a rebase-cleared stage still protects its released series', () => {
+  const POOLS_ONLY: CompetitionStructure = {
+    id: 'pools-only',
+    name: 'Two pools',
+    version: 2,
+    stages: [
+      stage({
+        id: 'pools',
+        name: 'Pools',
+        entrants: { kind: 'seeded-split', method: 'snake', groups: { kind: 'even', count: 2 } },
+        groupLabels: ['Pool A', 'Pool B'],
+      }),
+    ],
+  } as unknown as CompetitionStructure;
+
+  it('asks before regenerating over a released series it has no back-pointer to', async () => {
+    const released = {
+      id: 's-run-1-pools-g1',
+      name: 'Premier League · Pools · Pool A',
+      fixtures: [],
+      released: true,
+      seasonRunId: 'run-1',
+      stageSpecId: 'pools',
+      groupId: 'g1',
+      version: 4,
+    } as unknown as Series;
+    const { user, onGenerate } = setup(
+      POOLS_ONLY,
+      [
+        run(POOLS_ONLY, {
+          stages: [
+            {
+              specId: 'pools',
+              status: 'awaiting-entrants',
+              groups: [],
+              audit: [
+                {
+                  at: '2026-09-20T09:00:00.000Z',
+                  by: 'admin@union',
+                  prefill: [
+                    ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'],
+                    ['c7', 'c8', 'c9', 'c10', 'c11', 'c12'],
+                  ],
+                  accepted: false,
+                  event: 'rebase',
+                },
+              ],
+            },
+          ],
+        }),
+      ],
+      { series: [released] },
+    );
+
+    // The series exist, so this is a REgenerate, and it says so.
+    expect(screen.getByText(/needs regenerating/i)).toBeVisible();
+    await user.click(screen.getByRole('button', { name: /regenerate \d+ fixtures/i }));
+
+    expect(screen.getByRole('dialog', { name: /regenerate a released schedule/i })).toBeVisible();
+    expect(onGenerate).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: /replace the fixtures/i }));
+    expect(onGenerate).toHaveBeenCalledTimes(1);
   });
 });
 

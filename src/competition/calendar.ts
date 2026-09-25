@@ -124,6 +124,15 @@ export interface DatePlanRequest {
   startDate?: IsoDate;
   /** 2 ⇒ plan half as many DAYS and run two rounds (AM + PM) on each. Absent/1 ⇒ unchanged. */
   roundsPerDay?: 1 | 2;
+  /**
+   * Earliest date a round may use (inclusive) WITHOUT moving the cadence's anchor.
+   *
+   * Differs from `startDate` on purpose: `weekly`/`every-n-weeks` stride from the start,
+   * so starting a chained stage the day after a Saturday feeder would anchor every round
+   * on Sundays. This keeps the candidates anchored where they would have been (the
+   * block start, or `startDate`) and only skips the ones before this date.
+   */
+  notBefore?: IsoDate;
 }
 
 /**
@@ -353,6 +362,12 @@ export function planRoundDates(req: DatePlanRequest): DatePlan {
   if (requestedStart > block.end)
     return empty(`That start date is after ${block.label} ends (${formatIsoDate(block.end)})`);
   const from = requestedStart < block.start ? block.start : requestedStart;
+  // The chaining floor. Invalid ⇒ ignored, like a malformed `startDate`. A floor past the
+  // block's end leaves nothing to plan in, which is a real overflow — say so plainly
+  // rather than reporting "fits none at this cadence" about a cadence that is fine.
+  const floor = isValidIsoDate(req.notBefore) ? (req.notBefore as IsoDate) : undefined;
+  if (floor && floor > block.end)
+    return empty(`Nothing left in ${block.label} on or after ${formatIsoDate(floor)}`);
 
   // A double-header plans DAYS, then fans each day out into its two rounds — the day
   // machinery below (spreadDates / candidateDates) is untouched and still produces one
@@ -365,11 +380,22 @@ export function planRoundDates(req: DatePlanRequest): DatePlan {
   const skipped: SkippedDate[] = [];
   let dayDates: IsoDate[];
   if (cadence.kind === 'spread') {
-    dayDates = spreadDates(calendar, block, from, daysNeeded, skipped);
+    // `spread` has no weekday anchor to preserve — it spaces rounds across whatever span
+    // it is given — so the floor simply becomes its start.
+    dayDates = spreadDates(
+      calendar,
+      block,
+      floor && floor > from ? floor : from,
+      daysNeeded,
+      skipped,
+    );
   } else {
     dayDates = [];
     for (const candidate of candidateDates(block, from, cadence)) {
       if (dayDates.length >= daysNeeded) break;
+      // Before the floor is not "skipped" — nothing blocked it, it just belongs to the
+      // stage this one follows — so it stays out of `skipped` and the summary.
+      if (floor && candidate < floor) continue;
       const reason = blockedReason(calendar, candidate);
       if (reason) {
         skipped.push({ date: candidate, reason });

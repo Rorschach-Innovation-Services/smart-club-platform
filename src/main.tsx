@@ -718,6 +718,24 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       .then(() => invalidate(qk.seasonRuns()))
       .catch(() => {});
   }
+  // Adopt the live structure version (POST /season-runs/:id/rebase). `rawConflict` so a
+  // 409 reads as the server's own "the structure changed since you reviewed it" rather
+  // than the generic series-conflict line.
+  function rebaseSeasonRun(id, body) {
+    return withToast(() => api.rebaseSeasonRun(id, body), 'Could not apply the structure', {
+      invalidate: [qk.seasonRuns()],
+      rawConflict: true,
+    }).then((r) => {
+      invalidate(qk.seasonRuns());
+      return r;
+    });
+  }
+  // A fresh read of ONE run, straight from the server — the rebase flow regenerates
+  // stages one after another, and each generate patches the run with the version it was
+  // handed, so every stage after the first needs the version the previous one left.
+  function fetchSeasonRun(id) {
+    return api.getSeasonRun(id);
+  }
   /**
    * Materialise one stage into Series — one per group (ADR 0008), so every downstream
    * path (approval, release, broadcast, travel cost) is the existing tested one. The run
@@ -773,8 +791,8 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
           ...(stage.schedule.slots?.length ? { slots: stage.schedule.slots } : {}),
           // Persisted for addFixture + validation parity on THIS stored series — a stage
           // regenerate reads roundsPerDay off the structureSnapshot instead, so a season
-          // run started before a structure edit deliberately keeps its own snapshot
-          // rather than picking up the edit (runbook-documented, not a bug).
+          // run keeps its own snapshot until an admin explicitly adopts a newer structure
+          // version (POST /season-runs/:id/rebase, the Seasons panel's "Review changes").
           ...(stage.schedule.roundsPerDay === 2 ? { roundsPerDay: 2 } : {}),
         },
         ...(stage.schedule.activateFrom ? { activateFrom: stage.schedule.activateFrom } : {}),
@@ -837,8 +855,12 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       const base = cur.groups.length
         ? cur.groups
         : payloads.map((p) => ({ id: p.groupId, label: p.groupLabel, entrants: p.entrants }));
+      // Regenerating IS the catch-up a rebase's `staleSchedule` marker asks for, so the
+      // marker goes with it — carried along by the spread, it would pin the stage on
+      // "Needs regenerating" over fixtures that were just rebuilt on the new schedule.
+      const { staleSchedule: _stale, ...rest } = cur;
       return {
-        ...cur,
+        ...rest,
         status: 'generated',
         groups: base.map((g) => ({
           ...g,
@@ -1076,6 +1098,8 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   createSeasonRun,
                   patchSeasonRun,
                   deleteSeasonRun,
+                  rebaseSeasonRun,
+                  fetchSeasonRun,
                   generateStageSeries,
                   toastShow,
                   onboarded,
@@ -1145,6 +1169,8 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   createSeasonRun,
                   patchSeasonRun,
                   deleteSeasonRun,
+                  rebaseSeasonRun,
+                  fetchSeasonRun,
                   generateStageSeries,
                   toastShow,
                   onboarded,
@@ -1223,6 +1249,8 @@ function Shell({
   createSeasonRun,
   patchSeasonRun,
   deleteSeasonRun,
+  rebaseSeasonRun,
+  fetchSeasonRun,
   generateStageSeries,
   toastShow,
   onboarded,
@@ -2617,6 +2645,8 @@ function Shell({
             onCreateSeasonRun={createSeasonRun}
             onPatchSeasonRun={patchSeasonRun}
             onDeleteSeasonRun={deleteSeasonRun}
+            onRebaseSeasonRun={rebaseSeasonRun}
+            onFetchSeasonRun={fetchSeasonRun}
             onGenerateStageSeries={generateStageSeries}
           />
         );

@@ -1,7 +1,8 @@
 /**
  * Starter structure templates.
  *
- * Four blueprints cover all thirteen structures in the KZNCU and EMCU documents. An
+ * Four shapes cover all thirteen structures in the KZNCU and EMCU documents; the pools
+ * shape ships twice, once per semi-final pairing, so there are five blueprints. An
  * operator clones one and tunes the parameters, or builds from scratch — a template is a
  * starting point, never a constraint (ADR 0008). `templateId` survives on the clone as
  * provenance only; nothing reads it back to constrain editing.
@@ -112,9 +113,45 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
             rule: 'from-standings',
             fromStage: 'pools',
             detail: 'Top two from each pool, paired across pools',
+            qualifiersPerGroup: 2,
           },
         },
         schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, slots: T20_SLOTS },
+        outcome: { champion: [1] },
+      },
+    ],
+  },
+  {
+    // The same shape with the other semi-final pairing. Unions go either way season to
+    // season (EMCU Division 1 30 Over), so both are one click from the picker rather than
+    // one being a hand-edit of the other.
+    id: 'pools-to-knockout-within',
+    name: 'Seeded pools → within-group semis → final',
+    whenToUse:
+      'Seeded pools play a round robin, then each pool’s top two play their own semi-final and the winners meet in the final.',
+    examples: 'EMCU Division 1 30 Over — ten teams in two pools of five',
+    stages: [
+      {
+        id: 'pools',
+        name: 'Pool stage',
+        format: { kind: 'round-robin', legs: 1 },
+        entrants: { kind: 'seeded-split', groups: { kind: 'even', count: 2 }, method: 'snake' },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+      },
+      {
+        id: 'finals',
+        name: 'Semi-finals & final',
+        format: { kind: 'knockout', pairing: 'within-pool' },
+        entrants: {
+          kind: 'manual',
+          derivedFrom: {
+            rule: 'from-standings',
+            fromStage: 'pools',
+            detail: 'Top two from each pool; each pool plays its own semi-final (A1 v A2, B1 v B2)',
+            qualifiersPerGroup: 2,
+          },
+        },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
         outcome: { champion: [1] },
       },
     ],
@@ -190,16 +227,26 @@ export function instantiateTemplate(
     name: name?.trim() || template.name,
     version: 1,
     templateId: template.id,
-    stages: template.stages.map((stage, i) => ({
-      ...stage,
-      schedule: {
-        ...stage.schedule,
-        blockIndex: templateBlockIndexForStage(i, calendar),
-        // Fresh copies, and only when the template has slots at all — never an explicit
-        // `slots: undefined` key (the whole branch omits the key to mean "no set times").
-        ...(stage.schedule.slots ? { slots: stage.schedule.slots.map((s) => ({ ...s })) } : {}),
-      },
-    })),
+    stages: template.stages.map((stage, i) => {
+      const blockIndex = templateBlockIndexForStage(i, calendar);
+      return {
+        ...stage,
+        schedule: {
+          ...stage.schedule,
+          blockIndex,
+          // A single-block calendar lands every stage in block 0, where an unchained
+          // later stage would overlap the one before it (dates always count from the
+          // block start). Chain it instead; with two blocks the stages are already
+          // separated and the key is omitted.
+          ...(i > 0 && blockIndex === templateBlockIndexForStage(i - 1, calendar)
+            ? { startAfter: 'previous-stage' as const }
+            : {}),
+          // Fresh copies, and only when the template has slots at all — never an explicit
+          // `slots: undefined` key (the whole branch omits the key to mean "no set times").
+          ...(stage.schedule.slots ? { slots: stage.schedule.slots.map((s) => ({ ...s })) } : {}),
+        },
+      };
+    }),
   };
 }
 

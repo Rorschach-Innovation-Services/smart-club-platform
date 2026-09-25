@@ -240,13 +240,26 @@ export function resolveEntrants(spec: EntrantSpec, ctx: ResolveContext = {}): En
    *
    * Sides that have since withdrawn drop out; sides registered since are appended rather
    * than silently lost, so a late entry still appears for the admin to place.
+   *
+   * With `qualifiersPerGroup = q`, only the top q of each prior group carry — still in
+   * pool order, still for the admin to confirm. The late-entry test deliberately runs
+   * against the UNSLICED prior groups: judged against the qualifiers alone, every side
+   * that played the pools and didn't qualify would look "registered since" and be
+   * appended straight back, undoing the trim.
    */
   const registered = ctx.registered ?? [];
-  const carried = note && ctx.priorGroups?.length ? ctx.priorGroups.flat() : null;
+  const prior = note && ctx.priorGroups?.length ? ctx.priorGroups : null;
+  const q = note?.qualifiersPerGroup;
+  const everyPrior = prior ? prior.flat() : [];
+  const carried = prior
+    ? Number.isInteger(q) && (q as number) > 0
+      ? prior.map((g) => g.slice(0, q)).flat()
+      : everyPrior
+    : null;
   const pool = carried
     ? [
         ...carried.filter((t) => !registered.length || registered.includes(t)),
-        ...registered.filter((t) => !carried.includes(t)),
+        ...registered.filter((t) => !everyPrior.includes(t)),
       ]
     : (ctx.seedOrder ?? registered);
   const sizes = groupSizes(spec.groups, pool.length);

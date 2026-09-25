@@ -281,6 +281,8 @@ interface AdminFixturesProps {
   onCreateSeasonRun?;
   onPatchSeasonRun?;
   onDeleteSeasonRun?;
+  onRebaseSeasonRun?;
+  onFetchSeasonRun?;
   onGenerateStageSeries?;
 }
 
@@ -388,6 +390,8 @@ export function AdminFixtures({
   onCreateSeasonRun,
   onPatchSeasonRun,
   onDeleteSeasonRun,
+  onRebaseSeasonRun,
+  onFetchSeasonRun,
   onGenerateStageSeries,
 }: AdminFixturesProps) {
   const copy = useCopy();
@@ -634,6 +638,9 @@ export function AdminFixtures({
                 onPatchRun={onPatchSeasonRun}
                 onGenerate={onGenerateStageSeries}
                 onDeleteRun={onDeleteSeasonRun}
+                structures={tenantConfig?.structures ?? []}
+                onRebaseRun={onRebaseSeasonRun}
+                onFetchRun={onFetchSeasonRun}
               />
             </div>
           )}

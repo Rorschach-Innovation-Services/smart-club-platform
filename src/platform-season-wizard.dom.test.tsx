@@ -244,3 +244,90 @@ describe('SeasonSetupWizard', () => {
     expect(await screen.findByText(/⚠/)).toBeInTheDocument();
   });
 });
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   The fit verdict sizes each stage the way it will really play.
+
+   It used to preview every stage at a flat 12 teams: a two-pool round robin read as 11
+   rounds instead of 5, so a pools structure warned "⚠" against a block it fits with room
+   to spare. Now each stage is split into its own groups, a qualifier-counted knockout is
+   sized exactly (2 pools × top 2 ⇒ 4 sides, 2 rounds), and a chained stage's rounds are
+   counted after its feeder's.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('SeasonSetupWizard — fit verdict uses real group sizes', () => {
+  /** Pools of 6 (5 rounds) then a chained within-group bracket of 4 (2 rounds): 7 weeks. */
+  const poolsStructure: CompetitionStructure = {
+    id: 'struct-pools',
+    name: 'Pools to knockout',
+    version: 1,
+    stages: [
+      {
+        id: 'pools',
+        name: 'Pool stage',
+        format: { kind: 'round-robin', legs: 1 },
+        entrants: { kind: 'seeded-split', method: 'blocks', groups: { kind: 'even', count: 2 } },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+      },
+      {
+        id: 'finals',
+        name: 'Semi-finals & final',
+        format: { kind: 'knockout', pairing: 'within-pool' },
+        entrants: {
+          kind: 'manual',
+          derivedFrom: {
+            rule: 'from-standings',
+            fromStage: 'pools',
+            detail: 'Top two from each pool',
+            qualifiersPerGroup: 2,
+          },
+        },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, startAfter: 'previous-stage' },
+      },
+    ],
+  };
+
+  /** One block of `end`'s worth of Saturdays from 12 Sep 2026. */
+  const shortCalendar = (end: string): SeasonCalendar => ({
+    id: 'cal-short',
+    label: 'Short season',
+    blocks: [{ id: 'b1', label: 'Block 1', start: '2026-09-12', end }],
+    breaks: [],
+    excludeDates: [],
+  });
+
+  async function pickPoolsStructure(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole('radio', { name: /use an existing calendar/i }));
+    await user.click(continueBtn());
+    await user.selectOptions(screen.getByRole('combobox', { name: /add a league/i }), 'premier');
+    await user.click(screen.getByRole('radio', { name: /use an existing structure/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /structure for premier men/i }),
+      'struct-pools',
+    );
+  }
+
+  it('fits a seven-Saturday block — pools of 6, then 4 qualifiers', async () => {
+    // A flat 12 would be 11 rounds of pools alone, and warn.
+    const { user } = setup({
+      calendars: [shortCalendar('2026-10-24')],
+      structures: [poolsStructure],
+    });
+    await pickPoolsStructure(user);
+
+    expect(await screen.findByText(/✓ Fits the calendar/)).toBeInTheDocument();
+    expect(screen.queryByText(/⚠/)).toBeNull();
+  });
+
+  it('warns on six Saturdays — the chained semis need the week after the pools', async () => {
+    // Each stage fits six weeks on its own; only the combined 5 + 2 overruns.
+    const { user } = setup({
+      calendars: [shortCalendar('2026-10-17')],
+      structures: [poolsStructure],
+    });
+    await pickPoolsStructure(user);
+
+    expect(await screen.findByText(/⚠/)).toBeInTheDocument();
+    expect(screen.queryByText(/✓ Fits the calendar/)).toBeNull();
+  });
+});

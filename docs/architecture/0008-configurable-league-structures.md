@@ -545,3 +545,155 @@ skip) with a live fit verdict against the chosen calendar → a single review-an
 The three cards do not go away — they remain the library surfaces for editing a structure in
 detail, extending a calendar mid-season, or fixing a single binding — but the wizard is what a
 new tenant's setup checklist points at first.
+
+## Addendum (2026-09-25): within-group semis, counted qualifiers, chained stages, and rebase
+
+Driven by one real structure: EMCU Division 1 30 Over, ten teams seeded into two pools of
+five, round robin within each pool, then semi-finals the union may pair **either way** —
+within-group (A1 v A2, B1 v B2) or cross-group (A1 v B2, B1 v A2) — then a final. Most of
+it already existed. Four things didn't, and one of them is a deliberate crack in the
+snapshot rule above.
+
+### `within-pool` pairing is the existing bracket, fed a different order
+
+`FormatSpec.knockout.pairing` gains `'within-pool'`. There is no new bracket builder:
+`withinPoolRounds` lays the pools end to end, each in its own seeded order, and hands
+that to `bracketFromMatchOrder`, which pairs adjacent entries and then adjacent winners.
+`[A1, A2, B1, B2]` therefore yields A1 v A2 and B1 v B2, then `win:f1 v win:f2`. Slot
+refs, their labels ("Winner of Semi-final 1") and third-place handling come along
+unchanged, which is why `packages/api/src/slot-refs.ts` needed a parity test and no code.
+
+It refuses — returns nothing, exactly like `crossPoolRounds` — every shape that would need
+a bye: fewer than two pools, pools qualifying unequal numbers, a per-pool count that isn't
+a power of two ≥ 2, a side listed twice, and a pool **count** that isn't a power of two.
+The last one is the non-obvious refusal: three pools × two passes every other check, but
+byes pool C's winner into the final and the slot-ref labeller then calls the pool semis a
+"Preliminary round". A refusal falls back to the seeded bracket over the full field with
+the same `crossPoolFallback` notice as cross-pool — worded for within-group, naming the
+shape it needs — so the draw is wrong in pairing, never in personnel, and never silent.
+
+The engine handles 4 pools × 2. **Validation doesn't, yet:** `validateStructures` accepts
+`within-pool` only as 2 groups × 2 qualifiers ("within-group semi-finals need 2 groups × 2
+qualifiers in this version"), checked against the source stage's declared group plan.
+That is the shape a union has actually asked for; widening it later is a validation
+change, not an engine one.
+
+The union's choice is not fixed in the structure. `StageRun.pairingOverride` records the
+pairing chosen **at qualifier confirmation**, overlaying the structure's default for this
+season only, and the confirmation's audit entry records it. The PATCH and POST season-run
+routes 400 an override outside the same `KNOCKOUT_PAIRINGS` set the structure validator
+uses, since materialisation dispatches on it and an unknown value would silently draw a
+seeded bracket.
+
+### `qualifiersPerGroup`: counted, still confirmed
+
+`DerivationNote` gains `qualifiersPerGroup` (a whole number, 1–8). It lives on the note
+because it describes how entrants derive from `fromStage` — "top q per group" — and the
+pool-knockout plumbing already reads the note.
+
+It buys two things and deliberately not a third:
+
+- **An exact preview.** The knockout's entrant count is `q × the source stage's group
+count` (two pools, top two ⇒ 4), so preview and fit stop hedging with "up to N
+  rounds". `derivedEntrantTotal` resolves `fromStage` strictly — an exact number built on
+  a guessed source stage is the confident-but-wrong preview the count exists to replace.
+- **A better prefill.** The confirm form proposes the top q of each prior group, in pool
+  order. The late-entry check runs against the **unsliced** prior groups: judged against
+  the qualifiers alone, every side that played the pools and didn't qualify would look
+  "registered since" and get appended straight back.
+- **Not automation.** There is still no results or standings model. The admin still
+  confirms the finishing order; the count only tells the platform how many to expect.
+
+Cross-pool takes at most 2 per group when a count is present (a third qualifier has no
+expressible cross-pool opponent). Pre-existing cross-pool structures carry no count and
+keep validating — the rule is optional there, required only for `within-pool`.
+
+### `startAfter: 'previous-stage'` chains stages inside one block
+
+Every stage used to date from its block's start, so pools and semis in the same block
+overlapped and the semis needed a block of their own. `StageSchedule.startAfter:
+'previous-stage'` makes a stage follow the nearest **earlier stage in the same block**.
+Absent means today's behaviour. Validation rejects it when no earlier stage shares the
+block, because the silent fallback — dating from the block start — is exactly the
+overlap it exists to prevent.
+
+The mechanism is a **floor, not a new start date**. `weekly` and `every-n-weeks` stride
+from their start, so starting a chained stage the day after a Saturday feeder would put
+every following round on a Sunday. Instead `planRoundDates` takes `notBefore`: candidates
+stay anchored at the block start as before, and any before the day after the feeder's last
+round are skipped (not reported as "skipped" — nothing blocked them, they belong to the
+feeder). The cadence keeps its weekday; `spread` has no weekday to keep and simply starts
+at the floor. A floor past the block's end is reported as an overflow in plain words.
+
+A feeder still awaiting entrants has no dates, so its span is **estimated** — at the
+qualifier-exact size when its note counts qualifiers, else at its prefill's group sizes —
+so a chained semi doesn't claim the weekends the pools will need. A feeder with nothing to
+estimate from contributes no floor. `materialiseStructure` and `previewFitAll` share this
+walk, so the season console and the design-time preview cannot disagree about where a
+chained stage lands.
+
+Templates apply the rule themselves. `instantiateTemplate` sets `startAfter:
+'previous-stage'` on any stage that lands in the same block as the one before it — which,
+on a single-block calendar, is every stage after the first. On a two-block calendar the
+first stage takes block 1 and the rest take block 2, so the second stage needs no chaining
+key; any stage after it shares block 2 and is chained.
+
+### Rebase: the one audited exception to snapshot immutability
+
+"A `SeasonRun` snapshots the one it started with" above still holds, with one explicit
+exception: `POST /season-runs/:id/rebase`. It exists because the Consequences section's
+"live seasons diverge from their template" turned out to need a way back, not just a
+warning. PATCH still strips `structureSnapshot` and `calendarSnapshot` unconditionally.
+
+The shape of the exception is what keeps it safe:
+
+- **Server-fetched, never client-supplied.** The body carries only `structureVersion`
+  (the version the admin reviewed) and `version` (the run version they read). The new
+  snapshot is whatever tenant config holds for the run's structure id.
+- **Double version guard.** 409 if the live structure's version isn't the one reviewed —
+  it changed again after the review, and nobody looked at that — and 409 on a run
+  version conflict, as PATCH does. 404 if the structure no longer exists. Already on the
+  live version ⇒ returns the run unchanged, no audit noise.
+- **Series are never touched.** Only `StageRun`s are reconciled: a surviving spec keeps its
+  run; a new spec gets an `awaiting-entrants` run; a removed spec's run is dropped and its
+  series survive, exactly as with season-run DELETE.
+
+A surviving stage whose spec changed gets a server-stamped `event: 'rebase'` audit entry.
+The server also has to mark staleness itself, because the client's divergence check
+compares **pairings only** and confirmed groups shadow the spec:
+
+| What changed                                                 | Server does                                                                                                                                                               |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Entrant spec or `groupLabels`                                | Clears `groups`, drops the stage to `awaiting-entrants`, keeps the old grouping in the audit entry's `prefill`. Left in place, one Regenerate would dismiss the new spec. |
+| Schedule (block, cadence, slots, roundsPerDay, `startAfter`) | Sets `staleSchedule: true` — shown as "Needs regenerating". A pairing-only check never fires for a schedule edit.                                                         |
+| Format                                                       | Clears `pairingOverride` and records it in the audit entry. An override chosen against the old format must not silently win over the new one.                             |
+| `derivedFrom.fromStage` names no live stage                  | Returns a `warnings[]` entry. The engine would quietly draw from the adjacent earlier stage — plausible, and wrong.                                                       |
+
+Clearing `groups` also clears the groups' `seriesId` links. The series keep their
+deterministic ids and their own `seasonRunId`/`stageSpecId` back-pointers, so a regenerate
+over the same group ids replaces them in place rather than stacking duplicates. The stage
+card therefore finds its series by those back-pointers as well as by the run's links, so
+a stage reset this way still knows which of its series are released.
+
+Regeneration after a rebase is otherwise the existing path, with its existing gates. The
+console asks before any generate that would overwrite a released series — stale or not,
+rebase-cleared or not — and every write to a released series goes through the server's
+in-season clash gate. A released series already carrying residual clashes is refused on regenerate until
+those are fixed (a regenerate mints new fixture ids, so the subset rule can't recognise
+the old clashes). Series orphaned by a dropped stage or group still occupy ground-days in
+the clash ledger and 409 the release of their replacements until pruned — the same
+ordering consequence the Plan B import runbook documents.
+
+### Deliberately out of scope
+
+- **Calendar rebase.** `calendarSnapshot` stays frozen. A mid-season calendar edit (a new
+  break, a moved block) still does not reach a season run, while standalone series follow
+  the live calendar on regenerate. The same server-fetched, version-guarded pattern would
+  extend to calendars; it is a follow-up, not built.
+- **A results model.** Qualification stays admin-confirmed. `qualifiersPerGroup` counts; it
+  does not decide.
+- **The concurrent structure-PUT race.** Two operator PUTs reading the same stored version
+  can each mint `version + 1` for different content, with the second write winning
+  silently (recorded at the version mint in `PUT /platform/tenants/:slug`). Rebase's `structureVersion` guard
+  compares numbers, so it inherits the gap: in that window, the version an admin reviewed
+  and the version adopted can share a number and differ in content. Unchanged here.

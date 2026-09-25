@@ -21,7 +21,8 @@ import * as api from './api';
 import { ApiError } from './api';
 import { CalendarForm } from './platform-calendars';
 import { calendarSpan, formatIsoDate } from './competition/calendar';
-import { previewFit } from './competition/structure';
+import { groupSizes } from './competition/entrants';
+import { derivedEntrantTotal, previewFitAll } from './competition/structure';
 import {
   STRUCTURE_TEMPLATES,
   instantiateTemplate,
@@ -109,12 +110,31 @@ function Host({ onClose, children }: { onClose: () => void; children?: ReactNode
   );
 }
 
-/** Whether every stage of a structure fits the draft calendar, previewed at a plausible size. */
+/**
+ * Whether every stage of a structure fits the draft calendar, previewed at a plausible size.
+ *
+ * Each stage is sized the way it will really play: split into its OWN groups (12 teams in
+ * two pools is two groups of 6 — 5 rounds, not a flat 12's 11, which is what this used to
+ * check and why a pools structure read "⚠" against a block it fits comfortably). A stage
+ * whose DerivationNote counts qualifiers is left out of the sizes so `previewFitAll` sizes
+ * it exactly (2 pools × top 2 ⇒ one bracket of 4), and chained stages are placed after
+ * their feeder, all in the one walk the structure editor's preview rail also uses.
+ */
 function fitVerdict(
   structure: CompetitionStructure,
   calendar: SeasonCalendar,
 ): { ok: boolean; text: string } {
-  const plans = structure.stages.map((st) => previewFit(st, calendar, DEFAULT_PREVIEW_TEAMS));
+  const stages = structure.stages;
+  const sizesPerStage: Record<string, number[]> = {};
+  const groupCounts = new Map<string, number>();
+  for (const st of stages) {
+    const plan = st.entrants.kind === 'all-registered' ? undefined : st.entrants.groups;
+    const total = derivedEntrantTotal(st, stages, (id) => groupCounts.get(id));
+    const sizes = groupSizes(plan, total ?? DEFAULT_PREVIEW_TEAMS);
+    groupCounts.set(st.id, sizes.length);
+    if (total === undefined) sizesPerStage[st.id] = sizes;
+  }
+  const plans = previewFitAll(structure, calendar, sizesPerStage).flatMap((f) => f.plans);
   const failing = plans.find((p) => !p.fits);
   return failing
     ? { ok: false, text: `⚠ ${failing.summary}` }

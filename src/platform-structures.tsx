@@ -38,10 +38,17 @@ import {
   describeCadence,
   findBlock,
   formatIsoDate,
+  type DatePlan,
 } from './competition/calendar';
-import { describeStage, previewFit, previewRounds } from './competition/structure';
+import {
+  chainFeeder,
+  derivedEntrantTotal,
+  describeStage,
+  previewFitAll,
+  previewRounds,
+} from './competition/structure';
 import { groupSizes } from './competition/entrants';
-import { roundsForFormat } from './competition/formats';
+import { isPoolKnockout, roundsForFormat } from './competition/formats';
 import {
   STRUCTURE_TEMPLATES,
   blankStage,
@@ -246,6 +253,12 @@ const FORMAT_OPTIONS: Array<{
     eg: 'Pool A winner v Pool B runner-up in the semi-finals',
   },
   {
+    label: 'Knockout — within-group',
+    value: { kind: 'knockout', pairing: 'within-pool' },
+    help: "Each group's qualifiers play their own semi-final (A1 v A2, B1 v B2); the winners meet in the final.",
+    eg: 'two pools of five, top two each — A1 v A2 and B1 v B2, then the final',
+  },
+  {
     label: 'Single match',
     value: { kind: 'single-match' },
     help: 'One fixture between two sides — a final or any other one-off.',
@@ -270,9 +283,97 @@ function formatLabel(f: FormatSpec): string {
         ? 'Double round robin'
         : 'Single round robin';
   if (f.kind === 'knockout')
-    return f.pairing === 'cross-pool' ? 'Knockout — cross-pool' : 'Knockout — seeded';
+    return f.pairing === 'cross-pool'
+      ? 'Knockout — cross-pool'
+      : f.pairing === 'within-pool'
+        ? 'Knockout — within-group'
+        : 'Knockout — seeded';
   if (f.kind === 'single-match') return 'Single match';
   return 'Entered by hand';
+}
+
+/**
+ * How many groups a stage declares — no plan ⇒ one. The client twin of
+ * `declaredGroupCount` in the server's config-validation.ts, which the within-group rule
+ * below mirrors.
+ */
+function declaredGroupCount(stage: StageSpec): number {
+  const plan = stage.entrants.kind !== 'all-registered' ? stage.entrants.groups : undefined;
+  if (!plan) return 1;
+  return plan.kind === 'sizes' ? plan.sizes.length : plan.count;
+}
+
+/**
+ * Mirrors `validateStructures`' v1 within-group rule: the stage must draw from a stage of
+ * exactly 2 groups with `qualifiersPerGroup: 2`. The generator refuses every other shape
+ * (it would need a bye, or mislabel the bracket), so the server 400s it — caught here
+ * first, where the operator can still see which control to change.
+ */
+function breaksWithinPoolShape(stage: StageSpec, stages: StageSpec[]): boolean {
+  if (stage.format.kind !== 'knockout' || stage.format.pairing !== 'within-pool') return false;
+  const note = stage.entrants.kind === 'manual' ? stage.entrants.derivedFrom : undefined;
+  const source = note ? stages.find((s) => s.id === note.fromStage) : undefined;
+  return note?.qualifiersPerGroup !== 2 || !source || declaredGroupCount(source) !== 2;
+}
+
+/** The server's own wording for the rule above (config-validation.ts). */
+const WITHIN_POOL_SHAPE = 'within-group semi-finals need 2 groups × 2 qualifiers in this version';
+
+/**
+ * One stage as the preview reasons about it: its group sizes at the preview's team count
+ * — or, when its DerivationNote counts qualifiers, at exactly that many — and how it fits
+ * the previewed calendar once every earlier stage (and any chained feeder) is placed.
+ */
+interface StagePreview {
+  sizes: number[];
+  /** Sized from `qualifiersPerGroup` × the source stage's group count, not the team box. */
+  derived: boolean;
+  /** Every group fits. True with no calendar — there is nothing to be late for. */
+  fits: boolean;
+  /** The plan to report: the first group that overruns, else the first group's. */
+  plan: DatePlan | null;
+}
+
+/**
+ * The preview for a whole structure, in ONE sequential walk — shared by the stage rows
+ * and the rail so they can't disagree. Sizes are resolved here (a qualifier-counted
+ * stage takes `q × source groups`, the same rule `previewFitAll` applies) because they
+ * are needed with no calendar selected too; the fit is `previewFitAll`'s, so a stage set
+ * to start after the previous one is checked where it will really play, not from the
+ * block start on top of its feeder.
+ */
+function previewStages(
+  structure: CompetitionStructure,
+  calendar: SeasonCalendar | undefined,
+  previewTeams: number,
+): StagePreview[] {
+  const stages = structure.stages;
+  const groupCounts = new Map<string, number>();
+  const sized = stages.map((stage) => {
+    const total = derivedEntrantTotal(stage, stages, (id) => groupCounts.get(id));
+    const sizes = groupSizes(
+      stage.entrants.kind === 'all-registered' ? undefined : stage.entrants.groups,
+      total ?? previewTeams,
+    );
+    groupCounts.set(stage.id, sizes.length);
+    return { sizes, derived: total !== undefined };
+  });
+  const fitted = calendar
+    ? previewFitAll(
+        structure,
+        calendar,
+        Object.fromEntries(stages.map((s, i) => [s.id, sized[i].sizes])),
+      )
+    : null;
+  return sized.map(({ sizes, derived }, i) => {
+    const f = fitted?.[i];
+    return {
+      sizes,
+      derived,
+      fits: f ? f.fits : true,
+      plan: f ? (f.plans.find((p) => !p.fits) ?? f.plans[0] ?? null) : null,
+    };
+  });
 }
 
 // "…in one group" is not decoration. `all-registered` cannot be split — the type carries
@@ -456,7 +557,7 @@ function StageRow({
   total,
   calendar,
   earlierStages,
-  previewTeams,
+  preview,
   expanded,
   onToggle,
   onChange,
@@ -468,7 +569,8 @@ function StageRow({
   total: number;
   calendar: SeasonCalendar | undefined;
   earlierStages: StageSpec[];
-  previewTeams: number;
+  /** This stage's slice of `previewStages` — the same walk the rail reads. */
+  preview: StagePreview;
   expanded: boolean;
   onToggle: () => void;
   onChange: (patch: Partial<StageSpec>) => void;
@@ -488,13 +590,17 @@ function StageRow({
     () => stage.schedule.slots ?? T20_SLOTS,
   );
 
-  const sizes = groupSizes(
-    stage.entrants.kind === 'all-registered' ? undefined : stage.entrants.groups,
-    previewTeams,
-  );
-  const perGroup = sizes[0] ?? previewTeams;
+  const perGroup = preview.sizes[0] ?? 0;
   const rounds = previewRounds(stage, perGroup);
-  const fit = calendar ? previewFit(stage, calendar, perGroup) : null;
+  const fit = preview.plan;
+  // The stage this one WOULD follow if chained: the nearest earlier stage in its block.
+  // Asked of `chainFeeder` with the flag assumed on, so the checkbox and the engine agree
+  // on what "the previous stage" means.
+  const chained = stage.schedule.startAfter === 'previous-stage';
+  const feeder = chainFeeder(
+    { ...stage, schedule: { ...stage.schedule, startAfter: 'previous-stage' } },
+    [...earlierStages, stage],
+  );
   // A block that is set, but not reachable from the calendar being PREVIEWED against.
   // Almost always means the preview is pointed at the wrong calendar, not that anything
   // is broken.
@@ -954,6 +1060,55 @@ function StageRow({
               })}
             </div>
           )}
+          {/* Chaining. Every stage dates from its block's start by default, so pools and
+              their semi-finals sharing one block would overlap; ticking this moves this
+              stage's rounds past the previous stage's last round, on the same playing day.
+              Enabled only when there IS an earlier stage in the block — and kept
+              clickable while ticked, so a stage that lost its feeder (moved block,
+              reordered) can still be unticked. */}
+          <label
+            style={{
+              fontSize: 12.5,
+              display: 'inline-flex',
+              gap: 6,
+              alignItems: 'center',
+              marginTop: 10,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={chained}
+              disabled={!feeder && !chained}
+              onChange={(e) => {
+                const { startAfter: _startAfter, ...rest } = stage.schedule;
+                onChange({
+                  schedule: e.target.checked ? { ...rest, startAfter: 'previous-stage' } : rest,
+                });
+              }}
+            />
+            Start after the previous stage in this block
+            <InfoDot title="Start after the previous stage">
+              <p>
+                Lets two stages share one playing block without overlapping — pools, then their
+                semi-finals and final. This stage&apos;s rounds begin after the previous stage in
+                the same block finishes, still on the block&apos;s usual playing day.
+              </p>
+            </InfoDot>
+          </label>
+          {chained && !feeder ? (
+            <div style={ERR}>
+              No earlier stage plays in this block any more — untick this, or move the stage back
+              into its feeder&apos;s block.
+            </div>
+          ) : (
+            <p style={HINT}>
+              {feeder
+                ? chained
+                  ? `Rounds begin after "${feeder.name || 'the previous stage'}" finishes.`
+                  : `"${feeder.name || 'An earlier stage'}" also plays this block — tick this to follow it rather than overlap it.`
+                : 'No earlier stage plays this block, so this stage starts at the block start.'}
+            </p>
+          )}
           <div style={{ marginTop: 10 }}>
             <label
               style={{
@@ -1233,9 +1388,100 @@ function DerivationEditor({
             This sentence is shown to the administrator when they confirm which teams play, so write
             it the way you&apos;d say it out loud.
           </p>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 12.5, display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+              Qualifiers per group
+              <InfoDot title="Qualifiers per group">
+                <p>
+                  How many sides go through from <strong>each</strong> group of the earlier stage —
+                  2 means the top two of every pool. Leave it blank when the number isn&apos;t
+                  fixed.
+                </p>
+              </InfoDot>
+            </span>
+            <OptionalCount
+              min={1}
+              max={8}
+              label="Qualifiers per group"
+              value={note.qualifiersPerGroup}
+              onChange={(q) => {
+                // Blank REMOVES the key — an absent count is "not declared", which keeps
+                // the preview's "up to" hedge; persisting 0 would be a different, invalid
+                // value the server rejects.
+                const { qualifiersPerGroup: _q, ...rest } = note;
+                onChange({
+                  entrants: {
+                    ...entrants,
+                    derivedFrom: q === undefined ? rest : { ...rest, qualifiersPerGroup: q },
+                  },
+                });
+              }}
+            />
+          </div>
+          <p style={{ ...HINT, marginTop: 0 }}>
+            Makes the preview exact and pre-fills the confirmation form — you still confirm the
+            finishing order.
+          </p>
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * A whole-number box that may be left BLANK — `BoundedNumber` always holds a value, which
+ * is wrong for a count that is optional by design. Same keystroke discipline: publish
+ * only in-range values while typing, settle on the nearest legal one on blur; blank
+ * publishes `undefined`.
+ */
+function OptionalCount({
+  value,
+  onChange,
+  min,
+  max,
+  label,
+}: {
+  value: number | undefined;
+  onChange: (n: number | undefined) => void;
+  min: number;
+  max: number;
+  label: string;
+}) {
+  const [text, setText] = useState(value === undefined ? '' : String(value));
+  // Re-seed when the model changes from outside, not from our own keystrokes.
+  const [published, setPublished] = useState(value);
+  if (value !== published) {
+    setPublished(value);
+    setText(value === undefined ? '' : String(value));
+  }
+  const publish = (n: number | undefined) => {
+    setPublished(n);
+    if (n !== value) onChange(n);
+  };
+  return (
+    <input
+      type="number"
+      className="field-input"
+      style={{ width: 80 }}
+      aria-label={label}
+      placeholder="—"
+      min={min}
+      max={max}
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value);
+        if (!e.target.value.trim()) return publish(undefined);
+        const n = parseInt(e.target.value, 10);
+        if (Number.isFinite(n) && n >= min && n <= max) publish(n);
+      }}
+      onBlur={(e) => {
+        if (!e.target.value.trim()) return;
+        const n = parseInt(e.target.value, 10);
+        const next = Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : value;
+        setText(next === undefined ? '' : String(next));
+        publish(next);
+      }}
+    />
   );
 }
 
@@ -1244,22 +1490,23 @@ function DerivationEditor({
 function PreviewRail({
   structure,
   calendar,
+  previews,
   previewTeams,
   onPreviewTeams,
 }: {
   structure: CompetitionStructure;
   calendar: SeasonCalendar | undefined;
+  /** `previewStages` over this structure — one per stage, in order. */
+  previews: StagePreview[];
   previewTeams: number;
   onPreviewTeams: (n: number) => void;
 }) {
-  const rows = structure.stages.map((stage) => {
-    const sizes = groupSizes(
-      stage.entrants.kind === 'all-registered' ? undefined : stage.entrants.groups,
-      previewTeams,
-    );
+  const rows = structure.stages.map((stage, i) => {
+    const { sizes, derived, fits, plan } = previews[i];
     const perGroup = sizes[0] ?? previewTeams;
     const rounds = previewRounds(stage, perGroup);
-    const fit = calendar ? previewFit(stage, calendar, perGroup) : null;
+    const note = stage.entrants.kind === 'manual' ? stage.entrants.derivedFrom : undefined;
+    const feeder = chainFeeder(stage, structure.stages);
     // Counted from the REAL generator over placeholder entrants, not re-derived: the old
     // `perGroup - 1` was right only for a plain knockout — it previewed a single-match
     // stage of six as five fixtures, and was one short for a third-place playoff.
@@ -1276,8 +1523,20 @@ function PreviewRail({
       stage,
       sizes,
       rounds,
-      fit,
+      // `fits` is the whole stage (every group); `plan` carries the sentence to show.
+      fit: plan ? { fits, summary: plan.summary } : null,
       total,
+      derived,
+      // "Exactly 4 sides — the top 2 of each of Pool stage's 2 groups."
+      qualified: derived
+        ? {
+            count: sizes.reduce((a, b) => a + b, 0),
+            q: note?.qualifiersPerGroup ?? 0,
+            source: structure.stages.find((s) => s.id === note?.fromStage),
+          }
+        : undefined,
+      feeder,
+      shapeErr: breaksWithinPoolShape(stage, structure.stages),
       // A stage that produces nothing must not read as "fits". Splitting 20 teams into
       // 20 groups leaves a group of one, which plays nobody — the block is trivially
       // satisfied and the season is silently empty. Worth its own message.
@@ -1291,13 +1550,13 @@ function PreviewRail({
       // "5 groups of 5, 5, 5, 0 · ✓ Fits" because the total was comfortably non-zero.
       empty: stage.format.kind !== 'manual' && (total === 0 || sizes.some((n) => n < 2)),
       byHand: stage.format.kind === 'manual',
-      // A cross-pool bracket is sized by the QUALIFIERS the previous stage sends, not by
-      // everyone entered — and nothing in the structure states how many qualify. The
-      // number here is therefore an upper bound (worst case: everybody goes through),
-      // which is the safe direction for a "does it fit the block" check but has to be
-      // labelled or an operator will read it as the real round count.
-      qualifierBound:
-        stage.format.kind === 'knockout' && stage.format.pairing === 'cross-pool' && rounds > 0,
+      // A pool-driven bracket (cross- or within-group) is sized by the QUALIFIERS the
+      // previous stage sends, not by everyone entered. Unless the structure states how
+      // many qualify (`qualifiersPerGroup` — then `derived` and the number is exact), the
+      // number here is an upper bound (worst case: everybody goes through), which is the
+      // safe direction for a "does it fit the block" check but has to be labelled or an
+      // operator will read it as the real round count.
+      qualifierBound: isPoolKnockout(stage.format) && rounds > 0 && !derived,
       block: calendar ? findBlock(calendar, stage.schedule.blockIndex)?.label : undefined,
       // Out of range for the previewed calendar. True with no calendar selected too: see
       // the note on `offCalendar` in StageRow.
@@ -1305,12 +1564,14 @@ function PreviewRail({
     };
   });
   const anyEmpty = rows.some((r) => r.empty);
+  const anyShapeErr = rows.some((r) => r.shapeErr);
   // Only a verdict when there is a calendar to be off. With none selected the rows still
   // say where each block lives — that is useful — but "stages play on a DIFFERENT
   // calendar" is a claim about a comparison nobody made, and the footer already defers to
   // "No calendar selected" below.
   const anyOffCalendar = !!calendar && rows.some((r) => r.offCalendar);
-  const ok = !anyEmpty && !anyOffCalendar && rows.every((r) => !r.fit || r.fit.fits);
+  const ok =
+    !anyEmpty && !anyShapeErr && !anyOffCalendar && rows.every((r) => !r.fit || r.fit.fits);
   const grandTotal = rows.reduce((n, r) => n + r.total, 0);
 
   return (
@@ -1355,18 +1616,36 @@ function PreviewRail({
             {r.rounds} round{r.rounds === 1 ? '' : 's'} ×{' '}
             {describeCadence(r.stage.schedule.cadence)}
             {r.block ? ` · ${r.block}` : ''}
+            {r.feeder ? `, after ${r.feeder.name || 'the previous stage'}` : ''}
             {r.qualifierBound && (
               <>
                 <br />
                 <em>Sized by how many qualify from the stage before.</em>
               </>
             )}
+            {r.qualified && (
+              <>
+                <br />
+                <em>
+                  Exactly {r.qualified.count} side{r.qualified.count === 1 ? '' : 's'} — the top{' '}
+                  {r.qualified.q} of each group in {r.qualified.source?.name || 'the stage before'}.
+                </em>
+              </>
+            )}
           </div>
           {r.empty && (
             <div style={{ ...ERR, marginTop: 6, lineHeight: 1.5 }}>
               {r.sizes.some((n) => n < 2)
-                ? `A group needs at least two teams — this splits ${previewTeams} into ${r.sizes.join(', ')}.`
+                ? r.qualified
+                  ? `A group needs at least two teams — only ${r.qualified.count} qualify, split ${r.sizes.join(', ')}.`
+                  : `A group needs at least two teams — this splits ${previewTeams} into ${r.sizes.join(', ')}.`
                 : 'This stage generates no fixtures.'}
+            </div>
+          )}
+          {r.shapeErr && (
+            <div style={{ ...ERR, marginTop: 6, lineHeight: 1.5 }}>
+              Within-group semi-finals need 2 groups × 2 qualifiers in this version — draw this
+              stage from a 2-group stage and set 2 qualifiers per group.
             </div>
           )}
           {r.offCalendar ? (
@@ -1397,7 +1676,9 @@ function PreviewRail({
             ? '⚠ One or more stages play on a different calendar'
             : anyEmpty
               ? '⚠ One or more stages generate no fixtures'
-              : '⚠ One or more stages don’t fit their block'}
+              : anyShapeErr
+                ? '⚠ A within-group knockout can’t be drawn as set up'
+                : '⚠ One or more stages don’t fit their block'}
       </div>
       {!calendar && (
         <p style={HINT}>No calendar selected — fit can&apos;t be checked until one is.</p>
@@ -1509,6 +1790,13 @@ function StructureEditor({
       errors.push(`"${s.name || 'A stage'}" needs the earlier stage it draws from.`);
     else if (note && !seen.has(note.fromStage))
       errors.push(`"${s.name}" draws from a stage that doesn't come before it.`);
+    // Both mirror `validateStructures`, so they're caught inline rather than as a 400.
+    if (breaksWithinPoolShape(s, draft.stages))
+      errors.push(`"${s.name || 'A stage'}": ${WITHIN_POOL_SHAPE}.`);
+    if (s.schedule.startAfter && !chainFeeder(s, draft.stages))
+      errors.push(
+        `"${s.name || 'A stage'}" starts after the previous stage, but no earlier stage plays in its block.`,
+      );
     seen.add(s.id);
   }
 
@@ -1591,6 +1879,7 @@ function StructureEditor({
   // previewed calendar — that entire retargeting feature depended on blockId's cross-
   // calendar identity, which the index model deliberately does not have.
   const offPreview = calendar ? stagesOffCalendar(draft.stages, calendar) : draft.stages;
+  const previews = previewStages(draft, calendar, previewTeams);
 
   async function submit() {
     if (errors.length || busy) return;
@@ -1735,7 +2024,7 @@ function StructureEditor({
               total={draft.stages.length}
               calendar={calendar}
               earlierStages={draft.stages.slice(0, i)}
-              previewTeams={previewTeams}
+              preview={previews[i]}
               expanded={expanded === stage.id}
               onToggle={() => setExpanded(expanded === stage.id ? null : stage.id)}
               onChange={(patch) => patchStage(i, patch)}
@@ -1762,6 +2051,7 @@ function StructureEditor({
         <PreviewRail
           structure={draft}
           calendar={calendar}
+          previews={previews}
           previewTeams={previewTeams}
           onPreviewTeams={setPreviewTeams}
         />

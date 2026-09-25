@@ -10,23 +10,29 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  crossPoolQualifiersFor,
+  chainFeeder,
   crossPoolSourceStage,
-  feedsCrossPool,
+  feedsPoolKnockout,
   materialiseStage,
+  materialiseStructure,
+  poolQualifiersFor,
   previewFit,
+  previewFitAll,
 } from './structure';
 import {
   crossPoolRounds,
   knockoutShape,
   knockoutRounds,
+  roundCountForFormat,
   roundRobinRounds,
   seedOrder,
   slotRefLabel,
   slotSource,
+  withinPoolRounds,
 } from './formats';
+import { weekdayOf } from './calendar';
 import { groupSizes, labelFor, resolveEntrants } from './entrants';
-import type { EntrantSpec, SeasonCalendar, StageSpec } from '../types';
+import type { CompetitionStructure, EntrantSpec, SeasonCalendar, StageSpec } from '../types';
 
 /** The union's real 2026/27 calendar. */
 const CAL: SeasonCalendar = {
@@ -681,16 +687,16 @@ describe('cross-pool wiring', () => {
     }) as never;
 
   it('asks for finishing positions only on a stage that feeds a cross-pool draw', () => {
-    expect(feedsCrossPool(POOLS, [POOLS, SEMIS])).toBe(true);
-    expect(feedsCrossPool(SEMIS, [POOLS, SEMIS])).toBe(false);
+    expect(feedsPoolKnockout(POOLS, [POOLS, SEMIS])).toBe(true);
+    expect(feedsPoolKnockout(SEMIS, [POOLS, SEMIS])).toBe(false);
     // A pool stage followed by an ordinary round robin needs no ranking.
     expect(
-      feedsCrossPool(POOLS, [POOLS, { ...SEMIS, format: { kind: 'round-robin', legs: 1 } }]),
+      feedsPoolKnockout(POOLS, [POOLS, { ...SEMIS, format: { kind: 'round-robin', legs: 1 } }]),
     ).toBe(false);
   });
 
   it('takes WHO from the knockout stage and WHICH POOL, in order, from the one before', () => {
-    const q = crossPoolQualifiersFor(
+    const q = poolQualifiersFor(
       SEMIS,
       [POOLS, SEMIS],
       run(
@@ -711,7 +717,7 @@ describe('cross-pool wiring', () => {
   it('falls back when a qualifier played in no pool', () => {
     // The admin added a side that never played the pool stage — the draw would silently
     // drop it, so refuse and let the seeded bracket take the whole field.
-    const q = crossPoolQualifiersFor(
+    const q = poolQualifiersFor(
       SEMIS,
       [POOLS, SEMIS],
       run(
@@ -727,7 +733,7 @@ describe('cross-pool wiring', () => {
 
   it('falls back before the knockout stage is confirmed', () => {
     expect(
-      crossPoolQualifiersFor(
+      poolQualifiersFor(
         SEMIS,
         [POOLS, SEMIS],
         run(
@@ -836,8 +842,8 @@ describe('cross-pool derivation reaches past an adjacent stage (the Kingsmead sh
   const stages = [POOLS, STREAMS, KINGSMEAD];
 
   it('feeds the non-adjacent stage it names, not the one immediately before it', () => {
-    expect(feedsCrossPool(POOLS, stages)).toBe(true);
-    expect(feedsCrossPool(STREAMS, stages)).toBe(false);
+    expect(feedsPoolKnockout(POOLS, stages)).toBe(true);
+    expect(feedsPoolKnockout(STREAMS, stages)).toBe(false);
     expect(crossPoolSourceStage(KINGSMEAD, stages)?.id).toBe('pools');
   });
 
@@ -871,7 +877,7 @@ describe('cross-pool derivation reaches past an adjacent stage (the Kingsmead sh
         },
       ],
     } as never;
-    const q = crossPoolQualifiersFor(KINGSMEAD, stages, run);
+    const q = poolQualifiersFor(KINGSMEAD, stages, run);
     expect(q).toEqual([
       ['a1', 'a2'],
       ['b1', 'b2'],
@@ -1283,5 +1289,363 @@ describe('the one spelling of a group label', () => {
     // "Group [" here. Two spellings of one fallback is how the save path drifted to
     // a third ("Group 1").
     expect(labelFor(undefined, 26)).toBe('Group AA');
+  });
+});
+
+describe('within-pool knockout — each pool plays its own semi-final', () => {
+  // The EMCU Division 1 30 Over shape: two pools, top two each, A1 v A2 and B1 v B2, then
+  // the pool winners meet. The other half of the choice cross-pool already covers.
+  const TWO_BY_TWO = [
+    ['A1', 'A2'],
+    ['B1', 'B2'],
+  ];
+
+  it('pairs A1 v A2 and B1 v B2, then the two winners in the final', () => {
+    expect(withinPoolRounds(TWO_BY_TWO)).toEqual([
+      [
+        ['A1', 'A2'],
+        ['B1', 'B2'],
+      ],
+      [['win:f1', 'win:f2']],
+    ]);
+  });
+
+  it('plays off the two losing semi-finalists when asked for third place', () => {
+    const rounds = withinPoolRounds(TWO_BY_TWO, { thirdPlace: true });
+    expect(rounds).toHaveLength(3);
+    expect(rounds[2]).toEqual([['lose:f1', 'lose:f2']]);
+  });
+
+  it('keeps four pools apart until the pool winners are decided', () => {
+    const rounds = withinPoolRounds([
+      ['A1', 'A2'],
+      ['B1', 'B2'],
+      ['C1', 'C2'],
+      ['D1', 'D2'],
+    ]);
+    expect(rounds.map((r) => r.length)).toEqual([4, 2, 1]);
+    expect(rounds[0]).toEqual([
+      ['A1', 'A2'],
+      ['B1', 'B2'],
+      ['C1', 'C2'],
+      ['D1', 'D2'],
+    ]);
+  });
+
+  // Each refusal is a shape that would need a bye. Three pools × two is the subtle one:
+  // it passes every per-pool check, but pool C's winner walks into the final and the
+  // pool semis get labelled "Preliminary round".
+  it.each([
+    ['uneven qualifiers', [['A1', 'A2'], ['B1']]],
+    [
+      'three per pool',
+      [
+        ['A1', 'A2', 'A3'],
+        ['B1', 'B2', 'B3'],
+      ],
+    ],
+    ['a single pool', [['A1', 'A2']]],
+    [
+      'three pools',
+      [
+        ['A1', 'A2'],
+        ['B1', 'B2'],
+        ['C1', 'C2'],
+      ],
+    ],
+  ])('refuses %s', (_name, pools) => {
+    expect(withinPoolRounds(pools)).toEqual([]);
+  });
+
+  const withinStage: StageSpec = {
+    id: 'semis',
+    name: 'Semi-finals',
+    format: { kind: 'knockout', pairing: 'within-pool' },
+    entrants: { kind: 'manual' },
+    schedule: WEEKLY_B2,
+  };
+
+  it('materialises semis the finals label as "Winner of Semi-final 1/2"', () => {
+    const m = ready(
+      materialiseStage({
+        stage: withinStage,
+        calendar: CAL,
+        crossPoolQualifiers: TWO_BY_TWO,
+        context: { confirmed: [['A1', 'A2', 'B1', 'B2']] },
+      }),
+    );
+    const fx = m.groups[0].fixtures;
+    expect(fx.map((f) => [f.home, f.away]).slice(0, 2)).toEqual([
+      ['A1', 'A2'],
+      ['B1', 'B2'],
+    ]);
+    expect(slotRefLabel(fx[2].home, fx)).toBe('Winner of Semi-final 1');
+    expect(slotRefLabel(fx[2].away, fx)).toBe('Winner of Semi-final 2');
+    expect(m.crossPoolFallback).toBeUndefined();
+  });
+
+  // A refusal must reach the seeded bracket — never an empty stage — and say it did,
+  // naming the pairing the operator actually configured.
+  it.each([
+    ['uneven qualifiers', [['A1', 'A2'], ['B1']]],
+    [
+      'three per pool',
+      [
+        ['A1', 'A2', 'A3'],
+        ['B1', 'B2', 'B3'],
+      ],
+    ],
+    ['a single pool', [['A1', 'A2']]],
+    [
+      'three pools',
+      [
+        ['A1', 'A2'],
+        ['B1', 'B2'],
+        ['C1', 'C2'],
+      ],
+    ],
+  ])('falls back to a seeded bracket over everyone for %s, with a notice', (_name, pools) => {
+    const entrants = pools.flat();
+    const m = ready(
+      materialiseStage({
+        stage: withinStage,
+        calendar: CAL,
+        crossPoolQualifiers: pools,
+        context: { confirmed: [entrants] },
+      }),
+    );
+    expect(m.totalFixtures).toBeGreaterThan(0);
+    expect(m.crossPoolFallback).toContain('not within-group');
+    const named = new Set(
+      m.groups[0].fixtures.flatMap((f) => [f.home, f.away]).filter((t) => !t.startsWith('win:')),
+    );
+    expect(named).toEqual(new Set(entrants));
+  });
+
+  // Calendar fit is computed from the entrant count alone, before any pool is known — so
+  // the round count it predicts has to match the bracket the generator actually builds.
+  it.each([
+    [2, 2, false],
+    [2, 2, true],
+    [4, 2, false],
+    [2, 4, true],
+  ])('predicts the rounds for %i pools × %i (third place: %s)', (pools, perPool, thirdPlace) => {
+    const qualifiers = Array.from({ length: pools }, (_, p) =>
+      Array.from({ length: perPool }, (_, i) => `p${p}q${i}`),
+    );
+    const format = { kind: 'knockout', pairing: 'within-pool', thirdPlace } as const;
+    expect(roundCountForFormat(format, pools * perPool)).toBe(
+      withinPoolRounds(qualifiers, { thirdPlace }).length,
+    );
+  });
+
+  it('asks the pool stage for finishing positions, like a cross-pool draw', () => {
+    const POOLS: StageSpec = {
+      id: 'pools',
+      name: 'Pools',
+      format: { kind: 'round-robin', legs: 1 },
+      entrants: { kind: 'seeded-split', method: 'snake', groups: { kind: 'even', count: 2 } },
+      schedule: WEEKLY_B1,
+    };
+    expect(feedsPoolKnockout(POOLS, [POOLS, withinStage])).toBe(true);
+
+    const run = {
+      id: 'r',
+      leagueKey: 'l',
+      competitionId: 'c',
+      seasonLabel: '2026/27',
+      structureSnapshot: { id: 's', name: 's', version: 1, stages: [POOLS, withinStage] },
+      calendarSnapshot: CAL,
+      version: 1,
+      stages: [
+        {
+          specId: 'pools',
+          status: 'generated' as const,
+          groups: [
+            { id: 'g1', label: 'A', entrants: ['a1', 'a2', 'a3'] },
+            { id: 'g2', label: 'B', entrants: ['b1', 'b2', 'b3'] },
+          ],
+        },
+        {
+          specId: 'semis',
+          status: 'ready' as const,
+          groups: [{ id: 'g1', label: 'Semis', entrants: ['a1', 'a2', 'b1', 'b2'] }],
+        },
+      ],
+    } as never;
+    expect(poolQualifiersFor(withinStage, [POOLS, withinStage], run)).toEqual([
+      ['a1', 'a2'],
+      ['b1', 'b2'],
+    ]);
+  });
+});
+
+describe('sequential stages in one block (startAfter: previous-stage)', () => {
+  // A block that opens on a SATURDAY — the case the naive "start the day after the
+  // feeder" would get wrong: a weekly stride from a Sunday puts every semi on a Sunday.
+  const SAT: SeasonCalendar = {
+    id: 'sat',
+    label: 'Saturdays',
+    blocks: [
+      { id: 's1', label: 'Block 1', start: '2026-09-12', end: '2026-12-12' },
+      { id: 's2', label: 'Block 2', start: '2027-01-16', end: '2027-03-27' },
+    ],
+  };
+  // Only four Saturdays: 12, 19, 26 Sep and 3 Oct.
+  const SHORT: SeasonCalendar = {
+    id: 'short',
+    label: 'Short',
+    blocks: [{ id: 's1', label: 'Block 1', start: '2026-09-12', end: '2026-10-03' }],
+  };
+
+  const POOLS: StageSpec = {
+    id: 'pools',
+    name: 'Pools',
+    format: { kind: 'round-robin', legs: 1 },
+    entrants: { kind: 'seeded-split', method: 'snake', groups: { kind: 'even', count: 2 } },
+    schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+  };
+  const SEMIS: StageSpec = {
+    id: 'semis',
+    name: 'Semi-finals & final',
+    format: { kind: 'knockout', pairing: 'within-pool' },
+    entrants: {
+      kind: 'manual',
+      derivedFrom: {
+        rule: 'from-standings',
+        fromStage: 'pools',
+        detail: 'Top two per pool',
+        qualifiersPerGroup: 2,
+      },
+    },
+    schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, startAfter: 'previous-stage' },
+  };
+  const structure = (stages: StageSpec[]): CompetitionStructure => ({
+    id: 'st',
+    name: 'st',
+    version: 1,
+    stages,
+  });
+  // Two pools of three: 3 rounds each, on the block's first three Saturdays.
+  const contexts = {
+    pools: { seedOrder: ['a1', 'b1', 'b2', 'a2', 'a3', 'b3'] },
+    semis: { confirmed: [['a1', 'a2', 'b1', 'b2']] },
+  };
+  const qualifiers = {
+    semis: [
+      ['a1', 'a2'],
+      ['b1', 'b2'],
+    ],
+  };
+  const walk = (stages: StageSpec[], calendar: SeasonCalendar) =>
+    materialiseStructure({
+      structure: structure(stages),
+      calendar,
+      contexts,
+      crossPoolQualifiers: qualifiers,
+    }).map(ready);
+
+  it('follows the feeder and keeps the block’s playing weekday', () => {
+    const [pools, semis] = walk([POOLS, SEMIS], SAT);
+    expect(pools.groups[0].plan.dates).toEqual(['2026-09-12', '2026-09-19', '2026-09-26']);
+    expect(semis.groups[0].plan.dates).toEqual(['2026-10-03', '2026-10-10']);
+    // Saturdays, not the Sundays a stride from "feeder + 1 day" would have produced.
+    expect(semis.groups[0].plan.dates.map(weekdayOf)).toEqual([6, 6]);
+    expect(semis.fits).toBe(true);
+  });
+
+  it('starts the day after the feeder’s last date when the cadence allows it', () => {
+    const weekend = { kind: 'weekdays' as const, days: [6, 0] as (0 | 6)[] };
+    const [pools, semis] = walk(
+      [
+        { ...POOLS, schedule: { ...POOLS.schedule, cadence: weekend } },
+        { ...SEMIS, schedule: { ...SEMIS.schedule, cadence: weekend } },
+      ],
+      SAT,
+    );
+    expect(pools.groups[0].plan.dates.at(-1)).toBe('2026-09-19'); // Sat, Sun, Sat
+    expect(semis.groups[0].plan.dates[0]).toBe('2026-09-20');
+  });
+
+  it('checks the COMBINED length against the block', () => {
+    // 3 pool rounds + 2 knockout rounds = 5 Saturdays; the block has 4.
+    const [, chained] = walk([POOLS, SEMIS], SHORT);
+    expect(chained.fits).toBe(false);
+    // Unchained, the semis overlap the pools and "fit" — the bug chaining exists to fix.
+    const unchained = {
+      ...SEMIS,
+      schedule: { blockIndex: 0, cadence: { kind: 'weekly' as const } },
+    };
+    const [, overlapping] = walk([POOLS, unchained], SHORT);
+    expect(overlapping.fits).toBe(true);
+    expect(overlapping.groups[0].plan.dates[0]).toBe('2026-09-12');
+  });
+
+  it('leaves a stage in a separate block dated from that block’s start', () => {
+    const later = { ...SEMIS, schedule: { ...SEMIS.schedule, blockIndex: 1 } };
+    expect(chainFeeder(later, [POOLS, later])).toBeUndefined();
+    const [, semis] = walk([POOLS, later], SAT);
+    expect(semis.groups[0].plan.dates[0]).toBe('2027-01-16');
+  });
+
+  // The design-time twin: 10 teams in two pools of five, top two each ⇒ exactly four
+  // entrants in the knockout, so the preview can say "2 rounds" instead of "up to N".
+  it('previews qualifier-exact knockout sizes and chains the same way', () => {
+    const [pools, semis] = previewFitAll(structure([POOLS, SEMIS]), SAT, { pools: [5, 5] });
+    expect(pools.plans.map((p) => p.roundsRequested)).toEqual([5, 5]);
+    expect(semis.sizes).toEqual([4]);
+    expect(semis.derived).toBe(true);
+    expect(semis.plans[0].roundsRequested).toBe(2);
+    // Pools finish on the 5th Saturday (10 Oct), so the knockout starts the next one.
+    expect(semis.notBefore).toBe('2026-10-11');
+    expect(semis.plans[0].dates).toEqual(['2026-10-17', '2026-10-24']);
+    expect(semis.fits).toBe(true);
+  });
+
+  it('reports a combined overflow in the preview too', () => {
+    const [, semis] = previewFitAll(structure([POOLS, SEMIS]), SHORT, { pools: [3, 3] });
+    expect(semis.fits).toBe(false);
+  });
+
+  it('plans nothing for a stage whose size can’t be known yet', () => {
+    const uncounted: StageSpec = { ...SEMIS, entrants: { kind: 'manual' } };
+    const [, semis] = previewFitAll(structure([POOLS, uncounted]), SAT, { pools: [5, 5] });
+    expect(semis.sizes).toEqual([]);
+    expect(semis.plans).toEqual([]);
+  });
+});
+
+describe('a counted qualification prefills only the qualifiers', () => {
+  const POOL_A = ['a1', 'a2', 'a3', 'a4', 'a5'];
+  const POOL_B = ['b1', 'b2', 'b3', 'b4', 'b5'];
+  const KNOCKOUT: EntrantSpec = {
+    kind: 'manual',
+    derivedFrom: {
+      rule: 'from-standings',
+      fromStage: 'pools',
+      detail: 'Top two per pool',
+      qualifiersPerGroup: 2,
+    },
+  };
+
+  // `registered` is non-empty and names every pool side on purpose: judged against the
+  // qualifiers alone, the six non-qualifiers would look like late entries and be
+  // appended straight back — ten sides "prefilled" into a four-team knockout.
+  it('takes the top two of each pool, in pool order, and nobody else', () => {
+    const r = resolveEntrants(KNOCKOUT, {
+      registered: [...POOL_A, ...POOL_B],
+      priorGroups: [POOL_A, POOL_B],
+    });
+    if (r.status !== 'awaiting') throw new Error('expected awaiting');
+    expect(r.prefill.flatMap((g) => g.entrants)).toEqual(['a1', 'a2', 'b1', 'b2']);
+  });
+
+  it('still appends a side that genuinely registered after the pools', () => {
+    const r = resolveEntrants(KNOCKOUT, {
+      registered: [...POOL_A, ...POOL_B, 'newcomer'],
+      priorGroups: [POOL_A, POOL_B],
+    });
+    if (r.status !== 'awaiting') throw new Error('expected awaiting');
+    expect(r.prefill.flatMap((g) => g.entrants)).toEqual(['a1', 'a2', 'b1', 'b2', 'newcomer']);
   });
 });

@@ -22,6 +22,7 @@ import type {
   League,
   RequiredDoc,
   SeasonCalendar,
+  StageSpec,
   TimeSlot,
 } from './types.js';
 
@@ -106,6 +107,27 @@ export function validateCalendars(calendars: unknown): asserts calendars is Seas
 const FORMAT_KINDS = new Set(['round-robin', 'knockout', 'single-match', 'manual']);
 const ENTRANT_KINDS = new Set(['all-registered', 'manual', 'seeded-split']);
 const CADENCE_KINDS = new Set(['weekly', 'every-n-weeks', 'weekdays', 'spread']);
+/**
+ * Knockout pairings. Exported because the season-run routes check a stage's run-time
+ * `pairingOverride` against the SAME set — an override the structure could never declare
+ * must not be storable on a run either.
+ */
+export const KNOCKOUT_PAIRINGS: ReadonlySet<string> = new Set([
+  'seeded',
+  'cross-pool',
+  'within-pool',
+]);
+const START_AFTER_KINDS = new Set(['previous-stage']);
+
+/**
+ * How many groups a stage declares. No group plan ⇒ the stage plays as one group, which
+ * is how both `all-registered` and a plan-less `manual` stage materialise.
+ */
+function declaredGroupCount(stage: StageSpec): number {
+  const plan = stage.entrants.kind !== 'all-registered' ? stage.entrants.groups : undefined;
+  if (!plan) return 1;
+  return plan.kind === 'sizes' ? plan.sizes.length : plan.count;
+}
 
 /**
  * Shape guard for a `Cadence`, shared by structure-stage validation and series-schedule
@@ -161,6 +183,11 @@ export function assertValidTimeSlots(slots: unknown, context: string): asserts s
  * stage. Stages form a pipeline, and a reference forwards (or to itself) is either a
  * cycle or a stage waiting on results that do not exist yet — both of which would leave
  * a season permanently unresolvable with no obvious cause.
+ *
+ * BACK-COMPAT: `POST /season-runs` re-validates the structure snapshot a client started
+ * a season from, so every rule here may only reject values that could never have been
+ * stored before it existed. The `within-pool`, `qualifiersPerGroup` and `startAfter`
+ * rules below all guard fields that are new together — widen, never narrow, the rest.
  */
 export function validateStructures(
   structures: unknown,
@@ -193,6 +220,8 @@ export function validateStructures(
       throw new HttpError(409, `duplicate stage id in "${name}"`);
 
     const seen = new Set<string>();
+    // Block positions played by EARLIER stages — what a `startAfter` stage chains onto.
+    const blocksSeen = new Set<number>();
     for (const stage of st.stages) {
       const sName = stage.name?.trim() || stage.id;
       if (!stage.name?.trim()) throw new HttpError(400, `every stage in "${name}" needs a name`);
@@ -224,10 +253,19 @@ export function validateStructures(
         throw new HttpError(400, `stage "${sName}" roundsPerDay must be 1 or 2`);
       if (stage.schedule.roundsPerDay === 2 && (stage.schedule.slots ?? []).length !== 2)
         throw new HttpError(400, `stage "${sName}" needs exactly two slots for two rounds per day`);
-      if (
-        stage.format.kind === 'knockout' &&
-        !['seeded', 'cross-pool'].includes(stage.format.pairing)
-      )
+      // Chaining needs something to chain ONTO: the nearest earlier stage in the same
+      // block. Without one the stage would silently fall back to the block start, which
+      // is exactly the overlap `startAfter` exists to prevent.
+      if (stage.schedule.startAfter !== undefined) {
+        if (!START_AFTER_KINDS.has(stage.schedule.startAfter))
+          throw new HttpError(400, `stage "${sName}" has an unknown start rule`);
+        if (!blocksSeen.has(stage.schedule.blockIndex))
+          throw new HttpError(
+            400,
+            `stage "${sName}" starts after the previous stage, but no earlier stage plays in block ${stage.schedule.blockIndex + 1}`,
+          );
+      }
+      if (stage.format.kind === 'knockout' && !KNOCKOUT_PAIRINGS.has(stage.format.pairing))
         throw new HttpError(400, `stage "${sName}" has an unknown knockout pairing`);
       const plan = stage.entrants.kind !== 'all-registered' ? stage.entrants.groups : undefined;
       if (plan) {
@@ -258,8 +296,39 @@ export function validateStructures(
             400,
             `stage "${sName}" derives from "${note.fromStage}", which does not come before it`,
           );
+        if (note.qualifiersPerGroup !== undefined) {
+          const q = note.qualifiersPerGroup;
+          if (!Number.isInteger(q) || q < 1 || q > 8)
+            throw new HttpError(
+              400,
+              `stage "${sName}" needs a whole number of qualifiers per group between 1 and 8`,
+            );
+        }
+      }
+      if (stage.format.kind === 'knockout') {
+        const q = note?.qualifiersPerGroup;
+        // v1 within-pool is the 2×2 shape only: the generator refuses anything else (a
+        // non-power-of-two pool count mislabels the bracket), so a structure declaring it
+        // would silently fall back to a seeded draw. Refuse it at save time instead.
+        if (stage.format.pairing === 'within-pool') {
+          const source = note ? st.stages.find((s) => s.id === note.fromStage) : undefined;
+          if (q !== 2 || !source || declaredGroupCount(source) !== 2)
+            throw new HttpError(
+              400,
+              `stage "${sName}": within-group semi-finals need 2 groups × 2 qualifiers in this version`,
+            );
+        }
+        // Cross-pool pairs winners with runners-up; a third qualifier per pool has no
+        // expressible cross-pool opponent. Optional here — pre-existing cross-pool
+        // structures carry no count and must keep validating.
+        if (stage.format.pairing === 'cross-pool' && q !== undefined && q > 2)
+          throw new HttpError(
+            400,
+            `stage "${sName}": cross-group knockouts take at most 2 qualifiers per group`,
+          );
       }
       seen.add(stage.id);
+      blocksSeen.add(stage.schedule.blockIndex);
     }
   }
 }

@@ -407,6 +407,50 @@ export function crossPoolRounds(
   return bracketFromMatchOrder(seeded, opts);
 }
 
+/** True for 1, 2, 4, 8, … — the only sizes a bye-free bracket halves cleanly. */
+function isPowerOfTwo(n: number): boolean {
+  return Number.isInteger(n) && n >= 1 && (n & (n - 1)) === 0;
+}
+
+/**
+ * Within-pool knockout: each pool's qualifiers play off among themselves first, and the
+ * pool winners meet afterwards. Two pools × top two is A1 v A2 and B1 v B2, then the
+ * final — the other half of the choice unions make between this and cross-pool.
+ *
+ * Built by laying the pools end to end, each in its own seeded order, and handing that to
+ * `bracketFromMatchOrder`: adjacent entries pair first, then adjacent winners, so every
+ * pool resolves to one winner before any cross-pool match, with the usual `win:fN` /
+ * `lose:fN` references and third-place handling intact.
+ *
+ * Refuses (returns `[]`, like `crossPoolRounds`, so the caller falls back to a seeded
+ * bracket and says so) every shape that would need a bye:
+ * - fewer than two pools — there is nothing to be "within" against;
+ * - pools qualifying unequal numbers — the short pool's winner would skip a round;
+ * - a per-pool count that isn't a power of two ≥ 2 — same bye, inside the pool;
+ * - a pool COUNT that isn't a power of two. Three pools × two pass every check above,
+ *   but byes pool C's winner straight into the final and `slotRefLabel` then calls the
+ *   pool semis a "Preliminary round". Refused rather than mislabelled.
+ *
+ * `qualifiers[i]` is pool i's list, best-placed first.
+ */
+export function withinPoolRounds(
+  qualifiers: string[][],
+  opts: { thirdPlace?: boolean } = {},
+): Pairing[][] {
+  const pools = qualifiers.filter((q) => q.length > 0);
+  if (pools.length < 2 || !isPowerOfTwo(pools.length)) return [];
+  const perPool = pools[0].length;
+  if (perPool < 2 || !isPowerOfTwo(perPool)) return [];
+  if (pools.some((p) => p.length !== perPool)) return [];
+  // A side listed in two pools would play itself or vanish — refuse, never guess.
+  if (new Set(pools.flat()).size !== pools.flat().length) return [];
+
+  return bracketFromMatchOrder(
+    pools.flatMap((p) => seedOrder(p.length).map((i) => p[i])),
+    opts,
+  );
+}
+
 /** Build a knockout from a list already in first-round match order (pairs are adjacent). */
 export function bracketFromMatchOrder(
   matchOrder: string[],
@@ -440,10 +484,6 @@ export function bracketFromMatchOrder(
   return rounds;
 }
 
-/**
- * Apply a format to one group's entrants. `crossPoolQualifiers` is only meaningful for a
- * cross-pool knockout, where the "group" is really the set of qualifying pools.
- */
 /** The pools name the same set of sides as the stage's entrants — no more, no fewer. */
 function coversExactly(pools: string[][], entrants: string[]): boolean {
   const flat = pools.flat();
@@ -452,45 +492,64 @@ function coversExactly(pools: string[][], entrants: string[]): boolean {
   return flat.length === new Set(flat).size && flat.every((t) => want.has(t));
 }
 
+/** True when a format is a knockout drawn from pool qualifiers (either pairing). */
+export function isPoolKnockout(format: FormatSpec): boolean {
+  return (
+    format.kind === 'knockout' &&
+    (format.pairing === 'cross-pool' || format.pairing === 'within-pool')
+  );
+}
+
 /**
- * The cross-pool bracket for a stage, or `null` when one can't honestly be built.
+ * The pool-driven bracket for a stage — cross-pool or within-pool, per
+ * `format.pairing` — or `null` when one can't honestly be built.
  *
- * Separated out so callers can TELL whether the cross-pool path ran, rather than
- * inferring it by re-running both generators and diffing — which can't distinguish
- * "fell back" from "the two agree", and warned falsely on the simplest structure there
- * is (two pools, one qualifier each, straight final).
+ * Separated out so callers can TELL whether the pool path ran, rather than inferring it
+ * by re-running both generators and diffing — which can't distinguish "fell back" from
+ * "the two agree", and warned falsely on the simplest structure there is (two pools, one
+ * qualifier each, straight final).
  *
- * Returns null when the pools don't name exactly this stage's entrants, or when
- * `crossPoolRounds` refuses a shape it can't express without dropping somebody.
+ * Returns null for a seeded knockout or any other format, when the pools don't name
+ * exactly this stage's entrants, or when the pairing's generator refuses a shape it can't
+ * express without dropping somebody or handing out a bye.
  */
-export function crossPoolPairings(
+export function poolPairings(
   format: FormatSpec,
   entrants: string[],
   qualifiers?: string[][],
 ): Pairing[][] | null {
-  if (format.kind !== 'knockout' || format.pairing !== 'cross-pool') return null;
+  if (format.kind !== 'knockout' || !isPoolKnockout(format)) return null;
   if (!qualifiers?.length || !coversExactly(qualifiers, entrants)) return null;
-  const rounds = crossPoolRounds(qualifiers, { thirdPlace: format.thirdPlace });
+  const opts = { thirdPlace: format.thirdPlace };
+  const rounds =
+    format.pairing === 'within-pool'
+      ? withinPoolRounds(qualifiers, opts)
+      : crossPoolRounds(qualifiers, opts);
   return rounds.length ? rounds : null;
 }
 
+/**
+ * Apply a format to one group's entrants. `poolQualifiers` is only meaningful for a
+ * cross-pool or within-pool knockout, where the "group" is really the set of qualifying
+ * pools.
+ */
 export function roundsForFormat(
   format: FormatSpec,
   entrants: string[],
-  crossPoolQualifiers?: string[][],
+  poolQualifiers?: string[][],
 ): Pairing[][] {
   switch (format.kind) {
     case 'round-robin':
       return roundRobinRounds(entrants, format.legs, format.legOrder);
     case 'knockout':
-      // ALWAYS a bracket. `crossPoolPairings` returns null whenever a cross-pool draw
-      // can't be built honestly — the pools don't name exactly these entrants, or the
-      // shape would drop a qualifier — and the seeded bracket over the full field takes
-      // over: wrong in pairing, never wrong in personnel, and never empty. Returning the
-      // refusal verbatim gave a stage that generated ZERO fixtures and still called
-      // itself ready to generate.
+      // ALWAYS a bracket. `poolPairings` returns null whenever a pool-driven draw can't
+      // be built honestly — the pools don't name exactly these entrants, or the shape
+      // would drop a qualifier or need a bye — and the seeded bracket over the full field
+      // takes over: wrong in pairing, never wrong in personnel, and never empty.
+      // Returning the refusal verbatim gave a stage that generated ZERO fixtures and
+      // still called itself ready to generate.
       return (
-        crossPoolPairings(format, entrants, crossPoolQualifiers) ??
+        poolPairings(format, entrants, poolQualifiers) ??
         knockoutRounds(entrants, { thirdPlace: format.thirdPlace })
       );
     case 'single-match':
@@ -512,10 +571,12 @@ export function describeFormat(format: FormatSpec): string {
       if (format.legs === 1) return 'plays every team once';
       if (format.legs === 2) return 'plays every team twice, home and away';
       return `plays every team ${format.legs} times`;
-    case 'knockout':
-      return format.pairing === 'cross-pool'
-        ? `cross-pool knockout${format.thirdPlace ? ' with a third-place playoff' : ''}`
-        : `seeded knockout${format.thirdPlace ? ' with a third-place playoff' : ''}`;
+    case 'knockout': {
+      const playoff = format.thirdPlace ? ' with a third-place playoff' : '';
+      if (format.pairing === 'cross-pool') return `cross-pool knockout${playoff}`;
+      if (format.pairing === 'within-pool') return `within-group knockout${playoff}`;
+      return `seeded knockout${playoff}`;
+    }
     case 'single-match':
       return 'a single match';
     case 'manual':
@@ -525,7 +586,13 @@ export function describeFormat(format: FormatSpec): string {
   }
 }
 
-/** How many rounds a format produces for a given entrant count — drives calendar fit. */
+/**
+ * How many rounds a format produces for a given entrant count — drives calendar fit.
+ *
+ * Pairing-agnostic for knockouts on purpose: `knockoutShape` over the total qualifier
+ * count already gives a pool-driven bracket's depth (2 pools × 2 → 2 rounds, 4 × 2 → 3),
+ * and a shape the pool generators refuse falls back to the seeded bracket it measures.
+ */
 export function roundCountForFormat(format: FormatSpec, entrantCount: number): number {
   switch (format.kind) {
     case 'round-robin': {

@@ -210,8 +210,11 @@ export type FormatSpec =
       /**
        * `seeded` = standard bracket from the entrant order (1 v n, 2 v n-1 …).
        * `cross-pool` = pool winners/runners-up paired across pools (A1 v B2, B1 v A2).
+       * `within-pool` = each pool's qualifiers play off among themselves first (A1 v A2,
+       * B1 v B2), and the pool winners meet later. Unions decide this either way per
+       * season, so it is a structure default a season run can override at confirmation.
        */
-      pairing: 'seeded' | 'cross-pool';
+      pairing: 'seeded' | 'cross-pool' | 'within-pool';
       thirdPlace?: boolean;
     }
   | { kind: 'single-match' }
@@ -238,6 +241,14 @@ export interface DerivationNote {
    * this, so it is an admin-entered handover value, never computed.
    */
   carryPoints?: boolean;
+  /**
+   * "Top q from each group of `fromStage`." Counted but still CONFIRMED: there is no
+   * standings model, so this only makes the preview exact and trims the prefill to the
+   * top q of each prior group — an admin still types the finishing order. Lives on the
+   * note because it describes how entrants derive from `fromStage`, which is what the
+   * note is for.
+   */
+  qualifiersPerGroup?: number;
 }
 
 /** How a stage's entrants divide into groups. */
@@ -283,6 +294,13 @@ export interface StageSchedule {
   roundsPerDay?: 1 | 2;
   /** Generate now, surface to clubs from this date (junior leagues). */
   activateFrom?: IsoDate;
+  /**
+   * `previous-stage` = play after the nearest earlier stage in the same block finishes,
+   * rather than from the block's start. Lets pools and their semis share one block
+   * without overlapping. Absent ⇒ the block start, which is how every stage dated before
+   * this field existed.
+   */
+  startAfter?: 'previous-stage';
 }
 
 /** What finishing where in this stage means — display and next-season carry. */
@@ -398,6 +416,19 @@ export interface StageRun {
    */
   carriedPoints?: Record<string, number>;
   /**
+   * This season's knockout pairing when it differs from the structure's default — the
+   * union decides within- or cross-group semis at qualifier confirmation. Absent ⇒ the
+   * structure's own `pairing`. Only meaningful on a knockout stage.
+   */
+  pairingOverride?: 'seeded' | 'cross-pool' | 'within-pool';
+  /**
+   * Set when a structure rebase changed this stage's schedule spec (block, cadence,
+   * slots, roundsPerDay, startAfter). The pairing-only divergence check can't see a
+   * schedule edit, so the server marks it explicitly and the console shows "Needs
+   * regenerating" until the stage is regenerated. Absent ⇒ not stale.
+   */
+  staleSchedule?: boolean;
+  /**
    * Who confirmed this stage's entrants, when, what was proposed and whether they took
    * it. Relegation and points carry ride on these decisions, so the trail is a
    * governance requirement rather than a nicety.
@@ -407,6 +438,10 @@ export interface StageRun {
     by: string;
     prefill: string[][];
     accepted: boolean;
+    /** Absent ⇒ an entrant confirmation; `rebase` ⇒ the run adopted a newer structure. */
+    event?: 'rebase';
+    /** The pairing chosen at this confirmation, when one was (see `pairingOverride`). */
+    pairing?: string;
   }>;
 }
 
