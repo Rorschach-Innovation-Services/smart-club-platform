@@ -244,7 +244,8 @@ describe('preview rail — fixture counts come from the real generator', () => {
     ]);
     await openEditor(user);
 
-    expect(within(preview()).getByText(/fixtures entered by hand/i)).toBeVisible();
+    // Said twice: in the narrative sentence and in the stage's own numbers.
+    expect(within(preview()).getAllByText(/fixtures entered by hand/i).length).toBeGreaterThan(1);
     expect(within(preview()).getByText(/✓ Fits/)).toBeVisible();
   });
 
@@ -1016,10 +1017,7 @@ describe('pools → within-group semis', () => {
     await openEditor(user, /pools to knockout/i);
     await editFinals(user);
 
-    await user.selectOptions(
-      within(dialog()).getByRole('combobox', { name: /^format$/i }),
-      'Knockout — within-group',
-    );
+    await user.click(within(dialog()).getByRole('radio', { name: /^Knockout — within-group/ }));
     // No count yet — the v1 shape rule says so straight away.
     expect(saveBtn()).toBeDisabled();
 
@@ -1071,5 +1069,109 @@ describe('pools → within-group semis', () => {
 
     expect(previewPicker()).toHaveValue('other');
     expect(within(preview()).getByText(/don’t fit their block/i)).toBeVisible();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   The expanded stage as three questions — who plays, who plays whom, when — each a
+   set of cards drawn from the stage-kinds registries, and the rail's narrative.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('StageRow — three questions', () => {
+  it('groups the expanded stage into who plays, who plays whom and when', async () => {
+    const { user } = setup([structure()]);
+    await openEditor(user);
+
+    expect(screen.getByRole('region', { name: 'Who plays?' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Who plays whom?' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'When?' })).toBeInTheDocument();
+    // The current values are the checked cards.
+    expect(screen.getByRole('radio', { name: /^Every registered side/ })).toBeChecked();
+    expect(screen.getByRole('radio', { name: /^Single round robin/ })).toBeChecked();
+    expect(screen.getByRole('radio', { name: /^Weekly/ })).toBeChecked();
+  });
+
+  it('a format card click changes the stage’s format', async () => {
+    const { user, save } = setup([structure()]);
+    await openEditor(user);
+
+    await user.click(screen.getByRole('radio', { name: /^Double round robin/ }));
+    expect(screen.getByRole('radio', { name: /^Double round robin/ })).toBeChecked();
+    await user.click(saveBtn());
+
+    const saved = save.mock.calls[0][0].structures[0].stages[0];
+    expect(saved.format).toEqual({ kind: 'round-robin', legs: 2 });
+  });
+
+  it('a seeded card sets both the kind and the seeding method', async () => {
+    const { user, save } = setup([structure()]);
+    await openEditor(user);
+
+    await user.click(screen.getByRole('radio', { name: /^Seeded into groups \(snake\)/ }));
+    await user.click(saveBtn());
+    expect(save.mock.calls[0][0].structures[0].stages[0].entrants).toEqual({
+      kind: 'seeded-split',
+      method: 'snake',
+      groups: { kind: 'even', count: 2 },
+    });
+  });
+
+  it('switching between the two seeded cards keeps the group plan and flips the method', async () => {
+    const { user, save } = setup([
+      structure({
+        stages: [
+          {
+            id: 's1',
+            name: 'Pools',
+            format: { kind: 'round-robin', legs: 1 },
+            entrants: { kind: 'seeded-split', method: 'snake', groups: { kind: 'even', count: 3 } },
+            schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+          },
+        ],
+      } as Partial<CompetitionStructure>),
+    ]);
+    await openEditor(user);
+
+    await user.click(screen.getByRole('radio', { name: /^Seeded into groups \(top-down\)/ }));
+    await user.click(saveBtn());
+    expect(save.mock.calls[0][0].structures[0].stages[0].entrants).toEqual({
+      kind: 'seeded-split',
+      method: 'blocks',
+      groups: { kind: 'even', count: 3 },
+    });
+  });
+
+  it('a cadence card switches to every N weeks and shows the N box', async () => {
+    const { user, save } = setup([structure()]);
+    await openEditor(user);
+
+    await user.click(screen.getByRole('radio', { name: /^Every N weeks/ }));
+    await user.click(saveBtn());
+    expect(save.mock.calls[0][0].structures[0].stages[0].schedule.cadence).toEqual({
+      kind: 'every-n-weeks',
+      n: 2,
+    });
+  });
+});
+
+describe('preview rail — the structure as a story', () => {
+  it('opens with one sentence per stage, above the numbers', async () => {
+    const { user } = setup([structure()]);
+    await openEditor(user);
+
+    expect(
+      within(preview()).getByText(
+        /^Stage 1 · Round-robin stage · all 12 sides in one group · everyone plays everyone once · weekly in Block 1/,
+      ),
+    ).toBeVisible();
+  });
+
+  it('follows the teams-entered box', async () => {
+    const { user } = setup([structure()]);
+    await openEditor(user);
+
+    await user.clear(teamsBox());
+    await user.type(teamsBox(), '8');
+    expect(within(preview()).getByText(/all 8 sides in one group/)).toBeVisible();
   });
 });

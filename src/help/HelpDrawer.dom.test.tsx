@@ -87,6 +87,8 @@ describe('HelpDrawer', () => {
 
   it('links to the guide only when the topic has an anchor', async () => {
     const user = userEvent.setup();
+    // Every shipped topic has an anchor now; clear one to exercise the no-anchor path.
+    HELP_TOPICS['home-and-away'].guideAnchor = undefined;
     const { unmount } = renderLink('home-and-away');
     await user.click(screen.getByRole('button', { name: /how does this work/i }));
     expect(screen.queryByRole('link', { name: /read more in the guide/i })).toBeNull();

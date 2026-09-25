@@ -11,7 +11,7 @@
  */
 import { useState, useEffect, useId, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Btn, Card, EmptyState, Icon, InfoDot, Pill, useEscapeClose } from './atoms';
+import { Btn, Card, EmptyState, FieldGuide, Icon, InfoDot, Pill, useEscapeClose } from './atoms';
 import * as api from './api';
 import { ApiError } from './api';
 import {
@@ -129,6 +129,49 @@ function Timeline({ calendar }: { calendar: SeasonCalendar }) {
         <span>{formatIsoDate(min)}</span>
         <span>{formatIsoDate(max)}</span>
       </div>
+    </div>
+  );
+}
+
+/**
+ * A read-only example calendar, from Part Two of the league structures guide. Collapsed by
+ * default: an operator who knows what a calendar looks like never has to scroll past it.
+ */
+function WorkedExample() {
+  const [open, setOpen] = useState(false);
+  const rows: Array<[string, string]> = [
+    ['Block 1', '13 Sep – 13 Dec 2026'],
+    ['Break', '14 Dec 2026 – 17 Jan 2027'],
+    ['Block 2', '18 Jan – 28 Mar 2027'],
+    ['Excluded', '24 Sep 2026 (Heritage Day)'],
+  ];
+  return (
+    <div style={{ marginTop: 12 }}>
+      <button
+        type="button"
+        className="text-btn"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? 'Hide the worked example' : 'See a worked example'}
+      </button>
+      {open && (
+        <div className="cal-example" aria-label="Worked example calendar">
+          <div className="cal-example-title">2026/27</div>
+          <dl className="cal-example-rows">
+            {rows.map(([k, v]) => (
+              <div key={k}>
+                <dt>{k}</dt>
+                <dd>{v}</dd>
+              </div>
+            ))}
+          </dl>
+          <p className="cal-example-why">
+            Why the break matters: a ten-round league would otherwise schedule its last rounds into
+            the holidays.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -469,6 +512,7 @@ export function CalendarForm({
           Add block
         </Btn>
       </div>
+      <FieldGuide id="block-dates" />
 
       <div style={{ ...sectionHead, display: 'flex', alignItems: 'center', gap: 2 }}>
         Breaks
@@ -513,6 +557,7 @@ export function CalendarForm({
           Add break
         </Btn>
       </div>
+      <FieldGuide id="breaks" />
 
       <div style={{ ...sectionHead, display: 'flex', alignItems: 'center', gap: 2 }}>
         Excluded dates
@@ -567,6 +612,8 @@ export function CalendarForm({
           Add date
         </Btn>
       </div>
+      <FieldGuide id="exclude-dates" />
+      <WorkedExample />
 
       <div style={sectionHead}>Preview</div>
       <Timeline calendar={draft} />

@@ -198,6 +198,6 @@ control together. Authoring it end to end:
   the ADR 0008 deploy runbook: starter templates, `blockIndex`, cadence kinds, the season
   wizard flow, venues, and the post-deploy operator setup order this doc assumes is already
   done.
-- [`docs/guides/league-structures-tutorial.html`](../guides/league-structures-tutorial.html)
-  (and its `.pdf` companion) — the illustrated, print-oriented walkthrough of the stage
+- [`public/guides/league-structures-tutorial.html`](../../public/guides/league-structures-tutorial.html) (served at `/guides/league-structures-tutorial.html`)
+  (and its [`.pdf` companion](../guides/league-structures-tutorial.pdf)) — the illustrated, print-oriented walkthrough of the stage
   pipeline model for anyone who hasn't used the wizard before.

@@ -3,8 +3,9 @@
  * structures (ADR 0008 and its addenda). Each topic is short enough to read in a popover
  * and concrete enough to check against a real fixture list.
  *
- * `guideAnchor` points at a section of docs/guides/league-structures-tutorial.html. The
- * guide has no section ids yet, so every anchor is unset for now.
+ * `guideAnchor` is the `id` of a heading in public/guides/league-structures-tutorial.html
+ * (served at /guides/league-structures-tutorial.html). Renaming an id there breaks the
+ * "Read more in the guide" link here, so change both together.
  */
 
 export interface HelpTopic {
@@ -36,6 +37,7 @@ export type HelpTopicId =
 export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   'how-dates-are-planned': {
     id: 'how-dates-are-planned',
+    guideAnchor: 'schedule',
     title: 'How fixture dates are planned',
     summary:
       'Each stage plays inside one block of the season calendar, at its cadence. Breaks and excluded dates push rounds later. They never drop them.',
@@ -50,6 +52,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   },
   'home-and-away': {
     id: 'home-and-away',
+    guideAnchor: 'format',
     title: 'Who plays at home',
     summary:
       'Home and away swap every second round. The pairings match union spreadsheets, but which side is at home deliberately differs in the even-numbered rounds.',
@@ -64,6 +67,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   },
   'knockout-seeding': {
     id: 'knockout-seeding',
+    guideAnchor: 'format',
     title: 'How a knockout is seeded',
     summary:
       'A seeded knockout pairs by rank and keeps seeds 1 and 2 apart until the final. A field that is not 2, 4, 8 or 16 is trimmed by a preliminary round among the lowest seeds.',
@@ -78,6 +82,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   },
   'semi-final-pairing': {
     id: 'semi-final-pairing',
+    guideAnchor: 'confirming-entrants',
     title: 'Semi-finals: within-group or cross-group',
     summary:
       'Two groups sending two sides each can be paired two ways. Cross-group is A1 v B2 and B1 v A2; within-group is A1 v A2 and B1 v B2.',
@@ -92,6 +97,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   },
   'standings-typed-by-human': {
     id: 'standings-typed-by-human',
+    guideAnchor: 'standings',
     title: 'Why the admin types the standings',
     summary:
       'The platform does not record scores, so it cannot work out who finished where. Any stage that depends on finishing order stops and asks the admin.',
@@ -106,6 +112,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   },
   'venue-allocation': {
     id: 'venue-allocation',
+    guideAnchor: 'allocating-grounds',
     title: 'How grounds are allocated',
     summary:
       'Allocation runs after fixtures exist. It tries the home ground first and falls back in a fixed order, and every fixture gets a reason.',
@@ -120,6 +127,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   },
   'approve-release-withhold': {
     id: 'approve-release-withhold',
+    guideAnchor: 'running-a-season',
     title: 'Approve, release and withhold',
     summary:
       'Clubs see nothing until a series is approved and released. Withholding releases the dates but hides grounds and start times until the admin reveals them.',
@@ -134,6 +142,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   },
   'activate-from': {
     id: 'activate-from',
+    guideAnchor: 'schedule',
     title: 'Show fixtures to clubs from a date',
     summary:
       'An activation date hides a released series from clubs until that date. The fixtures exist and the admin can see them the whole time.',
@@ -147,6 +156,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   },
   'what-regenerate-destroys': {
     id: 'what-regenerate-destroys',
+    guideAnchor: 'generating',
     title: 'What regenerating replaces',
     summary:
       'Regenerating rebuilds every fixture in a stage’s series. Allocated venues and hand-edited dates are lost, and there is no undo.',
@@ -161,6 +171,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   },
   'structure-versions-and-rebase': {
     id: 'structure-versions-and-rebase',
+    guideAnchor: 'start-a-season',
     title: 'Structure versions and rebase',
     summary:
       'A season keeps a copy of the structure it started with. Rebase moves a running season onto the latest version without touching its series.',
@@ -175,6 +186,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   },
   'blocks-vs-stages': {
     id: 'blocks-vs-stages',
+    guideAnchor: 'part-one',
     title: 'Blocks and stages',
     summary:
       'A block is a stretch of dates on the calendar. A stage is a phase of play. Each stage plays in one block.',
@@ -188,6 +200,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   },
   'legacy-series': {
     id: 'legacy-series',
+    guideAnchor: 'binding',
     title: 'Series made without a structure',
     summary:
       'A league with no competition bound to it uses the older flow: the admin creates a series and gets one flat round robin.',
