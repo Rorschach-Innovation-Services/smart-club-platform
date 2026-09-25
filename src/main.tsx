@@ -15,9 +15,10 @@ import {
 } from 'react-router-dom';
 import { QueryClientProvider, useQuery, useQueries } from '@tanstack/react-query';
 import { queryClient, qk } from './query';
-import { leagueParticipants, clubPlaysVeterans } from './leagues';
-import { allocateVenues, buildLedger } from './competition/venues';
-import { findBlock } from './competition/calendar';
+import { leagueParticipants, clubPlaysVeterans } from '../packages/engine/src/leagues';
+import { allocateVenues, buildLedger } from '../packages/engine/src/venues';
+import { findBlock } from '../packages/engine/src/calendar';
+import { buildStageSeries } from '../packages/engine/src/series-builder';
 import * as api from './api';
 import { ApiError, SERIES_CONFLICT_MESSAGE, SERIES_CONFLICT_FRIENDLY } from './api';
 import { resolveTenantSlug, applyTheme, redirectToCanonicalOrigin } from './config';
@@ -765,47 +766,16 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       );
     }
     const created = [];
+    const leagueTeams = leagueParticipants(clubs, run.leagueKey);
     for (const p of payloads) {
-      const participants = leagueParticipants(clubs, run.leagueKey)
-        .filter((t) => p.entrants.includes(t.teamId))
-        .map((t) => ({
-          teamId: t.teamId,
-          clubId: t.clubId,
-          name: t.name,
-          ...(t.venue ? { venue: t.venue } : {}),
-          ...(Number.isFinite(t.lat) ? { lat: t.lat } : {}),
-          ...(Number.isFinite(t.lon) ? { lon: t.lon } : {}),
-        }));
-      const multi = payloads.length > 1;
-      const series = {
-        id: `s-${run.id}-${stage.id}-${p.groupId}`,
-        name: `${p.league?.label ?? run.leagueKey} · ${stage.name}${multi ? ` · ${p.groupLabel}` : ''}`,
-        startDate: p.startDate,
-        teams: p.entrants,
-        participants,
-        fixtures: p.fixtures,
-        schedule: {
-          calendarId: run.calendarSnapshot.id,
-          blockId: resolvedBlock.id,
-          cadence: stage.schedule.cadence,
-          ...(stage.schedule.slots?.length ? { slots: stage.schedule.slots } : {}),
-          // Persisted for addFixture + validation parity on THIS stored series — a stage
-          // regenerate reads roundsPerDay off the structureSnapshot instead, so a season
-          // run keeps its own snapshot until an admin explicitly adopts a newer structure
-          // version (POST /season-runs/:id/rebase, the Seasons panel's "Review changes").
-          ...(stage.schedule.roundsPerDay === 2 ? { roundsPerDay: 2 } : {}),
-        },
-        ...(stage.schedule.activateFrom ? { activateFrom: stage.schedule.activateFrom } : {}),
-        seasonRunId: run.id,
-        stageSpecId: stage.id,
-        groupId: p.groupId,
-        maxOvers: p.competition?.matchFormat?.overs ?? 50,
-        seriesType: p.competition?.label ?? stage.name,
-        kind: 'series',
-        released: false,
-        releasedAt: null,
-        version: 1,
-      };
+      const series = buildStageSeries({
+        run,
+        stage,
+        blockId: resolvedBlock.id,
+        group: p,
+        multi: payloads.length > 1,
+        leagueTeams,
+      });
       // A re-generate replaces the group's series rather than stacking a second one.
       //
       // NEVER carry `released`/`releasedAt` into a re-generate: `series` is built fresh

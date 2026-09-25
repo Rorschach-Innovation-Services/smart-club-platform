@@ -21,7 +21,7 @@ import { resolveCopy } from './branding';
 import { Icon, Pill, Btn, Card, EmptyState, useToast, useEscapeClose } from './atoms';
 import { LeagueForm } from './admin';
 import { DISTRICTS } from './data';
-import { OVERARCHING_DISTRICT } from './leagues';
+import { OVERARCHING_DISTRICT } from '../packages/engine/src/leagues';
 import { InsightsBreakdown, LeagueTeamDirectoryCard, DemographicsCard } from './insights';
 import { CalendarsCard } from './platform-calendars';
 import { formatDayYear, formatStampDay } from './dates';

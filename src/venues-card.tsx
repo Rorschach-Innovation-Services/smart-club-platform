@@ -24,8 +24,8 @@ import {
   useEscapeClose,
 } from './atoms';
 import { ApiError } from './api';
-import { WEEKDAY_LABELS, isValidIsoDate } from './competition/calendar';
-import { MIN_GEO_COVERAGE, geoCoverage } from './competition/venues';
+import { WEEKDAY_LABELS, isValidIsoDate } from '../packages/engine/src/calendar';
+import { MIN_GEO_COVERAGE, geoCoverage } from '../packages/engine/src/venues';
 import type { Club, Venue, VenueUnavailable, Weekday } from './types';
 
 type Toast = (m: string, t?: string) => void;

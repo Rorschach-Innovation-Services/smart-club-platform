@@ -116,7 +116,7 @@ describe('labelByKey / findByKey / optionsGroupedByGroup', () => {
     expect(labelByKey(LEAGUES).emcuD1).toBe('EMCU Division 1');
   });
   it('finds by key, undefined when missing (orphaned key)', () => {
-    expect(findByKey(LEAGUES, 'veterans').label).toBe('Veterans League');
+    expect(findByKey(LEAGUES, 'veterans')!.label).toBe('Veterans League');
     expect(findByKey(LEAGUES, 'deleted-key')).toBeUndefined();
     expect(findByKey([], 'x')).toBeUndefined();
   });

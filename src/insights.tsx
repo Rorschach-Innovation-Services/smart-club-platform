@@ -20,7 +20,7 @@ import {
   leagueOptionsForDistrict,
   clubTeamsForLeague,
   findByKey,
-} from './leagues';
+} from '../packages/engine/src/leagues';
 import type {
   InsightsClub,
   League,

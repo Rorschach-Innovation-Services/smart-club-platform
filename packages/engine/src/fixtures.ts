@@ -17,7 +17,7 @@
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import { slotForIndex } from './calendar';
-import type { IsoDate, IsoTime, TimeSlot } from '../types';
+import type { IsoDate, IsoTime, TimeSlot } from './types';
 
 dayjs.extend(utc);
 

@@ -13,7 +13,7 @@ import {
 import { materialiseStage } from './structure';
 import { describeStage } from './narrative';
 import { T20_SLOTS } from './calendar';
-import type { SeasonCalendar } from '../types';
+import type { SeasonCalendar } from './types';
 
 const CAL: SeasonCalendar = {
   id: 'cal',

@@ -39,16 +39,16 @@ import {
   findBlock,
   formatIsoDate,
   type DatePlan,
-} from './competition/calendar';
+} from '../packages/engine/src/calendar';
 import {
   chainFeeder,
   derivedEntrantTotal,
   previewFitAll,
   previewRounds,
-} from './competition/structure';
-import { describeStage } from './competition/narrative';
-import { groupSizes } from './competition/entrants';
-import { isPoolKnockout, roundsForFormat } from './competition/formats';
+} from '../packages/engine/src/structure';
+import { describeStage } from '../packages/engine/src/narrative';
+import { groupSizes } from '../packages/engine/src/entrants';
+import { isPoolKnockout, roundsForFormat } from '../packages/engine/src/formats';
 import {
   STRUCTURE_TEMPLATES,
   blankStage,
@@ -58,14 +58,14 @@ import {
   newStructureId,
   parseStructureJson,
   structureToJson,
-} from './competition/templates';
+} from '../packages/engine/src/templates';
 import {
   CADENCE_KINDS,
   ENTRANT_KINDS,
   STAGE_KINDS,
   stageKindFor,
   stageTitle,
-} from './help/stage-kinds';
+} from '../packages/engine/src/stage-kinds';
 import type {
   Cadence,
   Competition,

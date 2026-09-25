@@ -1,0 +1,6 @@
+{
+  "name": "@smart-club/engine",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0"
+}

@@ -28,7 +28,7 @@ import {
   composeDob,
   type DobError,
 } from './data';
-import { leagueOptionsForDistrict } from './leagues';
+import { leagueOptionsForDistrict } from '../packages/engine/src/leagues';
 
 const EMPTY = {
   surname: '',

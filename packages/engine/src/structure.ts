@@ -25,7 +25,7 @@ import type {
   SeasonCalendar,
   SeasonRun,
   StageSpec,
-} from '../types';
+} from './types';
 
 /** One group of a materialised stage: its teams, its dates and its fixtures. */
 export interface MaterialisedGroup {

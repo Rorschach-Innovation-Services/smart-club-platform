@@ -113,6 +113,21 @@ export function clubTeamsForLeague(club: ClubSidesSource, leagueKey: string): Te
   ];
 }
 
+/**
+ * The league fields these helpers read. A pick of `League`, loose on everything but `key`
+ * so callers can pass the full catalogue entry or a lighter projection; the helpers hand
+ * back whatever element type they were given. Lists may be absent (a fresh tenant, or a
+ * config still loading) and are treated as empty.
+ */
+export interface LeagueRef {
+  key: string;
+  label?: string;
+  group?: string;
+  district?: string;
+}
+
+type LeagueList<L> = readonly L[] | null | undefined;
+
 /** Derive a stable, URL-safe key from a league name (new admin-created leagues only). */
 export function slugifyLeagueKey(label: string) {
   return String(label || '')
@@ -128,14 +143,17 @@ export function slugifyLeagueKey(label: string) {
  * fallback to a default district — an unknown/blank district yields just the overarching
  * set, which is the correct behaviour for a fresh tenant.
  */
-export function leagueOptionsForDistrict(allLeagues: any[], district: string): any[] {
+export function leagueOptionsForDistrict<L extends LeagueRef>(
+  allLeagues: LeagueList<L>,
+  district: string,
+): L[] {
   const list = Array.isArray(allLeagues) ? allLeagues : [];
   const overarching = list.filter((l) => l.district === OVERARCHING_DISTRICT);
   const districtSpecific = list.filter(
     (l) => l.district === district && l.district !== OVERARCHING_DISTRICT,
   );
   const seen = new Set<string>();
-  const out: any[] = [];
+  const out: L[] = [];
   for (const l of [...overarching, ...districtSpecific]) {
     if (seen.has(l.key)) continue;
     seen.add(l.key);
@@ -152,40 +170,51 @@ export function leagueOptionsForDistrict(allLeagues: any[], district: string): a
  * EMCU junior league for a club whose home district is Ilembe). The server accepts any
  * catalogue key, so these are valid selections — just not the district-default ones.
  */
-export function leagueOptionsOutsideDistrict(
-  allLeagues: any[],
+export function leagueOptionsOutsideDistrict<L extends LeagueRef>(
+  allLeagues: LeagueList<L>,
   district: string,
-): Record<string, Record<string, any[]>> {
+): Record<string, Record<string, L[]>> {
   const list = Array.isArray(allLeagues) ? allLeagues : [];
   const inDistrict = new Set(leagueOptionsForDistrict(list, district).map((l) => l.key));
   const seen = new Set<string>();
-  const out: Record<string, Record<string, any[]>> = {};
+  const out: Record<string, Record<string, L[]>> = {};
   for (const l of list) {
     if (inDistrict.has(l.key) || seen.has(l.key)) continue;
     seen.add(l.key);
     const d = l.district || '';
     const byGroup = (out[d] = out[d] || {});
-    (byGroup[l.group] = byGroup[l.group] || []).push(l);
+    const g = String(l.group);
+    (byGroup[g] = byGroup[g] || []).push(l);
   }
   return out;
 }
 
 /** key -> label map (replaces the static LEAGUE_LABEL_BY_KEY). */
-export function labelByKey(allLeagues: any[]): Record<string, string> {
+export function labelByKey(allLeagues: LeagueList<LeagueRef>): Record<string, string> {
   const map: Record<string, string> = {};
-  for (const l of allLeagues || []) map[l.key] = l.label;
+  // A league with no label maps to `undefined`, exactly as before the list was typed.
+  for (const l of allLeagues || []) map[l.key] = l.label as string;
   return map;
 }
 
 /** Group leagues by their `group` label, for optgroup-style rendering. */
-export function optionsGroupedByGroup(allLeagues: any[]): Record<string, any[]> {
-  const groups: Record<string, any[]> = {};
-  for (const l of allLeagues || []) (groups[l.group] = groups[l.group] || []).push(l);
+export function optionsGroupedByGroup<L extends LeagueRef>(
+  allLeagues: LeagueList<L>,
+): Record<string, L[]> {
+  const groups: Record<string, L[]> = {};
+  // An ungrouped league lands under the "undefined" key, exactly as before the list was typed.
+  for (const l of allLeagues || []) {
+    const g = String(l.group);
+    (groups[g] = groups[g] || []).push(l);
+  }
   return groups;
 }
 
 /** Find a single league by key (returns undefined if it was deleted). */
-export function findByKey(allLeagues: any[], key: string) {
+export function findByKey<L extends LeagueRef>(
+  allLeagues: LeagueList<L>,
+  key: string,
+): L | undefined {
   return (allLeagues || []).find((l) => l.key === key);
 }
 
@@ -202,7 +231,7 @@ export const JUNIOR_GROUP = 'Juniors';
 const WOMENS_LABEL_RE = /\b(women(?:['’]?s)?|ladies)\b/i;
 
 /** True when a catalogue league is a women's league (matched on label). */
-export function isWomensLeague(league: any): boolean {
+export function isWomensLeague(league: Pick<LeagueRef, 'label'> | null | undefined): boolean {
   return !!league && WOMENS_LABEL_RE.test(String(league.label || ''));
 }
 
@@ -220,7 +249,9 @@ const VETERANS_KEY_RE = /^veterans\b/i;
 const VETERANS_LABEL_RE = /\bveterans?\b|\bvets\b/i;
 
 /** True when a catalogue league is a veterans league (matched on key OR label). */
-export function isVeteransLeague(league: any): boolean {
+export function isVeteransLeague(
+  league: { key?: string; label?: string } | null | undefined,
+): boolean {
   if (!league) return false;
   return (
     VETERANS_KEY_RE.test(String(league.key || '')) ||
@@ -238,7 +269,7 @@ export function isVeteransLeague(league: any): boolean {
  */
 export function clubPlaysVeterans(
   club: { leagues?: string[] } | null | undefined,
-  allLeagues: any[],
+  allLeagues: LeagueList<LeagueRef>,
 ): boolean {
   const keys = Array.isArray(club?.leagues) ? club!.leagues : [];
   return keys.some((k) => {
@@ -258,8 +289,8 @@ export function clubPlaysVeterans(
  * Keys whose league was deleted from the catalogue fall through to senior.
  */
 export function teamCounts(
-  leagueKeys: any[],
-  allLeagues: any[],
+  leagueKeys: readonly string[] | null | undefined,
+  allLeagues: LeagueList<LeagueRef>,
   leagueTeams?: Record<string, number>,
 ) {
   const keys = Array.isArray(leagueKeys) ? leagueKeys : [];

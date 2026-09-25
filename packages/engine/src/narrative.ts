@@ -16,8 +16,8 @@ import { describeCadence, findBlock, formatIsoDate } from './calendar';
 import { describeEntrants, groupSizes } from './entrants';
 import { describeFormat, knockoutShape } from './formats';
 import { chainFeeder, derivedEntrantTotal, previewFitAll } from './structure';
-import { stageTitle } from '../help/stage-kinds';
-import type { CompetitionStructure, GroupPlan, IsoDate, SeasonCalendar, StageSpec } from '../types';
+import { stageTitle } from './stage-kinds';
+import type { CompetitionStructure, GroupPlan, IsoDate, SeasonCalendar, StageSpec } from './types';
 
 /**
  * A stage as one plain-English sentence — the primary artefact of the operator console's

@@ -10,7 +10,7 @@
  * label).
  */
 
-import type { Cadence, EntrantSpec, FormatSpec } from '../types';
+import type { Cadence, EntrantSpec, FormatSpec } from './types';
 
 /** What a format choice means, in the words an operator would use out loud. */
 export interface StageKindHelp {

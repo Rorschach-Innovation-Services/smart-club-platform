@@ -18,7 +18,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { currentSeasonLabel } from './data';
-import { T20_SLOTS } from './competition/calendar';
+import { T20_SLOTS } from '../packages/engine/src/calendar';
 import {
   buildFlatSeasonRun,
   FLAT_COMPETITION_ID,

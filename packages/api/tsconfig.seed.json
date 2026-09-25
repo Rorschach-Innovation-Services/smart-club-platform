@@ -1,13 +1,11 @@
 {
   /*
-   * Type-check project for the CLIs that reach into the frontend tree — seed-cohort.ts
-   * and export-cohort.ts.
+   * Type-check project for the CLI that reaches into the frontend tree — export-cohort.ts.
    *
-   * These are the places the two trees meet: they persist through packages/api (strict)
-   * while importing from src/ — the fixture-generation engine (src/competition/*) and the
-   * CQI catalogue/scoring (src/data.ts, src/cqiScore.ts) — which is `strict: false` and
-   * typed against the frontend's own src/types.ts. Checking them in the api project would
-   * drag that tree in under strict rules it was never written for.
+   * It persists nothing but reads through packages/api (strict) while importing the CQI
+   * catalogue/scoring from src/ (src/data.ts, src/cqiScore.ts), which is `strict: false`
+   * and typed against the frontend's own src/types.ts. Checking it in the api project
+   * would drag that tree in under strict rules it was never written for.
    *
    * `lib` stays ES2022 with no DOM: those modules are pure TS — dayjs, exceljs and type
    * imports only — and src/types.ts references no DOM types. If that ever stops being
@@ -21,6 +19,6 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false
   },
-  "include": ["src/seed-cohort.ts", "src/export-cohort.ts"],
+  "include": ["src/export-cohort.ts"],
   "exclude": []
 }

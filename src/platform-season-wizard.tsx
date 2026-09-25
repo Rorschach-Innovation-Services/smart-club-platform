@@ -20,9 +20,9 @@ import { Btn, EmptyState, Icon, InfoDot, useEscapeClose } from './atoms';
 import * as api from './api';
 import { ApiError } from './api';
 import { CalendarForm } from './platform-calendars';
-import { calendarSpan, formatIsoDate } from './competition/calendar';
-import { groupSizes } from './competition/entrants';
-import { derivedEntrantTotal, previewFitAll } from './competition/structure';
+import { calendarSpan, formatIsoDate } from '../packages/engine/src/calendar';
+import { groupSizes } from '../packages/engine/src/entrants';
+import { derivedEntrantTotal, previewFitAll } from '../packages/engine/src/structure';
 import {
   STRUCTURE_TEMPLATES,
   applyPlacement,
@@ -30,8 +30,8 @@ import {
   findTemplate,
   instantiateTemplate,
   newStructureId,
-} from './competition/templates';
-import { stageTitle } from './help/stage-kinds';
+} from '../packages/engine/src/templates';
+import { stageTitle } from '../packages/engine/src/stage-kinds';
 import type {
   Competition,
   CompetitionStructure,

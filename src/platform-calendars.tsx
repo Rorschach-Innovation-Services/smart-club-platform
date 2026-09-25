@@ -21,7 +21,7 @@ import {
   formatIsoDate,
   isValidIsoDate,
   todayIso,
-} from './competition/calendar';
+} from '../packages/engine/src/calendar';
 import type { SeasonBlock, SeasonBreak, SeasonCalendar, TenantConfig } from './types';
 
 type Toast = (m: string, t?: string) => void;

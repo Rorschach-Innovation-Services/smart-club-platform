@@ -21,7 +21,7 @@
  */
 
 import { roundRobinPairings, type Pairing } from './fixtures';
-import type { FormatSpec } from '../types';
+import type { FormatSpec } from './types';
 
 /**
  * The Series Type options offered wherever an admin picks a match format — the ad-hoc

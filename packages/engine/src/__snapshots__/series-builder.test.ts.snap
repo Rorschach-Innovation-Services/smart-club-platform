@@ -1,0 +1,74 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`buildStageSeries > builds one group of a two-group stage with slots, roundsPerDay and activateFrom 1`] = `
+{
+  "activateFrom": "2027-01-18",
+  "fixtures": [
+    {
+      "away": "pinetown",
+      "date": "2026-09-13",
+      "home": "tm_glen_a",
+      "id": "f1",
+      "round": 1,
+    },
+  ],
+  "groupId": "g1",
+  "id": "s-run-1-pools-g1",
+  "kind": "series",
+  "maxOvers": 20,
+  "name": "Premier Men · Pool stage · Group A",
+  "participants": [
+    {
+      "clubId": "pinetown",
+      "lat": -29.8156,
+      "lon": 30.8586,
+      "name": "Pinetown CC",
+      "teamId": "pinetown",
+      "venue": "Pinetown Sports Club",
+    },
+    {
+      "clubId": "westville",
+      "name": "Westville CC",
+      "teamId": "westville",
+    },
+    {
+      "clubId": "glenwood",
+      "lat": -29.8703,
+      "lon": 30.9932,
+      "name": "Glenwood A",
+      "teamId": "tm_glen_a",
+      "venue": "Glenwood Park",
+    },
+  ],
+  "released": false,
+  "releasedAt": null,
+  "schedule": {
+    "blockId": "cal-2026-block-1",
+    "cadence": {
+      "kind": "weekly",
+    },
+    "calendarId": "cal-2026",
+    "roundsPerDay": 2,
+    "slots": [
+      {
+        "label": "Morning",
+        "start": "08:00",
+      },
+      {
+        "label": "Afternoon",
+        "start": "13:30",
+      },
+    ],
+  },
+  "seasonRunId": "run-1",
+  "seriesType": "T20 (Pink Ball)",
+  "stageSpecId": "pools",
+  "startDate": "2026-09-13",
+  "teams": [
+    "tm_glen_a",
+    "westville",
+    "pinetown",
+  ],
+  "version": 1,
+}
+`;

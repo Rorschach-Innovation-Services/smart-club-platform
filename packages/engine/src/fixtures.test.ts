@@ -9,7 +9,7 @@ import {
 } from './fixtures';
 import { planRoundDates } from './calendar';
 import { roundRobinRounds } from './formats';
-import type { SeasonCalendar } from '../types';
+import type { SeasonCalendar } from './types';
 
 /** The confirmed 2026/27 Top Six, in the order the union's spreadsheet lists them. */
 const TOP_SIX = [

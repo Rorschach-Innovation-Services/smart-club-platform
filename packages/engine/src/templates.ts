@@ -13,7 +13,7 @@
  * "group phase before the break, deciders after it" shape both unions use.
  */
 
-import type { CompetitionStructure, SeasonCalendar, StageSpec } from '../types';
+import type { CompetitionStructure, SeasonCalendar, StageSpec } from './types';
 import { T20_SLOTS } from './calendar';
 
 export interface StructureTemplate {

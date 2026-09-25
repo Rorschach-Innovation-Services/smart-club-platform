@@ -1,8 +1,13 @@
 /* ─── Sample data ─── */
 
 import type { Club, RequiredDoc } from './types';
-import { fixturesFromDates, legacyRoundDates, roundRobinPairings } from './competition/fixtures';
-import { slotRefLabel } from './competition/formats';
+import {
+  fixturesFromDates,
+  legacyRoundDates,
+  roundRobinPairings,
+} from '../packages/engine/src/fixtures';
+import { slotRefLabel } from '../packages/engine/src/formats';
+import { haversineKm } from '../packages/engine/src/geo';
 import {
   daysSince,
   daysUntilDate,
@@ -1388,26 +1393,9 @@ export function overallProgress(club, requiredDocs = DEFAULT_REQUIRED_DOCS) {
 }
 
 /* ─── FIXTURE GENERATION + TRAVEL COSTS ───
-   Haversine great-circle distance between two lat/lon coords (km).
+   Haversine distance lives in the engine (packages/engine/src/geo.ts).
    Round-robin schedule generator.
    Travel cost = round-trip distance × cars × cost per km. */
-export function haversineKm(a, b) {
-  // Guarded on the COORDINATES, not on the objects. `{}` is truthy, and a pending
-  // knockout side resolves to `ground: {}` (resolveTeam's slot-ref branch), as does a
-  // club with no ground on record — so an object check let NaN through and every
-  // bracket's later rounds rendered "NaN km" and "R NaN". A missing coordinate means
-  // "unknown distance", and zero is the only honest number to add to a total.
-  const finite = (p) => !!p && Number.isFinite(p.lat) && Number.isFinite(p.lon);
-  if (!finite(a) || !finite(b)) return 0;
-  const R = 6371;
-  const toRad = (x) => (x * Math.PI) / 180;
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lon - a.lon);
-  const s =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
-}
 
 // Shared travel-cost defaults — used as fixtureCost's parameter defaults AND by
 // display sites that read series.costPerKm/carsPerAwayTrip directly, so a series
@@ -1524,7 +1512,7 @@ export function resolveTeam(series, teamId, clubBy) {
   // A knockout's later rounds reference earlier fixtures ("win:f3") because the winner
   // isn't known yet. Resolve those to a readable slot label BEFORE the participant
   // lookup, which would otherwise find nothing and render "Unknown team" for every
-  // fixture past round one. See competition/formats.ts for the reference format.
+  // fixture past round one. See packages/engine/src/formats.ts for the reference format.
   const slot = slotRefLabel(teamId, series?.fixtures);
   if (slot) {
     return { teamId, clubId: undefined, club: undefined, name: slot, ground: {}, pending: true };
@@ -1570,7 +1558,7 @@ export function resolveSpread({ dateMode, kind }: { dateMode?: string; kind?: st
 /**
  * Round-robin: each team plays every other team once. Home/away alternates fairly.
  *
- * Now a thin wrapper over src/competition/fixtures.ts, which owns the pairing rotation
+ * Now a thin wrapper over packages/engine/src/fixtures.ts, which owns the pairing rotation
  * and both date strategies (ADR 0008). Behaviour is unchanged and must stay that way —
  * the create/regenerate parity test in data.test.ts is the gate.
  *

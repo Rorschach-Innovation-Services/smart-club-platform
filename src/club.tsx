@@ -67,9 +67,9 @@ import {
   defaultTeamName,
   teamLetter,
   isVeteransLeague,
-} from './leagues';
-import { isActivated, todayIso } from './competition/calendar';
-import { fixtureVenueCoords } from './competition/venues';
+} from '../packages/engine/src/leagues';
+import { isActivated, todayIso } from '../packages/engine/src/calendar';
+import { fixtureVenueCoords } from '../packages/engine/src/venues';
 import { shortAddress, suburbOf, SA_BOUNDS, isInSouthAfrica } from './geocode';
 import {
   formatDay,

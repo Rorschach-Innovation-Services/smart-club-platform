@@ -4,8 +4,10 @@
  * The browser's within-pool generator flattens the pools and hands them to the same
  * adjacent-pairing bracket builder every knockout uses, so the fixtures are ordinary
  * round-major ones with `win:`/`lose:` refs. The emailed schedule labels them through
- * slot-refs.ts; this pins that the wording matches the portal's ("Winner of Semi-final
- * 1") with no server change. PARITY: src/competition/formats.ts `slotRefLabel`.
+ * slot-refs.ts, which now delegates to the engine's `slotRefLabel`
+ * (packages/engine/src/formats.ts) — the portal's own function. No longer a parity check
+ * between twins; this pins the wording ("Winner of Semi-final 1") through the API's
+ * wrapper and the broadcast resolver.
  *
  * Run with the API package's test runner (tsx --test).
  */

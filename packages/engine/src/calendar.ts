@@ -22,7 +22,7 @@
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
-import type { Cadence, IsoDate, SeasonBlock, SeasonCalendar, TimeSlot, Weekday } from '../types';
+import type { Cadence, IsoDate, SeasonBlock, SeasonCalendar, TimeSlot, Weekday } from './types';
 
 dayjs.extend(utc);
 dayjs.extend(customParseFormat);
@@ -40,7 +40,7 @@ export type {
   TimeSlot,
   Weekday,
   SeriesSchedule,
-} from '../types';
+} from './types';
 
 /** The one storage/parse format. Strict-matched, so '2026-02-31' and '13/09/2026' are invalid. */
 const FMT = 'YYYY-MM-DD';

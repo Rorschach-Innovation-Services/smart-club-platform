@@ -23,7 +23,11 @@ import * as api from './api';
 import { ApiError } from './api';
 import { Btn, Card, EmptyState, Icon, Pill } from './atoms';
 import { DISTRICTS } from './data';
-import { OVERARCHING_DISTRICT, optionsGroupedByGroup, slugifyLeagueKey } from './leagues';
+import {
+  OVERARCHING_DISTRICT,
+  optionsGroupedByGroup,
+  slugifyLeagueKey,
+} from '../packages/engine/src/leagues';
 import { buildClubIndex } from './intake-match';
 import {
   applyRowEdits,

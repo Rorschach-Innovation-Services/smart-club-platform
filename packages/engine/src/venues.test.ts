@@ -10,7 +10,7 @@ import {
   type AllocatedFixture,
   type TeamHome,
 } from './venues';
-import type { Venue } from '../types';
+import type { Venue } from './types';
 
 /** Three Durban grounds, roughly where they really are. */
 const KINGSMEAD: Venue = { id: 'kingsmead', name: 'Kingsmead', lat: -29.856, lon: 31.03 };

@@ -73,7 +73,7 @@ import {
   teamCounts,
   clubTeamsForLeague,
   OVERARCHING_DISTRICT,
-} from './leagues';
+} from '../packages/engine/src/leagues';
 import {
   CADENCE_LABELS,
   T20_SLOTS,
@@ -86,14 +86,23 @@ import {
   isValidIsoDate,
   planRoundDates,
   todayIso,
-} from './competition/calendar';
-import { fixturesFromPlan, legacyRoundDates, roundsForTeamCount } from './competition/fixtures';
+} from '../packages/engine/src/calendar';
+import {
+  fixturesFromPlan,
+  legacyRoundDates,
+  roundsForTeamCount,
+} from '../packages/engine/src/fixtures';
 import {
   fixtureVenueCoords as fixtureVenue,
   isLocked,
   VENUE_REASON_PREFIX,
-} from './competition/venues';
-import { DEFAULT_SERIES_OVERS, isSlotRef, SERIES_TYPES, slotRefLabel } from './competition/formats';
+} from '../packages/engine/src/venues';
+import {
+  DEFAULT_SERIES_OVERS,
+  isSlotRef,
+  SERIES_TYPES,
+  slotRefLabel,
+} from '../packages/engine/src/formats';
 import type {
   AdminClearanceView,
   Cadence,
@@ -202,7 +211,7 @@ type SelectedPlayerState = PlayerRegistration & { clubName?: string };
    already reads in the suburb line; this is the at-a-glance pill (full reason on hover).
    Only the operator-facing moves get a pill — a plain allocated ground or a Union T20
    slot is the normal case and gets none. Prefixes match what the allocator/import write
-   (see competition/venues.ts and packages/api/src/import-planb-fixtures.ts). */
+   (see packages/engine/src/venues.ts and packages/api/src/import-planb-fixtures.ts). */
 function venueReasonPill(reason?: string, status?: string): string | null {
   if (!reason || status === 'home') return null;
   if (reason.startsWith(VENUE_REASON_PREFIX.movedToAvoid)) return 'moved';

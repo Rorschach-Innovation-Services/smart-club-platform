@@ -8,14 +8,14 @@ import {
   entrantKindFor,
   stageKindFor,
   stageTitle,
-} from '../help/stage-kinds';
+} from './stage-kinds';
 import type {
   Cadence,
   CompetitionStructure,
   EntrantSpec,
   FormatSpec,
   SeasonCalendar,
-} from '../types';
+} from './types';
 
 const TWO_BLOCKS: SeasonCalendar = {
   id: 'cal',

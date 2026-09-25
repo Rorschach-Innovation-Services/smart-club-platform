@@ -12,7 +12,7 @@
  * normal, displayable state that the admin console renders as a confirmation step.
  */
 
-import type { EntrantSpec, GroupPlan } from '../types';
+import type { EntrantSpec, GroupPlan } from './types';
 
 /** One group of entrants, in seed order where that is meaningful. */
 export interface ResolvedGroup {
