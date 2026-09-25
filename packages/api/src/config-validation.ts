@@ -16,14 +16,17 @@ import dayjsUtc from 'dayjs/plugin/utc.js';
 import dayjsCustomParseFormat from 'dayjs/plugin/customParseFormat.js';
 import { HttpError } from './auth.js';
 import { DOC_FORMAT_MIME, MAX_DOC_FILES_HARD_CAP, MAX_SAFEGUARDING_FILES } from './catalogue.js';
+import { normaliseName } from './venue-clash.js';
 import type {
   Cadence,
+  CompetitionDefaults,
   CompetitionStructure,
   League,
   RequiredDoc,
   SeasonCalendar,
   StageSpec,
   TimeSlot,
+  Weekday,
 } from './types.js';
 
 // `HH:MM`, 24h — matches the `IsoTime` doc comment on types.ts, not parsed via dayjs
@@ -131,6 +134,18 @@ function declaredGroupCount(stage: StageSpec): number {
   return plan.kind === 'sizes' ? plan.sizes.length : plan.count;
 }
 
+/** 2, 4, 8, … — the counts a within-group bracket halves cleanly (`withinPoolRounds`). */
+function isPowerOfTwoAtLeast2(n: number): boolean {
+  return Number.isInteger(n) && n >= 2 && (n & (n - 1)) === 0;
+}
+
+/**
+ * The within-group rule in words. The console's structure editor shows the same sentence
+ * (`WITHIN_POOL_SHAPE`, src/platform-structures.tsx), so keep the two in step.
+ */
+export const WITHIN_POOL_SHAPE_MESSAGE =
+  'within-group semi-finals need a power-of-two number of groups (2, 4, 8) each sending the same power-of-two number of sides (2, 4)';
+
 /**
  * Shape guard for a `Cadence`, shared by structure-stage validation and series-schedule
  * validation (`POST`/`PATCH /series`) so the two paths can never drift apart on what
@@ -190,6 +205,7 @@ export function assertValidTimeSlots(slots: unknown, context: string): asserts s
  * a season from, so every rule here may only reject values that could never have been
  * stored before it existed. The `within-pool`, `qualifiersPerGroup` and `startAfter`
  * rules below all guard fields that are new together — widen, never narrow, the rest.
+ * (The within-pool rule was widened from 2×2 to the engine's power-of-two rule, ADR 0014.)
  */
 export function validateStructures(
   structures: unknown,
@@ -311,16 +327,15 @@ export function validateStructures(
       }
       if (stage.format.kind === 'knockout') {
         const q = note?.qualifiersPerGroup;
-        // v1 within-pool is the 2×2 shape only: the generator refuses anything else (a
-        // non-power-of-two pool count mislabels the bracket), so a structure declaring it
-        // would silently fall back to a seeded draw. Refuse it at save time instead.
+        // Within-pool draws only a bye-free bracket: a power-of-two number of groups, each
+        // sending the same power-of-two number of sides (`withinPoolRounds`, the engine's
+        // rule). Any other shape would silently fall back to a seeded draw, so it is
+        // refused at save time instead.
         if (stage.format.pairing === 'within-pool') {
           const source = note ? st.stages.find((s) => s.id === note.fromStage) : undefined;
-          if (q !== 2 || !source || declaredGroupCount(source) !== 2)
-            throw new HttpError(
-              400,
-              `stage "${sName}": within-group semi-finals need 2 groups × 2 qualifiers in this version`,
-            );
+          const groups = source ? declaredGroupCount(source) : 0;
+          if (q === undefined || !isPowerOfTwoAtLeast2(q) || !isPowerOfTwoAtLeast2(groups))
+            throw new HttpError(400, `stage "${sName}": ${WITHIN_POOL_SHAPE_MESSAGE}`);
         }
         // Cross-pool pairs winners with runners-up; a third qualifier per pool has no
         // expressible cross-pool opponent. Optional here — pre-existing cross-pool
@@ -564,4 +579,97 @@ function assertMatchHints(key: string, matchHints: unknown): void {
       `document "${key}": matchHints must be up to 10 short strings (max 40 chars)`,
     );
   }
+}
+
+const MAX_MATCH_FORMATS = 20;
+const MAX_TIME_SLOTS = 8;
+const MAX_VENUE_ALIASES = 500;
+
+/**
+ * `TenantConfig.competitionDefaults` shape guard (ADR 0014). Shared by both write paths —
+ * the tenant admin's `PUT /tenant/config` and the operator's `PUT /platform/tenants/:slug` —
+ * through `applyTenantConfigPatch`. Returns the value to store: strings trimmed, absent
+ * fields left absent, so a stored object never carries an explicit `undefined`.
+ */
+export function validateCompetitionDefaults(value: unknown): CompetitionDefaults {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new HttpError(400, 'competitionDefaults must be an object');
+  const d = value as Record<string, unknown>;
+  const out: CompetitionDefaults = {};
+
+  if (d.matchFormats !== undefined) {
+    if (!Array.isArray(d.matchFormats)) throw new HttpError(400, 'match formats must be an array');
+    if (d.matchFormats.length > MAX_MATCH_FORMATS)
+      throw new HttpError(400, `no more than ${MAX_MATCH_FORMATS} match formats`);
+    out.matchFormats = d.matchFormats.map((raw) => {
+      const f = (raw ?? {}) as { label?: unknown; overs?: unknown; ballType?: unknown };
+      if (typeof f.label !== 'string' || !f.label.trim())
+        throw new HttpError(400, 'every match format needs a label');
+      const label = f.label.trim();
+      if (label.length > 60)
+        throw new HttpError(400, 'match format labels must be 60 characters or fewer');
+      if (
+        f.overs !== undefined &&
+        (!Number.isInteger(f.overs) || (f.overs as number) < 1 || (f.overs as number) > 200)
+      )
+        throw new HttpError(400, `"${label}" needs a whole number of overs between 1 and 200`);
+      if (f.ballType !== undefined && typeof f.ballType !== 'string')
+        throw new HttpError(400, `"${label}" ball type must be text`);
+      const ballType = (f.ballType as string | undefined)?.trim();
+      if (ballType && ballType.length > 30)
+        throw new HttpError(400, `"${label}" ball type must be 30 characters or fewer`);
+      return {
+        label,
+        ...(f.overs !== undefined ? { overs: f.overs as number } : {}),
+        ...(ballType ? { ballType } : {}),
+      };
+    });
+  }
+
+  if (d.matchDays !== undefined) {
+    if (!Array.isArray(d.matchDays)) throw new HttpError(400, 'match days must be an array');
+    if (d.matchDays.some((n) => !Number.isInteger(n) || n < 0 || n > 6))
+      throw new HttpError(400, 'match days must be weekdays 0 (Sunday) to 6 (Saturday)');
+    if (new Set(d.matchDays).size !== d.matchDays.length)
+      throw new HttpError(400, 'match days must not repeat');
+    out.matchDays = d.matchDays as Weekday[];
+  }
+
+  if (d.timeSlots !== undefined) {
+    assertValidTimeSlots(d.timeSlots, 'the default time slots');
+    if (d.timeSlots.length > MAX_TIME_SLOTS)
+      throw new HttpError(400, `no more than ${MAX_TIME_SLOTS} default time slots`);
+    out.timeSlots = d.timeSlots.map((sl) => ({ label: sl.label.trim(), start: sl.start }));
+  }
+
+  if (d.travel !== undefined) {
+    const t = d.travel as { costPerKm?: unknown; carsPerAwayTrip?: unknown } | null;
+    const ok = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0;
+    if (!t || typeof t !== 'object' || !ok(t.costPerKm) || !ok(t.carsPerAwayTrip))
+      throw new HttpError(400, 'travel needs a cost per km and cars per away trip of 0 or more');
+    out.travel = { costPerKm: t.costPerKm, carsPerAwayTrip: t.carsPerAwayTrip };
+  }
+
+  if (d.venueAliases !== undefined) {
+    const a = d.venueAliases;
+    if (!a || typeof a !== 'object' || Array.isArray(a))
+      throw new HttpError(400, 'venue aliases must be an object of name → registry name');
+    const entries = Object.entries(a as Record<string, unknown>);
+    if (entries.length > MAX_VENUE_ALIASES)
+      throw new HttpError(400, `no more than ${MAX_VENUE_ALIASES} venue aliases`);
+    // Stored in `normaliseName` form, the only form `groundKey` ever looks up — so an alias
+    // typed as it appears on a sheet ("Riverside Bowl") works, and a name that normalises
+    // to nothing ("CC") is refused rather than stored as a key nothing can match.
+    const aliases: Record<string, string> = {};
+    for (const [k, v] of entries) {
+      const from = normaliseName(k);
+      const to = typeof v === 'string' ? normaliseName(v) : '';
+      if (!from || !to)
+        throw new HttpError(400, 'every venue alias needs a ground name and the name it means');
+      aliases[from] = to;
+    }
+    out.venueAliases = aliases;
+  }
+
+  return out;
 }

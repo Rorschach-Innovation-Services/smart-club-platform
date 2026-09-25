@@ -50,6 +50,10 @@ import {
   newStructureId,
 } from '../packages/engine/src/templates';
 import { stageTitle } from '../packages/engine/src/stage-kinds';
+import {
+  resolveCompetitionDefaults,
+  type ResolvedCompetitionDefaults,
+} from '../packages/engine/src/defaults';
 import type {
   Competition,
   CompetitionStructure,
@@ -155,9 +159,12 @@ const MODE_CARDS = (hasStructures: boolean): OptionCard<'template' | 'existing'>
 function AdjustStages({
   structure,
   calendar,
+  defaults,
   onUpdate,
 }: {
   structure: CompetitionStructure;
+  /** The client's resolved competition defaults — match days and slots for new choices. */
+  defaults: ResolvedCompetitionDefaults;
   calendar: SeasonCalendar;
   onUpdate: (fn: (s: CompetitionStructure) => CompetitionStructure) => void;
 }) {
@@ -192,6 +199,7 @@ function AdjustStages({
           onChange={(patch) => patchStage(i, patch)}
           onRemove={() => onUpdate((s) => ({ ...s, stages: s.stages.filter((_, j) => j !== i) }))}
           onMove={(dir) => moveStage(i, dir)}
+          defaults={defaults}
         />
       ))}
     </div>
@@ -208,6 +216,7 @@ function AdjustStages({
 function LeagueSetupRow({
   league,
   calendar,
+  defaults,
   structures,
   choice,
   sharedWith,
@@ -218,6 +227,7 @@ function LeagueSetupRow({
 }: {
   league: League;
   calendar: SeasonCalendar;
+  defaults: ResolvedCompetitionDefaults;
   structures: CompetitionStructure[];
   choice: LeagueChoice;
   /** Other leagues in this run holding the same new template instance. */
@@ -335,6 +345,7 @@ function LeagueSetupRow({
                 <AdjustStages
                   structure={choice.structure}
                   calendar={calendar}
+                  defaults={defaults}
                   onUpdate={onUpdateStructure}
                 />
               )}
@@ -562,6 +573,7 @@ export function SeasonSetupWizard({
   const calendars = config.calendars ?? [];
   const leagues = config.leagues ?? [];
   const structures = config.structures ?? [];
+  const competitionDefaults = resolveCompetitionDefaults(config);
 
   const [step, setStep] = useState(0);
 
@@ -611,6 +623,7 @@ export function SeasonSetupWizard({
         calDraft ?? undefined,
         undefined,
         placementFor(t, calDraft ?? undefined),
+        competitionDefaults,
       ),
       isNew: true,
     };
@@ -1038,6 +1051,7 @@ export function SeasonSetupWizard({
                         key={l.key}
                         league={l}
                         calendar={calDraft}
+                        defaults={competitionDefaults}
                         structures={structures}
                         choice={choiceFor(l.key)}
                         sharedWith={sharersOf(l.key)}

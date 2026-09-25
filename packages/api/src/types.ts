@@ -11,6 +11,7 @@ import type {
   Cadence,
   ClubTeam,
   Competition,
+  CompetitionDefaults,
   CompetitionStructure,
   DerivationNote,
   EntrantSpec,
@@ -40,6 +41,7 @@ export type {
   Cadence,
   ClubTeam,
   Competition,
+  CompetitionDefaults,
   CompetitionStructure,
   DerivationNote,
   EntrantSpec,
@@ -321,6 +323,15 @@ export interface TenantConfig {
    */
   setupCompletedAt?: string;
   setupCompletedBy?: string;
+  /**
+   * Tenant-configured defaults that replace sport- and union-specific constants (ADR 0014):
+   * match formats, match days, double-header slots, travel cost and venue aliases. Absent
+   * (or any absent field) ⇒ the built-in fallback (`resolveCompetitionDefaults`, engine
+   * defaults.ts). Admin-level setup data like leagues: writable by BOTH `PUT /tenant/config`
+   * and `PUT /platform/tenants/:slug`, validated by `validateCompetitionDefaults`. The
+   * anonymous `GET /tenant` serves only matchFormats/matchDays/timeSlots.
+   */
+  competitionDefaults?: CompetitionDefaults;
 }
 
 /** Stored club record. Catalogue-derived fields stay client-side. */

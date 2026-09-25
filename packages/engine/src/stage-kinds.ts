@@ -51,7 +51,7 @@ export const STAGE_KINDS: Record<StageKindId, StageKindHelp> = {
     does: 'Every side in a group plays every other side once.',
     youWillBeAsked: 'Nothing extra. The rounds come from the number of sides in each group.',
     produces: '11 rounds for a group of 12, or 5 rounds for a group of 6.',
-    eg: 'EMCU Division 4: 12 sides, each playing 11 matches.',
+    eg: 'a league of 12 sides, each playing 11 matches.',
     decideBy: 'Pick this when each side should meet each other side exactly once.',
   },
   'round-robin-2': {
@@ -59,7 +59,7 @@ export const STAGE_KINDS: Record<StageKindId, StageKindHelp> = {
     does: 'Every side plays every other side twice, once at home and once away. The second leg mirrors the first.',
     youWillBeAsked: 'Nothing extra. The rounds come from the number of sides in each group.',
     produces: 'Twice the rounds of a single round robin: 10 rounds for a group of 6.',
-    eg: 'KZNCU Premier Men 50 Over: a Top Six and a Bottom Six, 30 fixtures in each group.',
+    eg: 'a 12-side league split into a Top Six and a Bottom Six, 30 fixtures in each group.',
     decideBy: 'Pick this for a full home-and-away season.',
   },
   'round-robin-3': {
@@ -76,7 +76,7 @@ export const STAGE_KINDS: Record<StageKindId, StageKindHelp> = {
     youWillBeAsked: 'the seeding order of the sides that go through, best first.',
     produces:
       'Semi-finals and a final for 4 sides. A field that is not 2, 4, 8 or 16 gets a preliminary round among the lowest seeds.',
-    eg: 'Kingsmead Cup: 9 sides, one preliminary match, then quarter-finals, semi-finals and a final.',
+    eg: 'a 9-side cup: one preliminary match, then quarter-finals, semi-finals and a final.',
     decideBy: 'Pick this when sides go through on one ranked list, not group by group.',
   },
   'knockout-cross-pool': {
@@ -84,15 +84,16 @@ export const STAGE_KINDS: Record<StageKindId, StageKindHelp> = {
     does: 'Each group winner plays another group’s runner-up: A1 v B2 and B1 v A2. Sides from the same group cannot meet again straight away.',
     youWillBeAsked: 'the finishing order of each group in the previous stage.',
     produces: 'Two semi-finals and a final when two groups send two sides each.',
-    eg: 'T20 Pink Ball: two groups of 6, the top two of each into cross-group semi-finals.',
+    eg: 'two groups of 6, the top two of each into cross-group semi-finals.',
     decideBy: 'Pick this when group winners should face a runner-up from the other group.',
   },
   'knockout-within-pool': {
     title: 'Knockout — within-group',
     does: 'Each group plays its own semi-final: A1 v A2 and B1 v B2. The two winners meet in the final.',
     youWillBeAsked: 'the finishing order of each group in the previous stage.',
-    produces: 'One semi-final per group, then a final. Needs 2 groups sending 2 sides each.',
-    eg: 'EMCU Division 1 30 Over: two groups of 5, the top two of each.',
+    produces:
+      'One semi-final per group, then a final. Needs 2, 4 or 8 groups each sending the same number of sides (2 or 4).',
+    eg: 'a 10-side league in two groups of 5, the top two of each.',
     decideBy: 'Pick this when each group should produce its own finalist.',
   },
   'single-match': {
@@ -158,13 +159,13 @@ export const CADENCE_KINDS: Record<CadenceKindId, ChoiceHelp> = {
   'every-n-weeks': {
     title: 'Every N weeks',
     does: 'One round every few weeks. You set the gap.',
-    eg: 'every 2 weeks, like EMCU Division 4.',
+    eg: 'every 2 weeks, for a league that plays fortnightly.',
     decideBy: 'Pick this for a league that plays fortnightly or less often.',
   },
   weekdays: {
     title: 'Set days only',
     does: 'Rounds go only on the weekdays you tick, one round per day.',
-    eg: 'Saturdays only, like EMCU Division 5.',
+    eg: 'Saturdays only, for a league that never plays midweek.',
     decideBy: 'Pick this when the league plays on fixed days of the week.',
   },
   spread: {

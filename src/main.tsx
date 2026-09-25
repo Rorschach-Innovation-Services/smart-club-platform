@@ -1,3 +1,5 @@
+import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
+import { CompetitionDefaultsCard } from './competition-defaults';
 import { Sentry } from './sentry'; // first — installs global error handlers before render
 import { useState as useStateApp, useMemo as useMemoApp, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
@@ -434,10 +436,12 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   // Admin-only setup config (structures) that deliberately isn't on the public
   // GET /tenant payload. Merged over `tenantConfig` below so consumers keep reading one
   // object.
+  // Reps read it too, for the one field the club portal needs off it: the tenant's
+  // travel-cost defaults (competitionDefaults.travel), which the anonymous payload omits.
   const tenantConfigQuery = useQuery({
     queryKey: qk.tenantConfig(),
     queryFn: api.getTenantConfig,
-    enabled: !!membership && role === 'admin',
+    enabled: !!membership,
   });
   const venuesQuery = useQuery({
     queryKey: qk.venues(),
@@ -521,6 +525,10 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   const allCalendars = tenantConfig?.calendars ?? [];
   // Structures live only on the authenticated read; absent for reps, who never need them.
   const allStructures = tenantConfigQuery.data?.structures ?? [];
+  // Competition defaults (ADR 0014): the authenticated read carries all of it; the public
+  // payload only the pickers' fields (formats, days, slots) — enough until the read lands.
+  const competitionDefaults =
+    tenantConfigQuery.data?.competitionDefaults ?? tenantConfig?.competitionDefaults;
   const allSeasonRuns = seasonRunsQuery.data ?? [];
   const allVenues = venuesQuery.data ?? [];
   // A FAILED fetch is not an empty registry, and the difference matters: the venues card
@@ -961,6 +969,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   allSeasonRuns,
                   allVenues,
                   allStructures,
+                  competitionDefaults,
                   venuesFailed,
                   structuresFailed,
                   seasonRunsFailed,
@@ -1031,6 +1040,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   allSeasonRuns,
                   allVenues,
                   allStructures,
+                  competitionDefaults,
                   venuesFailed,
                   structuresFailed,
                   seasonRunsFailed,
@@ -1110,6 +1120,7 @@ function Shell({
   allSeasonRuns = [],
   allVenues = [],
   allStructures = [],
+  competitionDefaults = undefined,
   venuesFailed = false,
   structuresFailed = false,
   seasonRunsFailed = false,
@@ -1160,6 +1171,8 @@ function Shell({
   const { memberships: authMemberships } = useAuth();
   const showOperatorNav = isOperator(authMemberships);
   const branding = tenantConfig?.branding;
+  // The tenant's travel-cost defaults for the club portal's estimates (ADR 0014).
+  const travel = resolveCompetitionDefaults({ competitionDefaults }).travel;
   // Union office email for mailto actions — parsed from the tenant support copy
   // slot via the shared parseSupport helper, so it stays correct per tenant.
   const unionEmail = parseSupport(branding?.copy?.support).email;
@@ -2443,6 +2456,23 @@ function Shell({
             onEdit={(L) => setShowLeagueForm(L)}
             onDeleteLeague={deleteLeague}
             toast={toastShow}
+            defaultsCard={
+              // Admin-level setup data like the leagues above (ADR 0014). Keyed on the
+              // stored value so the card reopens on what the server holds after a save.
+              <CompetitionDefaultsCard
+                key={JSON.stringify(competitionDefaults ?? {})}
+                config={{ ...tenantConfig, competitionDefaults }}
+                fetchLatest={api.getTenantConfig}
+                save={async (patch) => {
+                  const next = await api.putTenantConfig(patch);
+                  invalidate(qk.tenantConfig());
+                  invalidate(qk.tenant());
+                  return next;
+                }}
+                toast={toastShow}
+                aliasesReadOnly
+              />
+            }
           />
         );
       if (view === 'insights')
@@ -2498,7 +2528,9 @@ function Shell({
             onSaveVenue={saveVenue}
             onDeleteVenue={deleteVenue}
             onAllocateVenues={allocateSeriesVenues}
-            tenantConfig={tenantConfig && { ...tenantConfig, structures: allStructures }}
+            tenantConfig={
+              tenantConfig && { ...tenantConfig, structures: allStructures, competitionDefaults }
+            }
             allLeagues={allLeagues}
             onCreateSeasonRun={createSeasonRun}
             onSeasonSetupChanged={refetchSeasonSetup}
@@ -2614,6 +2646,7 @@ function Shell({
             clubs={clubs}
             toast={toastShow}
             onSendFixtures={sendFixtures}
+            travel={travel}
           />
         );
       }

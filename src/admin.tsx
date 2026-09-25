@@ -46,8 +46,6 @@ import {
   overallProgress,
   affiliationSubmitted,
   fixtureCost,
-  DEFAULT_COST_PER_KM,
-  DEFAULT_CARS,
   resolveTeam,
   teamIdsForClub,
   distinctClubCount,
@@ -82,6 +80,7 @@ import {
   VENUE_REASON_PREFIX,
 } from '../packages/engine/src/venues';
 import { isSlotRef, slotRefLabel } from '../packages/engine/src/formats';
+import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
 import type {
   AdminClearanceView,
   Club,
@@ -279,7 +278,24 @@ interface AdminFixturesProps {
 // Clubs without geocoded grounds can't have distance/travel computed (haversine
 // returns 0) — emit '—' rather than a misleading 0. Hoisted to module level so the
 // on-platform SeasonViewer renders exactly the rows the xlsx export writes.
-export function seriesScheduleRows(s: Series, clubs: Club[]) {
+/** The tenant's travel-cost defaults (`competitionDefaults.travel`); per-series values win. */
+type TravelDefaults = { costPerKm: number; carsPerAwayTrip: number };
+
+/** A series' own travel figures where it carries them, else the tenant's defaults. */
+function seriesTravel(s: unknown, travel: TravelDefaults): TravelDefaults {
+  const own = (s ?? {}) as { costPerKm?: unknown; carsPerAwayTrip?: unknown };
+  return {
+    costPerKm: typeof own.costPerKm === 'number' ? own.costPerKm : travel.costPerKm,
+    carsPerAwayTrip:
+      typeof own.carsPerAwayTrip === 'number' ? own.carsPerAwayTrip : travel.carsPerAwayTrip,
+  };
+}
+
+export function seriesScheduleRows(
+  s: Series,
+  clubs: Club[],
+  travel: TravelDefaults = resolveCompetitionDefaults().travel,
+) {
   const clubBy = (id) => clubs.find((c) => c.id === id);
   const fixtures = s.fixtures as any[];
   // "Time TBC" is only meaningful once the series has at least one timed fixture —
@@ -296,8 +312,13 @@ export function seriesScheduleRows(s: Series, clubs: Club[]) {
       away?.ground?.lon != null;
     const cost =
       home && away
-        ? // TODO(phase-4): read competitionDefaults.travel
-          fixtureCost(home, away, (s as any).costPerKm, (s as any).carsPerAwayTrip, fixtureVenue(f))
+        ? fixtureCost(
+            home,
+            away,
+            seriesTravel(s, travel).costPerKm,
+            seriesTravel(s, travel).carsPerAwayTrip,
+            fixtureVenue(f),
+          )
         : null;
     // The slot label ('Morning'/'Afternoon') alongside the raw kickoff time when the
     // series' schedule carries named slots — trivially available off `schedule.slots`,
@@ -424,6 +445,8 @@ export function AdminFixtures({
   // Resolve a fixture id → team (series participant). A single-team club resolves to
   // itself; a multi-team club's `tm_…` id resolves via the series snapshot.
   const teamBy = (s, id) => resolveTeam(s, id, clubBy);
+  // The tenant's travel-cost defaults (ADR 0014); a series' own values win.
+  const travel = resolveCompetitionDefaults(tenantConfig).travel;
 
   // Aggregate distance + fuel per series
   const seriesAgg = (s) => {
@@ -433,8 +456,8 @@ export function AdminFixtures({
       const home = teamBy(s, f.home),
         away = teamBy(s, f.away);
       if (!home.clubId || !away.clubId) return;
-      // TODO(phase-4): read competitionDefaults.travel
-      const c = fixtureCost(home, away, s.costPerKm, s.carsPerAwayTrip, fixtureVenue(f));
+      const t = seriesTravel(s, travel);
+      const c = fixtureCost(home, away, t.costPerKm, t.carsPerAwayTrip, fixtureVenue(f));
       totalKm += c.roundTripKm;
       totalCost += c.fuelR;
     });
@@ -447,7 +470,7 @@ export function AdminFixtures({
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '')}-schedule.xlsx`;
-    exportRowsToXlsx(fname, 'Schedule', seriesScheduleRows(s, clubs)).catch(() =>
+    exportRowsToXlsx(fname, 'Schedule', seriesScheduleRows(s, clubs, travel)).catch(() =>
       toast?.('Export failed — please retry'),
     );
   }
@@ -477,7 +500,10 @@ export function AdminFixtures({
     const summary = seasonSummaryRows(allSeries);
     const sheets = [
       { name: 'Season summary', rows: summary },
-      ...allSeries.map((s) => ({ name: sheetName(s.name), rows: seriesScheduleRows(s, clubs) })),
+      ...allSeries.map((s) => ({
+        name: sheetName(s.name),
+        rows: seriesScheduleRows(s, clubs, travel),
+      })),
     ];
     exportSheetsToXlsx(
       `season-fixtures-${new Date().toISOString().slice(0, 10)}.xlsx`,
@@ -720,6 +746,7 @@ export function AdminFixtures({
             <FixtureTable
               series={active}
               clubs={clubs}
+              travel={travel}
               onUpdateSeries={onUpdateSeries}
               onDeleteSeries={onDeleteSeries}
               onDuplicateSeries={onDuplicateSeries}
@@ -840,6 +867,7 @@ export function AdminFixtures({
         <SeasonViewer
           allSeries={allSeries}
           clubs={clubs}
+          travel={travel}
           initialSeriesId={active?.id}
           onClose={() => setViewerOpen(false)}
           onDownloadSeason={exportSeason}
@@ -856,6 +884,7 @@ export function AdminFixtures({
 function SeasonViewer({
   allSeries,
   clubs,
+  travel,
   initialSeriesId,
   onClose,
   onDownloadSeason,
@@ -863,6 +892,7 @@ function SeasonViewer({
 }: {
   allSeries: Series[];
   clubs: Club[];
+  travel: TravelDefaults;
   initialSeriesId?: string;
   onClose: () => void;
   onDownloadSeason: () => void;
@@ -873,7 +903,7 @@ function SeasonViewer({
   const [tabId, setTabId] = useStateA(initialSeriesId ?? allSeries[0]?.id);
   const tab = allSeries.find((s) => s.id === tabId) || allSeries[0];
   const summary = seasonSummaryRows(allSeries);
-  const scheduleRows = tab ? seriesScheduleRows(tab, clubs) : [];
+  const scheduleRows = tab ? seriesScheduleRows(tab, clubs, travel) : [];
   const statusTone = (label: string) =>
     label === 'Released' ? 'teal' : label === 'Approved (draft)' ? 'gold' : 'muted';
 
@@ -1043,6 +1073,8 @@ function SeasonViewer({
 export function FixtureTable({
   series,
   clubs,
+  // The tenant's travel-cost defaults; a series' own costPerKm/carsPerAwayTrip win.
+  travel = resolveCompetitionDefaults().travel as TravelDefaults,
   onUpdateSeries,
   onDeleteSeries,
   onDuplicateSeries,
@@ -1165,11 +1197,17 @@ export function FixtureTable({
   const seriesHasTimes = series.fixtures.some((f) => !!formatTime(f.time));
 
   // Build rows with computed cost
+  const ownTravel = seriesTravel(series, travel);
   const allRows = series.fixtures.map((f) => {
     const home = teamBy(f.home),
       away = teamBy(f.away);
-    // TODO(phase-4): read competitionDefaults.travel
-    const c = fixtureCost(home, away, series.costPerKm, series.carsPerAwayTrip, fixtureVenue(f));
+    const c = fixtureCost(
+      home,
+      away,
+      ownTravel.costPerKm,
+      ownTravel.carsPerAwayTrip,
+      fixtureVenue(f),
+    );
     return { f, home, away, c };
   });
   let totalKm = 0,
@@ -1226,9 +1264,8 @@ export function FixtureTable({
           <div className="fix-header-agg">
             <div className="fix-header-agg-l">@ R / km</div>
             <div className="fix-header-agg-n">
-              {/* TODO(phase-4): read competitionDefaults.travel */}R{' '}
-              {(series.costPerKm ?? DEFAULT_COST_PER_KM).toFixed(2)}
-              <span className="unit">× {series.carsPerAwayTrip ?? DEFAULT_CARS} cars</span>
+              R {ownTravel.costPerKm.toFixed(2)}
+              <span className="unit">× {ownTravel.carsPerAwayTrip} cars</span>
             </div>
           </div>
         </div>
@@ -2233,7 +2270,24 @@ function EmptyCohort({ onShareLink, onInviteAdmin }) {
 }
 
 /* ─── AdminLeagues — manage the tenant league catalogue clubs opt into ─── */
-export function AdminLeagues({ allLeagues, clubs, onCreate, onEdit, onDeleteLeague, toast }) {
+export function AdminLeagues({
+  allLeagues,
+  clubs,
+  onCreate,
+  onEdit,
+  onDeleteLeague,
+  toast,
+  defaultsCard = null,
+}: {
+  allLeagues;
+  clubs;
+  onCreate;
+  onEdit;
+  onDeleteLeague;
+  toast;
+  /** The tenant's competition defaults card (ADR 0014), rendered under the catalogue. */
+  defaultsCard?: ReactNode;
+}) {
   const copy = useCopy();
   const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null);
   const countFor = (key) =>
@@ -2331,6 +2385,8 @@ export function AdminLeagues({ allLeagues, clubs, onCreate, onEdit, onDeleteLeag
           </table>
         </div>
       )}
+
+      {defaultsCard && <div style={{ marginTop: 18 }}>{defaultsCard}</div>}
 
       {confirm &&
         createPortal(

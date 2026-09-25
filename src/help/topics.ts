@@ -32,7 +32,8 @@ export type HelpTopicId =
   | 'what-regenerate-destroys'
   | 'structure-versions-and-rebase'
   | 'blocks-vs-stages'
-  | 'legacy-series';
+  | 'legacy-series'
+  | 'competition-defaults';
 
 export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   'how-dates-are-planned': {
@@ -212,5 +213,20 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
     ],
     example:
       'EMCU Division 4 has no competition bound. The admin uses Create a series, picks Block 1 and every 2 weeks, and gets 11 rounds for 12 sides.',
+  },
+  'competition-defaults': {
+    id: 'competition-defaults',
+    title: 'How the platform uses your defaults',
+    summary:
+      'Competition defaults are the union’s own answers to questions the platform would otherwise answer with built-in values: formats, match days, start times, travel cost and ground spellings.',
+    body: [
+      'Match formats are offered when an admin starts a season. The first one is the default, and picking one fills in its overs and ball type.',
+      'Match days and start times are filled in when a stage plays on set days only or has set start times. They are a starting point, not a rule: every stage can still change them.',
+      'Travel cost prices the travel estimates on the fixtures screens and exports. A series that carries its own figures keeps them.',
+      'Venue aliases tell the clash check that two spellings are one ground, so a fixture at either books the same field.',
+      'Anything left empty uses the built-in value. Changing a default never changes a season or structure that already exists.',
+    ],
+    example:
+      'A union sets its formats to 50 Over (Red Ball) and T20 (Pink Ball), and its match days to Saturday and Sunday. Starting a season now offers those two formats, and a stage set to set days only starts with Saturday and Sunday ticked.',
   },
 };

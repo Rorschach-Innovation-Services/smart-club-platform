@@ -229,8 +229,9 @@ The EMCU Division 1 30 Over shape. Use real club names.
    it per season at step 5. Pool stage: round robin, two groups (snake-seeded 10 ⇒ 5 + 5).
 2. **Knockout stage.** Entrants derive from the pool stage with **Qualifiers per group = 2**.
    The preview now reads an exact 4 entrants and 2 rounds + final, not "up to".
-   Within-group accepts only 2 groups × 2 qualifiers in this version; anything else 400s
-   on save with that message.
+   Within-group accepts a power-of-two number of groups (2, 4, 8) each sending the same
+   power-of-two number of sides (2, 4) — the engine's own rule. Anything else (3 groups,
+   3 qualifiers) 400s on save with that message.
 3. **Same block?** On a single-block calendar, a structure created from a template already
    chains the knockout behind the pools (`startAfter: 'previous-stage'`) — nothing to
    tick. On a two-block calendar the template puts the knockout in the second block
@@ -359,6 +360,44 @@ league or delete the run.
 **Calendar delete guard.** After migration, the operator portal refuses to delete a calendar
 while a season run's `calendarSnapshot.id` still names it (`409 "N season runs were started
 on …"`). It already refused while a series was scheduled against it.
+
+## 9. Competition defaults and the venue-alias backfill (added 2026-09-25)
+
+`TenantConfig.competitionDefaults` ([ADR 0014](../architecture/0014-seasons-one-vocabulary-one-path-one-engine.md),
+[docs/api/tenant.md](../api/tenant.md#put-tenantconfig--update-config-admin)) holds what used
+to be constants: match formats, match days, double-header start times, travel cost and venue
+aliases. Every field is optional; an absent one uses the built-in value, so no tenant needs
+setting up for this deploy to be safe.
+
+- **Where it is edited.** The operator's client settings page has a **Competition defaults**
+  card (after Competition structures). The tenant admin sees the same card on the Leagues page,
+  with venue aliases read-only. Both write through the same validation.
+- **What reads it.** Quick start offers the tenant's match formats; the structure editor and
+  the season wizard fill in the tenant's match days and start times; templates with start
+  times take the tenant's slots; the admin and club travel estimates use the tenant's travel
+  cost unless a series carries its own; a generated series with no overs of its own takes
+  the first match format's overs. Existing structures, seasons and series are never changed.
+- **Venue aliases.** The release, in-season and clash-check gates, and the four venue CLIs
+  (`resolve-venue-clashes`, `normalise-venue-names`, `merge-duplicate-venues`,
+  `bootstrap-fixture-prereqs`), resolve ground names through the code default
+  (`DEFAULT_VENUE_ALIASES`, `packages/engine/src/venue-aliases.ts`) with the tenant's aliases
+  merged over it. Aliases are stored normalised (`Riverside Bowl` → `riversidebowl`).
+
+### 9a. Backfill the dolphins aliases into config
+
+The code default is every dolphins spelling. Copy it into the dolphins config so an operator
+can see and edit it there. This changes no clash result — the gates already merge the two.
+
+```bash
+sst shell --stage dev -- npx tsx packages/api/scripts/backfill-venue-aliases.ts            # dry-run: prints the count
+sst shell --stage dev -- npx tsx packages/api/scripts/backfill-venue-aliases.ts --confirm
+sst shell --stage dev -- npx tsx packages/api/scripts/backfill-venue-aliases.ts            # "already has N venue alias(es)"
+# then prod, the same three steps
+```
+
+It writes only when dolphins has no `venueAliases` at all; an existing map (even `{}`) is left
+alone, and the rest of `competitionDefaults` is kept. **Do not** empty `DEFAULT_VENUE_ALIASES`
+in code until this has run on dev **and** prod; that is a separate follow-up change.
 
 ## Known limitations to communicate
 

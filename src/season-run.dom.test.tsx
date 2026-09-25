@@ -1915,9 +1915,9 @@ describe('Quick start', () => {
     );
     // Keep the knockout in the first block, straight after the groups.
     await user.selectOptions(screen.getByRole('combobox', { name: 'Stage 2 plays in' }), '0');
-    await user.selectOptions(screen.getByLabelText('Series Type'), 'One-Day (40-50 overs)');
-    await user.clear(screen.getByLabelText('Overs'));
-    await user.type(screen.getByLabelText('Overs'), '50');
+    await user.selectOptions(screen.getByLabelText('Match format'), 'One-Day (40-50 overs)');
+    // Picking a format prefills its overs; ball type stays the admin's to add.
+    expect(screen.getByLabelText('Overs')).toHaveValue(50);
     await user.type(screen.getByLabelText('Ball type'), 'White');
     await user.click(startBtn());
 
@@ -1936,6 +1936,42 @@ describe('Quick start', () => {
     const next = screen.getAllByRole('listitem').map((li) => li.textContent);
     expect(next.join('|')).toMatch(/Confirm entrants.*Generate fixtures.*Approve.*Release/);
     expect(screen.queryByRole('radiogroup', { name: /how the season is played/i })).toBeNull();
+  });
+
+  it('offers the tenant’s own match formats and prefills overs and ball type from the pick', async () => {
+    const { user } = setup({
+      config: {
+        structures: [],
+        calendars: [calendar],
+        competitionDefaults: {
+          matchFormats: [
+            { label: '50 Over (Red Ball)', overs: 50, ballType: 'Red' },
+            { label: 'T20 (Pink Ball)', overs: 20, ballType: 'Pink' },
+          ],
+        },
+      } as unknown as TenantConfig,
+    });
+
+    const picker = screen.getByLabelText('Match format');
+    expect(
+      within(picker)
+        .getAllByRole('option')
+        .map((o) => o.textContent),
+    ).toEqual(['50 Over (Red Ball)', 'T20 (Pink Ball)']);
+    // The first format is the default, overs and ball included.
+    expect(screen.getByLabelText('Overs')).toHaveValue(50);
+    expect(screen.getByLabelText('Ball type')).toHaveValue('Red');
+
+    await user.selectOptions(picker, 'T20 (Pink Ball)');
+    expect(screen.getByLabelText('Overs')).toHaveValue(20);
+    expect(screen.getByLabelText('Ball type')).toHaveValue('Pink');
+    await user.click(startBtn());
+
+    expect(mockedQuickStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        matchFormat: { label: 'T20 (Pink Ball)', overs: 20, ballType: 'Pink' },
+      }),
+    );
   });
 
   it('sends custom dates as a label with a start and an end, and no placement', async () => {

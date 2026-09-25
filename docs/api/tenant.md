@@ -5,14 +5,15 @@
 Resolves the tenant from the host (prod) or `x-tenant` / `?tenant=` (dev) and returns the
 **public** subset of config: branding (name, title, logo, favicon, color tokens, copy
 slots), the submission deadline, the league catalogue, the district list, the tutorial
-videos, the per-tenant feature flags, the season calendars, and the compliance-doc
-catalogue. `knownClubs` is not exposed here. `districts` and `requiredDocs` are the
+videos, the per-tenant feature flags, the season calendars, the compliance-doc
+catalogue, and the pickers' part of the competition defaults. `knownClubs` is not exposed here. `districts` and `requiredDocs` are the
 resolved lists — a legacy row without the field falls back to the shared defaults; an
 explicit `[]` (freshly created client) comes through empty.
 
 ```
 200 → { tenant, branding, submissionDeadline, leagues, districts, requiredDocs,
-        tutorials, features, calendars }
+        tutorials, features, calendars,
+        competitionDefaults: { matchFormats?, matchDays?, timeSlots? } }
 400 → unknown tenant
 404 → tenant not found
 ```
@@ -28,6 +29,11 @@ Used at first paint for theming: the SPA ships a neutral default theme and appli
 boolean map read via `useFeature`/`hasFeature`, so each flag carries its own default and an
 empty map means "all defaults".
 
+`competitionDefaults` here is an allowlist of three fields — the ones a form prefills from.
+`travel` and `venueAliases` never ride the anonymous payload; they are on
+`GET /tenant/config`. A field the tenant has not set is absent, and the client resolves it to
+the built-in value (`resolveCompetitionDefaults`, `packages/engine/src/defaults.ts`).
+
 ## `GET /tenant/config` — tenant setup config (authenticated)
 
 An explicit allowlist, not the raw row. Any tenant member may read it (reps included), so
@@ -36,7 +42,8 @@ it is a projection by construction — a denylist would expose every field later
 
 ```
 200 → { tenant, branding, submissionDeadline, leagues, districts, requiredDocs,
-        tutorials, features, calendars, structures, setupCompletedAt }
+        tutorials, features, calendars, structures, competitionDefaults,
+        setupCompletedAt }
 401 → not authenticated
 404 → tenant not found
 ```
@@ -53,6 +60,10 @@ public `GET /tenant`: that route is anonymous and hit on every public page load,
 structures × 20 stages of competition configuration is payload nobody on that path reads.
 `calendars` are on both — the create-series form reads them off the already-fetched public
 payload.
+
+`competitionDefaults` is served whole here (`{}` when the tenant set none), travel cost and
+venue aliases included. The club portal reads its travel-cost estimate from it, which is why
+reps fetch this route too.
 
 ## `PUT /tenant/config` — update config (admin)
 
@@ -76,6 +87,30 @@ operator's `PUT /platform/tenants/:slug`
 > has each incoming league's `competitions` overwritten with whatever is currently stored
 > for that key, so this route can rename or reorder leagues but can never mint or drop a
 > binding. Bind competitions via `PUT /platform/tenants/:slug` only.
+
+> `competitionDefaults` ([ADR 0014](../architecture/0014-seasons-one-vocabulary-one-path-one-engine.md))
+> is **admin-level setup data**, like `leagues`: writable here AND via
+> `PUT /platform/tenants/:slug`. Both routes run the same shape guard
+> (`validateCompetitionDefaults`) and store the normalised result:
+>
+> ```
+> competitionDefaults: {
+>   matchFormats?: { label, overs?, ballType? }[]  // label 1–60 chars, overs whole 1–200, ballType ≤30; ≤20 formats
+>   matchDays?: Weekday[]                          // 0 (Sunday) – 6 (Saturday), no repeats
+>   timeSlots?: { label, start: 'HH:MM' }[]        // the stage slot rule; ≤8 slots
+>   travel?: { costPerKm, carsPerAwayTrip }        // both numbers ≥ 0
+>   venueAliases?: Record<string, string>          // ground name → the ground it means; ≤500
+> }
+> ```
+>
+> The whole object replaces the stored one (send every field you want to keep; the consoles
+> refetch and rebuild before they PUT). An absent field means "use the built-in value":
+> formats Twenty20 / One-Day / Multi-Day / The Hundred, Saturday, 08:00 / 13:30, R4.50/km
+> × 3 cars. Venue alias keys and values are stored in `normaliseName` form (lowercase,
+> punctuation and generic words such as "Cricket Club" dropped), so "Riverside Bowl" is
+> stored as `riversidebowl`; a name that normalises to nothing is a 400. The release,
+> in-season and clash-check gates merge these aliases over the code default
+> (`DEFAULT_VENUE_ALIASES`).
 
 > `requiredDocs` is **operator-only** (stripped here) and edited via
 > `PUT /platform/tenants/:slug`, which validates each entry's shape and rejects (409)

@@ -30,6 +30,7 @@ import { SeasonSetupWizard } from './platform-season-wizard';
 import { HelpLink, HelpProvider } from './help/HelpDrawer';
 import { TutorialsCard } from './platform-tutorials';
 import { RequiredDocsCard } from './platform-required-docs';
+import { CompetitionDefaultsCard } from './competition-defaults';
 import { DocIntakeWizard } from './platform-intake';
 import { StructureIntakeWizard } from './platform-structure-intake';
 import { RosterIntakeWizard } from './platform-roster-intake';
@@ -799,6 +800,18 @@ function TenantEditPage({ toast }: { toast: Toast }) {
             key={`str-${config.tenant}`}
             slug={slug}
             config={config}
+            save={save}
+            toast={toast}
+          />
+        </div>
+        {/* The union's own answers to what the platform used to hard-code (ADR 0014). Read
+            by the season forms, the structure editor, the travel estimates and the clash
+            check, so it sits with the library it feeds. */}
+        <div id="setup-competition-defaults">
+          <CompetitionDefaultsCard
+            key={`cd-${config.tenant}`}
+            config={config}
+            fetchLatest={() => api.platformGetTenant(slug)}
             save={save}
             toast={toast}
           />

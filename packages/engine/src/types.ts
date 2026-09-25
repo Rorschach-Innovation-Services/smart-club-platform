@@ -121,13 +121,18 @@ export type FormatSpec =
     }
   | {
       kind: 'knockout';
-      /** Preliminary rounds trimming the field to a power of two. Derived if absent. */
+      /**
+       * Preliminary rounds trimming the field to a power of two. Derived if absent.
+       * @deprecated Stored but not read; kept so existing structures stay valid. The
+       * bracket always derives its preliminaries from the field size.
+       */
       preliminaries?: number;
       /**
        * `seeded` = standard bracket from the entrant order (1 v n, 2 v n-1 …).
        * `cross-pool` = pool winners/runners-up paired across pools (A1 v B2, B1 v A2).
        * `within-pool` = each pool's qualifiers meet each other first (A1 v A2, B1 v B2),
-       *   pool winners meet in the next round. v1: exactly 2 pools × 2 qualifiers.
+       *   pool winners meet in the next round. Needs a power-of-two number of pools
+       *   (2, 4, 8) each sending the same power-of-two number of sides (2, 4).
        */
       pairing: 'seeded' | 'cross-pool' | 'within-pool';
       thirdPlace?: boolean;
@@ -179,7 +184,11 @@ export type EntrantSpec =
   /** Distribute a seed order across groups. */
   | { kind: 'seeded-split'; groups: GroupPlan; method: 'blocks' | 'snake' };
 
-/** Points and tie-break configuration, lifted off the create-series form onto the stage. */
+/**
+ * Points and tie-break configuration, lifted off the create-series form onto the stage.
+ * @deprecated Stored but not read; kept so existing structures stay valid. The platform
+ * has no results or ladder model, and no UI edits this.
+ */
 export interface LadderSpec {
   winPoints: number;
   bonusPoints: number;
@@ -213,7 +222,11 @@ export interface StageSchedule {
   startAfter?: 'previous-stage';
 }
 
-/** What finishing where in this stage means — display and next-season carry. */
+/**
+ * What finishing where in this stage means — display and next-season carry.
+ * @deprecated Stored but not read; kept so existing structures stay valid. Nothing
+ * displays or carries it, and new templates no longer set it.
+ */
 export interface OutcomeSpec {
   /** Positions crowned champion, e.g. [1]. */
   champion?: number[];
@@ -232,7 +245,9 @@ export interface StageSpec {
   schedule: StageSchedule;
   /** Group display names, e.g. ["Top Six", "Bottom Six"]. Falls back to "Group A/B/…". */
   groupLabels?: string[];
+  /** @deprecated Stored but not read; kept so existing structures stay valid. */
   ladder?: LadderSpec;
+  /** @deprecated Stored but not read; kept so existing structures stay valid. */
   outcome?: OutcomeSpec;
 }
 
@@ -314,10 +329,43 @@ export interface Competition {
   excludeTeamIds?: string[];
 }
 
+/** One match format a tenant offers, e.g. `{ label: 'T20 (Pink Ball)', overs: 20, ballType: 'Pink' }`. */
+export interface MatchFormatDefault {
+  label: string;
+  overs?: number;
+  ballType?: string;
+}
+
+/**
+ * Tenant-configured defaults that replace sport- and union-specific constants (ADR 0014,
+ * "Tenant-configured defaults instead of constants"). Every field is optional: an absent
+ * field resolves to the built-in fallback (`resolveCompetitionDefaults`, defaults.ts), so a
+ * tenant that never configured any of this behaves exactly as before.
+ */
+export interface CompetitionDefaults {
+  /** The formats offered where an admin picks one. Absent ⇒ the built-in list. */
+  matchFormats?: MatchFormatDefault[];
+  /** Default weekdays for "set days only". Absent ⇒ Saturday. */
+  matchDays?: Weekday[];
+  /** Default start times for double-headers. Absent ⇒ 08:00 / 13:30. */
+  timeSlots?: TimeSlot[];
+  /** Travel cost estimate. Per-series values win. Absent ⇒ R4.50/km × 3 cars. */
+  travel?: { costPerKm: number; carsPerAwayTrip: number };
+  /**
+   * Ground-name spellings → the registry venue they mean, both in `normaliseName` form
+   * (packages/api/src/venue-clash.ts). Merged over the code defaults by the clash gates.
+   */
+  venueAliases?: Record<string, string>;
+}
+
 /** A stage's progress within a running season. */
 export interface StageRun {
   /** → `StageSpec.id` on the run's structure snapshot. */
   specId: string;
+  /**
+   * `'complete'` is @deprecated: stored but not read (nothing sets or checks it); kept so
+   * existing runs stay valid.
+   */
   status: 'awaiting-entrants' | 'ready' | 'generated' | 'complete';
   groups: Array<{
     id: string;

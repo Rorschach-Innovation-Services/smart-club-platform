@@ -38,10 +38,16 @@ import {
   registryResolver,
   GroundLedger,
   JUNK_GROUND,
+  DEFAULT_VENUE_ALIASES,
+  venueAliasesFor,
 } from './venue-clash.js';
 import type { Club, Series, Venue } from './types.js';
 
 const TENANT = 'dolphins';
+
+/** Ground-name aliases: the code default until main() loads the tenant's config, then the
+ * default merged with the tenant's own `competitionDefaults.venueAliases` (ADR 0014). */
+let ALIASES: Record<string, string> = DEFAULT_VENUE_ALIASES;
 
 /** A stored fixture — only the venue/scheduling fields matter; everything else is preserved. */
 interface StoredFixture {
@@ -245,7 +251,7 @@ function scanClashes(
   venues: Venue[],
 ): { signatures: Set<string>; lines: string[] } {
   const clubsById = new Map(clubs.map((c) => [c.id, c]));
-  const ledger = new GroundLedger(registryResolver(venues));
+  const ledger = new GroundLedger(registryResolver(venues, ALIASES));
   const bookings: Array<{
     gid: string;
     ground: string;
@@ -314,6 +320,7 @@ function implicitHomeCount(clubId: string, allSeries: Series[]): number {
 async function main() {
   const confirm = process.argv.includes('--confirm');
   const repo = await import('./repo.js');
+  ALIASES = venueAliasesFor(await repo.getTenantConfig(TENANT));
 
   const [venues, allSeries, clubs] = await Promise.all([
     repo.listVenues(TENANT),
@@ -381,7 +388,7 @@ async function main() {
     }
     // Repoint fixtures pointing at the row by id; link fixtures naming the old spelling
     // (by groundKey) that carry no venueId — but never a fixture the generic merge owns.
-    const oldKey = groundKey(r.oldName);
+    const oldKey = groundKey(r.oldName, ALIASES);
     let repointed = 0;
     let linked = 0;
     for (const s of allSeries) {
@@ -395,7 +402,7 @@ async function main() {
           }
         } else if (!f.venueId && !toMoveGids.has(`${s.id}/${f.id ?? '?'}`)) {
           const nm = f.venueOverride || f.venueName;
-          if (nm && groundKey(nm) === oldKey) {
+          if (nm && groundKey(nm, ALIASES) === oldKey) {
             f.venueId = r.id;
             f.venueName = r.newName;
             linked++;
@@ -440,7 +447,7 @@ async function main() {
     const candRows: Venue[] = [];
     const missing: string[] = [];
     for (const name of g.candidates) {
-      const match = alloc.find((v) => groundKey(v.name) === groundKey(name));
+      const match = alloc.find((v) => groundKey(v.name, ALIASES) === groundKey(name, ALIASES));
       if (match) candRows.push(match);
       else missing.push(name);
     }
@@ -477,7 +484,7 @@ async function main() {
   const postClubsForAlloc = clubs; // club-record renames don't change fixture-to-field allocation
   // (an implicit fixture's ground key is unchanged by a rename that maps onto the same field).
   const allocClubsById = new Map(postClubsForAlloc.map((c) => [c.id, c]));
-  const allocLedger = new GroundLedger(registryResolver(buildAllocVenues()));
+  const allocLedger = new GroundLedger(registryResolver(buildAllocVenues(), ALIASES));
   for (const s of allSeries) {
     for (const f of (s.fixtures as StoredFixture[]) ?? []) {
       if (!f.date || f.status === 'cancelled') continue;
@@ -597,9 +604,9 @@ async function main() {
   const homeClubIds = [...premierWomenClubIds].sort();
   const commonsToCreate: Venue[] = [];
   for (const name of COMMONS_NAMES) {
-    const key = groundKey(name);
+    const key = groundKey(name, ALIASES);
     const exists = [...vById.values()].some(
-      (v) => !genericDeleteIds.has(v.id) && groundKey(v.name) === key,
+      (v) => !genericDeleteIds.has(v.id) && groundKey(v.name, ALIASES) === key,
     );
     if (exists) {
       console.log(`  "${name}" already in the registry — skipping (idempotent)`);

@@ -37,6 +37,11 @@ export interface BuildStageSeriesArgs {
    * entrants and snapshotted onto the series, so a later roster edit can't orphan it.
    */
   leagueTeams: readonly TeamParticipant[];
+  /**
+   * Overs when the competition's match format names none: the tenant's first configured
+   * match format (`competitionDefaults.matchFormats[0].overs`). Absent ⇒ 50.
+   */
+  defaultOvers?: number;
 }
 
 export function buildStageSeries({
@@ -46,6 +51,7 @@ export function buildStageSeries({
   group: p,
   multi,
   leagueTeams,
+  defaultOvers,
 }: BuildStageSeriesArgs): Series {
   const participants = leagueTeams
     .filter((t) => p.entrants.includes(t.teamId))
@@ -79,7 +85,7 @@ export function buildStageSeries({
     seasonRunId: run.id,
     stageSpecId: stage.id,
     groupId: p.groupId,
-    maxOvers: p.competition?.matchFormat?.overs ?? 50,
+    maxOvers: p.competition?.matchFormat?.overs ?? defaultOvers ?? 50,
     seriesType: p.competition?.label ?? stage.name,
     kind: 'series',
     released: false,

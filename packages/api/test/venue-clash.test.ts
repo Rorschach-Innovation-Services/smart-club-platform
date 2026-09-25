@@ -1,10 +1,17 @@
 /**
- * Unit tests for venue-clash.ts's ground-name keying (groundKey / VENUE_ALIASES).
+ * Unit tests for venue-clash.ts's ground-name keying (groundKey / DEFAULT_VENUE_ALIASES).
  * Pure — no repo, no DynamoDB.
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { groundKey, findClashes, formatClash, clashKey } from '../src/venue-clash.js';
+import {
+  groundKey,
+  findClashes,
+  formatClash,
+  clashKey,
+  venueAliasesFor,
+  DEFAULT_VENUE_ALIASES,
+} from '../src/venue-clash.js';
 import type { Series, Club, Venue } from '../src/types.js';
 
 const mkSeries = (over: Partial<Series>): Series =>
@@ -218,5 +225,43 @@ describe('formatClash / clashKey', () => {
     const c = findClashes(a, [a, b], [], [kingsmead])[0];
     const moved = { ...c, time: '13:00', date: '2026-12-31' };
     assert.equal(clashKey(moved), clashKey(c));
+  });
+});
+
+describe('tenant-configured venue aliases (ADR 0014)', () => {
+  const at = (id: string, venueName: string) =>
+    mkSeries({
+      id,
+      fixtures: [
+        { id: 'f1', round: 1, date: '2026-10-04', time: '09:00', home: 'a', away: 'b', venueName },
+      ],
+    });
+
+  test('venueAliasesFor merges the tenant map over the code default; a tenant key wins', () => {
+    const merged = venueAliasesFor({
+      competitionDefaults: { venueAliases: { riversidebowl: 'riversideoval', acc1: 'acc1' } },
+    });
+    assert.equal(merged.riversidebowl, 'riversideoval');
+    assert.equal(merged.acc1, 'acc1', 'the tenant overrides a default entry');
+    assert.equal(merged.totioval, DEFAULT_VENUE_ALIASES.totioval, 'defaults survive');
+    assert.deepEqual(venueAliasesFor(null), DEFAULT_VENUE_ALIASES);
+  });
+
+  test('a config alias maps a new spelling onto the registry ground, and findClashes honours it', () => {
+    const aliases = venueAliasesFor({
+      competitionDefaults: { venueAliases: { riversidebowl: 'riversideoval' } },
+    });
+    assert.notEqual(groundKey('Riverside Bowl'), groundKey('Riverside Oval'));
+    assert.equal(groundKey('Riverside Bowl', aliases), groundKey('Riverside Oval', aliases));
+
+    const a = at('A', 'Riverside Bowl');
+    const b = at('B', 'Riverside Oval');
+    assert.equal(findClashes(a, [a, b], [], []).length, 0, 'no alias, no clash');
+    const clashes = findClashes(a, [a, b], [], [], aliases);
+    assert.equal(clashes.length, 1);
+    assert.equal(
+      clashKey(clashes[0], aliases),
+      clashKey({ ...clashes[0], ground: 'Riverside Oval' }, aliases),
+    );
   });
 });

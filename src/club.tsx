@@ -4492,7 +4492,22 @@ export function CQIView({
 }
 
 /* ─── Phase 2 · Club Fixtures (only shown once admin has released) ─── */
-export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures }) {
+export function ClubFixturesView({
+  club,
+  allSeries,
+  clubs,
+  toast,
+  onSendFixtures,
+  // The tenant's travel-cost defaults (competitionDefaults.travel); a series' own win.
+  travel = { costPerKm: DEFAULT_COST_PER_KM, carsPerAwayTrip: DEFAULT_CARS },
+}: {
+  club;
+  allSeries;
+  clubs;
+  toast;
+  onSendFixtures;
+  travel?: { costPerKm: number; carsPerAwayTrip: number };
+}) {
   const copy = useCopy();
   const clubBy = (id) => clubs.find((c) => c.id === id);
 
@@ -4711,12 +4726,11 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
       // so any distance would be a guess off the home-ground snapshot the server left
       // intact (see `venueWithheld`).
       if (!venueWithheld(s) && homeSide?.ground && awaySide?.ground) {
-        // TODO(phase-4): read competitionDefaults.travel
         const c = fixtureCost(
           homeSide,
           awaySide,
-          s.costPerKm || DEFAULT_COST_PER_KM,
-          s.carsPerAwayTrip || DEFAULT_CARS,
+          s.costPerKm || travel.costPerKm,
+          s.carsPerAwayTrip || travel.carsPerAwayTrip,
           fixtureVenue(f),
         );
         const mineLeg = isHome ? c.home : c.away;
@@ -4858,9 +4872,8 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
               'shown once venues are confirmed'
             ) : (
               <>
-                {/* TODO(phase-4): read competitionDefaults.travel */}
-                est · {myReleased[0]?.carsPerAwayTrip || DEFAULT_CARS} cars × R{' '}
-                {myReleased[0]?.costPerKm || DEFAULT_COST_PER_KM}
+                est · {myReleased[0]?.carsPerAwayTrip || travel.carsPerAwayTrip} cars × R{' '}
+                {myReleased[0]?.costPerKm || travel.costPerKm}
                 /km
               </>
             )}
@@ -5026,12 +5039,11 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                         const costHome = isHome ? club : opp;
                         const costAway = isHome ? opp : club;
                         if (!hideVenue && costHome?.ground && costAway?.ground) {
-                          // TODO(phase-4): read competitionDefaults.travel
                           const c = fixtureCost(
                             costHome,
                             costAway,
-                            s.costPerKm || DEFAULT_COST_PER_KM,
-                            s.carsPerAwayTrip || DEFAULT_CARS,
+                            s.costPerKm || travel.costPerKm,
+                            s.carsPerAwayTrip || travel.carsPerAwayTrip,
                             fixtureVenue(f),
                           );
                           // `myLeg`, not `mine` — the enclosing scope already binds
@@ -5227,10 +5239,9 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
           figures it explains are themselves standing down until grounds are public. */}
       {!anyVenueWithheld && (
         <div className="club-fix-foot">
-          {/* TODO(phase-4): read competitionDefaults.travel */}
-          Travel cost is estimated at R {myReleased[0]?.costPerKm || DEFAULT_COST_PER_KM}/km ×{' '}
-          {myReleased[0]?.carsPerAwayTrip || 3} cars per away trip — published with the fixture
-          release. Adjustments to schedule require a {copy.office} sign-off.
+          Travel cost is estimated at R {myReleased[0]?.costPerKm || travel.costPerKm}/km ×{' '}
+          {myReleased[0]?.carsPerAwayTrip || travel.carsPerAwayTrip} cars per away trip — published
+          with the fixture release. Adjustments to schedule require a {copy.office} sign-off.
         </div>
       )}
 

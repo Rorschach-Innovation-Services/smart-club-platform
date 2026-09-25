@@ -21,6 +21,7 @@ import type {
   ClubGround,
   ClubTeam,
   Competition,
+  CompetitionDefaults,
   CompetitionStructure,
   DerivationNote,
   EntrantSpec,
@@ -30,6 +31,7 @@ import type {
   IsoTime,
   LadderSpec,
   League,
+  MatchFormatDefault,
   OutcomeSpec,
   SeasonBlock,
   SeasonBreak,
@@ -51,6 +53,7 @@ export type {
   ClubGround,
   ClubTeam,
   Competition,
+  CompetitionDefaults,
   CompetitionStructure,
   DerivationNote,
   EntrantSpec,
@@ -60,6 +63,7 @@ export type {
   IsoTime,
   LadderSpec,
   League,
+  MatchFormatDefault,
   OutcomeSpec,
   SeasonBlock,
   SeasonBreak,
@@ -258,6 +262,12 @@ export interface TenantConfig {
    * strips it. Absent ⇒ no league has a structure and everything runs the flat path.
    */
   structures?: CompetitionStructure[];
+  /**
+   * Tenant-configured defaults (ADR 0014) — read through `resolveCompetitionDefaults`
+   * (engine defaults.ts), never directly, so an absent field gets its fallback. GET /tenant
+   * carries matchFormats/matchDays/timeSlots only; GET /tenant/config carries all of it.
+   */
+  competitionDefaults?: CompetitionDefaults;
   /** Operator "setup complete" milestone (D6). Present ⇒ setup marked done. */
   setupCompletedAt?: string;
   setupCompletedBy?: string;

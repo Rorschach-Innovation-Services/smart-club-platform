@@ -21,9 +21,14 @@
 import * as repo from './repo.js';
 import { clubIdFromName } from './club-id.js';
 import { normalise, groundKey } from './import-planb-fixtures.js';
+import { DEFAULT_VENUE_ALIASES, venueAliasesFor } from './venue-clash.js';
 import type { Club, League, Venue } from './types.js';
 
 const TENANT = 'dolphins';
+
+/** Ground-name aliases: the code default until main() loads the tenant's config, then the
+ * default merged with the tenant's own `competitionDefaults.venueAliases` (ADR 0014). */
+let ALIASES: Record<string, string> = DEFAULT_VENUE_ALIASES;
 
 const NEW_LEAGUES: Array<Pick<League, 'key' | 'label'>> = [
   { key: 'veterans-premier', label: 'Veterans Premier' },
@@ -185,6 +190,7 @@ async function main() {
 
   const [config, clubs] = await Promise.all([repo.getTenantConfig(TENANT), repo.listClubs(TENANT)]);
   if (!config) throw new Error(`no tenant config for "${TENANT}"`);
+  ALIASES = venueAliasesFor(config);
 
   // ── Leagues ──
   const have = new Set((config.leagues ?? []).map((l) => l.key));
@@ -261,7 +267,8 @@ async function main() {
     if (byName.has(key)) return; // registry already knows it — console owns it
     // Alias-aware duplicate guard: a club record saying "Phoenix Stonebridge" must not
     // spawn a second row beside the registry's "Stonebridge".
-    if (existingVenues.some((v) => groundKey(v.name) === groundKey(trimmed))) return;
+    if (existingVenues.some((v) => groundKey(v.name, ALIASES) === groundKey(trimmed, ALIASES)))
+      return;
     const pending = venuesToAdd.get(key);
     if (pending) {
       if (!pending.homeClubIds?.includes(clubId))
@@ -308,7 +315,7 @@ async function main() {
   // for fields the registry has never seen (Danville 2, Siripat 3, Highbury 1–3, …).
   const byKey = new Map<string, Venue>();
   for (const v of existingVenues) {
-    const k = groundKey(v.name);
+    const k = groundKey(v.name, ALIASES);
     const prior = byKey.get(k);
     // Two registry rows sharing one groundKey (e.g. the two Gledhow rows the 31 Aug alias
     // now collapses). This map keeps the LAST one, so facility-permission merges land on
@@ -319,7 +326,7 @@ async function main() {
       );
     byKey.set(k, v);
   }
-  for (const v of venuesToAdd.values()) byKey.set(groundKey(v.name), v);
+  for (const v of venuesToAdd.values()) byKey.set(groundKey(v.name, ALIASES), v);
   const pendingNew = new Set(venuesToAdd.values());
   const venueUpdates = new Map<string, Venue>();
   // Includes clubs being created THIS run (e.g. a recreated Parkgate), so their
@@ -333,7 +340,7 @@ async function main() {
       return false;
     });
     if (!clubIds.length) continue;
-    const existing = byKey.get(groundKey(field.name));
+    const existing = byKey.get(groundKey(field.name, ALIASES));
     if (existing) {
       const have = new Set(existing.homeClubIds ?? []);
       const missing = clubIds.filter((id) => !have.has(id));
@@ -349,7 +356,7 @@ async function main() {
       const created = venuesToAdd.get(field.name.trim().toLowerCase());
       if (created) {
         created.homeClubIds = clubIds;
-        byKey.set(groundKey(field.name), created);
+        byKey.set(groundKey(field.name, ALIASES), created);
         pendingNew.add(created);
         console.log(
           `${confirm ? 'create' : '[dry-run] would create'} facility venue "${field.name}" (permitted: ${clubIds.join(', ')})`,
@@ -386,9 +393,9 @@ async function main() {
     '129 dukuza street Lindelani/ Tennis court', // union directive: tennis court, unusable
   ];
   const BAD_NOTE = 'Bad condition — union facility list (red). Do not allocate fixtures here.';
-  const badKeys = new Set(BAD_FIELDS.map((n) => groundKey(n)));
+  const badKeys = new Set(BAD_FIELDS.map((n) => groundKey(n, ALIASES)));
   for (const v of [...existingVenues, ...venuesToAdd.values()]) {
-    if (!badKeys.has(groundKey(v.name))) continue;
+    if (!badKeys.has(groundKey(v.name, ALIASES))) continue;
     const hasPermissions = (v.homeClubIds ?? []).length > 0;
     const hasNote = v.note === BAD_NOTE;
     if (!hasPermissions && hasNote) continue;

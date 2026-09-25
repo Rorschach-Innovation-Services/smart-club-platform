@@ -28,7 +28,12 @@ export type FieldGuideId =
   | 'position-column'
   | 'semi-final-pairing'
   | 'withhold'
-  | 'venue-mode';
+  | 'venue-mode'
+  | 'match-formats'
+  | 'match-days'
+  | 'default-time-slots'
+  | 'travel-cost'
+  | 'venue-aliases';
 
 export const FIELD_GUIDES: Record<FieldGuideId, FieldGuide> = {
   'block-dates': {
@@ -94,7 +99,7 @@ export const FIELD_GUIDES: Record<FieldGuideId, FieldGuide> = {
     meaning: 'How often rounds are played inside the block.',
     howUsed:
       'Weekly, every N weeks, set days only (such as Saturdays only), or spread evenly across the block.',
-    example: 'Every 2 weeks for EMCU Division 4.',
+    example: 'Every 2 weeks for a league that plays fortnightly.',
   },
   'start-after-previous': {
     label: 'Start after the previous stage',
@@ -146,5 +151,44 @@ export const FIELD_GUIDES: Record<FieldGuideId, FieldGuide> = {
     howUsed:
       'Allocated follows the allocator. “Other” locks the fixture to the ground you type, so allocation never moves it.',
     example: 'Other: Kingsmead, for a final the union has booked.',
+  },
+  'match-formats': {
+    label: 'Match formats',
+    meaning: 'The formats this union plays, each with its overs and ball.',
+    howUsed:
+      'Offered where an admin starts a season. Picking one fills in its overs and ball type. The first one is the default.',
+    example: '50 Over (Red Ball), 50 overs, Red. T20 (Pink Ball), 20 overs, Pink.',
+    convention: 'Leave empty to offer the built-in list.',
+  },
+  'match-days': {
+    label: 'Match days',
+    meaning: 'The days of the week this union usually plays on.',
+    howUsed: 'Ticked for you when a stage is set to play on set days only.',
+    example: 'Saturday only, or Saturday and Sunday.',
+    convention: 'Leave empty for Saturday.',
+  },
+  'default-time-slots': {
+    label: 'Default start times',
+    meaning: 'The start times of a playing day with more than one match.',
+    howUsed:
+      'Filled in when a stage is given set start times or double-headers, and on templates that come with start times.',
+    example: '08:00 morning and 13:30 afternoon.',
+    convention: 'Leave empty for 08:00 and 13:30.',
+  },
+  'travel-cost': {
+    label: 'Travel cost',
+    meaning: 'The fuel cost per kilometre and how many cars travel to an away match.',
+    howUsed:
+      'Used for the travel estimates on the fixtures screens and schedule exports. A series with its own figures keeps them.',
+    example: 'R 4.50 per km, 3 cars per away trip.',
+  },
+  'venue-aliases': {
+    label: 'Venue aliases',
+    meaning: 'Other spellings of a ground, each pointing at the ground they mean.',
+    howUsed:
+      'The clash check treats the two spellings as one ground, so a fixture at either books the same field.',
+    example: '“Toti Oval” means “Toti 1”.',
+    convention:
+      'Case, punctuation and words such as “Cricket Club” are ignored, so type names as they appear.',
   },
 };

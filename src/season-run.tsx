@@ -53,13 +53,8 @@ import {
   defaultPlacement,
   instantiateTemplate,
 } from '../packages/engine/src/templates';
-import {
-  DEFAULT_SERIES_OVERS,
-  SERIES_TYPES,
-  isPoolKnockout,
-  poolPairings,
-  roundsForFormat,
-} from '../packages/engine/src/formats';
+import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
+import { isPoolKnockout, poolPairings, roundsForFormat } from '../packages/engine/src/formats';
 import {
   findByKey,
   leagueParticipants,
@@ -513,9 +508,19 @@ function QuickStartForm({
   // change of shape or calendar starts from the sensible default again.
   const [placementEdits, setPlacementEdits] = useState<Record<number, number>>({});
   const [seasonLabel, setSeasonLabel] = useState(currentSeasonLabel());
-  const [seriesType, setSeriesType] = useState<string>(SERIES_TYPES[0]);
-  const [overs, setOvers] = useState(DEFAULT_SERIES_OVERS);
-  const [ballType, setBallType] = useState('');
+  // The tenant's own match formats (ADR 0014), or the built-in list when it set none.
+  // Picking one prefills overs and ball type; both stay editable.
+  const defaults = resolveCompetitionDefaults(config);
+  const formats = defaults.matchFormats;
+  const [formatLabel, setFormatLabel] = useState(formats[0].label);
+  const [overs, setOvers] = useState(formats[0].overs ?? 20);
+  const [ballType, setBallType] = useState(formats[0].ballType ?? '');
+  function pickFormat(label: string) {
+    const f = formats.find((x) => x.label === label);
+    setFormatLabel(label);
+    if (f?.overs !== undefined) setOvers(f.overs);
+    setBallType(f?.ballType ?? '');
+  }
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [started, setStarted] = useState<string | null>(null);
@@ -541,7 +546,7 @@ function QuickStartForm({
   // included per side when entrants are confirmed.
   const teams = leagueParticipants(clubs, league.key, [], { isAffiliated: affiliationSubmitted });
   const narrative = describeStructure(
-    instantiateTemplate(template, calendar, undefined, placement),
+    instantiateTemplate(template, calendar, undefined, placement, defaults),
     calendar,
     teams.length,
   );
@@ -567,7 +572,7 @@ function QuickStartForm({
         ? { id: operatorCalendar.id }
         : { label, start: startDate, end: endDate },
       matchFormat: {
-        label: seriesType,
+        label: formatLabel,
         overs,
         ...(ballType.trim() ? { ballType: ballType.trim() } : {}),
       },
@@ -731,26 +736,28 @@ function QuickStartForm({
       <div className="field">
         <div className="field-label">Match format</div>
         <div className="sr-format">
+          <select
+            className="field-select"
+            aria-label="Match format"
+            value={formatLabel}
+            onChange={(e) => pickFormat(e.target.value)}
+            style={{ width: 220 }}
+          >
+            {formats.map((f) => (
+              <option key={f.label} value={f.label}>
+                {f.label}
+              </option>
+            ))}
+          </select>
           <BoundedNumber
             ariaLabel="Overs"
             min={1}
-            max={100}
+            max={200}
             style={{ width: 80 }}
             value={overs}
             onChange={setOvers}
           />
           <span style={{ fontSize: 12, color: 'var(--muted)' }}>overs</span>
-          <select
-            className="field-select"
-            aria-label="Series Type"
-            value={seriesType}
-            onChange={(e) => setSeriesType(e.target.value)}
-            style={{ width: 200 }}
-          >
-            {SERIES_TYPES.map((t) => (
-              <option key={t}>{t}</option>
-            ))}
-          </select>
           <input
             className="field-input"
             aria-label="Ball type"

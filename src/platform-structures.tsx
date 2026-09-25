@@ -38,7 +38,6 @@ import type { HelpTopicId } from './help/topics';
 import * as api from './api';
 import { ApiError } from './api';
 import {
-  T20_SLOTS,
   WEEKDAY_LABELS,
   calendarSpan,
   describeCadence,
@@ -53,6 +52,12 @@ import {
   previewRounds,
 } from '../packages/engine/src/structure';
 import { describeStage, describeStructure } from '../packages/engine/src/narrative';
+import {
+  FALLBACK_MATCH_DAYS,
+  FALLBACK_TIME_SLOTS,
+  resolveCompetitionDefaults,
+  type ResolvedCompetitionDefaults,
+} from '../packages/engine/src/defaults';
 import { groupSizes } from '../packages/engine/src/entrants';
 import { isPoolKnockout, roundsForFormat } from '../packages/engine/src/formats';
 import {
@@ -303,21 +308,32 @@ function declaredGroupCount(stage: StageSpec): number {
   return plan.kind === 'sizes' ? plan.sizes.length : plan.count;
 }
 
+/** 2, 4, 8, … — the counts a within-group bracket halves cleanly (`withinPoolRounds`). */
+function isPowerOfTwoAtLeast2(n: number | undefined): boolean {
+  return Number.isInteger(n) && (n as number) >= 2 && ((n as number) & ((n as number) - 1)) === 0;
+}
+
 /**
- * Mirrors `validateStructures`' v1 within-group rule: the stage must draw from a stage of
- * exactly 2 groups with `qualifiersPerGroup: 2`. The generator refuses every other shape
- * (it would need a bye, or mislabel the bracket), so the server 400s it — caught here
+ * Mirrors `validateStructures`' within-group rule, which is the engine's own
+ * (`withinPoolRounds`): the stage must draw from a stage with a power-of-two number of
+ * groups, each sending the same power-of-two number of sides (`qualifiersPerGroup`). Every
+ * other shape needs a bye or mislabels the bracket, so the server 400s it — caught here
  * first, where the operator can still see which control to change.
  */
 function breaksWithinPoolShape(stage: StageSpec, stages: StageSpec[]): boolean {
   if (stage.format.kind !== 'knockout' || stage.format.pairing !== 'within-pool') return false;
   const note = stage.entrants.kind === 'manual' ? stage.entrants.derivedFrom : undefined;
   const source = note ? stages.find((s) => s.id === note.fromStage) : undefined;
-  return note?.qualifiersPerGroup !== 2 || !source || declaredGroupCount(source) !== 2;
+  return (
+    !source ||
+    !isPowerOfTwoAtLeast2(note?.qualifiersPerGroup) ||
+    !isPowerOfTwoAtLeast2(declaredGroupCount(source))
+  );
 }
 
-/** The server's own wording for the rule above (config-validation.ts). */
-const WITHIN_POOL_SHAPE = 'within-group semi-finals need 2 groups × 2 qualifiers in this version';
+/** The server's own wording for the rule above (`WITHIN_POOL_SHAPE_MESSAGE`, config-validation.ts). */
+const WITHIN_POOL_SHAPE =
+  'within-group semi-finals need a power-of-two number of groups (2, 4, 8) each sending the same power-of-two number of sides (2, 4)';
 
 /**
  * One stage as the preview reasons about it: its group sizes at the preview's team count
@@ -518,6 +534,7 @@ export function StageRow({
   onChange,
   onRemove,
   onMove,
+  defaults,
 }: {
   stage: StageSpec;
   index: number;
@@ -531,6 +548,11 @@ export function StageRow({
   onChange: (patch: Partial<StageSpec>) => void;
   onRemove: () => void;
   onMove: (dir: -1 | 1) => void;
+  /**
+   * The tenant's match days and double-header slots (`resolveCompetitionDefaults`), used
+   * when "set days only" or set start times are switched on. Absent ⇒ the fallbacks.
+   */
+  defaults?: Pick<ResolvedCompetitionDefaults, 'matchDays' | 'timeSlots'>;
 }) {
   // Radio-group names must be unique per row: two rows can show the same stage (the
   // season wizard renders a shared template instance once per league that holds it).
@@ -543,10 +565,14 @@ export function StageRow({
   const [labelText, setLabelText] = useState(() => (stage.groupLabels ?? []).join(', '));
 
   // Remembers the slots to restore when the control is switched back on — either the
-  // T20 default, or whatever was there before (including a saved structure's own values,
-  // so re-toggling never resets an operator's edits back to the default).
+  // tenant's default slots, or whatever was there before (including a saved structure's own
+  // values, so re-toggling never resets an operator's edits back to the default).
   const [pendingSlots, setPendingSlots] = useState<TimeSlot[]>(
-    () => stage.schedule.slots ?? T20_SLOTS,
+    () =>
+      stage.schedule.slots ??
+      (defaults?.timeSlots?.length ? defaults.timeSlots : FALLBACK_TIME_SLOTS).map((sl) => ({
+        ...sl,
+      })),
   );
 
   const perGroup = preview.sizes[0] ?? 0;
@@ -614,7 +640,10 @@ export function StageRow({
       kind === 'every-n-weeks'
         ? { kind: 'every-n-weeks', n: 2 }
         : kind === 'weekdays'
-          ? { kind: 'weekdays', days: [6] }
+          ? {
+              kind: 'weekdays',
+              days: [...(defaults?.matchDays?.length ? defaults.matchDays : FALLBACK_MATCH_DAYS)],
+            }
           : kind === 'spread'
             ? { kind: 'spread' }
             : { kind: 'weekly' };
@@ -912,6 +941,7 @@ export function StageRow({
                 >
                   <span>Every</span>
                   <BoundedNumber
+                    ariaLabel="Weeks between rounds"
                     min={1}
                     max={12}
                     style={{ width: 80 }}
@@ -1037,7 +1067,7 @@ export function StageRow({
                     {
                       label: 'Morning & afternoon starts',
                       desc: 'Matches are stamped with alternating start times, cycled across the day’s fixtures.',
-                      eg: '08:00 morning / 13:30 afternoon for a T20 Pink Ball day',
+                      eg: '08:00 morning / 13:30 afternoon for a two-match day',
                     },
                     {
                       label: 'AM + PM double-headers',
@@ -1526,8 +1556,9 @@ function PreviewRail({
           )}
           {r.shapeErr && (
             <div style={{ ...ERR, marginTop: 6, lineHeight: 1.5 }}>
-              Within-group semi-finals need 2 groups × 2 qualifiers in this version — draw this
-              stage from a 2-group stage and set 2 qualifiers per group.
+              Within-group semi-finals need a power-of-two number of groups (2, 4, 8) each sending
+              the same power-of-two number of sides (2, 4) — draw this stage from a stage with 2, 4
+              or 8 groups and set 2 or 4 qualifiers per group.
             </div>
           )}
           {r.offCalendar ? (
@@ -1575,12 +1606,15 @@ function StructureEditor({
   initial,
   calendars,
   bindings = [],
+  defaults,
   onSave,
   onClose,
   toast,
 }: {
   initial: CompetitionStructure;
   calendars: SeasonCalendar[];
+  /** The tenant's resolved competition defaults — a new stage's match days and slots. */
+  defaults?: ResolvedCompetitionDefaults;
   /**
    * The competitions that bind this structure, and the calendar each one names.
    *
@@ -1914,6 +1948,7 @@ function StructureEditor({
                 setDraft((d) => ({ ...d, stages: d.stages.filter((_, j) => j !== i) }))
               }
               onMove={(dir) => moveStage(i, dir)}
+              defaults={defaults}
             />
           ))}
           <Btn
@@ -1967,11 +2002,14 @@ function StructureEditor({
 
 function StartPicker({
   calendars,
+  defaults,
   onPick,
   onClose,
   toast,
 }: {
   calendars: SeasonCalendar[];
+  /** The tenant's resolved defaults — a template's set start times become the tenant's. */
+  defaults?: ResolvedCompetitionDefaults;
   onPick: (s: CompetitionStructure) => void;
   onClose: () => void;
   toast: Toast;
@@ -2127,7 +2165,9 @@ function StartPicker({
             <Btn
               tone="teal"
               size="sm"
-              onClick={() => onPick(instantiateTemplate(chosen, calendar, undefined, placement))}
+              onClick={() =>
+                onPick(instantiateTemplate(chosen, calendar, undefined, placement, defaults))
+              }
             >
               Use this template
             </Btn>
@@ -2173,6 +2213,7 @@ export function StructuresCard({
   const [confirm, setConfirm] = useState<CompetitionStructure | null>(null);
   const structures = config.structures ?? [];
   const calendars = config.calendars ?? [];
+  const defaults = resolveCompetitionDefaults(config);
 
   /** Rebuild-and-PUT against the server's latest list — same guard as LeaguesCard. */
   async function saveStructures(
@@ -2373,6 +2414,7 @@ export function StructuresCard({
         >
           <StartPicker
             calendars={calendars}
+            defaults={defaults}
             toast={toast}
             onPick={(s) => {
               setPicking(false);
@@ -2398,6 +2440,7 @@ export function StructuresCard({
             initial={editing}
             calendars={calendars}
             bindings={bindingsFor(editing.id)}
+            defaults={defaults}
             onSave={upsert}
             onClose={() => setEditing(null)}
             toast={toast}

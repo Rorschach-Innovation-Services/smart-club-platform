@@ -1,5 +1,6 @@
 /* ─── Sample data ─── */
 
+import { FALLBACK_TRAVEL } from '../packages/engine/src/defaults';
 import type { Club, RequiredDoc } from './types';
 import { slotRefLabel } from '../packages/engine/src/formats';
 import { haversineKm } from '../packages/engine/src/geo';
@@ -1395,8 +1396,10 @@ export function overallProgress(club, requiredDocs = DEFAULT_REQUIRED_DOCS) {
 // Shared travel-cost defaults — used as fixtureCost's parameter defaults AND by
 // display sites that read series.costPerKm/carsPerAwayTrip directly, so a series
 // missing the fields (hand-crafted API payload) renders the same numbers it costs.
-export const DEFAULT_COST_PER_KM = 4.5;
-export const DEFAULT_CARS = 3;
+// The built-in fallbacks for `competitionDefaults.travel` (engine defaults.ts), so a tenant
+// that configured none costs travel exactly as before.
+export const DEFAULT_COST_PER_KM = FALLBACK_TRAVEL.costPerKm;
+export const DEFAULT_CARS = FALLBACK_TRAVEL.carsPerAwayTrip;
 
 /**
  * Travel distance and fuel cost for one fixture.

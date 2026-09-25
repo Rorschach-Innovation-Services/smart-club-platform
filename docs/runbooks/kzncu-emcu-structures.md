@@ -49,18 +49,17 @@ Competitions**.
   "2 groups of 6" means setting count = 2 against a 12-side entrant list, not typing "6"
   anywhere. Use "Exact sizes" only for an uneven split (e.g. `5, 5, 5, 4`), which none of the
   leagues above need.
-- **T20 time slots ship as the template default.** `pools-to-knockout`'s two stages now carry
-  `T20_SLOTS` (`packages/engine/src/calendar.ts`) — Morning 08:00 / Afternoon 13:30 — out of the
-  box for every T20 competition (Premier Men, Promotion Men, Premier Women). No per-league
-  edit is needed unless a competition should deviate from the union's stated slots.
+- **T20 time slots ship as the template default.** `pools-to-knockout`'s two stages carry
+  the tenant's default start times (`competitionDefaults.timeSlots`, ADR 0014), falling back to
+  `FALLBACK_TIME_SLOTS` (`packages/engine/src/defaults.ts`) — Morning 08:00 / Afternoon 13:30 —
+  for every T20 competition (Premier Men, Promotion Men, Premier Women). No per-league edit is
+  needed unless a competition should deviate from the union's stated slots.
 - **Kingsmead's preliminary round is automatic.** `knockoutShape` (`packages/engine/src/formats.ts`)
   computes the preliminary/main-draw split from entrant count alone — 9 entrants always
   produces one preliminary among the two lowest seeds and an 8-side main draw. There is no
   "preliminary round" toggle to set by hand.
-- **"Every 2 weeks" is the `every-n-weeks` cadence with n=2** — the Choice control's label is
-  literally "Every 2 weeks" (`CADENCE_LABELS`, `packages/engine/src/calendar.ts`); the underlying
-  `n` isn't operator-editable through the labelled control, which is fine since n=2 is what
-  every bi-weekly EMCU division needs.
+- **"Every 2 weeks" is the `every-n-weeks` cadence with n=2** — pick **Every N weeks** and set
+  the number of weeks to 2 (any whole number from 1 to 12 is accepted).
 - **First-round anchoring for bi-weekly cadences** lives under the Start flat season form's
   collapsed "Scheduling options" section, alongside cadence — it defaults to the block's start
   date if left blank, so anchoring on a Saturday only matters when the block itself doesn't

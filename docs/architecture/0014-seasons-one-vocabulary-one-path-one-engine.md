@@ -167,6 +167,17 @@ section.
   new, rare failure class accepted in exchange for one gated writer.
 - The known clash-gate bypasses recorded in ADR 0011 (venue CLIs, `PATCH /clubs/:id` ground
   changes) are unchanged by this ADR.
+- Tenant-configured defaults, as built (Phase 4). `competitionDefaults` is admin-level setup
+  data: both `PUT /tenant/config` and the operator route write it, and the anonymous
+  `GET /tenant` serves only formats, days and slots. The dolphins venue aliases stay in code
+  as `DEFAULT_VENUE_ALIASES` (moved into the engine so the console can import them), merged
+  under each tenant's own aliases; a backfill copies them into the dolphins config, and
+  emptying the code default is a later change. Alias keys and values are stored normalised.
+  The "Every 2 weeks" choice was already gone (the structure editor asks for N), so there was
+  no remaining two-week-only control to replace. Template and stage-kind copy describe a shape,
+  not a union; the optional "use the tenant's own league names as examples" idea was not built.
+  `ladder`, `outcome`, `knockout.preliminaries` and `StageRun.status: 'complete'` are marked
+  deprecated and no new template sets `outcome`; stored values still validate.
 
 ## Alternatives considered
 

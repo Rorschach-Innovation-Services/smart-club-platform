@@ -2619,6 +2619,109 @@ describe('season calendars (ADR 0008)', () => {
  * The pipeline-integrity check matters most: a stage deriving from a LATER stage is a
  * cycle, and a season built from one would be permanently unresolvable with no clue why.
  */
+describe('competition defaults (ADR 0014)', () => {
+  const T = 'compdefaults';
+  const OP = platformHeaders(OPERATOR);
+  const CD_ADMIN = devAuthAs('cd-adm', 'admin@cd', [{ tenantId: T, role: 'admin', clubIds: [] }]);
+  const CD_REP = devAuthAs('cd-rep', 'rep@cd', [{ tenantId: T, role: 'rep', clubIds: [] }]);
+
+  const full = {
+    matchFormats: [
+      { label: '50 Over (Red Ball)', overs: 50, ballType: 'Red' },
+      { label: 'T20 (Pink Ball)', overs: 20, ballType: 'Pink' },
+    ],
+    matchDays: [6],
+    timeSlots: [
+      { label: 'Morning', start: '09:00' },
+      { label: 'Afternoon', start: '14:00' },
+    ],
+    travel: { costPerKm: 5, carsPerAwayTrip: 2 },
+    venueAliases: { riversidebowl: 'riversideoval' },
+  };
+
+  before(async () => {
+    await repo.putTenantConfig({
+      tenant: T,
+      branding: { name: 'Defaults Union', title: 'CD', logoUrl: '', colors: {}, copy: {} },
+      submissionDeadline: '2026-12-31',
+      knownClubs: [],
+      leagues: [],
+    });
+  });
+
+  test('an operator PUT round-trips, trimmed, through GET /tenant/config', async () => {
+    const res = await app.request(`/platform/tenants/${T}`, {
+      method: 'PUT',
+      headers: OP,
+      body: JSON.stringify({
+        competitionDefaults: {
+          ...full,
+          matchFormats: [
+            { ...full.matchFormats[0], label: ' 50 Over (Red Ball) ' },
+            full.matchFormats[1],
+          ],
+        },
+      }),
+    });
+    assert.equal(res.status, 200);
+    const stored = await repo.getTenantConfig(T);
+    assert.deepEqual(stored?.competitionDefaults, full);
+    const got = await app.request('/tenant/config', { headers: tenantHeaders(CD_ADMIN, T) });
+    const body = (await got.json()) as Record<string, unknown>;
+    assert.deepEqual(body.competitionDefaults, full, 'all of it, aliases and travel included');
+  });
+
+  test('a tenant admin PUT /tenant/config writes it too — admin-level setup data, not stripped', async () => {
+    const next = { ...full, matchDays: [0, 6], travel: { costPerKm: 6, carsPerAwayTrip: 3 } };
+    const res = await app.request('/tenant/config', {
+      method: 'PUT',
+      headers: tenantHeaders(CD_ADMIN, T),
+      body: JSON.stringify({ competitionDefaults: next }),
+    });
+    assert.equal(res.status, 200);
+    const stored = await repo.getTenantConfig(T);
+    assert.deepEqual(stored?.competitionDefaults, next);
+  });
+
+  test('a rep cannot write it', async () => {
+    const res = await app.request('/tenant/config', {
+      method: 'PUT',
+      headers: tenantHeaders(CD_REP, T),
+      body: JSON.stringify({ competitionDefaults: { matchDays: [1] } }),
+    });
+    assert.equal(res.status, 403);
+  });
+
+  test('both write paths reject a malformed value with a 400', async () => {
+    const bad = { competitionDefaults: { matchFormats: [{ label: 'T20', overs: 0 }] } };
+    const op = await app.request(`/platform/tenants/${T}`, {
+      method: 'PUT',
+      headers: OP,
+      body: JSON.stringify(bad),
+    });
+    assert.equal(op.status, 400);
+    const adm = await app.request('/tenant/config', {
+      method: 'PUT',
+      headers: tenantHeaders(CD_ADMIN, T),
+      body: JSON.stringify({ competitionDefaults: { venueAliases: { a: '' } } }),
+    });
+    assert.equal(adm.status, 400);
+  });
+
+  test('the anonymous GET /tenant serves only formats, days and slots — never travel or aliases', async () => {
+    const res = await app.request('/tenant', { headers: { 'x-tenant': T } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { competitionDefaults: Record<string, unknown> };
+    assert.deepEqual(Object.keys(body.competitionDefaults).sort(), [
+      'matchDays',
+      'matchFormats',
+      'timeSlots',
+    ]);
+    assert.equal(body.competitionDefaults.travel, undefined);
+    assert.equal(body.competitionDefaults.venueAliases, undefined);
+  });
+});
+
 describe('competition structures (ADR 0008)', () => {
   const T = 'structures';
   const OP = platformHeaders(OPERATOR);

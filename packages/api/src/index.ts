@@ -64,7 +64,13 @@ import {
   computeIsMinor,
   dobFromSaId,
 } from './player-identity.js';
-import { findClashes, clashKey, formatClash, formatClashForHumans } from './venue-clash.js';
+import {
+  findClashes,
+  clashKey,
+  formatClash,
+  formatClashForHumans,
+  venueAliasesFor,
+} from './venue-clash.js';
 import {
   normaliseWithheld,
   projectSeriesForClub,
@@ -78,11 +84,13 @@ import {
   validateRequiredDocs,
   assertValidCadence,
   assertValidTimeSlots,
+  validateCompetitionDefaults,
   KNOCKOUT_PAIRINGS,
 } from './config-validation.js';
 import { findTemplate, instantiateTemplate, newStructureId } from '../../engine/src/templates.js';
 import { isAffiliated, leagueParticipants } from '../../engine/src/leagues.js';
 import { generateStage, stagesAfterGenerate } from '../../engine/src/generate.js';
+import { resolveCompetitionDefaults } from '../../engine/src/defaults.js';
 import { demographicsByLeague, summarizeDemographics } from './demographics.js';
 import {
   validateClubPatch,
@@ -127,6 +135,7 @@ import {
 } from './veterans.js';
 import type {
   Club,
+  CompetitionDefaults,
   ClubCommEvent,
   ClubSpec,
   Competition,
@@ -392,6 +401,22 @@ function publicRequiredDocs(cfg: TenantConfig | null): Omit<RequiredDoc, 'matchH
   return resolveRequiredDocs(cfg).map(({ matchHints: _hints, ...rest }) => rest);
 }
 
+/**
+ * The part of `competitionDefaults` the anonymous GET /tenant serves: the three fields a
+ * form prefills from. An ALLOWLIST, so `travel`, `venueAliases` and anything added later
+ * stay on the authenticated GET /tenant/config until someone decides otherwise.
+ */
+function publicCompetitionDefaults(
+  cfg: TenantConfig,
+): Pick<CompetitionDefaults, 'matchFormats' | 'matchDays' | 'timeSlots'> {
+  const d = cfg.competitionDefaults ?? {};
+  return {
+    ...(d.matchFormats ? { matchFormats: d.matchFormats } : {}),
+    ...(d.matchDays ? { matchDays: d.matchDays } : {}),
+    ...(d.timeSlots ? { timeSlots: d.timeSlots } : {}),
+  };
+}
+
 // ─────────────── Local-only upload sink (dev:local; 404 elsewhere) ───────────────
 
 /**
@@ -506,6 +531,10 @@ app.get('/tenant', async (c) => {
     // create-series form reads them off this already-fetched payload. Operator-only to
     // WRITE (stripped from PUT /tenant/config); public to read.
     calendars: config.calendars ?? [],
+    // The pickers' defaults (ADR 0014) — as public as the calendars. Only the three a form
+    // prefills from: travel cost and venue aliases are operational detail nobody on a public
+    // page reads, so they stay on the authenticated GET /tenant/config.
+    competitionDefaults: publicCompetitionDefaults(config),
     // Structures are deliberately NOT here. They are only needed by the authenticated
     // "Start a season" flow, and GET /tenant is unauthenticated and hit on every public
     // page load — serving up to 50 structures × 20 stages of competition configuration
@@ -3568,12 +3597,14 @@ async function applySeriesPatch(
   // The tenant-wide series/clubs/venues lists both clash gates read, loaded at most once and
   // only when a gate actually runs — a draft fixture edit with no release transition pays no
   // list reads, and a release never loads them twice.
-  let clashInputs: Promise<[Series[], Club[], Venue[]]> | undefined;
+  let clashInputs: Promise<[Series[], Club[], Venue[], Record<string, string>]> | undefined;
   const loadClashInputs = () =>
     (clashInputs ??= Promise.all([
       repo.listSeries(tenant),
       repo.listClubs(tenant),
       repo.listVenues(tenant),
+      // The tenant's configured ground-name aliases, merged over the code default.
+      repo.getTenantConfig(tenant).then(venueAliasesFor),
     ]));
 
   // Withheld fields are chosen ONLY on the false→true release transition, and only when
@@ -3625,9 +3656,9 @@ async function applySeriesPatch(
   // series, or fix the clashing venues), never to bypass the gate; see the "Ordering
   // consequence" section of docs/runbooks/planb-fixtures-import.md.
   if (patch.released === true && !current.released) {
-    const [allSeries, clubs, venues] = await loadClashInputs();
+    const [allSeries, clubs, venues, aliases] = await loadClashInputs();
     const subject = { ...current, ...patch, id } as Series;
-    const clashes = findClashes(subject, allSeries, clubs, venues);
+    const clashes = findClashes(subject, allSeries, clubs, venues, aliases);
     if (clashes.length) {
       const shown = clashes.slice(0, 3).map(formatClash).join('; ');
       // Keep the message string byte-identical (existing tests assert on it); the structured
@@ -3652,10 +3683,18 @@ async function applySeriesPatch(
   // at a time, so only clashes whose pair-on-ground identity (clashKey, no date/time) is
   // absent from the pre-edit set are refused. Recall (released:false) is never gated.
   if (current.released && patch.released !== false && patch.fixtures !== undefined) {
-    const [allSeries, clubs, venues] = await loadClashInputs();
-    const before = new Set(findClashes(current, allSeries, clubs, venues).map(clashKey));
-    const after = findClashes({ ...current, ...patch, id } as Series, allSeries, clubs, venues);
-    const introduced = after.filter((c) => !before.has(clashKey(c)));
+    const [allSeries, clubs, venues, aliases] = await loadClashInputs();
+    const before = new Set(
+      findClashes(current, allSeries, clubs, venues, aliases).map((c) => clashKey(c, aliases)),
+    );
+    const after = findClashes(
+      { ...current, ...patch, id } as Series,
+      allSeries,
+      clubs,
+      venues,
+      aliases,
+    );
+    const introduced = after.filter((c) => !before.has(clashKey(c, aliases)));
     if (introduced.length) {
       const shown = introduced.slice(0, 3).map(formatClashForHumans).join('; ');
       throw new HttpError(
@@ -3690,7 +3729,7 @@ async function applySeriesPatch(
  * candidate appended if new), so `introduced` is computed with the SAME clashKey subset logic
  * the in-season save gate uses — the editor's "will be refused on save" copy can therefore
  * never disagree with the server. Round-tripping to the server rather than a client ledger is
- * deliberate: ground-name normalisation and VENUE_ALIASES live only here, and the client
+ * deliberate: ground-name normalisation and the venue aliases live only here, and the client
  * ledger is venueId-keyed, so a client copy would drift from the gate.
  *
  * Note: `findClashes` rebuilds the whole-tenant ledger once per candidate (up to 20×) — the
@@ -3729,12 +3768,15 @@ app.post('/series/:id/clash-check', requireAdmin, async (c) => {
   }
   const current = await repo.getSeries(tenant, id);
   if (!current) throw new HttpError(404, 'series not found');
-  const [allSeries, clubs, venues] = await Promise.all([
+  const [allSeries, clubs, venues, aliases] = await Promise.all([
     repo.listSeries(tenant),
     repo.listClubs(tenant),
     repo.listVenues(tenant),
+    repo.getTenantConfig(tenant).then(venueAliasesFor),
   ]);
-  const before = new Set(findClashes(current, allSeries, clubs, venues).map(clashKey));
+  const before = new Set(
+    findClashes(current, allSeries, clubs, venues, aliases).map((cl) => clashKey(cl, aliases)),
+  );
   const fixtures = (current.fixtures ?? []) as Array<{ id?: string }>;
   const results = (candidates as Array<{ id: string }>).map((cand) => {
     const replaced = fixtures.some((f) => f.id === cand.id)
@@ -3745,11 +3787,11 @@ app.post('/series/:id/clash-check', requireAdmin, async (c) => {
     // ledger booked it first) as the same-series partner another fixture now clashes into.
     // Editing one fixture changes only clashes involving it, so this set equals what the
     // whole-series save gate would compute for this candidate.
-    const clashes = findClashes(subject, allSeries, clubs, venues).filter(
+    const clashes = findClashes(subject, allSeries, clubs, venues, aliases).filter(
       (cl) =>
         cl.fixtureId === cand.id || (cl.with.seriesId === id && cl.with.fixtureId === cand.id),
     );
-    const introduced = clashes.filter((cl) => !before.has(clashKey(cl)));
+    const introduced = clashes.filter((cl) => !before.has(clashKey(cl, aliases)));
     return { clashes, introduced };
   });
   return c.json({ results });
@@ -3973,7 +4015,14 @@ app.post('/season-runs/quick-start', requireAdmin, async (c) => {
   // not turn a valid quick start into a 400 the admin cannot do anything about.
   const structureName = `${league.label} · ${template.name}`.slice(0, 80).trim();
   const structure: CompetitionStructure = {
-    ...instantiateTemplate(template, calendar, structureName, placement),
+    // The tenant's own double-header slots where the template sets start times.
+    ...instantiateTemplate(
+      template,
+      calendar,
+      structureName,
+      placement,
+      resolveCompetitionDefaults(config),
+    ),
     source: 'quick-start',
     version: 1,
   };
@@ -4205,6 +4254,8 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     leagueTeams: leagueParticipants(clubs, run.leagueKey),
     league,
     competition,
+    // A competition with no overs of its own takes the tenant's first match format's.
+    defaultOvers: config.competitionDefaults?.matchFormats?.[0]?.overs,
   });
   if (result.status === 'unknown-stage') throw new HttpError(404, 'stage not found');
   if (result.status === 'awaiting-entrants')
@@ -4559,6 +4610,10 @@ async function applyTenantConfigPatch(
       patch.leagues = patch.leagues.map((l) => ({ ...l, competitions: storedByKey.get(l.key) }));
     }
   }
+  // Admin-level setup data (ADR 0014): both the tenant admin's and the operator's PUT land
+  // here, so the one shape guard covers both.
+  if (patch.competitionDefaults !== undefined)
+    patch.competitionDefaults = validateCompetitionDefaults(patch.competitionDefaults);
   const next = { ...current, ...patch, tenant };
   try {
     await repo.putTenantConfig(next);
@@ -4921,6 +4976,8 @@ app.get('/tenant/config', async (c) => {
     calendars: config.calendars ?? [],
     // The reason this route exists.
     structures: config.structures ?? [],
+    // All of it, aliases and travel included: admin-level setup data (ADR 0014).
+    competitionDefaults: config.competitionDefaults ?? {},
     // The milestone itself is useful on the console; who stamped it is not.
     setupCompletedAt: config.setupCompletedAt,
   });
@@ -5445,6 +5502,8 @@ app.put('/platform/tenants/:slug', async (c) => {
   // — the same path an admin's quick start takes.
   if (body.calendars !== undefined) patch.calendars = body.calendars;
   if (body.structures !== undefined) patch.structures = body.structures;
+  // Validated (and normalised) in the shared applyTenantConfigPatch, same as the admin path.
+  if (body.competitionDefaults !== undefined) patch.competitionDefaults = body.competitionDefaults;
   const { config: next, warnings } = await writeTenantConfigAsOperator(slug, patch, {
     by: c.get('auth')?.email ?? 'operator',
     current: currentCfg,

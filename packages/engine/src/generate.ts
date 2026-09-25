@@ -29,6 +29,8 @@ export interface StageGenerationArgs {
   leagueTeams: readonly TeamParticipant[];
   league?: Pick<League, 'label'>;
   competition?: Pick<Competition, 'label' | 'matchFormat'>;
+  /** Overs when the competition's match format names none — see `buildStageSeries`. */
+  defaultOvers?: number;
 }
 
 /** One group as generated: what the run's StageRun records against it. */
@@ -67,6 +69,7 @@ export function generateStage({
   leagueTeams,
   league,
   competition,
+  defaultOvers,
 }: StageGenerationArgs): StageGeneration {
   const index = run.structureSnapshot.stages.findIndex((s) => s.id === specId);
   if (index < 0) return { status: 'unknown-stage' };
@@ -102,6 +105,7 @@ export function generateStage({
       },
       multi,
       leagueTeams,
+      defaultOvers,
     }),
   );
   return {

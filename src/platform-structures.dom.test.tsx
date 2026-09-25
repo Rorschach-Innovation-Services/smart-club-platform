@@ -85,7 +85,11 @@ const smallCalendar: SeasonCalendar = {
 
 const setup = (
   structures: CompetitionStructure[] = [structure()],
-  opts: { calendars?: SeasonCalendar[]; leagues?: League[] } = {},
+  opts: {
+    calendars?: SeasonCalendar[];
+    leagues?: League[];
+    competitionDefaults?: TenantConfig['competitionDefaults'];
+  } = {},
 ) => {
   const save = vi.fn().mockResolvedValue({});
   const toast = vi.fn();
@@ -94,6 +98,7 @@ const setup = (
     structures,
     calendars: opts.calendars ?? [calendar],
     leagues: opts.leagues ?? [],
+    competitionDefaults: opts.competitionDefaults,
   } as unknown as TenantConfig;
   vi.mocked(api.platformGetTenant).mockResolvedValue(config);
   render(<StructuresCard slug="dolphins" config={config} save={save} toast={toast} />);
@@ -465,6 +470,37 @@ describe('StageRow — Time slots', () => {
       { label: 'Afternoon', start: '13:30' },
     ]);
     expect('roundsPerDay' in saved.stages[0].schedule).toBe(false);
+  });
+
+  it('prefills the tenant’s own default slots and match days (ADR 0014)', async () => {
+    const { user, save } = setup([structure()], {
+      competitionDefaults: {
+        timeSlots: [
+          { label: 'Early', start: '09:30' },
+          { label: 'Late', start: '14:15' },
+        ],
+        matchDays: [0],
+      },
+    });
+    await openEditor(user);
+
+    await user.click(
+      within(timeSlotsChoice()).getByRole('button', { name: 'Morning & afternoon starts' }),
+    );
+    expect(screen.getByDisplayValue('09:30')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('14:15')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('radio', { name: /^set days only/i }));
+    expect(screen.getByRole('button', { name: 'Sun' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Sat' })).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(saveBtn());
+    const schedule = save.mock.calls[0][0].structures[0].stages[0].schedule;
+    expect(schedule.slots).toEqual([
+      { label: 'Early', start: '09:30' },
+      { label: 'Late', start: '14:15' },
+    ]);
+    expect(schedule.cadence).toEqual({ kind: 'weekdays', days: [0] });
   });
 
   it('editing a row’s label and time round-trips into the saved structure', async () => {
@@ -978,7 +1014,7 @@ describe('pools → within-group semis', () => {
     expect(within(preview()).getByText(/✓ Fits · 23 fixtures across 2 stages/)).toBeVisible();
   });
 
-  it('keeps the "up to" hedge, and flags the 2 × 2 rule, once the count is cleared', async () => {
+  it('keeps the "up to" hedge, and flags the within-group rule, once the count is cleared', async () => {
     const { user, save } = setup([poolsStructure()]);
     await openEditor(user, /pools to knockout/i);
     await editFinals(user);
@@ -989,11 +1025,11 @@ describe('pools → within-group semis', () => {
     expect(within(preview()).getByText(/up to/i)).toBeInTheDocument();
     // Inline, before the server's 400 — in the rail and as a save-blocking error.
     expect(
-      within(preview()).getByText(/within-group semi-finals need 2 groups × 2 qualifiers/i),
+      within(preview()).getByText(/within-group semi-finals need a power-of-two number of groups/i),
     ).toBeVisible();
     expect(
       screen.getByText(
-        '"Semi-finals & final": within-group semi-finals need 2 groups × 2 qualifiers in this version.',
+        '"Semi-finals & final": within-group semi-finals need a power-of-two number of groups (2, 4, 8) each sending the same power-of-two number of sides (2, 4).',
       ),
     ).toBeVisible();
     expect(saveBtn()).toBeDisabled();

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildStageSeries, type BuildStageSeriesArgs } from './series-builder';
-import { T20_SLOTS } from './calendar';
+import { FALLBACK_TIME_SLOTS } from './defaults';
 import type { TeamParticipant } from './leagues';
 import type { StageSpec } from './types';
 
@@ -12,7 +12,7 @@ const STAGE: StageSpec = {
   schedule: {
     blockIndex: 0,
     cadence: { kind: 'weekly' },
-    slots: T20_SLOTS,
+    slots: [...FALLBACK_TIME_SLOTS],
     roundsPerDay: 2,
     activateFrom: '2027-01-18',
   },
@@ -98,5 +98,12 @@ describe('buildStageSeries', () => {
     expect('activateFrom' in s).toBe(false);
     expect(s.maxOvers).toBe(50);
     expect(s.seriesType).toBe('Pool stage');
+  });
+
+  it('falls back to the tenant’s default overs when the competition names none', () => {
+    const noOvers = { ...args().group, competition: { label: '40 Over' } };
+    expect(buildStageSeries(args({ group: noOvers, defaultOvers: 40 })).maxOvers).toBe(40);
+    // The competition's own overs still win.
+    expect(buildStageSeries(args({ defaultOvers: 40 })).maxOvers).toBe(20);
   });
 });

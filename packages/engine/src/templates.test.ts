@@ -12,7 +12,8 @@ import {
 } from './templates';
 import { materialiseStage } from './structure';
 import { describeStage } from './narrative';
-import { T20_SLOTS } from './calendar';
+import { FALLBACK_TIME_SLOTS } from './defaults';
+import { STAGE_KINDS } from './stage-kinds';
 import type { SeasonCalendar } from './types';
 
 const CAL: SeasonCalendar = {
@@ -102,7 +103,7 @@ describe('starter templates', () => {
     expect(within.format).toEqual({ kind: 'knockout', pairing: 'within-pool' });
   });
 
-  it('names real leagues so the choice is recognisable', () => {
+  it('describes the kind of league each shape suits', () => {
     for (const t of STRUCTURE_TEMPLATES) {
       expect(t.whenToUse.length).toBeGreaterThan(20);
       expect(t.examples.length).toBeGreaterThan(5);
@@ -222,12 +223,42 @@ describe('instantiateTemplate', () => {
     });
   });
 
-  // Every T20 Pink Ball competition plays a morning and an afternoon match per day, so
-  // the starter template carries T20_SLOTS on both its stages out of the box.
-  it('carries the T20 morning/afternoon slots on both stages of pools-to-knockout', () => {
+  // A short-format day plays a morning and an afternoon match, so the starter template
+  // carries the fallback slots on both its stages out of the box.
+  it('carries the fallback morning/afternoon slots on both stages of pools-to-knockout', () => {
     const st = instantiateTemplate(findTemplate('pools-to-knockout')!, CAL);
-    expect(st.stages[0].schedule.slots).toEqual(T20_SLOTS);
-    expect(st.stages[1].schedule.slots).toEqual(T20_SLOTS);
+    expect(st.stages[0].schedule.slots).toEqual(FALLBACK_TIME_SLOTS);
+    expect(st.stages[1].schedule.slots).toEqual(FALLBACK_TIME_SLOTS);
+  });
+
+  it('swaps in the tenant’s own time slots where the template sets start times', () => {
+    const slots = [
+      { label: 'Early', start: '09:30' },
+      { label: 'Late', start: '14:00' },
+    ];
+    const st = instantiateTemplate(findTemplate('pools-to-knockout')!, CAL, undefined, undefined, {
+      timeSlots: slots,
+    });
+    expect(st.stages[0].schedule.slots).toEqual(slots);
+    expect(st.stages[1].schedule.slots).toEqual(slots);
+    // Fresh copies: editing the structure never edits the tenant's config.
+    expect(st.stages[0].schedule.slots).not.toBe(slots);
+    // A template with no set times stays without them.
+    const flat = instantiateTemplate(findTemplate('flat-round-robin')!, CAL, undefined, undefined, {
+      timeSlots: slots,
+    });
+    expect('slots' in flat.stages[0].schedule).toBe(false);
+  });
+
+  // Templates and stage-kind examples are read by every tenant, so they describe a shape,
+  // never one union's league or cup.
+  it('names no union, league or sponsor in its copy', () => {
+    const UNION = /KZNCU|EMCU|Kingsmead|Hollywoodbets|Dolphins/i;
+    for (const t of STRUCTURE_TEMPLATES) {
+      expect(t.examples, t.id).not.toMatch(UNION);
+      expect(t.whenToUse, t.id).not.toMatch(UNION);
+    }
+    for (const [id, k] of Object.entries(STAGE_KINDS)) expect(k.eg, id).not.toMatch(UNION);
   });
 });
 
