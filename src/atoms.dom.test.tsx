@@ -393,6 +393,25 @@ describe('Modal — the one dialog shell', () => {
     expect(opener).toHaveFocus();
   });
 
+  it('keeps Tab and Shift+Tab cycling inside the dialog', async () => {
+    const user = userEvent.setup();
+    render(<Opener />);
+    await user.click(screen.getByRole('button', { name: 'Open' }));
+    const dialog = screen.getByRole('dialog');
+    const close = within(dialog).getByTitle('Close');
+    const confirm = within(dialog).getByRole('button', { name: 'Confirm' });
+
+    await user.tab();
+    expect(close).toHaveFocus();
+    await user.tab();
+    expect(confirm).toHaveFocus();
+    // Past the last control it wraps to the first — never out to the page behind.
+    await user.tab();
+    expect(close).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(confirm).toHaveFocus();
+  });
+
   it('closes on a backdrop click unless dismissable is false', async () => {
     const { unmount } = render(<Opener />);
     await userEvent.click(screen.getByRole('button', { name: 'Open' }));

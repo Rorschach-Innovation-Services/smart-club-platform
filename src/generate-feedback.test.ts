@@ -53,4 +53,21 @@ describe('generateConflictMessage', () => {
     expect(generateConflictMessage(new ApiError(400, 'bad', 'venue_clash'))).toBeNull();
     expect(generateConflictMessage(new Error('boom'))).toBeNull();
   });
+
+  it('names the series already replaced when a refusal lands part-way through', () => {
+    const err = new ApiError(409, 'Change blocked — 1 venue clash', 'venue_clash', {
+      clashes: [clash(3, 'Kingsmead', 'Premier T20')],
+      written: ['s-run-pools-g1', 's-run-pools-g2'],
+      releasedOverwritten: ['s-run-pools-g1'],
+    });
+    expect(generateConflictMessage(err)).toBe(
+      'Round 3 · Kingsmead · Home XI v Away XI clashes with Premier T20. Fix these in the fixtures list. ' +
+        '2 series were already replaced: s-run-pools-g1, s-run-pools-g2',
+    );
+    // Any refusal carrying `written` says so, even one without its own copy.
+    const other = new ApiError(409, 'series changed; refetch', undefined, { written: ['s-1'] });
+    expect(generateConflictMessage(other)).toBe(
+      'series changed; refetch. 1 series was already replaced: s-1',
+    );
+  });
 });

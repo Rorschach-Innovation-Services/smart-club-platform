@@ -3684,25 +3684,15 @@ async function applySeriesPatch(
   // absent from the pre-edit set are refused. Recall (released:false) is never gated.
   if (current.released && patch.released !== false && patch.fixtures !== undefined) {
     const [allSeries, clubs, venues, aliases] = await loadClashInputs();
-    const before = new Set(
-      findClashes(current, allSeries, clubs, venues, aliases).map((c) => clashKey(c, aliases)),
-    );
-    const after = findClashes(
+    const refusal = inSeasonClashRefusal(
+      current,
       { ...current, ...patch, id } as Series,
       allSeries,
       clubs,
       venues,
       aliases,
     );
-    const introduced = after.filter((c) => !before.has(clashKey(c, aliases)));
-    if (introduced.length) {
-      const shown = introduced.slice(0, 3).map(formatClashForHumans).join('; ');
-      throw new HttpError(
-        409,
-        `Change blocked — ${introduced.length} venue clash(es): ${shown}${introduced.length > 3 ? ` … +${introduced.length - 3} more` : ''}. Pick another ground or date/time, or move the other fixture, then save again.`,
-        { clashes: introduced, code: 'venue_clash' },
-      );
-    }
+    if (refusal) throw refusal;
   }
   // releasedAt is server-owned. Stamp it only on the false→true release transition and
   // clear it on recall. A whole-object edit of an already-released series carries
@@ -3717,6 +3707,35 @@ async function applySeriesPatch(
     if (err instanceof VersionConflictError) throw new HttpError(409, 'series changed; refetch');
     throw err;
   }
+}
+
+/**
+ * The in-season clash gate's verdict for one write: `current` is the stored released series,
+ * `subject` what it would become. Only clashes whose pair-on-ground identity (`clashKey`) is
+ * absent from `current`'s own clash set are refused (the subset rule). Returns the 409 to
+ * throw, or undefined when the write is allowed. Shared by `applySeriesPatch` and the stage
+ * generate route's dry pass, so the dry pass can never disagree with the gate it predicts.
+ */
+function inSeasonClashRefusal(
+  current: Series,
+  subject: Series,
+  allSeries: Series[],
+  clubs: Club[],
+  venues: Venue[],
+  aliases: Record<string, string>,
+): HttpError | undefined {
+  const before = new Set(
+    findClashes(current, allSeries, clubs, venues, aliases).map((c) => clashKey(c, aliases)),
+  );
+  const after = findClashes(subject, allSeries, clubs, venues, aliases);
+  const introduced = after.filter((c) => !before.has(clashKey(c, aliases)));
+  if (!introduced.length) return undefined;
+  const shown = introduced.slice(0, 3).map(formatClashForHumans).join('; ');
+  return new HttpError(
+    409,
+    `Change blocked — ${introduced.length} venue clash(es): ${shown}${introduced.length > 3 ? ` … +${introduced.length - 3} more` : ''}. Pick another ground or date/time, or move the other fixture, then save again.`,
+    { clashes: introduced, code: 'venue_clash' },
+  );
 }
 
 /**
@@ -3997,7 +4016,7 @@ app.post('/season-runs/quick-start', requireAdmin, async (c) => {
     )
       throw new HttpError(
         400,
-        `placement must give each of the ${template.stages.length} stage${template.stages.length === 1 ? '' : 's'} a block between 1 and ${calendar.blocks.length}`,
+        `placement must name a block for each of the ${template.stages.length} stage${template.stages.length === 1 ? '' : 's'}: each stage's block must be between 0 and ${calendar.blocks.length - 1} (0 = first block)`,
       );
     placement = p as number[];
   }
@@ -4046,9 +4065,23 @@ app.post('/season-runs/quick-start', requireAdmin, async (c) => {
     by: email ?? 'admin (quick start)',
     current: config,
   });
+  // The 500 for "the competition is in config but its season is not" — the admin recovers
+  // by starting it from "Start a season", so the body names the competition.
+  const notStarted = () =>
+    new HttpError(
+      500,
+      `The competition was set up (${competition.id}) but its season could not be started — start it from "Start a season"`,
+      { code: 'run_not_started', competitionId: competition.id },
+    );
   // Snapshot what was actually WRITTEN (the operator path owns the version number).
-  const structureSnapshot = (written.structures ?? []).find((st) => st.id === structure.id)!;
-  const calendarSnapshot = (written.calendars ?? []).find((cl) => cl.id === calendar.id)!;
+  const structureSnapshot = (written.structures ?? []).find((st) => st.id === structure.id);
+  const calendarSnapshot = (written.calendars ?? []).find((cl) => cl.id === calendar.id);
+  if (!structureSnapshot || !calendarSnapshot) {
+    console.error(
+      `quick start for ${tenant}/${league.key}: competition ${competition.id} was written but the config read back lacks its ${structureSnapshot ? 'calendar' : 'structure'}`,
+    );
+    throw notStarted();
+  }
 
   const run: SeasonRun = {
     id: `run-${randomUUID().slice(0, 8)}`,
@@ -4073,10 +4106,7 @@ app.post('/season-runs/quick-start', requireAdmin, async (c) => {
       err,
     );
     Sentry.captureException(err);
-    throw new HttpError(
-      500,
-      `The competition was set up (${competition.id}) but its season could not be started — start it from "Start a season"`,
-    );
+    throw notStarted();
   }
   return c.json(
     {
@@ -4204,10 +4234,15 @@ interface GenerateStageBody {
  *
  * Overwriting a RELEASED series needs `confirmReleasedOverwrite: true`. Every group is
  * checked before anything is written, so a refusal (409 `released_overwrite`, naming every
- * released series in `seriesIds`) writes nothing. Past that point writes are sequential and
- * not transactional: a clash-gate 409 on a later group leaves earlier groups written, as the
- * client-side loop this replaces did — the response to retry is to fix the clash and
- * generate again, which is idempotent (same ids, same content).
+ * released series in `seriesIds`) writes nothing. The in-season clash gate is likewise dry-run
+ * for every released group before the first write, so a clash 409s with nothing replaced.
+ * Past that point writes are sequential and not transactional; should a later group still be
+ * refused (a concurrent edit), the error's details carry `written` (series ids already
+ * replaced) and `releasedOverwritten`. Retrying after a fix is idempotent (same ids, same
+ * content).
+ *
+ * A 200 may carry `warnings` — today only when a pool pairing could not be drawn and the
+ * stage was paired as a seeded bracket instead.
  */
 app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => {
   const { tenant, email } = c.get('requestAuth')!;
@@ -4276,22 +4311,72 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
       { code: 'released_overwrite', seriesIds: released },
     );
 
-  const written: Series[] = [];
-  for (const [i, series] of result.series.entries()) {
-    const stored = existing[i];
-    if (!stored) {
-      written.push(await createSeries(tenant, series));
-      continue;
-    }
+  // What an existing series is PATCHed with: regenerating changes the fixtures, never
+  // whether they are published, and never a name the admin chose.
+  const overwriteOf = (series: Series): Partial<Series> => {
     const { released: _r, releasedAt: _ra, name: _n, ...fixturesAndConfig } = series;
-    written.push(
-      await applySeriesPatch(
-        tenant,
-        series.id,
-        { ...fixturesAndConfig, version: stored.version },
-        actor,
-      ),
-    );
+    return fixturesAndConfig;
+  };
+
+  // Dry pass of the in-season clash gate over every RELEASED group about to be overwritten,
+  // before anything is written — so a clash on a later group 409s with nothing replaced,
+  // rather than leaving the earlier groups rewritten. Simulated in write order against a
+  // ledger that already carries the earlier groups' would-be series, which is exactly what
+  // the gate sees when the real writes run one after another.
+  if (released.length) {
+    const [allSeries, allClubs, venues] = await Promise.all([
+      repo.listSeries(tenant),
+      repo.listClubs(tenant),
+      repo.listVenues(tenant),
+    ]);
+    const aliases = venueAliasesFor(config);
+    let ledger = allSeries;
+    for (const [i, series] of result.series.entries()) {
+      const stored = existing[i];
+      const subject = stored
+        ? ({ ...stored, ...overwriteOf(series), id: series.id } as Series)
+        : series;
+      if (stored?.released) {
+        const refusal = inSeasonClashRefusal(stored, subject, ledger, allClubs, venues, aliases);
+        if (refusal) throw refusal;
+      }
+      ledger = [...ledger.filter((s) => s.id !== series.id), subject];
+    }
+  }
+
+  const written: Series[] = [];
+  const writtenIds: string[] = [];
+  const releasedOverwritten: string[] = [];
+  try {
+    for (const [i, series] of result.series.entries()) {
+      const stored = existing[i];
+      if (!stored) {
+        written.push(await createSeries(tenant, series));
+        writtenIds.push(series.id);
+        continue;
+      }
+      written.push(
+        await applySeriesPatch(
+          tenant,
+          series.id,
+          { ...overwriteOf(series), version: stored.version },
+          actor,
+        ),
+      );
+      writtenIds.push(series.id);
+      if (stored.released) releasedOverwritten.push(series.id);
+    }
+  } catch (err) {
+    // Safety net behind the dry pass (a concurrent write can still land between the two):
+    // a refusal after some groups were already written says which, so the admin knows the
+    // stage is half-replaced rather than untouched.
+    if (err instanceof HttpError && writtenIds.length)
+      throw new HttpError(err.status, err.message, {
+        ...(err.details ?? {}),
+        written: writtenIds,
+        releasedOverwritten,
+      });
+    throw err;
   }
   const nextRun = await applySeasonRunPatch(
     tenant,
@@ -4299,7 +4384,11 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     { stages: stagesAfterGenerate(run, specId, result.groups), version: run.version },
     actor,
   );
-  return c.json({ run: nextRun, series: written });
+  return c.json({
+    run: nextRun,
+    series: written,
+    ...(result.warnings?.length ? { warnings: result.warnings } : {}),
+  });
 });
 
 /**

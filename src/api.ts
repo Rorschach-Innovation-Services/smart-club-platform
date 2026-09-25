@@ -537,6 +537,8 @@ export interface GenerateStageRequest {
 export interface GenerateStageResponse {
   run: SeasonRun;
   series: Series[];
+  /** Caveats on a generate that still succeeded, e.g. a pool pairing drawn as a seeded bracket. */
+  warnings?: string[];
 }
 /** The generate would replace released series and the caller did not confirm it. */
 export class ReleasedOverwriteError extends ApiError {

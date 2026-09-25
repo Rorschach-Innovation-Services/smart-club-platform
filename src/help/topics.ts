@@ -91,7 +91,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
       'Cross-group: each group winner plays the other group’s runner-up. Sides from the same group cannot meet again until the final.',
       'Within-group: each group plays its own semi-final. The two group winners meet in the final.',
       'The structure sets a default. The admin can choose the other pairing when confirming the qualifiers, and that choice applies to this season only.',
-      'In this version, within-group needs exactly 2 groups sending 2 sides each.',
+      'Within-group needs a power-of-two number of groups (2, 4, 8), each sending the same power-of-two number of sides (2, 4).',
     ],
     example:
       'Group A: Westville 1st, Crusaders 2nd. Group B: Berea Rovers 1st, Glenwood 2nd. Cross-group gives Westville v Glenwood and Berea Rovers v Crusaders. Within-group gives Westville v Crusaders and Berea Rovers v Glenwood.',
@@ -201,21 +201,21 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   },
   'legacy-series': {
     id: 'legacy-series',
-    guideAnchor: 'binding',
+    guideAnchor: 'imported-series',
     title: 'Series made without a structure',
     summary:
-      'A league with no competition bound to it uses the older flow: the admin creates a series and gets one flat round robin.',
+      'Every season is now started from a structure. A league with no competition is quick-started; the only series without a season are imported schedules and stand-alone series.',
     body: [
-      'A league with no competition bound uses Create a series. That gives one flat round robin, as it always has.',
-      'These series work as before. Approval, release, ground allocation and broadcasts behave the same.',
-      'They are not part of a season run, so they have no stages. Rebase and “Needs regenerating” do not apply to them.',
-      'Regenerating one follows the calendar block it was created against, including any later edits to that calendar.',
+      'A league with no competition bound is started with quick start: the admin picks a starter shape, a calendar and a match format, and the platform creates the competition and its season in one step.',
+      'Imported schedules (the union’s Plan B fixtures) and stand-alone series are not part of a season, so they have no stages. Rebase and “Needs regenerating” do not apply to them.',
+      'They cannot be regenerated. They can be edited fixture by fixture, and approval, release, ground allocation and broadcasts behave as they do for any series.',
     ],
     example:
-      'EMCU Division 4 has no competition bound. The admin uses Create a series, picks Block 1 and every 2 weeks, and gets 11 rounds for 12 sides.',
+      'EMCU Division 4 has no competition. The admin opens Start a season, picks Division 4, quick-starts a flat round robin on Block 1 and gets a season whose one stage generates 11 rounds for 12 sides.',
   },
   'competition-defaults': {
     id: 'competition-defaults',
+    guideAnchor: 'competition-defaults',
     title: 'How the platform uses your defaults',
     summary:
       'Competition defaults are the union’s own answers to questions the platform would otherwise answer with built-in values: formats, match days, start times, travel cost and ground spellings.',

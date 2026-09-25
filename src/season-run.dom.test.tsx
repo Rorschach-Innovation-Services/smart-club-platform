@@ -20,6 +20,10 @@ import userEvent from '@testing-library/user-event';
 import { currentSeasonLabel } from './data';
 import { ApiError, quickStartSeason } from './api';
 import { GenerateFixturesLauncher, SeasonRunsPanel } from './season-run';
+import { materialiseRun } from '../packages/engine/src/run';
+import { leagueParticipants } from '../packages/engine/src/leagues';
+import { addDays, formatIsoDate, todayIso } from '../packages/engine/src/calendar';
+import { Sentry } from './sentry';
 import type {
   Club,
   CompetitionStructure,
@@ -37,6 +41,8 @@ vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api');
   return { ...actual, quickStartSeason: vi.fn() };
 });
+// Error reporting is observed, never sent.
+vi.mock('./sentry', () => ({ Sentry: { captureException: vi.fn() } }));
 
 const calendar: SeasonCalendar = {
   id: 'cal',
@@ -815,36 +821,41 @@ const poolsConfirmed = {
 const cardFor = (name: RegExp) =>
   screen.getByRole('heading', { name }).closest('div')!.parentElement!;
 
-/** The series a generate call would have written, from the payloads it was handed. */
+/**
+ * The series a generate call would have written. `onGenerate` is handed only the run and
+ * the stage (the server materialises it, ADR 0014), so this materialises the same way with
+ * the shared engine over the test's clubs.
+ */
 const seriesFromGenerate = (
   call: unknown[],
   over: Partial<Series> = {},
 ): { series: Series[]; groups: Array<{ id: string; seriesId: string }> } => {
-  const [payloads, run, stageSpec] = call as [
-    Array<{ groupId: string; fixtures: unknown[]; entrants: string[] }>,
-    SeasonRun,
-    StageSpec,
+  const [genRun, stageSpec] = call as [SeasonRun, StageSpec];
+  const index = genRun.structureSnapshot.stages.findIndex((x) => x.id === stageSpec.id);
+  const m = materialiseRun(genRun, leagueParticipants(clubs, genRun.leagueKey)).materialisations[
+    index
   ];
-  const series = payloads.map(
-    (p) =>
+  if (m.status !== 'ready') throw new Error(`stage ${stageSpec.id} is not ready to generate`);
+  const series = m.groups.map(
+    (g) =>
       ({
-        id: `s-${run.id}-${stageSpec.id}-${p.groupId}`,
+        id: `s-${genRun.id}-${stageSpec.id}-${g.id}`,
         name: stageSpec.name,
-        fixtures: p.fixtures,
-        teams: p.entrants,
+        fixtures: g.fixtures,
+        teams: g.entrants,
         released: false,
-        seasonRunId: run.id,
+        seasonRunId: genRun.id,
         stageSpecId: stageSpec.id,
-        groupId: p.groupId,
+        groupId: g.id,
         version: 1,
         ...over,
       }) as unknown as Series,
   );
   return {
     series,
-    groups: payloads.map((p) => ({
-      id: p.groupId,
-      seriesId: `s-${run.id}-${stageSpec.id}-${p.groupId}`,
+    groups: m.groups.map((g) => ({
+      id: g.id,
+      seriesId: `s-${genRun.id}-${stageSpec.id}-${g.id}`,
     })),
   };
 };
@@ -1367,13 +1378,13 @@ describe('rebase — review and apply a newer structure version', () => {
     expect(onRebaseRun).toHaveBeenCalledWith('run-1', { structureVersion: 2, version: 1 });
     expect(onGenerate).toHaveBeenCalledTimes(2);
     // Stage one generates against the run the rebase returned…
-    const [, firstRun, firstStage] = onGenerate.mock.calls[0];
+    const [firstRun, firstStage] = onGenerate.mock.calls[0];
     expect(firstRun.version).toBe(2);
     expect(firstStage.id).toBe('league');
     expect(firstStage.schedule.cadence.kind).toBe('weekdays');
     // …stage two against a FRESH read, not the snapshot stage one already moved on.
     expect(onFetchRun).toHaveBeenCalledTimes(1);
-    const [, secondRun, secondStage] = onGenerate.mock.calls[1];
+    const [secondRun, secondStage] = onGenerate.mock.calls[1];
     expect(secondRun.version).toBe(3);
     expect(secondStage.id).toBe('cup');
 
@@ -1396,8 +1407,86 @@ describe('rebase — review and apply a newer structure version', () => {
     await user.click(within(dialog()).getByRole('button', { name: /apply structure v2/i }));
 
     expect(onGenerate).toHaveBeenCalledTimes(1);
-    expect(onGenerate.mock.calls[0][2].id).toBe('league');
+    expect(onGenerate.mock.calls[0][1].id).toBe('league');
     expect(within(dialog()).getByText(/derives from a stage that no longer exists/i)).toBeVisible();
+  });
+
+  it('says why a stage was not regenerated when the fresh read fails', async () => {
+    const onRebaseRun = vi.fn().mockResolvedValue(rebased(2));
+    const onFetchRun = vi.fn().mockRejectedValue(new Error('Network request failed'));
+    const { user, onGenerate } = setup(TWO_STAGES_V1, [v1Run()], {
+      series: [draft('league'), draft('cup')],
+      structures: [TWO_STAGES_V2],
+      onRebaseRun,
+      onFetchRun,
+    });
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+    await user.click(within(dialog()).getByRole('button', { name: /apply structure v2/i }));
+
+    expect(onGenerate).toHaveBeenCalledTimes(1);
+    const status = within(dialog()).getByRole('status');
+    expect(status).toHaveTextContent(/regenerated: league/i);
+    expect(status).toHaveTextContent(/couldn.t regenerate cup/i);
+    expect(status).toHaveTextContent(/cup: network request failed/i);
+  });
+
+  it('stops at a 401 and lists the stages it never tried', async () => {
+    const THREE_V1 = {
+      ...TWO_STAGES_V1,
+      stages: [...TWO_STAGES_V1.stages, { ...TWO_STAGES_V1.stages[1], id: 'plate', name: 'Plate' }],
+    } as CompetitionStructure;
+    const THREE_V2 = {
+      ...TWO_STAGES_V2,
+      stages: [...TWO_STAGES_V2.stages, { ...TWO_STAGES_V2.stages[1], id: 'plate', name: 'Plate' }],
+    } as CompetitionStructure;
+    const r2 = rebased(2);
+    const onRebaseRun = vi.fn().mockResolvedValue({
+      ...r2,
+      structureSnapshot: THREE_V2,
+      stages: [...r2.stages, { ...generatedStage('plate'), staleSchedule: true }],
+    });
+    const onFetchRun = vi.fn().mockRejectedValue(new ApiError(401, 'Your session has expired'));
+    const threeRun = run(THREE_V1, {
+      stages: [generatedStage('league'), generatedStage('cup'), generatedStage('plate')],
+    });
+    const { user, onGenerate } = setup(THREE_V1, [threeRun], {
+      series: [draft('league'), draft('cup'), draft('plate')],
+      structures: [THREE_V2],
+      onRebaseRun,
+      onFetchRun,
+    });
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+    await user.click(within(dialog()).getByRole('button', { name: /apply structure v2/i }));
+
+    // One fetch, then the loop stops — no second attempt against a lost session.
+    expect(onFetchRun).toHaveBeenCalledTimes(1);
+    expect(onGenerate).toHaveBeenCalledTimes(1);
+    const status = within(dialog()).getByRole('status');
+    expect(status).toHaveTextContent(/cup: your session has expired/i);
+    expect(status).toHaveTextContent(/plate: not attempted/i);
+  });
+
+  it('reports a regenerate that came back with a warning apart from the clean ones', async () => {
+    const onRebaseRun = vi.fn().mockResolvedValue(rebased(2));
+    const { user, onGenerate } = setup(TWO_STAGES_V1, [v1Run()], {
+      series: [draft('league'), draft('cup')],
+      structures: [TWO_STAGES_V2],
+      onRebaseRun,
+      onFetchRun: vi.fn().mockResolvedValue(rebased(3)),
+    });
+    onGenerate.mockResolvedValueOnce({}).mockResolvedValueOnce({
+      warnings: [
+        'Paired as a seeded bracket, not cross-group; fix the confirmed positions and regenerate',
+      ],
+    });
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+    await user.click(within(dialog()).getByRole('button', { name: /apply structure v2/i }));
+
+    const status = within(dialog()).getByRole('status');
+    expect(status).toHaveTextContent(/regenerated: league\./i);
+    expect(status).toHaveTextContent(
+      /regenerated cup, with a warning: paired as a seeded bracket, not cross-group/i,
+    );
   });
 
   it('never offers to auto-regenerate a released stage — it keeps the confirm path', async () => {
@@ -2007,6 +2096,81 @@ describe('Quick start', () => {
     ).toBeVisible();
     expect(onSeasonSetupChanged).not.toHaveBeenCalled();
     expect(shapes()).toBeVisible();
+  });
+
+  it('refetches before showing the recovery copy when the season could not be started', async () => {
+    mockedQuickStart.mockRejectedValue(
+      new ApiError(
+        500,
+        'The competition was set up (cmp-1) but its season could not be started — start it from "Start a season"',
+        'run_not_started',
+        { competitionId: 'cmp-1' },
+      ),
+    );
+    const { user, onSeasonSetupChanged } = setup();
+
+    await user.click(startBtn());
+
+    expect(await screen.findByText(/start it from "Start a season"/)).toBeVisible();
+    // The competition now exists, so the config must be refetched for "Start a season"
+    // to find it.
+    expect(onSeasonSetupChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a failure that never reached the server, and says to try again', async () => {
+    const offline = new TypeError('Failed to fetch');
+    mockedQuickStart.mockRejectedValue(offline);
+    const { user, onSeasonSetupChanged } = setup();
+
+    await user.click(startBtn());
+
+    expect(await screen.findByText('Could not start the season — try again')).toBeVisible();
+    expect(vi.mocked(Sentry.captureException)).toHaveBeenCalledWith(offline, {
+      tags: { where: 'quick-start' },
+    });
+    expect(onSeasonSetupChanged).not.toHaveBeenCalled();
+  });
+
+  describe('a league whose competitions are on calendars that have ended', () => {
+    const endingOn = (end: string): SeasonCalendar => ({
+      id: 'cal-old',
+      label: '2025/26',
+      blocks: [{ id: 'b1', label: 'Block 1', start: addDays(end, -60), end }],
+    });
+    const boundLeague = {
+      ...flatLeague,
+      competitions: [
+        { id: 'cmp-old', label: '50 Over', structureId: 'st-old', calendarId: 'cal-old' },
+      ],
+    } as unknown as League;
+    const bound = (cal: SeasonCalendar) => ({
+      allLeagues: [boundLeague],
+      config: {
+        structures: [{ id: 'st-old', name: 'Old league', version: 1, stages: [] }],
+        calendars: [cal, calendar],
+      } as unknown as TenantConfig,
+    });
+
+    it('offers quick start when every calendar ended before today', () => {
+      const yesterday = addDays(todayIso(), -1);
+      setup(bound(endingOn(yesterday)));
+
+      expect(
+        screen.getByText(
+          `This league's competitions are on calendars that have ended (2025/26, ended ${formatIsoDate(yesterday)}). Quick-start the new season below, or ask your operator to bind a new calendar.`,
+        ),
+      ).toBeVisible();
+      expect(shapes()).toBeVisible();
+      expect(screen.queryByRole('button', { name: /^continue$/i })).toBeNull();
+    });
+
+    it('continues to the season form while a calendar is still running', () => {
+      setup(bound(endingOn(addDays(todayIso(), 1))));
+
+      expect(screen.queryByRole('radiogroup', { name: /how the season is played/i })).toBeNull();
+      expect(screen.getByText(/has a competition set up by your operator/)).toBeVisible();
+      expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
+    });
   });
 
   it('refuses to start with fewer than two registered sides', () => {

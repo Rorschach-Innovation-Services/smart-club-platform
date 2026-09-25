@@ -720,9 +720,9 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
    * it records each group's seriesId on the run, so a re-generate replaces rather than
    * duplicates.
    */
-  async function generateStageSeries(payloads, run, stage) {
+  async function generateStageSeries(run, stage) {
     return withToast(
-      () => generateStageSeriesInner(payloads, run, stage),
+      () => generateStageSeriesInner(run, stage),
       'Could not generate the fixtures',
       // A clash-gate or released-overwrite refusal names what to do; any other 409 is a
       // version race and keeps the generic refresh line. Both refetch (below).
@@ -735,9 +735,9 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       throw e;
     });
   }
-  // `payloads` is no longer read: the server materialises the stage itself with the shared
-  // engine (ADR 0014). Kept so the Seasons panel and the launcher call this unchanged.
-  async function generateStageSeriesInner(_payloads, run, stage) {
+  // The server materialises the stage itself with the shared engine (ADR 0014); the
+  // browser's materialisation only drives the preview.
+  async function generateStageSeriesInner(run, stage) {
     // The Seasons panel asks "Regenerate a released schedule?" before calling here whenever
     // this cache shows any of the stage's series released — so a released series in the
     // cache means the admin has already confirmed. When the cache is stale (released
@@ -752,13 +752,18 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
         s.released &&
         ((s.seasonRunId === run.id && s.stageSpecId === stage.id) || linked.has(s.id)),
     );
-    const { series } = await api.generateStage(run.id, stage.id, {
+    const { series, warnings = [] } = await api.generateStage(run.id, stage.id, {
       version: run.version,
       ...(confirmed ? { confirmReleasedOverwrite: true as const } : {}),
     });
     invalidate(qk.series());
     invalidate(qk.seasonRuns());
-    toastShow(`${stage.name} · ${series.length} series generated`);
+    // A generate that succeeded with a caveat (a pool pairing drawn as a seeded bracket)
+    // says so in the same toast, as a warning, rather than reading as a clean success.
+    if (warnings.length)
+      toastShow(`${stage.name} · ${series.length} series generated. ${warnings.join(' ')}`, 'warn');
+    else toastShow(`${stage.name} · ${series.length} series generated`);
+    return { warnings };
   }
 
   /**

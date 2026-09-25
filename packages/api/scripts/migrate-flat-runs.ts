@@ -31,11 +31,16 @@
  *     structure (same content; new id/version/templateId/source), `flatFormat` dropped.
  *
  * Writes, in crash-safe order, per tenant: config (whole-item put, after the SAME
- * calendar/structure/competition validators the operator route runs), then each run's
- * series (version-checked), then the run itself (version-checked, so an in-flight admin
- * PATCH 409s and refetches rather than writing the sentinel back). The run is the "done"
- * marker: a crash part-way leaves it on `__flat__`, and a re-run converges — minted ids
- * are deterministic and replaced in place. Idempotent: a second run finds nothing.
+ * calendar/structure/competition validators the operator route runs, planned against a
+ * config re-read immediately before the put — TenantConfig has no version guard), then each
+ * run's series (version-checked), then the run itself (version-checked, so an in-flight
+ * admin PATCH 409s and refetches rather than writing the sentinel back). The run is the
+ * "done" marker: a crash part-way leaves it on `__flat__`, and a re-run converges — minted
+ * ids are deterministic and replaced in place. Idempotent: a second run finds nothing.
+ *
+ * A run (or tenant) that fails for any reason is recorded as skipped with the reason and
+ * the migration carries on; the summary always prints, and `--confirm` exits 1 when
+ * anything was skipped.
  *
  *   sst shell --stage <stage> -- npx tsx packages/api/scripts/migrate-flat-runs.ts            (dry-run)
  *   sst shell --stage <stage> -- npx tsx packages/api/scripts/migrate-flat-runs.ts --dry-run   (explicit dry-run)
@@ -270,13 +275,28 @@ function printTable(tenant: string, plans: FlatRunPlan[], log: (line: string) =>
   for (const r of rows) log('  ' + r.map((cell, col) => cell.padEnd(widths[col])).join('  '));
 }
 
+/** The storage calls the migration makes — the real repo unless a test substitutes one. */
+export type MigrationStore = Pick<
+  typeof repo,
+  | 'listTenants'
+  | 'listSeasonRuns'
+  | 'listSeries'
+  | 'getTenantConfig'
+  | 'putTenantConfig'
+  | 'updateSeries'
+  | 'updateSeasonRun'
+>;
+
+const reasonOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
 export async function migrateFlatRuns(
-  opts: { confirm?: boolean; log?: (line: string) => void } = {},
+  opts: { confirm?: boolean; log?: (line: string) => void; store?: MigrationStore } = {},
 ): Promise<MigrateFlatRunsResult> {
   const confirm = opts.confirm ?? false;
   const log = opts.log ?? console.log;
+  const store = opts.store ?? repo;
 
-  const tenants = await repo.listTenants();
+  const tenants = await store.listTenants();
   const result: MigrateFlatRunsResult = {
     tenantsScanned: tenants.length,
     runsFound: 0,
@@ -285,52 +305,80 @@ export async function migrateFlatRuns(
     skipped: [],
   };
 
-  for (const config of tenants) {
-    const flatRuns = (await repo.listSeasonRuns(config.tenant)).filter(
-      (r) => r.competitionId === FLAT_COMPETITION_ID,
-    );
-    if (flatRuns.length === 0) continue;
-    result.runsFound += flatRuns.length;
+  for (const listed of tenants) {
+    const tenant = listed.tenant;
+    try {
+      const flatRuns = (await store.listSeasonRuns(tenant)).filter(
+        (r) => r.competitionId === FLAT_COMPETITION_ID,
+      );
+      if (flatRuns.length === 0) continue;
+      result.runsFound += flatRuns.length;
 
-    const allSeries = await repo.listSeries(config.tenant);
-    const planned = planTenant(config, flatRuns, allSeries, result.skipped);
-    if (!planned) continue;
-
-    const plans = planned.runs.map((r) => r.plan);
-    printTable(`${confirm ? '' : '[dry-run] '}${config.tenant}`, plans, log);
-
-    if (!confirm) {
-      result.plans.push(...plans);
-      result.runsMigrated += plans.length;
-      continue;
-    }
-
-    await repo.putTenantConfig(planned.config);
-    for (const { plan, run, next, series } of planned.runs) {
-      try {
-        for (const s of series)
-          await repo.updateSeries(config.tenant, s.id, {
-            version: s.version,
-            schedule: { ...s.schedule!, calendarId: plan.calendarId },
-          });
-        await repo.updateSeasonRun(config.tenant, run.id, {
-          ...next,
-          version: run.version,
-          // An explicit undefined drops the stored attribute: the repo merges the patch
-          // over the stored item and marshals with removeUndefinedValues.
-          flatFormat: undefined,
-        });
-      } catch (err) {
-        if (!(err instanceof VersionConflictError)) throw err;
+      const allSeries = await store.listSeries(tenant);
+      // Under --confirm, plan against the config as it is right before the put: the
+      // tenant list was read at the start, and a settings save since then must not be
+      // overwritten by a whole-item put built from the older copy.
+      const config = confirm ? await store.getTenantConfig(tenant) : listed;
+      if (!config) {
+        for (const r of flatRuns)
+          result.skipped.push({ tenant, runId: r.id, reason: 'tenant skipped' });
         result.skipped.push({
-          tenant: config.tenant,
-          runId: run.id,
-          reason: 'changed while migrating (version conflict) — re-run to finish it',
+          tenant,
+          reason: 'tenant disappeared during the migration — nothing written',
         });
         continue;
       }
-      result.plans.push(plan);
-      result.runsMigrated++;
+      const planned = planTenant(config, flatRuns, allSeries, result.skipped);
+      if (!planned) continue;
+
+      const plans = planned.runs.map((r) => r.plan);
+      printTable(`${confirm ? '' : '[dry-run] '}${tenant}`, plans, log);
+
+      if (!confirm) {
+        result.plans.push(...plans);
+        result.runsMigrated += plans.length;
+        continue;
+      }
+
+      try {
+        await store.putTenantConfig(planned.config);
+      } catch (err) {
+        for (const r of planned.runs)
+          result.skipped.push({ tenant, runId: r.run.id, reason: 'tenant skipped' });
+        result.skipped.push({ tenant, reason: `config write failed: ${reasonOf(err)}` });
+        continue;
+      }
+      for (const { plan, run, next, series } of planned.runs) {
+        try {
+          for (const s of series)
+            await store.updateSeries(tenant, s.id, {
+              version: s.version,
+              schedule: { ...s.schedule!, calendarId: plan.calendarId },
+            });
+          await store.updateSeasonRun(tenant, run.id, {
+            ...next,
+            version: run.version,
+            // An explicit undefined drops the stored attribute: the repo merges the patch
+            // over the stored item and marshals with removeUndefinedValues.
+            flatFormat: undefined,
+          });
+        } catch (err) {
+          result.skipped.push({
+            tenant,
+            runId: run.id,
+            reason:
+              err instanceof VersionConflictError
+                ? 'changed while migrating (version conflict) — re-run to finish it'
+                : `write failed: ${reasonOf(err)} — re-run to finish it`,
+          });
+          continue;
+        }
+        result.plans.push(plan);
+        result.runsMigrated++;
+      }
+    } catch (err) {
+      // A read failed for this tenant: record it and carry on with the others.
+      result.skipped.push({ tenant, reason: `could not be read: ${reasonOf(err)}` });
     }
   }
 
@@ -345,19 +393,37 @@ export async function migrateFlatRuns(
   return result;
 }
 
-async function main(): Promise<void> {
-  const flag = process.argv[2];
+/**
+ * The CLI, minus `process.exit`: returns the exit status. 1 for an unknown flag, and 1
+ * under --confirm when any run or tenant was skipped (so a wrapper script notices an
+ * unfinished migration); 0 otherwise. A dry-run's skips are the report, not a failure.
+ */
+export async function main(
+  args: string[],
+  opts: {
+    log?: (line: string) => void;
+    error?: (line: string) => void;
+    store?: MigrationStore;
+  } = {},
+): Promise<number> {
+  const flag = args[0];
   if (flag && flag !== '--dry-run' && flag !== '--confirm') {
-    console.error(`unknown flag "${flag}" — usage: migrate-flat-runs [--dry-run|--confirm]`);
-    process.exit(1);
+    (opts.error ?? console.error)(
+      `unknown flag "${flag}" — usage: migrate-flat-runs [--dry-run|--confirm]`,
+    );
+    return 1;
   }
-  await migrateFlatRuns({ confirm: flag === '--confirm' });
+  const confirm = flag === '--confirm';
+  const result = await migrateFlatRuns({ confirm, log: opts.log, store: opts.store });
+  return confirm && result.skipped.length > 0 ? 1 : 0;
 }
 
-// Only run as a CLI — a test can import migrateFlatRuns directly.
+// Only run as a CLI — a test can import migrateFlatRuns / main directly.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
+  main(process.argv.slice(2))
+    .then((status) => process.exit(status))
+    .catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
 }

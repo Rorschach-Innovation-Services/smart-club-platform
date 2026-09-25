@@ -33,12 +33,18 @@ export interface BackfillResult {
   aliases: number;
 }
 
+/** The storage calls the backfill makes — the real repo unless a test substitutes one. */
+export type BackfillStore = Pick<typeof repo, 'getTenantConfig' | 'putTenantConfig'>;
+
 export async function backfillVenueAliases(
-  opts: { confirm: boolean; log?: (line: string) => void } = { confirm: false },
+  opts: { confirm: boolean; log?: (line: string) => void; store?: BackfillStore } = {
+    confirm: false,
+  },
 ): Promise<BackfillResult> {
   const log = opts.log ?? ((line: string) => console.log(line));
+  const store = opts.store ?? repo;
   const tenant = BACKFILL_TENANT;
-  const config = await repo.getTenantConfig(tenant);
+  const config = await store.getTenantConfig(tenant);
   if (!config) {
     log(`no tenant config for "${tenant}" — nothing to do`);
     return { tenant, outcome: 'no-tenant', aliases: 0 };
@@ -59,12 +65,17 @@ export async function backfillVenueAliases(
   }
   // TenantConfig has no version guard (see repo.ts): re-read just before the write so the
   // window for clobbering a concurrent settings save is as small as the other backfills'.
-  const fresh = (await repo.getTenantConfig(tenant)) ?? config;
+  const fresh = await store.getTenantConfig(tenant);
+  if (!fresh) {
+    // Writing `config` back would resurrect a deleted tenant from a stale copy.
+    log(`${tenant}: tenant disappeared during backfill — nothing written`);
+    return { tenant, outcome: 'no-tenant', aliases: 0 };
+  }
   if (fresh.competitionDefaults?.venueAliases !== undefined) {
     log(`${tenant} gained venue aliases while this ran — nothing written`);
     return { tenant, outcome: 'already-set', aliases: 0 };
   }
-  await repo.putTenantConfig({
+  await store.putTenantConfig({
     ...fresh,
     competitionDefaults: { ...(fresh.competitionDefaults ?? {}), venueAliases },
   });

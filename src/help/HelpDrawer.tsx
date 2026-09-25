@@ -29,6 +29,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { HELP_TOPICS, type HelpTopic, type HelpTopicId } from './topics';
+import { useFocusTrap } from '../useFocusTrap';
 
 /** Where the long-form guide is served. A topic's `guideAnchor` is appended as `#…`. */
 export const GUIDE_URL = '/guides/league-structures-tutorial.html';
@@ -119,11 +120,13 @@ export function HelpLink({ topic, children }: { topic: HelpTopicId; children?: R
   );
 }
 
-const FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
 export function HelpDrawer({ topicId, onClose }: { topicId: string; onClose: () => void }) {
   const topic = (HELP_TOPICS as Record<string, HelpTopic | undefined>)[topicId];
+  useEffect(() => {
+    // A link to a topic that was renamed or never written: the drawer still opens (with the
+    // guide fallback), so say which id is missing where a developer will see it.
+    if (!topic && import.meta.env.DEV) console.warn(`HelpDrawer: no help topic "${topicId}"`);
+  }, [topic, topicId]);
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -132,32 +135,13 @@ export function HelpDrawer({ topicId, onClose }: { topicId: string; onClose: () 
     closeRef.current?.focus();
   }, [topicId]);
 
+  useFocusTrap(panelRef, true);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopImmediatePropagation();
-        e.preventDefault();
-        onClose();
-        return;
-      }
-      if (e.key !== 'Tab') return;
-      const panel = panelRef.current;
-      if (!panel) return;
-      const items = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE));
-      if (items.length === 0) {
-        e.preventDefault();
-        return;
-      }
-      const first = items[0];
-      const last = items[items.length - 1];
-      const active = document.activeElement;
-      if (e.shiftKey && (active === first || !panel.contains(active))) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && (active === last || !panel.contains(active))) {
-        e.preventDefault();
-        first.focus();
-      }
+      if (e.key !== 'Escape') return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      onClose();
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);

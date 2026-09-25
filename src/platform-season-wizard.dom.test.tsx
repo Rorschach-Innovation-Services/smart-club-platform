@@ -174,6 +174,59 @@ describe('SeasonSetupWizard', () => {
     expect(await screen.findByText(/is updated/i)).toBeInTheDocument();
   });
 
+  it('never reuses a quick-start structure: picking its template mints a fresh one', async () => {
+    const quickStarted: CompetitionStructure = {
+      id: 'struct-qs',
+      name: 'Premier Men quick start',
+      version: 1,
+      templateId: 'flat-round-robin',
+      source: 'quick-start',
+      stages: [twoBlockStructure.stages[0]],
+    };
+    const { user, save } = setup({ structures: [quickStarted] });
+
+    await fillSeasonLabel(user);
+    await user.click(continueBtn());
+    await user.selectOptions(screen.getByRole('combobox', { name: /add a league/i }), 'premier');
+    // No operator structure exists, so "Use an existing structure" is not offered.
+    expect(screen.getByRole('radio', { name: /use an existing structure/i })).toBeDisabled();
+    await user.click(screen.getByRole('radio', { name: /flat round robin/i }));
+    await user.click(continueBtn());
+    await user.click(screen.getByRole('button', { name: /create season/i }));
+
+    const patch = save.mock.calls[0][0];
+    expect(patch.structures).toHaveLength(2);
+    const fresh = patch.structures.find((s: CompetitionStructure) => s.id !== 'struct-qs');
+    expect(fresh.templateId).toBe('flat-round-robin');
+    expect(patch.leagues[0].competitions[0].structureId).toBe(fresh.id);
+  });
+
+  it('lists only operator structures under "Use an existing structure"', async () => {
+    const quickStarted: CompetitionStructure = {
+      ...twoBlockStructure,
+      id: 'struct-qs',
+      name: 'Quick-started league',
+      source: 'quick-start',
+    };
+    const migrated: CompetitionStructure = {
+      ...twoBlockStructure,
+      id: 'struct-mig',
+      name: 'Migrated flat season',
+      source: 'migration',
+    };
+    const { user } = setup({ structures: [twoBlockStructure, quickStarted, migrated] });
+
+    await fillSeasonLabel(user);
+    await user.click(continueBtn());
+    await user.selectOptions(screen.getByRole('combobox', { name: /add a league/i }), 'premier');
+    await user.click(screen.getByRole('radio', { name: /use an existing structure/i }));
+    const select = screen.getByRole('combobox', { name: /structure for premier men/i });
+    const names = Array.from(select.querySelectorAll('option')).map((o) => o.textContent);
+    expect(names).toContain('Split league');
+    expect(names).not.toContain('Quick-started league');
+    expect(names).not.toContain('Migrated flat season');
+  });
+
   it('two leagues picking the same template share ONE structure', async () => {
     const { user, save } = setup({
       leagues: [league(), league({ key: 'promo', label: 'Promotion Men' })],

@@ -2505,6 +2505,15 @@ export function StructuresCard({
 /* ─── Competitions: binding a league to its format streams ─── */
 
 /**
+ * Structures not authored by an operator, listed apart in the competition picker so an
+ * operator can still bind one deliberately but never mistakes it for a library structure.
+ */
+const NON_OPERATOR_GROUPS = [
+  { source: 'quick-start', label: 'Created by admin quick start' },
+  { source: 'migration', label: 'Migrated flat seasons' },
+] as const;
+
+/**
  * A league's format streams. This is the join that lets Premier Men run T20 Pink Ball and
  * 50 Over Red Ball side by side over the same twelve registered clubs — the thing the
  * pre-ADR-0008 model could not express at all, because a league could only be one thing.
@@ -2627,11 +2636,26 @@ export function CompetitionsEditor({
               width={230}
             >
               <option value="">Structure…</option>
-              {structures.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
+              {structures
+                .filter((s) => s.source === undefined || s.source === 'operator')
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              {NON_OPERATOR_GROUPS.map(({ source, label }) => {
+                const inGroup = structures.filter((s) => s.source === source);
+                if (inGroup.length === 0) return null;
+                return (
+                  <optgroup key={source} label={label}>
+                    {inGroup.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                );
+              })}
             </Select>
             <Select
               value={c.calendarId}

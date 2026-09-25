@@ -35,7 +35,8 @@ import {
 } from './atoms';
 import { ApiError, quickStartSeason, type QuickStartSeasonRequest } from './api';
 import { HelpLink } from './help/HelpDrawer';
-import { findBlock, formatIsoDate, todayIso } from '../packages/engine/src/calendar';
+import { Sentry } from './sentry';
+import { daysBetween, findBlock, formatIsoDate, todayIso } from '../packages/engine/src/calendar';
 import { describeEntrants, groupSizes, labelFor } from '../packages/engine/src/entrants';
 import { formatStampDay } from './dates';
 import {
@@ -63,7 +64,6 @@ import {
 import { affiliationSubmitted, currentSeasonLabel } from './data';
 import type {
   Club,
-  Competition,
   CompetitionStructure,
   League,
   SeasonCalendar,
@@ -209,6 +209,29 @@ const scheduleShape = (s: StageSpec) => ({
 /** A league is season-capable only once the operator has bound a competition to it. */
 export function seasonCapableLeagues(allLeagues: League[]): League[] {
   return (allLeagues || []).filter((l) => (l.competitions?.length ?? 0) > 0);
+}
+
+/**
+ * The calendars a bound league's competitions play on, when EVERY one of them has ended
+ * (its last block finished before `today`) — or `null` when any is still current, has no
+ * blocks, or can't be found. A league whose seasons are all over has nothing to start a
+ * season FROM, so the launcher offers quick start for its next one.
+ */
+export function endedCalendarsOf(
+  league: League,
+  calendars: SeasonCalendar[],
+  today: string = todayIso(),
+): Array<{ label: string; end: string }> | null {
+  const competitions = league.competitions ?? [];
+  if (!competitions.length) return null;
+  const ended = new Map<string, { label: string; end: string }>();
+  for (const comp of competitions) {
+    const cal = calendars.find((c) => c.id === comp.calendarId);
+    const end = cal?.blocks[cal.blocks.length - 1]?.end;
+    if (!cal || !end || daysBetween(end, today) <= 0) return null;
+    ended.set(cal.id, { label: cal.label, end });
+  }
+  return [...ended.values()];
 }
 
 /* ─── Start a season ─── */
@@ -581,7 +604,22 @@ function QuickStartForm({
     try {
       await quickStartSeason(body);
     } catch (e) {
-      setErr(e instanceof ApiError ? e.message : 'Could not start the season — try again');
+      if (e instanceof ApiError) {
+        // The competition was written but its season was not: refetch first, so the
+        // recovery copy ("start it from Start a season") finds the competition there.
+        if (e.status === 500 && e.code === 'run_not_started') {
+          try {
+            await onStarted?.();
+          } catch {
+            /* the next refetch catches up */
+          }
+        }
+        setErr(e.message);
+      } else {
+        // Not the server's answer (offline, a TypeError): nothing else would report it.
+        Sentry.captureException(e, { tags: { where: 'quick-start' } });
+        setErr('Could not start the season — try again');
+      }
       setBusy(false);
       return;
     }
@@ -873,6 +911,9 @@ export function GenerateFixturesLauncher({
   // this console's own config refetch drops it — which simply reads as "pick again".
   const league = findByKey(allLeagues, leagueKey) as League | undefined;
   const bound = !!league && isCapable(league.key);
+  // A bound league whose every calendar has ended: its next season is a quick start.
+  const ended = league && bound ? endedCalendarsOf(league, config.calendars ?? []) : null;
+  const quickStart = !!league && (!bound || !!ended);
   const structureName = (id: string) =>
     (config.structures ?? []).find((s) => s.id === id)?.name ?? 'structure missing';
   // The sides a season would draw on, and how many the affiliation gate holds back — the
@@ -882,14 +923,14 @@ export function GenerateFixturesLauncher({
     : undefined;
 
   function submit() {
-    if (bound) setStep('season');
+    if (bound && !ended) setStep('season');
   }
 
   return (
     <Modal
       eyebrow="Fixtures"
       title="Start a season"
-      maxWidth={league && !bound ? 900 : undefined}
+      maxWidth={quickStart ? 900 : undefined}
       onClose={onClose}
     >
       <div style={{ display: 'grid', gap: 16 }}>
@@ -935,7 +976,13 @@ export function GenerateFixturesLauncher({
 
         {league && (
           <div className="sr-callout">
-            {bound ? (
+            {ended ? (
+              <p>
+                This league&apos;s competitions are on calendars that have ended (
+                {ended.map((c) => `${c.label}, ended ${formatIsoDate(c.end)}`).join('; ')}).
+                Quick-start the new season below, or ask your operator to bind a new calendar.
+              </p>
+            ) : bound ? (
               <p>
                 This league has a competition set up by your operator:{' '}
                 {(league.competitions ?? [])
@@ -959,7 +1006,7 @@ export function GenerateFixturesLauncher({
           </div>
         )}
 
-        {league && !bound ? (
+        {league && quickStart ? (
           <QuickStartForm
             key={league.key}
             clubs={clubs}
@@ -1986,9 +2033,12 @@ interface RebaseOutcome {
   /** From the server — e.g. a `derivedFrom.fromStage` that no longer resolves. */
   warnings: string[];
   regenerated: string[];
+  /** Regenerated, but the generate came back with a caveat the admin must act on. */
+  warned: Array<{ name: string; warnings: string[] }>;
   /** Opted in, but not generatable after the rebase (awaiting entrants / doesn't fit). */
   skipped: string[];
-  failed: string[];
+  /** Not regenerated because something went wrong; `reason` when we know it. */
+  failed: Array<{ name: string; reason?: string }>;
 }
 
 /** What adopting the live structure would do to one stage of this season. */
@@ -2232,6 +2282,11 @@ function StructureReviewModal({
           {outcome.regenerated.length > 0 && (
             <div>Regenerated: {outcome.regenerated.join(', ')}.</div>
           )}
+          {outcome.warned.map((w) => (
+            <div key={w.name} style={{ color: 'var(--coral)' }}>
+              Regenerated {w.name}, with a warning: {w.warnings.join(' ')}
+            </div>
+          ))}
           {outcome.skipped.length > 0 && (
             <div>
               Not regenerated — {outcome.skipped.join(', ')} can&apos;t generate as it stands; its
@@ -2240,7 +2295,15 @@ function StructureReviewModal({
           )}
           {outcome.failed.length > 0 && (
             <div style={{ color: 'var(--coral)' }}>
-              Couldn&apos;t regenerate {outcome.failed.join(', ')} — try again from its card.
+              Couldn&apos;t regenerate {outcome.failed.map((f) => f.name).join(', ')} — try again
+              from its card.
+              {outcome.failed
+                .filter((f) => f.reason)
+                .map((f) => (
+                  <div key={f.name}>
+                    {f.name}: {f.reason}
+                  </div>
+                ))}
             </div>
           )}
           {outcome.warnings.map((w, i) => (
@@ -2276,18 +2339,6 @@ function StructureReviewModal({
 }
 
 /* ─── Season run view ─── */
-
-export interface GenerateGroupPayload {
-  run: SeasonRun;
-  stage: StageSpec;
-  groupId: string;
-  groupLabel: string;
-  entrants: string[];
-  fixtures: unknown[];
-  startDate: string;
-  league: League | undefined;
-  competition: Competition | undefined;
-}
 
 export function SeasonRunsPanel({
   clubs,
@@ -2331,7 +2382,11 @@ export function SeasonRunsPanel({
    *  Start-season modal, so both the top action and the empty-state CTA route through it. */
   onOpenLauncher: () => void;
   onPatchRun: (id: string, patch: Partial<SeasonRun>) => Promise<void>;
-  onGenerate: (payloads: GenerateGroupPayload[], run: SeasonRun, stage: StageSpec) => Promise<void>;
+  /**
+   * Generate one stage on the server (ADR 0014). Resolves with any caveats the server
+   * attached to a successful generate (e.g. a pool pairing drawn as a seeded bracket).
+   */
+  onGenerate: (run: SeasonRun, stage: StageSpec) => Promise<{ warnings?: string[] } | undefined>;
   onDeleteRun: (id: string) => void;
 }) {
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -2397,32 +2452,6 @@ export function SeasonRunsPanel({
     };
   }, [active, allLeagues, clubs]);
 
-  /** One generate payload per materialised group of `stage`, against `run`. */
-  function payloadsFor(
-    run: SeasonRun,
-    stage: StageSpec,
-    m: Extract<StageMaterialisation, { status: 'ready' }>,
-  ): GenerateGroupPayload[] {
-    return m.groups.map((g) => ({
-      run,
-      stage,
-      groupId: g.id,
-      groupLabel: g.label,
-      entrants: g.entrants,
-      fixtures: g.fixtures,
-      // A `manual` stage plans no rounds by design, so it has no first date — fall back
-      // to the block it plays in rather than sending '', which becomes an empty `gsi1sk`
-      // that real DynamoDB rejects (dynalite accepts it, so no test would catch it)
-      // part-way through a loop that has already written the earlier groups.
-      startDate:
-        g.plan.dates[0] ??
-        findBlock(run.calendarSnapshot, stage.schedule.blockIndex)?.start ??
-        todayIso(),
-      league: runContext?.league,
-      competition: runContext?.competition,
-    }));
-  }
-
   /**
    * Adopt the live structure, then regenerate the draft stages the admin opted in to.
    *
@@ -2442,16 +2471,43 @@ export function SeasonRunsPanel({
       structureVersion: live.version,
       version: run.version,
     });
-    const outcome: RebaseOutcome = { warnings, regenerated: [], skipped: [], failed: [] };
+    const outcome: RebaseOutcome = {
+      warnings,
+      regenerated: [],
+      warned: [],
+      skipped: [],
+      failed: [],
+    };
     const participants = runContext?.participants ?? [];
+    const liveName = (id: string) => live.stages.find((s) => s.id === id)?.name ?? id;
     let fresh: SeasonRun | undefined = rebased as SeasonRun;
     for (const [k, id] of regenIds.entries()) {
-      if (k > 0) fresh = onFetchRun ? await onFetchRun(run.id).catch(() => undefined) : undefined;
+      if (k > 0) {
+        try {
+          fresh = onFetchRun ? await onFetchRun(run.id) : undefined;
+        } catch (e) {
+          outcome.failed.push({
+            name: liveName(id),
+            reason: e instanceof Error ? e.message : String(e),
+          });
+          // Signed out: every later fetch fails the same way. Stop, and say which stages
+          // were never tried rather than leaving them out of the outcome.
+          if (e instanceof ApiError && e.status === 401) {
+            for (const rest of regenIds.slice(k + 1))
+              outcome.failed.push({
+                name: liveName(rest),
+                reason: 'not attempted — sign in again',
+              });
+            break;
+          }
+          continue;
+        }
+      }
       const index = fresh?.structureSnapshot.stages.findIndex((s) => s.id === id) ?? -1;
       const spec = fresh?.structureSnapshot.stages[index];
-      const name = spec?.name ?? live.stages.find((s) => s.id === id)?.name ?? id;
+      const name = spec?.name ?? liveName(id);
       if (!fresh || !spec) {
-        outcome.failed.push(name);
+        outcome.failed.push({ name });
         continue;
       }
       const m = materialiseRun(fresh, participants).materialisations[index];
@@ -2462,10 +2518,12 @@ export function SeasonRunsPanel({
         continue;
       }
       try {
-        await onGenerate(payloadsFor(fresh, spec, m), fresh, spec);
-        outcome.regenerated.push(name);
+        const generated = await onGenerate(fresh, spec);
+        const caveats = generated?.warnings ?? [];
+        if (caveats.length) outcome.warned.push({ name, warnings: caveats });
+        else outcome.regenerated.push(name);
       } catch {
-        outcome.failed.push(name);
+        outcome.failed.push({ name });
       }
     }
     return outcome;
@@ -2751,7 +2809,7 @@ export function SeasonRunsPanel({
                     try {
                       // withToast in the caller has already surfaced the failure; swallow
                       // the rejection here so it doesn't reach the console as unhandled.
-                      await onGenerate(payloadsFor(active, spec, m), active, spec).catch(() => {});
+                      await onGenerate(active, spec).catch(() => {});
                     } finally {
                       setBusyStage(null);
                     }

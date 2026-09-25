@@ -92,7 +92,7 @@ export const STAGE_KINDS: Record<StageKindId, StageKindHelp> = {
     does: 'Each group plays its own semi-final: A1 v A2 and B1 v B2. The two winners meet in the final.',
     youWillBeAsked: 'the finishing order of each group in the previous stage.',
     produces:
-      'One semi-final per group, then a final. Needs 2, 4 or 8 groups each sending the same number of sides (2 or 4).',
+      'One semi-final per group, then a final. Needs a power-of-two number of groups (2, 4, 8), each sending the same power-of-two number of sides (2, 4).',
     eg: 'a 10-side league in two groups of 5, the top two of each.',
     decideBy: 'Pick this when each group should produce its own finalist.',
   },

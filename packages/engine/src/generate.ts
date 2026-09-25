@@ -55,6 +55,11 @@ export type StageGeneration =
       /** One series per group, in group order, built by `buildStageSeries`. */
       series: Series[];
       groups: GeneratedGroup[];
+      /**
+       * Things the admin should know about a generate that still succeeded — today only a
+       * pool pairing that could not be drawn and fell back to a seeded bracket.
+       */
+      warnings?: string[];
     };
 
 /**
@@ -76,7 +81,8 @@ export function generateStage({
   // The snapshot spec, not the effective one: `buildStageSeries` reads only id, name and
   // schedule, which a pairing override never changes — and it is what the console passes.
   const stage = run.structureSnapshot.stages[index];
-  const m = materialiseRun(run, [...participants]).materialisations[index];
+  const materialised = materialiseRun(run, [...participants]);
+  const m = materialised.materialisations[index];
   if (m.status !== 'ready') return { status: 'awaiting-entrants', reason: m.reason };
   if (!m.fits) return { status: 'does-not-fit', summary: m.summary };
   // The stage names a POSITION into the run's bound calendar, not a block id.
@@ -108,10 +114,18 @@ export function generateStage({
       defaultOvers,
     }),
   );
+  // Named for the pairing THIS season plays (the run's override laid over the spec).
+  const played = materialised.stages[index].format;
+  const warnings = m.crossPoolFallback
+    ? [
+        `Paired as a seeded bracket, not ${played.kind === 'knockout' && played.pairing === 'within-pool' ? 'within-group' : 'cross-group'}; fix the confirmed positions and regenerate`,
+      ]
+    : undefined;
   return {
     status: 'ready',
     stage,
     series,
+    ...(warnings ? { warnings } : {}),
     groups: m.groups.map((g, i) => ({
       groupId: g.id,
       groupLabel: g.label,

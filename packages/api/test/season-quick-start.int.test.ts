@@ -226,6 +226,12 @@ describe('POST /season-runs/quick-start — guards', () => {
         400,
         JSON.stringify(placement),
       );
+    // The message describes the 0-based check it made, not 1-based block labels.
+    const res = await quickStart({ ...pools, placement: [0, 2] });
+    assert.match(
+      ((await res.json()) as { error: string }).error,
+      /each stage's block must be between 0 and 1 \(0 = first block\)$/,
+    );
   });
 
   test('a malformed matchFormat is a 400', async () => {

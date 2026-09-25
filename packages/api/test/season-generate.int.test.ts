@@ -88,11 +88,13 @@ let repo: typeof import('../src/repo.js');
 interface GenerateResponse {
   run: SeasonRun;
   series: Series[];
+  warnings?: string[];
 }
 interface ErrorBody {
   error: string;
   code?: string;
   seriesIds?: string[];
+  written?: string[];
   clashes?: Array<{ fixtureId: string; ground: string; with: { seriesId: string } }>;
 }
 
@@ -419,6 +421,115 @@ describe('POST /season-runs/:id/stages/:specId/generate — writes', () => {
     assert.equal(s1.releasedAt, '2026-09-01T00:00:00.000Z', 'releasedAt is not re-stamped');
     assert.deepEqual(s1.fixtures, first.series[0].fixtures);
     assert.equal(out.run.version, 5);
+  });
+});
+
+describe('POST /season-runs/:id/stages/:specId/generate — clash dry pass', () => {
+  const RUN = 'run-dry';
+  const g1 = `s-${RUN}-pools-g1`;
+  const g2 = `s-${RUN}-pools-g2`;
+
+  test('a clash on the SECOND released group 409s before the first is written', async () => {
+    // The previous suite's series play the same sides on the same dates; clear them so the
+    // only clash is the one this test plants.
+    for (const s of await repo.listSeries(TENANT)) await repo.deleteSeries(TENANT, s.id);
+    await seedRun(RUN);
+    const res0 = await generate(RUN, 'pools', { version: 1 });
+    assert.equal(res0.status, 200);
+    const generated = (await res0.json()) as GenerateResponse;
+
+    // Both groups released, then moved off their home grounds — so regenerating changes
+    // where every game is played, and group 1's regenerate alone is clean.
+    const moved: Record<string, unknown[]> = {};
+    for (const id of [g1, g2]) {
+      const stored = (await repo.getSeries(TENANT, id))!;
+      moved[id] = (stored.fixtures as Array<{ id: string }>).map((f) => ({
+        ...f,
+        venueOverride: `Elsewhere ${id} ${f.id}`,
+      }));
+      await repo.putSeries(TENANT, {
+        ...stored,
+        fixtures: moved[id],
+        released: true,
+        releasedAt: '2026-09-01T00:00:00.000Z',
+        approved: true,
+      } as Series);
+    }
+    // Another competition holds the ground group 2's first regenerated fixture needs.
+    const target = generated.series[1].fixtures[0] as { date: string; home: string };
+    const ground = `${target.home.slice(4).toUpperCase()} Gen Oval`;
+    await repo.putSeries(TENANT, {
+      id: 'ext-dry-clash',
+      name: 'Another competition',
+      startDate: target.date,
+      teams: ['x', 'y'],
+      fixtures: [
+        { id: 'x1', round: 1, date: target.date, home: 'x', away: 'y', venueName: ground },
+      ],
+      released: false,
+      releasedAt: null,
+      version: 1,
+    } as unknown as Series);
+    const versionsBefore = await Promise.all([g1, g2].map((id) => repo.getSeries(TENANT, id)));
+
+    const res = await generate(RUN, 'pools', { version: 2, confirmReleasedOverwrite: true });
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as ErrorBody;
+    assert.equal(body.code, 'venue_clash');
+    assert.equal(body.clashes![0].with.seriesId, 'ext-dry-clash');
+    assert.equal(body.written, undefined, 'nothing was written, so nothing is reported');
+    // Neither released series changed — group 1 included.
+    for (const [i, id] of [g1, g2].entries()) {
+      const after = (await repo.getSeries(TENANT, id))!;
+      assert.deepEqual(after.fixtures, moved[id]);
+      assert.equal(after.version, versionsBefore[i]!.version);
+    }
+    assert.equal((await repo.getSeasonRun(TENANT, RUN))!.version, 2);
+    await repo.deleteSeries(TENANT, 'ext-dry-clash');
+  });
+});
+
+describe('POST /season-runs/:id/stages/:specId/generate — warnings', () => {
+  test('a pool pairing that cannot be drawn generates a seeded bracket and says so', async () => {
+    const KO: StageSpec = {
+      id: 'ko',
+      name: 'Knockout',
+      format: { kind: 'knockout', pairing: 'cross-pool' },
+      entrants: { kind: 'manual' },
+      schedule: { blockIndex: 1, cadence: { kind: 'weekly' } },
+    };
+    // No feeding group stage, so there are no qualifying groups to pair across.
+    await repo.putSeasonRun(TENANT, {
+      id: 'run-warn',
+      leagueKey: LEAGUE_KEY,
+      competitionId: 'cmp-gen',
+      seasonLabel: 'Season run-warn',
+      structureSnapshot: { id: 'st-gen', name: 'Knockout only', version: 1, stages: [KO] },
+      calendarSnapshot: CALENDAR,
+      stages: [
+        {
+          specId: 'ko',
+          status: 'ready',
+          groups: [{ id: 'g1', label: 'Knockout', entrants: CLUB_IDS.slice(0, 4) }],
+        },
+      ],
+      version: 1,
+    });
+    const res = await generate('run-warn', 'ko', { version: 1 });
+    assert.equal(res.status, 200);
+    const out = (await res.json()) as GenerateResponse;
+    assert.ok(out.series[0].fixtures.length > 0);
+    assert.deepEqual(out.warnings, [
+      'Paired as a seeded bracket, not cross-group; fix the confirmed positions and regenerate',
+    ]);
+  });
+
+  test('a clean generate carries no warnings', async () => {
+    await seedRun('run-nowarn');
+    const out = (await (
+      await generate('run-nowarn', 'pools', { version: 1 })
+    ).json()) as GenerateResponse;
+    assert.equal(out.warnings, undefined);
   });
 });
 

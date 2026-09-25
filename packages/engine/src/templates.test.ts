@@ -172,7 +172,7 @@ describe('instantiateTemplate', () => {
   it('describes each stage as a readable sentence', () => {
     const st = instantiateTemplate(findTemplate('split-league-swap')!, CAL);
     expect(describeStage(st.stages[0], CAL)).toBe(
-      'Entered by an administrator · plays every team twice, home and away · weekly, Block 1',
+      'Chosen by the admin · plays every team twice, home and away · weekly, Block 1',
     );
     expect(describeStage(st.stages[1], CAL)).toContain('swaps with first in the bottom group');
     expect(describeStage(st.stages[1], CAL)).toContain('Block 2');

@@ -15,7 +15,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { StructuresCard } from './platform-structures';
+import { CompetitionsEditor, StructuresCard } from './platform-structures';
 import type { CompetitionStructure, League, SeasonCalendar, TenantConfig } from './types';
 import * as api from './api';
 import { ApiError } from './api';
@@ -1209,5 +1209,43 @@ describe('preview rail — the structure as a story', () => {
     await user.clear(teamsBox());
     await user.type(teamsBox(), '8');
     expect(within(preview()).getByText(/all 8 sides in one group/)).toBeVisible();
+  });
+});
+
+describe('CompetitionsEditor — structures not authored by an operator', () => {
+  it('lists quick-start and migrated structures in their own labelled groups', () => {
+    const config = {
+      structures: [
+        structure(),
+        structure({ id: 'qs', name: 'Quick-started', source: 'quick-start' }),
+        structure({ id: 'mig', name: 'Migrated', source: 'migration' }),
+      ],
+      calendars: [calendar],
+      leagues: [],
+    } as unknown as TenantConfig;
+    const lg = {
+      key: 'premier',
+      label: 'Premier Men',
+      competitions: [{ id: 'c1', label: 'League', structureId: 'flat', calendarId: 'cal' }],
+    } as unknown as League;
+    render(
+      <CompetitionsEditor
+        league={lg}
+        config={config}
+        onSave={vi.fn()}
+        onClose={vi.fn()}
+        toast={vi.fn()}
+      />,
+    );
+    const picker = screen
+      .getAllByRole('combobox')
+      .find((el) => within(el).queryByRole('option', { name: 'Structure…' }))!;
+    const quick = within(picker).getByRole('group', { name: 'Created by admin quick start' });
+    expect(within(quick).getByRole('option', { name: 'Quick-started' })).toBeInTheDocument();
+    const migrated = within(picker).getByRole('group', { name: 'Migrated flat seasons' });
+    expect(within(migrated).getByRole('option', { name: 'Migrated' })).toBeInTheDocument();
+    // The operator's own structure stays at the top level.
+    const top = within(picker).getByRole('option', { name: 'Flat round robin' });
+    expect(top.parentElement).toBe(picker);
   });
 });

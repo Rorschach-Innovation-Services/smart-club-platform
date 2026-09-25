@@ -130,4 +130,25 @@ describe('backfill-venue-aliases', () => {
     const titans = await repo.getTenantConfig('titans');
     assert.equal(titans?.competitionDefaults, undefined);
   });
+
+  test('aborts, writing nothing, when the tenant disappears before the write', async () => {
+    await repo.putTenantConfig(config('dolphins', { competitionDefaults: { matchDays: [6] } }));
+    let reads = 0;
+    const puts: TenantConfig[] = [];
+    const lines: string[] = [];
+    const r = await backfill({
+      confirm: true,
+      log: (l) => lines.push(l),
+      store: {
+        // Found on the first read, gone by the re-read just before the write.
+        getTenantConfig: async (t) => (reads++ === 0 ? repo.getTenantConfig(t) : null),
+        putTenantConfig: async (c) => {
+          puts.push(c);
+        },
+      },
+    });
+    assert.equal(r.outcome, 'no-tenant');
+    assert.equal(puts.length, 0);
+    assert.ok(lines.some((l) => /tenant disappeared during backfill — nothing written/.test(l)));
+  });
 });

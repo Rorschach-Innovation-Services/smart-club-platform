@@ -573,6 +573,14 @@ export function SeasonSetupWizard({
   const calendars = config.calendars ?? [];
   const leagues = config.leagues ?? [];
   const structures = config.structures ?? [];
+  /**
+   * The structures the wizard may REUSE (template prefill and "Use an existing
+   * structure"): operator-authored only. Quick-start and migrated structures are minted
+   * per league and never become a prefill (ADR 0014).
+   */
+  const operatorStructures = structures.filter(
+    (s) => s.source === undefined || s.source === 'operator',
+  );
   const competitionDefaults = resolveCompetitionDefaults(config);
 
   const [step, setStep] = useState(0);
@@ -611,7 +619,7 @@ export function SeasonSetupWizard({
   const resolveTemplate = (
     t: (typeof STRUCTURE_TEMPLATES)[number],
   ): { structure: CompetitionStructure; isNew: boolean } => {
-    const existing = structures.find((s) => s.templateId === t.id);
+    const existing = operatorStructures.find((s) => s.templateId === t.id);
     if (existing) return { structure: existing, isNew: false };
     const pending = Object.values(leagueChoices).find(
       (c) => c.isNew && c.structure?.templateId === t.id,
@@ -1052,7 +1060,7 @@ export function SeasonSetupWizard({
                         league={l}
                         calendar={calDraft}
                         defaults={competitionDefaults}
-                        structures={structures}
+                        structures={operatorStructures}
                         choice={choiceFor(l.key)}
                         sharedWith={sharersOf(l.key)}
                         onChange={(c) => setChoiceFor(l.key, c)}

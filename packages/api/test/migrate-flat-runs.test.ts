@@ -442,3 +442,98 @@ describe('migrate-flat-runs — collisions and orphans', () => {
     assert.equal(again.runsMigrated, 0);
   });
 });
+
+describe('migrate-flat-runs — failures are reported, not fatal', () => {
+  const T = 'flatmig-fail';
+  let main: (typeof import('../scripts/migrate-flat-runs.js'))['main'];
+  let store: import('../scripts/migrate-flat-runs.js').MigrationStore;
+  const silent = { log: () => {}, error: () => {} };
+
+  before(async () => {
+    ({ main } = await import('../scripts/migrate-flat-runs.js'));
+    // The real repo, except one series write fails the way a throttled or dropped
+    // connection would — not a version conflict.
+    store = {
+      ...repo,
+      updateSeries: async (tenant, id, patch) => {
+        if (id === 'ser-broken') throw new Error('connection reset');
+        return repo.updateSeries(tenant, id, patch);
+      },
+    };
+  });
+
+  test('a run whose series write throws is skipped with the reason; the next run still migrates', async () => {
+    // Each run's dates match a config calendar with another id, so its series are rewritten.
+    await repo.createTenantConfig(
+      baseConfig(T, {
+        leagues: [league('la'), league('lb')],
+        calendars: [
+          singleBlock('cal-a', 'A dates', '2026-09-05', '2027-03-06'),
+          singleBlock('cal-b', 'B dates', '2026-09-12', '2027-03-13'),
+        ],
+      }),
+    );
+    await repo.putSeasonRun(
+      T,
+      flatRun({
+        id: 'run-broken',
+        leagueKey: 'la',
+        calendarSnapshot: singleBlock('cal-flat-la', '2026/27', '2026-09-05', '2027-03-06'),
+      }),
+    );
+    await repo.putSeasonRun(
+      T,
+      flatRun({
+        id: 'run-fine',
+        leagueKey: 'lb',
+        calendarSnapshot: singleBlock('cal-flat-lb', '2026/27', '2026-09-12', '2027-03-13'),
+      }),
+    );
+    await repo.putSeries(T, series('ser-broken', 'run-broken', 'cal-flat-la'));
+    await repo.putSeries(T, series('ser-fine', 'run-fine', 'cal-flat-lb'));
+
+    const lines: string[] = [];
+    const result = await migrateFlatRuns({ confirm: true, log: (l) => lines.push(l), store });
+
+    const skip = result.skipped.find((s) => s.tenant === T && s.runId === 'run-broken');
+    assert.ok(skip, 'the failed run is reported');
+    assert.match(skip!.reason, /connection reset/);
+    assert.equal((await repo.getSeasonRun(T, 'run-broken'))?.competitionId, '__flat__');
+    // The loop carried on.
+    assert.equal((await repo.getSeasonRun(T, 'run-fine'))?.competitionId, 'cmp-flat-run-fine');
+    assert.equal((await repo.getSeries(T, 'ser-fine'))?.schedule?.calendarId, 'cal-b');
+    // The summary printed, skip included.
+    assert.ok(lines.some((l) => /skipped: flatmig-fail · run "run-broken" — write failed/.test(l)));
+    assert.ok(lines.some((l) => /^migration complete: /.test(l)));
+  });
+
+  test('--confirm exits 1 while anything is skipped; a dry-run and a bad flag behave', async () => {
+    assert.equal(await main(['--confirm'], { ...silent, store }), 1);
+    // A dry-run reports skips but is not a failure.
+    assert.equal(await main(['--dry-run'], silent), 0);
+    assert.equal(await main(['--bogus'], silent), 1);
+  });
+
+  test('the config is re-read right before the put, so a concurrent save survives', async () => {
+    const T2 = 'flatmig-race';
+    await repo.createTenantConfig(baseConfig(T2, { leagues: [league('lr')] }));
+    await repo.putSeasonRun(T2, flatRun({ id: 'run-race', leagueKey: 'lr' }));
+    const racing: typeof store = {
+      ...repo,
+      // Hand back the tenant list, then land an operator's settings save before the
+      // migration gets to this tenant's put.
+      listTenants: async () => {
+        const listed = await repo.listTenants();
+        const cur = await repo.getTenantConfig(T2);
+        await repo.putTenantConfig({ ...cur!, submissionDeadline: '2026-12-31' });
+        return listed;
+      },
+    };
+
+    await migrateFlatRuns({ confirm: true, log: () => {}, store: racing });
+
+    const cfg = await repo.getTenantConfig(T2);
+    assert.equal(cfg?.submissionDeadline, '2026-12-31', 'the concurrent save is kept');
+    assert.equal((await repo.getSeasonRun(T2, 'run-race'))?.competitionId, 'cmp-flat-run-race');
+  });
+});

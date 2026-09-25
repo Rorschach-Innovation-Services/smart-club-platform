@@ -20,10 +20,21 @@ export function describeClash(c: Clash): string {
 
 /**
  * The toast for a generate refusal, or `null` when the error is not one of the structured
- * generate 409s (the caller then falls back to its generic copy).
+ * generate refusals (the caller then falls back to its generic copy). A refusal that landed
+ * after some groups were already written (`details.written`) always says which, whatever
+ * else it is — the stage is then half-replaced, not untouched.
  */
 export function generateConflictMessage(err: unknown): string | null {
-  if (!(err instanceof ApiError) || err.status !== 409) return null;
+  if (!(err instanceof ApiError)) return null;
+  const base = structuredConflictMessage(err);
+  const written = err.details?.written;
+  if (Array.isArray(written) && written.length)
+    return `${base ?? err.message}. ${written.length} series ${written.length === 1 ? 'was' : 'were'} already replaced: ${written.join(', ')}`;
+  return base;
+}
+
+function structuredConflictMessage(err: ApiError): string | null {
+  if (err.status !== 409) return null;
   if (err.code === 'released_overwrite')
     return "Some of this stage's fixtures are released; the console will ask before replacing them";
   if (err.code === 'venue_clash') {

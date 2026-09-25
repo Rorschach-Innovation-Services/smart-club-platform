@@ -3,7 +3,7 @@
  * Escape hands focus back to the link, and an unknown or anchorless topic degrades
  * gracefully instead of throwing or linking nowhere.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { HelpLink, HelpProvider, GUIDE_URL } from './HelpDrawer';
@@ -74,7 +74,8 @@ describe('HelpDrawer', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
-  it('shows a fallback for a topic with no explainer', async () => {
+  it('shows a fallback for a topic with no explainer, and warns in development', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const user = userEvent.setup();
     renderLink('no-such-topic' as HelpTopicId);
 
@@ -83,6 +84,8 @@ describe('HelpDrawer', () => {
     expect(
       screen.getByRole('dialog', { name: 'No help written for this yet' }),
     ).toBeInTheDocument();
+    expect(warn).toHaveBeenCalledWith('HelpDrawer: no help topic "no-such-topic"');
+    warn.mockRestore();
   });
 
   it('links to the guide only when the topic has an anchor', async () => {

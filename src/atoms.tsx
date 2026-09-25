@@ -6,6 +6,7 @@ import type { ReactNode, CSSProperties, ComponentType, ButtonHTMLAttributes } fr
 import { scoreCQI, cqiBand } from './cqiScore';
 import type { Club } from './types';
 import { HelpLink } from './help/HelpDrawer';
+import { useFocusTrap } from './useFocusTrap';
 import { FIELD_GUIDES, type FieldGuideId } from './help/field-guides';
 
 /* ─── Icons (inline, no external deps) ─── */
@@ -843,6 +844,7 @@ export function useNestedEscapeClose(onClose: () => void) {
  *   caller renders its own heading) — without a role a dialog is an ordinary div to
  *   assistive tech: nothing announces it opened and nothing scopes the reading order;
  * - Escape closes;
+ * - Tab and Shift+Tab cycle inside the dialog (`useFocusTrap`, shared with the help drawer);
  * - focus moves into the dialog on open (unless a child already took it, e.g. `autoFocus`)
  *   and returns to whatever had it when the dialog closes;
  * - a click on the backdrop closes, unless `dismissable={false}` (a form that must not lose
@@ -881,6 +883,7 @@ export function Modal({
   useEscapeClose(onClose);
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, true);
   // Read during the first render, before any child's autoFocus runs, so it is the element
   // that opened the dialog rather than something inside it.
   const restoreTo = useRef<Element | null>(
@@ -1378,7 +1381,7 @@ const HSW_PIPELINE = ['Competition', 'Season', 'Stage', 'Group', 'Fixtures'];
 const HSW_IDEAS: Array<{ title: string; text: string }> = [
   {
     title: 'A league is not a competition',
-    text: 'A league holds one or more competitions, each a format stream with its own shape and dates, so the same clubs can play a T20 in pools and a 50-over league in two halves.',
+    text: 'A league holds one or more competitions, each a format stream with its own shape and dates, so the same clubs can play a T20 in groups and a 50-over league in two halves.',
   },
   {
     title: 'A competition is a pipeline of stages',

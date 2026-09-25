@@ -12,6 +12,7 @@
  * normal, displayable state that the admin console renders as a confirmation step.
  */
 
+import { ENTRANT_KINDS } from './stage-kinds';
 import type { EntrantSpec, GroupPlan } from './types';
 
 /** One group of entrants, in seed order where that is meaningful. */
@@ -282,9 +283,9 @@ export function resolveEntrants(spec: EntrantSpec, ctx: ResolveContext = {}): En
 export function describeEntrants(spec: EntrantSpec): string {
   switch (spec.kind) {
     case 'all-registered':
-      // Matches ENTRANT_OPTIONS in the operator console verbatim. "in one group" is the
-      // load-bearing half: this kind cannot be split, and an operator who reads only
-      // "every registered side" discovers that mid-season in the confirm modal.
+      // "in one group" is the load-bearing half: this kind cannot be split, and an operator
+      // who reads only "every registered side" discovers that mid-season in the confirm
+      // modal.
       return 'Every registered side, in one group';
     case 'seeded-split': {
       const plan = spec.groups;
@@ -292,8 +293,8 @@ export function describeEntrants(spec: EntrantSpec): string {
       return `Seeded into ${shape} (${spec.method === 'snake' ? 'snake' : 'top-down blocks'})`;
     }
     case 'manual':
-      return spec.derivedFrom?.detail ?? 'Entered by an administrator';
+      return spec.derivedFrom?.detail ?? ENTRANT_KINDS.manual.title;
     default:
-      return 'Entered by an administrator';
+      return ENTRANT_KINDS.manual.title;
   }
 }
