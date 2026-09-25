@@ -24,40 +24,64 @@ import {
   Card,
   Choice,
   EmptyState,
+  FieldGuide,
+  HowSeasonsWork,
   Icon,
   InfoDot,
+  Modal,
+  OptionCards,
   Pill,
-  useEscapeClose,
+  type OptionCard,
 } from './atoms';
+import { HelpLink } from './help/HelpDrawer';
+import type { HelpTopicId } from './help/topics';
 import * as api from './api';
 import { ApiError } from './api';
 import {
-  T20_SLOTS,
   WEEKDAY_LABELS,
   calendarSpan,
   describeCadence,
   findBlock,
   formatIsoDate,
   type DatePlan,
-} from './competition/calendar';
+} from '../packages/engine/src/calendar';
 import {
   chainFeeder,
   derivedEntrantTotal,
-  describeStage,
   previewFitAll,
   previewRounds,
-} from './competition/structure';
-import { groupSizes } from './competition/entrants';
-import { isPoolKnockout, roundsForFormat } from './competition/formats';
+} from '../packages/engine/src/structure';
+import { describeStage, describeStructure } from '../packages/engine/src/narrative';
+import {
+  FALLBACK_MATCH_DAYS,
+  FALLBACK_TIME_SLOTS,
+  resolveCompetitionDefaults,
+  type ResolvedCompetitionDefaults,
+} from '../packages/engine/src/defaults';
+import { groupSizes } from '../packages/engine/src/entrants';
+import { isPoolKnockout, roundsForFormat } from '../packages/engine/src/formats';
 import {
   STRUCTURE_TEMPLATES,
+  applyPlacement,
   blankStage,
   blankStructure,
+  defaultPlacement,
   instantiateTemplate,
   newStructureId,
   parseStructureJson,
   structureToJson,
-} from './competition/templates';
+} from '../packages/engine/src/templates';
+import {
+  CADENCE_KINDS,
+  ENTRANT_KINDS,
+  STAGE_KINDS,
+  entrantKindFor,
+  stageKindFor,
+  stageTitle,
+  type CadenceKindId,
+  type EntrantKindId,
+  type StageKindId,
+} from '../packages/engine/src/stage-kinds';
 import type {
   Cadence,
   Competition,
@@ -153,143 +177,124 @@ const SECTION: CSSProperties = {
   margin: '14px 0 6px',
 };
 
-/** A stage-editor section label with an optional "(i)" explainer beside it. */
-function SectionHead({ children, info }: { children: ReactNode; info?: ReactNode }) {
+/** The team count the preview reasons about while a structure has no teams in it. */
+export const DEFAULT_PREVIEW_TEAMS = 12;
+
+/* ─── Stage editor ─── */
+
+// Every format the server accepts, one card each. Title, description and example all come
+// from the STAGE_KINDS registry, so the cards, the help drawer and the season narrative
+// quote the same words.
+//
+// Every value is listed: triple round robin (legs 1–3 are valid) and the "entered by hand"
+// escape hatch (reachable through JSON import) both used to be missing, which rendered
+// such a stage as the wrong choice and retyped it on any touch.
+const FORMAT_VALUES: FormatSpec[] = [
+  { kind: 'round-robin', legs: 1 },
+  { kind: 'round-robin', legs: 2 },
+  { kind: 'round-robin', legs: 3 },
+  { kind: 'knockout', pairing: 'seeded' },
+  { kind: 'knockout', pairing: 'cross-pool' },
+  { kind: 'knockout', pairing: 'within-pool' },
+  { kind: 'single-match' },
+  { kind: 'manual' },
+];
+const FORMAT_CARDS: OptionCard<StageKindId>[] = FORMAT_VALUES.map((value) => {
+  const id = stageKindFor(value);
+  const k = STAGE_KINDS[id];
+  return { value: id, title: k.title, desc: k.does, eg: k.eg };
+});
+
+// "Every registered side" cannot be split — the type carries no group plan — and an
+// operator who picks it expecting groups discovers that three screens later, mid-season,
+// in a modal that offers "Group A" and nothing else. Its card says so up front.
+const ENTRANT_CARDS: OptionCard<EntrantKindId>[] = (
+  ['all-registered', 'seeded-split-snake', 'seeded-split-blocks', 'manual'] as const
+).map((id) => ({
+  value: id,
+  title: ENTRANT_KINDS[id].title,
+  desc: ENTRANT_KINDS[id].does,
+  eg: ENTRANT_KINDS[id].eg,
+}));
+
+const CADENCE_CARDS: OptionCard<CadenceKindId>[] = (
+  ['weekly', 'every-n-weeks', 'weekdays', 'spread'] as const
+).map((id) => ({
+  value: id,
+  title: CADENCE_KINDS[id].title,
+  desc: CADENCE_KINDS[id].does,
+  eg: CADENCE_KINDS[id].eg,
+}));
+
+/**
+ * One card per starter template, for the structures card's picker and the season wizard.
+ * The example line is the first stage's format example, so a card says what the opening
+ * phase looks like in a real league.
+ */
+export const TEMPLATE_CARDS: OptionCard<string>[] = STRUCTURE_TEMPLATES.map((t) => ({
+  value: t.id,
+  title: t.name,
+  desc: t.whenToUse,
+  eg: STAGE_KINDS[stageKindFor(t.stages[0].format)].eg,
+}));
+
+/**
+ * A structure as a bulleted story, one sentence per stage (`describeStructure`). Shown
+ * under a template pick, at the top of the preview rail and on the wizard's review step.
+ */
+export function StructureNarrative({
+  structure,
+  calendar,
+  teamCount,
+  assumed,
+}: {
+  structure: CompetitionStructure;
+  calendar: SeasonCalendar | undefined;
+  teamCount: number;
+  /** The team count is a stand-in, not a real registration count: say so. */
+  assumed?: boolean;
+}) {
+  const lines = describeStructure(structure, calendar, teamCount);
   return (
-    <div style={{ ...SECTION, display: 'flex', alignItems: 'center', gap: 2 }}>
-      {children}
-      {info}
+    <div className="narrative">
+      <ul className="narrative-list">
+        {lines.map((line, i) => (
+          <li key={i}>{line}</li>
+        ))}
+      </ul>
+      {assumed && <p className="narrative-note">(assuming {teamCount} sides)</p>}
     </div>
   );
 }
 
-/** The team count the preview reasons about while a structure has no teams in it. */
-const DEFAULT_PREVIEW_TEAMS = 12;
-
-function Modal({
-  title,
-  wide,
-  onClose,
-  children,
-}: {
-  title: ReactNode;
-  wide?: boolean;
-  onClose: () => void;
-  children?: ReactNode;
-}) {
-  useEscapeClose(onClose);
-  // A dialog with no role is, to assistive tech, an ordinary div: nothing announces that
-  // a modal opened, nothing scopes the reading order to it, and Escape is the only thing
-  // that behaves. `aria-labelledby` points at the visible heading so it gets a name too.
-  const titleId = useId();
-  return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div
-        className="task-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        style={wide ? { maxWidth: 1040 } : undefined}
-      >
-        <div className="task-modal-head">
-          <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Platform · Competition structures</div>
-            <div className="task-modal-head-title" id={titleId}>
-              {title}
-            </div>
-          </div>
-          <button className="task-modal-close" onClick={onClose} title="Close">
-            <Icon.X />
-          </button>
-        </div>
-        <div className="task-modal-body">{children}</div>
-      </div>
-    </div>,
-    document.body,
-  );
+/** A stage-editor field caption: sentence case, no uppercase. */
+function FieldLabel({ children }: { children: ReactNode }) {
+  return <div className="stage-field-label">{children}</div>;
 }
 
-/* ─── Stage editor ─── */
-
-// `help` is a full sentence (not a fragment) so it reads on its own — used both in
-// the Format info-popover and as the live hint under the select. `describeFormat`
-// stays as-is for the collapsed-row subtitle it was written for.
-const FORMAT_OPTIONS: Array<{
-  label: string;
-  value: FormatSpec;
-  help: string;
-  eg: string;
-}> = [
-  {
-    label: 'Single round robin',
-    value: { kind: 'round-robin', legs: 1 },
-    help: 'Every side plays every other side once. Standings decide the winner — no knockout.',
-    eg: 'a short league where 12 sides each play 11 matches',
-  },
-  {
-    label: 'Double round robin',
-    value: { kind: 'round-robin', legs: 2 },
-    help: 'Every side plays every other side twice, once home and once away.',
-    eg: 'a full home-and-away league season',
-  },
-  // The server accepts legs 1–3 and the generator implements 3; leaving it off the list
-  // rendered a three-leg stage as "Single round robin" and retyped it on any touch.
-  {
-    label: 'Triple round robin',
-    value: { kind: 'round-robin', legs: 3 },
-    help: 'Every side plays every other side three times.',
-    eg: 'a small 4-team pool that needs more matches to separate sides',
-  },
-  {
-    label: 'Knockout — seeded',
-    value: { kind: 'knockout', pairing: 'seeded' },
-    help: 'A single-elimination bracket seeded by rank — top seed meets bottom seed, and losers are out.',
-    eg: 'an end-of-season playoff: 1st v 4th, 2nd v 3rd, then the final',
-  },
-  {
-    label: 'Knockout — cross-pool',
-    value: { kind: 'knockout', pairing: 'cross-pool' },
-    help: 'A bracket that crosses groups — the winner of one pool meets the runner-up of another.',
-    eg: 'Pool A winner v Pool B runner-up in the semi-finals',
-  },
-  {
-    label: 'Knockout — within-group',
-    value: { kind: 'knockout', pairing: 'within-pool' },
-    help: "Each group's qualifiers play their own semi-final (A1 v A2, B1 v B2); the winners meet in the final.",
-    eg: 'two pools of five, top two each — A1 v A2 and B1 v B2, then the final',
-  },
-  {
-    label: 'Single match',
-    value: { kind: 'single-match' },
-    help: 'One fixture between two sides — a final or any other one-off.',
-    eg: 'a grand final',
-  },
-  // The ADR's escape hatch. Reachable through JSON import and accepted by the server's
-  // FORMAT_KINDS, so leaving it off the list rendered a blank Format select on a stage
-  // that was perfectly valid — and any touch of the control would silently retype it.
-  {
-    label: 'Entered by hand',
-    value: { kind: 'manual' },
-    help: 'No fixtures are generated. An administrator types in each match themselves.',
-    eg: 'an invitational with no fixed pattern',
-  },
-];
-
-function formatLabel(f: FormatSpec): string {
-  if (f.kind === 'round-robin')
-    return f.legs === 3
-      ? 'Triple round robin'
-      : f.legs === 2
-        ? 'Double round robin'
-        : 'Single round robin';
-  if (f.kind === 'knockout')
-    return f.pairing === 'cross-pool'
-      ? 'Knockout — cross-pool'
-      : f.pairing === 'within-pool'
-        ? 'Knockout — within-group'
-        : 'Knockout — seeded';
-  if (f.kind === 'single-match') return 'Single match';
-  return 'Entered by hand';
+/**
+ * One of the three questions a stage answers — who plays, who plays whom, when — with a
+ * link to the help topic that explains it. A labelled region, so the three read as
+ * landmarks to a screen reader too.
+ */
+function StageQuestion({
+  title,
+  topic,
+  children,
+}: {
+  title: string;
+  topic: HelpTopicId;
+  children: ReactNode;
+}) {
+  return (
+    <section className="stage-q" aria-label={title}>
+      <div className="stage-q-head">
+        <span className="stage-q-label">{title}</span>
+        <HelpLink topic={topic} />
+      </div>
+      {children}
+    </section>
+  );
 }
 
 /**
@@ -303,28 +308,39 @@ function declaredGroupCount(stage: StageSpec): number {
   return plan.kind === 'sizes' ? plan.sizes.length : plan.count;
 }
 
+/** 2, 4, 8, … — the counts a within-group bracket halves cleanly (`withinPoolRounds`). */
+function isPowerOfTwoAtLeast2(n: number | undefined): boolean {
+  return Number.isInteger(n) && (n as number) >= 2 && ((n as number) & ((n as number) - 1)) === 0;
+}
+
 /**
- * Mirrors `validateStructures`' v1 within-group rule: the stage must draw from a stage of
- * exactly 2 groups with `qualifiersPerGroup: 2`. The generator refuses every other shape
- * (it would need a bye, or mislabel the bracket), so the server 400s it — caught here
+ * Mirrors `validateStructures`' within-group rule, which is the engine's own
+ * (`withinPoolRounds`): the stage must draw from a stage with a power-of-two number of
+ * groups, each sending the same power-of-two number of sides (`qualifiersPerGroup`). Every
+ * other shape needs a bye or mislabels the bracket, so the server 400s it — caught here
  * first, where the operator can still see which control to change.
  */
 function breaksWithinPoolShape(stage: StageSpec, stages: StageSpec[]): boolean {
   if (stage.format.kind !== 'knockout' || stage.format.pairing !== 'within-pool') return false;
   const note = stage.entrants.kind === 'manual' ? stage.entrants.derivedFrom : undefined;
   const source = note ? stages.find((s) => s.id === note.fromStage) : undefined;
-  return note?.qualifiersPerGroup !== 2 || !source || declaredGroupCount(source) !== 2;
+  return (
+    !source ||
+    !isPowerOfTwoAtLeast2(note?.qualifiersPerGroup) ||
+    !isPowerOfTwoAtLeast2(declaredGroupCount(source))
+  );
 }
 
-/** The server's own wording for the rule above (config-validation.ts). */
-const WITHIN_POOL_SHAPE = 'within-group semi-finals need 2 groups × 2 qualifiers in this version';
+/** The server's own wording for the rule above (`WITHIN_POOL_SHAPE_MESSAGE`, config-validation.ts). */
+const WITHIN_POOL_SHAPE =
+  'within-group semi-finals need a power-of-two number of groups (2, 4, 8) each sending the same power-of-two number of sides (2, 4)';
 
 /**
  * One stage as the preview reasons about it: its group sizes at the preview's team count
  * — or, when its DerivationNote counts qualifiers, at exactly that many — and how it fits
  * the previewed calendar once every earlier stage (and any chained feeder) is placed.
  */
-interface StagePreview {
+export interface StagePreview {
   sizes: number[];
   /** Sized from `qualifiersPerGroup` × the source stage's group count, not the team box. */
   derived: boolean;
@@ -342,7 +358,7 @@ interface StagePreview {
  * to start after the previous one is checked where it will really play, not from the
  * block start on top of its feeder.
  */
-function previewStages(
+export function previewStages(
   structure: CompetitionStructure,
   calendar: SeasonCalendar | undefined,
   previewTeams: number,
@@ -375,58 +391,6 @@ function previewStages(
     };
   });
 }
-
-// "…in one group" is not decoration. `all-registered` cannot be split — the type carries
-// no group plan — and an operator who picks it expecting pools discovers that three
-// screens later, mid-season, in a modal that offers "Group A" and nothing else. The
-// constraint belongs in the name of the choice.
-const ENTRANT_OPTIONS = [
-  {
-    key: 'all-registered',
-    label: 'Every registered side, in one group',
-    help: 'Every side entered in the league plays in a single group. This kind cannot be split into pools.',
-    eg: 'a 12-team league that all plays each other',
-  },
-  {
-    key: 'seeded-split',
-    label: 'Seeded into groups',
-    help: 'Sides are divided into pools by seeding order — set how many groups and how below.',
-    eg: '12 sides split into a Top Six and a Bottom Six',
-  },
-  {
-    key: 'manual',
-    label: 'Entered by an administrator',
-    help: "An administrator chooses who plays. Use this when a stage's teams come from an earlier stage's results.",
-    eg: 'the four semi-finalists carried through to a knockout',
-  },
-] as const;
-
-const CADENCE_OPTIONS = [
-  {
-    key: 'weekly',
-    label: 'Weekly',
-    help: 'One round is played every week.',
-    eg: 'a Saturday league',
-  },
-  {
-    key: 'every-n-weeks',
-    label: 'Every N weeks',
-    help: 'One round every few weeks — set the gap. For leagues that skip some weekends.',
-    eg: 'a fortnightly midweek league (every 2 weeks)',
-  },
-  {
-    key: 'weekdays',
-    label: 'Set days only',
-    help: 'Matches only on the weekdays you pick (e.g. Saturday and Sunday). Rounds fill those days.',
-    eg: 'a weekend festival playing both Sat and Sun',
-  },
-  {
-    key: 'spread',
-    label: 'Spread across block',
-    help: 'Rounds are spaced evenly across the whole playing block, however long it runs.',
-    eg: 'six rounds spread evenly over a 12-week block',
-  },
-] as const;
 
 function Select({
   value,
@@ -504,7 +468,7 @@ function GroupPlanEditor({
         <option value="sizes">Exact sizes</option>
       </Select>
       <InfoDot
-        title="Group plan — how sides divide into pools"
+        title="Group plan — how sides divide into groups"
         options={[
           {
             label: 'Even groups',
@@ -551,7 +515,14 @@ function GroupPlanEditor({
   );
 }
 
-function StageRow({
+/**
+ * One stage of a structure: collapsed, a plain-English sentence; expanded, the three
+ * questions every stage answers — who plays, who plays whom, and when.
+ *
+ * Exported so the season wizard's "Adjust stages" can edit a template instance in place
+ * with the same controls the structures card uses.
+ */
+export function StageRow({
   stage,
   index,
   total,
@@ -563,6 +534,7 @@ function StageRow({
   onChange,
   onRemove,
   onMove,
+  defaults,
 }: {
   stage: StageSpec;
   index: number;
@@ -576,7 +548,16 @@ function StageRow({
   onChange: (patch: Partial<StageSpec>) => void;
   onRemove: () => void;
   onMove: (dir: -1 | 1) => void;
+  /**
+   * The tenant's match days and double-header slots (`resolveCompetitionDefaults`), used
+   * when "set days only" or set start times are switched on. Absent ⇒ the fallbacks.
+   */
+  defaults?: Pick<ResolvedCompetitionDefaults, 'matchDays' | 'timeSlots'>;
 }) {
+  // Radio-group names must be unique per row: two rows can show the same stage (the
+  // season wizard renders a shared template instance once per league that holds it).
+  const uid = useId();
+
   // Same raw-text treatment as the group SIZES box: round-tripping through
   // `labels.join(', ')` on every keystroke deletes the separator the moment it is typed,
   // so a second label can never be entered and "Top Six, Bottom Six" — the ADR's own
@@ -584,10 +565,14 @@ function StageRow({
   const [labelText, setLabelText] = useState(() => (stage.groupLabels ?? []).join(', '));
 
   // Remembers the slots to restore when the control is switched back on — either the
-  // T20 default, or whatever was there before (including a saved structure's own values,
-  // so re-toggling never resets an operator's edits back to the default).
+  // tenant's default slots, or whatever was there before (including a saved structure's own
+  // values, so re-toggling never resets an operator's edits back to the default).
   const [pendingSlots, setPendingSlots] = useState<TimeSlot[]>(
-    () => stage.schedule.slots ?? T20_SLOTS,
+    () =>
+      stage.schedule.slots ??
+      (defaults?.timeSlots?.length ? defaults.timeSlots : FALLBACK_TIME_SLOTS).map((sl) => ({
+        ...sl,
+      })),
   );
 
   const perGroup = preview.sizes[0] ?? 0;
@@ -612,11 +597,11 @@ function StageRow({
   // misread this option exists to prevent.
   const offCalendar = !calendar || stage.schedule.blockIndex >= calendar.blocks.length;
 
-  const setFormat = (label: string) => {
-    const opt = FORMAT_OPTIONS.find((o) => o.label === label);
-    if (opt) onChange({ format: opt.value });
+  const setFormat = (id: StageKindId) => {
+    const value = FORMAT_VALUES.find((v) => stageKindFor(v) === id);
+    if (value) onChange({ format: value });
   };
-  const setEntrantKind = (kind: string) => {
+  const setEntrantKind = (kind: string, method: 'blocks' | 'snake' = 'blocks') => {
     const groups = stage.entrants.kind !== 'all-registered' ? stage.entrants.groups : undefined;
     if (kind === 'all-registered') onChange({ entrants: { kind: 'all-registered' } });
     else if (kind === 'seeded-split')
@@ -632,7 +617,7 @@ function StageRow({
             kind: 'even',
             count: Math.min(26, Math.max(2, stage.groupLabels?.length ?? 2)),
           },
-          method: 'blocks',
+          method,
         },
       });
     else
@@ -644,12 +629,21 @@ function StageRow({
         },
       });
   };
+  // A seeded card sets both the kind and the method, so the two can never disagree.
+  const setEntrantCard = (id: EntrantKindId) => {
+    if (id === 'seeded-split-snake') setEntrantKind('seeded-split', 'snake');
+    else if (id === 'seeded-split-blocks') setEntrantKind('seeded-split', 'blocks');
+    else setEntrantKind(id);
+  };
   const setCadence = (kind: string) => {
     const next: Cadence =
       kind === 'every-n-weeks'
         ? { kind: 'every-n-weeks', n: 2 }
         : kind === 'weekdays'
-          ? { kind: 'weekdays', days: [6] }
+          ? {
+              kind: 'weekdays',
+              days: [...(defaults?.matchDays?.length ? defaults.matchDays : FALLBACK_MATCH_DAYS)],
+            }
           : kind === 'spread'
             ? { kind: 'spread' }
             : { kind: 'weekly' };
@@ -688,6 +682,9 @@ function StageRow({
             <span style={{ fontSize: 11, color: 'var(--muted-2)', fontWeight: 700 }}>
               STAGE {index + 1}
             </span>
+            <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>
+              {stageTitle(stage.format)}
+            </span>
             <span style={{ fontWeight: 700, fontSize: 13.5 }}>
               {stage.name || 'Untitled stage'}
             </span>
@@ -719,41 +716,107 @@ function StageRow({
       </div>
 
       {expanded && (
-        <div style={{ padding: '4px 14px 16px', borderTop: '1px solid var(--line2)' }}>
-          <div style={SECTION}>Name</div>
+        <div style={{ padding: '12px 16px 16px', borderTop: '1px solid var(--line2)' }}>
+          <FieldLabel>Stage name</FieldLabel>
           <input
             className="field-input"
+            aria-label="Stage name"
             value={stage.name}
             onChange={(e) => onChange({ name: e.target.value })}
             placeholder="e.g. Double round"
           />
 
-          <SectionHead
-            info={
-              <InfoDot
-                title="Format — how a group's matches are decided"
-                options={FORMAT_OPTIONS.map((o) => ({ label: o.label, desc: o.help, eg: o.eg }))}
+          {/* ── 1. Who plays? ── */}
+          <StageQuestion title="Who plays?" topic="standings-typed-by-human">
+            <OptionCards
+              name={`${uid}-entrants`}
+              label="Who plays"
+              value={entrantKindFor(stage.entrants)}
+              onChange={setEntrantCard}
+              options={ENTRANT_CARDS}
+            />
+            {stage.entrants.kind !== 'all-registered' && (
+              <div style={{ marginTop: 12 }}>
+                <FieldLabel>Groups</FieldLabel>
+                <GroupPlanEditor
+                  plan={stage.entrants.groups}
+                  onChange={(groups) =>
+                    onChange({ entrants: { ...stage.entrants, groups } as EntrantSpec })
+                  }
+                />
+                <FieldGuide id="group-plan" />
+              </div>
+            )}
+            {/* There is no group-count control above, because this kind has nowhere to put
+                one. Say where the control went, rather than leaving its absence to be read
+                as "groups aren't configurable". */}
+            {stage.entrants.kind === 'all-registered' && (
+              <p style={HINT}>
+                One group of everyone — this kind can&apos;t be split, and switching to it discards
+                any group plan. To make groups, choose one of the{' '}
+                <strong>Seeded into groups</strong> cards: with no seeding supplied it follows the
+                registration order, which is the same list this stage already draws on.
+              </p>
+            )}
+            {/* The exact state that produced the bug report: a stage named for two groups
+                that puts everyone in one. Caught at design time, where it is free to fix. */}
+            {stage.entrants.kind === 'all-registered' && (stage.groupLabels?.length ?? 0) > 1 && (
+              <div style={{ ...ERR, lineHeight: 1.5 }}>
+                This stage names {stage.groupLabels!.length} groups, but every registered side goes
+                into one — the names are never used.{' '}
+                <Btn tone="outline" size="sm" onClick={() => setEntrantKind('seeded-split')}>
+                  Split into {stage.groupLabels!.length} groups
+                </Btn>
+              </div>
+            )}
+
+            <div style={{ marginTop: 12 }}>
+              <FieldLabel>Group names</FieldLabel>
+              <input
+                className="field-input"
+                aria-label="Group names"
+                value={labelText}
+                placeholder="Top Six, Bottom Six"
+                onChange={(e) => {
+                  setLabelText(e.target.value);
+                  onChange({
+                    groupLabels: e.target.value
+                      .split(',')
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                  });
+                }}
               />
-            }
+              <FieldGuide id="group-names" />
+            </div>
+
+            {stage.entrants.kind === 'manual' && index > 0 && (
+              <DerivationEditor stage={stage} earlierStages={earlierStages} onChange={onChange} />
+            )}
+          </StageQuestion>
+
+          {/* ── 2. Who plays whom? ── */}
+          <StageQuestion
+            title="Who plays whom?"
+            topic={stage.format.kind === 'knockout' ? 'knockout-seeding' : 'home-and-away'}
           >
-            Format
-          </SectionHead>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <Select
-              value={formatLabel(stage.format)}
-              onChange={setFormat}
-              width={220}
+            <OptionCards
+              name={`${uid}-format`}
               label="Format"
-            >
-              {FORMAT_OPTIONS.map((o) => (
-                <option key={o.label} value={o.label}>
-                  {o.label}
-                </option>
-              ))}
-            </Select>
+              value={stageKindFor(stage.format)}
+              onChange={setFormat}
+              options={FORMAT_CARDS}
+              columns={2}
+            />
             {stage.format.kind === 'knockout' && (
               <label
-                style={{ fontSize: 12.5, display: 'inline-flex', gap: 6, alignItems: 'center' }}
+                style={{
+                  fontSize: 12.5,
+                  display: 'inline-flex',
+                  gap: 6,
+                  alignItems: 'center',
+                  marginTop: 12,
+                }}
               >
                 <input
                   type="checkbox"
@@ -767,13 +830,223 @@ function StageRow({
                 Third-place playoff
               </label>
             )}
-          </div>
-          {/* Live hint: the selected format's own sentence, so it always matches the pick. */}
-          <p style={HINT}>
-            {FORMAT_OPTIONS.find((o) => o.label === formatLabel(stage.format))?.help}
-          </p>
-          {stage.format.kind === 'round-robin' && stage.format.legs >= 2 && (
-            <div style={{ marginTop: 10 }}>
+            {stage.format.kind === 'round-robin' && stage.format.legs >= 2 && (
+              <div style={{ marginTop: 12 }}>
+                <label
+                  style={{
+                    fontSize: 12.5,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 2,
+                    marginBottom: 4,
+                  }}
+                >
+                  Leg order
+                  <InfoDot
+                    title="Leg order"
+                    options={[
+                      {
+                        label: 'Full round, then return round',
+                        desc: 'Everyone plays the whole first round before any return match — the standard home-and-away shape.',
+                        eg: 'first-half fixtures, then the reverse fixtures after the break',
+                      },
+                      {
+                        label: 'Same opponents back-to-back',
+                        desc: 'A pair plays both their matches close together before moving on to new opponents.',
+                        eg: 'a two-match weekend against the same side',
+                      },
+                    ]}
+                  />
+                </label>
+                <Choice
+                  value={
+                    stage.format.legOrder === 'interleaved'
+                      ? 'Same opponents back-to-back'
+                      : 'Full round, then return round'
+                  }
+                  onChange={(v) => {
+                    const format = stage.format;
+                    if (format.kind !== 'round-robin') return;
+                    if (v === 'Same opponents back-to-back') {
+                      onChange({ format: { ...format, legOrder: 'interleaved' } as FormatSpec });
+                    } else {
+                      // 'mirrored' is `roundRobinRounds`'s own default when `legOrder` is
+                      // absent — omit the key rather than writing a value it already implies.
+                      const { legOrder: _legOrder, ...restFormat } = format;
+                      onChange({ format: restFormat as FormatSpec });
+                    }
+                  }}
+                  options={['Full round, then return round', 'Same opponents back-to-back']}
+                />
+                {stage.schedule.roundsPerDay === 2 && (
+                  <p style={HINT}>
+                    With double-headers on, interleaved plays a side&apos;s morning leg and its PM
+                    return against the same opponent, rather than saving the return for a later day.
+                  </p>
+                )}
+              </div>
+            )}
+          </StageQuestion>
+
+          {/* ── 3. When? ── */}
+          <StageQuestion title="When?" topic="how-dates-are-planned">
+            <div className="place-chip">
+              <span>Plays in</span>
+              <Select
+                value={String(stage.schedule.blockIndex)}
+                onChange={(v) =>
+                  onChange({ schedule: { ...stage.schedule, blockIndex: Number(v) } })
+                }
+                label="Playing block"
+              >
+                {/* The stage's own position, kept selectable even when it doesn't exist on
+                    the calendar being previewed — dropping it would silently rewrite the
+                    stage to whatever the select falls back to, the moment the operator
+                    opens a picker that was never meant to touch it. Worded two ways: with
+                    no calendar chosen there's nothing to compare against, so it's a plain
+                    ordinal; with one chosen but too short, say so. */}
+                {offCalendar && (
+                  <option value={String(stage.schedule.blockIndex)}>
+                    {calendar
+                      ? `${ordinal(stage.schedule.blockIndex)} block (this calendar has fewer blocks)`
+                      : `${ordinal(stage.schedule.blockIndex)} block`}
+                  </option>
+                )}
+                {(calendar?.blocks ?? []).map((b, i) => (
+                  <option key={b.id} value={String(i)}>
+                    {`${ordinal(i)} block — ${b.label} · ${formatIsoDate(b.start)} → ${formatIsoDate(b.end)}`}
+                  </option>
+                ))}
+              </Select>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <FieldLabel>How often</FieldLabel>
+              <OptionCards
+                name={`${uid}-cadence`}
+                label="Cadence"
+                value={stage.schedule.cadence.kind}
+                onChange={setCadence}
+                options={CADENCE_CARDS}
+              />
+              {stage.schedule.cadence.kind === 'every-n-weeks' && (
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: 8,
+                    alignItems: 'center',
+                    marginTop: 8,
+                    fontSize: 12.5,
+                  }}
+                >
+                  <span>Every</span>
+                  <BoundedNumber
+                    ariaLabel="Weeks between rounds"
+                    min={1}
+                    max={12}
+                    style={{ width: 80 }}
+                    value={stage.schedule.cadence.n}
+                    onChange={(n) =>
+                      onChange({
+                        schedule: {
+                          ...stage.schedule,
+                          cadence: { kind: 'every-n-weeks', n },
+                        },
+                      })
+                    }
+                  />
+                  <span>weeks</span>
+                </div>
+              )}
+              {stage.schedule.cadence.kind === 'weekdays' && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+                  {WEEKDAY_LABELS.map((label, day) => {
+                    const days = (stage.schedule.cadence as { days: Weekday[] }).days ?? [];
+                    const on = days.includes(day as Weekday);
+                    return (
+                      <button
+                        key={label}
+                        type="button"
+                        aria-pressed={on}
+                        onClick={() =>
+                          onChange({
+                            schedule: {
+                              ...stage.schedule,
+                              cadence: {
+                                kind: 'weekdays',
+                                days: on
+                                  ? days.filter((d) => d !== day)
+                                  : [...days, day as Weekday].sort((a, b) => a - b),
+                              },
+                            },
+                          })
+                        }
+                        style={{
+                          padding: '4px 10px',
+                          borderRadius: 999,
+                          fontSize: 11.5,
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          border: '1px solid var(--line)',
+                          background: on ? 'var(--green-pale)' : 'var(--paper)',
+                          color: on ? 'var(--green)' : 'var(--muted-2)',
+                        }}
+                      >
+                        {label.slice(0, 3)}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              <FieldGuide id="cadence" />
+            </div>
+
+            {/* Chaining. Every stage dates from its block's start by default, so pools and
+                their semi-finals sharing one block would overlap; ticking this moves this
+                stage's rounds past the previous stage's last round, on the same playing day.
+                Enabled only when there IS an earlier stage in the block — and kept
+                clickable while ticked, so a stage that lost its feeder (moved block,
+                reordered) can still be unticked. */}
+            <div style={{ marginTop: 12 }}>
+              <label
+                style={{
+                  fontSize: 12.5,
+                  display: 'inline-flex',
+                  gap: 6,
+                  alignItems: 'center',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={chained}
+                  disabled={!feeder && !chained}
+                  onChange={(e) => {
+                    const { startAfter: _startAfter, ...rest } = stage.schedule;
+                    onChange({
+                      schedule: e.target.checked ? { ...rest, startAfter: 'previous-stage' } : rest,
+                    });
+                  }}
+                />
+                Start after the previous stage in this block
+              </label>
+              {chained && !feeder ? (
+                <div style={ERR}>
+                  No earlier stage plays in this block any more — untick this, or move the stage
+                  back into its feeder&apos;s block.
+                </div>
+              ) : (
+                <p style={HINT}>
+                  {feeder
+                    ? chained
+                      ? `Rounds begin after "${feeder.name || 'the previous stage'}" finishes.`
+                      : `"${feeder.name || 'An earlier stage'}" also plays this block — tick this to follow it rather than overlap it.`
+                    : 'No earlier stage plays this block, so this stage starts at the block start.'}
+                </p>
+              )}
+              <FieldGuide id="start-after-previous" />
+            </div>
+
+            <div style={{ marginTop: 12 }}>
               <label
                 style={{
                   fontSize: 12.5,
@@ -783,466 +1056,106 @@ function StageRow({
                   marginBottom: 4,
                 }}
               >
-                Leg order
+                Time slots
                 <InfoDot
-                  title="Leg order"
+                  title="Time slots — start times on a playing day"
                   options={[
                     {
-                      label: 'Full round, then return round',
-                      desc: 'Everyone plays the whole first round before any return match — the standard home-and-away shape.',
-                      eg: 'first-half fixtures, then the reverse fixtures after the break',
+                      label: 'No set times',
+                      desc: 'Fixtures carry a date but no fixed start time — clubs sort it out.',
                     },
                     {
-                      label: 'Same opponents back-to-back',
-                      desc: 'A pair plays both their matches close together before moving on to new opponents.',
-                      eg: 'a two-match weekend against the same side',
+                      label: 'Morning & afternoon starts',
+                      desc: 'Matches are stamped with alternating start times, cycled across the day’s fixtures.',
+                      eg: '08:00 morning / 13:30 afternoon for a two-match day',
+                    },
+                    {
+                      label: 'AM + PM double-headers',
+                      desc: 'Each playing day hosts two full rounds — every side plays a morning and an afternoon match.',
+                      eg: 'a festival day where each team plays twice',
                     },
                   ]}
                 />
               </label>
               <Choice
                 value={
-                  stage.format.legOrder === 'interleaved'
-                    ? 'Same opponents back-to-back'
-                    : 'Full round, then return round'
+                  !stage.schedule.slots
+                    ? 'No set times'
+                    : stage.schedule.roundsPerDay === 2
+                      ? 'AM + PM double-headers'
+                      : 'Morning & afternoon starts'
                 }
                 onChange={(v) => {
-                  const format = stage.format;
-                  if (format.kind !== 'round-robin') return;
-                  if (v === 'Same opponents back-to-back') {
-                    onChange({ format: { ...format, legOrder: 'interleaved' } as FormatSpec });
+                  if (v === 'No set times') {
+                    // Remove both keys entirely — the server (and the planner) treat
+                    // absent `slots`/`roundsPerDay` as "no slots"; persisting empty/zero
+                    // values is a different, invalid state, not merely an empty one.
+                    const { slots: _slots, roundsPerDay: _rpd, ...rest } = stage.schedule;
+                    onChange({ schedule: rest });
+                  } else if (v === 'Morning & afternoon starts') {
+                    const { roundsPerDay: _rpd, ...rest } = stage.schedule;
+                    onChange({
+                      schedule: { ...rest, slots: stage.schedule.slots ?? pendingSlots },
+                    });
                   } else {
-                    // 'mirrored' is `roundRobinRounds`'s own default when `legOrder` is
-                    // absent — omit the key rather than writing a value it already implies.
-                    const { legOrder: _legOrder, ...restFormat } = format;
-                    onChange({ format: restFormat as FormatSpec });
+                    onChange({
+                      schedule: {
+                        ...stage.schedule,
+                        slots: stage.schedule.slots ?? pendingSlots,
+                        roundsPerDay: 2,
+                      },
+                    });
                   }
                 }}
-                options={['Full round, then return round', 'Same opponents back-to-back']}
+                options={['No set times', 'Morning & afternoon starts', 'AM + PM double-headers']}
               />
-              {stage.schedule.roundsPerDay === 2 && (
-                <p style={HINT}>
-                  With double-headers on, interleaved plays a side&apos;s morning leg and its PM
-                  return against the same opponent, rather than saving the return for a later day.
-                </p>
+              {stage.schedule.slots && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                  {stage.schedule.slots.map((slot, i) => (
+                    <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <input
+                        className="field-input"
+                        style={{ width: 120 }}
+                        value={slot.label}
+                        placeholder="Morning"
+                        onChange={(e) => setSlot(i, { label: e.target.value })}
+                      />
+                      <input
+                        className="field-input"
+                        type="time"
+                        style={{ width: 110 }}
+                        value={slot.start}
+                        onChange={(e) => setSlot(i, { start: e.target.value })}
+                      />
+                    </div>
+                  ))}
+                </div>
               )}
+              <FieldGuide id="time-slots" />
             </div>
-          )}
 
-          <SectionHead
-            info={
-              <InfoDot
-                title="Teams — who plays in this stage"
-                options={ENTRANT_OPTIONS.map((o) => ({ label: o.label, desc: o.help, eg: o.eg }))}
-              />
-            }
-          >
-            Teams
-          </SectionHead>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            {/* 280, not 220: "Every registered side, in one group" truncates below that,
-                and the clause that truncates is the one carrying the constraint. */}
-            <Select value={stage.entrants.kind} onChange={setEntrantKind} width={280} label="Teams">
-              {ENTRANT_OPTIONS.map((o) => (
-                <option key={o.key} value={o.key}>
-                  {o.label}
-                </option>
-              ))}
-            </Select>
-            {stage.entrants.kind === 'seeded-split' && (
-              <>
-                <Select
-                  value={stage.entrants.method}
-                  onChange={(v) =>
-                    onChange({
-                      entrants: {
-                        ...(stage.entrants as EntrantSpec & { kind: 'seeded-split' }),
-                        method: v as 'blocks' | 'snake',
-                      },
-                    })
-                  }
-                  label="Seeding method"
-                >
-                  <option value="blocks">Top-down blocks</option>
-                  <option value="snake">Snake</option>
-                </Select>
-                <InfoDot
-                  title="Seeding method — how seeds fill the groups"
-                  options={[
-                    {
-                      label: 'Top-down blocks',
-                      desc: 'Seeds fill one group at a time: 1–6 into the first group, 7–12 into the next.',
-                      eg: 'a Premier pool (seeds 1–6) and a Reserve pool (seeds 7–12)',
-                    },
-                    {
-                      label: 'Snake',
-                      desc: 'A serpentine draft — 1→A, 2→B, 3→C, then back — so no group gets all the top seeds.',
-                      eg: 'two balanced pools, each with a mix of strong and weak sides',
-                    },
-                  ]}
-                />
-              </>
-            )}
-          </div>
-          {stage.entrants.kind !== 'all-registered' && (
-            <div style={{ marginTop: 8 }}>
-              <GroupPlanEditor
-                plan={stage.entrants.groups}
-                onChange={(groups) =>
-                  onChange({ entrants: { ...stage.entrants, groups } as EntrantSpec })
-                }
-              />
-            </div>
-          )}
-          {/* There is no group-count control above, because this kind has nowhere to put
-              one. Say where the control went, rather than leaving its absence to be read
-              as "groups aren't configurable". */}
-          {stage.entrants.kind === 'all-registered' && (
-            <p style={HINT}>
-              One group of everyone — this kind can&apos;t be split, and switching to it discards
-              any group plan. To make pools, choose <strong>Seeded into groups</strong>: with no
-              seeding supplied it blocks the registration order, which is the same list this stage
-              already draws on.
-            </p>
-          )}
-          {/* The exact state that produced the bug report: a stage named for two groups
-              that puts everyone in one. Caught at design time, where it is free to fix. */}
-          {stage.entrants.kind === 'all-registered' && (stage.groupLabels?.length ?? 0) > 1 && (
-            <div style={{ ...ERR, lineHeight: 1.5 }}>
-              This stage names {stage.groupLabels!.length} groups, but every registered side goes
-              into one — the names are never used.{' '}
-              <Btn tone="outline" size="sm" onClick={() => setEntrantKind('seeded-split')}>
-                Split into {stage.groupLabels!.length} groups
-              </Btn>
-            </div>
-          )}
-          {stage.entrants.kind === 'manual' && index > 0 && (
-            <DerivationEditor stage={stage} earlierStages={earlierStages} onChange={onChange} />
-          )}
-
-          <SectionHead
-            info={
-              <InfoDot title="Group names">
-                <p>
-                  What each pool is called — these labels show on the admin’s “confirm entrants”
-                  screen and on fixtures (e.g. <strong>Top Six</strong>, <strong>Bottom Six</strong>
-                  ). Leave blank to fall back to Group A, Group B…
-                </p>
-              </InfoDot>
-            }
-          >
-            Group names
-          </SectionHead>
-          <input
-            className="field-input"
-            value={labelText}
-            placeholder="Top Six, Bottom Six"
-            onChange={(e) => {
-              setLabelText(e.target.value);
-              onChange({
-                groupLabels: e.target.value
-                  .split(',')
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-              });
-            }}
-          />
-          <p style={HINT}>Comma-separated. Blank falls back to Group A, Group B…</p>
-
-          <SectionHead
-            info={
-              <InfoDot title="Schedule — when this stage is played">
-                <p>
-                  The first dropdown is the <strong>playing block</strong> — which block of the
-                  season calendar this stage runs in. A structure binds to blocks{' '}
-                  <strong>by position</strong> (first block, second block…), so the calendar it’s
-                  later paired with decides the actual dates.
-                </p>
-                <p>The second is the cadence — how often rounds are played inside that block.</p>
-              </InfoDot>
-            }
-          >
-            Schedule
-          </SectionHead>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <Select
-              value={String(stage.schedule.blockIndex)}
-              onChange={(v) => onChange({ schedule: { ...stage.schedule, blockIndex: Number(v) } })}
-              width={240}
-              label="Playing block"
-            >
-              {/* The stage's own position, kept selectable even when it doesn't exist on
-                  the calendar being previewed — dropping it would silently rewrite the
-                  stage to whatever the select falls back to, the moment the operator
-                  opens a picker that was never meant to touch it. Worded two ways: with
-                  no calendar chosen there's nothing to compare against, so it's a plain
-                  ordinal; with one chosen but too short, say so. */}
-              {offCalendar && (
-                <option value={String(stage.schedule.blockIndex)}>
-                  {calendar
-                    ? `${ordinal(stage.schedule.blockIndex)} block (this calendar has fewer blocks)`
-                    : `${ordinal(stage.schedule.blockIndex)} block`}
-                </option>
-              )}
-              {(calendar?.blocks ?? []).map((b, i) => (
-                <option key={b.id} value={String(i)}>
-                  {`${ordinal(i)} block — ${b.label} · ${formatIsoDate(b.start)} → ${formatIsoDate(b.end)}`}
-                </option>
-              ))}
-            </Select>
-            <Select value={stage.schedule.cadence.kind} onChange={setCadence} label="Cadence">
-              {CADENCE_OPTIONS.map((o) => (
-                <option key={o.key} value={o.key}>
-                  {o.label}
-                </option>
-              ))}
-            </Select>
-            {stage.schedule.cadence.kind === 'every-n-weeks' && (
-              <BoundedNumber
-                min={1}
-                max={12}
-                style={{ width: 80 }}
-                value={stage.schedule.cadence.n}
-                onChange={(n) =>
+            <div style={{ marginTop: 12 }}>
+              <FieldLabel>Show to clubs from (optional)</FieldLabel>
+              <input
+                className="field-input"
+                type="date"
+                aria-label="Show to clubs from"
+                style={{ maxWidth: 200 }}
+                value={stage.schedule.activateFrom ?? ''}
+                onChange={(e) =>
                   onChange({
-                    schedule: {
-                      ...stage.schedule,
-                      cadence: { kind: 'every-n-weeks', n },
-                    },
+                    schedule: { ...stage.schedule, activateFrom: e.target.value || undefined },
                   })
                 }
               />
-            )}
-            <InfoDot
-              title="Cadence — how often rounds are played"
-              options={CADENCE_OPTIONS.map((o) => ({ label: o.label, desc: o.help, eg: o.eg }))}
-            />
-          </div>
-          <p style={HINT}>
-            {CADENCE_OPTIONS.find((o) => o.key === stage.schedule.cadence.kind)?.help}
-          </p>
-          {stage.schedule.cadence.kind === 'weekdays' && (
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
-              {WEEKDAY_LABELS.map((label, day) => {
-                const days = (stage.schedule.cadence as { days: Weekday[] }).days ?? [];
-                const on = days.includes(day as Weekday);
-                return (
-                  <button
-                    key={label}
-                    type="button"
-                    onClick={() =>
-                      onChange({
-                        schedule: {
-                          ...stage.schedule,
-                          cadence: {
-                            kind: 'weekdays',
-                            days: on
-                              ? days.filter((d) => d !== day)
-                              : [...days, day as Weekday].sort((a, b) => a - b),
-                          },
-                        },
-                      })
-                    }
-                    style={{
-                      padding: '4px 10px',
-                      borderRadius: 999,
-                      fontSize: 11.5,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                      border: '1px solid var(--line)',
-                      background: on ? 'var(--green-pale)' : 'var(--paper)',
-                      color: on ? 'var(--green)' : 'var(--muted-2)',
-                    }}
-                  >
-                    {label.slice(0, 3)}
-                  </button>
-                );
-              })}
+              <FieldGuide id="activate-from" />
             </div>
-          )}
-          {/* Chaining. Every stage dates from its block's start by default, so pools and
-              their semi-finals sharing one block would overlap; ticking this moves this
-              stage's rounds past the previous stage's last round, on the same playing day.
-              Enabled only when there IS an earlier stage in the block — and kept
-              clickable while ticked, so a stage that lost its feeder (moved block,
-              reordered) can still be unticked. */}
-          <label
-            style={{
-              fontSize: 12.5,
-              display: 'inline-flex',
-              gap: 6,
-              alignItems: 'center',
-              marginTop: 10,
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={chained}
-              disabled={!feeder && !chained}
-              onChange={(e) => {
-                const { startAfter: _startAfter, ...rest } = stage.schedule;
-                onChange({
-                  schedule: e.target.checked ? { ...rest, startAfter: 'previous-stage' } : rest,
-                });
-              }}
-            />
-            Start after the previous stage in this block
-            <InfoDot title="Start after the previous stage">
-              <p>
-                Lets two stages share one playing block without overlapping — pools, then their
-                semi-finals and final. This stage&apos;s rounds begin after the previous stage in
-                the same block finishes, still on the block&apos;s usual playing day.
-              </p>
-            </InfoDot>
-          </label>
-          {chained && !feeder ? (
-            <div style={ERR}>
-              No earlier stage plays in this block any more — untick this, or move the stage back
-              into its feeder&apos;s block.
-            </div>
-          ) : (
-            <p style={HINT}>
-              {feeder
-                ? chained
-                  ? `Rounds begin after "${feeder.name || 'the previous stage'}" finishes.`
-                  : `"${feeder.name || 'An earlier stage'}" also plays this block — tick this to follow it rather than overlap it.`
-                : 'No earlier stage plays this block, so this stage starts at the block start.'}
-            </p>
-          )}
-          <div style={{ marginTop: 10 }}>
-            <label
-              style={{
-                fontSize: 12.5,
-                display: 'flex',
-                alignItems: 'center',
-                gap: 2,
-                marginBottom: 4,
-              }}
-            >
-              Time slots
-              <InfoDot
-                title="Time slots — start times on a playing day"
-                options={[
-                  {
-                    label: 'No set times',
-                    desc: 'Fixtures carry a date but no fixed start time — clubs sort it out.',
-                  },
-                  {
-                    label: 'Morning & afternoon starts',
-                    desc: 'Matches are stamped with alternating start times, cycled across the day’s fixtures.',
-                    eg: '08:00 morning / 13:30 afternoon for a T20 Pink Ball day',
-                  },
-                  {
-                    label: 'AM + PM double-headers',
-                    desc: 'Each playing day hosts two full rounds — every side plays a morning and an afternoon match.',
-                    eg: 'a festival day where each team plays twice',
-                  },
-                ]}
-              />
-            </label>
-            <Choice
-              value={
-                !stage.schedule.slots
-                  ? 'No set times'
-                  : stage.schedule.roundsPerDay === 2
-                    ? 'AM + PM double-headers'
-                    : 'Morning & afternoon starts'
-              }
-              onChange={(v) => {
-                if (v === 'No set times') {
-                  // Remove both keys entirely — the server (and the planner) treat
-                  // absent `slots`/`roundsPerDay` as "no slots"; persisting empty/zero
-                  // values is a different, invalid state, not merely an empty one.
-                  const { slots: _slots, roundsPerDay: _rpd, ...rest } = stage.schedule;
-                  onChange({ schedule: rest });
-                } else if (v === 'Morning & afternoon starts') {
-                  const { roundsPerDay: _rpd, ...rest } = stage.schedule;
-                  onChange({ schedule: { ...rest, slots: stage.schedule.slots ?? pendingSlots } });
-                } else {
-                  onChange({
-                    schedule: {
-                      ...stage.schedule,
-                      slots: stage.schedule.slots ?? pendingSlots,
-                      roundsPerDay: 2,
-                    },
-                  });
-                }
-              }}
-              options={['No set times', 'Morning & afternoon starts', 'AM + PM double-headers']}
-            />
-            {stage.schedule.slots && (
-              <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                {stage.schedule.slots.map((slot, i) => (
-                  <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                    <input
-                      className="field-input"
-                      style={{ width: 120 }}
-                      value={slot.label}
-                      placeholder="Morning"
-                      onChange={(e) => setSlot(i, { label: e.target.value })}
-                    />
-                    <input
-                      className="field-input"
-                      type="time"
-                      style={{ width: 110 }}
-                      value={slot.start}
-                      onChange={(e) => setSlot(i, { start: e.target.value })}
-                    />
-                  </div>
-                ))}
-              </div>
-            )}
-            <p style={HINT}>
-              Two starts per playing day, cycled across the stage's matches — e.g. 08:00 morning /
-              13:30 afternoon for T20 Pink Ball.
-            </p>
-            {stage.schedule.roundsPerDay === 2 && (
-              <p style={HINT}>
-                Each playing day hosts two full rounds — every side plays a morning and an afternoon
-                match.
-              </p>
-            )}
-          </div>
-          <div style={{ marginTop: 10 }}>
-            <label
-              style={{
-                fontSize: 12.5,
-                display: 'flex',
-                alignItems: 'center',
-                gap: 2,
-                marginBottom: 4,
-              }}
-            >
-              Activate from (optional)
-              <InfoDot title="Activate from">
-                <p>
-                  Fixtures are generated now but stay <strong>hidden from clubs</strong> until this
-                  date. Leave it blank to show them straight away. Handy for a junior league that
-                  only starts after the mid-season break.
-                </p>
-              </InfoDot>
-            </label>
-            <input
-              className="field-input"
-              type="date"
-              style={{ maxWidth: 200 }}
-              value={stage.schedule.activateFrom ?? ''}
-              onChange={(e) =>
-                onChange({
-                  schedule: { ...stage.schedule, activateFrom: e.target.value || undefined },
-                })
-              }
-            />
-            <p style={HINT}>
-              Fixtures generate now but stay hidden from clubs until this date — junior leagues that
-              only start after the break.
-            </p>
-          </div>
+          </StageQuestion>
 
           {/* Per-stage fit, right where the cadence was just changed. */}
           <div
             style={{
-              marginTop: 14,
+              marginTop: 16,
               padding: '10px 12px',
               borderRadius: 8,
               fontSize: 12.5,
@@ -1302,7 +1215,7 @@ function DerivationEditor({
     });
 
   return (
-    <div style={{ marginTop: 10 }}>
+    <div style={{ marginTop: 12 }}>
       <label style={{ fontSize: 12.5, display: 'inline-flex', gap: 6, alignItems: 'center' }}>
         <input
           type="checkbox"
@@ -1384,17 +1297,14 @@ function DerivationEditor({
             />
             Points move with the position, not the team
           </label>
-          <p style={{ ...HINT, marginTop: 0 }}>
-            This sentence is shown to the administrator when they confirm which teams play, so write
-            it the way you&apos;d say it out loud.
-          </p>
+          <FieldGuide id="derivation-rule" />
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <span style={{ fontSize: 12.5, display: 'inline-flex', alignItems: 'center', gap: 2 }}>
               Qualifiers per group
               <InfoDot title="Qualifiers per group">
                 <p>
                   How many sides go through from <strong>each</strong> group of the earlier stage —
-                  2 means the top two of every pool. Leave it blank when the number isn&apos;t
+                  2 means the top two of every group. Leave it blank when the number isn&apos;t
                   fixed.
                 </p>
               </InfoDot>
@@ -1418,10 +1328,7 @@ function DerivationEditor({
               }}
             />
           </div>
-          <p style={{ ...HINT, marginTop: 0 }}>
-            Makes the preview exact and pre-fills the confirmation form — you still confirm the
-            finishing order.
-          </p>
+          <FieldGuide id="qualifiers-per-group" />
         </div>
       )}
     </div>
@@ -1598,6 +1505,11 @@ function PreviewRail({
         <span style={{ fontSize: 12, color: 'var(--muted-2)' }}>teams entered</span>
       </div>
 
+      {/* The whole structure as a story first; the numbers per stage follow. */}
+      <div style={{ marginBottom: 12 }}>
+        <StructureNarrative structure={structure} calendar={calendar} teamCount={previewTeams} />
+      </div>
+
       {rows.map((r, i) => (
         <div
           key={r.stage.id}
@@ -1644,8 +1556,9 @@ function PreviewRail({
           )}
           {r.shapeErr && (
             <div style={{ ...ERR, marginTop: 6, lineHeight: 1.5 }}>
-              Within-group semi-finals need 2 groups × 2 qualifiers in this version — draw this
-              stage from a 2-group stage and set 2 qualifiers per group.
+              Within-group semi-finals need a power-of-two number of groups (2, 4, 8) each sending
+              the same power-of-two number of sides (2, 4) — draw this stage from a stage with 2, 4
+              or 8 groups and set 2 or 4 qualifiers per group.
             </div>
           )}
           {r.offCalendar ? (
@@ -1693,12 +1606,15 @@ function StructureEditor({
   initial,
   calendars,
   bindings = [],
+  defaults,
   onSave,
   onClose,
   toast,
 }: {
   initial: CompetitionStructure;
   calendars: SeasonCalendar[];
+  /** The tenant's resolved competition defaults — a new stage's match days and slots. */
+  defaults?: ResolvedCompetitionDefaults;
   /**
    * The competitions that bind this structure, and the calendar each one names.
    *
@@ -2032,6 +1948,7 @@ function StructureEditor({
                 setDraft((d) => ({ ...d, stages: d.stages.filter((_, j) => j !== i) }))
               }
               onMove={(dir) => moveStage(i, dir)}
+              defaults={defaults}
             />
           ))}
           <Btn
@@ -2085,11 +2002,14 @@ function StructureEditor({
 
 function StartPicker({
   calendars,
+  defaults,
   onPick,
   onClose,
   toast,
 }: {
   calendars: SeasonCalendar[];
+  /** The tenant's resolved defaults — a template's set start times become the tenant's. */
+  defaults?: ResolvedCompetitionDefaults;
   onPick: (s: CompetitionStructure) => void;
   onClose: () => void;
   toast: Toast;
@@ -2098,11 +2018,21 @@ function StartPicker({
   const [json, setJson] = useState('');
   const [err, setErr] = useState('');
   // Which calendar a NEW structure is built against. First is the right default here —
-  // unlike the editor, there is no stored structure whose blocks could say otherwise —
-  // and `instantiateTemplate` now records it, so the editor reopens on it rather than
-  // having to re-derive it.
+  // unlike the editor, there is no stored structure whose blocks could say otherwise.
   const [calendarId, setCalendarId] = useState(calendars[0]?.id ?? '');
   const calendar = calendars.find((c) => c.id === calendarId) ?? calendars[0];
+  const blockCount = calendar?.blocks?.length ?? 0;
+  // Picking a template shows what it will do (the narrative) and, on a calendar with two
+  // or more blocks, which block each stage plays in (prefilled with the default rule).
+  // Nothing is created until "Use this template".
+  const [chosen, setChosen] = useState<(typeof STRUCTURE_TEMPLATES)[number] | null>(null);
+  const [placement, setPlacement] = useState<number[]>([]);
+  function chooseTemplate(id: string) {
+    const t = STRUCTURE_TEMPLATES.find((x) => x.id === id);
+    if (!t) return;
+    setChosen(t);
+    setPlacement(defaultPlacement(t, blockCount));
+  }
 
   function doImport() {
     const parsed = parseStructureJson(json);
@@ -2147,16 +2077,35 @@ function StartPicker({
     );
   }
 
+  // The chosen template with its stages placed, for the narrative. Not instantiated —
+  // that mints an id, and nothing is created until the operator says so.
+  const previewStructure: CompetitionStructure | null = chosen
+    ? {
+        id: 'preview',
+        name: chosen.name,
+        version: 1,
+        stages: applyPlacement(chosen.stages, placement),
+      }
+    : null;
+
   return (
     <div>
-      <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
-        Build a structure yourself, or start from a template that already matches how the league
-        runs. Either way, everything stays editable afterwards.
+      <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
+        Start from a template that already matches how the league runs, or build one yourself.
+        Everything stays editable afterwards.
       </p>
       {calendars.length > 1 && (
-        <div style={{ marginBottom: 14 }}>
+        <div style={{ marginBottom: 16 }}>
           <div className="field-label">Season calendar</div>
-          <Select value={calendarId} onChange={setCalendarId} width={240} label="Season calendar">
+          <Select
+            value={calendarId}
+            onChange={(v) => {
+              setCalendarId(v);
+              setChosen(null);
+            }}
+            width={240}
+            label="Season calendar"
+          >
             {calendars.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.label}
@@ -2167,94 +2116,78 @@ function StartPicker({
         </div>
       )}
 
-      {/* Primary path: build your own. Templates are the alternative, below. */}
-      <div style={{ display: 'grid', gap: 10 }}>
-        <button
-          type="button"
-          onClick={() => onPick(blankStructure(calendar))}
-          style={{
-            textAlign: 'left',
-            display: 'flex',
-            gap: 12,
-            alignItems: 'center',
-            border: '2px solid var(--brand-primary, #16332B)',
-            borderRadius: 10,
-            padding: '14px 16px',
-            background: 'var(--green-pale, #EAF3EE)',
-            cursor: 'pointer',
-          }}
-        >
-          <span
-            style={{
-              flex: '0 0 auto',
-              width: 30,
-              height: 30,
-              borderRadius: 8,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              background: 'var(--brand-primary, #16332B)',
-              color: '#fff',
-            }}
-          >
-            <Icon.Plus />
-          </span>
-          <span>
-            <div style={{ fontWeight: 700, fontSize: 14 }}>Build from scratch</div>
-            <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5, marginTop: 2 }}>
-              Start with one empty stage and shape every detail yourself. Best when no template
-              quite fits.
-            </div>
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setImporting(true)}
-          style={{
-            textAlign: 'left',
-            border: '1px solid var(--line)',
-            borderRadius: 10,
-            padding: '12px 14px',
-            background: 'var(--white, #fff)',
-            cursor: 'pointer',
-          }}
-        >
-          <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 3 }}>Import JSON</div>
-          <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5 }}>
-            Paste a structure exported from another client, or one prepared offline.
+      <OptionCards
+        name="structure-template"
+        label="Template"
+        value={chosen?.id ?? null}
+        onChange={chooseTemplate}
+        options={TEMPLATE_CARDS}
+      />
+
+      {chosen && previewStructure && (
+        <div className="template-detail">
+          <div className="stage-field-label">What {chosen.name} does</div>
+          <StructureNarrative
+            structure={previewStructure}
+            calendar={calendar}
+            teamCount={DEFAULT_PREVIEW_TEAMS}
+            assumed
+          />
+          {blockCount >= 2 && calendar && (
+            <>
+              <div className="place-chips" style={{ marginTop: 12 }}>
+                {chosen.stages.map((stage, i) => (
+                  <div key={stage.id} className="place-chip">
+                    <span>Stage {i + 1} plays in</span>
+                    <Select
+                      value={String(placement[i] ?? 0)}
+                      onChange={(v) =>
+                        setPlacement((prev) => prev.map((b, j) => (j === i ? Number(v) : b)))
+                      }
+                      label={`Stage ${i + 1} plays in`}
+                    >
+                      {calendar.blocks.map((b, bi) => (
+                        <option key={b.id} value={String(bi)}>
+                          {`Block ${bi + 1} — ${b.label} · ${formatIsoDate(b.start)} → ${formatIsoDate(b.end)}`}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                ))}
+              </div>
+              <p style={HINT}>
+                Two stages in the same block play one after the other: the later one starts after
+                the earlier one finishes.
+              </p>
+            </>
+          )}
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <Btn
+              tone="teal"
+              size="sm"
+              onClick={() =>
+                onPick(instantiateTemplate(chosen, calendar, undefined, placement, defaults))
+              }
+            >
+              Use this template
+            </Btn>
           </div>
-        </button>
-      </div>
+        </div>
+      )}
 
-      <div style={{ ...SECTION, marginTop: 18 }}>Or start from a template</div>
-      <div style={{ display: 'grid', gap: 10 }}>
-        {STRUCTURE_TEMPLATES.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => onPick(instantiateTemplate(t, calendar))}
-            style={{
-              textAlign: 'left',
-              border: '1px solid var(--line)',
-              borderRadius: 10,
-              padding: '12px 14px',
-              background: 'var(--white, #fff)',
-              cursor: 'pointer',
-            }}
-          >
-            <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 3 }}>{t.name}</div>
-            <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5 }}>
-              {t.whenToUse}
-            </div>
-            <div style={{ fontSize: 11.5, color: 'var(--muted-2)', marginTop: 5 }}>
-              {t.stages.length} stage{t.stages.length === 1 ? '' : 's'} · {t.examples}
-            </div>
-          </button>
-        ))}
-      </div>
-
-      <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-        <Btn tone="ghost" onClick={onClose}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 16 }}>
+        <Btn
+          tone="outline"
+          size="sm"
+          icon={Icon.Plus}
+          onClick={() => onPick(blankStructure(calendar))}
+        >
+          Build from scratch
+        </Btn>
+        <Btn tone="outline" size="sm" onClick={() => setImporting(true)}>
+          Import JSON
+        </Btn>
+        <Btn tone="ghost" size="sm" onClick={onClose}>
           Cancel
         </Btn>
       </div>
@@ -2280,6 +2213,7 @@ export function StructuresCard({
   const [confirm, setConfirm] = useState<CompetitionStructure | null>(null);
   const structures = config.structures ?? [];
   const calendars = config.calendars ?? [];
+  const defaults = resolveCompetitionDefaults(config);
 
   /** Rebuild-and-PUT against the server's latest list — same guard as LeaguesCard. */
   async function saveStructures(
@@ -2381,11 +2315,16 @@ export function StructuresCard({
         <EmptyState
           icon={Icon.Shield}
           title="No structures yet"
-          sub="Most leagues are one flat round robin, but a split league or a pools-and-knockout needs a structure. Start from a template that matches how the league actually runs."
+          sub="Most leagues are one flat round robin, but a split league or groups-then-knockout needs a structure. Start from a template that matches how the league actually runs."
           action={
-            <Btn tone="teal" icon={Icon.Plus} onClick={() => setPicking(true)}>
-              Create your first structure
-            </Btn>
+            <>
+              <div className="empty-hsw">
+                <HowSeasonsWork />
+              </div>
+              <Btn tone="teal" icon={Icon.Plus} onClick={() => setPicking(true)}>
+                Create your first structure
+              </Btn>
+            </>
           }
         />
       ) : (
@@ -2465,6 +2404,7 @@ export function StructuresCard({
 
       {picking && (
         <Modal
+          eyebrow="Platform · Competition structures"
           title={
             <>
               Start a <em>structure</em>
@@ -2474,6 +2414,7 @@ export function StructuresCard({
         >
           <StartPicker
             calendars={calendars}
+            defaults={defaults}
             toast={toast}
             onPick={(s) => {
               setPicking(false);
@@ -2486,7 +2427,8 @@ export function StructuresCard({
 
       {editing && (
         <Modal
-          wide
+          eyebrow="Platform · Competition structures"
+          maxWidth={1040}
           title={
             <>
               Edit <em>structure</em>
@@ -2498,6 +2440,7 @@ export function StructuresCard({
             initial={editing}
             calendars={calendars}
             bindings={bindingsFor(editing.id)}
+            defaults={defaults}
             onSave={upsert}
             onClose={() => setEditing(null)}
             toast={toast}
@@ -2560,6 +2503,15 @@ export function StructuresCard({
 }
 
 /* ─── Competitions: binding a league to its format streams ─── */
+
+/**
+ * Structures not authored by an operator, listed apart in the competition picker so an
+ * operator can still bind one deliberately but never mistakes it for a library structure.
+ */
+const NON_OPERATOR_GROUPS = [
+  { source: 'quick-start', label: 'Created by admin quick start' },
+  { source: 'migration', label: 'Migrated flat seasons' },
+] as const;
 
 /**
  * A league's format streams. This is the join that lets Premier Men run T20 Pink Ball and
@@ -2684,11 +2636,26 @@ export function CompetitionsEditor({
               width={230}
             >
               <option value="">Structure…</option>
-              {structures.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
+              {structures
+                .filter((s) => s.source === undefined || s.source === 'operator')
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              {NON_OPERATOR_GROUPS.map(({ source, label }) => {
+                const inGroup = structures.filter((s) => s.source === source);
+                if (inGroup.length === 0) return null;
+                return (
+                  <optgroup key={source} label={label}>
+                    {inGroup.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                );
+              })}
             </Select>
             <Select
               value={c.calendarId}
@@ -2784,6 +2751,7 @@ export function CompetitionsModal({
 }) {
   return (
     <Modal
+      eyebrow="Platform · Competition structures"
       title={
         <>
           Competitions · <em>{league.label}</em>

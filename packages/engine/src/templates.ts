@@ -1,8 +1,10 @@
 /**
  * Starter structure templates.
  *
- * Four shapes cover all thirteen structures in the KZNCU and EMCU documents; the pools
- * shape ships twice, once per semi-final pairing, so there are five blueprints. An
+ * Four shapes cover all thirteen structures in the union documents the model was built from; the groups
+ * shape ships twice, once per semi-final pairing, and a one-off tournament covers the cup
+ * or festival outside the league season (it replaced the retired create-series form, ADR
+ * 0014), so there are six blueprints. An
  * operator clones one and tunes the parameters, or builds from scratch — a template is a
  * starting point, never a constraint (ADR 0008). `templateId` survives on the clone as
  * provenance only; nothing reads it back to constrain editing.
@@ -13,15 +15,15 @@
  * "group phase before the break, deciders after it" shape both unions use.
  */
 
-import type { CompetitionStructure, SeasonCalendar, StageSpec } from '../types';
-import { T20_SLOTS } from './calendar';
+import type { CompetitionStructure, SeasonCalendar, StageSpec } from './types';
+import { FALLBACK_TIME_SLOTS, type ResolvedCompetitionDefaults } from './defaults';
 
 export interface StructureTemplate {
   id: string;
   name: string;
   /** One line in the picker: when an operator should reach for this. */
   whenToUse: string;
-  /** Real leagues this shape came from, so the choice is recognisable. */
+  /** The kind of league this shape suits, described by its shape, never by a union's name. */
   examples: string;
   stages: StageSpec[];
 }
@@ -40,7 +42,7 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
     id: 'flat-round-robin',
     name: 'Flat round robin',
     whenToUse: 'Every registered side in one group, playing each other once.',
-    examples: 'EMCU Division 1 & 2, Promotion Women',
+    examples: 'A league of 8 to 12 sides that meets once each',
     stages: [
       {
         id: 'season',
@@ -48,7 +50,6 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
         format: { kind: 'round-robin', legs: 1 },
         entrants: { kind: 'all-registered' },
         schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
-        outcome: { champion: [1] },
       },
     ],
   },
@@ -57,7 +58,8 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
     name: 'Split league with mid-season swap',
     whenToUse:
       'Two groups play their own double round, then the bottom of the top group swaps with the top of the bottom group before a final round.',
-    examples: 'KZNCU Premier Men 50 Over, Premier Women 30 Over',
+    examples:
+      'A 12-side league split into a top and bottom half of six, with one swap before the final round',
     stages: [
       {
         id: 'double-round',
@@ -84,24 +86,25 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
         },
         schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
         groupLabels: ['Top group', 'Bottom group'],
-        outcome: { champion: [1], relegated: [-1] },
       },
     ],
   },
   {
     id: 'pools-to-knockout',
-    name: 'Seeded pools → cross-pool semis → final',
+    name: 'Seeded groups → cross-group semis → final',
     whenToUse:
-      'Seeded pools play a round robin, then the top finishers cross over into a knockout.',
-    examples: 'Every T20 Pink Ball competition — Premier Men, Premier Women, Promotion Men',
+      'Seeded groups play a round robin, then the top finishers cross over into a knockout.',
+    examples:
+      'A 12-side short-format league in two groups of six, top two of each into the semi-finals',
     stages: [
       {
         id: 'pools',
-        name: 'Pool stage',
+        name: 'Group stage',
         format: { kind: 'round-robin', legs: 1 },
         entrants: { kind: 'seeded-split', groups: { kind: 'even', count: 2 }, method: 'snake' },
-        // Every T20 Pink Ball competition plays a morning and an afternoon match per day.
-        schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, slots: T20_SLOTS },
+        // A short-format day plays a morning and an afternoon match. The static template
+        // carries the fallback slots; `instantiateTemplate` swaps in the tenant's own.
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, slots: [...FALLBACK_TIME_SLOTS] },
       },
       {
         id: 'finals',
@@ -112,28 +115,28 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
           derivedFrom: {
             rule: 'from-standings',
             fromStage: 'pools',
-            detail: 'Top two from each pool, paired across pools',
+            detail: 'Top two from each group, paired across groups',
             qualifiersPerGroup: 2,
           },
         },
-        schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, slots: T20_SLOTS },
-        outcome: { champion: [1] },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, slots: [...FALLBACK_TIME_SLOTS] },
       },
     ],
   },
   {
     // The same shape with the other semi-final pairing. Unions go either way season to
-    // season (EMCU Division 1 30 Over), so both are one click from the picker rather than
+    // season, so both are one click from the picker rather than
     // one being a hand-edit of the other.
     id: 'pools-to-knockout-within',
-    name: 'Seeded pools → within-group semis → final',
+    name: 'Seeded groups → within-group semis → final',
     whenToUse:
-      'Seeded pools play a round robin, then each pool’s top two play their own semi-final and the winners meet in the final.',
-    examples: 'EMCU Division 1 30 Over — ten teams in two pools of five',
+      'Seeded groups play a round robin, then each group’s top two play their own semi-final and the winners meet in the final.',
+    examples:
+      'A 10-side league in two groups of five, each group’s top two playing their own semi-final',
     stages: [
       {
         id: 'pools',
-        name: 'Pool stage',
+        name: 'Group stage',
         format: { kind: 'round-robin', legs: 1 },
         entrants: { kind: 'seeded-split', groups: { kind: 'even', count: 2 }, method: 'snake' },
         schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
@@ -147,12 +150,12 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
           derivedFrom: {
             rule: 'from-standings',
             fromStage: 'pools',
-            detail: 'Top two from each pool; each pool plays its own semi-final (A1 v A2, B1 v B2)',
+            detail:
+              'Top two from each group; each group plays its own semi-final (A1 v A2, B1 v B2)',
             qualifiersPerGroup: 2,
           },
         },
         schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
-        outcome: { champion: [1] },
       },
     ],
   },
@@ -161,7 +164,8 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
     name: 'Stream + knockout cup',
     whenToUse:
       'Two streams play a round robin; the lower stream then contests a straight knockout cup.',
-    examples: 'KZNCU Promotion Men — 50 Over streams and the Hollywoodbets Kingsmead Cup',
+    examples:
+      'Two streams of a 20-side league, the lower stream then playing a 9-side knockout cup',
     stages: [
       {
         id: 'streams',
@@ -184,7 +188,26 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
           },
         },
         schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
-        outcome: { champion: [1] },
+      },
+    ],
+  },
+  {
+    // The one-off event that used to go through the retired create-series form. Sides are
+    // picked by the admin on Confirm entrants; the seeded knockout takes their order as
+    // the seed line, and `spread` places the rounds evenly across whatever dates the
+    // admin gives it (a weekend, a fortnight).
+    id: 'one-off-tournament',
+    name: 'One-off tournament',
+    whenToUse:
+      'A cup or festival outside the league season: pick the sides, get a seeded knockout.',
+    examples: 'A club’s invitation weekend, a mid-season cup day',
+    stages: [
+      {
+        id: 'tournament',
+        name: 'Tournament',
+        format: { kind: 'knockout', pairing: 'seeded' },
+        entrants: { kind: 'manual' },
+        schedule: { blockIndex: 0, cadence: { kind: 'spread' } },
       },
     ],
   },
@@ -201,9 +224,9 @@ export function findTemplate(id: string): StructureTemplate | undefined {
  * before the mid-season break, deciders after it — and an operator who wants otherwise
  * just changes the dropdown.
  *
- * Shared by `instantiateTemplate` (mapping at pick time) and the season wizard's step-0
- * Continue handler (re-mapping a held NEW structure if the operator goes back and changes
- * the calendar's block count after picking a template) — one rule, so the two can't drift.
+ * The same rule as `defaultPlacement`, per stage. Kept for callers that place one stage
+ * at a time; `defaultPlacement` is what `instantiateTemplate` and the season wizard use,
+ * and an operator's explicit "plays in" choice overrides both.
  */
 export function templateBlockIndexForStage(
   i: number,
@@ -216,37 +239,79 @@ export function templateBlockIndexForStage(
   return i === 0 ? 0 : second;
 }
 
-/** Clone a template into an editable structure bound to a real calendar. */
+/**
+ * The block each of a template's stages plays in when the operator hasn't said: the
+ * `templateBlockIndexForStage` rule over a calendar of `blockCount` blocks. It is the
+ * PREFILL for the "plays in" choice, never a decision made on the operator's behalf.
+ */
+export function defaultPlacement(template: StructureTemplate, blockCount: number): number[] {
+  const second = blockCount > 1 ? 1 : 0;
+  return template.stages.map((_, i) => (i === 0 ? 0 : second));
+}
+
+/**
+ * Put each stage in its block and keep chaining consistent with the result: a stage in
+ * the same block as the stage before it gets `startAfter: 'previous-stage'` (otherwise
+ * both would date from the block start and overlap); any other stage has the key removed,
+ * because validation rejects a chained stage with no earlier stage in its block.
+ *
+ * Only `blockIndex` and `startAfter` change — every other schedule field is kept.
+ */
+export function applyPlacement(stages: StageSpec[], placement: number[]): StageSpec[] {
+  return stages.map((stage, i) => {
+    const blockIndex = placement[i] ?? stage.schedule.blockIndex;
+    const prev = i > 0 ? (placement[i - 1] ?? stages[i - 1].schedule.blockIndex) : undefined;
+    const { startAfter: _startAfter, ...rest } = stage.schedule;
+    void _startAfter;
+    return {
+      ...stage,
+      schedule: {
+        ...rest,
+        blockIndex,
+        ...(i > 0 && blockIndex === prev ? { startAfter: 'previous-stage' as const } : {}),
+      },
+    };
+  });
+}
+
+/**
+ * Clone a template into an editable structure bound to a real calendar.
+ *
+ * `placement` (one block position per stage) is the operator's explicit choice and wins
+ * when given; without it the stages take `defaultPlacement`. Either way stages sharing a
+ * block with the stage before them are chained (`applyPlacement`).
+ */
 export function instantiateTemplate(
   template: StructureTemplate,
   calendar: SeasonCalendar | undefined,
   name?: string,
+  placement?: number[],
+  /**
+   * The tenant's resolved defaults (`resolveCompetitionDefaults`). A stage the template
+   * gives set start times takes the tenant's `timeSlots` instead of the fallback ones.
+   */
+  defaults?: Pick<ResolvedCompetitionDefaults, 'timeSlots'>,
 ): CompetitionStructure {
+  const placed = defaultPlacement(template, calendar?.blocks?.length ?? 0);
+  const blocks = template.stages.map((_, i) => placement?.[i] ?? placed[i]);
+  const tenantSlots = defaults?.timeSlots?.length ? defaults.timeSlots : undefined;
+  const copies = template.stages.map((stage) => ({
+    ...stage,
+    schedule: {
+      ...stage.schedule,
+      // Fresh copies, and only when the template has slots at all — never an explicit
+      // `slots: undefined` key (the whole branch omits the key to mean "no set times").
+      ...(stage.schedule.slots
+        ? { slots: (tenantSlots ?? stage.schedule.slots).map((s) => ({ ...s })) }
+        : {}),
+    },
+  }));
   return {
     id: newStructureId(),
     name: name?.trim() || template.name,
     version: 1,
     templateId: template.id,
-    stages: template.stages.map((stage, i) => {
-      const blockIndex = templateBlockIndexForStage(i, calendar);
-      return {
-        ...stage,
-        schedule: {
-          ...stage.schedule,
-          blockIndex,
-          // A single-block calendar lands every stage in block 0, where an unchained
-          // later stage would overlap the one before it (dates always count from the
-          // block start). Chain it instead; with two blocks the stages are already
-          // separated and the key is omitted.
-          ...(i > 0 && blockIndex === templateBlockIndexForStage(i - 1, calendar)
-            ? { startAfter: 'previous-stage' as const }
-            : {}),
-          // Fresh copies, and only when the template has slots at all — never an explicit
-          // `slots: undefined` key (the whole branch omits the key to mean "no set times").
-          ...(stage.schedule.slots ? { slots: stage.schedule.slots.map((s) => ({ ...s })) } : {}),
-        },
-      };
-    }),
+    stages: applyPlacement(copies, blocks),
   };
 }
 

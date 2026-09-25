@@ -5,6 +5,9 @@ import { createPortal } from 'react-dom';
 import type { ReactNode, CSSProperties, ComponentType, ButtonHTMLAttributes } from 'react';
 import { scoreCQI, cqiBand } from './cqiScore';
 import type { Club } from './types';
+import { HelpLink } from './help/HelpDrawer';
+import { useFocusTrap } from './useFocusTrap';
+import { FIELD_GUIDES, type FieldGuideId } from './help/field-guides';
 
 /* ─── Icons (inline, no external deps) ─── */
 export const Icon = {
@@ -835,6 +838,102 @@ export function useNestedEscapeClose(onClose: () => void) {
 }
 
 /**
+ * The one modal shell. Every console dialog renders through it so they share the
+ * `.task-modal*` look and the same accessibility behaviour:
+ * - `role="dialog"` + `aria-modal`, named by the visible title (or `labelledBy`, when the
+ *   caller renders its own heading) — without a role a dialog is an ordinary div to
+ *   assistive tech: nothing announces it opened and nothing scopes the reading order;
+ * - Escape closes;
+ * - Tab and Shift+Tab cycle inside the dialog (`useFocusTrap`, shared with the help drawer);
+ * - focus moves into the dialog on open (unless a child already took it, e.g. `autoFocus`)
+ *   and returns to whatever had it when the dialog closes;
+ * - a click on the backdrop closes, unless `dismissable={false}` (a form that must not lose
+ *   its input to a stray click).
+ *
+ * Portalled to document.body so the fixed backdrop centres on the viewport, not on the
+ * residual transform the fadeUp animation leaves on `.main > *`. The help drawer's
+ * backdrop sits above it (z-index 1100 vs 900), so help opens over any modal.
+ */
+export function Modal({
+  eyebrow,
+  title,
+  onClose,
+  maxWidth,
+  children,
+  footer,
+  labelledBy,
+  dismissable = true,
+  closeLabel = 'Close',
+}: {
+  eyebrow?: ReactNode;
+  title: ReactNode;
+  onClose: () => void;
+  /** Caps the dialog's width in px; absent ⇒ the stylesheet's full width. */
+  maxWidth?: number;
+  children?: ReactNode;
+  /** Pinned below the scrolling body — for actions that must stay in view. */
+  footer?: ReactNode;
+  /** Id of an element that names the dialog, in place of the built-in title. */
+  labelledBy?: string;
+  /** False ⇒ a backdrop click does not close. Escape and the close button still do. */
+  dismissable?: boolean;
+  /** Tooltip on the close button. */
+  closeLabel?: string;
+}) {
+  useEscapeClose(onClose);
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, true);
+  // Read during the first render, before any child's autoFocus runs, so it is the element
+  // that opened the dialog rather than something inside it.
+  const restoreTo = useRef<Element | null>(
+    typeof document !== 'undefined' ? document.activeElement : null,
+  );
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.contains(document.activeElement)) dialog.focus();
+    const opener = restoreTo.current;
+    return () => {
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+    };
+  }, []);
+  const style: CSSProperties = {};
+  if (maxWidth) style.maxWidth = maxWidth;
+  if (footer) style.gridTemplateRows = 'auto 1fr auto';
+  return createPortal(
+    <div
+      className="task-modal-backdrop"
+      onClick={(e) => dismissable && e.target === e.currentTarget && onClose()}
+    >
+      <div
+        ref={dialogRef}
+        className="task-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={labelledBy ?? titleId}
+        tabIndex={-1}
+        style={style}
+      >
+        <div className="task-modal-head">
+          <div className="task-modal-head-text">
+            {eyebrow && <div className="task-modal-head-eyebrow">{eyebrow}</div>}
+            <div className="task-modal-head-title" id={titleId}>
+              {title}
+            </div>
+          </div>
+          <button className="task-modal-close" onClick={onClose} title={closeLabel}>
+            <Icon.X />
+          </button>
+        </div>
+        <div className="task-modal-body">{children}</div>
+        {footer && <div className="task-modal-foot">{footer}</div>}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/**
  * Horizontal-scroll wrapper with an edge fade + "scroll for more" affordance, shown only
  * while columns are off-screen. Wrap a `<table>` INSIDE its `.tbl-w` so wide tables — the
  * compliance docs tracker, the season viewer's 11-column schedule — scroll with a visible
@@ -1034,17 +1133,22 @@ export function Field({
  * listens on window in the bubble phase, so a capture-phase listener here fires
  * first and calls stopImmediatePropagation — the modal never sees the key.
  */
-// Module-level single-open latch: opening one dot closes any other. A stale
-// closer just no-ops on an already-closed dot, so we never need to clear it.
+// Module-level single-open latch, shared by every InfoDot (and InfoTip, which is the
+// same component): opening one closes any other. Each instance clears the latch only
+// while it still holds it, so the next dot never calls a closed or unmounted one.
 let closeActiveInfoDot: (() => void) | null = null;
 
 export function InfoDot({
   title,
+  label,
   options,
   children,
   align = 'start',
 }: {
+  /** Shown as the popover's heading, and the button's name when `label` is unset. */
   title?: string;
+  /** The button's accessible name, with no popover heading (the InfoTip usage). */
+  label?: string;
   options?: Array<{ label: string; desc: ReactNode; eg?: ReactNode }>;
   children?: ReactNode;
   align?: 'start' | 'end';
@@ -1058,6 +1162,8 @@ export function InfoDot({
   } | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
+  const popId = useId();
+  const closeSelfRef = useRef<(() => void) | null>(null);
 
   const place = () => {
     const b = btnRef.current?.getBoundingClientRect();
@@ -1106,6 +1212,19 @@ export function InfoDot({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  // Release the latch whenever this dot closes by any route (outside click, Escape,
+  // blur) or unmounts — but only while this dot still holds it.
+  useEffect(() => {
+    if (open) return;
+    if (closeActiveInfoDot === closeSelfRef.current) closeActiveInfoDot = null;
+  }, [open]);
+  useEffect(
+    () => () => {
+      if (closeActiveInfoDot === closeSelfRef.current) closeActiveInfoDot = null;
+    },
+    [],
+  );
+
   const toggle = (e: React.MouseEvent) => {
     // The dot often sits inside a <label>; stop the click reaching it, or opening
     // help would also toggle the label's checkbox/radio.
@@ -1116,18 +1235,31 @@ export function InfoDot({
       return;
     }
     if (closeActiveInfoDot) closeActiveInfoDot();
-    closeActiveInfoDot = () => setOpen(false);
+    const close = () => setOpen(false);
+    closeSelfRef.current = close;
+    closeActiveInfoDot = close;
     setOpen(true);
   };
 
+  // Keyboard users tabbing away close the popover. Only when focus lands on another
+  // element: a click on the popover's own text blurs to <body>, and the outside-click
+  // listener already handles real outside clicks.
+  const onBlur = (e: React.FocusEvent) => {
+    const next = e.relatedTarget as Node | null;
+    if (!next) return;
+    if (btnRef.current?.contains(next) || popRef.current?.contains(next)) return;
+    setOpen(false);
+  };
+
   return (
-    <span className="info-wrap">
+    <span className="info-wrap" onBlur={onBlur}>
       <button
         ref={btnRef}
         type="button"
         className="info-dot"
-        aria-label={title ?? 'What this means'}
+        aria-label={label ?? title ?? 'What this means'}
         aria-expanded={open}
+        aria-describedby={open ? popId : undefined}
         onClick={toggle}
       >
         <Icon.Info />
@@ -1137,6 +1269,7 @@ export function InfoDot({
         createPortal(
           <div
             ref={popRef}
+            id={popId}
             className="info-pop"
             role="tooltip"
             style={{
@@ -1165,6 +1298,209 @@ export function InfoDot({
           document.body,
         )}
     </span>
+  );
+}
+
+/* ─── Explainer components (season setup) ─── */
+
+export interface OptionCard<T extends string> {
+  value: T;
+  title: string;
+  /** One line: what choosing this does. */
+  desc: string;
+  /** A concrete example, shown as "e.g. …". */
+  eg?: string;
+  disabled?: boolean;
+  /** Why this option can't be picked right now. Shown on the card. */
+  disabledReason?: string;
+}
+
+/**
+ * A radio group drawn as cards: each card is a <label> around a real radio input, so
+ * clicking anywhere on the card selects it and arrow keys move the selection exactly as
+ * native radios do. The input is visually hidden but stays focusable; the card shows the
+ * focus ring.
+ */
+export function OptionCards<T extends string>({
+  name,
+  value,
+  onChange,
+  options,
+  columns = 2,
+  compact,
+  label,
+}: {
+  name: string;
+  value: T | null | undefined;
+  onChange: (value: T) => void;
+  options: OptionCard<T>[];
+  columns?: number;
+  /** Tighter cards with no example line. */
+  compact?: boolean;
+  /** Accessible name for the group. */
+  label?: string;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label={label}
+      className={`opt-cards${compact ? ' compact' : ''}`}
+      style={{ '--opt-cols': columns } as CSSProperties}
+    >
+      {options.map((o) => {
+        const selected = o.value === value;
+        const cls = ['opt-card', selected && 'is-selected', o.disabled && 'is-disabled']
+          .filter(Boolean)
+          .join(' ');
+        return (
+          <label key={o.value} className={cls}>
+            <input
+              type="radio"
+              className="opt-card-input"
+              name={name}
+              value={o.value}
+              checked={selected}
+              disabled={o.disabled}
+              onChange={() => onChange(o.value)}
+            />
+            <span className="opt-card-title">{o.title}</span>
+            <span className="opt-card-desc">{o.desc}</span>
+            {o.eg && !compact && <span className="opt-card-eg">e.g. {o.eg}</span>}
+            {o.disabled && o.disabledReason && (
+              <span className="opt-card-reason">{o.disabledReason}</span>
+            )}
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+const HSW_PIPELINE = ['Competition', 'Season', 'Stage', 'Group', 'Fixtures'];
+
+const HSW_IDEAS: Array<{ title: string; text: string }> = [
+  {
+    title: 'A league is not a competition',
+    text: 'A league holds one or more competitions, each a format stream with its own shape and dates, so the same clubs can play a T20 in groups and a 50-over league in two halves.',
+  },
+  {
+    title: 'A competition is a pipeline of stages',
+    text: 'Each stage is one phase of play and answers three questions: who plays, who plays whom, and when.',
+  },
+  {
+    title: 'One group becomes one series',
+    text: 'When a stage generates, each group becomes an ordinary series, so approving, releasing and broadcasts work exactly as they always have.',
+  },
+  {
+    title: 'Standings are typed by a human, on purpose',
+    text: 'The platform records no results, so a stage that depends on finishing order stops, quotes its rule and waits for the administrator to type the positions.',
+  },
+];
+
+/** The four ideas behind season setup, from Part One of the league structures guide. */
+export function HowSeasonsWork({ compact }: { compact?: boolean }) {
+  const strip = (
+    <ol className="hsw-pipeline" aria-label="How a season is put together">
+      {HSW_PIPELINE.map((n) => (
+        <li key={n} className="hsw-node">
+          {n}
+        </li>
+      ))}
+    </ol>
+  );
+  if (compact) {
+    return (
+      <section className="hsw compact">
+        {strip}
+        <p className="hsw-summary">
+          A competition is a pipeline of stages; each stage plays in one block, and each of its
+          groups becomes one series of fixtures. <HelpLink topic="blocks-vs-stages" />
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section className="hsw">
+      {strip}
+      <div className="hsw-ideas">
+        {HSW_IDEAS.map((idea) => (
+          <div key={idea.title} className="hsw-idea">
+            <h4>{idea.title}</h4>
+            <p>{idea.text}</p>
+          </div>
+        ))}
+      </div>
+      <p className="hsw-summary">
+        The operator builds the shape once. The administrator runs the season through it every year.
+      </p>
+    </section>
+  );
+}
+
+export interface StatusStep {
+  label: string;
+  state: 'done' | 'current' | 'todo';
+  hint?: string;
+}
+
+const STATUS_WORD: Record<StatusStep['state'], string> = {
+  done: 'done',
+  current: 'current',
+  todo: 'not started',
+};
+
+/** Where something is in its lifecycle: dots joined by a line, the current one ringed. */
+export function StatusTimeline({ steps }: { steps: StatusStep[] }) {
+  const summary = steps.map((s) => `${s.label}: ${STATUS_WORD[s.state]}`).join(', ');
+  return (
+    <ol className="status-tl" aria-label={summary}>
+      {steps.map((s) => (
+        <li
+          key={s.label}
+          className={`status-tl-step is-${s.state}`}
+          aria-current={s.state === 'current' ? 'step' : undefined}
+        >
+          <span className="status-tl-dot" aria-hidden="true" />
+          <span className="status-tl-label">{s.label}</span>
+          {s.state === 'current' && s.hint && <span className="status-tl-hint">{s.hint}</span>}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** A numbered "what happens next" strip. Wraps onto several lines on phones. */
+export function NextSteps({ steps }: { steps: Array<{ title: string; desc: string }> }) {
+  return (
+    <ol className="next-steps">
+      {steps.map((s, i) => (
+        <li key={s.title} className="next-steps-step">
+          <span className="next-steps-num" aria-hidden="true">
+            {i + 1}
+          </span>
+          <span className="next-steps-text">
+            <span className="next-steps-title">{s.title}</span>
+            <span className="next-steps-desc">{s.desc}</span>
+          </span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** The explainer for one form field, placed under the field. */
+export function FieldGuide({ id }: { id: FieldGuideId }) {
+  const g = (FIELD_GUIDES as Record<string, (typeof FIELD_GUIDES)[FieldGuideId] | undefined>)[id];
+  if (!g) return null;
+  return (
+    <div className="field-guide">
+      <p>{g.meaning}</p>
+      <p>
+        <span className="field-guide-k">Used for:</span> {g.howUsed}
+      </p>
+      <p className="field-guide-eg">e.g. {g.example}</p>
+      {g.convention && <span className="field-guide-conv">{g.convention}</span>}
+    </div>
   );
 }
 

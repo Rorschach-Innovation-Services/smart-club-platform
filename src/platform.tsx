@@ -18,17 +18,19 @@ import { queryClient, qk } from './query';
 import * as api from './api';
 import { ApiError, EMAIL_RE } from './api';
 import { resolveCopy } from './branding';
-import { Icon, Pill, Btn, Card, EmptyState, useToast, useEscapeClose } from './atoms';
+import { Icon, Pill, Btn, Card, EmptyState, Modal, useToast } from './atoms';
 import { LeagueForm } from './admin';
 import { DISTRICTS } from './data';
-import { OVERARCHING_DISTRICT } from './leagues';
+import { OVERARCHING_DISTRICT } from '../packages/engine/src/leagues';
 import { InsightsBreakdown, LeagueTeamDirectoryCard, DemographicsCard } from './insights';
 import { CalendarsCard } from './platform-calendars';
 import { formatDayYear, formatStampDay } from './dates';
 import { StructuresCard, CompetitionsModal } from './platform-structures';
 import { SeasonSetupWizard } from './platform-season-wizard';
+import { HelpLink, HelpProvider } from './help/HelpDrawer';
 import { TutorialsCard } from './platform-tutorials';
 import { RequiredDocsCard } from './platform-required-docs';
+import { CompetitionDefaultsCard } from './competition-defaults';
 import { DocIntakeWizard } from './platform-intake';
 import { StructureIntakeWizard } from './platform-structure-intake';
 import { RosterIntakeWizard } from './platform-roster-intake';
@@ -342,121 +344,128 @@ export function PlatformPortal({
   const path = location.pathname;
   const onClients = path === '/platform' || path.startsWith('/platform/tenants');
 
+  // One help drawer for the whole operator portal, so a HelpLink in any card, modal or
+  // wizard opens it in place rather than falling back to a new tab.
   return (
-    <div data-screen-label="Platform · operator">
-      <header className="app-header">
-        <span className="h-sub" style={{ color: '#fff', fontWeight: 700 }}>
-          Smart Club Platform
-        </span>
-        <div className="h-divider" />
-        <span className="h-sub">Operator console</span>
-        <div className="h-spacer" />
-        <button className="h-switch" onClick={signOutUser} title="Sign out">
-          <svg viewBox="0 0 16 16" fill="none">
-            <path
-              d="M9 2H4a1 1 0 00-1 1v10a1 1 0 001 1h5"
-              stroke="currentColor"
-              strokeWidth="1.4"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            <path
-              d="M11 5l3 3-3 3M7 8h7"
-              stroke="currentColor"
-              strokeWidth="1.4"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-          Sign out
-        </button>
-        <div className="h-user">
-          <div className="h-avatar" style={{ background: 'var(--gold)', color: 'var(--ink)' }}>
-            {(userEmail || 'OP').slice(0, 2).toUpperCase()}
+    <HelpProvider>
+      <div data-screen-label="Platform · operator">
+        <header className="app-header">
+          <span className="h-sub" style={{ color: '#fff', fontWeight: 700 }}>
+            Smart Club Platform
+          </span>
+          <div className="h-divider" />
+          <span className="h-sub">Operator console</span>
+          <div className="h-spacer" />
+          <button className="h-switch" onClick={signOutUser} title="Sign out">
+            <svg viewBox="0 0 16 16" fill="none">
+              <path
+                d="M9 2H4a1 1 0 00-1 1v10a1 1 0 001 1h5"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <path
+                d="M11 5l3 3-3 3M7 8h7"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Sign out
+          </button>
+          <div className="h-user">
+            <div className="h-avatar" style={{ background: 'var(--gold)', color: 'var(--ink)' }}>
+              {(userEmail || 'OP').slice(0, 2).toUpperCase()}
+            </div>
+            <div>
+              <div className="h-user-name">{userEmail || 'Operator'}</div>
+              <div className="h-user-role">Platform · Operator</div>
+            </div>
           </div>
-          <div>
-            <div className="h-user-name">{userEmail || 'Operator'}</div>
-            <div className="h-user-role">Platform · Operator</div>
-          </div>
+        </header>
+
+        <div className="shell">
+          <aside className="nav">
+            <div className="nav-section">Platform</div>
+            <button
+              className={`nav-item ${onClients ? 'active' : ''}`}
+              onClick={() => navigate('/platform')}
+            >
+              <span className="ni-icon">
+                <Icon.Clubs />
+              </span>
+              <span className="ni-label">Clients</span>
+            </button>
+            <button
+              className={`nav-item ${path === '/platform/new' ? 'active' : ''}`}
+              onClick={() => navigate('/platform/new')}
+            >
+              <span className="ni-icon">
+                <Icon.Plus />
+              </span>
+              <span className="ni-label">New client</span>
+            </button>
+
+            {hasTenantConsole && (
+              <>
+                <div className="nav-section" style={{ marginTop: 18 }}>
+                  Workspace
+                </div>
+                <button className="nav-item" onClick={() => navigate('/')}>
+                  <span className="ni-icon">
+                    <Icon.Dashboard />
+                  </span>
+                  <span className="ni-label">Tenant console</span>
+                </button>
+              </>
+            )}
+
+            <div className="nav-footer">
+              <strong>Smart Club Platform</strong> · Operator
+              <br />
+              <span style={{ color: 'var(--muted-3)' }}>Powered by Medicoach</span>
+            </div>
+          </aside>
+
+          <main className="main">
+            <Routes>
+              <Route path="/platform" element={<TenantListPage />} />
+              <Route path="/platform/new" element={<CreateTenantWizard toast={toastShow} />} />
+              <Route
+                path="/platform/tenants/:slug"
+                element={<TenantEditPage toast={toastShow} />}
+              />
+              <Route
+                path="/platform/tenants/:slug/doc-intake"
+                element={<DocIntakeWizard toast={toastShow} />}
+              />
+              <Route
+                path="/platform/tenants/:slug/structure-intake"
+                element={<StructureIntakeWizard toast={toastShow} />}
+              />
+              <Route
+                path="/platform/tenants/:slug/roster-intake"
+                element={<RosterIntakeWizard toast={toastShow} />}
+              />
+              <Route path="/platform/tenants/:slug/reps" element={<RepsPage toast={toastShow} />} />
+              <Route
+                path="/platform/tenants/:slug/onboarding"
+                element={<OnboardingPage toast={toastShow} />}
+              />
+              <Route path="/platform/tenants/:slug/overview" element={<TenantOverviewPage />} />
+              <Route
+                path="/platform/tenants/:slug/overview/leagues/:leagueKey"
+                element={<TenantLeaguePage />}
+              />
+              <Route path="*" element={<Navigate to="/platform" replace />} />
+            </Routes>
+          </main>
         </div>
-      </header>
-
-      <div className="shell">
-        <aside className="nav">
-          <div className="nav-section">Platform</div>
-          <button
-            className={`nav-item ${onClients ? 'active' : ''}`}
-            onClick={() => navigate('/platform')}
-          >
-            <span className="ni-icon">
-              <Icon.Clubs />
-            </span>
-            <span className="ni-label">Clients</span>
-          </button>
-          <button
-            className={`nav-item ${path === '/platform/new' ? 'active' : ''}`}
-            onClick={() => navigate('/platform/new')}
-          >
-            <span className="ni-icon">
-              <Icon.Plus />
-            </span>
-            <span className="ni-label">New client</span>
-          </button>
-
-          {hasTenantConsole && (
-            <>
-              <div className="nav-section" style={{ marginTop: 18 }}>
-                Workspace
-              </div>
-              <button className="nav-item" onClick={() => navigate('/')}>
-                <span className="ni-icon">
-                  <Icon.Dashboard />
-                </span>
-                <span className="ni-label">Tenant console</span>
-              </button>
-            </>
-          )}
-
-          <div className="nav-footer">
-            <strong>Smart Club Platform</strong> · Operator
-            <br />
-            <span style={{ color: 'var(--muted-3)' }}>Powered by Medicoach</span>
-          </div>
-        </aside>
-
-        <main className="main">
-          <Routes>
-            <Route path="/platform" element={<TenantListPage />} />
-            <Route path="/platform/new" element={<CreateTenantWizard toast={toastShow} />} />
-            <Route path="/platform/tenants/:slug" element={<TenantEditPage toast={toastShow} />} />
-            <Route
-              path="/platform/tenants/:slug/doc-intake"
-              element={<DocIntakeWizard toast={toastShow} />}
-            />
-            <Route
-              path="/platform/tenants/:slug/structure-intake"
-              element={<StructureIntakeWizard toast={toastShow} />}
-            />
-            <Route
-              path="/platform/tenants/:slug/roster-intake"
-              element={<RosterIntakeWizard toast={toastShow} />}
-            />
-            <Route path="/platform/tenants/:slug/reps" element={<RepsPage toast={toastShow} />} />
-            <Route
-              path="/platform/tenants/:slug/onboarding"
-              element={<OnboardingPage toast={toastShow} />}
-            />
-            <Route path="/platform/tenants/:slug/overview" element={<TenantOverviewPage />} />
-            <Route
-              path="/platform/tenants/:slug/overview/leagues/:leagueKey"
-              element={<TenantLeaguePage />}
-            />
-            <Route path="*" element={<Navigate to="/platform" replace />} />
-          </Routes>
-        </main>
+        {toastNode}
       </div>
-      {toastNode}
-    </div>
+    </HelpProvider>
   );
 }
 
@@ -751,6 +760,18 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           save={save}
           toast={toast}
         />
+        {/* The season library: leagues, the calendars they play on and the structures they
+            play through. The wizard writes all three; these cards are where they're kept. */}
+        <div className="library-head">
+          <div>
+            <h2 className="library-title">Library</h2>
+            <p className="library-desc">
+              Everything the season wizard creates lives here. Come back to extend a calendar
+              mid-season, edit a structure stage by stage, or fix a single binding.
+            </p>
+          </div>
+          <HelpLink topic="structure-versions-and-rebase" />
+        </div>
         <div id="setup-leagues">
           <LeaguesCard
             key={`lg-${config.tenant}`}
@@ -779,6 +800,18 @@ function TenantEditPage({ toast }: { toast: Toast }) {
             key={`str-${config.tenant}`}
             slug={slug}
             config={config}
+            save={save}
+            toast={toast}
+          />
+        </div>
+        {/* The union's own answers to what the platform used to hard-code (ADR 0014). Read
+            by the season forms, the structure editor, the travel estimates and the clash
+            check, so it sits with the library it feeds. */}
+        <div id="setup-competition-defaults">
+          <CompetitionDefaultsCard
+            key={`cd-${config.tenant}`}
+            config={config}
+            fetchLatest={() => api.platformGetTenant(slug)}
             save={save}
             toast={toast}
           />
@@ -867,7 +900,7 @@ function OnboardingCard({
             size="sm"
             onClick={() => navigate(`/platform/tenants/${slug}/structure-intake`)}
           >
-            Structure
+            Team entries import
           </Btn>
           <Btn
             tone="outline"
@@ -1693,37 +1726,6 @@ function ClubDirectoryCard({
   );
 }
 
-/** Modal host for LeagueForm — main.tsx's TaskModal is private (and importing it
- *  would create a cycle), so this reuses the same global task-modal classes. */
-function LeagueModal({
-  title,
-  onClose,
-  children,
-}: {
-  title: ReactNode;
-  onClose: () => void;
-  children?: ReactNode;
-}) {
-  useEscapeClose(onClose);
-  return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="task-modal narrow">
-        <div className="task-modal-head">
-          <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Platform · League catalogue</div>
-            <div className="task-modal-head-title">{title}</div>
-          </div>
-          <button className="task-modal-close" onClick={onClose} title="Close">
-            <Icon.X />
-          </button>
-        </div>
-        <div className="task-modal-body">{children}</div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
 function LeaguesCard({
   slug,
   config,
@@ -1875,7 +1877,9 @@ function LeaguesCard({
       )}
 
       {form && (
-        <LeagueModal
+        <Modal
+          eyebrow="Platform · League catalogue"
+          maxWidth={820}
           title={
             form !== 'new' ? (
               <>
@@ -1900,7 +1904,7 @@ function LeaguesCard({
             onClose={() => setForm(null)}
             toast={toast}
           />
-        </LeagueModal>
+        </Modal>
       )}
 
       {competitionsFor && (

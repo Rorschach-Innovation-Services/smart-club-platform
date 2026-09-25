@@ -10,9 +10,8 @@ import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
 import type { Club } from '../src/types.js';
 
-const { parseReleaseWorkbook, splitPromotionT20, releaseDate } = await import(
-  '../src/import-planb-fixtures.js'
-);
+const { parseReleaseWorkbook, splitPromotionT20, releaseDate } =
+  await import('../src/import-planb-fixtures.js');
 
 // ── cell + workbook builders (mirror import-planb.test.ts's helpers) ──
 const dateCell = (y: number, m: number, d: number): Date => new Date(Date.UTC(y, m - 1, d));
@@ -203,7 +202,10 @@ describe('splitPromotionT20 — group split by prod participants + dense round r
   }
   const prodSeries = [
     { id: 's-planb-promotion-men-t20-g1', participants: [{ teamId: 'alpha' }, { teamId: 'beta' }] },
-    { id: 's-planb-promotion-men-t20-g2', participants: [{ teamId: 'gamma' }, { teamId: 'delta' }] },
+    {
+      id: 's-planb-promotion-men-t20-g2',
+      participants: [{ teamId: 'gamma' }, { teamId: 'delta' }],
+    },
   ];
   // Combined section: two g1 pairs (across two dates) + one g2 pair. Sheet weeks are noisy
   // (7, 3) so the dense (date,time) renumber is what's actually under test.
@@ -218,9 +220,30 @@ describe('splitPromotionT20 — group split by prod participants + dense round r
     },
     skippedRows: [],
     fixtures: [
-      { round: 7, date: '2026-10-11', time: '09:00', homeName: 'Beta', awayName: 'Alpha', venue: 'V2' },
-      { round: 3, date: '2026-10-04', time: '09:00', homeName: 'Alpha', awayName: 'Beta', venue: 'V1' },
-      { round: 5, date: '2026-10-04', time: '09:00', homeName: 'Gamma', awayName: 'Delta', venue: 'V3' },
+      {
+        round: 7,
+        date: '2026-10-11',
+        time: '09:00',
+        homeName: 'Beta',
+        awayName: 'Alpha',
+        venue: 'V2',
+      },
+      {
+        round: 3,
+        date: '2026-10-04',
+        time: '09:00',
+        homeName: 'Alpha',
+        awayName: 'Beta',
+        venue: 'V1',
+      },
+      {
+        round: 5,
+        date: '2026-10-04',
+        time: '09:00',
+        homeName: 'Gamma',
+        awayName: 'Delta',
+        venue: 'V3',
+      },
     ],
   };
 

@@ -447,4 +447,37 @@ describe('release clash gate', () => {
     assert.equal((await patchRelease('s-gate-junk', 1)).status, 200);
     assert.equal((await patchRelease('s-gate-junk2', 1)).status, 200);
   });
+
+  test('a tenant-configured venue alias joins two spellings onto one ground (ADR 0014)', async () => {
+    // "Riverside Bowl" and "Riverside Oval" normalise apart, so without the tenant's alias
+    // these two fixtures sit on different ledger rows and both would release.
+    const fx = (home: string, away: string, venueName: string) => [
+      { id: 'f1', round: 1, date: '2026-11-15', time: '09:00', home, away, venueName },
+    ];
+    await repo.putSeries(
+      'dolphins',
+      series('s-gate-alias-a', { fixtures: fx('home-club', 'away-club', 'Riverside Oval') }),
+    );
+    await repo.putSeries(
+      'dolphins',
+      series('s-gate-alias-b', { fixtures: fx('away-club', 'home-club', 'Riverside Bowl') }),
+    );
+    assert.equal((await patchRelease('s-gate-alias-a', 1)).status, 200);
+
+    const existing = await repo.getTenantConfig('dolphins');
+    await repo.putTenantConfig({
+      ...(existing ?? {
+        tenant: 'dolphins',
+        branding: { name: 'd', title: 'd', logoUrl: '', colors: {}, copy: {} },
+        submissionDeadline: '2026-01-01',
+        knownClubs: [],
+      }),
+      competitionDefaults: { venueAliases: { riversidebowl: 'riversideoval' } },
+    } as Parameters<typeof repo.putTenantConfig>[0]);
+
+    const res = await patchRelease('s-gate-alias-b', 1);
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as { error?: string; message?: string };
+    assert.match(String(body.error ?? body.message), /Riverside Bowl/);
+  });
 });

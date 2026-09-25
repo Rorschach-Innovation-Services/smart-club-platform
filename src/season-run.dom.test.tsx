@@ -18,13 +18,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { currentSeasonLabel } from './data';
-import { T20_SLOTS } from './competition/calendar';
-import {
-  buildFlatSeasonRun,
-  FLAT_COMPETITION_ID,
-  GenerateFixturesLauncher,
-  SeasonRunsPanel,
-} from './season-run';
+import { ApiError, quickStartSeason } from './api';
+import { GenerateFixturesLauncher, SeasonRunsPanel } from './season-run';
+import { materialiseRun } from '../packages/engine/src/run';
+import { leagueParticipants } from '../packages/engine/src/leagues';
+import { addDays, formatIsoDate, todayIso } from '../packages/engine/src/calendar';
+import { Sentry } from './sentry';
 import type {
   Club,
   CompetitionStructure,
@@ -35,6 +34,15 @@ import type {
   StageSpec,
   TenantConfig,
 } from './types';
+
+// Quick start posts straight to the server; the route is mocked here, the rest of the
+// api module stays real (ApiError in particular).
+vi.mock('./api', async () => {
+  const actual = await vi.importActual<typeof import('./api')>('./api');
+  return { ...actual, quickStartSeason: vi.fn() };
+});
+// Error reporting is observed, never sent.
+vi.mock('./sentry', () => ({ Sentry: { captureException: vi.fn() } }));
 
 const calendar: SeasonCalendar = {
   id: 'cal',
@@ -47,11 +55,12 @@ const calendar: SeasonCalendar = {
   excludeDates: [],
 };
 
-/** Twelve single-side clubs, enough for a 6/6 split. */
+/** Twelve single-side clubs, enough for a 6/6 split — all affiliated, so the gate passes. */
 const clubs = Array.from({ length: 12 }, (_, i) => ({
   id: `c${i + 1}`,
   name: `Club ${i + 1}`,
   leagues: ['premier'],
+  affiliation: 'complete',
   ground: { venue: `Ground ${i + 1}`, lat: -29.8 - i / 100, lon: 31 + i / 100 },
 })) as unknown as Club[];
 
@@ -101,7 +110,7 @@ const SPLIT_LEAGUE: CompetitionStructure = {
 /** Premier Men T20: two seeded pools of six, then a cross-pool knockout. */
 const POOLS_THEN_CROSS: CompetitionStructure = {
   id: 'pools',
-  name: 'Seeded pools → cross-pool semis → final',
+  name: 'Seeded groups → cross-group semis → final',
   version: 1,
   stages: [
     stage({
@@ -207,6 +216,10 @@ const openConfirm = async (user: ReturnType<typeof userEvent.setup>, stageName: 
 const groupPickers = () => within(dialog()).getAllByRole('combobox');
 const confirmBtn = () => within(dialog()).getByRole('button', { name: /confirm entrants/i });
 
+/** The stage timeline's current step (Awaiting entrants / Ready / Generated / Released). */
+const currentStep = (scope?: HTMLElement) =>
+  (scope ? within(scope) : screen).getByRole('listitem', { current: 'step' });
+
 beforeEach(() => vi.clearAllMocks());
 
 describe('a stage that needs a human — the rule is shown, never executed', () => {
@@ -227,7 +240,7 @@ describe('a stage that needs a human — the rule is shown, never executed', () 
       }),
     ]);
 
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
 
     expect(
       within(dialog()).getByText(/Top Six 6th ↔ Bottom Six 1st, points carried/),
@@ -254,7 +267,7 @@ describe('a stage that needs a human — the rule is shown, never executed', () 
       }),
     ]);
 
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
     expect(within(dialog()).getByRole('columnheader', { name: /carried points/i })).toBeVisible();
   });
 
@@ -275,7 +288,7 @@ describe('a stage that needs a human — the rule is shown, never executed', () 
       }),
     ]);
 
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
     // Perform the swap by hand, exactly as the rule describes: club 6 down, club 7 up.
     await user.selectOptions(groupPickers()[5], '1');
     await user.selectOptions(groupPickers()[6], '0');
@@ -312,7 +325,7 @@ describe('the confirm form refuses a season that would generate nothing', () => 
 
   it('blocks an empty group — the structure asked for it and nobody is in it', async () => {
     const { user, onPatchRun } = setup(SPLIT_LEAGUE, [readyRun()]);
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
 
     // Empty the Bottom Six entirely.
     for (const i of [6, 7, 8, 9, 10, 11]) await user.selectOptions(groupPickers()[i], '');
@@ -324,7 +337,7 @@ describe('the confirm form refuses a season that would generate nothing', () => 
 
   it('blocks a group of one, which would play nobody', async () => {
     const { user } = setup(SPLIT_LEAGUE, [readyRun()]);
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
 
     for (const i of [7, 8, 9, 10, 11]) await user.selectOptions(groupPickers()[i], '');
 
@@ -336,7 +349,7 @@ describe('the confirm form refuses a season that would generate nothing', () => 
 
   it('flags a group that does not match the size the structure asks for', async () => {
     const { user } = setup(SPLIT_LEAGUE, [readyRun()]);
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
 
     await user.selectOptions(groupPickers()[11], '0'); // 7 in the Top Six, 5 in the Bottom
 
@@ -363,7 +376,7 @@ describe('the confirm form refuses a season that would generate nothing', () => 
         ],
       }),
     ]);
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
 
     await user.selectOptions(groupPickers()[11], ''); // c12 sits out
     await user.selectOptions(groupPickers()[0], '1'); // rebalance to 5 / 6
@@ -396,7 +409,7 @@ describe('cross-pool — the order inside a pool is load-bearing', () => {
 
   it('asks for a finishing position, not just which pool a side was in', async () => {
     const { user } = setup(POOLS_THEN_CROSS, [pooledRun()]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
 
     // The bracket pairs the winner of A against the runner-up of B, so registration
     // order is not a ranking of anything and must not decide the semi-finals.
@@ -406,7 +419,7 @@ describe('cross-pool — the order inside a pool is load-bearing', () => {
 
   it('refuses two sides in the same position', async () => {
     const { user } = setup(POOLS_THEN_CROSS, [pooledRun()]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
 
     const positions = within(dialog()).getAllByRole('spinbutton');
     await user.clear(positions[1]);
@@ -418,7 +431,7 @@ describe('cross-pool — the order inside a pool is load-bearing', () => {
 
   it('stores each pool in the confirmed finishing order', async () => {
     const { user, onPatchRun } = setup(POOLS_THEN_CROSS, [pooledRun()]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
 
     // Reverse Pool A: the side registered last finished first.
     const positions = within(dialog()).getAllByRole('spinbutton');
@@ -472,7 +485,7 @@ describe('the Position column also appears on a seeded knockout and a non-adjace
 
   it('asks a seeded knockout for the seed line, not just who is in the draw', async () => {
     const { user } = setup(KNOCKOUT_SEEDED, [generatedKnockoutRun()]);
-    await openConfirm(user, /^Cup$/);
+    await openConfirm(user, /^Cup · /);
 
     expect(within(dialog()).getByText(/seeded knockout/i)).toBeVisible();
     expect(within(dialog()).getByRole('columnheader', { name: /position/i })).toBeVisible();
@@ -480,7 +493,7 @@ describe('the Position column also appears on a seeded knockout and a non-adjace
 
   it('reordering a knockout’s positions before confirming reorders the resulting seed line', async () => {
     const { user, onPatchRun } = setup(KNOCKOUT_SEEDED, [generatedKnockoutRun()]);
-    await openConfirm(user, /^Cup$/);
+    await openConfirm(user, /^Cup · /);
 
     const positions = within(dialog()).getAllByRole('spinbutton');
     // Swap seed 1 and seed 2 — c1 was first, c2 second.
@@ -544,7 +557,7 @@ describe('the Position column also appears on a seeded knockout and a non-adjace
         ],
       }),
     ]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
 
     // Not adjacent — Streams sits between Pools and the Cup — but the derivation names
     // Pools directly, so it still gets ranked ordering.
@@ -566,7 +579,7 @@ describe('the Position column also appears on a seeded knockout and a non-adjace
         ],
       }),
     ]);
-    await openConfirm(user, /^Streams$/);
+    await openConfirm(user, /^Streams · /);
     expect(within(dialog()).queryByText(/order matters here/i)).toBeNull();
     expect(within(dialog()).queryByRole('columnheader', { name: /position/i })).toBeNull();
   });
@@ -617,11 +630,11 @@ describe('order-sensitive staleness — a pure reorder on a knockout invalidates
   it('reordering a knockout’s confirmed seed line marks it stale, and Regenerate reappears', async () => {
     const { user, onPatchRun, rerenderRuns } = setup(KNOCKOUT_SEEDED, [generatedKnockoutRun()]);
     // Starting state: generated, nothing to regenerate.
-    expect(screen.getByText('Generated')).toBeVisible();
+    expect(currentStep()).toHaveTextContent(/^Generated/);
     expect(screen.queryByText(/needs regenerating/i)).toBeNull();
     expect(screen.queryByRole('button', { name: /regenerate \d+ fixtures/i })).toBeNull();
 
-    await openConfirm(user, /^Cup$/);
+    await openConfirm(user, /^Cup · /);
     const positions = within(dialog()).getAllByRole('spinbutton');
     await user.clear(positions[0]);
     await user.type(positions[0], '2');
@@ -670,7 +683,7 @@ describe('order-sensitive staleness — a pure reorder on a knockout invalidates
     const { user, onPatchRun, rerenderRuns } = setup(POOLS_THEN_CROSS, [generatedPoolsRun()]);
     expect(screen.queryByText(/needs regenerating/i)).toBeNull();
 
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
     // Reverse the finishing order within Pool A — same six sides, different positions.
     const positions = within(dialog()).getAllByRole('spinbutton');
     await user.clear(positions[0]);
@@ -694,7 +707,7 @@ describe('order-sensitive staleness — a pure reorder on a knockout invalidates
 describe('the audit trail — who decided the relegation', () => {
   it('records an accepted suggestion as accepted', async () => {
     const { user, onPatchRun } = setup(POOLS_THEN_CROSS, [run(POOLS_THEN_CROSS)]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
     await user.click(confirmBtn());
 
     const entry = onPatchRun.mock.calls[0][1].stages[0].audit.at(-1);
@@ -704,7 +717,7 @@ describe('the audit trail — who decided the relegation', () => {
 
   it('records an overridden suggestion as overridden', async () => {
     const { user, onPatchRun } = setup(POOLS_THEN_CROSS, [run(POOLS_THEN_CROSS)]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
 
     // Reordering inside a pool IS an override: for a cross-pool bracket the order is
     // the decision, so A1-v-B2 changing is exactly what the trail has to record.
@@ -746,7 +759,7 @@ describe('the audit trail — who decided the relegation', () => {
       }),
     ]);
 
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
     await user.click(confirmBtn());
 
     const audit = onPatchRun.mock.calls[0][1].stages[0].audit;
@@ -808,36 +821,41 @@ const poolsConfirmed = {
 const cardFor = (name: RegExp) =>
   screen.getByRole('heading', { name }).closest('div')!.parentElement!;
 
-/** The series a generate call would have written, from the payloads it was handed. */
+/**
+ * The series a generate call would have written. `onGenerate` is handed only the run and
+ * the stage (the server materialises it, ADR 0014), so this materialises the same way with
+ * the shared engine over the test's clubs.
+ */
 const seriesFromGenerate = (
   call: unknown[],
   over: Partial<Series> = {},
 ): { series: Series[]; groups: Array<{ id: string; seriesId: string }> } => {
-  const [payloads, run, stageSpec] = call as [
-    Array<{ groupId: string; fixtures: unknown[]; entrants: string[] }>,
-    SeasonRun,
-    StageSpec,
+  const [genRun, stageSpec] = call as [SeasonRun, StageSpec];
+  const index = genRun.structureSnapshot.stages.findIndex((x) => x.id === stageSpec.id);
+  const m = materialiseRun(genRun, leagueParticipants(clubs, genRun.leagueKey)).materialisations[
+    index
   ];
-  const series = payloads.map(
-    (p) =>
+  if (m.status !== 'ready') throw new Error(`stage ${stageSpec.id} is not ready to generate`);
+  const series = m.groups.map(
+    (g) =>
       ({
-        id: `s-${run.id}-${stageSpec.id}-${p.groupId}`,
+        id: `s-${genRun.id}-${stageSpec.id}-${g.id}`,
         name: stageSpec.name,
-        fixtures: p.fixtures,
-        teams: p.entrants,
+        fixtures: g.fixtures,
+        teams: g.entrants,
         released: false,
-        seasonRunId: run.id,
+        seasonRunId: genRun.id,
         stageSpecId: stageSpec.id,
-        groupId: p.groupId,
+        groupId: g.id,
         version: 1,
         ...over,
       }) as unknown as Series,
   );
   return {
     series,
-    groups: payloads.map((p) => ({
-      id: p.groupId,
-      seriesId: `s-${run.id}-${stageSpec.id}-${p.groupId}`,
+    groups: m.groups.map((g) => ({
+      id: g.id,
+      seriesId: `s-${genRun.id}-${stageSpec.id}-${g.id}`,
     })),
   };
 };
@@ -847,7 +865,7 @@ describe('semi-final pairing — the union decides within- or cross-group per se
     const { user, onPatchRun } = setup(POOLS_TOP_TWO, [
       run(POOLS_TOP_TWO, { stages: [poolsConfirmed] }),
     ]);
-    await openConfirm(user, /^Semi-finals$/);
+    await openConfirm(user, /^Semi-finals · /);
 
     // The structure's default is pre-selected, and its bracket is previewed: A1 v B2.
     expect(within(dialog()).getByRole('radio', { name: /structure default/i })).toBeChecked();
@@ -855,7 +873,7 @@ describe('semi-final pairing — the union decides within- or cross-group per se
       /Club 1 v Club 8/,
     );
 
-    await user.click(within(dialog()).getByRole('radio', { name: /^within-group$/i }));
+    await user.click(within(dialog()).getByRole('radio', { name: /^within-group/i }));
     // Now each pool's qualifiers meet each other first: A1 v A2, B1 v B2.
     const preview = within(dialog()).getByText(/first round:/i).parentElement!;
     expect(preview).toHaveTextContent(/Club 1 v Club 2/);
@@ -873,7 +891,7 @@ describe('semi-final pairing — the union decides within- or cross-group per se
     const { user, onPatchRun } = setup(POOLS_TOP_TWO, [
       run(POOLS_TOP_TWO, { stages: [poolsConfirmed] }),
     ]);
-    await openConfirm(user, /^Semi-finals$/);
+    await openConfirm(user, /^Semi-finals · /);
     await user.click(confirmBtn());
 
     const semis = onPatchRun.mock.calls[0][1].stages.find(
@@ -897,7 +915,7 @@ describe('semi-final pairing — the union decides within- or cross-group per se
 
     // Generate the cross-group semis, then land them the way a real generate would.
     await user.click(
-      within(cardFor(/^Semi-finals$/)).getByRole('button', { name: /generate \d+ fixtures/i }),
+      within(cardFor(/^Semi-finals · /)).getByRole('button', { name: /generate \d+ fixtures/i }),
     );
     const { series, groups } = seriesFromGenerate(onGenerate.mock.calls[0]);
     const generated = {
@@ -909,12 +927,12 @@ describe('semi-final pairing — the union decides within- or cross-group per se
       })),
     };
     rerenderRuns([run(POOLS_TOP_TWO, { stages: [poolsConfirmed, generated] })], series);
-    expect(within(cardFor(/^Semi-finals$/)).getByText('Generated')).toBeVisible();
-    expect(within(cardFor(/^Semi-finals$/)).queryByText(/needs regenerating/i)).toBeNull();
+    expect(currentStep(cardFor(/^Semi-finals · /))).toHaveTextContent(/^Generated/);
+    expect(within(cardFor(/^Semi-finals · /)).queryByText(/needs regenerating/i)).toBeNull();
 
     // Same qualifiers, different pairing — no entrant changed, so only the bracket moved.
-    await openConfirm(user, /^Semi-finals$/);
-    await user.click(within(dialog()).getByRole('radio', { name: /^within-group$/i }));
+    await openConfirm(user, /^Semi-finals · /);
+    await user.click(within(dialog()).getByRole('radio', { name: /^within-group/i }));
     await user.click(confirmBtn());
     const patch = onPatchRun.mock.calls[0][1];
     expect(patch.stages.find((s: { specId: string }) => s.specId === 'semis').status).toBe(
@@ -922,7 +940,7 @@ describe('semi-final pairing — the union decides within- or cross-group per se
     );
 
     rerenderRuns([run(POOLS_TOP_TWO, { stages: patch.stages })]);
-    const card = cardFor(/^Semi-finals$/);
+    const card = cardFor(/^Semi-finals · /);
     expect(within(card).getByText(/needs regenerating/i)).toBeVisible();
     expect(within(card).getByRole('button', { name: /regenerate \d+ fixtures/i })).toBeVisible();
   });
@@ -960,13 +978,143 @@ describe('semi-final pairing — the union decides within- or cross-group per se
     const { user } = setup(THREE_POOLS, [
       run(THREE_POOLS, { stages: [threeConfirmed, semisReady] }),
     ]);
-    await openConfirm(user, /^Semi-finals$/);
+    await openConfirm(user, /^Semi-finals · /);
 
-    expect(within(dialog()).getByRole('radio', { name: /^within-group$/i })).toBeDisabled();
-    expect(within(dialog()).getByRole('radio', { name: /^cross-group$/i })).toBeEnabled();
+    expect(within(dialog()).getByRole('radio', { name: /^within-group/i })).toBeDisabled();
+    expect(within(dialog()).getByRole('radio', { name: /^cross-group/i })).toBeEnabled();
     expect(within(dialog()).getByText(/within-group is unavailable/i)).toBeVisible();
   });
 });
+
+describe('the confirm form explains why it asks, and draws the pairing choice', () => {
+  it('quotes the rule, says why a human types the order, and notes the trimmed prefill', async () => {
+    const { user } = setup(POOLS_TOP_TWO, [run(POOLS_TOP_TWO, { stages: [poolsConfirmed] })]);
+    await openConfirm(user, /^Semi-finals · /);
+
+    expect(within(dialog()).getByText(/^The rule:/).parentElement).toHaveTextContent(
+      /Top two from each pool/,
+    );
+    expect(within(dialog()).getByText(/^Why you.re asked:/).parentElement).toHaveTextContent(
+      /does not record results, so the finishing order is typed by you and recorded against your name/,
+    );
+    expect(
+      within(dialog()).getByText(
+        /Prefilled with the top 2 of each group; sides that did not qualify are not re-added\./,
+      ),
+    ).toBeVisible();
+  });
+
+  it('offers the semi-final pairing as cards, each with its first round drawn in miniature', async () => {
+    const { user } = setup(POOLS_TOP_TWO, [run(POOLS_TOP_TWO, { stages: [poolsConfirmed] })]);
+    await openConfirm(user, /^Semi-finals · /);
+
+    const group = within(dialog()).getByRole('radiogroup', { name: /semi-final pairing/i });
+    expect(within(group).getAllByRole('radio')).toHaveLength(4);
+    expect(
+      within(group)
+        .getByRole('radio', { name: /^within-group/i })
+        .closest('label'),
+    ).toHaveTextContent('A1 v A2 · B1 v B2');
+    expect(
+      within(group)
+        .getByRole('radio', { name: /^cross-group/i })
+        .closest('label'),
+    ).toHaveTextContent('A1 v B2 · B1 v A2');
+    expect(
+      within(dialog()).getByText(/Whether the semi-finals are within each group or across groups/),
+    ).toBeVisible();
+  });
+
+  it('explains the Position column once, above the table, not per row', async () => {
+    const { user } = setup(POOLS_TOP_TWO, [run(POOLS_TOP_TWO, { stages: [poolsConfirmed] })]);
+    await openConfirm(user, /^Pools · /);
+
+    expect(within(dialog()).getAllByText(/Where each side finished in its group/)).toHaveLength(1);
+    expect(within(dialog()).getAllByText(/^Why you.re asked:/)).toHaveLength(1);
+  });
+});
+
+describe('stage cards say where each stage is, where it plays and what it needs', () => {
+  it('walks the timeline and names the block, the narrative and what is asked', () => {
+    setup(SPLIT_LEAGUE, [
+      run(SPLIT_LEAGUE, {
+        stages: [
+          {
+            specId: 'double-round',
+            status: 'generated',
+            groups: [
+              { id: 'g0', label: 'Top Six', entrants: ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'] },
+              { id: 'g1', label: 'Bottom Six', entrants: ['c7', 'c8', 'c9', 'c10', 'c11', 'c12'] },
+            ],
+            audit: [],
+          },
+        ],
+      }),
+    ]);
+
+    const first = cardFor(/^Double round · /);
+    expect(currentStep(first)).toHaveTextContent(
+      /^GeneratedApprove and release from the Fixtures list$/,
+    );
+    expect(within(first).getByText(/^Plays in Block 1 · /)).toBeVisible();
+    expect(within(first).getByText(/^Stage 1 · Round-robin stage · /)).toBeVisible();
+    // A generated stage no longer shows it as a hint; the card still says it.
+    expect(
+      within(first).getByText(/What the platform needs from you:/).parentElement,
+    ).toHaveTextContent(/Which sides play in each group/);
+
+    // The final round waits on the admin: its sides are chosen from the first stage.
+    const second = cardFor(/^Final round · /);
+    expect(currentStep(second)).toHaveTextContent(/^Awaiting entrants/);
+    expect(currentStep(second)).toHaveTextContent(/Which sides play in each group/);
+    expect(within(second).getByText(/^Plays in Block 2 · /)).toBeVisible();
+    expect(within(second).getByRole('button', { name: /confirm entrants/i })).toBeVisible();
+  });
+
+  it('reads Ready before generation and Released once every group is out', async () => {
+    const readyStage = { specId: 'league', status: 'ready' as const, groups: [], audit: [] };
+    const { user, onGenerate, rerenderRuns } = setup(ONE_STAGE_FOR_CARDS, [
+      run(ONE_STAGE_FOR_CARDS, { stages: [readyStage] }),
+    ]);
+    expect(currentStep()).toHaveTextContent(/^ReadyGenerate to create the fixtures$/);
+
+    await user.click(screen.getByRole('button', { name: /generate \d+ fixtures/i }));
+    const { series, groups } = seriesFromGenerate(onGenerate.mock.calls[0], { released: true });
+    rerenderRuns(
+      [
+        run(ONE_STAGE_FOR_CARDS, {
+          stages: [
+            {
+              specId: 'league',
+              status: 'generated',
+              groups: groups.map((g) => ({
+                id: g.id,
+                label: 'Group A',
+                entrants: [],
+                seriesId: g.seriesId,
+              })),
+              audit: [],
+            },
+          ],
+        }),
+      ],
+      series,
+    );
+    expect(currentStep()).toHaveTextContent(/^Released$/);
+  });
+
+  it('keeps Start a season to an outline button once a season is on screen', () => {
+    setup(SPLIT_LEAGUE, [run(SPLIT_LEAGUE)]);
+    expect(screen.getByRole('button', { name: /start a season/i })).not.toHaveClass('btn-teal');
+  });
+});
+
+const ONE_STAGE_FOR_CARDS: CompetitionStructure = {
+  id: 'flat-cards',
+  name: 'One round robin',
+  version: 1,
+  stages: [stage({ id: 'league', name: 'League' })],
+} as unknown as CompetitionStructure;
 
 /* ─────────────────────────────────────────────────────────────────────────────
    Schedule staleness from a structure rebase. The server marks `staleSchedule` on any
@@ -990,7 +1138,7 @@ describe('a rebase-changed schedule — "Needs regenerating" only once there are
 
     // Nothing generated: generating simply uses the new schedule, nothing is stale.
     expect(screen.queryByText(/needs regenerating/i)).toBeNull();
-    expect(screen.getByText(/ready to generate/i)).toBeVisible();
+    expect(currentStep()).toHaveTextContent(/^Ready/);
 
     await user.click(screen.getByRole('button', { name: /generate \d+ fixtures/i }));
     const { series, groups } = seriesFromGenerate(onGenerate.mock.calls[0]);
@@ -1008,7 +1156,7 @@ describe('a rebase-changed schedule — "Needs regenerating" only once there are
 
     // Generated, same pairings, no marker: plain "Generated".
     rerenderRuns([run(ONE_STAGE, { stages: [generated] })], series);
-    expect(screen.getByText('Generated')).toBeVisible();
+    expect(currentStep()).toHaveTextContent(/^Generated/);
     expect(screen.queryByText(/needs regenerating/i)).toBeNull();
 
     // Generated AND marked: the pairings still match, so only the marker can say so.
@@ -1068,7 +1216,7 @@ describe('a chained stage notices when its feeder now runs into its fixtures', (
       run(structure, { stages: [playoffReady] }),
     ]);
     await user.click(
-      within(cardFor(/^Play-off$/)).getByRole('button', { name: /generate \d+ fixtures/i }),
+      within(cardFor(/^Play-off · /)).getByRole('button', { name: /generate \d+ fixtures/i }),
     );
     const { series, groups } = seriesFromGenerate(onGenerate.mock.calls[0]);
     const playoff = series.map(
@@ -1121,7 +1269,7 @@ describe('a chained stage notices when its feeder now runs into its fixtures', (
   it('flags a chained stage once its regenerated feeder runs into its fixtures', async () => {
     // The feeder's last round now lands on the play-off's opening date.
     await generateThenLand(true, { feederLast: 'playoff-start' });
-    const card = cardFor(/^Play-off$/);
+    const card = cardFor(/^Play-off · /);
     expect(within(card).getByText(/needs regenerating/i)).toBeVisible();
     expect(
       within(card).getByText(/the stage this one follows now runs into these fixtures/i),
@@ -1131,16 +1279,16 @@ describe('a chained stage notices when its feeder now runs into its fixtures', (
   it('leaves a chained stage alone when its own opener is merely rescheduled later', async () => {
     // A rained-off play-off pushed into December, well clear of the feeder's last round.
     await generateThenLand(true, { playoffDate: '2026-12-05', feederLast: '2026-09-19' });
-    const card = cardFor(/^Play-off$/);
+    const card = cardFor(/^Play-off · /);
     expect(within(card).queryByText(/needs regenerating/i)).toBeNull();
-    expect(within(card).getByText('Generated')).toBeVisible();
+    expect(currentStep(card)).toHaveTextContent(/^Generated/);
   });
 
   it('never flags an unchained stage, even when it overlaps the stage before it', async () => {
     await generateThenLand(false, { feederLast: 'playoff-start' });
-    const card = cardFor(/^Play-off$/);
+    const card = cardFor(/^Play-off · /);
     expect(within(card).queryByText(/needs regenerating/i)).toBeNull();
-    expect(within(card).getByText('Generated')).toBeVisible();
+    expect(currentStep(card)).toHaveTextContent(/^Generated/);
   });
 });
 
@@ -1230,13 +1378,13 @@ describe('rebase — review and apply a newer structure version', () => {
     expect(onRebaseRun).toHaveBeenCalledWith('run-1', { structureVersion: 2, version: 1 });
     expect(onGenerate).toHaveBeenCalledTimes(2);
     // Stage one generates against the run the rebase returned…
-    const [, firstRun, firstStage] = onGenerate.mock.calls[0];
+    const [firstRun, firstStage] = onGenerate.mock.calls[0];
     expect(firstRun.version).toBe(2);
     expect(firstStage.id).toBe('league');
     expect(firstStage.schedule.cadence.kind).toBe('weekdays');
     // …stage two against a FRESH read, not the snapshot stage one already moved on.
     expect(onFetchRun).toHaveBeenCalledTimes(1);
-    const [, secondRun, secondStage] = onGenerate.mock.calls[1];
+    const [secondRun, secondStage] = onGenerate.mock.calls[1];
     expect(secondRun.version).toBe(3);
     expect(secondStage.id).toBe('cup');
 
@@ -1259,8 +1407,86 @@ describe('rebase — review and apply a newer structure version', () => {
     await user.click(within(dialog()).getByRole('button', { name: /apply structure v2/i }));
 
     expect(onGenerate).toHaveBeenCalledTimes(1);
-    expect(onGenerate.mock.calls[0][2].id).toBe('league');
+    expect(onGenerate.mock.calls[0][1].id).toBe('league');
     expect(within(dialog()).getByText(/derives from a stage that no longer exists/i)).toBeVisible();
+  });
+
+  it('says why a stage was not regenerated when the fresh read fails', async () => {
+    const onRebaseRun = vi.fn().mockResolvedValue(rebased(2));
+    const onFetchRun = vi.fn().mockRejectedValue(new Error('Network request failed'));
+    const { user, onGenerate } = setup(TWO_STAGES_V1, [v1Run()], {
+      series: [draft('league'), draft('cup')],
+      structures: [TWO_STAGES_V2],
+      onRebaseRun,
+      onFetchRun,
+    });
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+    await user.click(within(dialog()).getByRole('button', { name: /apply structure v2/i }));
+
+    expect(onGenerate).toHaveBeenCalledTimes(1);
+    const status = within(dialog()).getByRole('status');
+    expect(status).toHaveTextContent(/regenerated: league/i);
+    expect(status).toHaveTextContent(/couldn.t regenerate cup/i);
+    expect(status).toHaveTextContent(/cup: network request failed/i);
+  });
+
+  it('stops at a 401 and lists the stages it never tried', async () => {
+    const THREE_V1 = {
+      ...TWO_STAGES_V1,
+      stages: [...TWO_STAGES_V1.stages, { ...TWO_STAGES_V1.stages[1], id: 'plate', name: 'Plate' }],
+    } as CompetitionStructure;
+    const THREE_V2 = {
+      ...TWO_STAGES_V2,
+      stages: [...TWO_STAGES_V2.stages, { ...TWO_STAGES_V2.stages[1], id: 'plate', name: 'Plate' }],
+    } as CompetitionStructure;
+    const r2 = rebased(2);
+    const onRebaseRun = vi.fn().mockResolvedValue({
+      ...r2,
+      structureSnapshot: THREE_V2,
+      stages: [...r2.stages, { ...generatedStage('plate'), staleSchedule: true }],
+    });
+    const onFetchRun = vi.fn().mockRejectedValue(new ApiError(401, 'Your session has expired'));
+    const threeRun = run(THREE_V1, {
+      stages: [generatedStage('league'), generatedStage('cup'), generatedStage('plate')],
+    });
+    const { user, onGenerate } = setup(THREE_V1, [threeRun], {
+      series: [draft('league'), draft('cup'), draft('plate')],
+      structures: [THREE_V2],
+      onRebaseRun,
+      onFetchRun,
+    });
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+    await user.click(within(dialog()).getByRole('button', { name: /apply structure v2/i }));
+
+    // One fetch, then the loop stops — no second attempt against a lost session.
+    expect(onFetchRun).toHaveBeenCalledTimes(1);
+    expect(onGenerate).toHaveBeenCalledTimes(1);
+    const status = within(dialog()).getByRole('status');
+    expect(status).toHaveTextContent(/cup: your session has expired/i);
+    expect(status).toHaveTextContent(/plate: not attempted/i);
+  });
+
+  it('reports a regenerate that came back with a warning apart from the clean ones', async () => {
+    const onRebaseRun = vi.fn().mockResolvedValue(rebased(2));
+    const { user, onGenerate } = setup(TWO_STAGES_V1, [v1Run()], {
+      series: [draft('league'), draft('cup')],
+      structures: [TWO_STAGES_V2],
+      onRebaseRun,
+      onFetchRun: vi.fn().mockResolvedValue(rebased(3)),
+    });
+    onGenerate.mockResolvedValueOnce({}).mockResolvedValueOnce({
+      warnings: [
+        'Paired as a seeded bracket, not cross-group; fix the confirmed positions and regenerate',
+      ],
+    });
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+    await user.click(within(dialog()).getByRole('button', { name: /apply structure v2/i }));
+
+    const status = within(dialog()).getByRole('status');
+    expect(status).toHaveTextContent(/regenerated: league\./i);
+    expect(status).toHaveTextContent(
+      /regenerated cup, with a warning: paired as a seeded bracket, not cross-group/i,
+    );
   });
 
   it('never offers to auto-regenerate a released stage — it keeps the confirm path', async () => {
@@ -1325,7 +1551,7 @@ describe('a rebase-cleared stage re-confirms from where the season actually was'
         ],
       }),
     ]);
-    await openConfirm(user, /^Double round$/);
+    await openConfirm(user, /^Double round · /);
 
     const pickerFor = (side: string) => {
       const row = within(dialog())
@@ -1470,7 +1696,7 @@ describe('the swap prefill starts from where the previous stage ended', () => {
         ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'],
       ),
     ]);
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
 
     expect(groupOf('Club 7')).toBe('Top Six');
     expect(groupOf('Club 12')).toBe('Top Six');
@@ -1483,7 +1709,7 @@ describe('the swap prefill starts from where the previous stage ended', () => {
     const top = ['c7', 'c8', 'c9', 'c10', 'c11', 'c12'];
     const bottom = ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'];
     const { user, onPatchRun } = setup(SPLIT_LEAGUE, [stage1Confirmed(top, bottom)]);
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
     await user.click(confirmBtn());
 
     const finalRound = onPatchRun.mock.calls[0][1].stages.find(
@@ -1520,7 +1746,7 @@ describe('a group is called the same thing wherever it is written', () => {
 
   it('stores Group A and Group B, not Group 1 and Group 2', async () => {
     const { user, onPatchRun } = setup(UNNAMED, [run(UNNAMED)]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
     await user.click(confirmBtn());
 
     const stored = onPatchRun.mock.calls[0][1].stages[0].groups.map(
@@ -1531,7 +1757,7 @@ describe('a group is called the same thing wherever it is written', () => {
 
   it('shows the admin the same names it is about to store', async () => {
     const { user } = setup(UNNAMED, [run(UNNAMED)]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
     const shown = Array.from((groupPickers()[0] as HTMLSelectElement).options).map((o) => o.text);
     expect(shown).toEqual(['Not playing', 'Group A', 'Group B']);
   });
@@ -1559,7 +1785,7 @@ describe('two groups may share a name', () => {
   it('renders both without a duplicate-key warning, and keeps them distinct', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { user, onPatchRun } = setup(SAME_NAME, [run(SAME_NAME)]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
 
     expect(spy.mock.calls.some((c) => String(c[0]).includes('same key'))).toBe(false);
 
@@ -1586,30 +1812,12 @@ describe('two groups may share a name', () => {
    ───────────────────────────────────────────────────────────────────────────── */
 
 describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
-  // `renderSeriesForm` stands in for the real CreateSeriesForm here (that form's own
-  // behaviour is covered by admin-create-series.dom.test.tsx) — this boundary only cares
-  // that the launcher hands it the right args and mounts it in place. It is reached ONLY
-  // via the ad-hoc option now — every real league routes to a season form instead.
-  const stubRenderSeriesForm =
-    (spy: ReturnType<typeof vi.fn>) =>
-    ({ onBack }: { onBack: () => void }) => {
-      spy({ onBack });
-      return (
-        <div>
-          <span>stub series form</span>
-          <button onClick={onBack}>Back to picker</button>
-        </div>
-      );
-    };
-
   const launcherProps = (over: Partial<Parameters<typeof GenerateFixturesLauncher>[0]> = {}) => ({
     clubs,
     allLeagues: [league(SPLIT_LEAGUE.id)],
     config: { structures: [SPLIT_LEAGUE], calendars: [calendar] } as unknown as TenantConfig,
     existingRuns: [],
     onCreateRun: vi.fn().mockResolvedValue(undefined),
-    onGenerateStage: vi.fn().mockResolvedValue(undefined),
-    renderSeriesForm: stubRenderSeriesForm(vi.fn()),
     onClose: vi.fn(),
     toast: vi.fn(),
     ...over,
@@ -1624,6 +1832,10 @@ describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
     // The one season-capable league routes straight into StartSeasonForm.
     await user.click(screen.getByRole('button', { name: /^continue$/i }));
     expect(screen.getByRole('button', { name: /^start season$/i })).toBeInTheDocument();
+    // Under the primary button: what the admin will do after starting, in order.
+    expect(screen.getByText('What happens next').nextElementSibling).toHaveTextContent(
+      /Confirm entrants.*finishing order.*Generate fixtures.*Approve.*Release/,
+    );
 
     await user.click(screen.getByRole('button', { name: /^back$/i }));
 
@@ -1634,48 +1846,25 @@ describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('routes a non-capable league to the flat-season dialog, and Back returns to the picker', async () => {
-    const onClose = vi.fn();
-    const user = userEvent.setup();
-    const spy = vi.fn();
-    // No competitions bound to this league at all (unlike `league()` above, which always
-    // sets one) — this is the every-tenant-admin-created-league case, always flat.
-    const flatLeague = {
-      key: 'friendlies',
-      label: 'Friendlies',
-      group: 'Senior',
-      district: 'All districts',
-    } as unknown as League;
-    const config = { structures: [], calendars: [] } as unknown as TenantConfig;
+  it('says plainly when a league has a competition its operator set up', () => {
+    render(<GenerateFixturesLauncher {...launcherProps()} />);
 
-    render(
-      <GenerateFixturesLauncher
-        {...launcherProps({
-          allLeagues: [flatLeague],
-          config,
-          onClose,
-          renderSeriesForm: stubRenderSeriesForm(spy),
-        })}
-      />,
+    expect(screen.getByRole('dialog', { name: /^start a season$/i })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /This league has a competition set up by your operator: 50 Over \(Split league with mid-season swap\)/,
+      ),
+    ).toBeInTheDocument();
+    // Outside a HelpProvider the help link falls back to the guide page.
+    expect(screen.getByRole('link', { name: /how does this work/i })).toHaveAttribute(
+      'href',
+      expect.stringContaining('league-structures-tutorial'),
     );
-
-    await user.click(screen.getByRole('button', { name: /^continue$/i }));
-
-    // The flat-season dialog, not the ad-hoc series form — and it names the league.
-    expect(screen.getByRole('dialog', { name: /start.*flat season/i })).toBeInTheDocument();
-    expect(screen.getByText(/Friendlies has no competition bound to it/)).toBeInTheDocument();
-    expect(screen.queryByText('stub series form')).toBeNull();
-    expect(spy).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole('button', { name: /^back$/i }));
-
-    // Back at the league picker, without the launcher having been told to close.
-    expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
-    expect(screen.queryByRole('dialog', { name: /start.*flat season/i })).toBeNull();
-    expect(onClose).not.toHaveBeenCalled();
+    // A bound league continues to the season form — no quick start on offer.
+    expect(screen.queryByRole('radiogroup', { name: /how the season is played/i })).toBeNull();
   });
 
-  it('falls back to the league picker if the flat step’s league vanishes mid-flow', async () => {
+  it('falls back to the league picker if the chosen league vanishes mid-flow', async () => {
     const flatLeague = {
       key: 'friendlies',
       label: 'Friendlies',
@@ -1683,142 +1872,51 @@ describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
       district: 'All districts',
     } as unknown as League;
     const onClose = vi.fn();
-    const user = userEvent.setup();
 
     const { rerender } = render(
       <GenerateFixturesLauncher {...launcherProps({ allLeagues: [flatLeague], onClose })} />,
     );
-
-    await user.click(screen.getByRole('button', { name: /^continue$/i }));
-    expect(screen.getByRole('dialog', { name: /start.*flat season/i })).toBeInTheDocument();
+    expect(screen.getByRole('radiogroup', { name: /how the season is played/i })).toBeVisible();
 
     // The league is gone from config — deleted in another tab, picked up by this
-    // console's own refetch — while the admin is still sitting on the flat-season step.
-    // `step` stays 'flat' in this component's own state; only `allLeagues` changed.
+    // console's own refetch — while the admin is looking at its quick start.
     rerender(<GenerateFixturesLauncher {...launcherProps({ allLeagues: [], onClose })} />);
 
-    // Back at the picker — not a dead modal the admin can only abandon by refreshing.
+    // Back to a plain picker — not a form for a league that no longer exists.
+    expect(screen.queryByRole('radiogroup', { name: /how the season is played/i })).toBeNull();
     expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
-    expect(screen.queryByRole('dialog', { name: /start.*flat season/i })).toBeNull();
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('only reaches the embedded series form via the ad-hoc option', async () => {
-    const user = userEvent.setup();
-    const spy = vi.fn();
+  // ADR 0014: exactly two paths. A one-off event is the One-off tournament template in
+  // quick start, not a third, league-less option.
+  it('offers only leagues — no one-off series option', () => {
+    render(<GenerateFixturesLauncher {...launcherProps()} />);
+    const options = within(screen.getByRole('combobox', { name: 'League' }))
+      .getAllByRole('option')
+      .map((o) => o.textContent);
+    expect(options).toEqual(['Premier League']);
+    expect(screen.queryByRole('option', { name: /one-off/i })).toBeNull();
+  });
 
-    render(
-      <GenerateFixturesLauncher
-        {...launcherProps({ renderSeriesForm: stubRenderSeriesForm(spy) })}
-      />,
-    );
-
-    await user.selectOptions(
-      screen.getByRole('combobox'),
-      screen.getByRole('option', { name: /one-off series/i }),
-    );
-    await user.click(screen.getByRole('button', { name: /^continue$/i }));
-
-    expect(screen.getByText('stub series form')).toBeInTheDocument();
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ onBack: expect.any(Function) }));
-
-    await user.click(screen.getByRole('button', { name: /back to picker/i }));
-    expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
-    expect(screen.queryByText('stub series form')).toBeNull();
+  it('counts the registered sides and says how many are not yet affiliated', () => {
+    const mixed = clubs.map((c, i) =>
+      i < 2 ? { ...c, affiliation: 'in_progress' } : c,
+    ) as unknown as Club[];
+    render(<GenerateFixturesLauncher {...launcherProps({ clubs: mixed })} />);
+    expect(
+      screen.getByText(/12 sides \(2 not yet affiliated\) registered for Premier League/),
+    ).toBeVisible();
   });
 });
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   SeasonRunsPanel — a flat run's persisted format survives a regenerate.
-
-   A flat run has no config competition to read a Series Type/overs from (there is no
-   `league.competitions` entry for the `__flat__` sentinel) — `flatFormat` on the run is
-   the only place that choice lives, so the panel must synthesize the Competition it hands
-   to `onGenerate` FROM `flatFormat`, not from a lookup that was always going to come back
-   empty.
+   Quick start — a league with no competition starts a season from a starter shape.
+   The server builds the competition, structure, calendar and run in one call; the form
+   previews the season as the same narrative the operator console shows.
    ───────────────────────────────────────────────────────────────────────────── */
 
-describe('SeasonRunsPanel — a flat run regenerating preserves its persisted format', () => {
-  const flatLeague = {
-    key: 'flatty',
-    label: 'Flat League',
-    group: 'Senior',
-    district: 'All districts',
-  } as unknown as League;
-
-  // A separate roster registered for 'flatty' — the top-of-file `clubs` fixture is
-  // registered for 'premier'.
-  const flatClubs = clubs.map((c) => ({ ...c, leagues: ['flatty'] })) as Club[];
-
-  it('carries flatFormat’s seriesType/overs into the regenerate payload, not a re-derived default', async () => {
-    const teamIds = flatClubs.map((c) => c.id);
-    const flatStage: StageSpec = {
-      id: 'stage-1',
-      name: '2026/27',
-      format: { kind: 'round-robin', legs: 1 },
-      entrants: { kind: 'all-registered' },
-      schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
-    } as unknown as StageSpec;
-    const flatRun = {
-      id: 'run-flat-1',
-      leagueKey: 'flatty',
-      competitionId: FLAT_COMPETITION_ID,
-      seasonLabel: '2026/27',
-      structureSnapshot: {
-        id: 'st-flat-default',
-        name: 'Flat season',
-        version: 1,
-        stages: [flatStage],
-      },
-      calendarSnapshot: calendar,
-      stages: [
-        {
-          specId: 'stage-1',
-          // 'ready' (not 'generated') with a `seriesId` already on its one group is what
-          // makes the stage STALE — entrants re-confirmed after an earlier generate — so
-          // the button reads "Regenerate", exactly the path the fix targets.
-          status: 'ready',
-          groups: [{ id: 'g1', label: 'Group A', entrants: teamIds, seriesId: 'existing-series' }],
-        },
-      ],
-      version: 1,
-      // NOT the defaults (Twenty20 / 20 overs) — chosen precisely so a coincidental
-      // default couldn't make this assertion pass by accident.
-      flatFormat: { seriesType: 'Multi-Day', overs: 35 },
-    } as unknown as SeasonRun;
-
-    const onGenerate = vi.fn().mockResolvedValue(undefined);
-    const user = userEvent.setup();
-    render(
-      <SeasonRunsPanel
-        clubs={flatClubs}
-        allLeagues={[flatLeague]}
-        allSeries={[]}
-        runs={[flatRun]}
-        onOpenLauncher={vi.fn()}
-        onPatchRun={vi.fn().mockResolvedValue(undefined)}
-        onGenerate={onGenerate}
-        onDeleteRun={vi.fn()}
-      />,
-    );
-
-    await user.click(screen.getByRole('button', { name: /^regenerate \d+ fixtures$/i }));
-
-    expect(onGenerate).toHaveBeenCalled();
-    const [payloads] = onGenerate.mock.calls[0];
-    expect(payloads[0].competition).toMatchObject({
-      id: FLAT_COMPETITION_ID,
-      label: 'Multi-Day',
-      matchFormat: { overs: 35 },
-    });
-  });
-});
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   buildFlatSeasonRun — the pure synthesis a flat season starts from.
-   ───────────────────────────────────────────────────────────────────────────── */
-
-describe('buildFlatSeasonRun', () => {
+describe('Quick start', () => {
   const flatLeague = {
     key: 'friendlies',
     label: 'Friendlies',
@@ -1826,455 +1924,414 @@ describe('buildFlatSeasonRun', () => {
     district: 'All districts',
   } as unknown as League;
 
-  it('synthesizes a single-block calendar from custom dates', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      custom: { start: '2026-09-01', end: '2026-12-01' },
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-
-    expect(run.calendarSnapshot.id).toBe('cal-flat-friendlies');
-    expect(run.calendarSnapshot.label).toBe('2026/27');
-    expect(run.calendarSnapshot.blocks).toEqual([
-      { id: 'b1', label: 'Season', start: '2026-09-01', end: '2026-12-01' },
-    ]);
-  });
-
-  it('passes an operator calendar through verbatim, with the given blockIndex', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      blockIndex: 1,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-
-    expect(run.calendarSnapshot).toBe(calendar);
-    expect(run.structureSnapshot.stages[0].schedule.blockIndex).toBe(1);
-  });
-
-  it('defaults blockIndex to 0 when not given', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-    expect(run.structureSnapshot.stages[0].schedule.blockIndex).toBe(0);
-  });
-
-  it('places activateFrom on the stage schedule when given, and omits it otherwise', () => {
-    const withDate = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      activateFrom: '2026-08-01',
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-    expect(withDate.structureSnapshot.stages[0].schedule.activateFrom).toBe('2026-08-01');
-
-    const without = buildFlatSeasonRun({
-      id: 'run-y',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-    expect(without.structureSnapshot.stages[0].schedule.activateFrom).toBeUndefined();
-  });
-
-  it('stamps the flat sentinel competitionId, version 1 and one awaiting stage', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-
-    expect(run.competitionId).toBe(FLAT_COMPETITION_ID);
-    expect(run.version).toBe(1);
-    expect(run.structureSnapshot.version).toBe(1);
-    expect(run.stages).toEqual([{ specId: 'stage-1', status: 'awaiting-entrants', groups: [] }]);
-    expect(run.structureSnapshot.stages).toHaveLength(1);
-    expect(run.structureSnapshot.stages[0].entrants).toEqual({ kind: 'all-registered' });
-    // The stage takes the SEASON's name, not the league's — parity with the old flat
-    // naming ("Promotion League · 2026/27") via generateStageSeriesInner's template.
-    expect(run.structureSnapshot.stages[0].name).toBe('2026/27');
-  });
-
-  it('persists the chosen series type and overs as flatFormat — the single source of truth a regenerate reads back', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      seriesType: 'Multi-Day',
-      overs: 35,
-    });
-
-    expect(run.flatFormat).toEqual({ seriesType: 'Multi-Day', overs: 35 });
-  });
-
-  it('passes cadence and slots through onto the synthesized stage schedule', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-      cadence: { kind: 'weekdays', days: [6] },
-      slots: T20_SLOTS,
-    });
-
-    expect(run.structureSnapshot.stages[0].schedule.cadence).toEqual({
-      kind: 'weekdays',
-      days: [6],
-    });
-    expect(run.structureSnapshot.stages[0].schedule.slots).toEqual(T20_SLOTS);
-  });
-
-  it('clamps the chosen block’s start to firstRound when it falls inside the block', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      blockIndex: 1,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-      firstRound: '2027-02-01',
-    });
-
-    expect(run.calendarSnapshot.blocks[1].start).toBe('2027-02-01');
-    // The other block is untouched.
-    expect(run.calendarSnapshot.blocks[0].start).toBe(calendar.blocks[0].start);
-  });
-
-  it('defaults cadence to weekly and omits the slots key entirely when both are omitted', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      blockIndex: 1,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-    });
-
-    const schedule = run.structureSnapshot.stages[0].schedule;
-    expect(schedule.cadence).toEqual({ kind: 'weekly' });
-    expect('slots' in schedule).toBe(false);
-    // Block start is left exactly as the operator calendar had it — no firstRound given.
-    expect(run.calendarSnapshot.blocks[1].start).toBe(calendar.blocks[1].start);
-  });
-
-  it('ignores a firstRound before the block starts, leaving the block unchanged', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      blockIndex: 1,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-      // Before block 2's start (2027-01-16) — outside its range.
-      firstRound: '2026-12-01',
-    });
-
-    expect(run.calendarSnapshot.blocks[1].start).toBe(calendar.blocks[1].start);
-  });
-
-  it('ignores a firstRound after the block ends, leaving the block unchanged', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      blockIndex: 1,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-      // After block 2's end (2027-03-27) — outside its range.
-      firstRound: '2027-04-01',
-    });
-
-    expect(run.calendarSnapshot.blocks[1].start).toBe(calendar.blocks[1].start);
-  });
-
-  it('ignores a malformed, non-ISO firstRound string, leaving the block unchanged', () => {
-    const run = buildFlatSeasonRun({
-      id: 'run-x',
-      league: flatLeague,
-      seasonLabel: '2026/27',
-      calendar,
-      blockIndex: 1,
-      seriesType: 'Twenty20 (16-25 overs)',
-      overs: 20,
-      firstRound: '16 January 2027',
-    });
-
-    expect(run.calendarSnapshot.blocks[1].start).toBe(calendar.blocks[1].start);
-  });
-});
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   StartFlatSeasonForm — reached through the launcher for any non-capable league.
-   ───────────────────────────────────────────────────────────────────────────── */
-
-describe('StartFlatSeasonForm', () => {
-  const flatLeague = {
-    key: 'friendlies',
-    label: 'Friendlies',
-    group: 'Senior',
-    district: 'All districts',
-  } as unknown as League;
-
-  const config = {
-    structures: [],
-    calendars: [calendar],
-  } as unknown as TenantConfig;
-
-  // The top-of-file `clubs` fixture is registered for 'premier', not 'friendlies' — a
-  // separate roster so `leagueParticipants` actually finds sides for this league.
+  // The top-of-file `clubs` fixture is registered for 'premier', not 'friendlies'.
   const friendliesClubs = clubs.map((c) => ({ ...c, leagues: ['friendlies'] })) as Club[];
 
+  const mockedQuickStart = vi.mocked(quickStartSeason);
+
   const setup = (over: Record<string, unknown> = {}) => {
-    const onCreateRun = vi.fn().mockImplementation((run: SeasonRun) => Promise.resolve(run));
-    const onGenerateStage = vi.fn().mockResolvedValue(undefined);
+    const onSeasonSetupChanged = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
-    const toast = vi.fn();
     const user = userEvent.setup();
     render(
       <GenerateFixturesLauncher
         clubs={friendliesClubs}
         allLeagues={[flatLeague]}
-        config={config}
+        config={{ structures: [], calendars: [calendar] } as unknown as TenantConfig}
         existingRuns={[]}
-        onCreateRun={onCreateRun}
-        onGenerateStage={onGenerateStage}
-        renderSeriesForm={() => <div>stub series form</div>}
+        onCreateRun={vi.fn()}
+        onSeasonSetupChanged={onSeasonSetupChanged}
         onClose={onClose}
-        toast={toast}
+        toast={vi.fn()}
         {...over}
       />,
     );
-    return { user, onCreateRun, onGenerateStage, onClose, toast };
+    return { user, onSeasonSetupChanged, onClose };
   };
 
-  const openFlatDialog = async (user: ReturnType<typeof userEvent.setup>) => {
-    await user.click(screen.getByRole('button', { name: /^continue$/i }));
-    return screen.getByRole('dialog', { name: /start.*flat season/i });
-  };
+  const shapes = () => screen.getByRole('radiogroup', { name: /how the season is played/i });
+  const startBtn = () => screen.getByRole('button', { name: /^start season$/i });
 
-  const fillCustomDates = async (
-    user: ReturnType<typeof userEvent.setup>,
-    dialog: HTMLElement,
-    start: string,
-    end: string,
-  ) => {
-    const startInput = within(dialog).getByLabelText(/start date/i);
-    const endInput = within(dialog).getByLabelText(/end date/i);
-    await user.clear(startInput);
-    await user.type(startInput, start);
-    await user.clear(endInput);
-    await user.type(endInput, end);
-  };
+  beforeEach(() => {
+    mockedQuickStart.mockReset();
+    mockedQuickStart.mockResolvedValue({
+      run: {} as SeasonRun,
+      competitionId: 'comp-1',
+      structureId: 'st-1',
+      calendarId: 'cal',
+    });
+  });
 
-  /** Picks the one operator calendar on offer — the form defaults to "Custom dates". */
-  const selectCalendar = async (user: ReturnType<typeof userEvent.setup>, dialog: HTMLElement) =>
-    user.selectOptions(within(dialog).getByRole('combobox', { name: 'Dates' }), calendar.id);
+  it('says the league has no competition and offers the starter shapes, flat first', () => {
+    setup();
 
-  it('blocks a duplicate label for the same league', async () => {
-    // The label field defaults to the real current season — match `existingRuns` to
-    // whatever that resolves to right now, rather than assuming a fixed value.
-    const existingRuns = [
-      buildFlatSeasonRun({
-        id: 'run-existing',
-        league: flatLeague,
-        seasonLabel: currentSeasonLabel(),
-        calendar,
-        seriesType: 'Twenty20 (16-25 overs)',
-        overs: 20,
-      }),
-    ];
-    const { user } = setup({ existingRuns });
-    const dialog = await openFlatDialog(user);
-
-    expect(within(dialog).getByDisplayValue(currentSeasonLabel())).toBeInTheDocument();
     expect(
-      within(dialog).getByText(/flat season with that label is already running/i),
-    ).toBeInTheDocument();
-    expect(within(dialog).getByRole('button', { name: /^start season$/i })).toBeDisabled();
+      screen.getByText(
+        /No competition has been set up for this league yet\. Quick-start one below/,
+      ),
+    ).toBeVisible();
+    const cards = within(shapes()).getAllByRole('radio');
+    expect(cards).toHaveLength(6);
+    expect(within(shapes()).getByRole('radio', { name: /^flat round robin/i })).toBeChecked();
+    // Each card carries its first stage's example from the stage-kind registry.
+    expect(within(shapes()).getAllByText(/^e\.g\. /).length).toBeGreaterThan(0);
   });
 
-  it('blocks fewer than two registered sides', async () => {
-    const { user } = setup({ clubs: [] });
-    const dialog = await openFlatDialog(user);
+  it('previews the season as a narrative against the registered sides and the calendar', async () => {
+    const { user } = setup();
 
-    expect(within(dialog).getByText(/at least two sides must be registered/i)).toBeInTheDocument();
-    expect(within(dialog).getByRole('button', { name: /^start season$/i })).toBeDisabled();
+    expect(
+      screen.getByText(/Stage 1 · Round-robin stage · all 12 sides in one group · everyone plays/),
+    ).toBeVisible();
+
+    await user.click(
+      within(shapes()).getByRole('radio', { name: /^seeded groups → cross-group semis/i }),
+    );
+    expect(
+      screen.getByText(/Stage 1 · Round-robin stage · 12 sides seeded into 2 groups/),
+    ).toBeVisible();
+    expect(screen.getByText(/^Stage 2 · Knockout stage/)).toBeVisible();
+    // Two blocks on the calendar: each stage gets a "plays in" choice, prefilled.
+    expect(screen.getByRole('combobox', { name: 'Stage 1 plays in' })).toHaveValue('0');
+    expect(screen.getByRole('combobox', { name: 'Stage 2 plays in' })).toHaveValue('1');
   });
 
-  it('blocks custom dates where the end is before the start', async () => {
+  it('posts the quick start, refetches, then shows what happens next', async () => {
+    const { user, onSeasonSetupChanged } = setup();
+
+    await user.click(
+      within(shapes()).getByRole('radio', { name: /^seeded groups → cross-group semis/i }),
+    );
+    // Keep the knockout in the first block, straight after the groups.
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Stage 2 plays in' }), '0');
+    await user.selectOptions(screen.getByLabelText('Match format'), 'One-Day (40-50 overs)');
+    // Picking a format prefills its overs; ball type stays the admin's to add.
+    expect(screen.getByLabelText('Overs')).toHaveValue(50);
+    await user.type(screen.getByLabelText('Ball type'), 'White');
+    await user.click(startBtn());
+
+    expect(mockedQuickStart).toHaveBeenCalledTimes(1);
+    expect(mockedQuickStart).toHaveBeenCalledWith({
+      leagueKey: 'friendlies',
+      templateId: 'pools-to-knockout',
+      seasonLabel: currentSeasonLabel(),
+      calendar: { id: 'cal' },
+      matchFormat: { label: 'One-Day (40-50 overs)', overs: 50, ballType: 'White' },
+      placement: [0, 0],
+    });
+    expect(onSeasonSetupChanged).toHaveBeenCalledTimes(1);
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/Friendlies · .* has started/);
+    const next = screen.getAllByRole('listitem').map((li) => li.textContent);
+    expect(next.join('|')).toMatch(/Confirm entrants.*Generate fixtures.*Approve.*Release/);
+    expect(screen.queryByRole('radiogroup', { name: /how the season is played/i })).toBeNull();
+  });
+
+  it('offers the tenant’s own match formats and prefills overs and ball type from the pick', async () => {
     const { user } = setup({
-      config: { structures: [], calendars: [] } as unknown as TenantConfig,
+      config: {
+        structures: [],
+        calendars: [calendar],
+        competitionDefaults: {
+          matchFormats: [
+            { label: '50 Over (Red Ball)', overs: 50, ballType: 'Red' },
+            { label: 'T20 (Pink Ball)', overs: 20, ballType: 'Pink' },
+          ],
+        },
+      } as unknown as TenantConfig,
     });
-    const dialog = await openFlatDialog(user);
 
-    await fillCustomDates(user, dialog, '2026-12-01', '2026-09-01');
+    const picker = screen.getByLabelText('Match format');
+    expect(
+      within(picker)
+        .getAllByRole('option')
+        .map((o) => o.textContent),
+    ).toEqual(['50 Over (Red Ball)', 'T20 (Pink Ball)']);
+    // The first format is the default, overs and ball included.
+    expect(screen.getByLabelText('Overs')).toHaveValue(50);
+    expect(screen.getByLabelText('Ball type')).toHaveValue('Red');
 
-    expect(within(dialog).getByRole('button', { name: /^start season$/i })).toBeDisabled();
-  });
+    await user.selectOptions(picker, 'T20 (Pink Ball)');
+    expect(screen.getByLabelText('Overs')).toHaveValue(20);
+    expect(screen.getByLabelText('Ball type')).toHaveValue('Pink');
+    await user.click(startBtn());
 
-  it('creates the run then generates its fixtures, in order, with the synthetic competition', async () => {
-    const { user, onCreateRun, onGenerateStage, onClose } = setup();
-    const dialog = await openFlatDialog(user);
-    await selectCalendar(user, dialog);
-
-    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
-
-    expect(onCreateRun).toHaveBeenCalled();
-    expect(onGenerateStage).toHaveBeenCalled();
-    const createOrder = onCreateRun.mock.invocationCallOrder[0];
-    const generateOrder = onGenerateStage.mock.invocationCallOrder[0];
-    expect(createOrder).toBeLessThan(generateOrder);
-
-    const [payloads] = onGenerateStage.mock.calls[0];
-    expect(payloads[0].competition).toMatchObject({
-      id: '__flat__',
-      label: 'Twenty20 (16-25 overs)',
-      matchFormat: { overs: 20 },
-    });
-    expect(onClose).toHaveBeenCalled();
-  });
-
-  it('carries the chosen series type and overs into the synthetic competition, independently', async () => {
-    // Overs and Series Type are separate controls — nothing here should infer one from
-    // the other, so picking a One-Day type with 50 overs must produce exactly that label
-    // and overs count, not the Twenty20 default either field started at.
-    const { user, onGenerateStage } = setup();
-    const dialog = await openFlatDialog(user);
-    await selectCalendar(user, dialog);
-
-    await user.selectOptions(within(dialog).getByLabelText('Series Type'), 'One-Day (40-50 overs)');
-    const oversInput = within(dialog).getByLabelText('Overs');
-    await user.clear(oversInput);
-    await user.type(oversInput, '50');
-
-    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
-
-    const [payloads] = onGenerateStage.mock.calls[0];
-    expect(payloads[0].competition).toMatchObject({
-      label: 'One-Day (40-50 overs)',
-      matchFormat: { overs: 50 },
-    });
-  });
-
-  it('still closes and points at the Seasons panel when generation fails', async () => {
-    const onGenerateStage = vi.fn().mockRejectedValue(new Error('nope'));
-    const { user, onClose, toast } = setup({ onGenerateStage });
-    const dialog = await openFlatDialog(user);
-    await selectCalendar(user, dialog);
-
-    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
-
-    expect(onClose).toHaveBeenCalled();
-    expect(toast).toHaveBeenCalledWith(
-      expect.stringMatching(/generate the fixtures from the seasons panel/i),
+    expect(mockedQuickStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        matchFormat: { label: 'T20 (Pink Ball)', overs: 20, ballType: 'Pink' },
+      }),
     );
   });
 
-  it('guards against a double-submit — a rapid second click creates nothing extra', async () => {
-    // Never resolves within this test — the button's own `busy` disable is what has to
-    // stop the second click from reaching `onCreate` at all, not a fast round trip.
-    const onCreateRun = vi.fn(() => new Promise<SeasonRun>(() => {}));
-    const { user } = setup({ onCreateRun });
-    const dialog = await openFlatDialog(user);
-    await selectCalendar(user, dialog);
+  it('sends custom dates as a label with a start and an end, and no placement', async () => {
+    const { user } = setup();
 
-    const startBtn = within(dialog).getByRole('button', { name: /^start season$/i });
-    // Not awaited individually — this is the rapid double-click the busy guard exists
-    // for. A guard that only worked when the two clicks were serialised wouldn't be
-    // proving anything a disabled-button check couldn't.
-    await Promise.all([user.click(startBtn), user.click(startBtn)]);
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Dates' }), 'Custom dates');
+    expect(screen.getByText(/The first and last date a match may be played/)).toBeVisible();
+    expect(startBtn()).toBeDisabled();
 
-    expect(onCreateRun).toHaveBeenCalledTimes(1);
+    await user.type(screen.getByLabelText('Start date'), '2026-09-05');
+    await user.type(screen.getByLabelText('End date'), '2026-12-12');
+    await user.click(startBtn());
+
+    expect(mockedQuickStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateId: 'flat-round-robin',
+        calendar: { label: currentSeasonLabel(), start: '2026-09-05', end: '2026-12-12' },
+      }),
+    );
+    expect(mockedQuickStart.mock.calls[0][0]).not.toHaveProperty('placement');
   });
 
-  it('keeps the modal open with an inline error when create fails outright', async () => {
-    const onCreateRun = vi.fn().mockRejectedValue(new Error('boom'));
-    const onGenerateStage = vi.fn();
-    const { user } = setup({ onCreateRun, onGenerateStage });
-    const dialog = await openFlatDialog(user);
-    await selectCalendar(user, dialog);
+  it('keeps the form open with the server’s reason when the quick start is refused', async () => {
+    mockedQuickStart.mockRejectedValue(
+      new ApiError(400, 'That season is already running for this league.'),
+    );
+    const { user, onSeasonSetupChanged } = setup();
 
-    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
+    await user.click(startBtn());
 
     expect(
-      await within(dialog).findByText(/could not start the season — try again/i),
-    ).toBeInTheDocument();
-    expect(onGenerateStage).not.toHaveBeenCalled();
-    // Still open — a failed create must not discard the admin's half-filled form.
-    expect(screen.getByRole('dialog', { name: /start.*flat season/i })).toBeInTheDocument();
+      await screen.findByText('That season is already running for this league.'),
+    ).toBeVisible();
+    expect(onSeasonSetupChanged).not.toHaveBeenCalled();
+    expect(shapes()).toBeVisible();
   });
 
-  it('shows no inline error when the rejection was already toasted', async () => {
-    // withToast (main.tsx) flags a rethrown error `alreadyToasted` once it has surfaced
-    // its own toast — an inline message on top of that would tell the admin the same
-    // thing twice.
-    const toasted = Object.assign(new Error('surfaced elsewhere'), { alreadyToasted: true });
-    const onCreateRun = vi.fn().mockRejectedValue(toasted);
-    const onGenerateStage = vi.fn();
-    const { user } = setup({ onCreateRun, onGenerateStage });
-    const dialog = await openFlatDialog(user);
-    await selectCalendar(user, dialog);
+  it('refetches before showing the recovery copy when the season could not be started', async () => {
+    mockedQuickStart.mockRejectedValue(
+      new ApiError(
+        500,
+        'The competition was set up (cmp-1) but its season could not be started — start it from "Start a season"',
+        'run_not_started',
+        { competitionId: 'cmp-1' },
+      ),
+    );
+    const { user, onSeasonSetupChanged } = setup();
 
-    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
+    await user.click(startBtn());
 
-    // Wait for the busy state to settle back (the button reads "Start season" again)
-    // before asserting the error never appeared.
-    await within(dialog).findByRole('button', { name: /^start season$/i });
-    expect(within(dialog).queryByText(/could not start the season/i)).toBeNull();
-    expect(onGenerateStage).not.toHaveBeenCalled();
+    expect(await screen.findByText(/start it from "Start a season"/)).toBeVisible();
+    // The competition now exists, so the config must be refetched for "Start a season"
+    // to find it.
+    expect(onSeasonSetupChanged).toHaveBeenCalledTimes(1);
   });
 
-  describe('Scheduling options', () => {
-    it('carries a chosen cadence, first round and time slots through to the created run', async () => {
-      // A small roster — every-n-weeks over 11 rounds wouldn't fit block 1's ~13 weeks,
-      // and a "does not fit" state disables Start season, which isn't what this test is
-      // checking. Four sides need only three rounds either way.
-      const { user, onCreateRun } = setup({ clubs: friendliesClubs.slice(0, 4) });
-      const dialog = await openFlatDialog(user);
-      await selectCalendar(user, dialog);
+  it('reports a failure that never reached the server, and says to try again', async () => {
+    const offline = new TypeError('Failed to fetch');
+    mockedQuickStart.mockRejectedValue(offline);
+    const { user, onSeasonSetupChanged } = setup();
 
-      await user.click(within(dialog).getByRole('button', { name: 'Scheduling options' }));
-      await user.click(within(dialog).getByRole('button', { name: 'Every 2 weeks' }));
-      await user.click(within(dialog).getByRole('button', { name: 'Morning & afternoon' }));
+    await user.click(startBtn());
 
-      const firstRoundInput = within(dialog).getByLabelText(/first round/i);
-      // Well inside block 1's range (2026-09-12 → 2026-12-12).
-      await user.type(firstRoundInput, '2026-10-01');
-
-      await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
-
-      expect(onCreateRun).toHaveBeenCalled();
-      const [run] = onCreateRun.mock.calls[0];
-      const schedule = run.structureSnapshot.stages[0].schedule;
-      expect(schedule.cadence).toEqual({ kind: 'every-n-weeks', n: 2 });
-      expect(schedule.slots).toEqual(T20_SLOTS);
-      expect(run.calendarSnapshot.blocks[0].start).toBe('2026-10-01');
+    expect(await screen.findByText('Could not start the season — try again')).toBeVisible();
+    expect(vi.mocked(Sentry.captureException)).toHaveBeenCalledWith(offline, {
+      tags: { where: 'quick-start' },
     });
+    expect(onSeasonSetupChanged).not.toHaveBeenCalled();
+  });
+
+  describe('a league whose competitions are on calendars that have ended', () => {
+    const endingOn = (end: string): SeasonCalendar => ({
+      id: 'cal-old',
+      label: '2025/26',
+      blocks: [{ id: 'b1', label: 'Block 1', start: addDays(end, -60), end }],
+    });
+    const boundLeague = {
+      ...flatLeague,
+      competitions: [
+        { id: 'cmp-old', label: '50 Over', structureId: 'st-old', calendarId: 'cal-old' },
+      ],
+    } as unknown as League;
+    const bound = (cal: SeasonCalendar) => ({
+      allLeagues: [boundLeague],
+      config: {
+        structures: [{ id: 'st-old', name: 'Old league', version: 1, stages: [] }],
+        calendars: [cal, calendar],
+      } as unknown as TenantConfig,
+    });
+
+    it('offers quick start when every calendar ended before today', () => {
+      const yesterday = addDays(todayIso(), -1);
+      setup(bound(endingOn(yesterday)));
+
+      expect(
+        screen.getByText(
+          `This league's competitions are on calendars that have ended (2025/26, ended ${formatIsoDate(yesterday)}). Quick-start the new season below, or ask your operator to bind a new calendar.`,
+        ),
+      ).toBeVisible();
+      expect(shapes()).toBeVisible();
+      expect(screen.queryByRole('button', { name: /^continue$/i })).toBeNull();
+    });
+
+    it('continues to the season form while a calendar is still running', () => {
+      setup(bound(endingOn(addDays(todayIso(), 1))));
+
+      expect(screen.queryByRole('radiogroup', { name: /how the season is played/i })).toBeNull();
+      expect(screen.getByText(/has a competition set up by your operator/)).toBeVisible();
+      expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
+    });
+  });
+
+  it('refuses to start with fewer than two registered sides', () => {
+    setup({ clubs: [] });
+    expect(screen.getByText(/at least two affiliated sides must be registered/i)).toBeVisible();
+    expect(startBtn()).toBeDisabled();
+  });
+
+  // The affiliation gate: the preview counts only affiliated sides.
+  it('previews against the affiliated sides only', () => {
+    setup({
+      clubs: friendliesClubs.map((c, i) => (i < 2 ? { ...c, affiliation: 'in_progress' } : c)),
+    });
+    expect(screen.getByText(/with the 10 sides registered for Friendlies/)).toBeVisible();
+    expect(screen.getByText(/all 10 sides in one group/)).toBeVisible();
+  });
+
+  // What the retired create-series form did for a cup weekend, as a template.
+  it('starts a one-off tournament from its template', async () => {
+    const { user } = setup();
+
+    await user.click(within(shapes()).getByRole('radio', { name: /^one-off tournament/i }));
+    expect(
+      screen.getByText(/Stage 1 · Knockout stage · chosen by the admin · a seeded knockout/),
+    ).toBeVisible();
+    await user.click(startBtn());
+
+    expect(mockedQuickStart).toHaveBeenCalledWith(
+      expect.objectContaining({ leagueKey: 'friendlies', templateId: 'one-off-tournament' }),
+    );
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Dropping a side from an all-registered stage — what the retired create-series form's
+   team opt-out chips did, re-homed as Edit entrants (ADR 0014).
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('Edit entrants on an all-registered stage', () => {
+  const FLAT: CompetitionStructure = {
+    id: 'flat',
+    name: 'Flat round robin',
+    version: 1,
+    stages: [stage({ id: 'season', name: 'League season' })],
+  } as unknown as CompetitionStructure;
+
+  it('opens with every registered side in, and confirming without one writes the groups', async () => {
+    const { user, onPatchRun } = setup(FLAT, [run(FLAT)]);
+
+    await openConfirm(user, /^League season · /);
+    expect(
+      within(dialog()).getByText(
+        'Every registered side is in by default. Remove a side here if it is not playing this season.',
+      ),
+    ).toBeVisible();
+    // Every side starts in the one group.
+    expect(groupPickers()).toHaveLength(12);
+    for (const picker of groupPickers()) expect(picker).toHaveValue('0');
+
+    // Club 3 is not playing this season.
+    await user.selectOptions(groupPickers()[2], 'Not playing');
+    expect(within(dialog()).getByText('1 not playing')).toBeVisible();
+    await user.click(confirmBtn());
+
+    expect(onPatchRun).toHaveBeenCalledTimes(1);
+    const [, patch] = onPatchRun.mock.calls[0];
+    const [stageRun] = patch.stages;
+    expect(stageRun.specId).toBe('season');
+    expect(stageRun.status).toBe('ready');
+    expect(stageRun.groups).toHaveLength(1);
+    expect(stageRun.groups[0].entrants).toHaveLength(11);
+    expect(stageRun.groups[0].entrants).not.toContain('c3');
+    // Recorded like any other confirmation: the suggestion, and that it was overridden.
+    expect(stageRun.audit).toEqual([
+      expect.objectContaining({ accepted: false, prefill: [clubs.map((c) => c.id)] }),
+    ]);
+  });
+
+  it('marks the generated stage stale once a side is dropped', () => {
+    const all = clubs.map((c) => c.id);
+    // What confirmEntrants writes after a drop on a generated stage: back to 'ready',
+    // the series back-pointer kept.
+    const dropped = run(FLAT, {
+      stages: [
+        {
+          specId: 'season',
+          status: 'ready',
+          groups: [
+            { id: 'g1', label: 'Group A', entrants: all.filter((t) => t !== 'c3'), seriesId: 's1' },
+          ],
+        },
+      ],
+    } as Partial<SeasonRun>);
+    const series = [
+      { id: 's1', name: 'Premier · League season', released: false, fixtures: [] },
+    ] as unknown as Series[];
+    setup(FLAT, [dropped], { series });
+    expect(screen.getByText(/needs regenerating/i)).toBeVisible();
+    expect(screen.getByRole('button', { name: /regenerate \d+ fixtures/i })).toBeVisible();
+  });
+});
+
+describe('the affiliation gate on Confirm entrants', () => {
+  const FLAT: CompetitionStructure = {
+    id: 'flat',
+    name: 'Flat round robin',
+    version: 1,
+    stages: [stage({ id: 'season', name: 'League season' })],
+  } as unknown as CompetitionStructure;
+  // Club 1 and Club 2 have not submitted their affiliation form.
+  const mixed = clubs.map((c, i) =>
+    i < 2 ? { ...c, affiliation: 'in_progress' } : c,
+  ) as unknown as Club[];
+
+  const renderMixed = () => {
+    const onPatchRun = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <SeasonRunsPanel
+        clubs={mixed}
+        allLeagues={[league(FLAT.id)]}
+        allSeries={[]}
+        runs={[run(FLAT)]}
+        onOpenLauncher={vi.fn()}
+        onPatchRun={onPatchRun}
+        onGenerate={vi.fn().mockResolvedValue(undefined)}
+        onDeleteRun={vi.fn()}
+      />,
+    );
+    return { user, onPatchRun };
+  };
+
+  it('keeps unaffiliated sides out of the pool and says how many there are', () => {
+    renderMixed();
+    expect(screen.getByText(/12 sides \(2 not yet affiliated\) registered/)).toBeVisible();
+    // The group line's <strong> is the label; its parent reads "Group A · 10 sides · …".
+    expect(screen.getByText('Group A', { selector: 'strong' }).parentElement).toHaveTextContent(
+      /^Group A · 10 sides/,
+    );
+  });
+
+  it('lists them greyed with a one-click "Include anyway"', async () => {
+    const { user, onPatchRun } = renderMixed();
+    await openConfirm(user, /^League season · /);
+
+    expect(groupPickers()).toHaveLength(10);
+    const held = within(dialog())
+      .getAllByText('Not yet affiliated')
+      .map((el) => el.closest('tr')!);
+    expect(held).toHaveLength(2);
+    for (const row of held) expect(row).toHaveClass('sr-held-back');
+
+    await user.click(within(dialog()).getByRole('button', { name: 'Include Club 1 anyway' }));
+    // Included straight into the only group; the other stays held back.
+    expect(groupPickers()).toHaveLength(11);
+    expect(within(dialog()).getAllByText('Not yet affiliated')).toHaveLength(1);
+    await user.click(confirmBtn());
+
+    const [, patch] = onPatchRun.mock.calls[0];
+    expect(patch.stages[0].groups[0].entrants).toHaveLength(11);
+    expect(patch.stages[0].groups[0].entrants).toContain('c1');
+    expect(patch.stages[0].groups[0].entrants).not.toContain('c2');
   });
 });

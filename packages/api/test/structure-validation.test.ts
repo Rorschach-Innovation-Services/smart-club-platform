@@ -67,7 +67,32 @@ const rejects = (stages: StageSpec[], why: string, message?: RegExp) =>
 
 describe('within-pool pairing', () => {
   test('2 groups × 2 qualifiers is accepted', () =>
-    accepts([pools(), knockout('within-pool', 2)], 'the v1 shape'));
+    accepts([pools(), knockout('within-pool', 2)], 'the original shape'));
+
+  const groupsOf = (count: number) =>
+    pools({
+      entrants: { kind: 'seeded-split', groups: { kind: 'even', count }, method: 'snake' },
+    });
+
+  // Widened to the engine's real rule (ADR 0014): `withinPoolRounds` draws any
+  // power-of-two number of groups each sending the same power-of-two number of sides.
+  test('4 groups × 2 qualifiers is accepted', () =>
+    accepts([groupsOf(4), knockout('within-pool', 2)], '4×2'));
+
+  test('2 groups × 4 qualifiers and 8 groups × 2 are accepted', () => {
+    accepts([groupsOf(2), knockout('within-pool', 4)], '2×4');
+    accepts([groupsOf(8), knockout('within-pool', 2)], '8×2');
+  });
+
+  test('3 groups × 2 qualifiers is rejected', () =>
+    rejects(
+      [groupsOf(3), knockout('within-pool', 2)],
+      '3×2',
+      /power-of-two number of groups \(2, 4, 8\) each sending the same power-of-two number of sides \(2, 4\)/,
+    ));
+
+  test('2 groups × 3 qualifiers is rejected', () =>
+    rejects([groupsOf(2), knockout('within-pool', 3)], '2×3', /power-of-two/));
 
   test('a sizes plan with exactly two groups counts as two groups', () =>
     accepts(
@@ -84,16 +109,17 @@ describe('within-pool pairing', () => {
       'sizes [5,5]',
     ));
 
-  test('no qualifier count is rejected with the v1 message', () =>
+  test('no qualifier count is rejected with the within-group message', () =>
     rejects(
       [pools(), knockout('within-pool')],
       'missing qualifiersPerGroup',
-      /within-group semi-finals need 2 groups × 2 qualifiers/,
+      /within-group semi-finals need a power-of-two number of groups/,
     ));
 
-  test('a count other than 2 is rejected', () => {
+  test('a count that is not a power of two of at least 2 is rejected', () => {
     rejects([pools(), knockout('within-pool', 1)], 'q=1');
     rejects([pools(), knockout('within-pool', 3)], 'q=3');
+    rejects([pools(), knockout('within-pool', 6)], 'q=6');
   });
 
   test('a source stage with three groups is rejected', () =>
@@ -105,7 +131,7 @@ describe('within-pool pairing', () => {
         knockout('within-pool', 2),
       ],
       '3 pools',
-      /2 groups × 2 qualifiers/,
+      /power-of-two number of groups/,
     ));
 
   test('a source stage with no group plan (one group) is rejected', () =>
@@ -200,5 +226,19 @@ describe('back-compat: structures saved before these fields existed', () => {
         }),
       ],
       'two stages sharing a block without chaining — the old overlap is still expressible',
+    ));
+});
+
+describe('source (provenance)', () => {
+  test('each known source is accepted, and absent still validates', () => {
+    for (const source of ['operator', 'quick-start', 'migration'] as const)
+      assert.doesNotThrow(() => validateStructures([{ ...structure([pools()]), source }]));
+    accepts([pools()], 'no source ⇒ operator, the pre-existing meaning');
+  });
+  test('an unknown source is rejected', () =>
+    assert.throws(
+      () =>
+        validateStructures([{ ...structure([pools()]), source: 'admin' as unknown as 'operator' }]),
+      (err: unknown) => err instanceof HttpError && /unknown source/.test(err.message),
     ));
 });

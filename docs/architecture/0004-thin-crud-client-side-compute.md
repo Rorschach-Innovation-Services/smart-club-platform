@@ -45,3 +45,16 @@ helpers, unchanged.
 
 - **Server-side aggregation / reporting endpoints:** justified only at large scale; here it
   adds code and a drift risk for no user-visible benefit. Rejected for v1.
+
+## Addendum (2026-09): season generation writes server-side
+
+[ADR 0014](0014-seasons-one-vocabulary-one-path-one-engine.md) amends this decision; it does
+not reverse it. The fixture engine now lives in `packages/engine`, which the web app, the
+API and the CLIs all import. Generation and preview are still pure functions, and preview
+still runs in the browser. What moved is the write side of season generation:
+`POST /season-runs/:id/stages/:specId/generate` materialises a stage on the server with that
+same engine. It writes the group series through the `POST`/`PATCH /series` code (approval
+recall, release and in-season clash gates) and updates the run through the
+`PATCH /season-runs/:id` code. The console's "Regenerate a released schedule?" prompt
+becomes a `409 released_overwrite` followed by a confirmed retry. Everything else in this ADR
+stands.

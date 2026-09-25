@@ -19,7 +19,14 @@ module.exports = {
   plugins: ['react-refresh'],
   // sst.config.ts is SST-owned infra (its own root tsconfig.json + required
   // triple-slash ambient ref); kept out of lint, same as it's out of the type gate.
-  ignorePatterns: ['dist', 'node_modules', 'public', '*.config.js', '.eslintrc.cjs', 'sst.config.ts'],
+  ignorePatterns: [
+    'dist',
+    'node_modules',
+    'public',
+    '*.config.js',
+    '.eslintrc.cjs',
+    'sst.config.ts',
+  ],
   rules: {
     'react/prop-types': 'off',
     'react/jsx-no-target-blank': 'off',

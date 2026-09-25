@@ -72,7 +72,7 @@ club is a **participant in a released series whose `leagueKey` is a veterans lea
 fixtured it into veterans cricket. The client-side `clubPlaysVeterans(club.leagues)` predicate
 only drives nav visibility and is cosmetic; the server predicate is the authoritative gate. The
 two use the same key/label regexes (`isVeteransLeague`), kept in sync between
-`packages/api/src/veterans.ts` and `src/leagues.ts`, so a club never sees the nav yet 403s (or
+`packages/api/src/veterans.ts` and `packages/engine/src/leagues.ts`, so a club never sees the nav yet 403s (or
 the reverse). Every finder call is logged to CloudWatch (tenant, club, rep, query length, result
 count) for the enumeration-risk audit trail. The finder also excludes the club's own players,
 non-active rows, players already affiliated to a veterans club, and players already registered

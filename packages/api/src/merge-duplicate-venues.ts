@@ -8,7 +8,7 @@
  * WHY THIS EXISTS — the venue registry (ADR 0008 phase 2) grew duplicate rows for one
  * ground under two spellings (a club record's spelling beside the union's, e.g.
  * "CHATSWORTH OVAL" vs "Chatsworth Cricket Oval"). `groundKey()` from venue-clash.ts
- * already collapses each pair to one ledger/registry key via VENUE_ALIASES, so the two
+ * already collapses each pair to one ledger/registry key via the venue aliases, so the two
  * rows contend for the same field — but they remain two separate registry items, two
  * homeClubIds lists, two pins. This script picks a survivor per duplicate group, folds
  * the loser's data into it, repoints every fixture that pointed at the loser, and deletes
@@ -28,10 +28,20 @@
  * listed as an unhandled reference site rather than silently skipped.
  */
 import { writeFile } from 'node:fs/promises';
-import { groundKey, normaliseName, JUNK_GROUND } from './venue-clash.js';
+import {
+  groundKey,
+  normaliseName,
+  JUNK_GROUND,
+  DEFAULT_VENUE_ALIASES,
+  venueAliasesFor,
+} from './venue-clash.js';
 import type { Series, Venue } from './types.js';
 
 const TENANT = 'dolphins';
+
+/** Ground-name aliases: the code default until main() loads the tenant's config, then the
+ * default merged with the tenant's own `competitionDefaults.venueAliases` (ADR 0014). */
+let ALIASES: Record<string, string> = DEFAULT_VENUE_ALIASES;
 
 /** A stored fixture — only the venue fields matter here; everything else is preserved. */
 interface StoredFixture {
@@ -57,7 +67,7 @@ function hasPin(v: Venue): boolean {
 }
 
 /** normaliseName equals the group key ⇒ this spelling is the canonical registry form
- * (it did not have to pass through VENUE_ALIASES to reach the key). */
+ * (it did not have to pass through the venue aliases to reach the key). */
 function isCanonical(v: Venue, key: string): boolean {
   return normaliseName(v.name) === key;
 }
@@ -123,6 +133,7 @@ interface Merge {
 async function main() {
   const confirm = process.argv.includes('--confirm');
   const repo = await import('./repo.js');
+  ALIASES = venueAliasesFor(await repo.getTenantConfig(TENANT));
 
   const [venues, allSeries] = await Promise.all([repo.listVenues(TENANT), repo.listSeries(TENANT)]);
   const counts = fixtureCounts(allSeries);
@@ -155,7 +166,7 @@ async function main() {
   const groups = new Map<string, Venue[]>();
   for (const v of venues) {
     if (junkIds.has(v.id)) continue;
-    const key = groundKey(v.name);
+    const key = groundKey(v.name, ALIASES);
     (groups.get(key) ?? groups.set(key, []).get(key)!).push(v);
   }
 

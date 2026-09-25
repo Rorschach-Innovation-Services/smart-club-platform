@@ -147,7 +147,9 @@ describe('CalendarsCard — validation before anything is generated', () => {
     await user.clear(end);
     await user.type(end, '2026-09-12');
 
-    expect(screen.getByText(/ends before it starts/i)).toBeVisible();
+    // The error names the block; the block-dates field guide states the same rule in
+    // general terms, so match the error's own wording.
+    expect(screen.getByText(/block 1 ends before it starts/i)).toBeVisible();
     await user.click(screen.getByRole('button', { name: /^create calendar$|^save/i }));
     expect(save).not.toHaveBeenCalled();
   });
@@ -326,5 +328,40 @@ describe('CalendarsCard — deleting a bound calendar cascades to its competitio
     expect(toast).toHaveBeenCalledWith('A series already schedules against this calendar.', 'warn');
     // Nothing removed locally — the calendar's row is still there.
     expect(screen.getByRole('row', { name: /cal 1/i })).toBeInTheDocument();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Explainers under the form: a field guide under each list, and a collapsed worked
+   example an operator can open to see what a finished calendar looks like.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('CalendarForm — field guides and the worked example', () => {
+  it('explains blocks, breaks and excluded dates under their lists', async () => {
+    const { user } = setup([]);
+    await openNew(user);
+
+    expect(
+      screen.getByText('The first and last date a match may be played in this block.'),
+    ).toBeVisible();
+    expect(screen.getByText('A stretch inside the season when nobody plays.')).toBeVisible();
+    expect(screen.getByText(/Single days that are out: public holidays/)).toBeVisible();
+  });
+
+  it('opens and closes a read-only example calendar', async () => {
+    const { user } = setup([]);
+    await openNew(user);
+
+    const toggle = screen.getByRole('button', { name: /see a worked example/i });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText(/ten-round league would otherwise schedule/i)).toBeNull();
+
+    await user.click(toggle);
+    expect(screen.getByText(/ten-round league would otherwise schedule/i)).toBeVisible();
+    expect(screen.getByText('13 Sep – 13 Dec 2026')).toBeVisible();
+    expect(screen.getByText('24 Sep 2026 (Heritage Day)')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: /hide the worked example/i }));
+    expect(screen.queryByText(/ten-round league would otherwise schedule/i)).toBeNull();
   });
 });

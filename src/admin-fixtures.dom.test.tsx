@@ -20,7 +20,7 @@ import userEvent from '@testing-library/user-event';
 import { AdminFixtures, FixtureTable, SCHEDULE_COLS } from './admin';
 import { ApiError } from './api';
 import { renderWithProviders } from './test-utils';
-import type { Clash, Club, SeasonCalendar, Series, TenantConfig } from './types';
+import type { Clash, Club, SeasonCalendar, SeasonRun, Series, TenantConfig } from './types';
 
 const calendar: SeasonCalendar = {
   id: 'cal',
@@ -68,6 +68,7 @@ const setup = (
     onUpdateSeries?: ReturnType<typeof vi.fn>;
     onCheckClashes?: ReturnType<typeof vi.fn>;
     toast?: ReturnType<typeof vi.fn>;
+    allSeasonRuns?: SeasonRun[];
   } = {},
 ) => {
   // Resolve by default: onSave now closes the row only once the write promise lands, so a
@@ -82,6 +83,7 @@ const setup = (
       series={s}
       clubs={clubs}
       allCalendars={[calendar]}
+      allSeasonRuns={extra.allSeasonRuns}
       onUpdateSeries={onUpdateSeries}
       onDeleteSeries={vi.fn()}
       onDuplicateSeries={vi.fn()}
@@ -475,6 +477,39 @@ describe('adding a fixture', () => {
     expect(added.date).toBe('2026-10-03');
   });
 
+  it('dates through the season run snapshot when the calendar exists only there', async () => {
+    // A run's frozen calendar snapshot may exist nowhere in tenant config (a migrated flat
+    // run's `cal-flat-<league>`), so looking only at `allCalendars` fell back to the
+    // legacy +7-day step (29 Aug) instead of the snapshot block.
+    const flatCalendar: SeasonCalendar = {
+      id: 'cal-flat-friendlies',
+      label: '2026/27',
+      blocks: [{ id: 'b1', label: 'Season', start: '2026-10-03', end: '2027-03-27' }],
+      breaks: [],
+      excludeDates: [],
+    };
+    const run = { id: 'run-1', calendarSnapshot: flatCalendar } as unknown as SeasonRun;
+    const s = series({
+      seasonRunId: 'run-1',
+      schedule: { calendarId: 'cal-flat-friendlies', blockId: 'b1', cadence: { kind: 'weekly' } },
+    } as Partial<Series>);
+    const { user, onUpdateSeries } = setup(s, { allSeasonRuns: [run] });
+    await user.click(screen.getByRole('button', { name: /add fixture/i }));
+
+    // Block opens 3 Oct; round 4 weekly is 24 Oct.
+    const added = resultingFixtures(onUpdateSeries, s).at(-1)!;
+    expect(added.date).toBe('2026-10-24');
+  });
+
+  // ADR 0014: a series is only ever rebuilt from its season stage. Adding, editing and
+  // deleting fixtures by hand stays, including on an imported or stand-alone series.
+  it('offers no series-level Regenerate, only the hand-editing tools', () => {
+    setup(series());
+    expect(screen.queryByRole('button', { name: /regenerate/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /add fixture/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /allocate venues/i })).toBeTruthy();
+  });
+
   it('never proposes a side against itself', async () => {
     const s = series({ teams: ['spartan', 'tongaat'] } as Partial<Series>);
     const { user, onUpdateSeries } = setup(s);
@@ -539,7 +574,6 @@ describe('a tenant with no series still gets the season machinery', () => {
       <AdminFixtures
         clubs={clubs}
         allSeries={[]}
-        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -565,28 +599,43 @@ describe('a tenant with no series still gets the season machinery', () => {
     renderPage();
     expect(screen.getByRole('heading', { name: /venues/i })).toBeTruthy();
     expect(screen.getByText(/no season running/i)).toBeTruthy();
-    expect(screen.getByRole('button', { name: /start a season/i })).toBeTruthy();
+    // The header action, the Seasons card's CTA and the series empty state.
+    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(3);
     expect(screen.getByText(/no series yet/i)).toBeTruthy();
   });
 
+  // The page header's button is always there; what must not appear is the Seasons card's
+  // own Start CTA over a runs list that never loaded.
   it('holds the space while the season setup is loading instead of offering Start', () => {
     // An unloaded runs list rendered as "No season running" offers a Start CTA whose
     // duplicate guard is checking a list that never arrived.
     renderPage({ seasonSetupLoading: true });
-    expect(screen.queryByRole('button', { name: /start a season/i })).toBeNull();
+    expect(screen.queryByText(/no season running/i)).toBeNull();
+    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(1);
     expect(screen.getByText(/loading the season setup/i)).toBeTruthy();
   });
 
   it('reports a failed season-setup fetch rather than rendering it as an empty season list', () => {
     renderPage({ structuresFailed: true });
-    expect(screen.queryByRole('button', { name: /start a season/i })).toBeNull();
+    expect(screen.queryByText(/no season running/i)).toBeNull();
+    // Header + the series empty state; the Seasons card offers none.
+    expect(screen.getAllByRole('button', { name: /^start a season$/i })).toHaveLength(2);
     expect(screen.getByText(/couldn.t load the season setup/i)).toBeTruthy();
+  });
+
+  // ADR 0014: the header action is named for what it does, and nothing on the page opens
+  // the retired create-series form.
+  it('names the header action "Start a season" and has no create-series path', () => {
+    renderPage();
+    expect(screen.queryByRole('button', { name: /generate fixtures/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /create (a )?series/i })).toBeNull();
+    expect(screen.queryByText(/one-off series/i)).toBeNull();
   });
 });
 
-describe('the "Generate fixtures" launcher — one entry point, routed by league', () => {
+describe('the "Start a season" launcher — one entry point, routed by league', () => {
   // A minimal bound competition so `premier` is season-capable; `friendlies` has none, so
-  // it stays on the flat path. Both leagues share the same registered clubs.
+  // it gets Quick start. Both leagues share the same registered clubs.
   const structure = {
     id: 'struct-1',
     name: 'Straight round robin',
@@ -626,19 +675,13 @@ describe('the "Generate fixtures" launcher — one entry point, routed by league
     { id: 'c2', name: 'Club 2', affiliation: 'complete', leagues: ['premier', 'friendlies'] },
   ] as unknown as Club[];
 
-  // `onSubmitSeries` is the real POST handler — CreateSeriesForm now renders IN-MODAL via
-  // a render prop, not a level up in main.tsx, so what belongs to THIS boundary is the
-  // routing decision (which league gets the season form vs the embedded series form) and
-  // the wiring of that embedded form (prefilled + locked league, hint text). A full
-  // submit-through test would duplicate admin-create-series.dom.test.tsx, so it's skipped
-  // here.
-  const renderPage = (onSubmitSeries = vi.fn().mockResolvedValue(undefined)) => ({
-    onSubmitSeries,
+  // What belongs to THIS boundary is the routing decision: a league with a competition
+  // gets the season form, one without gets Quick start. There is no third path.
+  const renderPage = () => ({
     ...renderWithProviders(
       <AdminFixtures
         clubs={registeredClubs}
         allSeries={[]}
-        onSubmitSeries={onSubmitSeries}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -663,77 +706,78 @@ describe('the "Generate fixtures" launcher — one entry point, routed by league
   // Two buttons open the same launcher with no series yet (the header action and the
   // empty-state CTA) — either proves the wiring, so the first one found is enough.
   const openLauncher = async (user: ReturnType<typeof userEvent.setup>) =>
-    user.click(screen.getAllByRole('button', { name: /generate fixtures/i })[0]);
+    user.click(screen.getAllByRole('button', { name: /^start a season$/i })[0]);
 
-  const launcher = () => screen.getByRole('dialog', { name: /generate fixtures/i });
+  const launcher = () => screen.getByRole('dialog', { name: /^start a season$/i });
   const continueBtn = () => within(launcher()).getByRole('button', { name: /continue/i });
 
   it('routes a season-capable league straight to the season form, in the same modal', async () => {
-    const user = userEvent.setup();
-    const { onSubmitSeries } = renderPage();
-    await openLauncher(user);
-
-    await user.selectOptions(within(launcher()).getByRole('combobox'), 'premier');
-    await user.click(continueBtn());
-
-    expect(screen.getByRole('dialog', { name: /start.*season/i })).toBeTruthy();
-    expect(screen.queryByRole('dialog', { name: /^generate fixtures$/i })).toBeNull();
-    expect(onSubmitSeries).not.toHaveBeenCalled();
-  });
-
-  it('routes a flat league to the flat-season dialog, not the embedded series form', async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await openLauncher(user);
-
-    await user.selectOptions(within(launcher()).getByRole('combobox'), 'friendlies');
-    await user.click(continueBtn());
-
-    // Same launcher, routed to the flat-season step — not the embedded series form, and
-    // the "Generate fixtures" picker is gone.
-    const flatDialog = screen.getByRole('dialog', { name: /start.*flat season/i });
-    expect(flatDialog).toBeTruthy();
-    expect(screen.queryByRole('dialog', { name: /^generate fixtures$/i })).toBeNull();
-    expect(screen.queryByRole('dialog', { name: /create.*series/i })).toBeNull();
-
-    // The operator-hint box names the league and explains why it gets a flat season.
-    expect(within(flatDialog).getByText(/Friendlies has no competition bound to it/)).toBeTruthy();
-
-    // Back returns to the picker rather than closing the whole launcher.
-    await user.click(within(flatDialog).getByRole('button', { name: /^back$/i }));
-    expect(screen.getByRole('dialog', { name: /^generate fixtures$/i })).toBeTruthy();
-  });
-
-  it('opens the embedded series form with no prefill and a free league select for ad-hoc', async () => {
     const user = userEvent.setup();
     renderPage();
     await openLauncher(user);
 
     await user.selectOptions(
-      within(launcher()).getByRole('combobox'),
-      within(launcher()).getByRole('option', { name: /one-off series/i }),
+      within(launcher()).getByRole('combobox', { name: 'League' }),
+      'premier',
     );
     await user.click(continueBtn());
 
-    const seriesDialog = screen.getByRole('dialog', { name: /create.*series/i });
-    // Ad-hoc keeps the free select, unset — no league, no hint box.
-    expect(within(seriesDialog).getByLabelText('League')).toHaveValue('');
+    expect(screen.getByRole('button', { name: /^start season$/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /continue/i })).toBeNull();
   });
 
-  it('groups the league select into structured and flat optgroups', async () => {
+  it('offers Quick start in place for a league with no competition', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await openLauncher(user);
+
+    await user.selectOptions(
+      within(launcher()).getByRole('combobox', { name: 'League' }),
+      'friendlies',
+    );
+
+    // Same modal, no Continue: the league's status, then the quick start form under it.
+    expect(
+      within(launcher()).getByText(/No competition has been set up for this league yet/),
+    ).toBeTruthy();
+    expect(
+      within(launcher()).getByRole('radiogroup', { name: /how the season is played/i }),
+    ).toBeTruthy();
+    expect(within(launcher()).queryByRole('button', { name: /continue/i })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: /create.*series/i })).toBeNull();
+  });
+
+  it('has exactly two paths — the one-off option is gone, the template replaces it', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await openLauncher(user);
+
+    const options = within(within(launcher()).getByRole('combobox', { name: 'League' }))
+      .getAllByRole('option')
+      .map((o) => o.getAttribute('value'));
+    expect(options).toEqual(['premier', 'friendlies']);
+
+    await user.selectOptions(
+      within(launcher()).getByRole('combobox', { name: 'League' }),
+      'friendlies',
+    );
+    expect(within(launcher()).getByRole('radio', { name: /^one-off tournament/i })).toBeTruthy();
+  });
+
+  it('groups the league select by whether the operator set up a competition', async () => {
     // `leagues` above has one season-capable league ('premier') and one flat league
     // ('friendlies'), so both optgroups should render.
     const user = userEvent.setup();
     renderPage();
     await openLauncher(user);
 
-    const select = within(launcher()).getByRole('combobox');
+    const select = within(launcher()).getByRole('combobox', { name: 'League' });
     const groups = Array.from(select.querySelectorAll('optgroup')).map((g) =>
       g.getAttribute('label'),
     );
     expect(groups).toEqual([
-      'Structured seasons — set up by your platform operator',
-      'Flat seasons — one flat round robin until a competition is bound',
+      'Competition set up by your operator',
+      'No competition yet — quick start one',
     ]);
   });
 });
@@ -756,7 +800,6 @@ describe('the season viewer — every schedule on screen, downloads inside it', 
       <AdminFixtures
         clubs={clubs}
         allSeries={allSeries}
-        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -890,7 +933,6 @@ describe('progressive release — withhold at release, reveal later (ADR 0011)',
       <AdminFixtures
         clubs={clubs}
         allSeries={[s]}
-        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -918,8 +960,8 @@ describe('progressive release — withhold at release, reveal later (ADR 0011)',
     const user = userEvent.setup();
     const { onSetReleased } = renderPage(series({ approved: true } as Partial<Series>));
 
-    // Header CTA opens the ReleaseDialog (not an immediate release).
-    await user.click(screen.getAllByRole('button', { name: /release to clubs/i })[0]);
+    // The release bar opens the ReleaseDialog (not an immediate release).
+    await user.click(screen.getByRole('button', { name: /release to clubs/i }));
     const dialog = screen.getByRole('dialog', { name: /release .*to clubs/i });
     expect(onSetReleased).not.toHaveBeenCalled();
 
@@ -935,11 +977,11 @@ describe('progressive release — withhold at release, reveal later (ADR 0011)',
       series({ approved: true, released: true, withheld: { venue: true } } as Partial<Series>),
     );
 
-    // The series card carries the withheld badge.
-    expect(screen.getAllByText(/venues withheld/i).length).toBeGreaterThan(0);
+    // The series card (and the header) carry the withheld pill.
+    expect(screen.getAllByText(/withheld venues/i).length).toBeGreaterThan(0);
 
-    // Header CTA → confirm modal → dispatch reveal(['venue']).
-    await user.click(screen.getAllByRole('button', { name: /reveal venues/i })[0]);
+    // The release bar → confirm modal → dispatch reveal(['venue']). It is the only one.
+    await user.click(screen.getByRole('button', { name: /reveal venues/i }));
     const confirmBox = screen
       .getByText(/reveal venues to all clubs\?/i)
       .closest('.fix-confirm-box') as HTMLElement;
@@ -954,6 +996,134 @@ describe('progressive release — withhold at release, reveal later (ADR 0011)',
   });
 });
 
+describe('one release bar — the header and the cards show status only', () => {
+  const renderPage = (all: Series[]) =>
+    renderWithProviders(
+      <AdminFixtures
+        clubs={clubs}
+        allSeries={all}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onSetReleased={vi.fn()}
+        onReveal={vi.fn()}
+        onSetApproved={vi.fn()}
+        toast={vi.fn()}
+        allVenues={[]}
+        allSeasonRuns={[]}
+        allLeagues={[]}
+        tenantConfig={{ structures: [], calendars: [] } as unknown as TenantConfig}
+        onSaveVenue={vi.fn()}
+        onDeleteVenue={vi.fn()}
+        onAllocateVenues={vi.fn()}
+        onCreateSeasonRun={vi.fn()}
+        onPatchSeasonRun={vi.fn()}
+        onDeleteSeasonRun={vi.fn()}
+        onGenerateStageSeries={vi.fn()}
+      />,
+    );
+
+  const header = () => document.querySelector('.page-head') as HTMLElement;
+  const bar = () => document.querySelector('.fix-release-bar') as HTMLElement;
+
+  it('offers Approve once, in the release bar, with the header showing a Draft pill', () => {
+    renderPage([series(), series({ id: 's2', name: 'EMCU Premier · 2026/27' })]);
+
+    expect(screen.getAllByRole('button', { name: /approve fixtures/i })).toHaveLength(1);
+    expect(within(bar()).getByRole('button', { name: /approve fixtures/i })).toBeTruthy();
+    expect(
+      within(header()).queryByRole('button', { name: /approve|release|reveal|recall/i }),
+    ).toBeNull();
+    expect(within(header()).getByText('Draft')).toBeTruthy();
+  });
+
+  it('keeps every release action for a released, withheld series in the bar alone', () => {
+    renderPage([
+      series({
+        approved: true,
+        released: true,
+        withheld: { venue: true, time: true },
+      } as Partial<Series>),
+    ]);
+
+    for (const name of [/reveal venues/i, /reveal times/i, /recall release/i]) {
+      expect(screen.getAllByRole('button', { name })).toHaveLength(1);
+      expect(within(bar()).getByRole('button', { name })).toBeTruthy();
+    }
+    expect(within(header()).getByText('Released')).toBeTruthy();
+    expect(within(header()).getByText('Withheld venues')).toBeTruthy();
+    expect(within(header()).getByText('Withheld times')).toBeTruthy();
+    // The cards carry no action buttons of their own any more.
+    expect(document.querySelector('.series-card-cta')).toBeNull();
+    // Released has no next lifecycle step, so no button on the bar is filled: the reveals
+    // are outline actions, like Recall.
+    expect(bar().querySelectorAll('.btn:not(.btn-outline)')).toHaveLength(0);
+  });
+
+  it('fills only the next lifecycle step on the bar', () => {
+    renderPage([series({ approved: true } as Partial<Series>)]);
+    const filled = bar().querySelectorAll('.btn:not(.btn-outline)');
+    expect(filled).toHaveLength(1);
+    expect(filled[0].textContent).toMatch(/release to clubs/i);
+  });
+
+  it('says when a released series activates for clubs', () => {
+    renderPage([
+      series({ approved: true, released: true, activateFrom: '2099-01-18' } as Partial<Series>),
+    ]);
+    expect(within(header()).getByText(/^Activates /)).toBeTruthy();
+  });
+});
+
+describe('series outside every season stage are labelled for what they are', () => {
+  const renderStrip = (all: Series[]) =>
+    renderWithProviders(
+      <AdminFixtures
+        clubs={clubs}
+        allSeries={all}
+        onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
+        onDeleteSeries={vi.fn()}
+        onDuplicateSeries={vi.fn()}
+        onSetReleased={vi.fn()}
+        onSetApproved={vi.fn()}
+        toast={vi.fn()}
+        allSeasonRuns={[]}
+        allLeagues={[]}
+      />,
+    );
+  const cardNamed = (name: string) =>
+    screen
+      .getAllByText(name)
+      .map((el) => el.closest('.series-card'))
+      .find(Boolean) as HTMLElement;
+
+  it('marks an imported schedule, a stand-alone series, and nothing on a season-stage series', () => {
+    renderStrip([
+      series({ id: 's-planb-premier', name: 'Plan B import' }),
+      series({ id: 's-league', name: 'League import', leagueKey: 'premier' } as Partial<Series>),
+      series({ id: 's-hand', name: 'Hand-made cup' }),
+      series({ id: 's-run', name: 'Season stage', seasonRunId: 'run-1' } as Partial<Series>),
+    ]);
+
+    expect(within(cardNamed('Plan B import')).getByText('Imported schedule')).toBeTruthy();
+    expect(within(cardNamed('League import')).getByText('Imported schedule')).toBeTruthy();
+    expect(within(cardNamed('Hand-made cup')).getByText('Stand-alone series')).toBeTruthy();
+    expect(
+      within(cardNamed('Season stage')).queryByText(/imported schedule|stand-alone/i),
+    ).toBeNull();
+
+    const pill = within(cardNamed('Hand-made cup')).getByText('Stand-alone series');
+    expect(pill.closest('[title]')).toHaveAttribute(
+      'title',
+      'Not part of a season stage; cannot be regenerated. Its fixtures can still be added, edited and deleted.',
+    );
+    // Each pill carries its explainer (a plain guide link outside the help drawer).
+    expect(
+      within(cardNamed('Hand-made cup')).getByRole('link', { name: /what is this/i }),
+    ).toBeTruthy();
+  });
+});
+
 describe('release fires exactly one success toast', () => {
   const renderPage = (s: Series) => {
     const toast = vi.fn();
@@ -962,7 +1132,6 @@ describe('release fires exactly one success toast', () => {
       <AdminFixtures
         clubs={clubs}
         allSeries={[s]}
-        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -990,8 +1159,8 @@ describe('release fires exactly one success toast', () => {
     const user = userEvent.setup();
     const { toast, onSetReleased } = renderPage(series({ approved: true } as Partial<Series>));
 
-    // Header CTA opens the dialog; the dialog's own "Release to clubs" fires the release.
-    await user.click(screen.getAllByRole('button', { name: /release to clubs/i })[0]);
+    // The release bar opens the dialog; the dialog's own "Release to clubs" fires the release.
+    await user.click(screen.getByRole('button', { name: /release to clubs/i }));
     const dialog = screen.getByRole('dialog', { name: /release .*to clubs/i });
     await user.click(within(dialog).getByRole('button', { name: /release to clubs/i }));
 
@@ -1012,7 +1181,6 @@ describe('recall fires no false success toast when the recall fails', () => {
       <AdminFixtures
         clubs={clubs}
         allSeries={[s]}
-        onSubmitSeries={vi.fn().mockResolvedValue(undefined)}
         onUpdateSeries={vi.fn().mockResolvedValue(undefined)}
         onDeleteSeries={vi.fn()}
         onDuplicateSeries={vi.fn()}
@@ -1042,7 +1210,7 @@ describe('recall fires no false success toast when the recall fails', () => {
       series({ approved: true, released: true } as Partial<Series>),
     );
 
-    // Header CTA opens the shared confirm modal (not an immediate recall).
+    // The release bar opens the shared confirm modal (not an immediate recall).
     await user.click(screen.getByRole('button', { name: /recall release/i }));
     const confirmBox = screen
       .getByText(/recall this release\?/i)

@@ -87,7 +87,7 @@ function renderWizard() {
 }
 
 async function uploadWorkbook() {
-  await screen.findByRole('heading', { name: /league structure/i });
+  await screen.findByRole('heading', { name: /team entries import/i });
   const input = document.querySelector('input[type="file"]') as HTMLInputElement;
   const file = workbookFile();
   Object.defineProperty(input, 'files', { value: [file], configurable: true });

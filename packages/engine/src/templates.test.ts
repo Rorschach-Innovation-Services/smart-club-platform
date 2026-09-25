@@ -1,15 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import {
   STRUCTURE_TEMPLATES,
+  applyPlacement,
   blankStructure,
+  defaultPlacement,
+  templateBlockIndexForStage,
   findTemplate,
   instantiateTemplate,
   parseStructureJson,
   structureToJson,
 } from './templates';
-import { materialiseStage, describeStage } from './structure';
-import { T20_SLOTS } from './calendar';
-import type { SeasonCalendar } from '../types';
+import { materialiseStage } from './structure';
+import { describeStage } from './narrative';
+import { FALLBACK_TIME_SLOTS } from './defaults';
+import { STAGE_KINDS } from './stage-kinds';
+import type { SeasonCalendar } from './types';
 
 const CAL: SeasonCalendar = {
   id: 'cal',
@@ -24,16 +29,66 @@ const CAL: SeasonCalendar = {
 const team = (n: number) => Array.from({ length: n }, (_, i) => `t${i + 1}`);
 
 describe('starter templates', () => {
-  // Four shapes, with the pools shape shipped once per semi-final pairing — unions go
-  // either way season to season, so neither should be a hand-edit of the other.
-  it('ships the four shapes that cover every documented league', () => {
+  // Four shapes, with the groups shape shipped once per semi-final pairing — unions go
+  // either way season to season, so neither should be a hand-edit of the other — plus
+  // the one-off tournament that replaced the retired create-series form.
+  it('ships the four league shapes and the one-off tournament', () => {
     expect(STRUCTURE_TEMPLATES.map((t) => t.id)).toEqual([
       'flat-round-robin',
       'split-league-swap',
       'pools-to-knockout',
       'pools-to-knockout-within',
       'stream-and-cup',
+      'one-off-tournament',
     ]);
+  });
+
+  // Ids stay `pools-…` (stored as provenance on cloned structures); what people read
+  // says "groups", like the rest of the console.
+  it('names the groups shapes in groups, not pools', () => {
+    expect(findTemplate('pools-to-knockout')!.name).toBe(
+      'Seeded groups → cross-group semis → final',
+    );
+    expect(findTemplate('pools-to-knockout-within')!.name).toBe(
+      'Seeded groups → within-group semis → final',
+    );
+    for (const t of STRUCTURE_TEMPLATES) {
+      expect(`${t.name} ${t.whenToUse}`, t.id).not.toMatch(/\bpools?\b/i);
+    }
+  });
+
+  it('offers a one-off tournament: one seeded knockout of hand-picked sides, spread over its dates', () => {
+    const t = findTemplate('one-off-tournament')!;
+    expect(t.name).toBe('One-off tournament');
+    expect(t.whenToUse).toBe(
+      'A cup or festival outside the league season: pick the sides, get a seeded knockout.',
+    );
+    expect(t.stages).toEqual([
+      {
+        id: 'tournament',
+        name: 'Tournament',
+        format: { kind: 'knockout', pairing: 'seeded' },
+        entrants: { kind: 'manual' },
+        schedule: { blockIndex: 0, cadence: { kind: 'spread' } },
+      },
+    ]);
+  });
+
+  it('waits for the admin to pick the sides, then draws a knockout inside the block', () => {
+    const st = instantiateTemplate(findTemplate('one-off-tournament')!, CAL);
+    expect(materialiseStage({ stage: st.stages[0], calendar: CAL }).status).toBe(
+      'awaiting-entrants',
+    );
+    const m = materialiseStage({
+      stage: st.stages[0],
+      calendar: CAL,
+      context: { registered: team(8), seedOrder: team(8), confirmed: [team(8)] },
+    });
+    expect(m.status).toBe('ready');
+    if (m.status !== 'ready') return;
+    // Eight sides: quarter-finals, semi-finals, final.
+    expect(m.totalFixtures).toBe(7);
+    expect(m.fits).toBe(true);
   });
 
   // The count is what makes the preview exact ("4 entrants") instead of "up to N rounds".
@@ -48,7 +103,7 @@ describe('starter templates', () => {
     expect(within.format).toEqual({ kind: 'knockout', pairing: 'within-pool' });
   });
 
-  it('names real leagues so the choice is recognisable', () => {
+  it('describes the kind of league each shape suits', () => {
     for (const t of STRUCTURE_TEMPLATES) {
       expect(t.whenToUse.length).toBeGreaterThan(20);
       expect(t.examples.length).toBeGreaterThan(5);
@@ -117,18 +172,93 @@ describe('instantiateTemplate', () => {
   it('describes each stage as a readable sentence', () => {
     const st = instantiateTemplate(findTemplate('split-league-swap')!, CAL);
     expect(describeStage(st.stages[0], CAL)).toBe(
-      'Entered by an administrator · plays every team twice, home and away · weekly, Block 1',
+      'Chosen by the admin · plays every team twice, home and away · weekly, Block 1',
     );
     expect(describeStage(st.stages[1], CAL)).toContain('swaps with first in the bottom group');
     expect(describeStage(st.stages[1], CAL)).toContain('Block 2');
   });
 
-  // Every T20 Pink Ball competition plays a morning and an afternoon match per day, so
-  // the starter template carries T20_SLOTS on both its stages out of the box.
-  it('carries the T20 morning/afternoon slots on both stages of pools-to-knockout', () => {
+  describe('explicit placement', () => {
+    it('lets an explicit placement win over the default rule', () => {
+      const st = instantiateTemplate(findTemplate('split-league-swap')!, CAL, undefined, [0, 0]);
+      expect(st.stages.map((s) => s.schedule.blockIndex)).toEqual([0, 0]);
+    });
+
+    it('defaults to the old rule: first stage in block 1, the rest in block 2 when it exists', () => {
+      for (const t of STRUCTURE_TEMPLATES) {
+        const single: SeasonCalendar = { ...CAL, blocks: [CAL.blocks[0]] };
+        expect(defaultPlacement(t, 2), t.id).toEqual(
+          t.stages.map((_, i) => templateBlockIndexForStage(i, CAL)),
+        );
+        expect(defaultPlacement(t, 1), t.id).toEqual(
+          t.stages.map((_, i) => templateBlockIndexForStage(i, single)),
+        );
+        expect(
+          instantiateTemplate(t, CAL).stages.map((s) => s.schedule.blockIndex),
+          t.id,
+        ).toEqual(defaultPlacement(t, 2));
+      }
+    });
+
+    it('chains a stage only when it shares a block with the stage before it', () => {
+      const t = findTemplate('pools-to-knockout-within')!;
+      const sameBlock = instantiateTemplate(t, CAL, undefined, [0, 0]);
+      expect(sameBlock.stages[0].schedule.startAfter).toBeUndefined();
+      expect(sameBlock.stages[1].schedule.startAfter).toBe('previous-stage');
+
+      const split = instantiateTemplate(t, CAL, undefined, [0, 1]);
+      expect('startAfter' in split.stages[1].schedule).toBe(false);
+    });
+
+    it('re-chains when a placement is applied to stages placed differently before', () => {
+      const t = findTemplate('split-league-swap')!;
+      const chained = instantiateTemplate(t, CAL, undefined, [0, 0]);
+      const moved = applyPlacement(chained.stages, [0, 1]);
+      expect(moved.map((s) => s.schedule.blockIndex)).toEqual([0, 1]);
+      expect('startAfter' in moved[1].schedule).toBe(false);
+      const back = applyPlacement(moved, [1, 1]);
+      expect(back[1].schedule.startAfter).toBe('previous-stage');
+      // Everything else on the schedule survives.
+      expect(back[1].schedule.cadence).toEqual({ kind: 'weekly' });
+    });
+  });
+
+  // A short-format day plays a morning and an afternoon match, so the starter template
+  // carries the fallback slots on both its stages out of the box.
+  it('carries the fallback morning/afternoon slots on both stages of pools-to-knockout', () => {
     const st = instantiateTemplate(findTemplate('pools-to-knockout')!, CAL);
-    expect(st.stages[0].schedule.slots).toEqual(T20_SLOTS);
-    expect(st.stages[1].schedule.slots).toEqual(T20_SLOTS);
+    expect(st.stages[0].schedule.slots).toEqual(FALLBACK_TIME_SLOTS);
+    expect(st.stages[1].schedule.slots).toEqual(FALLBACK_TIME_SLOTS);
+  });
+
+  it('swaps in the tenant’s own time slots where the template sets start times', () => {
+    const slots = [
+      { label: 'Early', start: '09:30' },
+      { label: 'Late', start: '14:00' },
+    ];
+    const st = instantiateTemplate(findTemplate('pools-to-knockout')!, CAL, undefined, undefined, {
+      timeSlots: slots,
+    });
+    expect(st.stages[0].schedule.slots).toEqual(slots);
+    expect(st.stages[1].schedule.slots).toEqual(slots);
+    // Fresh copies: editing the structure never edits the tenant's config.
+    expect(st.stages[0].schedule.slots).not.toBe(slots);
+    // A template with no set times stays without them.
+    const flat = instantiateTemplate(findTemplate('flat-round-robin')!, CAL, undefined, undefined, {
+      timeSlots: slots,
+    });
+    expect('slots' in flat.stages[0].schedule).toBe(false);
+  });
+
+  // Templates and stage-kind examples are read by every tenant, so they describe a shape,
+  // never one union's league or cup.
+  it('names no union, league or sponsor in its copy', () => {
+    const UNION = /KZNCU|EMCU|Kingsmead|Hollywoodbets|Dolphins/i;
+    for (const t of STRUCTURE_TEMPLATES) {
+      expect(t.examples, t.id).not.toMatch(UNION);
+      expect(t.whenToUse, t.id).not.toMatch(UNION);
+    }
+    for (const [id, k] of Object.entries(STAGE_KINDS)) expect(k.eg, id).not.toMatch(UNION);
   });
 });
 

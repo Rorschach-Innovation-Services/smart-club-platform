@@ -291,7 +291,7 @@
     </div>
     <div style="text-align:right">
       2026 / 27 Season<br>
-      Version 1.0
+      Version 2.0 · September 2026
     </div>
     </div>
   </div>
@@ -304,9 +304,9 @@
     <h2>What's in this guide</h2>
   </div>
   <ol>
-    <li><span class="n">One</span><span class="t">How a season is put together</span><span class="d">The four ideas everything else rests on</span></li>
+    <li><span class="n">One</span><span class="t">How a season is put together</span><span class="d">The four ideas everything else rests on, and the two ways in</span></li>
     <li><span class="n">Two</span><span class="t">Season calendars</span><span class="d">Playing blocks, breaks and excluded dates</span></li>
-    <li><span class="n">Three</span><span class="t">Venues</span><span class="d">The ground list, and why pinning matters</span></li>
+    <li><span class="n">Three</span><span class="t">Venues and competition defaults</span><span class="d">The ground list, why pinning matters, and the union's own defaults</span></li>
     <li><span class="n">Four</span><span class="t">Competition structures</span><span class="d">Building the shape of a competition</span></li>
     <li><span class="n">Five</span><span class="t">Binding a competition to a league</span><span class="d">Where structures meet real clubs</span></li>
     <li><span class="n">Six</span><span class="t">Running a season</span><span class="d">The administrator's stage-by-stage walkthrough</span></li>
@@ -321,10 +321,10 @@
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part One</div>
-    <h2>How a season is put together</h2>
+    <h2 id="part-one">How a season is put together</h2>
     <p class="lede">
-      Before any clicking, four ideas. They take five minutes and they make the rest
-      of this guide obvious rather than fiddly.
+      Before any clicking, four ideas and the two ways in. They take five minutes and they
+      make the rest of this guide obvious rather than fiddly.
     </p>
   </div>
 
@@ -333,7 +333,7 @@
   <p>
     In the old model a league was just a name, and it ran one flat round robin. That works
     for EMCU Division 2. It does not work for KZNCU Premier Men, which runs
-    <strong>two competitions at once</strong>: a T20 Pink Ball tournament in seeded pools,
+    <strong>two competitions at once</strong>: a T20 Pink Ball tournament in seeded groups,
     and a 50 Over Red Ball league split into a Top Six and a Bottom Six.
   </p>
 
@@ -353,11 +353,19 @@
   <table class="t-narrow">
     <thead><tr><th>The question</th><th>What you choose</th></tr></thead>
     <tbody>
-      <tr><td><strong>Who plays?</strong></td><td>Every registered side · seeded into groups · entered by an administrator</td></tr>
-      <tr><td><strong>Who plays whom?</strong></td><td>Round robin (1, 2 or 3 legs) · knockout · single match · entered by hand</td></tr>
-      <tr><td><strong>When?</strong></td><td>Which playing block, and at what cadence</td></tr>
+      <tr><td><strong>Who plays?</strong></td><td>Every registered side · seeded into groups · chosen by the admin</td></tr>
+      <tr><td><strong>Who plays whom?</strong></td><td>Round robin (1, 2 or 3 legs) · knockout (seeded, cross-group or within-group) · single match · fixtures entered by hand</td></tr>
+      <tr><td><strong>When?</strong></td><td>Which block of the calendar it plays in, and at what cadence</td></tr>
     </tbody>
   </table>
+
+  <p>
+    A stage is not a block. A <strong>block</strong> is a stretch of dates on the season
+    calendar, such as Block 1, 13 Sep to 13 Dec 2026. A <strong>stage</strong> is a phase of
+    play. Each stage plays in one block, and the platform always says which: "Round-robin stage
+    · plays in Block 1". Two stages can share a block, one after the other, or sit in different
+    blocks either side of the break.
+  </p>
 
   <div class="why">
     <span class="callout-label">Why so few options</span>
@@ -383,7 +391,7 @@
     two loose lists.
   </p>
 
-  <h3>Standings are typed by a human, on purpose</h3>
+  <h3 id="standings">Standings are typed by a human, on purpose</h3>
 
   <p>
     The platform does not record results. There is no ladder. That means a stage which depends
@@ -406,30 +414,64 @@
     </p>
   </div>
 
-  <div class="note">
-    <span class="callout-label">The fast way through Parts Two, Four and Five</span>
+  <h3 id="two-doors">Two doors into the same model</h3>
+
+  <p>
+    Every season is a real competition on a real structure, however it was set up. There are
+    two ways to get one, and they end in the same place.
+  </p>
+
+  <table class="t-narrow">
+    <thead><tr><th>Door</th><th>Who, and what it does</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>The operator's wizard</strong><br><span class="ui">Set up a season</span></td>
+        <td>
+          The operator opens <em>Set up the season calendar &amp; competitions</em> from the tenant
+          page. Three steps: <strong>season dates</strong> (the calendar), <strong>league
+          structures</strong> (a template or an existing structure per league, with
+          <span class="ui">Adjust stages</span> to edit a new template's stages inline), then
+          <strong>review &amp; create</strong>, which saves it all at once. This is the full tool,
+          and it embeds Parts Two, Four and Five.
+        </td>
+      </tr>
+      <tr>
+        <td><strong>The administrator's quick start</strong><br><span class="ui">Start a season</span></td>
+        <td>
+          For a league with no competition yet, or whose competitions are on calendars that have
+          ended, <span class="ui">Start a season</span> offers <strong>Quick start</strong>. The
+          admin picks a template, the dates (an existing calendar or their own start and end) and
+          a match format. The platform then creates the structure, the calendar and the
+          competition, binds it to the league and starts the season in one step.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="why">
+    <span class="callout-label">Admins choose, operators author</span>
     <p>
-      Open <span class="ui">Set up a season</span> from the tenant page and it walks you
-      through the calendar, then a structure choice per league, then one review screen —
-      the same three things Parts Two, Four and Five cover, done as one guided pass instead
-      of three separate settings pages. Skip a league at the structure step and it stays on
-      the flat round robin flow.
-    </p>
-    <p style="margin-top:2.5mm">
-      The parts that follow are still worth reading in full: they're what the wizard's steps
-      are built from, and they're where you go afterwards to edit a structure stage by stage,
-      extend a calendar mid-season, or fix a single binding.
+      Quick start only ever picks from the platform's own list of templates. An administrator
+      cannot write or edit a structure's stages. That stays the operator's job, which is why a
+      quick-started structure is made fresh for its league and never offered back to the
+      wizard as a shape to reuse.
     </p>
   </div>
+
+  <p>
+    The parts that follow are still worth reading in full. They're what the wizard's steps and
+    the quick-start templates are built from, and they're where the operator goes afterwards to
+    edit a structure stage by stage, extend a calendar mid-season, or fix a single binding.
+  </p>
 </section>
 
 <!-- ══ PART TWO ═══════════════════════════════════════════════════════════ -->
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Two · Operator</div>
-    <h2>Season calendars</h2>
+    <h2 id="season-calendars">Season calendars</h2>
     <p class="lede">
-      Start here — or via the wizard, which embeds this same form as its first step.
+      Start here. The wizard's first step, <em>Season dates</em>, embeds this same form.
       Structures reference calendars, and leagues reference both, so the calendar has to
       exist before anything can point at it.
     </p>
@@ -496,8 +538,8 @@
   <div class="warn">
     <span class="callout-label">Before you save</span>
     <p>
-      A calendar a series is already scheduled against cannot be deleted. The platform will
-      refuse and tell you which competitions are using it. That is deliberate — deleting it
+      A calendar that a competition, a series or a running season uses cannot be deleted. The
+      platform will refuse and tell you what is using it. That is deliberate: deleting it
       would strand a season nobody could regenerate.
     </p>
   </div>
@@ -520,7 +562,7 @@
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Three · Operator</div>
-    <h2>Venues</h2>
+    <h2 id="venues">Venues and competition defaults</h2>
     <p class="lede">
       The master list of grounds fixtures can be played at. Second, because the allocator
       needs it and because you can seed most of it automatically.
@@ -595,26 +637,45 @@
       cannot argue with a fixture that simply appeared somewhere unexpected.
     </p>
   </div>
+
+  <h3 id="competition-defaults">Competition defaults</h3>
+
+  <p>
+    The <span class="ui">Competition defaults</span> card on the client's settings page holds
+    the union's own answers to questions the platform would otherwise answer with built-in
+    values. <strong>Match formats</strong> are offered when an administrator starts a season,
+    and picking one fills in its overs and ball type. <strong>Match days</strong> and
+    <strong>time slots</strong> are the starting ticks for a stage that plays on set days only
+    or has set start times; every stage can still change them. <strong>Travel cost</strong>
+    prices the travel estimates on the fixtures screens and exports. <strong>Venue
+    aliases</strong> tell the clash check that two spellings are one ground, so a fixture at
+    either books the same field. Anything left empty uses the built-in value, and changing a
+    default never changes a season or structure that already exists. Administrators see the
+    same card on their league page, with venue aliases read-only.
+  </p>
 </section>
 
 <!-- ══ PART FOUR ══════════════════════════════════════════════════════════ -->
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Four · Operator</div>
-    <h2>Competition structures</h2>
+    <h2 id="competition-structures">Competition structures</h2>
     <p class="lede">
       The shape of a competition, built once and reused. This is the heart of the feature
-      and the part worth taking slowly. The wizard's per-league step picks a template or an
-      existing structure inline; this part is what that step is choosing between.
+      and the part worth taking slowly. The wizard embeds it: its second step, <em>League
+      structures</em>, picks a template or an existing structure per league, and
+      <span class="ui">Adjust stages</span> opens this same stage editor inline. This part is
+      what that step is choosing between.
     </p>
   </div>
 
   <h3>Start from a template, almost always</h3>
 
   <p>
-    Four templates ship, and between them they cover all thirteen documented KZNCU and EMCU
-    structures. A template is a <strong>copy</strong>, not a link — once you pick one it is
-    yours and fully editable, and changing it later never affects anything else.
+    Six templates ship, and between them they cover all thirteen documented KZNCU and EMCU
+    structures. A template is a <strong>copy</strong>, not a link. Once you pick one it is
+    yours and fully editable, and changing it later never affects anything else. The same six
+    are what an administrator chooses from in Quick start.
   </p>
 
   <table>
@@ -622,10 +683,20 @@
     <tbody>
       <tr><td>Flat round robin</td><td>Every EMCU division. One stage, everyone plays everyone.</td></tr>
       <tr><td>Split league with mid-season swap</td><td>KZNCU Premier Men 50 Over, Premier Women 30 Over.</td></tr>
-      <tr><td>Seeded pools → cross-pool semis → final</td><td>Every T20 Pink Ball competition.</td></tr>
-      <tr><td>Stream + knockout cup</td><td>Promotion Men — streams plus the Kingsmead Cup.</td></tr>
+      <tr><td>Seeded groups → cross-group semis → final</td><td>Every T20 Pink Ball competition.</td></tr>
+      <tr><td>Seeded groups → within-group semis → final</td><td>A league where each group produces its own finalist.</td></tr>
+      <tr><td>Stream + knockout cup</td><td>Promotion Men: streams plus the Kingsmead Cup.</td></tr>
+      <tr><td>One-off tournament</td><td>A cup or festival outside the league season. Pick the sides, get a seeded knockout spread across the dates you give it.</td></tr>
     </tbody>
   </table>
+
+  <p>
+    When the calendar has two or more blocks, the wizard's second step asks which block each
+    stage plays in (<em>Stage 2 plays in Block 2</em>), prefilled with the usual choice. Under
+    each league it shows the <strong>season narrative</strong>: one plain sentence per stage,
+    with its block and dates, so you can read what the season will do before anything is
+    saved.
+  </p>
 
   <p>
     <span class="ui">Build from scratch</span> is there when nothing fits, and
@@ -642,52 +713,46 @@
 
   <div class="flow">
     <div class="flow-stage">
-      <div class="st">Stage 1</div>
+      <div class="st">Stage 1 · Round-robin stage</div>
       <div class="sn">Double round</div>
-      <div class="sd">2 groups of 6 · plays every team twice, home and away · weekly, Block 1</div>
+      <div class="sd">2 groups of 6 · plays every team twice, home and away · weekly · plays in Block 1</div>
     </div>
     <div class="flow-down">↓</div>
     <div class="flow-stage">
-      <div class="st">Stage 2</div>
+      <div class="st">Stage 2 · Round-robin stage</div>
       <div class="sn">Final round</div>
-      <div class="sd">Entered by an administrator · plays every team once · weekly, Block 2</div>
+      <div class="sd">Chosen by the admin · plays every team once · weekly · plays in Block 2</div>
     </div>
   </div>
 
-  <h3>The four controls inside a stage</h3>
+  <h3>Three questions inside a stage</h3>
 
-  <h4>Format — who plays whom</h4>
+  <p>
+    The stage editor asks the three questions from Part One, in order: <strong>Who
+    plays?</strong>, <strong>Who plays whom?</strong> and <strong>When?</strong> Every choice
+    that changes behaviour is an option card with a plain description, an example and a line on
+    when to pick it. The <em>(i)</em> beside each one opens the longer explainer.
+  </p>
+
+  <h4 id="teams">Who plays? Where the entrants come from</h4>
   <table class="t-narrow">
     <thead><tr><th>Choice</th><th>Meaning</th></tr></thead>
     <tbody>
-      <tr><td>Single round robin</td><td>Everyone plays everyone once.</td></tr>
-      <tr><td>Double round robin</td><td>Twice, home and away. The second leg mirrors the first.</td></tr>
-      <tr><td>Triple round robin</td><td>Three times. Rare, but the model supports it.</td></tr>
-      <tr><td>Knockout — seeded</td><td>Standard bracket from the entrant order. Top two seeds can only meet in the final. A field that isn't a power of two gets a preliminary round automatically.</td></tr>
-      <tr><td>Knockout — cross-pool</td><td>Pool winners paired against other pools' runners-up. Needs the previous stage's finishing positions — see Part Six.</td></tr>
-      <tr><td>Single match</td><td>One fixture. A final, a playoff.</td></tr>
-      <tr><td>Entered by hand</td><td>The escape hatch. Generates no fixtures; the administrator adds them manually afterwards.</td></tr>
-    </tbody>
-  </table>
-
-  <h4>Teams — where the entrants come from</h4>
-  <table class="t-narrow">
-    <thead><tr><th>Choice</th><th>Meaning</th></tr></thead>
-    <tbody>
-      <tr><td>Every registered side</td><td>Everyone entered in the league. One group.</td></tr>
-      <tr><td>Seeded into groups</td><td>Split by seeding order. <strong>Snake</strong> puts seeds 1 and 2 in different pools; <strong>top-down blocks</strong> puts the top half in one group.</td></tr>
-      <tr><td>Entered by an administrator</td><td>A human types the groups. Used whenever the answer depends on standings.</td></tr>
+      <tr><td>Every registered side</td><td>Everyone entered in the league, in one group. This option cannot be split into groups.</td></tr>
+      <tr><td>Seeded into groups (snake)</td><td>Dealt into groups by seed, back and forth: 1→A, 2→B, 3→B, 4→A. Seeds 1 and 2 always land in different groups.</td></tr>
+      <tr><td>Seeded into groups (top-down)</td><td>Fills one group at a time in seed order, so the top half goes into group A. For tiers: a Top Six and a Bottom Six.</td></tr>
+      <tr><td>Chosen by the admin</td><td>The admin types which sides play in each group when the stage opens. Used whenever the answer depends on results.</td></tr>
     </tbody>
   </table>
 
   <p>
-    For the last two you also set the group plan: <strong>even groups</strong> (say 4 groups,
+    For every choice except the first you also set the group plan: <strong>even groups</strong> (say 4 groups,
     remainder lands in the earlier ones) or <strong>exact sizes</strong>
     (<span class="field">5, 5, 5, 4</span> — the only way to express the 19-team Promotion Men
     split).
   </p>
 
-  <h4>The rule, for administrator-entered stages</h4>
+  <h4 id="derivation-rule">The rule, for stages chosen by the admin</h4>
   <p>
     When a stage depends on an earlier one, write the rule in plain English. This sentence is
     shown to the administrator when they confirm, and it is the whole instruction they get:
@@ -701,29 +766,55 @@
     calculated.
   </p>
 
-  <h4>Schedule — when it is played</h4>
+  <h4 id="format">Who plays whom? The format</h4>
+  <table class="t-narrow">
+    <thead><tr><th>Choice</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Single round robin</td><td>Everyone in a group plays everyone once.</td></tr>
+      <tr><td>Double round robin</td><td>Twice, home and away. The second leg mirrors the first.</td></tr>
+      <tr><td>Triple round robin</td><td>Three times. Rare, but the model supports it.</td></tr>
+      <tr><td>Knockout — seeded</td><td>Standard bracket from the entrant order. Top two seeds can only meet in the final. A field that isn't 2, 4, 8 or 16 gets a preliminary round among the lowest seeds automatically.</td></tr>
+      <tr><td>Knockout — cross-group</td><td>Each group winner plays another group's runner-up: A1 v B2 and B1 v A2. Needs the previous stage's finishing positions (see Part Six).</td></tr>
+      <tr><td>Knockout — within-group</td><td>Each group plays its own semi-final: A1 v A2 and B1 v B2, and the two winners meet in the final. Needs a power-of-two number of groups (2, 4 or 8), each sending the same power-of-two number of sides (2 or 4).</td></tr>
+      <tr><td>Single match</td><td>One fixture. A final, a playoff.</td></tr>
+      <tr><td>Fixtures entered by hand</td><td>The escape hatch. Generates no fixtures; the administrator adds them afterwards.</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    For a knockout fed by groups, the structure sets a default pairing. The administrator can
+    choose the other one when confirming the qualifiers, for that season only.
+  </p>
+
+  <h4 id="schedule">When? The block and the cadence</h4>
+  <p>
+    First, which block of the calendar the stage plays in. A stage that shares a block with an
+    earlier one can be set to start after the previous stage finishes, on the same weekday.
+    Then the cadence:
+  </p>
   <table class="t-narrow">
     <thead><tr><th>Cadence</th><th>Meaning</th></tr></thead>
     <tbody>
-      <tr><td>Weekly</td><td>One round per week.</td></tr>
-      <tr><td>Every N weeks</td><td>Fortnightly for EMCU Division 3 Stream 2 and Division 4.</td></tr>
-      <tr><td>Set days only</td><td>Saturdays only, for EMCU Division 5.</td></tr>
-      <tr><td>Spread across block</td><td>Rounds spaced evenly to fill the block.</td></tr>
+      <tr><td>Weekly</td><td>One round each week, on the weekday the block starts.</td></tr>
+      <tr><td>Every N weeks</td><td>You set the gap. Fortnightly for EMCU Division 3 Stream 2 and Division 4.</td></tr>
+      <tr><td>Set days only</td><td>Only the weekdays you tick. Saturdays only, for EMCU Division 5.</td></tr>
+      <tr><td>Spread across the block</td><td>Rounds spaced evenly from the block's first date to its last.</td></tr>
     </tbody>
   </table>
 
   <p>
     You can also add <strong>time slots</strong> (a T20 morning and afternoon), and an
-    <strong>activation date</strong> — junior fixtures generated in September but not visible
-    to clubs until the third week of January.
+    <strong>activation date</strong>: junior fixtures generated in September but not visible
+    to clubs until the third week of January. Match days and time slots start from the
+    union's <a href="#competition-defaults">competition defaults</a>.
   </p>
 
-  <h3>Watch the preview rail</h3>
+  <h3 id="preview-rail">Watch the preview rail</h3>
 
   <p>
     The panel beside the editor recalculates on every change, for a hypothetical number of
-    teams you set. It shows fixture counts per group, rounds against cadence, the resulting
-    date span, and whether it fits the block.
+    teams you set. It shows the season narrative, fixture counts per group, rounds against
+    cadence, the resulting date span, and whether it fits the block.
   </p>
 
   <div class="note">
@@ -743,11 +834,11 @@
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Five · Operator</div>
-    <h2>Binding a competition to a league</h2>
+    <h2 id="binding">Binding a competition to a league</h2>
     <p class="lede">
-      The step that makes everything else reachable — until a league has a competition, an
-      administrator cannot start a season on it. The wizard does this as its review-and-commit
-      step; this part is for binding one by hand from the Leagues card.
+      The step that puts a structure to work on a league's real clubs. The wizard does this as
+      its third step, <em>Review &amp; create</em>, and an administrator's Quick start does it
+      for a single league. This part is for binding one by hand from the Leagues card.
     </p>
   </div>
 
@@ -781,12 +872,19 @@
     </p>
   </div>
 
+  <p>
+    The match format lives on the competition. Every series its stages generate copies it from
+    there.
+  </p>
+
   <div class="note">
     <span class="callout-label">Nothing breaks if you stop here</span>
     <p>
-      A league with no competition behaves exactly as it always has: the administrator uses
-      <span class="ui">Create a series</span> and gets a flat round robin. Structured seasons
-      are opt-in, league by league.
+      A league with no competition is not stuck. The administrator's
+      <span class="ui">Start a season</span> offers Quick start for it: they pick a template,
+      dates and a match format, and the platform binds a competition for them. You only need
+      to bind by hand when the league needs a shape the templates don't give, or several
+      competitions side by side.
     </p>
   </div>
 </section>
@@ -795,48 +893,103 @@
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Six · Administrator</div>
-    <h2>Running a season</h2>
+    <h2 id="running-a-season">Running a season</h2>
     <p class="lede">
       The operator's work is done. This is the part the union office does every year.
     </p>
   </div>
 
-  <h3>Start it</h3>
+  <h3 id="start-a-season">Start it</h3>
 
   <div class="steps">
     <div class="step">
-      <h4>Admin console → <span class="ui">Seasons</span> → <span class="ui">Start a season</span></h4>
+      <h4>Admin console → <span class="ui">Fixtures</span> → <span class="ui">Start a season</span></h4>
       <p>
-        Pick the league, then the competition, then confirm the season label. If the league has
-        no competition configured you will be told so plainly and pointed at your platform
-        operator.
+        Pick the league. The box under it says plainly which case you are in, and how many
+        sides are registered for the league (with any not yet affiliated called out).
+      </p>
+    </div>
+    <div class="step">
+      <h4>A league your operator set up: pick the competition</h4>
+      <p>
+        <span class="ui">Continue</span>, then pick the competition (there is usually only one)
+        and confirm the season label. A summary shows the structure, its version, the calendar,
+        and how many groups each stage will make with the sides actually registered.
+      </p>
+    </div>
+    <div class="step">
+      <h4>A league with no competition: Quick start</h4>
+      <p>
+        The Quick start form appears in place. Pick <strong>how the season is played</strong>
+        from the template cards, then the <strong>dates</strong>: one of the union's calendars,
+        or <em>Custom dates</em> with your own start and end. If the calendar has more than one
+        block, say which block each stage plays in. Give the season a label and pick the
+        <strong>match format</strong>; its overs and ball type fill in and stay editable.
+      </p>
+      <p>
+        Before you press <span class="ui">Start season</span>, the preview reads the season
+        back to you in plain sentences, one per stage, using the sides registered for the
+        league. That is exactly what the platform will build.
+      </p>
+    </div>
+    <div class="step">
+      <h4>Read "What happens next"</h4>
+      <p>
+        Both paths show the same four-step strip: <strong>Confirm entrants</strong>,
+        <strong>Generate fixtures</strong>, <strong>Approve</strong>, <strong>Release</strong>.
+        That is the order you work each stage in, below.
       </p>
     </div>
     <div class="step">
       <h4>The structure and calendar are frozen at this moment</h4>
       <p>
-        A copy is taken. If the operator edits the template next week, your running season is
-        untouched. This is deliberate and there is no way to un-freeze it — start a new season
-        instead.
+        A copy is taken. If the operator edits the structure next week, your running season is
+        untouched until you choose to adopt the new version. Neither can be un-frozen: to
+        change them outright, start a new season instead.
       </p>
     </div>
   </div>
 
   <h3>Work the stages</h3>
 
-  <p>Each stage shows a status, and the status tells you what it needs:</p>
+  <p>
+    Each stage is a card titled by its name and kind, such as <em>Double round · Round-robin
+    stage</em>. Under the title:
+  </p>
+
+  <ul>
+    <li>
+      A <strong>status timeline</strong>:
+      <span class="pill muted">Awaiting entrants</span> →
+      <span class="pill muted">Ready</span> →
+      <span class="pill teal">Generated</span> →
+      <span class="pill teal">Released</span>.
+      The current step carries a one-line hint of what to do. A stage is Released only when
+      every one of its groups' series is out.
+    </li>
+    <li>
+      <strong>Plays in Block N</strong> with its dates: the planned first and last round once
+      the stage has groups, otherwise the block's own dates. For example, <em>Plays in Block 2
+      (After the break) · 16 Jan 2027 → 27 Mar 2027</em>.
+    </li>
+    <li>The stage's line from the <strong>season narrative</strong>, in plain English.</li>
+    <li>
+      <strong>What the platform needs from you</strong>: the seeding order, each group's
+      finishing order, which sides play in each group, or nothing extra.
+    </li>
+  </ul>
+
+  <p>Two pills appear only when something needs attention:</p>
 
   <table class="t-narrow">
-    <thead><tr><th>Status</th><th>What it means</th></tr></thead>
+    <thead><tr><th>Pill</th><th>What it means</th></tr></thead>
     <tbody>
-      <tr><td><span class="pill muted">Awaiting entrants</span></td><td>The stage cannot work out who plays. It will show you the rule and a suggestion. Your move.</td></tr>
-      <tr><td><span class="pill muted">Ready to generate</span></td><td>Everything it needs is known. Press the button.</td></tr>
-      <tr><td><span class="pill teal">Generated</span></td><td>Fixtures exist as series. Approve and release them from the series list.</td></tr>
-      <tr><td><span class="pill coral">Needs regenerating</span></td><td>Something changed after generation and the live fixtures no longer match.</td></tr>
+      <tr><td><span class="pill coral">Doesn’t fit</span></td><td>The rounds need more time than the block allows. The reason is shown on the card.</td></tr>
+      <tr><td><span class="pill coral">Needs regenerating</span></td><td>The entrants, the pairing or the schedule changed after generation, so the live fixtures no longer match.</td></tr>
     </tbody>
   </table>
 
-  <h3>Confirming entrants</h3>
+  <h3 id="confirming-entrants">Confirming entrants</h3>
 
   <p>
     <span class="ui">Confirm entrants</span> opens a table of every registered side with a group
@@ -852,12 +1005,20 @@
 
   <p>Live counts against the structure's expected sizes catch a miscount before it becomes a fixture list.</p>
 
+  <p>
+    <span class="ui">Edit entrants</span> is on every stage, including one where every
+    registered side plays. It is how you drop a side from a season. Sides whose club has not
+    submitted its affiliation are listed greyed out, with a one-click
+    <span class="ui">Include anyway</span>.
+  </p>
+
   <div class="warn">
     <span class="callout-label">The Position column</span>
     <p>
-      On a pool stage that feeds a cross-pool knockout, an extra <strong>Position</strong>
-      column appears. Fill it in. The later bracket pairs the winner of one pool against
-      another pool's runner-up, so the order inside each group decides who plays whom.
+      On a group stage that feeds a cross-group or within-group knockout, an extra
+      <strong>Position</strong> column appears. Fill it in. The later bracket pairs sides by
+      their finishing place in each group, so the order inside each group decides who plays
+      whom.
     </p>
     <p style="margin-top:2.5mm">
       Without it the draw falls back to a seeded bracket over the same teams and says so on the
@@ -865,19 +1026,31 @@
     </p>
   </div>
 
-  <h3>Generating</h3>
+  <h3 id="generating">Generating</h3>
 
   <p>
-    <span class="ui">Generate</span> creates one series per group, named after the league and
-    the stage. From there it is the ordinary path you already know: check the fixtures, approve,
-    release. Clubs and players see nothing until you release.
+    <span class="ui">Generate 30 fixtures</span> (the button names the count) creates one
+    series per group, named after the league and the stage. Generation runs on the server,
+    through the same checks as any other fixture change, so a ground clash with another
+    competition is refused and listed rather than written. From there it is the ordinary path:
+    check the fixtures, approve, release. Clubs and players see nothing until you release.
+  </p>
+
+  <p>
+    A stage whose fixtures are entered by hand shows
+    <span class="ui">Create the series to enter fixtures</span> instead. It makes the empty
+    series for you to fill.
   </p>
 
   <div class="warn">
     <span class="callout-label">Regenerating a released schedule</span>
     <p>
-      If the fixtures have already gone out, regenerating replaces them and there is no undo.
-      You will get a confirmation naming how many series are affected. Read it.
+      Regenerating is on the stage card, and only when the stage needs it. If any of the
+      stage's series have already gone out, the console stops and asks first:
+      <em>Regenerate a released schedule?</em> It names the series and says how many fixtures
+      will replace them. <span class="ui">Replace the fixtures</span> cannot be undone.
+      Allocated venues and hand-moved dates are lost, so to fix one fixture, edit that
+      fixture instead.
     </p>
   </div>
 
@@ -897,13 +1070,34 @@
       rather than a nicety. It cannot be edited or shortened afterwards.
     </p>
   </div>
+
+  <h3 id="imported-series">Series that are not part of a season</h3>
+
+  <p>
+    Some series on the Fixtures list carry a grey pill instead of a stage:
+  </p>
+
+  <table class="t-narrow">
+    <thead><tr><th>Pill</th><th>Where it came from</th></tr></thead>
+    <tbody>
+      <tr><td><span class="pill muted">Imported schedule</span></td><td>Loaded in bulk from the union's own spreadsheet by the platform team.</td></tr>
+      <tr><td><span class="pill muted">Stand-alone series</span></td><td>Made by hand before seasons existed, through the old create-series form.</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Both are ordinary series. You can add, edit and delete their fixtures, allocate grounds,
+    approve, release and recall them as usual. What you cannot do is regenerate them: there is
+    no stage to rebuild them from. To reshape an imported schedule, the platform team
+    re-imports it.
+  </p>
 </section>
 
 <!-- ══ PART SEVEN ═════════════════════════════════════════════════════════ -->
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Seven · Administrator</div>
-    <h2>Allocating grounds</h2>
+    <h2 id="allocating-grounds">Allocating grounds</h2>
     <p class="lede">
       A separate pass, run after fixtures exist. It decides where each match is played.
     </p>
@@ -972,13 +1166,27 @@
     <strong>Travel per club</strong> — minimising total kilometres can quietly dump the burden
     on one club. The per-club figure is the one that matters for fairness.
   </p>
+
+  <h3>Releasing, and holding grounds back</h3>
+
+  <p>
+    The <strong>release bar</strong> under a series' fixtures is the single place to approve,
+    release, reveal and recall it. The page never offers the same action twice.
+  </p>
+
+  <p>
+    At release you can withhold venues, start times or both. Clubs then see <em>venue to be
+    confirmed</em> or <em>time to be confirmed</em> until you reveal them from the same bar. A
+    withheld fixture still books its real ground, so the clash check sees it and nobody else
+    can take that ground on that day.
+  </p>
 </section>
 
 <!-- ══ PART EIGHT ═════════════════════════════════════════════════════════ -->
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Eight</div>
-    <h2>Worked examples</h2>
+    <h2 id="worked-examples">Worked examples</h2>
     <p class="lede">
       Four real competitions, exactly as they are configured.
     </p>
@@ -989,7 +1197,7 @@
     <div class="flow-stage">
       <div class="st">Single stage</div>
       <div class="sn">League season</div>
-      <div class="sd">Every registered side · plays every team once · every 2 weeks, Block 1</div>
+      <div class="sd">Every registered side · plays every team once · every 2 weeks · plays in Block 1</div>
     </div>
   </div>
   <p>
@@ -1003,13 +1211,13 @@
     <div class="flow-stage">
       <div class="st">Stage 1</div>
       <div class="sn">Double round</div>
-      <div class="sd">2 groups of 6, entered by an administrator · plays every team twice · weekly, Block 1</div>
+      <div class="sd">2 groups of 6, chosen by the admin · plays every team twice · weekly · plays in Block 1</div>
     </div>
     <div class="flow-down">↓ &nbsp;<span style="font-size:8.5pt; color:var(--ink-3)">6th of the Top Six swaps with 1st of the Bottom Six, carrying points</span></div>
     <div class="flow-stage">
       <div class="st">Stage 2</div>
       <div class="sn">Final round</div>
-      <div class="sd">2 groups of 6, entered by an administrator · plays every team once · weekly, Block 2</div>
+      <div class="sd">2 groups of 6, chosen by the admin · plays every team once · weekly · plays in Block 2</div>
     </div>
   </div>
   <p>
@@ -1023,17 +1231,17 @@
     <div class="flow-stage">
       <div class="st">Stage 1</div>
       <div class="sn">Group stage</div>
-      <div class="sd">2 pools of 6, snake-seeded · plays every team once · weekly, Block 1</div>
+      <div class="sd">2 groups of 6, seeded into groups (snake) · plays every team once · weekly · plays in Block 1</div>
     </div>
-    <div class="flow-down">↓ &nbsp;<span style="font-size:8.5pt; color:var(--ink-3)">top two of each pool qualify · <strong>set the Position column</strong></span></div>
+    <div class="flow-down">↓ &nbsp;<span style="font-size:8.5pt; color:var(--ink-3)">top two of each group qualify · <strong>set the Position column</strong></span></div>
     <div class="flow-stage">
       <div class="st">Stage 2</div>
-      <div class="sn">Cross-pool semi-finals and final</div>
-      <div class="sd">Entered by an administrator · knockout, cross-pool · Block 2</div>
+      <div class="sn">Cross-group semi-finals and final</div>
+      <div class="sd">Chosen by the admin · knockout, cross-group · plays in Block 2</div>
     </div>
   </div>
   <p>
-    Snake seeding puts the top two seeds in different pools. The semis pair A1 against B2 and
+    Snake seeding puts the top two seeds in different groups. The semis pair A1 against B2 and
     B1 against A2, then the final references the two winners — so the bracket reads
     "Winner of Semi-final 1" until the results are known.
   </p>
@@ -1043,7 +1251,7 @@
     <div class="flow-stage">
       <div class="st">Single stage</div>
       <div class="sn">Kingsmead Cup</div>
-      <div class="sd">9 sides, entered by an administrator · knockout, seeded · weekly, Block 2</div>
+      <div class="sd">9 sides, chosen by the admin · knockout, seeded · weekly · plays in Block 2</div>
     </div>
   </div>
   <p>
@@ -1065,7 +1273,7 @@
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Nine</div>
-    <h2>What the messages mean</h2>
+    <h2 id="messages">What the messages mean</h2>
     <p class="lede">
       Everything the console might tell you, and what to do about it.
     </p>
@@ -1088,15 +1296,19 @@
       </tr>
       <tr>
         <td>Give every side in Group A a finishing position.</td>
-        <td>You are on a stage that feeds a cross-pool draw and a side has no position. Fill in the Position column for everyone in the group.</td>
+        <td>You are on a stage that feeds a cross-group or within-group draw, or on a seeded knockout, and a side has no position. Fill in the Position column for everyone in the group.</td>
       </tr>
       <tr>
         <td>Group A has two sides in the same position.</td>
         <td>Two sides share a finishing position. One of them has to move.</td>
       </tr>
       <tr>
-        <td>Paired as a seeded bracket, not cross-pool.</td>
-        <td>The qualifying pools do not line up with this stage's entrants. Confirm the pool stage's finishing positions, then re-check this stage. The fixtures are correct in personnel, just not paired across pools.</td>
+        <td>Paired as a seeded bracket, not cross-group.</td>
+        <td>The qualifying groups do not line up with this stage's entrants, or qualify unevenly. Confirm the group stage's finishing positions, then re-check this stage. The fixtures are correct in personnel, just not paired across groups.</td>
+      </tr>
+      <tr>
+        <td>Paired as a seeded bracket, not within-group.</td>
+        <td>Same cause, plus one more: within-group needs a power-of-two number of groups (2, 4, 8), each sending the same power-of-two number of sides. Three groups, or groups sending different numbers, cannot be drawn without a bye. Confirm the group stage's finishing positions, or pick cross-group pairing for this season when confirming the qualifiers.</td>
       </tr>
       <tr>
         <td>3 registered sides are in no group.</td>
@@ -1127,8 +1339,24 @@
         <td>The structure was deleted after the competition was bound to it. Your operator needs to re-point the competition.</td>
       </tr>
       <tr>
-        <td>No structure configured for this league.</td>
-        <td>Nobody has bound a competition to this league yet. Ask your platform operator, or use <span class="ui">Create a series</span> for a simple league.</td>
+        <td>No competition has been set up for this league yet.</td>
+        <td>Shown in <span class="ui">Start a season</span>. Use the Quick start form below it: pick a template, dates and a match format. Or ask your operator to set the league up in the season wizard.</td>
+      </tr>
+      <tr>
+        <td>This league's competitions are on calendars that have ended.</td>
+        <td>Last season's competition is still bound, but its dates are over. Quick-start this season on new dates, or ask your operator to extend the calendar or bind a new one.</td>
+      </tr>
+      <tr>
+        <td>"Premier Men" already has a competition on "2026/27" — start the season from it instead</td>
+        <td>Quick start refused because the league already has a competition on the calendar you picked. Go back and pick the competition, or quick-start on different dates.</td>
+      </tr>
+      <tr>
+        <td>Competition no longer bound to this league.</td>
+        <td>Generating refused because an operator removed this season's competition from the league after the season started. Ask your operator to re-bind it, or start a new season.</td>
+      </tr>
+      <tr>
+        <td>Some of this stage's fixtures are released; the console will ask before replacing them.</td>
+        <td>Another tab or person released a series after your page loaded. Refresh, press generate again, and read the <em>Regenerate a released schedule?</em> prompt before replacing anything.</td>
       </tr>
     </tbody>
   </table>
@@ -1138,7 +1366,7 @@
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Ten</div>
-    <h2>Reference</h2>
+    <h2 id="reference">Reference</h2>
   </div>
 
   <h3>Who can do what</h3>
@@ -1148,9 +1376,10 @@
     <tbody>
       <tr><td>Season calendars</td><td>Create and edit</td><td>Read</td><td>—</td></tr>
       <tr><td>Competition structures</td><td>Create and edit</td><td>Read</td><td>—</td></tr>
-      <tr><td>Bind competitions to leagues</td><td>Yes</td><td>—</td><td>—</td></tr>
+      <tr><td>Bind competitions to leagues</td><td>Yes</td><td>Only through Quick start</td><td>—</td></tr>
       <tr><td>Venues</td><td>—</td><td>Create and edit</td><td>Read</td></tr>
-      <tr><td>Start and run a season</td><td>—</td><td>Yes</td><td>—</td></tr>
+      <tr><td>Competition defaults</td><td>Create and edit</td><td>Edit (venue aliases read-only)</td><td>—</td></tr>
+      <tr><td>Start and run a season, including Quick start</td><td>—</td><td>Yes</td><td>—</td></tr>
       <tr><td>Confirm entrants</td><td>—</td><td>Yes</td><td>—</td></tr>
       <tr><td>Generate, approve, release</td><td>—</td><td>Yes</td><td>—</td></tr>
       <tr><td>Allocate grounds</td><td>—</td><td>Yes</td><td>—</td></tr>
@@ -1169,40 +1398,49 @@
 
   <dl class="terms">
     <dt>Block</dt>
-    <dd>A continuous stretch of the season during which matches are played. A season usually has two, separated by a break.</dd>
+    <dd>A stretch of dates on the season calendar during which matches can be played, such as Block 1, 13 Sep to 13 Dec 2026. A calendar usually has two, separated by a break. A block is dates, never a phase of play.</dd>
 
     <dt>Cadence</dt>
     <dd>How often rounds are played: weekly, every N weeks, on set weekdays, or spread evenly across the block.</dd>
 
     <dt>Competition</dt>
-    <dd>One format stream inside a league — "50 Over Red Ball". A league can run several at once.</dd>
+    <dd>One format stream inside a league, such as "50 Over Red Ball": a structure, a calendar and a match format, bound to the league. A league can run several at once.</dd>
 
-    <dt>Cross-pool</dt>
-    <dd>A knockout that pairs one pool's winner against another pool's runner-up, so pool rivals cannot meet again immediately.</dd>
+    <dt>Competition defaults</dt>
+    <dd>The union's own match formats, match days, time slots, travel cost and venue aliases, set on the Competition defaults card. Anything left empty uses the built-in value.</dd>
+
+    <dt>Cross-group</dt>
+    <dd>A knockout that pairs one group's winner against another group's runner-up, so group rivals cannot meet again immediately.</dd>
 
     <dt>Group</dt>
-    <dd>A set of teams within a stage that play each other. A Top Six is a group. Each group becomes one series.</dd>
+    <dd>A set of teams within a stage that play each other. A Top Six is a group. Each group becomes one series. The platform says "group" everywhere; older union documents may say "pool".</dd>
 
     <dt>Preliminary round</dt>
     <dd>An extra opening round that trims a knockout field to a power of two. Nine entrants need one; eight need none.</dd>
 
-    <dt>Season run</dt>
-    <dd>One competition being played out for one season. Holds which teams are in which group at each stage, and freezes the structure and calendar it started with.</dd>
+    <dt>Quick start</dt>
+    <dd>The administrator's way to start a season on a league with no competition, or whose competitions' calendars have ended. Pick a template, dates and a match format; the platform creates the structure, calendar and competition and starts the season. Admins choose from the templates only and cannot author stages.</dd>
+
+    <dt>Season</dt>
+    <dd>One competition being played out this year (a season run). Holds which teams are in which group at each stage, and freezes the structure and calendar it started with. Started from <em>Start a season</em>.</dd>
 
     <dt>Series</dt>
     <dd>The existing unit of fixtures. One stage-group becomes one series, so everything downstream is unchanged.</dd>
 
     <dt>Snake seeding</dt>
-    <dd>Splitting seeds 1,2,3,4 into two pools as A,B,B,A rather than A,A,B,B — it keeps the top seeds apart.</dd>
+    <dd>Splitting seeds 1,2,3,4 into two groups as A,B,B,A rather than A,A,B,B — it keeps the top seeds apart.</dd>
 
     <dt>Stage</dt>
-    <dd>One phase of a competition. A split league has two: the double round and the final round.</dd>
+    <dd>One phase of play in a competition. A split league has two: the double round and the final round. A stage is titled by its kind (Round-robin stage, Knockout stage, Final, Hand-entered stage) and plays in one block.</dd>
 
     <dt>Structure</dt>
-    <dd>The reusable shape of a competition — its stages, in order. Built once by the operator and used season after season.</dd>
+    <dd>The reusable shape of a competition: its stages, in order. Built once by the operator (or made from a template by Quick start) and used season after season.</dd>
 
     <dt>Unresolved</dt>
     <dd>A fixture the allocator could not place, shown with the reason. Deliberately visible rather than placed somewhere wrong.</dd>
+
+    <dt>Within-group</dt>
+    <dd>A knockout where each group plays its own semi-final (A1 v A2, B1 v B2) and the group winners meet in the final. Needs a power-of-two number of groups, each sending the same power-of-two number of sides.</dd>
   </dl>
 
   <h3>Two things this does not do yet</h3>
@@ -1220,8 +1458,9 @@
   </p>
 
   <div class="colophon">
-    Smart Club Platform · Setting up how a league works · Version 1.0<br>
-    Technical detail: <span class="path">docs/architecture/0008-configurable-league-structures.md</span><br>
+    Smart Club Platform · Setting up how a league works · Version 2.0 · September 2026<br>
+    Technical detail: <span class="path">docs/architecture/0008-configurable-league-structures.md</span>,
+    <span class="path">docs/architecture/0014-seasons-one-vocabulary-one-path-one-engine.md</span><br>
     Deploying this feature: <span class="path">docs/runbooks/configurable-league-structures.md</span>
   </div>
 </section>

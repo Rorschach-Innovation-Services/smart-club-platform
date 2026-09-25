@@ -4,13 +4,14 @@
  * must not reach club portals; ADR: releasing a known double-booking is publishing a
  * schedule the union will have to retract).
  *
- * Semantics mirror the frontend allocator's ledger (src/competition/venues.ts): per
+ * Semantics mirror the frontend allocator's ledger (packages/engine/src/venues.ts): per
  * ground-and-date, bookings count per slot with an untimed fixture owning every slot
  * that day; a slot is full when its load reaches the ground's surface capacity
  * (max(1, surfaces ?? 1)). Registry-resolved grounds share one ledger row by venue id,
  * so "Toti Oval" on one fixture and "Toti 1" on another contest the same field.
  */
-import type { Club, Series, Venue } from './types.js';
+import type { Club, Series, TenantConfig, Venue } from './types.js';
+import { DEFAULT_VENUE_ALIASES } from '../../engine/src/venue-aliases.js';
 
 /** Lowercase, strip punctuation, drop generic suffix/roster words. Keeps
  * distinguishing words ("sporting", "united") — Chatsworth Sporting must not collide
@@ -28,56 +29,25 @@ export function normaliseName(name: string): string {
     .join('');
 }
 
-/** Ground-name variants that don't normalise onto the venue registry's own name —
- * union sheet spellings on one side, club-record spellings on the other. Values are
- * the normalised form of real dolphins registry venue names. */
-export const VENUE_ALIASES: Record<string, string> = {
-  acc1: 'toti1', // "ACC 1" (REVISED) = Amanzimtoti's Toti 1
-  // Exact-field numbering (union, 31 Aug 2026): the registry rows and club records are now
-  // named by exact field number ("Siripat 1", "Crusaders 1", "Danville 1", "Harlequins 1"…),
-  // so every OLD spelling aliases FORWARD onto the numbered canonical form.
-  siripatroadgrounds: 'siripat1', // was "Siripat Road Grounds"
-  siripatgrounds: 'siripat2', // was "Siripat Grounds"
-  crawfordnc: 'crawfordnorthcoast', // Railways
-  laheepark: 'laheeparkoval', // PTCC's pinned "Lahee park cricket oval"
-  tills: 'tillscrescentground', // Delta
-  hammond: 'hammondoval', // UKZN's "Hammond Cricket Oval"
-  danville: 'danville1', // was "Danville"
-  vanriebekparkharlequins1: 'harlequins1', // was "Van Riebek Park (Harlequins 1)"
-  vanriebekparkharlequins2: 'harlequins2', // was "Van Riebek Park (Harlequins 2)"
-  crusaderssports: 'crusaders1', // was "Crusaders Sports Club"
-  crusaders2field: 'crusaders2', // was "Crusaders 2 Field"
-  catormanor: 'catomanor1', // typo generic "Cator Manor" → merged into Cato Manor 1
-  catomanor: 'catomanor1', // generic "Cato Manor" → merged into Cato Manor 1
-  harlequins: 'harlequins1', // generic "Harlequins" → merged into Harlequins 1
-  highburygrounds: 'highbury1', // generic "Highbury grounds" → merged into Highbury 1
-  foresthills: 'foresthillssports', // "Forest Hills CC" → "Forest Hills Sports Club"
-  phoenixstonebridge: 'stonebridge', // East Coast / Phoenix / Parkgate
-  penguinstreet: 'penguinstreetground', // Meadowridge's "PENGUIN STREET GROUND"
-  // From the union's "facility updated" permitted-fields sheet (17 Aug 2026).
-  dhubriroad: 'dhubriroadgrounds',
-  hammondukzn: 'hammondoval', // "Hammond (UKZN)"
-  laheepark1: 'laheeparkoval',
-  penguinstreetchatsworth: 'penguinstreetground', // "Penguin Street (Chatsworth)"
-  phoenixsydmore: 'sidmore', // East Coast's "Sidmore" = the facility list's "Phoenix Sydmore"
-  totioval: 'toti1', // "Toti Oval"
-  gledhowgrounds: 'gledhowground', // Ilembe's club-record spelling of Dawnheights' "Gledhow Cricket Ground" — one shared field (union, 31 Aug 2026)
-  chatsworthpenguingrounds: 'penguinstreetground', // Saints' club-record "Chatsworth, Penguin Grounds" = the registry's "PENGUIN STREET GROUND" (KCCD's re-base) — one field, one ledger row
-  // 2026-27 Release workbook spellings (single-file union release) → the numbered
-  // registry canonical forms. Each key is the release sheet's own spelling, normalised.
-  gledhow: 'gledhowground', // release "Gledhow" = the registry's "Gledhow Cricket Ground" (Dawnheights/Ilembe's shared field)
-  totioval1: 'toti1', // release "Toti Oval 1" = Amanzimtoti's "Toti 1"
-  totioval2: 'toti2', // release "Toti Oval 2" = Amanzimtoti's "Toti 2"
-  commons1wbhs: 'commons1', // release "Commons 1 [WBHS]" = the registry's "Commons 1"
-  commons2wbhs: 'commons2', // release "Commons 2 [WBHS]" = the registry's "Commons 2"
-  mpumalanga: 'mpumalangatownshipstadium', // release "Mpumalanga" = West CC's "Mpumalanga Township Cricket Stadium"
-  kloofcountry: 'kloof', // release "Kloof Country Club" = the registry's "Kloof CC" (reinstated Sep 2026)
-};
+// The code-default alias map lives in the engine so the operator console's "Import from
+// code defaults" button reads the same list the gates use. Re-exported for API callers.
+export { DEFAULT_VENUE_ALIASES };
+
+/** The alias map a tenant's ground names resolve through: the code default with the
+ * tenant's own configured aliases merged over it (a tenant entry wins on the same key). */
+export function venueAliasesFor(
+  config: Pick<TenantConfig, 'competitionDefaults'> | null | undefined,
+): Record<string, string> {
+  return { ...DEFAULT_VENUE_ALIASES, ...(config?.competitionDefaults?.venueAliases ?? {}) };
+}
 
 /** A ground name's ledger/registry lookup key: alias applied over the normal form. */
-export function groundKey(name: string): string {
+export function groundKey(
+  name: string,
+  aliases: Record<string, string> = DEFAULT_VENUE_ALIASES,
+): string {
   const n = normaliseName(name);
-  return VENUE_ALIASES[n] ?? n;
+  return Object.prototype.hasOwnProperty.call(aliases, n) ? aliases[n] : n;
 }
 
 /** Club-record ground values that mean "no ground recorded", not a ground named that. */
@@ -164,14 +134,17 @@ function effectiveGround(
 
 /** Registry-aware ledger resolver: registry grounds share a row by venue id and book
  * against their surface count; unknown names stay strict at one surface. */
-export function registryResolver(venues: Venue[]): (ground: string) => GroundSlot {
+export function registryResolver(
+  venues: Venue[],
+  aliases: Record<string, string> = DEFAULT_VENUE_ALIASES,
+): (ground: string) => GroundSlot {
   const byNorm = new Map<string, Venue>();
-  for (const v of venues) byNorm.set(groundKey(v.name), v);
+  for (const v of venues) byNorm.set(groundKey(v.name, aliases), v);
   return (ground) => {
-    const venue = byNorm.get(groundKey(ground));
+    const venue = byNorm.get(groundKey(ground, aliases));
     return venue
       ? { key: `v:${venue.id}`, capacity: Math.max(1, Number(venue.surfaces) || 1) }
-      : { key: `g:${groundKey(ground)}`, capacity: 1 };
+      : { key: `g:${groundKey(ground, aliases)}`, capacity: 1 };
   };
 }
 
@@ -227,13 +200,15 @@ export function findClashes(
   allSeries: Series[],
   clubs: Club[],
   venues: Venue[],
+  /** The tenant's ground-name aliases (`venueAliasesFor`). Absent ⇒ the code default. */
+  aliases: Record<string, string> = DEFAULT_VENUE_ALIASES,
 ): Clash[] {
   const clubsById = new Map(clubs.map((c) => [c.id, c]));
   const seriesById = new Map<string, Series>(allSeries.map((s) => [String(s.id), s]));
   // The subject may be an in-flight edit that isn't the stored copy in `allSeries`; index it
   // last so a self-clash (or a stale stored twin) resolves its name/sides off the edit.
   seriesById.set(String(subject.id), subject);
-  const ledger = new GroundLedger(registryResolver(venues));
+  const ledger = new GroundLedger(registryResolver(venues, aliases));
   for (const s of allSeries) {
     if (String(s.id) === String(subject.id)) continue;
     for (const f of (s.fixtures as StoredFixture[]) ?? []) {
@@ -309,15 +284,18 @@ export function formatClashForHumans(c: Clash): string {
  *
  * `fixtureId` is safe as a key component even though `f.id ?? ''` allows an empty string:
  * every fixture producer assigns a non-empty id — the client generator (`fixturesFromDates`
- * in src/competition/fixtures.ts, `id: 'f' + fixtureId++`), the union importer
+ * in packages/engine/src/fixtures.ts, `id: 'f' + fixtureId++`), the union importer
  * (import-planb-fixtures.ts, `id: \`f${i + 1}\``) and the seeder (seed-cohort.ts, which
  * emits generator fixtures). So id-less fixtures collapsing to one key is not a real state
  * for first-party data; the `?? ''` is only a type-level fallback for the optional field.
  * Boundary of that guarantee: POST/PATCH /series do not enforce a fixture `id` on write, so
  * a scripted client COULD store id-less fixtures and collapse their keys. Not defended here;
  * requiring `id` on fixture writes is the follow-up if that ever matters. */
-export function clashKey(c: Clash): string {
-  return `${c.fixtureId}|${groundKey(c.ground)}|${c.with.seriesId}/${c.with.fixtureId}`;
+export function clashKey(
+  c: Clash,
+  aliases: Record<string, string> = DEFAULT_VENUE_ALIASES,
+): string {
+  return `${c.fixtureId}|${groundKey(c.ground, aliases)}|${c.with.seriesId}/${c.with.fixtureId}`;
 }
 
 /** Back-compat wrapper: the release gate's original prose-line signature, now a projection
@@ -327,6 +305,7 @@ export function findReleaseClashes(
   allSeries: Series[],
   clubs: Club[],
   venues: Venue[],
+  aliases: Record<string, string> = DEFAULT_VENUE_ALIASES,
 ): string[] {
-  return findClashes(subject, allSeries, clubs, venues).map(formatClash);
+  return findClashes(subject, allSeries, clubs, venues, aliases).map(formatClash);
 }

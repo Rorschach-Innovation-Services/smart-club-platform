@@ -1,8 +1,10 @@
 /* ─── Sample data ─── */
 
+import { FALLBACK_TRAVEL } from '../packages/engine/src/defaults';
 import type { Club, RequiredDoc } from './types';
-import { fixturesFromDates, legacyRoundDates, roundRobinPairings } from './competition/fixtures';
-import { slotRefLabel } from './competition/formats';
+import { slotRefLabel } from '../packages/engine/src/formats';
+import { haversineKm } from '../packages/engine/src/geo';
+import { isAffiliated } from '../packages/engine/src/leagues';
 import {
   daysSince,
   daysUntilDate,
@@ -139,7 +141,7 @@ export const DISTRICTS = [
 ];
 
 /* Leagues are admin-managed per-tenant config now (TenantConfig.leagues), read on the
-   client via src/leagues.js helpers. The former static catalogue was removed from this
+   client via packages/engine/src/leagues.ts helpers. The former static catalogue was removed from this
    client bundle; its content lives in packages/api/seed-data/<tenant>.json as the demo
    seed (see git history for the original arrays). DISTRICTS above stays live. */
 
@@ -1372,10 +1374,9 @@ export function computeRevertCompliance(club, keys, requiredDocs = DEFAULT_REQUI
   return { docs, docMeta, reverted };
 }
 
-// Canonical "did the club submit its affiliation form" — the form fact.
-export function affiliationSubmitted(club) {
-  return club.affiliation === 'complete';
-}
+// Canonical "did the club submit its affiliation form" — the form fact. Lives in the
+// engine so the season preview here and the server generate route gate on one predicate.
+export const affiliationSubmitted = isAffiliated;
 
 export function overallProgress(club, requiredDocs = DEFAULT_REQUIRED_DOCS) {
   // 5 weighted phases: 20% each
@@ -1388,32 +1389,17 @@ export function overallProgress(club, requiredDocs = DEFAULT_REQUIRED_DOCS) {
 }
 
 /* ─── FIXTURE GENERATION + TRAVEL COSTS ───
-   Haversine great-circle distance between two lat/lon coords (km).
+   Haversine distance lives in the engine (packages/engine/src/geo.ts).
    Round-robin schedule generator.
    Travel cost = round-trip distance × cars × cost per km. */
-export function haversineKm(a, b) {
-  // Guarded on the COORDINATES, not on the objects. `{}` is truthy, and a pending
-  // knockout side resolves to `ground: {}` (resolveTeam's slot-ref branch), as does a
-  // club with no ground on record — so an object check let NaN through and every
-  // bracket's later rounds rendered "NaN km" and "R NaN". A missing coordinate means
-  // "unknown distance", and zero is the only honest number to add to a total.
-  const finite = (p) => !!p && Number.isFinite(p.lat) && Number.isFinite(p.lon);
-  if (!finite(a) || !finite(b)) return 0;
-  const R = 6371;
-  const toRad = (x) => (x * Math.PI) / 180;
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lon - a.lon);
-  const s =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
-}
 
 // Shared travel-cost defaults — used as fixtureCost's parameter defaults AND by
 // display sites that read series.costPerKm/carsPerAwayTrip directly, so a series
 // missing the fields (hand-crafted API payload) renders the same numbers it costs.
-export const DEFAULT_COST_PER_KM = 4.5;
-export const DEFAULT_CARS = 3;
+// The built-in fallbacks for `competitionDefaults.travel` (engine defaults.ts), so a tenant
+// that configured none costs travel exactly as before.
+export const DEFAULT_COST_PER_KM = FALLBACK_TRAVEL.costPerKm;
+export const DEFAULT_CARS = FALLBACK_TRAVEL.carsPerAwayTrip;
 
 /**
  * Travel distance and fuel cost for one fixture.
@@ -1524,7 +1510,7 @@ export function resolveTeam(series, teamId, clubBy) {
   // A knockout's later rounds reference earlier fixtures ("win:f3") because the winner
   // isn't known yet. Resolve those to a readable slot label BEFORE the participant
   // lookup, which would otherwise find nothing and render "Unknown team" for every
-  // fixture past round one. See competition/formats.ts for the reference format.
+  // fixture past round one. See packages/engine/src/formats.ts for the reference format.
   const slot = slotRefLabel(teamId, series?.fixtures);
   if (slot) {
     return { teamId, clubId: undefined, club: undefined, name: slot, ground: {}, pending: true };
@@ -1557,31 +1543,4 @@ export function resolveTeam(series, teamId, clubBy) {
     name: club?.name ?? 'Removed club',
     ground: (club && club.ground) || {},
   };
-}
-
-// Resolve whether an end date should drive scheduling. Empty/absent `dateMode`
-// falls back to a format-based default: tournaments are bounded events (spread),
-// series run weekly (reference). Shared by the create form and `regenerate` so
-// the two paths can never interpret a stored series differently.
-export function resolveSpread({ dateMode, kind }: { dateMode?: string; kind?: string } = {}) {
-  return (dateMode || (kind === 'tournament' ? 'spread' : 'reference')) === 'spread';
-}
-
-/**
- * Round-robin: each team plays every other team once. Home/away alternates fairly.
- *
- * Now a thin wrapper over src/competition/fixtures.ts, which owns the pairing rotation
- * and both date strategies (ADR 0008). Behaviour is unchanged and must stay that way —
- * the create/regenerate parity test in data.test.ts is the gate.
- *
- * For a series scheduled against a season calendar, callers use `fixturesFromPlan` with
- * dates from `planRoundDates` instead; this signature stays for the legacy path.
- */
-export function generateRoundRobin(
-  teamIds: (string | null)[],
-  startDateISO: string,
-  options: { endDateISO?: string; spread?: boolean } = {},
-) {
-  const rounds = roundRobinPairings(teamIds);
-  return fixturesFromDates(rounds, legacyRoundDates(rounds.length, startDateISO, options));
 }

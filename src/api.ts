@@ -487,6 +487,30 @@ export const patchSeasonRun = (id: string, patch: unknown) =>
 export const deleteSeasonRunReq = (id: string) =>
   request(`/season-runs/${id}`, { method: 'DELETE' });
 export const getSeasonRun = (id: string) => request<SeasonRun>(`/season-runs/${id}`);
+/**
+ * Admin quick start for a league with no competition bound: the SERVER instantiates the
+ * named template from the closed registry (server-minted ids, `source: 'quick-start'`),
+ * writes calendar + structure + binding into tenant config and creates the run, all in
+ * one handler. Admins never send a structure body (ADR 0006 keeps structures
+ * operator-authored). `calendar` is either an existing calendar id or new single-block
+ * dates. `placement` is the per-stage block position when the calendar has ≥2 blocks.
+ */
+export interface QuickStartSeasonRequest {
+  leagueKey: string;
+  templateId: string;
+  seasonLabel: string;
+  calendar: { id: string } | { label: string; start: string; end: string };
+  matchFormat?: { label?: string; overs?: number; ballType?: string };
+  placement?: number[];
+}
+export interface QuickStartSeasonResponse {
+  run: SeasonRun;
+  competitionId: string;
+  structureId: string;
+  calendarId: string;
+}
+export const quickStartSeason = (body: QuickStartSeasonRequest) =>
+  request<QuickStartSeasonResponse>('/season-runs/quick-start', { method: 'POST', body });
 // Adopt the live version of the run's structure — the one audited exception to snapshot
 // immutability. The server reads the structure itself; the body only names the version
 // the admin reviewed and the run version they read, so either moving underneath 409s.
@@ -496,6 +520,46 @@ export const rebaseSeasonRun = (id: string, body: { structureVersion: number; ve
   request<SeasonRun & { warnings?: string[] }>(`/season-runs/${id}/rebase`, {
     method: 'POST',
     body,
+  });
+/**
+ * Generate one stage of a season run ON THE SERVER (ADR 0014): it materialises the stage
+ * with the shared engine and writes one series per group through the same gates as
+ * `POST`/`PATCH /series`, then records the series on the run. `version` is the run version
+ * the caller read. Overwriting a released series needs `confirmReleasedOverwrite: true`;
+ * without it the server answers 409 `released_overwrite`, surfaced here as
+ * `ReleasedOverwriteError` naming the series. A clash-gate refusal stays an `ApiError`
+ * with `code: 'venue_clash'` and the clashes on `details`.
+ */
+export interface GenerateStageRequest {
+  version: number;
+  confirmReleasedOverwrite?: true;
+}
+export interface GenerateStageResponse {
+  run: SeasonRun;
+  series: Series[];
+  /** Caveats on a generate that still succeeded, e.g. a pool pairing drawn as a seeded bracket. */
+  warnings?: string[];
+}
+/** The generate would replace released series and the caller did not confirm it. */
+export class ReleasedOverwriteError extends ApiError {
+  seriesIds: string[];
+  constructor(err: ApiError) {
+    super(err.status, err.message, err.code, err.details);
+    this.name = 'ReleasedOverwriteError';
+    const ids = err.details?.seriesIds;
+    this.seriesIds = Array.isArray(ids)
+      ? ids.filter((x): x is string => typeof x === 'string')
+      : [];
+  }
+}
+export const generateStage = (runId: string, specId: string, body: GenerateStageRequest) =>
+  request<GenerateStageResponse>(`/season-runs/${runId}/stages/${specId}/generate`, {
+    method: 'POST',
+    body,
+  }).catch((err) => {
+    if (err instanceof ApiError && err.status === 409 && err.code === 'released_overwrite')
+      throw new ReleasedOverwriteError(err);
+    throw err;
   });
 
 // ── Venues (ADR 0008 phase 2) ──

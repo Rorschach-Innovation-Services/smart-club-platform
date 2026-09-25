@@ -33,11 +33,11 @@ export default defineConfig({
     host: true,
   },
   test: {
-    // Frontend (src/) only. The API package owns its own node:test suite
-    // (packages/api: `npm test`), which uses a different runner — excluded here
-    // so root vitest doesn't try to collect it.
-    include: ['src/**/*.{test,spec}.{js,jsx,ts,tsx}'],
-    exclude: ['**/node_modules/**', 'packages/**'],
+    // Frontend (src/) plus the shared engine (packages/engine). The API package owns its
+    // own node:test suite (packages/api: `npm test`), which uses a different runner —
+    // excluded here so root vitest doesn't try to collect it.
+    include: ['src/**/*.{test,spec}.{js,jsx,ts,tsx}', 'packages/engine/**/*.test.ts'],
+    exclude: ['**/node_modules/**', 'packages/api/**'],
     /*
      * Two environments on purpose. The pure-logic suites (`*.test.ts`) stay on `node` —
      * they are the bulk of the run and jsdom would cost every one of them a synthetic

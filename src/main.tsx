@@ -1,3 +1,5 @@
+import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
+import { CompetitionDefaultsCard } from './competition-defaults';
 import { Sentry } from './sentry'; // first — installs global error handlers before render
 import { useState as useStateApp, useMemo as useMemoApp, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
@@ -15,9 +17,8 @@ import {
 } from 'react-router-dom';
 import { QueryClientProvider, useQuery, useQueries } from '@tanstack/react-query';
 import { queryClient, qk } from './query';
-import { leagueParticipants, clubPlaysVeterans } from './leagues';
-import { allocateVenues, buildLedger } from './competition/venues';
-import { findBlock } from './competition/calendar';
+import { clubPlaysVeterans } from '../packages/engine/src/leagues';
+import { allocateVenues, buildLedger } from '../packages/engine/src/venues';
 import * as api from './api';
 import { ApiError, SERIES_CONFLICT_MESSAGE, SERIES_CONFLICT_FRIENDLY } from './api';
 import { resolveTenantSlug, applyTheme, redirectToCanonicalOrigin } from './config';
@@ -44,17 +45,18 @@ import {
   computeDocUnavailable,
   MIN_SAFEGUARDING_FILES,
   teamIdsForClub,
-  distinctClubCount,
   DISTRICTS,
   resolveTeam,
 } from './data';
 import { exportRowsToXlsx } from './exportXlsx';
+import { generateConflictMessage } from './generate-feedback';
 import { openBccReminder } from './mailto';
 import {
   Icon,
   Pill,
   Btn,
   EmptyState,
+  Modal,
   ProgChip,
   ClubNameCell,
   affPill,
@@ -80,6 +82,7 @@ import {
 } from './admin';
 import { AdminInsightsPage, AdminLeagueDetailPage } from './insights';
 import { parseSupport } from './support';
+import { HelpProvider } from './help/HelpDrawer';
 import {
   ClubHome,
   AffiliationForm,
@@ -250,46 +253,6 @@ function HelpModal({ onClose, support }) {
             quickly.
           </div>
         </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
-/* ─── TaskModal — wraps the affiliation form & documents view ─── */
-function TaskModal({
-  eyebrow,
-  title,
-  onClose,
-  narrow,
-  children,
-}: {
-  eyebrow?: ReactNode;
-  title?: ReactNode;
-  onClose: () => void;
-  narrow?: boolean;
-  children?: ReactNode;
-}) {
-  useEscapeClose(onClose);
-  // Portal to document.body so the fixed backdrop centers against the viewport, not the
-  // residual transform left on `.main > *` by the fadeUp animation (see admin.jsx fix-confirm).
-  return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`task-modal ${narrow ? 'narrow' : ''}`}>
-        <div className="task-modal-head">
-          <div className="task-modal-head-text">
-            {eyebrow && <div className="task-modal-head-eyebrow">{eyebrow}</div>}
-            <div className="task-modal-head-title">{title}</div>
-          </div>
-          <button
-            className="task-modal-close"
-            onClick={onClose}
-            title="Close (your inputs are saved)"
-          >
-            <Icon.X />
-          </button>
-        </div>
-        <div className="task-modal-body">{children}</div>
       </div>
     </div>,
     document.body,
@@ -473,10 +436,12 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   // Admin-only setup config (structures) that deliberately isn't on the public
   // GET /tenant payload. Merged over `tenantConfig` below so consumers keep reading one
   // object.
+  // Reps read it too, for the one field the club portal needs off it: the tenant's
+  // travel-cost defaults (competitionDefaults.travel), which the anonymous payload omits.
   const tenantConfigQuery = useQuery({
     queryKey: qk.tenantConfig(),
     queryFn: api.getTenantConfig,
-    enabled: !!membership && role === 'admin',
+    enabled: !!membership,
   });
   const venuesQuery = useQuery({
     queryKey: qk.venues(),
@@ -560,6 +525,10 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   const allCalendars = tenantConfig?.calendars ?? [];
   // Structures live only on the authenticated read; absent for reps, who never need them.
   const allStructures = tenantConfigQuery.data?.structures ?? [];
+  // Competition defaults (ADR 0014): the authenticated read carries all of it; the public
+  // payload only the pickers' fields (formats, days, slots) — enough until the read lands.
+  const competitionDefaults =
+    tenantConfigQuery.data?.competitionDefaults ?? tenantConfig?.competitionDefaults;
   const allSeasonRuns = seasonRunsQuery.data ?? [];
   const allVenues = venuesQuery.data ?? [];
   // A FAILED fetch is not an empty registry, and the difference matters: the venues card
@@ -619,7 +588,13 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   async function withToast(
     fn: () => Promise<any>,
     errMsg?: string,
-    opts: { rawConflict?: boolean; rawClientError?: boolean; invalidate?: any[] } = {},
+    opts: {
+      rawConflict?: boolean;
+      rawClientError?: boolean;
+      invalidate?: any[];
+      /** Actionable copy for a structured 409; `null` falls back to the generic line. */
+      conflictMessage?: (err: unknown) => string | null;
+    } = {},
   ) {
     try {
       return await fn();
@@ -642,12 +617,14 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       // 401s carry the session-expired copy from api.js — more useful than errMsg.
       // (When auth is truly lost the app flips to Login anyway; this covers the rest.)
       const authError = err instanceof ApiError && err.status === 401;
+      const structured = conflict ? (opts.conflictMessage?.(err) ?? null) : null;
       toastShow(
-        rawConflict || rawClientError || authError
-          ? err.message
-          : conflict
-            ? SERIES_CONFLICT_FRIENDLY
-            : errMsg || err.message,
+        structured ??
+          (rawConflict || rawClientError || authError
+            ? err.message
+            : conflict
+              ? SERIES_CONFLICT_FRIENDLY
+              : errMsg || err.message),
         'warn',
       );
       if (conflict) {
@@ -738,15 +715,18 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   }
   /**
    * Materialise one stage into Series — one per group (ADR 0008), so every downstream
-   * path (approval, release, broadcast, travel cost) is the existing tested one. The run
-   * is patched with each group's seriesId afterwards, so a re-generate replaces rather
-   * than duplicates.
+   * path (approval, release, broadcast, travel cost) is the existing tested one. The
+   * server does the writing (`POST /season-runs/:id/stages/:specId/generate`, ADR 0014):
+   * it records each group's seriesId on the run, so a re-generate replaces rather than
+   * duplicates.
    */
-  async function generateStageSeries(payloads, run, stage) {
+  async function generateStageSeries(run, stage) {
     return withToast(
-      () => generateStageSeriesInner(payloads, run, stage),
+      () => generateStageSeriesInner(run, stage),
       'Could not generate the fixtures',
-      { invalidate: [qk.series(), qk.seasonRuns()] },
+      // A clash-gate or released-overwrite refusal names what to do; any other 409 is a
+      // version race and keeps the generic refresh line. Both refetch (below).
+      { invalidate: [qk.series(), qk.seasonRuns()], conflictMessage: generateConflictMessage },
     ).catch((e) => {
       // Partial progress is possible — some groups may already have series. Refresh so
       // the stage card reflects what actually landed rather than the pre-click state.
@@ -755,123 +735,35 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       throw e;
     });
   }
-  async function generateStageSeriesInner(payloads, run, stage) {
-    // The stage names a POSITION into the run's bound calendar, not a block id — resolve
-    // it once against the snapshot before building any series.
-    const resolvedBlock = findBlock(run.calendarSnapshot, stage.schedule.blockIndex);
-    if (!resolvedBlock) {
-      throw new Error(
-        `${stage.name} points at a playing block that no longer exists on this calendar`,
-      );
-    }
-    const created = [];
-    for (const p of payloads) {
-      const participants = leagueParticipants(clubs, run.leagueKey)
-        .filter((t) => p.entrants.includes(t.teamId))
-        .map((t) => ({
-          teamId: t.teamId,
-          clubId: t.clubId,
-          name: t.name,
-          ...(t.venue ? { venue: t.venue } : {}),
-          ...(Number.isFinite(t.lat) ? { lat: t.lat } : {}),
-          ...(Number.isFinite(t.lon) ? { lon: t.lon } : {}),
-        }));
-      const multi = payloads.length > 1;
-      const series = {
-        id: `s-${run.id}-${stage.id}-${p.groupId}`,
-        name: `${p.league?.label ?? run.leagueKey} · ${stage.name}${multi ? ` · ${p.groupLabel}` : ''}`,
-        startDate: p.startDate,
-        teams: p.entrants,
-        participants,
-        fixtures: p.fixtures,
-        schedule: {
-          calendarId: run.calendarSnapshot.id,
-          blockId: resolvedBlock.id,
-          cadence: stage.schedule.cadence,
-          ...(stage.schedule.slots?.length ? { slots: stage.schedule.slots } : {}),
-          // Persisted for addFixture + validation parity on THIS stored series — a stage
-          // regenerate reads roundsPerDay off the structureSnapshot instead, so a season
-          // run keeps its own snapshot until an admin explicitly adopts a newer structure
-          // version (POST /season-runs/:id/rebase, the Seasons panel's "Review changes").
-          ...(stage.schedule.roundsPerDay === 2 ? { roundsPerDay: 2 } : {}),
-        },
-        ...(stage.schedule.activateFrom ? { activateFrom: stage.schedule.activateFrom } : {}),
-        seasonRunId: run.id,
-        stageSpecId: stage.id,
-        groupId: p.groupId,
-        maxOvers: p.competition?.matchFormat?.overs ?? 50,
-        seriesType: p.competition?.label ?? stage.name,
-        kind: 'series',
-        released: false,
-        releasedAt: null,
-        version: 1,
-      };
-      // A re-generate replaces the group's series rather than stacking a second one.
-      //
-      // NEVER carry `released`/`releasedAt` into a re-generate: `series` is built fresh
-      // with `released: false`, so patching it wholesale would silently recall a
-      // schedule clubs and players have already been sent. Regeneration changes the
-      // fixtures; whether they are published stays the admin's separate decision.
-      //
-      // `name` is dropped for the same reason: it is rebuilt from the template every
-      // time, so a series the admin renamed would revert on any regenerate.
-      const { released: _r, releasedAt: _ra, name: _n, ...fixturesAndConfig } = series;
-      const patchOver = async (version) =>
-        api.patchSeries(series.id, { ...fixturesAndConfig, version });
-
-      // Which branch is correct is decided by the SERVER, not by this cache. A tab whose
-      // series query hasn't refetched since another admin released this schedule would
-      // otherwise take the create branch and clobber it — POST now 409s in that case, and
-      // we recover by refetching for the real version and patching.
-      const existing = allSeries.find((x) => x.id === series.id);
-      if (existing) {
-        await patchOver(existing.version);
-      } else {
-        try {
-          await api.createSeries(series);
-        } catch (e) {
-          if (!(e instanceof ApiError) || e.status !== 409) throw e;
-          const fresh = (await api.getSeriesList()).find((x) => x.id === series.id);
-          if (!fresh) throw e;
-          await patchOver(fresh.version);
-        }
-      }
-      created.push({ groupId: p.groupId, seriesId: series.id });
-    }
-    const nextStages = run.structureSnapshot.stages.map((sp) => {
-      const cur = run.stages.find((x) => x.specId === sp.id) ?? {
-        specId: sp.id,
-        status: 'awaiting-entrants',
-        groups: [],
-      };
-      if (sp.id !== stage.id) return cur;
-      // A `seeded-split` or `all-registered` stage is ready on sight, so the admin can
-      // generate without ever opening "Confirm entrants" and `cur.groups` is []. Mapping
-      // over that recorded NO seriesId, which cost three things downstream: the
-      // Released/Draft pill never resolved, the stage could never report itself stale,
-      // and — worst — the released-schedule confirmation was skipped, so a regenerate
-      // silently overwrote a published schedule. So seed the groups from what was
-      // actually generated when there is nothing stored.
-      const base = cur.groups.length
-        ? cur.groups
-        : payloads.map((p) => ({ id: p.groupId, label: p.groupLabel, entrants: p.entrants }));
-      // Regenerating IS the catch-up a rebase's `staleSchedule` marker asks for, so the
-      // marker goes with it — carried along by the spread, it would pin the stage on
-      // "Needs regenerating" over fixtures that were just rebuilt on the new schedule.
-      const { staleSchedule: _stale, ...rest } = cur;
-      return {
-        ...rest,
-        status: 'generated',
-        groups: base.map((g) => ({
-          ...g,
-          seriesId: created.find((c) => c.groupId === g.id)?.seriesId ?? g.seriesId,
-        })),
-      };
+  // The server materialises the stage itself with the shared engine (ADR 0014); the
+  // browser's materialisation only drives the preview.
+  async function generateStageSeriesInner(run, stage) {
+    // The Seasons panel asks "Regenerate a released schedule?" before calling here whenever
+    // this cache shows any of the stage's series released — so a released series in the
+    // cache means the admin has already confirmed. When the cache is stale (released
+    // elsewhere since it loaded) this sends no confirmation, the server refuses with
+    // `ReleasedOverwriteError` (a 409), withToast refreshes the queries, and the next click
+    // prompts. The server, not this cache, decides what is released.
+    const linked = new Set(
+      (run.stages.find((x) => x.specId === stage.id)?.groups ?? []).map((g) => g.seriesId),
+    );
+    const confirmed = allSeries.some(
+      (s) =>
+        s.released &&
+        ((s.seasonRunId === run.id && s.stageSpecId === stage.id) || linked.has(s.id)),
+    );
+    const { series, warnings = [] } = await api.generateStage(run.id, stage.id, {
+      version: run.version,
+      ...(confirmed ? { confirmReleasedOverwrite: true as const } : {}),
     });
-    await api.patchSeasonRun(run.id, { stages: nextStages, version: run.version });
     invalidate(qk.series());
     invalidate(qk.seasonRuns());
-    toastShow(`${stage.name} · ${payloads.length} series generated`);
+    // A generate that succeeded with a caveat (a pool pairing drawn as a seeded bracket)
+    // says so in the same toast, as a warning, rather than reading as a clean success.
+    if (warnings.length)
+      toastShow(`${stage.name} · ${series.length} series generated. ${warnings.join(' ')}`, 'warn');
+    else toastShow(`${stage.name} · ${series.length} series generated`);
+    return { warnings };
   }
 
   /**
@@ -1021,12 +913,6 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       .then(() => invalidate(qk.me()))
       .catch(() => {});
   }
-  function onCreateSeries(s) {
-    return withToast(() => api.createSeries(s), 'Could not create series').then((created) => {
-      invalidate(qk.series());
-      return created;
-    });
-  }
   // ── League mutations: leagues are a config array, written whole via PUT /tenant/config. ──
   function onCreateLeague(league) {
     if (allLeagues.some((l) => l.key === league.key)) {
@@ -1088,6 +974,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   allSeasonRuns,
                   allVenues,
                   allStructures,
+                  competitionDefaults,
                   venuesFailed,
                   structuresFailed,
                   seasonRunsFailed,
@@ -1120,7 +1007,6 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   setReleased,
                   revealSeries,
                   setApproved,
-                  onCreateSeries,
                   onCreateLeague,
                   updateLeague,
                   deleteLeague,
@@ -1159,6 +1045,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   allSeasonRuns,
                   allVenues,
                   allStructures,
+                  competitionDefaults,
                   venuesFailed,
                   structuresFailed,
                   seasonRunsFailed,
@@ -1191,7 +1078,6 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
                   setReleased,
                   revealSeries,
                   setApproved,
-                  onCreateSeries,
                   onCreateLeague,
                   updateLeague,
                   deleteLeague,
@@ -1239,6 +1125,7 @@ function Shell({
   allSeasonRuns = [],
   allVenues = [],
   allStructures = [],
+  competitionDefaults = undefined,
   venuesFailed = false,
   structuresFailed = false,
   seasonRunsFailed = false,
@@ -1271,7 +1158,6 @@ function Shell({
   setReleased,
   revealSeries,
   setApproved,
-  onCreateSeries,
   onCreateLeague,
   updateLeague,
   deleteLeague,
@@ -1290,6 +1176,8 @@ function Shell({
   const { memberships: authMemberships } = useAuth();
   const showOperatorNav = isOperator(authMemberships);
   const branding = tenantConfig?.branding;
+  // The tenant's travel-cost defaults for the club portal's estimates (ADR 0014).
+  const travel = resolveCompetitionDefaults({ competitionDefaults }).travel;
   // Union office email for mailto actions — parsed from the tenant support copy
   // slot via the shared parseSupport helper, so it stays correct per tenant.
   const unionEmail = parseSupport(branding?.copy?.support).email;
@@ -2433,17 +2321,6 @@ function Shell({
   const orgName = branding?.name ?? 'Smart Club';
   const orgFooter = branding?.copy?.footer ?? 'Powered by Medicoach';
 
-  // The launcher's series step passes this straight through as `onSubmitSeries` — the
-  // busy idiom in CreateSeriesForm awaits it and stays open on rejection, so this must
-  // NOT swallow a failure the way the old TaskModal's `.catch(() => {})` did.
-  function createSeriesWithToast(s) {
-    return onCreateSeries(s).then(() => {
-      const clubN = distinctClubCount(s);
-      const tail = s.bulkSend ? ` · bulk-sent to ${clubN} club${clubN === 1 ? '' : 's'}` : '';
-      toastShow(`${s.name} created · ${s.fixtures.length} fixtures generated${tail}`);
-    });
-  }
-
   function renderMain() {
     if (role === 'admin') {
       const gotoList = () => gotoAdminView('clubs_list');
@@ -2584,6 +2461,23 @@ function Shell({
             onEdit={(L) => setShowLeagueForm(L)}
             onDeleteLeague={deleteLeague}
             toast={toastShow}
+            defaultsCard={
+              // Admin-level setup data like the leagues above (ADR 0014). Keyed on the
+              // stored value so the card reopens on what the server holds after a save.
+              <CompetitionDefaultsCard
+                key={JSON.stringify(competitionDefaults ?? {})}
+                config={{ ...tenantConfig, competitionDefaults }}
+                fetchLatest={api.getTenantConfig}
+                save={async (patch) => {
+                  const next = await api.putTenantConfig(patch);
+                  invalidate(qk.tenantConfig());
+                  invalidate(qk.tenant());
+                  return next;
+                }}
+                toast={toastShow}
+                aliasesReadOnly
+              />
+            }
           />
         );
       if (view === 'insights')
@@ -2618,7 +2512,6 @@ function Shell({
           <AdminFixtures
             clubs={clubs}
             allSeries={allSeries}
-            onSubmitSeries={createSeriesWithToast}
             onUpdateSeries={updateSeries}
             onDeleteSeries={deleteSeries}
             onDuplicateSeries={duplicateSeries}
@@ -2640,9 +2533,12 @@ function Shell({
             onSaveVenue={saveVenue}
             onDeleteVenue={deleteVenue}
             onAllocateVenues={allocateSeriesVenues}
-            tenantConfig={tenantConfig && { ...tenantConfig, structures: allStructures }}
+            tenantConfig={
+              tenantConfig && { ...tenantConfig, structures: allStructures, competitionDefaults }
+            }
             allLeagues={allLeagues}
             onCreateSeasonRun={createSeasonRun}
+            onSeasonSetupChanged={refetchSeasonSetup}
             onPatchSeasonRun={patchSeasonRun}
             onDeleteSeasonRun={deleteSeasonRun}
             onRebaseSeasonRun={rebaseSeasonRun}
@@ -2755,6 +2651,7 @@ function Shell({
             clubs={clubs}
             toast={toastShow}
             onSendFixtures={sendFixtures}
+            travel={travel}
           />
         );
       }
@@ -2840,7 +2737,14 @@ function Shell({
           .slice(0, 2)
           .join('');
 
-  return (
+  // After a quick start (POST /season-runs/quick-start) the server has made the
+  // competition, its structure and calendar, and the run in one go — so both the runs list
+  // and the tenant config (where leagues carry their competitions) are stale.
+  function refetchSeasonSetup() {
+    return Promise.all([invalidate(qk.seasonRuns()), invalidate(qk.tenantConfig())]);
+  }
+
+  const shellView = (
     <div data-screen-label={role === 'admin' ? 'Admin · ' + view : 'Club · ' + view}>
       <header className="app-header">
         <div className="h-logo">
@@ -3050,7 +2954,8 @@ function Shell({
       )}
 
       {role === 'club' && view === 'affiliation' && (
-        <TaskModal
+        <Modal
+          closeLabel="Close (your inputs are saved)"
           eyebrow={`Phase 01 · ${activeClub.name}`}
           title={
             <>
@@ -3095,12 +3000,13 @@ function Shell({
               gotoClubView('home');
             }}
           />
-        </TaskModal>
+        </Modal>
       )}
 
       {role === 'club' && view === 'documents' && (
-        <TaskModal
-          narrow
+        <Modal
+          closeLabel="Close (your inputs are saved)"
+          maxWidth={820}
           eyebrow={`Compliance · ${activeClub.name}`}
           title={
             <>
@@ -3125,12 +3031,13 @@ function Shell({
             submissionDeadline={submissionDeadline}
             unionEmail={unionEmail}
           />
-        </TaskModal>
+        </Modal>
       )}
 
       {role === 'club' && showRequestPlayer && activeClub && (
-        <TaskModal
-          narrow
+        <Modal
+          closeLabel="Close (your inputs are saved)"
+          maxWidth={820}
           eyebrow={`Clearances · ${activeClub.name}`}
           title={
             <>
@@ -3146,13 +3053,14 @@ function Shell({
             onSubmit={requestClearance}
             onCancel={() => setShowRequestPlayer(false)}
           />
-        </TaskModal>
+        </Modal>
       )}
 
       {role === 'admin' && showLeagueForm && (
-        <TaskModal
+        <Modal
+          closeLabel="Close (your inputs are saved)"
           eyebrow="Catalogue · Cricket Services"
-          narrow
+          maxWidth={820}
           title={
             showLeagueForm.key ? (
               <>
@@ -3175,10 +3083,13 @@ function Shell({
             onClose={() => setShowLeagueForm(null)}
             toast={toastShow}
           />
-        </TaskModal>
+        </Modal>
       )}
     </div>
   );
+
+  // One help drawer for the whole admin/club shell: every HelpLink inside opens it.
+  return <HelpProvider>{shellView}</HelpProvider>;
 }
 
 /* ─── Filtered admin views (Affiliation / Docs / CQI) ─── */

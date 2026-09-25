@@ -12,19 +12,11 @@
  * `InfoTip` (a small inline "what does this mean" popover) and `StepIntro` (a short,
  * always-visible overview block at the top of a step).
  */
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useRef,
-  useState,
-  type CSSProperties,
-  type ReactNode,
-} from 'react';
+import { useCallback, useId, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import * as api from './api';
 import { ApiError } from './api';
-import { Btn, Icon, Pill, useEscapeClose } from './atoms';
+import { Btn, Icon, InfoDot, Pill, useEscapeClose } from './atoms';
 import type { Club } from './types';
 
 export const ERR: CSSProperties = { color: 'var(--coral, #C0392B)', fontSize: 12, marginTop: 6 };
@@ -247,136 +239,9 @@ export function StepIntro({ title, children }: { title: string; children: ReactN
   );
 }
 
-// Module-level single-open latch: opening one InfoTip closes any other, same rule
-// InfoDot (atoms.tsx) uses for its own popovers.
-let closeActiveInfoTip: (() => void) | null = null;
-
 /**
- * A small "ⓘ" icon-button beside a field/option/column header. Click or focus opens
- * an accessible popover — `aria-describedby` on the button ties it to the popover's
- * content, Escape closes it without closing a parent modal (capture-phase listener,
- * mirroring InfoDot), and it closes on an outside click or when focus leaves both the
- * button and the popover.
- *
- * Portaled to <body> and fixed-positioned (reusing the .info-dot/.info-pop styles
- * InfoDot already established) so it isn't clipped by a table's or modal's overflow.
+ * A small "ⓘ" icon-button beside a field/option/column header that opens an accessible
+ * popover. Merged into `InfoDot` (atoms.tsx): same component, same single-open latch, so
+ * only one help popover is ever open across the console. `label` is the button's name.
  */
-export function InfoTip({ label, children }: { label: string; children: ReactNode }) {
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left: number; flipY: boolean } | null>(null);
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
-  const popId = useId();
-  // Identity of the close-fn this instance registered as the module-level latch, so we
-  // only ever clear the latch when WE still hold it (never another tip that opened after).
-  const closeSelfRef = useRef<(() => void) | null>(null);
-
-  const place = useCallback(() => {
-    const b = btnRef.current?.getBoundingClientRect();
-    if (!b) return;
-    const W = 260;
-    const margin = 8;
-    const left = Math.max(margin, Math.min(b.left, window.innerWidth - W - margin));
-    const spaceBelow = window.innerHeight - b.bottom - margin;
-    const flipY = spaceBelow < 120 && b.top > spaceBelow;
-    setPos({ top: flipY ? b.top - 6 : b.bottom + 6, left, flipY });
-  }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    place();
-    const onDown = (e: MouseEvent) => {
-      if (btnRef.current?.contains(e.target as Node)) return;
-      if (popRef.current?.contains(e.target as Node)) return;
-      setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopImmediatePropagation();
-        setOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', onDown);
-    window.addEventListener('keydown', onKey, true);
-    window.addEventListener('resize', place);
-    window.addEventListener('scroll', place, true);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      window.removeEventListener('keydown', onKey, true);
-      window.removeEventListener('resize', place);
-      window.removeEventListener('scroll', place, true);
-    };
-  }, [open, place]);
-
-  // Release the module-level single-open latch whenever this tip closes — by outside
-  // click, Escape, or blur (all of which flip `open` to false without going through
-  // `toggle`) — or unmounts. Without this, the latch keeps pointing at a closed (or
-  // unmounted) tip's setter, and the next tip to open calls a stale no-op instead of a
-  // live one.
-  useEffect(() => {
-    if (open) return;
-    if (closeActiveInfoTip === closeSelfRef.current) closeActiveInfoTip = null;
-  }, [open]);
-  useEffect(
-    () => () => {
-      if (closeActiveInfoTip === closeSelfRef.current) closeActiveInfoTip = null;
-    },
-    [],
-  );
-
-  function toggle(e: React.MouseEvent) {
-    // InfoTip often sits beside a checkbox/radio label; stop the click reaching it.
-    e.preventDefault();
-    e.stopPropagation();
-    if (open) {
-      setOpen(false);
-      if (closeActiveInfoTip === closeSelfRef.current) closeActiveInfoTip = null;
-      return;
-    }
-    if (closeActiveInfoTip) closeActiveInfoTip();
-    const close = () => setOpen(false);
-    closeSelfRef.current = close;
-    closeActiveInfoTip = close;
-    setOpen(true);
-  }
-
-  function onBlur(e: React.FocusEvent) {
-    const next = e.relatedTarget as Node | null;
-    if (next && (btnRef.current?.contains(next) || popRef.current?.contains(next))) return;
-    setOpen(false);
-  }
-
-  return (
-    <span className="info-wrap" onBlur={onBlur}>
-      <button
-        ref={btnRef}
-        type="button"
-        className="info-dot"
-        aria-label={label}
-        aria-expanded={open}
-        aria-describedby={open ? popId : undefined}
-        onClick={toggle}
-      >
-        <Icon.Info />
-      </button>
-      {open &&
-        pos &&
-        createPortal(
-          <div
-            ref={popRef}
-            id={popId}
-            role="tooltip"
-            className="info-pop"
-            style={{
-              top: pos.top,
-              left: pos.left,
-              transform: pos.flipY ? 'translateY(-100%)' : undefined,
-            }}
-          >
-            {children}
-          </div>,
-          document.body,
-        )}
-    </span>
-  );
-}
+export const InfoTip = InfoDot;

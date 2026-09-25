@@ -14,26 +14,52 @@
  * Modeled on `CreateTenantWizard` (platform.tsx): pill stepper, per-step body, a footRow
  * with Back/Continue, errors routed to the step that owns them, a terminal Done summary.
  */
-import { useId, useState, type CSSProperties, type ReactNode } from 'react';
-import { createPortal } from 'react-dom';
-import { Btn, EmptyState, Icon, InfoDot, useEscapeClose } from './atoms';
+import { useState, type CSSProperties } from 'react';
+import {
+  Btn,
+  EmptyState,
+  HowSeasonsWork,
+  Icon,
+  InfoDot,
+  Modal,
+  NextSteps,
+  OptionCards,
+  type OptionCard,
+} from './atoms';
 import * as api from './api';
 import { ApiError } from './api';
+import { HelpLink } from './help/HelpDrawer';
 import { CalendarForm } from './platform-calendars';
-import { calendarSpan, formatIsoDate } from './competition/calendar';
-import { groupSizes } from './competition/entrants';
-import { derivedEntrantTotal, previewFitAll } from './competition/structure';
+import {
+  DEFAULT_PREVIEW_TEAMS,
+  StageRow,
+  StructureNarrative,
+  TEMPLATE_CARDS,
+  previewStages,
+} from './platform-structures';
+import { StepIntro } from './platform-wizard';
+import { calendarSpan, formatIsoDate } from '../packages/engine/src/calendar';
+import { groupSizes } from '../packages/engine/src/entrants';
+import { derivedEntrantTotal, previewFitAll } from '../packages/engine/src/structure';
 import {
   STRUCTURE_TEMPLATES,
+  applyPlacement,
+  defaultPlacement,
+  findTemplate,
   instantiateTemplate,
   newStructureId,
-  templateBlockIndexForStage,
-} from './competition/templates';
+} from '../packages/engine/src/templates';
+import { stageTitle } from '../packages/engine/src/stage-kinds';
+import {
+  resolveCompetitionDefaults,
+  type ResolvedCompetitionDefaults,
+} from '../packages/engine/src/defaults';
 import type {
   Competition,
   CompetitionStructure,
   League,
   SeasonCalendar,
+  StageSpec,
   TenantConfig,
 } from './types';
 
@@ -49,13 +75,6 @@ const SECTION: CSSProperties = {
   color: 'var(--muted-2)',
   margin: '16px 0 8px',
 };
-
-/**
- * The team count the fit verdict reasons about while nobody has registered yet — the same
- * assumption StructuresCard's preview rail makes (its own `DEFAULT_PREVIEW_TEAMS`). Kept as
- * a separate constant here rather than imported: it is a display default, not shared state.
- */
-const DEFAULT_PREVIEW_TEAMS = 12;
 
 const STEPS = ['Season dates', 'League structures', 'Review & create'] as const;
 
@@ -78,37 +97,12 @@ interface LeagueChoice {
 
 const SKIP: LeagueChoice = { mode: 'skip', label: '' };
 
-function Host({ onClose, children }: { onClose: () => void; children?: ReactNode }) {
-  useEscapeClose(onClose);
-  // A dialog with no role is, to assistive tech, an ordinary div — see CalendarModal /
-  // StructuresCard's Modal for the same pattern this mirrors.
-  const titleId = useId();
-  return createPortal(
-    <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div
-        className="task-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        style={{ maxWidth: 1040 }}
-      >
-        <div className="task-modal-head">
-          <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Platform · Season setup</div>
-            <div className="task-modal-head-title" id={titleId}>
-              Set up a <em>season</em>
-            </div>
-          </div>
-          <button className="task-modal-close" onClick={onClose} title="Close">
-            <Icon.X />
-          </button>
-        </div>
-        <div className="task-modal-body">{children}</div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
+const WIZARD_EYEBROW = 'Platform · Season setup';
+const WIZARD_TITLE = (
+  <>
+    Set up the season calendar &amp; <em>competitions</em>
+  </>
+);
 
 /**
  * Whether every stage of a structure fits the draft calendar, previewed at a plausible size.
@@ -141,6 +135,77 @@ function fitVerdict(
     : { ok: true, text: '✓ Fits the calendar' };
 }
 
+/** How a league's structure is sourced. Compact cards: two options, one line each. */
+const MODE_CARDS = (hasStructures: boolean): OptionCard<'template' | 'existing'>[] => [
+  {
+    value: 'template',
+    title: 'Start from a template',
+    desc: 'A ready-made shape that becomes a new structure for this client.',
+  },
+  {
+    value: 'existing',
+    title: 'Use an existing structure',
+    desc: 'Reuse one from this client’s library. No new version is created.',
+    disabled: !hasStructures,
+    disabledReason: hasStructures ? undefined : 'This client has no structures yet.',
+  },
+];
+
+/**
+ * "Adjust stages": the structures card's own stage editor, inline, over one template
+ * instance. Edits go through `onUpdate` as a function of the CURRENT instance, so two
+ * quick edits never race each other on a stale copy.
+ */
+function AdjustStages({
+  structure,
+  calendar,
+  defaults,
+  onUpdate,
+}: {
+  structure: CompetitionStructure;
+  /** The client's resolved competition defaults — match days and slots for new choices. */
+  defaults: ResolvedCompetitionDefaults;
+  calendar: SeasonCalendar;
+  onUpdate: (fn: (s: CompetitionStructure) => CompetitionStructure) => void;
+}) {
+  const [expanded, setExpanded] = useState<string | null>(structure.stages[0]?.id ?? null);
+  const previews = previewStages(structure, calendar, DEFAULT_PREVIEW_TEAMS);
+  const patchStage = (i: number, patch: Partial<StageSpec>) =>
+    onUpdate((s) => ({
+      ...s,
+      stages: s.stages.map((st, j) => (i === j ? { ...st, ...patch } : st)),
+    }));
+  const moveStage = (i: number, dir: -1 | 1) =>
+    onUpdate((s) => {
+      const j = i + dir;
+      if (j < 0 || j >= s.stages.length) return s;
+      const stages = [...s.stages];
+      [stages[i], stages[j]] = [stages[j], stages[i]];
+      return { ...s, stages };
+    });
+  return (
+    <div className="adjust-stages">
+      {structure.stages.map((stage, i) => (
+        <StageRow
+          key={stage.id}
+          stage={stage}
+          index={i}
+          total={structure.stages.length}
+          calendar={calendar}
+          earlierStages={structure.stages.slice(0, i)}
+          preview={previews[i]}
+          expanded={expanded === stage.id}
+          onToggle={() => setExpanded(expanded === stage.id ? null : stage.id)}
+          onChange={(patch) => patchStage(i, patch)}
+          onRemove={() => onUpdate((s) => ({ ...s, stages: s.stages.filter((_, j) => j !== i) }))}
+          onMove={(dir) => moveStage(i, dir)}
+          defaults={defaults}
+        />
+      ))}
+    </div>
+  );
+}
+
 /**
  * One ADDED league's row in the "League structures" step. Leagues appear here only after
  * the operator picks them from the "Add a league" select — the step is opt-IN, because a
@@ -151,24 +216,33 @@ function fitVerdict(
 function LeagueSetupRow({
   league,
   calendar,
+  defaults,
   structures,
   choice,
+  sharedWith,
   onChange,
   onRemove,
+  onUpdateStructure,
   resolveTemplate,
 }: {
   league: League;
   calendar: SeasonCalendar;
+  defaults: ResolvedCompetitionDefaults;
   structures: CompetitionStructure[];
   choice: LeagueChoice;
+  /** Other leagues in this run holding the same new template instance. */
+  sharedWith: string[];
   onChange: (c: LeagueChoice) => void;
   onRemove: () => void;
+  /** Edit this league's (shared) new template instance in place. */
+  onUpdateStructure: (fn: (s: CompetitionStructure) => CompetitionStructure) => void;
   /** Resolves a template pick to a structure — reusing before minting (see the caller). */
   resolveTemplate: (t: (typeof STRUCTURE_TEMPLATES)[number]) => {
     structure: CompetitionStructure;
     isNew: boolean;
   };
 }) {
+  const [adjusting, setAdjusting] = useState(false);
   const verdict =
     choice.mode !== 'skip' && choice.structure ? fitVerdict(choice.structure, calendar) : null;
 
@@ -179,7 +253,7 @@ function LeagueSetupRow({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          marginBottom: 8,
+          marginBottom: 12,
         }}
       >
         <div style={{ fontWeight: 700, fontSize: 13.5 }}>{league.label}</div>
@@ -187,68 +261,33 @@ function LeagueSetupRow({
           Remove
         </Btn>
       </div>
-      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, marginBottom: 8 }}>
-        <label style={radioLabel}>
-          <input
-            type="radio"
-            name={`mode-${league.key}`}
-            checked={choice.mode === 'template'}
-            onChange={() => onChange({ mode: 'template', label: '' })}
-          />
-          Start from a template
-        </label>
-        <label style={radioLabel}>
-          <input
-            type="radio"
-            name={`mode-${league.key}`}
-            checked={choice.mode === 'existing'}
-            onChange={() => onChange({ mode: 'existing', label: '' })}
-            disabled={structures.length === 0}
-          />
-          Use an existing structure
-        </label>
-        <InfoDot
-          title="Where this league's structure comes from"
-          options={[
-            {
-              label: 'Start from a template',
-              desc: 'Begin from a ready-made shape (flat league, split league, pools + knockout) and it becomes a new structure for this client.',
-              eg: 'a new club using the "Split league with mid-season swap" template',
-            },
-            {
-              label: 'Use an existing structure',
-              desc: 'Reuse a structure this client already has — no new version is created.',
-              eg: 'last season’s Premier Men structure, run again',
-            },
-          ]}
-        />
-      </div>
+
+      <OptionCards
+        name={`mode-${league.key}`}
+        label={`Where ${league.label}'s structure comes from`}
+        value={choice.mode === 'skip' ? null : choice.mode}
+        onChange={(mode) => {
+          setAdjusting(false);
+          onChange({ mode, label: '' });
+        }}
+        options={MODE_CARDS(structures.length > 0)}
+        compact
+      />
 
       {choice.mode === 'template' && (
-        <div style={{ display: 'grid', gap: 6, marginBottom: 8 }}>
-          {STRUCTURE_TEMPLATES.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => onChange({ mode: 'template', ...resolveTemplate(t), label: t.name })}
-              style={{
-                textAlign: 'left',
-                border:
-                  choice.structure?.templateId === t.id
-                    ? '2px solid var(--brand-primary, #16332B)'
-                    : '1px solid var(--line)',
-                borderRadius: 8,
-                padding: '8px 10px',
-                background: 'var(--white, #fff)',
-                cursor: 'pointer',
-              }}
-            >
-              <div style={{ fontWeight: 700, fontSize: 12.5 }}>{t.name}</div>
-              <div style={{ fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.4 }}>
-                {t.whenToUse}
-              </div>
-            </button>
-          ))}
+        <div style={{ marginTop: 12 }}>
+          <OptionCards
+            name={`tpl-${league.key}`}
+            label={`Template for ${league.label}`}
+            value={choice.structure?.templateId ?? null}
+            onChange={(id) => {
+              const t = STRUCTURE_TEMPLATES.find((x) => x.id === id);
+              if (!t) return;
+              setAdjusting(false);
+              onChange({ mode: 'template', ...resolveTemplate(t), label: t.name });
+            }}
+            options={TEMPLATE_CARDS}
+          />
         </div>
       )}
 
@@ -265,7 +304,7 @@ function LeagueSetupRow({
                 : { mode: 'existing', label: '' },
             );
           }}
-          style={{ marginBottom: 8 }}
+          style={{ marginTop: 12 }}
         >
           <option value="">Structure…</option>
           {structures.map((s) => (
@@ -277,7 +316,53 @@ function LeagueSetupRow({
       )}
 
       {choice.mode !== 'skip' && choice.structure && (
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div className="template-detail">
+          <div className="stage-field-label">What {choice.structure.name} does</div>
+          <StructureNarrative
+            structure={choice.structure}
+            calendar={calendar}
+            teamCount={DEFAULT_PREVIEW_TEAMS}
+            assumed
+          />
+          {choice.isNew ? (
+            <>
+              <button
+                type="button"
+                className="text-btn"
+                aria-expanded={adjusting}
+                onClick={() => setAdjusting((v) => !v)}
+                style={{ marginTop: 8 }}
+              >
+                {adjusting ? 'Done adjusting' : 'Adjust stages'}
+              </button>
+              {adjusting && sharedWith.length > 0 && (
+                <p style={HINT}>
+                  {sharedWith.join(', ')} {sharedWith.length === 1 ? 'uses' : 'use'} this structure
+                  too — changes here apply to every league on it.
+                </p>
+              )}
+              {adjusting && (
+                <AdjustStages
+                  structure={choice.structure}
+                  calendar={calendar}
+                  defaults={defaults}
+                  onUpdate={onUpdateStructure}
+                />
+              )}
+            </>
+          ) : (
+            <p style={HINT}>
+              {choice.structure.name} is already in this client&rsquo;s library. Edit its stages
+              from the Competition structures card.
+            </p>
+          )}
+        </div>
+      )}
+
+      {choice.mode !== 'skip' && choice.structure && (
+        <div
+          style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 12 }}
+        >
           <InfoDot
             title="Competition details"
             options={[
@@ -350,18 +435,125 @@ function LeagueSetupRow({
   );
 }
 
+/** One NEW template structure held in this run, and the leagues sharing it. */
+interface HeldInstance {
+  structure: CompetitionStructure;
+  leagueLabels: string[];
+}
+
+/** The distinct new template instances the added leagues hold, in add order. */
+function newTemplateInstances(
+  addedKeys: string[],
+  choices: Record<string, LeagueChoice>,
+  leagues: League[],
+): HeldInstance[] {
+  const byId = new Map<string, HeldInstance>();
+  for (const key of addedKeys) {
+    const c = choices[key];
+    if (!c || c.mode !== 'template' || !c.isNew || !c.structure) continue;
+    const label = leagues.find((l) => l.key === key)?.label ?? key;
+    const held = byId.get(c.structure.id);
+    if (held) held.leagueLabels.push(label);
+    else byId.set(c.structure.id, { structure: c.structure, leagueLabels: [label] });
+  }
+  return [...byId.values()];
+}
+
+/**
+ * "Plays in" — which block each stage of a new template structure plays in. Shown once
+ * per shared instance (every league picking the template shares it), and only when the
+ * calendar has two or more blocks: with one block there is nothing to choose.
+ */
+function PlacementSection({
+  calendar,
+  instances,
+  onPlace,
+}: {
+  calendar: SeasonCalendar;
+  instances: HeldInstance[];
+  onPlace: (structureId: string, stageIndex: number, blockIndex: number) => void;
+}) {
+  if ((calendar.blocks?.length ?? 0) < 2 || instances.length === 0) return null;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ ...SECTION, display: 'flex', alignItems: 'center', gap: 8 }}>
+        Where each stage plays
+        <HelpLink topic="blocks-vs-stages" />
+      </div>
+      {instances.map(({ structure, leagueLabels }) => (
+        <div key={structure.id} style={rowBox}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>{structure.name}</div>
+          <div style={{ fontSize: 12, color: 'var(--muted-2)', marginBottom: 8 }}>
+            Used by {leagueLabels.join(', ')}
+          </div>
+          <div className="place-chips">
+            {structure.stages.map((stage, i) => (
+              <div
+                key={stage.id}
+                className="place-chip"
+                title={`${stageTitle(stage.format)} · ${stage.name}`}
+              >
+                <span>Stage {i + 1} plays in</span>
+                <select
+                  aria-label={`${structure.name}: stage ${i + 1} plays in`}
+                  value={String(stage.schedule.blockIndex)}
+                  onChange={(e) => onPlace(structure.id, i, Number(e.target.value))}
+                >
+                  {stage.schedule.blockIndex >= calendar.blocks.length && (
+                    <option value={String(stage.schedule.blockIndex)}>
+                      {`Block ${stage.schedule.blockIndex + 1} (not on this calendar)`}
+                    </option>
+                  )}
+                  {calendar.blocks.map((b, bi) => (
+                    <option key={b.id} value={String(bi)}>
+                      {`Block ${bi + 1} — ${b.label} · ${formatIsoDate(b.start)} → ${formatIsoDate(b.end)}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+          <p style={HINT}>
+            Two stages in the same block play one after the other: the later one starts after the
+            earlier one finishes.
+          </p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 const rowBox: CSSProperties = {
   border: '1px solid var(--line)',
   borderRadius: 10,
   padding: 12,
   marginBottom: 10,
 };
-const radioLabel: CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 6,
-  cursor: 'pointer',
-};
+
+/** Step 0's calendar source. Shown only when the client already has a calendar. */
+const CALENDAR_MODE_CARDS: OptionCard<'new' | 'existing'>[] = [
+  {
+    value: 'new',
+    title: 'Start a new season calendar',
+    desc: 'Build a fresh calendar below: blocks, breaks and excluded dates for this season.',
+  },
+  {
+    value: 'existing',
+    title: 'Use an existing calendar',
+    desc: 'Reuse one this client already has, so every league on it shares the same dates.',
+  },
+];
+
+/** What happens after the wizard, in the admin console. */
+const AFTER_SETUP_STEPS = [
+  {
+    title: 'Start the season',
+    desc: 'Admin console → Fixtures & Venues → Start a season, once clubs are registered.',
+  },
+  { title: 'Confirm entrants', desc: 'The admin confirms which sides play in each stage.' },
+  { title: 'Generate fixtures', desc: 'Each stage’s groups become draft series.' },
+  { title: 'Approve and release', desc: 'Clubs see nothing until a series is released.' },
+];
 
 export function SeasonSetupWizard({
   slug,
@@ -381,6 +573,15 @@ export function SeasonSetupWizard({
   const calendars = config.calendars ?? [];
   const leagues = config.leagues ?? [];
   const structures = config.structures ?? [];
+  /**
+   * The structures the wizard may REUSE (template prefill and "Use an existing
+   * structure"): operator-authored only. Quick-start and migrated structures are minted
+   * per league and never become a prefill (ADR 0014).
+   */
+  const operatorStructures = structures.filter(
+    (s) => s.source === undefined || s.source === 'operator',
+  );
+  const competitionDefaults = resolveCompetitionDefaults(config);
 
   const [step, setStep] = useState(0);
 
@@ -418,13 +619,106 @@ export function SeasonSetupWizard({
   const resolveTemplate = (
     t: (typeof STRUCTURE_TEMPLATES)[number],
   ): { structure: CompetitionStructure; isNew: boolean } => {
-    const existing = structures.find((s) => s.templateId === t.id);
+    const existing = operatorStructures.find((s) => s.templateId === t.id);
     if (existing) return { structure: existing, isNew: false };
     const pending = Object.values(leagueChoices).find(
       (c) => c.isNew && c.structure?.templateId === t.id,
     );
     if (pending?.structure) return { structure: pending.structure, isNew: true };
-    return { structure: instantiateTemplate(t, calDraft ?? undefined), isNew: true };
+    return {
+      structure: instantiateTemplate(
+        t,
+        calDraft ?? undefined,
+        undefined,
+        placementFor(t, calDraft ?? undefined),
+        competitionDefaults,
+      ),
+      isNew: true,
+    };
+  };
+  /**
+   * The operator's explicit "plays in" choices, per template, one entry per stage
+   * (`undefined` = not set, so the default rule still applies). Keyed by template id
+   * because a template instance is SHARED by every league that picks it in this run —
+   * one set of choices per instance, not per league.
+   */
+  const [placements, setPlacements] = useState<Record<string, Array<number | undefined>>>({});
+
+  /**
+   * Where a template's stages play on `cal`: the operator's explicit choice where they
+   * made one (and the block still exists), else `defaultPlacement`.
+   */
+  const placementFor = (
+    t: (typeof STRUCTURE_TEMPLATES)[number],
+    cal: SeasonCalendar | undefined,
+  ): number[] => {
+    const blockCount = cal?.blocks?.length ?? 0;
+    const defaults = defaultPlacement(t, blockCount);
+    const explicit = placements[t.id] ?? [];
+    return defaults.map((d, i) => {
+      const chosen = explicit[i];
+      return chosen !== undefined && chosen < blockCount ? chosen : d;
+    });
+  };
+
+  /** Set one stage's block on a shared template instance, for every league holding it. */
+  const setStagePlacement = (structureId: string, stageIndex: number, blockIndex: number) => {
+    const held = Object.values(leagueChoices).find(
+      (c) => c.structure?.id === structureId,
+    )?.structure;
+    if (!held) return;
+    if (held.templateId) {
+      const templateId = held.templateId;
+      setPlacements((prev) => {
+        const next = [...(prev[templateId] ?? [])];
+        next[stageIndex] = blockIndex;
+        return { ...prev, [templateId]: next };
+      });
+    }
+    const placement = held.stages.map((st, i) =>
+      i === stageIndex ? blockIndex : st.schedule.blockIndex,
+    );
+    const updated = { ...held, stages: applyPlacement(held.stages, placement) };
+    setLeagueChoices((prev) => {
+      const next = { ...prev };
+      for (const key of Object.keys(next)) {
+        if (next[key].structure?.id === structureId)
+          next[key] = { ...next[key], structure: updated };
+      }
+      return next;
+    });
+  };
+  /**
+   * New template instances the operator has edited through "Adjust stages". Their stages
+   * are the operator's own from then on, so leaving step 0 never re-derives them.
+   */
+  const [customised, setCustomised] = useState<string[]>([]);
+
+  /** Edit a held new instance in place, for every league sharing it. */
+  const updateInstance = (
+    structureId: string,
+    fn: (s: CompetitionStructure) => CompetitionStructure,
+  ) => {
+    setCustomised((prev) => (prev.includes(structureId) ? prev : [...prev, structureId]));
+    setLeagueChoices((prev) => {
+      const current = Object.values(prev).find((c) => c.structure?.id === structureId)?.structure;
+      if (!current) return prev;
+      const updated = fn(current);
+      const next = { ...prev };
+      for (const key of Object.keys(next)) {
+        if (next[key].structure?.id === structureId)
+          next[key] = { ...next[key], structure: updated };
+      }
+      return next;
+    });
+  };
+  /** The other added leagues holding the same NEW instance as `key`. */
+  const sharersOf = (key: string): string[] => {
+    const id = leagueChoices[key]?.isNew ? leagueChoices[key]?.structure?.id : undefined;
+    if (!id) return [];
+    return addedKeys
+      .filter((k) => k !== key && leagueChoices[k]?.structure?.id === id)
+      .map((k) => leagues.find((l) => l.key === k)?.label ?? k);
   };
   const choiceFor = (key: string) => leagueChoices[key] ?? SKIP;
   const setChoiceFor = (key: string, c: LeagueChoice) =>
@@ -443,13 +737,19 @@ export function SeasonSetupWizard({
 
   /**
    * Leaving step 0: re-derive every held NEW template structure's stage block positions
-   * against the CURRENT `calDraft`, using the same rule `instantiateTemplate` applies at
-   * pick time. A template is instantiated once, at pick time, against whatever `calDraft`
-   * looked like then — but the operator can go Back to step 0 and change the calendar's
-   * block count afterwards. A shrink is caught by the fit verdict (it just warns); a GROW
-   * is the dangerous direction, because a later stage stays at block position 0 or 1
-   * exactly as minted, silently pointing at the wrong (now-existing) block rather than the
-   * new one the operator actually added.
+   * against the CURRENT `calDraft`. A template is instantiated once, at pick time, against
+   * whatever `calDraft` looked like then — but the operator can go Back to step 0 and
+   * change the calendar's block count afterwards. A shrink is caught by the fit verdict
+   * (it just warns); a GROW is the dangerous direction, because a later stage stays at
+   * block position 0 or 1 exactly as minted, silently pointing at the wrong (now-existing)
+   * block rather than the new one the operator actually added.
+   *
+   * Only stages the operator has NOT placed explicitly are re-derived (`placementFor`):
+   * an explicit "plays in" choice survives the round trip, unless the block it names no
+   * longer exists. Chaining is recomputed to match (`applyPlacement`).
+   *
+   * An instance edited through "Adjust stages" is left alone: its stages are the
+   * operator's own now, and re-deriving by template position could undo a move.
    *
    * Only `isNew` template structures are touched — `isNew: false` choices are library
    * structures, unaffected by this wizard's own calendar draft. Structures shared by more
@@ -461,13 +761,18 @@ export function SeasonSetupWizard({
       const remapped = new Map<string, CompetitionStructure>();
       for (const choice of Object.values(leagueChoices)) {
         const s = choice.structure;
-        if (choice.mode === 'template' && choice.isNew && s && !remapped.has(s.id)) {
+        const template = s?.templateId ? findTemplate(s.templateId) : undefined;
+        if (
+          choice.mode === 'template' &&
+          choice.isNew &&
+          s &&
+          template &&
+          !customised.includes(s.id) &&
+          !remapped.has(s.id)
+        ) {
           remapped.set(s.id, {
             ...s,
-            stages: s.stages.map((stage, i) => ({
-              ...stage,
-              schedule: { ...stage.schedule, blockIndex: templateBlockIndexForStage(i, calDraft) },
-            })),
+            stages: applyPlacement(s.stages, placementFor(template, calDraft)),
           });
         }
       }
@@ -554,7 +859,7 @@ export function SeasonSetupWizard({
 
   if (done) {
     return (
-      <Host onClose={onDone}>
+      <Modal eyebrow={WIZARD_EYEBROW} title={WIZARD_TITLE} maxWidth={1040} onClose={onDone}>
         <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.6 }}>
           <strong>{done.calendarLabel}</strong> is {done.calendarCreated ? 'created' : 'updated'}.
         </p>
@@ -568,21 +873,19 @@ export function SeasonSetupWizard({
             </li>
           ))}
         </ul>
-        <p style={HINT}>
-          Fixture generation happens in the club admin console — &ldquo;Start a season&rdquo;
-          against each competition, once clubs are registered.
-        </p>
+        <div style={SECTION}>What happens next</div>
+        <NextSteps steps={AFTER_SETUP_STEPS} />
         <div style={footRow}>
           <Btn tone="teal" onClick={onDone}>
             Done
           </Btn>
         </div>
-      </Host>
+      </Modal>
     );
   }
 
   return (
-    <Host onClose={onClose}>
+    <Modal eyebrow={WIZARD_EYEBROW} title={WIZARD_TITLE} maxWidth={1040} onClose={onClose}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 18 }}>
         {STEPS.map((label, i) => (
           <span
@@ -636,48 +939,22 @@ export function SeasonSetupWizard({
 
       {step === 0 && (
         <>
-          <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
-            A season's real-world time — playing blocks, breaks and excluded dates. Every league
-            playing this season usually shares one calendar.
-          </p>
+          <StepIntro title="How a season is set up">
+            <p style={{ margin: '0 0 12px' }}>
+              Three steps: set the season&rsquo;s dates, choose how each structured league plays
+              through them, then check it all and create it in one save.
+            </p>
+            <HowSeasonsWork compact />
+          </StepIntro>
           {calendars.length > 0 && (
-            <div
-              style={{
-                display: 'flex',
-                gap: 16,
-                flexWrap: 'wrap',
-                marginBottom: 14,
-                fontSize: 12.5,
-              }}
-            >
-              <label style={radioLabel}>
-                <input
-                  type="radio"
-                  checked={calMode === 'new'}
-                  onChange={() => setCalMode('new')}
-                />
-                Start a new season calendar
-              </label>
-              <label style={radioLabel}>
-                <input
-                  type="radio"
-                  checked={calMode === 'existing'}
-                  onChange={() => setCalMode('existing')}
-                />
-                Use an existing calendar
-              </label>
-              <InfoDot
-                title="Season calendar"
-                options={[
-                  {
-                    label: 'Start a new season calendar',
-                    desc: 'Build a fresh calendar below — blocks, breaks and excluded dates for this season.',
-                  },
-                  {
-                    label: 'Use an existing calendar',
-                    desc: 'Reuse a calendar this client already has, so every league on it shares the same dates and breaks.',
-                  },
-                ]}
+            <div style={{ marginBottom: 16 }}>
+              <OptionCards
+                name="calendar-mode"
+                label="Season calendar"
+                value={calMode}
+                onChange={setCalMode}
+                options={CALENDAR_MODE_CARDS}
+                compact
               />
             </div>
           )}
@@ -731,7 +1008,7 @@ export function SeasonSetupWizard({
           <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
             Most leagues keep the simple flat series flow and need nothing here. Add only the
             leagues that run a <strong>structured competition</strong> on{' '}
-            <strong>{calDraft.label}</strong> — a split league, pools, a knockout. Every choice
+            <strong>{calDraft.label}</strong> — a split league, groups, a knockout. Every choice
             stays editable from the structures and competitions cards afterwards.
           </p>
           {leagues.length === 0 ? (
@@ -782,10 +1059,16 @@ export function SeasonSetupWizard({
                         key={l.key}
                         league={l}
                         calendar={calDraft}
-                        structures={structures}
+                        defaults={competitionDefaults}
+                        structures={operatorStructures}
                         choice={choiceFor(l.key)}
+                        sharedWith={sharersOf(l.key)}
                         onChange={(c) => setChoiceFor(l.key, c)}
                         onRemove={() => removeLeague(l.key)}
+                        onUpdateStructure={(fn) => {
+                          const id = choiceFor(l.key).structure?.id;
+                          if (id) updateInstance(id, fn);
+                        }}
                         resolveTemplate={resolveTemplate}
                       />
                     ))}
@@ -810,6 +1093,11 @@ export function SeasonSetupWizard({
                       </p>
                     </div>
                   )}
+                  <PlacementSection
+                    calendar={calDraft}
+                    instances={newTemplateInstances(addedKeys, leagueChoices, leagues)}
+                    onPlace={setStagePlacement}
+                  />
                 </>
               );
             })()
@@ -857,12 +1145,33 @@ export function SeasonSetupWizard({
               const c = leagueChoices[l.key];
               const verdict = c?.structure ? fitVerdict(c.structure, calDraft) : null;
               return (
-                <div key={l.key} style={{ fontSize: 12.5, marginBottom: 6 }}>
-                  <strong>{l.label}</strong>: {c?.label} —{' '}
-                  {c?.isNew
-                    ? `new structure (${c.structure?.name})`
-                    : `existing structure (${c?.structure?.name})`}
-                  {verdict && <span style={{ marginLeft: 6 }}>{verdict.ok ? '✓' : '⚠'}</span>}
+                <div key={l.key} style={{ ...rowBox, fontSize: 12.5 }}>
+                  <div style={{ marginBottom: 8 }}>
+                    <strong>{l.label}</strong>: {c?.label} ·{' '}
+                    <span style={{ color: 'var(--muted)' }}>
+                      {c?.isNew
+                        ? `new structure (${c.structure?.name})`
+                        : `existing structure (${c?.structure?.name})`}
+                    </span>
+                  </div>
+                  {c?.structure && (
+                    <StructureNarrative
+                      structure={c.structure}
+                      calendar={calDraft}
+                      teamCount={DEFAULT_PREVIEW_TEAMS}
+                      assumed
+                    />
+                  )}
+                  {verdict && (
+                    <div
+                      style={{
+                        marginTop: 8,
+                        color: verdict.ok ? 'var(--muted)' : 'var(--gold, #B7791F)',
+                      }}
+                    >
+                      {verdict.text}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -927,6 +1236,6 @@ export function SeasonSetupWizard({
           </div>
         </>
       )}
-    </Host>
+    </Modal>
   );
 }

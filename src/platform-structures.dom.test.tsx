@@ -15,7 +15,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { StructuresCard } from './platform-structures';
+import { CompetitionsEditor, StructuresCard } from './platform-structures';
 import type { CompetitionStructure, League, SeasonCalendar, TenantConfig } from './types';
 import * as api from './api';
 import { ApiError } from './api';
@@ -85,7 +85,11 @@ const smallCalendar: SeasonCalendar = {
 
 const setup = (
   structures: CompetitionStructure[] = [structure()],
-  opts: { calendars?: SeasonCalendar[]; leagues?: League[] } = {},
+  opts: {
+    calendars?: SeasonCalendar[];
+    leagues?: League[];
+    competitionDefaults?: TenantConfig['competitionDefaults'];
+  } = {},
 ) => {
   const save = vi.fn().mockResolvedValue({});
   const toast = vi.fn();
@@ -94,6 +98,7 @@ const setup = (
     structures,
     calendars: opts.calendars ?? [calendar],
     leagues: opts.leagues ?? [],
+    competitionDefaults: opts.competitionDefaults,
   } as unknown as TenantConfig;
   vi.mocked(api.platformGetTenant).mockResolvedValue(config);
   render(<StructuresCard slug="dolphins" config={config} save={save} toast={toast} />);
@@ -244,7 +249,8 @@ describe('preview rail — fixture counts come from the real generator', () => {
     ]);
     await openEditor(user);
 
-    expect(within(preview()).getByText(/fixtures entered by hand/i)).toBeVisible();
+    // Said twice: in the narrative sentence and in the stage's own numbers.
+    expect(within(preview()).getAllByText(/fixtures entered by hand/i).length).toBeGreaterThan(1);
     expect(within(preview()).getByText(/✓ Fits/)).toBeVisible();
   });
 
@@ -464,6 +470,37 @@ describe('StageRow — Time slots', () => {
       { label: 'Afternoon', start: '13:30' },
     ]);
     expect('roundsPerDay' in saved.stages[0].schedule).toBe(false);
+  });
+
+  it('prefills the tenant’s own default slots and match days (ADR 0014)', async () => {
+    const { user, save } = setup([structure()], {
+      competitionDefaults: {
+        timeSlots: [
+          { label: 'Early', start: '09:30' },
+          { label: 'Late', start: '14:15' },
+        ],
+        matchDays: [0],
+      },
+    });
+    await openEditor(user);
+
+    await user.click(
+      within(timeSlotsChoice()).getByRole('button', { name: 'Morning & afternoon starts' }),
+    );
+    expect(screen.getByDisplayValue('09:30')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('14:15')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('radio', { name: /^set days only/i }));
+    expect(screen.getByRole('button', { name: 'Sun' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Sat' })).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(saveBtn());
+    const schedule = save.mock.calls[0][0].structures[0].stages[0].schedule;
+    expect(schedule.slots).toEqual([
+      { label: 'Early', start: '09:30' },
+      { label: 'Late', start: '14:15' },
+    ]);
+    expect(schedule.cadence).toEqual({ kind: 'weekdays', days: [0] });
   });
 
   it('editing a row’s label and time round-trips into the saved structure', async () => {
@@ -977,7 +1014,7 @@ describe('pools → within-group semis', () => {
     expect(within(preview()).getByText(/✓ Fits · 23 fixtures across 2 stages/)).toBeVisible();
   });
 
-  it('keeps the "up to" hedge, and flags the 2 × 2 rule, once the count is cleared', async () => {
+  it('keeps the "up to" hedge, and flags the within-group rule, once the count is cleared', async () => {
     const { user, save } = setup([poolsStructure()]);
     await openEditor(user, /pools to knockout/i);
     await editFinals(user);
@@ -988,11 +1025,11 @@ describe('pools → within-group semis', () => {
     expect(within(preview()).getByText(/up to/i)).toBeInTheDocument();
     // Inline, before the server's 400 — in the rail and as a save-blocking error.
     expect(
-      within(preview()).getByText(/within-group semi-finals need 2 groups × 2 qualifiers/i),
+      within(preview()).getByText(/within-group semi-finals need a power-of-two number of groups/i),
     ).toBeVisible();
     expect(
       screen.getByText(
-        '"Semi-finals & final": within-group semi-finals need 2 groups × 2 qualifiers in this version.',
+        '"Semi-finals & final": within-group semi-finals need a power-of-two number of groups (2, 4, 8) each sending the same power-of-two number of sides (2, 4).',
       ),
     ).toBeVisible();
     expect(saveBtn()).toBeDisabled();
@@ -1016,10 +1053,7 @@ describe('pools → within-group semis', () => {
     await openEditor(user, /pools to knockout/i);
     await editFinals(user);
 
-    await user.selectOptions(
-      within(dialog()).getByRole('combobox', { name: /^format$/i }),
-      'Knockout — within-group',
-    );
+    await user.click(within(dialog()).getByRole('radio', { name: /^Knockout — within-group/ }));
     // No count yet — the v1 shape rule says so straight away.
     expect(saveBtn()).toBeDisabled();
 
@@ -1071,5 +1105,147 @@ describe('pools → within-group semis', () => {
 
     expect(previewPicker()).toHaveValue('other');
     expect(within(preview()).getByText(/don’t fit their block/i)).toBeVisible();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   The expanded stage as three questions — who plays, who plays whom, when — each a
+   set of cards drawn from the stage-kinds registries, and the rail's narrative.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('StageRow — three questions', () => {
+  it('groups the expanded stage into who plays, who plays whom and when', async () => {
+    const { user } = setup([structure()]);
+    await openEditor(user);
+
+    expect(screen.getByRole('region', { name: 'Who plays?' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Who plays whom?' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'When?' })).toBeInTheDocument();
+    // The current values are the checked cards.
+    expect(screen.getByRole('radio', { name: /^Every registered side/ })).toBeChecked();
+    expect(screen.getByRole('radio', { name: /^Single round robin/ })).toBeChecked();
+    expect(screen.getByRole('radio', { name: /^Weekly/ })).toBeChecked();
+  });
+
+  it('a format card click changes the stage’s format', async () => {
+    const { user, save } = setup([structure()]);
+    await openEditor(user);
+
+    await user.click(screen.getByRole('radio', { name: /^Double round robin/ }));
+    expect(screen.getByRole('radio', { name: /^Double round robin/ })).toBeChecked();
+    await user.click(saveBtn());
+
+    const saved = save.mock.calls[0][0].structures[0].stages[0];
+    expect(saved.format).toEqual({ kind: 'round-robin', legs: 2 });
+  });
+
+  it('a seeded card sets both the kind and the seeding method', async () => {
+    const { user, save } = setup([structure()]);
+    await openEditor(user);
+
+    await user.click(screen.getByRole('radio', { name: /^Seeded into groups \(snake\)/ }));
+    await user.click(saveBtn());
+    expect(save.mock.calls[0][0].structures[0].stages[0].entrants).toEqual({
+      kind: 'seeded-split',
+      method: 'snake',
+      groups: { kind: 'even', count: 2 },
+    });
+  });
+
+  it('switching between the two seeded cards keeps the group plan and flips the method', async () => {
+    const { user, save } = setup([
+      structure({
+        stages: [
+          {
+            id: 's1',
+            name: 'Pools',
+            format: { kind: 'round-robin', legs: 1 },
+            entrants: { kind: 'seeded-split', method: 'snake', groups: { kind: 'even', count: 3 } },
+            schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+          },
+        ],
+      } as Partial<CompetitionStructure>),
+    ]);
+    await openEditor(user);
+
+    await user.click(screen.getByRole('radio', { name: /^Seeded into groups \(top-down\)/ }));
+    await user.click(saveBtn());
+    expect(save.mock.calls[0][0].structures[0].stages[0].entrants).toEqual({
+      kind: 'seeded-split',
+      method: 'blocks',
+      groups: { kind: 'even', count: 3 },
+    });
+  });
+
+  it('a cadence card switches to every N weeks and shows the N box', async () => {
+    const { user, save } = setup([structure()]);
+    await openEditor(user);
+
+    await user.click(screen.getByRole('radio', { name: /^Every N weeks/ }));
+    await user.click(saveBtn());
+    expect(save.mock.calls[0][0].structures[0].stages[0].schedule.cadence).toEqual({
+      kind: 'every-n-weeks',
+      n: 2,
+    });
+  });
+});
+
+describe('preview rail — the structure as a story', () => {
+  it('opens with one sentence per stage, above the numbers', async () => {
+    const { user } = setup([structure()]);
+    await openEditor(user);
+
+    expect(
+      within(preview()).getByText(
+        /^Stage 1 · Round-robin stage · all 12 sides in one group · everyone plays everyone once · weekly in Block 1/,
+      ),
+    ).toBeVisible();
+  });
+
+  it('follows the teams-entered box', async () => {
+    const { user } = setup([structure()]);
+    await openEditor(user);
+
+    await user.clear(teamsBox());
+    await user.type(teamsBox(), '8');
+    expect(within(preview()).getByText(/all 8 sides in one group/)).toBeVisible();
+  });
+});
+
+describe('CompetitionsEditor — structures not authored by an operator', () => {
+  it('lists quick-start and migrated structures in their own labelled groups', () => {
+    const config = {
+      structures: [
+        structure(),
+        structure({ id: 'qs', name: 'Quick-started', source: 'quick-start' }),
+        structure({ id: 'mig', name: 'Migrated', source: 'migration' }),
+      ],
+      calendars: [calendar],
+      leagues: [],
+    } as unknown as TenantConfig;
+    const lg = {
+      key: 'premier',
+      label: 'Premier Men',
+      competitions: [{ id: 'c1', label: 'League', structureId: 'flat', calendarId: 'cal' }],
+    } as unknown as League;
+    render(
+      <CompetitionsEditor
+        league={lg}
+        config={config}
+        onSave={vi.fn()}
+        onClose={vi.fn()}
+        toast={vi.fn()}
+      />,
+    );
+    const picker = screen
+      .getAllByRole('combobox')
+      .find((el) => within(el).queryByRole('option', { name: 'Structure…' }))!;
+    const quick = within(picker).getByRole('group', { name: 'Created by admin quick start' });
+    expect(within(quick).getByRole('option', { name: 'Quick-started' })).toBeInTheDocument();
+    const migrated = within(picker).getByRole('group', { name: 'Migrated flat seasons' });
+    expect(within(migrated).getByRole('option', { name: 'Migrated' })).toBeInTheDocument();
+    // The operator's own structure stays at the top level.
+    const top = within(picker).getByRole('option', { name: 'Flat round robin' });
+    expect(top.parentElement).toBe(picker);
   });
 });

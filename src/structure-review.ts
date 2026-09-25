@@ -12,7 +12,7 @@
  * confidence matching here.
  */
 import { matchClub, type ClubIndex } from './intake-match';
-import { slugifyLeagueKey } from './leagues';
+import { slugifyLeagueKey } from '../packages/engine/src/leagues';
 import type {
   InsightsClub,
   League,

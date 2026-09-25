@@ -4,14 +4,83 @@
  * CANONICAL SOURCE: packages/api/src/types.ts — the backend owns these shapes.
  * This is a deliberate hand-port (the repo is not an npm workspace and the api
  * package has no build output, so a cross-package `import type` isn't viable).
- * Keep this file in sync when the API contract changes. Future consolidation:
- * extract a `packages/shared` both sides depend on (see migration plan).
+ * Keep this file in sync when the API contract changes. The competition/season types
+ * are no longer ported: they live in packages/engine/src/types.ts and are re-exported
+ * below, so both sides share one definition.
  *
  * DELIBERATE DIVERGENCE from the backend: fields the server authoritatively
  * produces but the client doesn't always have on hand (e.g. optimistic-concurrency
  * `version`) are marked OPTIONAL here even where the backend requires them. Such
  * fields are annotated `// server-authoritative`.
  */
+
+// Competition/season domain types live in the engine (packages/engine/src/types.ts) — one
+// definition shared with the API, not a hand-port.
+import type {
+  Cadence,
+  ClubGround,
+  ClubTeam,
+  Competition,
+  CompetitionDefaults,
+  CompetitionStructure,
+  DerivationNote,
+  EntrantSpec,
+  FormatSpec,
+  GroupPlan,
+  IsoDate,
+  IsoTime,
+  LadderSpec,
+  League,
+  MatchFormatDefault,
+  OutcomeSpec,
+  SeasonBlock,
+  SeasonBreak,
+  SeasonCalendar,
+  SeasonRun,
+  Series,
+  SeriesSchedule,
+  StageRun,
+  StageSchedule,
+  StageSpec,
+  TimeSlot,
+  Venue,
+  VenueStatus,
+  VenueUnavailable,
+  Weekday,
+} from '../packages/engine/src/types';
+export type {
+  Cadence,
+  ClubGround,
+  ClubTeam,
+  Competition,
+  CompetitionDefaults,
+  CompetitionStructure,
+  DerivationNote,
+  EntrantSpec,
+  FormatSpec,
+  GroupPlan,
+  IsoDate,
+  IsoTime,
+  LadderSpec,
+  League,
+  MatchFormatDefault,
+  OutcomeSpec,
+  SeasonBlock,
+  SeasonBreak,
+  SeasonCalendar,
+  SeasonRun,
+  Series,
+  SeriesSchedule,
+  StageRun,
+  StageSchedule,
+  StageSpec,
+  TimeSlot,
+  Venue,
+  VenueStatus,
+  VenueUnavailable,
+  Weekday,
+};
+export { TEAM_ID_PREFIX } from '../packages/engine/src/types';
 
 export type Role = 'admin' | 'rep' | 'operator';
 
@@ -38,22 +107,6 @@ export interface UserProfile {
   onboardingSeen: Record<string, boolean>;
   /** First-ever sign-in (ISO). Absent ⇒ invited but never signed in ('pending'). */
   lastLoginAt?: string;
-}
-
-/** An admin-defined competition a club can register for during affiliation. */
-export interface League {
-  key: string;
-  label: string;
-  group: string;
-  /** A DISTRICTS value, or the 'All districts' sentinel for overarching leagues. */
-  district: string;
-  note?: string;
-  /**
-   * Format streams this league runs (ADR 0008) — e.g. T20 Pink Ball and 50 Over Red Ball
-   * side by side over the same registered clubs. Absent ⇒ the league behaves exactly as
-   * before: one flat create-series flow, no structure.
-   */
-  competitions?: Competition[];
 }
 
 /** A short how-to-use-the-app tutorial video, surfaced on the public /tutorials page. */
@@ -107,370 +160,6 @@ export interface DirectoryClub {
   /** Stable slug derived server-side from the name at save time. */
   id: string;
   name: string;
-}
-
-/* ─── SEASON CALENDAR (ADR 0008) ───
-   The union's real playing calendar: blocks of play either side of a mid-season break.
-   The scheduling logic over these types lives in src/competition/calendar.ts.
-
-   Dates are LOCAL WALL-CLOCK date-only strings, never UTC instants — a fixture happens
-   on a date, in one place, in a region with no DST. The engine parses them strictly with
-   dayjs.utc so whole-day arithmetic can never drift by the host's offset. */
-
-/** A date-only string, `YYYY-MM-DD`. */
-export type IsoDate = string;
-
-/** A wall-clock time, `HH:MM` (24h). */
-export type IsoTime = string;
-
-/** 0 = Sunday … 6 = Saturday, matching `dayjs().day()`. */
-export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;
-
-/** A continuous stretch of the season in which matches are played. Bounds inclusive. */
-export interface SeasonBlock {
-  id: string;
-  label: string;
-  start: IsoDate;
-  end: IsoDate;
-}
-
-/** A stretch where no match may be scheduled. Bounds inclusive. */
-export interface SeasonBreak {
-  label: string;
-  start: IsoDate;
-  end: IsoDate;
-}
-
-export interface SeasonCalendar {
-  id: string;
-  /** e.g. "2026/27". */
-  label: string;
-  /** IANA zone, display-only. Absent ⇒ the platform default. */
-  timezone?: string;
-  blocks: SeasonBlock[];
-  breaks?: SeasonBreak[];
-  /** One-off blocked days — public holidays, exam windows, union events. */
-  excludeDates?: IsoDate[];
-}
-
-/**
- * How often a round is played. `spread` reproduces the pre-calendar behaviour (rounds
- * distributed evenly across the window), so a series created before calendars existed
- * keeps its schedule shape when regenerated.
- */
-export type Cadence =
-  | { kind: 'weekly' }
-  | { kind: 'every-n-weeks'; n: number }
-  | { kind: 'weekdays'; days: Weekday[] }
-  | { kind: 'spread' };
-
-/** A named start time, e.g. `{ label: 'Morning', start: '08:00' }`. */
-export interface TimeSlot {
-  label: string;
-  start: IsoTime;
-}
-
-/**
- * The calendar binding persisted on a Series so `regenerate` reproduces exactly the
- * schedule the admin confirmed at create time — the same parity guarantee `dateMode`
- * gives the legacy path. Absent ⇒ a legacy series scheduled from `startDate`/`endDate`.
- */
-export interface SeriesSchedule {
-  calendarId: string;
-  blockId: string;
-  cadence: Cadence;
-  slots?: TimeSlot[];
-  /** each planned day hosts roundsPerDay consecutive rounds; round r starts wholly at
-   * slot r % slots.length; DatePlan.dates carries repeated consecutive dates. */
-  roundsPerDay?: 1 | 2;
-}
-
-/* ─── COMPETITION STRUCTURE (ADR 0008) ───
-   A league is not one round robin. A competition is an ordered pipeline of STAGES, each
-   with a format (how fixtures are made), entrants (where its teams come from) and a
-   schedule (when it plays). The closed sets below cover every structure in the
-   KZNCU/EMCU documents; they are closed on purpose, because a configuration language
-   general enough to need conditionals is the inner-platform effect.
-
-   The logic over these types lives in src/competition/. */
-
-/** How fixtures are made within one group. */
-export type FormatSpec =
-  | {
-      kind: 'round-robin';
-      /** 1 = single round, 2 = home and away, 3 = a season-and-a-half. */
-      legs: 1 | 2 | 3;
-      /** `mirrored` plays a whole leg then reverses it; `interleaved` alternates. */
-      legOrder?: 'mirrored' | 'interleaved';
-    }
-  | {
-      kind: 'knockout';
-      /** Preliminary rounds trimming the field to a power of two. Derived if absent. */
-      preliminaries?: number;
-      /**
-       * `seeded` = standard bracket from the entrant order (1 v n, 2 v n-1 …).
-       * `cross-pool` = pool winners/runners-up paired across pools (A1 v B2, B1 v A2).
-       * `within-pool` = each pool's qualifiers play off among themselves first (A1 v A2,
-       * B1 v B2), and the pool winners meet later. Unions decide this either way per
-       * season, so it is a structure default a season run can override at confirmation.
-       */
-      pairing: 'seeded' | 'cross-pool' | 'within-pool';
-      thirdPlace?: boolean;
-    }
-  | { kind: 'single-match' }
-  | { kind: 'manual' };
-
-/**
- * The rule a standings-dependent stage follows, recorded for prefill, display and audit.
- *
- * The platform has no results or ladder model, so these rules cannot be EXECUTED — the
- * stage's entrants are `manual` and an admin confirms them. Storing the rule keeps the
- * operator's intent legible ("Top Six 6th ↔ Bottom Six 1st, points carried") and means
- * that when results capture lands, each rule promotes to a real resolver with no change
- * to stored structures. See ADR 0008.
- */
-export interface DerivationNote {
-  rule: 'from-standings' | 'swap' | 'winners-of' | 'carry-forward';
-  /** The `StageSpec.id` this stage draws from. */
-  fromStage: string;
-  /** Human sentence shown to the admin confirming entrants. */
-  detail: string;
-  /**
-   * The KZNCU mid-season swap moves points BY POSITION, not with the team: the relegated
-   * side takes on the incoming side's points and vice versa. No researched platform does
-   * this, so it is an admin-entered handover value, never computed.
-   */
-  carryPoints?: boolean;
-  /**
-   * "Top q from each group of `fromStage`." Counted but still CONFIRMED: there is no
-   * standings model, so this only makes the preview exact and trims the prefill to the
-   * top q of each prior group — an admin still types the finishing order. Lives on the
-   * note because it describes how entrants derive from `fromStage`, which is what the
-   * note is for.
-   */
-  qualifiersPerGroup?: number;
-}
-
-/** How a stage's entrants divide into groups. */
-export type GroupPlan =
-  /** Explicit sizes — the only way to express 19 teams as 5+5+5+4. */
-  | { kind: 'sizes'; sizes: number[] }
-  /** Split evenly into `count` groups; a remainder lands in the earlier groups. */
-  | { kind: 'even'; count: number };
-
-/** Where a stage's teams come from. Three real resolvers — see DerivationNote for why. */
-export type EntrantSpec =
-  /** Every side registered for the league. Today's create-series behaviour. */
-  | { kind: 'all-registered' }
-  /** An admin picks. The normal path for a new client with no prior-season log. */
-  | { kind: 'manual'; groups?: GroupPlan; derivedFrom?: DerivationNote }
-  /** Distribute a seed order across groups. */
-  | { kind: 'seeded-split'; groups: GroupPlan; method: 'blocks' | 'snake' };
-
-/** Points and tie-break configuration, lifted off the create-series form onto the stage. */
-export interface LadderSpec {
-  winPoints: number;
-  bonusPoints: number;
-  lossPoints: number;
-  tiePoints: number;
-  abandonedPoints: number;
-  /** Tie-break sequence, most significant first. */
-  order: string[];
-}
-
-/**
- * When a stage plays. Names a POSITION into whichever calendar the competition binds,
- * not a calendar or block directly — a structure carries no calendar identity of its own,
- * so the same structure can be reused against different calendars. The Competition's
- * binding supplies the actual blocks at generation time.
- */
-export interface StageSchedule {
-  /** 0-based index into the bound calendar's `blocks` array. */
-  blockIndex: number;
-  cadence: Cadence;
-  slots?: TimeSlot[];
-  /** each planned day hosts roundsPerDay consecutive rounds; round r starts wholly at
-   * slot r % slots.length; DatePlan.dates carries repeated consecutive dates. */
-  roundsPerDay?: 1 | 2;
-  /** Generate now, surface to clubs from this date (junior leagues). */
-  activateFrom?: IsoDate;
-  /**
-   * `previous-stage` = play after the nearest earlier stage in the same block finishes,
-   * rather than from the block's start. Lets pools and their semis share one block
-   * without overlapping. Absent ⇒ the block start, which is how every stage dated before
-   * this field existed.
-   */
-  startAfter?: 'previous-stage';
-}
-
-/** What finishing where in this stage means — display and next-season carry. */
-export interface OutcomeSpec {
-  champion?: number[];
-  promoted?: number[];
-  relegated?: number[];
-}
-
-export interface StageSpec {
-  /** Stable within the structure — later stages reference it via DerivationNote. */
-  id: string;
-  name: string;
-  format: FormatSpec;
-  entrants: EntrantSpec;
-  schedule: StageSchedule;
-  /** Group display names, e.g. ["Top Six", "Bottom Six"]. Falls back to "Group A/B/…". */
-  groupLabels?: string[];
-  ladder?: LadderSpec;
-  outcome?: OutcomeSpec;
-}
-
-/**
- * A reusable competition blueprint with no teams in it. Versioned: editing mints a new
- * version, and a running season keeps a snapshot of the one it started with, so a
- * template edit can never reshape a season already in flight.
- */
-export interface CompetitionStructure {
-  id: string;
-  name: string;
-  version: number;
-  /** Provenance only — which starter template this was cloned from, if any. */
-  templateId?: string;
-  stages: StageSpec[];
-}
-
-/* ─── VENUES (ADR 0008, phase 2) ───
-   The master list of grounds fixtures are allocated to. Its own DynamoDB item per venue
-   rather than a TenantConfig array: a region has hundreds, and availability windows
-   change constantly, so they are operational data rather than setup data. */
-
-/** A window in which a ground can't be used — maintenance, another sport's season, exams. */
-export interface VenueUnavailable {
-  start: IsoDate;
-  end: IsoDate;
-  reason: string;
-}
-
-export interface Venue {
-  id: string;
-  name: string;
-  address?: string;
-  suburb?: string;
-  /** Hand-pinned; there is no geocoder. Absent ⇒ this venue can't be distance-ranked. */
-  lat?: number;
-  lon?: number;
-  /**
-   * Clubs that call this ground home. Plural on purpose — ground-sharing is routine in
-   * club cricket, and it is exactly why "home preference" can conflict with itself.
-   */
-  homeClubIds?: string[];
-  /** Matches playable here on one day. Grounds with two pitches host two. Default 1. */
-  surfaces?: number;
-  unavailable?: VenueUnavailable[];
-  /** Weekdays the ground is never available (0 = Sunday). */
-  unavailableWeekdays?: Weekday[];
-  note?: string;
-}
-
-/**
- * How a fixture's venue was decided. Ordered by how well it served the home team, so a
- * glance down a column tells an operator how much compromise the allocation involved.
- */
-export type VenueStatus = 'home' | 'alternative' | 'neutral' | 'unresolved';
-
-/**
- * One format stream inside a league. The structural gap in the pre-ADR-0008 model: a
- * league could only be ONE thing, but KZNCU Premier Men runs a T20 Pink Ball competition
- * and a 50 Over Red Ball competition in parallel — different structures, different
- * groupings, over the same twelve registered clubs.
- */
-export interface Competition {
-  id: string;
-  /** e.g. "50 Over (Red Ball)". */
-  label: string;
-  matchFormat?: { overs?: number; ballType?: string; label?: string };
-  structureId: string;
-  calendarId: string;
-  /**
-   * Sides entered in the LEAGUE but not in this competition — a club that plays the
-   * 50 Over but sits out the T20. Honoured by `leagueParticipants`, so a season run
-   * never offers them; there is no UI for it yet, so today it is set through the
-   * operator API or a JSON import.
-   */
-  excludeTeamIds?: string[];
-}
-
-/** A stage's progress within a running season. */
-export interface StageRun {
-  /** → `StageSpec.id` on the run's structure snapshot. */
-  specId: string;
-  status: 'awaiting-entrants' | 'ready' | 'generated' | 'complete';
-  groups: Array<{
-    id: string;
-    label: string;
-    entrants: string[];
-    /** The Series this group materialised into, once generated. */
-    seriesId?: string;
-  }>;
-  /**
-   * The mid-season swap's points handover, keyed by teamId. Admin-entered and never
-   * recomputed — flagged so a future ladder cannot double-count it (ADR 0008).
-   */
-  carriedPoints?: Record<string, number>;
-  /**
-   * This season's knockout pairing when it differs from the structure's default — the
-   * union decides within- or cross-group semis at qualifier confirmation. Absent ⇒ the
-   * structure's own `pairing`. Only meaningful on a knockout stage.
-   */
-  pairingOverride?: 'seeded' | 'cross-pool' | 'within-pool';
-  /**
-   * Set when a structure rebase changed this stage's schedule spec (block, cadence,
-   * slots, roundsPerDay, startAfter). The pairing-only divergence check can't see a
-   * schedule edit, so the server marks it explicitly and the console shows "Needs
-   * regenerating" until the stage is regenerated. Absent ⇒ not stale.
-   */
-  staleSchedule?: boolean;
-  /**
-   * Who confirmed this stage's entrants, when, what was proposed and whether they took
-   * it. Relegation and points carry ride on these decisions, so the trail is a
-   * governance requirement rather than a nicety.
-   */
-  audit?: Array<{
-    at: string;
-    by: string;
-    prefill: string[][];
-    accepted: boolean;
-    /** Absent ⇒ an entrant confirmation; `rebase` ⇒ the run adopted a newer structure. */
-    event?: 'rebase';
-    /** The pairing chosen at this confirmation, when one was (see `pairingOverride`). */
-    pairing?: string;
-  }>;
-}
-
-/**
- * One competition being played out for one season.
- *
- * Holds a SNAPSHOT of the structure and calendar it started with: editing a structure
- * mints a new version and must never reshape a season already in flight. Same defensive
- * pattern as `Series.participants`, which snapshots team identity so a later roster edit
- * can't orphan a released series.
- */
-export interface SeasonRun {
-  id: string;
-  leagueKey: string;
-  competitionId: string;
-  /** e.g. "2026/27". */
-  seasonLabel: string;
-  structureSnapshot: CompetitionStructure;
-  calendarSnapshot: SeasonCalendar;
-  stages: StageRun[];
-  createdAt?: string;
-  createdBy?: string;
-  version: number;
-  /**
-   * Only set when `competitionId` is the flat sentinel: there is no config competition
-   * to read format from, so the admin's series-type/overs choice is persisted here and
-   * the panel synthesizes a Competition from it (regenerate must preserve the choice).
-   */
-  flatFormat?: { seriesType: string; overs: number };
 }
 
 /** File formats a compliance doc can accept (mirror of packages/api types). */
@@ -573,6 +262,12 @@ export interface TenantConfig {
    * strips it. Absent ⇒ no league has a structure and everything runs the flat path.
    */
   structures?: CompetitionStructure[];
+  /**
+   * Tenant-configured defaults (ADR 0014) — read through `resolveCompetitionDefaults`
+   * (engine defaults.ts), never directly, so an absent field gets its fallback. GET /tenant
+   * carries matchFormats/matchDays/timeSlots only; GET /tenant/config carries all of it.
+   */
+  competitionDefaults?: CompetitionDefaults;
   /** Operator "setup complete" milestone (D6). Present ⇒ setup marked done. */
   setupCompletedAt?: string;
   setupCompletedBy?: string;
@@ -774,35 +469,6 @@ export interface DnsSheet {
   sharedApiTarget?: string;
 }
 
-/**
- * A named side a club fields in a league when it enters >1 team there
- * (`leagueTeams[key] >= 2`). `id` uses the reserved `tm_` prefix so the teamId
- * namespace never collides with a bare clubId. Single-team leagues have no roster
- * (the club is the team; `teamId === clubId`).
- */
-export interface ClubTeam {
-  id: string; // `tm_${shortId}`
-  name: string; // "Glenwood A", 1–80 chars
-  venue?: string; // optional home-ground override; absent ⇒ club ground
-  address?: string;
-  lat?: number;
-  lon?: number;
-}
-
-/** Reserved prefix every generated team id carries (clubIds never have it). */
-export const TEAM_ID_PREFIX = 'tm_';
-
-/** A club's home/secondary ground. */
-export interface ClubGround {
-  venue?: string;
-  address?: string;
-  suburb?: string;
-  lat?: number;
-  lon?: number;
-  secondaryVenue?: string;
-  secondaryAddress?: string;
-}
-
 /** A note appended to a club's admin communication log. */
 export interface ClubNote {
   id: string;
@@ -910,49 +576,6 @@ export interface ClubCommEvent {
     | 'veterans-request-accepted'
     | 'veterans-request-declined';
   summary?: string;
-}
-
-export interface Series {
-  id: string;
-  name: string;
-  startDate: string;
-  endDate?: string;
-  dateMode?: 'spread' | 'reference';
-  teams: string[];
-  fixtures: unknown[];
-  /**
-   * The season-calendar binding (ADR 0008), when this series was scheduled against one.
-   * Persisted so `regenerate` reproduces the schedule the admin confirmed — the same
-   * parity guarantee `dateMode` gives the legacy path. Absent ⇒ a legacy series
-   * scheduled from `startDate`/`endDate` alone.
-   */
-  schedule?: SeriesSchedule;
-  /**
-   * Delayed visibility: a released series stays hidden from clubs and player broadcasts
-   * until this date. Junior leagues generate their fixtures up front but only activate in
-   * the second half of the season. Absent ⇒ visible as soon as it is released.
-   */
-  activateFrom?: IsoDate;
-  /**
-   * Back-pointers to the season run that produced this series (ADR 0008). One
-   * stage-group materialises into one Series, so these three identify which. Absent ⇒ a
-   * standalone series created through the flat create-series flow — the default, and
-   * unchanged. The club portal groups by `seasonRunId` so a split league reads as one
-   * season rather than three unrelated series.
-   */
-  seasonRunId?: string;
-  stageSpecId?: string;
-  groupId?: string;
-  approved?: boolean;
-  approvedAt?: string | null;
-  released: boolean;
-  releasedAt: string | null;
-  /** Fields withheld from clubs on a released series (ADR 0011). Server-owned: set at release, cleared by reveal/recall. Absent ⇒ nothing withheld. */
-  withheld?: { venue?: true; time?: true };
-  /** When each withheld field was revealed to clubs. */
-  revealedAt?: { venue?: string; time?: string };
-  version: number;
-  [key: string]: unknown;
 }
 
 export type WithheldField = 'venue' | 'time';

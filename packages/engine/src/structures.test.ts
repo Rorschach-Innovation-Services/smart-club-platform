@@ -32,7 +32,7 @@ import {
 } from './formats';
 import { weekdayOf } from './calendar';
 import { groupSizes, labelFor, resolveEntrants } from './entrants';
-import type { CompetitionStructure, EntrantSpec, SeasonCalendar, StageSpec } from '../types';
+import type { CompetitionStructure, EntrantSpec, SeasonCalendar, StageSpec } from './types';
 
 /** The union's real 2026/27 calendar. */
 const CAL: SeasonCalendar = {

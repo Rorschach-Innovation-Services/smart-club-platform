@@ -36,11 +36,11 @@
  * ground is worse than an admitted gap.
  */
 
-import { haversineKm } from '../data';
+import { haversineKm } from './geo';
 import { weekdayOf } from './calendar';
 import { isSlotRef } from './formats';
 import type { GeneratedFixture } from './fixtures';
-import type { IsoDate, Venue, VenueStatus, Weekday } from '../types';
+import type { IsoDate, Venue, VenueStatus, Weekday } from './types';
 
 /**
  * Venue-reason prefixes the Plan-B import writes (packages/api/src/import-planb-fixtures.ts)

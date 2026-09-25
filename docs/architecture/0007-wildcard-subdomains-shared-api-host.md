@@ -44,7 +44,7 @@ truthful Origin, so this is invisible to the SPA; it matters only for curl/e2e/n
 
 ### Why Origin-derived tenant selection is safe
 
-`resolveTenant()` only *selects* which tenant a request targets; it is not the isolation
+`resolveTenant()` only _selects_ which tenant a request targets; it is not the isolation
 boundary. Enumerated in code:
 
 - `GET /tenant` is the only **unauthenticated** consumer and returns only public per-tenant

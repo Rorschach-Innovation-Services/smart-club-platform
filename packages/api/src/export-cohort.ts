@@ -14,8 +14,8 @@
  * catalogue and the derive/score helpers (src/data.ts, src/cqiScore.ts) are the single
  * source of truth for scoring — reimplementing them here would drift. scoreCQI/cqiBand
  * were extracted out of atoms.tsx (React) into src/cqiScore.ts precisely so a Node CLI can
- * import them. Like seed-cohort.ts, this file is EXCLUDED from the strict api tsconfig and
- * type-checked under tsconfig.seed.json instead (that frontend tree is `strict: false`).
+ * import them. This file is EXCLUDED from the strict api tsconfig and type-checked under
+ * tsconfig.seed.json instead (that frontend tree is `strict: false`).
  */
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -24,7 +24,7 @@ import * as repo from './repo.js';
 import type { Club, TenantConfig } from './types.js';
 
 // Scoring + catalogue from the frontend tree (pure TS — no React, no DOM). Same import
-// mechanism seed-cohort.ts uses for src/competition/*.
+// mechanism seed-cohort.ts uses for packages/engine/src/*.
 import { CQI_STRUCTURE, effectiveAnswers } from '../../../src/data.js';
 import { scoreCQI, cqiBand } from '../../../src/cqiScore.js';
 

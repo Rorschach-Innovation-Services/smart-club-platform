@@ -26,10 +26,21 @@
  */
 import { writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { groundKey, registryResolver, GroundLedger, JUNK_GROUND } from './venue-clash.js';
+import {
+  groundKey,
+  registryResolver,
+  GroundLedger,
+  JUNK_GROUND,
+  DEFAULT_VENUE_ALIASES,
+  venueAliasesFor,
+} from './venue-clash.js';
 import type { Series, Venue } from './types.js';
 
 const TENANT = 'dolphins';
+
+/** Ground-name aliases: the code default until main() loads the tenant's config, then the
+ * default merged with the tenant's own `competitionDefaults.venueAliases` (ADR 0014). */
+let ALIASES: Record<string, string> = DEFAULT_VENUE_ALIASES;
 
 /**
  * Grounds the union has ruled unusable — a mirror of BAD_CONDITION_GROUNDS in
@@ -55,7 +66,7 @@ const BAD_CONDITION_GROUNDS = new Set(
     'Verulam Recreation Ground',
     'Kloof CC',
     '129 dukuza street Lindelani/ Tennis court',
-  ].map((n) => groundKey(n)),
+  ].map((n) => groundKey(n, ALIASES)),
 );
 
 /** A stored fixture — only the venue/scheduling fields matter; everything else is preserved. */
@@ -172,12 +183,12 @@ export function chooseFixtureToMove(a: ClashParticipant, b: ClashParticipant): M
 /** Registry index keyed by groundKey — matches registryResolver's keying (import-planb buildVenueIndex). */
 function buildVenueIndex(venues: Venue[]): Map<string, Venue> {
   const byNorm = new Map<string, Venue>();
-  for (const v of venues) byNorm.set(groundKey(v.name), v);
+  for (const v of venues) byNorm.set(groundKey(v.name, ALIASES), v);
   return byNorm;
 }
 
 function resolveVenue(name: string, byNorm: Map<string, Venue>): Venue | undefined {
-  return byNorm.get(groundKey(name));
+  return byNorm.get(groundKey(name, ALIASES));
 }
 
 /**
@@ -219,6 +230,7 @@ function setVenue(
 async function main() {
   const confirm = process.argv.includes('--confirm');
   const repo = await import('./repo.js');
+  ALIASES = venueAliasesFor(await repo.getTenantConfig(TENANT));
 
   const [venues, allSeries, clubs] = await Promise.all([
     repo.listVenues(TENANT),
@@ -265,7 +277,7 @@ async function main() {
     const homeClubId = homeClubIdOf(s, f);
     const homeGround = homeClubId ? clubsById.get(homeClubId)?.ground?.venue?.trim() : undefined;
     if (!homeGround || JUNK_GROUND.test(homeGround)) return false;
-    return groundKey(ground) === groundKey(homeGround);
+    return groundKey(ground, ALIASES) === groundKey(homeGround, ALIASES);
   };
 
   interface Booking {
@@ -315,7 +327,7 @@ async function main() {
 
   /** Count of distinct clash signatures (identity-keyed, naming-independent) — Step-5 style. */
   const countClashes = (bookings: Booking[]): number => {
-    const ledger = new GroundLedger(registryResolver(venues));
+    const ledger = new GroundLedger(registryResolver(venues, ALIASES));
     const sigs = new Set<string>();
     for (const b of sortBookings(bookings)) {
       const hit = ledger.check(b.ground, b.date, b.time);
@@ -336,7 +348,7 @@ async function main() {
   /** The first clash in (date, gid) order: the triggering booking `b` and the earlier `a`. */
   const firstClash = (bookings: Booking[]): { a: Booking; b: Booking } | undefined => {
     const sorted = sortBookings(bookings);
-    const ledger = new GroundLedger(registryResolver(venues));
+    const ledger = new GroundLedger(registryResolver(venues, ALIASES));
     for (const b of sorted) {
       const hit = ledger.check(b.ground, b.date, b.time);
       if (hit) {
@@ -357,7 +369,7 @@ async function main() {
 
   /** A ledger of every booking EXCEPT one fixture — used to test candidate grounds for it. */
   const ledgerExcluding = (bookings: Booking[], excludeGid: string): GroundLedger => {
-    const ledger = new GroundLedger(registryResolver(venues));
+    const ledger = new GroundLedger(registryResolver(venues, ALIASES));
     for (const b of bookings) {
       if (b.gid === excludeGid) continue;
       ledger.book(b.ground, b.date, b.time, {
@@ -392,12 +404,12 @@ async function main() {
       if (!g) return;
       const t = g.trim();
       if (!t || JUNK_GROUND.test(t)) return;
-      if (groundKey(t) === groundKey(contested)) return;
-      if (seen.has(groundKey(t))) return;
-      if (BAD_CONDITION_GROUNDS.has(groundKey(t))) return;
-      const row = byNorm.get(groundKey(t));
+      if (groundKey(t, ALIASES) === groundKey(contested, ALIASES)) return;
+      if (seen.has(groundKey(t, ALIASES))) return;
+      if (BAD_CONDITION_GROUNDS.has(groundKey(t, ALIASES))) return;
+      const row = byNorm.get(groundKey(t, ALIASES));
       if (row?.note && /^Bad condition/i.test(row.note)) return;
-      seen.add(groundKey(t));
+      seen.add(groundKey(t, ALIASES));
       out.push({ ground: t, label });
     };
     const addPermitted = (clubId: string | undefined, label: string) => {

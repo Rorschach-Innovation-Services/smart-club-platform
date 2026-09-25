@@ -67,9 +67,9 @@ import {
   defaultTeamName,
   teamLetter,
   isVeteransLeague,
-} from './leagues';
-import { isActivated, todayIso } from './competition/calendar';
-import { fixtureVenueCoords } from './competition/venues';
+} from '../packages/engine/src/leagues';
+import { isActivated, todayIso } from '../packages/engine/src/calendar';
+import { fixtureVenueCoords } from '../packages/engine/src/venues';
 import { shortAddress, suburbOf, SA_BOUNDS, isInSouthAfrica } from './geocode';
 import {
   formatDay,
@@ -113,6 +113,7 @@ import { DocPreviewModal } from './DocPreviewModal';
 import { RegLinkModal } from './RegLinkModal';
 import { PlayerDetailModal } from './PlayerDetailModal';
 import { ClubNameModal } from './ClubNameModal';
+import { SeriesOriginPill } from './season-run';
 
 /* ─── Compliance doc upload — presigned S3 PUT, then mark uploaded ─── */
 interface DocUploadButtonProps {
@@ -4491,7 +4492,22 @@ export function CQIView({
 }
 
 /* ─── Phase 2 · Club Fixtures (only shown once admin has released) ─── */
-export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures }) {
+export function ClubFixturesView({
+  club,
+  allSeries,
+  clubs,
+  toast,
+  onSendFixtures,
+  // The tenant's travel-cost defaults (competitionDefaults.travel); a series' own win.
+  travel = { costPerKm: DEFAULT_COST_PER_KM, carsPerAwayTrip: DEFAULT_CARS },
+}: {
+  club;
+  allSeries;
+  clubs;
+  toast;
+  onSendFixtures;
+  travel?: { costPerKm: number; carsPerAwayTrip: number };
+}) {
   const copy = useCopy();
   const clubBy = (id) => clubs.find((c) => c.id === id);
 
@@ -4713,8 +4729,8 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
         const c = fixtureCost(
           homeSide,
           awaySide,
-          s.costPerKm || DEFAULT_COST_PER_KM,
-          s.carsPerAwayTrip || DEFAULT_CARS,
+          s.costPerKm || travel.costPerKm,
+          s.carsPerAwayTrip || travel.carsPerAwayTrip,
           fixtureVenue(f),
         );
         const mineLeg = isHome ? c.home : c.away;
@@ -4856,8 +4872,8 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
               'shown once venues are confirmed'
             ) : (
               <>
-                est · {myReleased[0]?.carsPerAwayTrip || DEFAULT_CARS} cars × R{' '}
-                {myReleased[0]?.costPerKm || DEFAULT_COST_PER_KM}
+                est · {myReleased[0]?.carsPerAwayTrip || travel.carsPerAwayTrip} cars × R{' '}
+                {myReleased[0]?.costPerKm || travel.costPerKm}
                 /km
               </>
             )}
@@ -4977,6 +4993,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                     </div>
                   </div>
                   <div className="club-fix-series-tags">
+                    <SeriesOriginPill series={s} />
                     {(s.tags || []).map((t, i) => (
                       <Pill key={i} tone="muted">
                         {t}
@@ -5025,8 +5042,8 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                           const c = fixtureCost(
                             costHome,
                             costAway,
-                            s.costPerKm || DEFAULT_COST_PER_KM,
-                            s.carsPerAwayTrip || DEFAULT_CARS,
+                            s.costPerKm || travel.costPerKm,
+                            s.carsPerAwayTrip || travel.carsPerAwayTrip,
                             fixtureVenue(f),
                           );
                           // `myLeg`, not `mine` — the enclosing scope already binds
@@ -5222,9 +5239,9 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
           figures it explains are themselves standing down until grounds are public. */}
       {!anyVenueWithheld && (
         <div className="club-fix-foot">
-          Travel cost is estimated at R {myReleased[0]?.costPerKm || DEFAULT_COST_PER_KM}/km ×{' '}
-          {myReleased[0]?.carsPerAwayTrip || 3} cars per away trip — published with the fixture
-          release. Adjustments to schedule require a {copy.office} sign-off.
+          Travel cost is estimated at R {myReleased[0]?.costPerKm || travel.costPerKm}/km ×{' '}
+          {myReleased[0]?.carsPerAwayTrip || travel.carsPerAwayTrip} cars per away trip — published
+          with the fixture release. Adjustments to schedule require a {copy.office} sign-off.
         </div>
       )}
 

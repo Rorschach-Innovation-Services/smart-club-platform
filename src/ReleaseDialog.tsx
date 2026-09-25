@@ -1,6 +1,6 @@
 import { useState, useId } from 'react';
 import { createPortal } from 'react-dom';
-import { Icon, Btn, useEscapeClose } from './atoms';
+import { Icon, Btn, FieldGuide, useEscapeClose } from './atoms';
 import { SERIES_CONFLICT_MESSAGE, SERIES_CONFLICT_FRIENDLY } from './api';
 import type { WithheldField } from './types';
 
@@ -74,6 +74,15 @@ export function ReleaseDialog({
     }
   }
 
+  // What clubs will actually see, read straight off the ticks — the withhold choice in one
+  // line, so nobody has to translate two checkboxes into a club's view.
+  const visible = [
+    'dates and opponents',
+    !withheld.venue && 'venues',
+    !withheld.time && 'start times',
+  ].filter(Boolean) as string[];
+  const clubsWillSee = visible.join(', ');
+
   const toggles: Array<{ field: WithheldField; label: string; hint: string }> = [
     {
       field: 'venue',
@@ -131,6 +140,10 @@ export function ReleaseDialog({
               </button>
             ))}
           </div>
+          <p className="release-preview" aria-live="polite">
+            <span className="release-preview-k">Clubs will see:</span> {clubsWillSee}
+          </p>
+          <FieldGuide id="withhold" />
           {error && (
             <div
               className="field-error"
@@ -141,7 +154,7 @@ export function ReleaseDialog({
             </div>
           )}
           <div className="fix-confirm-actions" style={{ marginTop: 22 }}>
-            <Btn tone="outline" onClick={close}>
+            <Btn tone="ghost" onClick={close}>
               Cancel
             </Btn>
             <Btn tone="teal" icon={Icon.Arrow} onClick={confirm} disabled={busy}>

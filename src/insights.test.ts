@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { OVERARCHING_DISTRICT } from './leagues';
+import { OVERARCHING_DISTRICT } from '../packages/engine/src/leagues';
 import {
   leagueBreakdown,
   leaguesWithFixturesButNoClub,

@@ -328,7 +328,7 @@ describe('TenantEditPage card swap', () => {
     const card = screen.getByText('Client onboarding').closest('.card') as HTMLElement;
     expect(card).toHaveTextContent(/\d of \d+ steps done/);
     expect(within(card).getByRole('button', { name: 'Documents' })).toBeInTheDocument();
-    expect(within(card).getByRole('button', { name: 'Structure' })).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Team entries import' })).toBeInTheDocument();
     expect(within(card).getByRole('button', { name: 'Rosters' })).toBeInTheDocument();
     expect(within(card).getByRole('button', { name: 'Reps' })).toBeInTheDocument();
     expect(within(card).getByRole('button', { name: 'Open checklist' })).toBeInTheDocument();

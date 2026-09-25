@@ -14,21 +14,9 @@
  * displayable state that the console shows before anyone generates anything.
  */
 
-import { addDays, describeCadence, findBlock, planRoundDates, type DatePlan } from './calendar';
-import {
-  describeEntrants,
-  groupSizes,
-  resolveEntrants,
-  type ResolveContext,
-  type ResolvedGroup,
-} from './entrants';
-import {
-  describeFormat,
-  isPoolKnockout,
-  poolPairings,
-  roundCountForFormat,
-  roundsForFormat,
-} from './formats';
+import { addDays, findBlock, planRoundDates, type DatePlan } from './calendar';
+import { groupSizes, resolveEntrants, type ResolveContext, type ResolvedGroup } from './entrants';
+import { isPoolKnockout, poolPairings, roundCountForFormat, roundsForFormat } from './formats';
 import { fixturesFromDates, type GeneratedFixture } from './fixtures';
 import type {
   CompetitionStructure,
@@ -37,7 +25,7 @@ import type {
   SeasonCalendar,
   SeasonRun,
   StageSpec,
-} from '../types';
+} from './types';
 
 /** One group of a materialised stage: its teams, its dates and its fixtures. */
 export interface MaterialisedGroup {
@@ -178,8 +166,8 @@ export function materialiseStage(args: MaterialiseArgs): StageMaterialisation {
   // a within-group draw also refuses shapes that line up perfectly but would need a bye.
   const withinPool = stage.format.kind === 'knockout' && stage.format.pairing === 'within-pool';
   const fallbackNotice = withinPool
-    ? 'Paired as a seeded bracket, not within-group — the qualifying pools don’t line up with this stage’s entrants, or can’t be drawn without a bye (it needs 2, 4, 8… pools, each sending the same 2, 4, 8… sides). Confirm the pool stage’s finishing positions.'
-    : 'Paired as a seeded bracket, not cross-pool — the qualifying pools don’t line up with this stage’s entrants, or qualify unevenly. Confirm the pool stage’s finishing positions.';
+    ? 'Paired as a seeded bracket, not within-group — the qualifying groups don’t line up with this stage’s entrants, or can’t be drawn without a bye (it needs 2, 4, 8… groups, each sending the same 2, 4, 8… sides). Confirm the group stage’s finishing positions.'
+    : 'Paired as a seeded bracket, not cross-group — the qualifying groups don’t line up with this stage’s entrants, or qualify unevenly. Confirm the group stage’s finishing positions.';
   const crossPoolFallback =
     isPoolKnockout(stage.format) &&
     groups.length > 0 &&
@@ -404,22 +392,6 @@ export function previewFitAll(
       ...(notBefore ? { notBefore } : {}),
     };
   });
-}
-
-/**
- * A stage as one plain-English sentence — the primary artefact of the operator console's
- * collapsed stage row. An operator should be able to read a whole structure without
- * expanding anything, so this has to carry the real meaning, not a type name.
- *
- * "2 groups of 6 · plays every team twice, home and away · weekly, Block 1"
- */
-export function describeStage(stage: StageSpec, calendar?: SeasonCalendar): string {
-  const block = calendar ? findBlock(calendar, stage.schedule.blockIndex) : undefined;
-  const where = block
-    ? `${describeCadence(stage.schedule.cadence)}, ${block.label}`
-    : describeCadence(stage.schedule.cadence);
-  const doubleHeader = stage.schedule.roundsPerDay === 2 ? ', double-headers' : '';
-  return `${describeEntrants(stage.entrants)} · ${describeFormat(stage.format)} · ${where}${doubleHeader}`;
 }
 
 /**

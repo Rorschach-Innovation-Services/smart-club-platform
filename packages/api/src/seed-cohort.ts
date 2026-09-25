@@ -15,10 +15,11 @@
  * calendars, structures or season runs, and there is no admin "create club" endpoint at
  * all — so there was no way to stand up a cohort that exercises the competition feature.
  *
- * WHY IT WRITES THROUGH `repo` RATHER THAN HTTP: fixture generation runs in the browser
- * (ADR 0004) — the API has no generate endpoint, it only stores finished objects. So the
- * CLI imports the SAME generation engine the SPA uses (src/competition/*) and persists
- * the result directly. The cost of bypassing the routes is bypassing their validation,
+ * WHY IT WRITES THROUGH `repo` RATHER THAN HTTP: the server generate route
+ * (`POST /season-runs/:id/stages/:specId/generate`, ADR 0014) writes through the release
+ * gates, and pre-released seeds would 409 on home-ground collisions. So the CLI imports
+ * the SAME engine that route uses (packages/engine/src/*) and persists the result
+ * directly. The cost of bypassing the routes is bypassing their validation,
  * which is why `config-validation.ts` was extracted: we run the operator route's exact
  * assertions before writing.
  *
@@ -55,13 +56,13 @@ import type {
   Venue,
 } from './types.js';
 
-// The generation engine lives in the frontend tree (pure TS — dayjs and types only, no
-// React, no DOM). Type-checked by tsconfig.seed.json, which is scoped to this file
-// precisely because that tree is `strict: false` while the api project is strict.
-import { materialiseStage } from '../../../src/competition/structure.js';
-import { findBlock } from '../../../src/competition/calendar.js';
-import { STRUCTURE_TEMPLATES } from '../../../src/competition/templates.js';
-import { leagueParticipants } from '../../../src/leagues.js';
+// The generation engine (packages/engine — pure TS, dayjs and types only, no React, no
+// DOM), the same one the SPA runs.
+import { materialiseStage } from '../../engine/src/structure.js';
+import { findBlock } from '../../engine/src/calendar.js';
+import { STRUCTURE_TEMPLATES, instantiateTemplate } from '../../engine/src/templates.js';
+import { leagueParticipants } from '../../engine/src/leagues.js';
+import { buildStageSeries } from '../../engine/src/series-builder.js';
 
 /* ─────────────────────────── Cohort fixture data ─────────────────────────── */
 
@@ -332,17 +333,9 @@ function buildStructures(season: string, calendar: SeasonCalendar): CompetitionS
   return wanted.map((templateId) => {
     const template = STRUCTURE_TEMPLATES.find((t) => t.id === templateId);
     if (!template) throw new Error(`unknown structure template "${templateId}"`);
-    const second = calendar.blocks.length > 1 ? 1 : 0;
-    return {
-      id: structureId(season, templateId),
-      name: template.name,
-      version: 1,
-      templateId: template.id,
-      stages: template.stages.map((stage, i) => ({
-        ...stage,
-        schedule: { ...stage.schedule, blockIndex: i === 0 ? 0 : second },
-      })),
-    };
+    // The engine's default block placement (and stage chaining), with a deterministic id
+    // so a re-seed converges on the same structure row.
+    return { ...instantiateTemplate(template, calendar), id: structureId(season, templateId) };
   });
 }
 
@@ -634,9 +627,10 @@ function buildVenues(clubs: Club[]): Venue[] {
 /**
  * Materialise the flat round-robin structure and persist one Series per stage-group.
  *
- * The series id is `s-${runId}-${stageId}-${groupId}` — byte-identical to what
- * `generateStageSeriesInner` (src/main.tsx) produces, which is what lets a re-seed
- * overwrite the same rows the admin UI would have written rather than stacking duplicates.
+ * The series is built by the engine's `buildStageSeries` — the same builder the server
+ * generate route (`POST /season-runs/:id/stages/:specId/generate`) uses — so its id
+ * `s-${runId}-${stageId}-${groupId}` is byte-identical to the admin UI's, which is what lets a re-seed overwrite the same rows
+ * rather than stacking duplicates.
  */
 async function seedSeason(
   tenant: string,
@@ -671,7 +665,6 @@ async function seedSeason(
 
     const groups: StageRun['groups'] = [];
     for (const group of result.groups) {
-      const seriesId = `s-${runId}-${stage.id}-${group.id}`;
       const startDate = group.plan.dates[0];
       // A stage whose rounds outrun its block does NOT fail — `fixturesFromDates` simply
       // emits fewer rounds, producing a round robin in which some sides never meet. That
@@ -698,53 +691,40 @@ async function seedSeason(
             `${group.plan.summary}. Refusing to write a blank startDate.`,
         );
 
-      const byTeamId = new Map(participants.map((p) => [p.teamId, p]));
       const series: Series = {
-        id: seriesId,
-        name: `${league.label} · ${stage.name}${result.groups.length > 1 ? ` · ${group.label}` : ''}`,
-        startDate,
-        teams: group.entrants,
-        // Snapshot team identity so a later roster edit can't orphan these fixtures.
-        participants: group.entrants.flatMap((teamId) => {
-          const p = byTeamId.get(teamId);
-          if (!p) return [];
-          return [
-            {
-              teamId: p.teamId,
-              clubId: p.clubId,
-              name: p.name,
-              ...(p.venue ? { venue: p.venue } : {}),
-              ...(Number.isFinite(p.lat) ? { lat: p.lat as number } : {}),
-              ...(Number.isFinite(p.lon) ? { lon: p.lon as number } : {}),
-            },
-          ];
-        }),
-        fixtures: group.fixtures,
-        schedule: {
-          calendarId: calendar.id,
+        ...buildStageSeries({
+          run: { id: runId, leagueKey: league.key, calendarSnapshot: calendar },
+          stage,
           // Series.schedule is still id-based (ADR 0008 parity guarantee) — resolve the
           // stage's POSITION against the calendar this run is actually generating from.
           blockId: findBlock(calendar, stage.schedule.blockIndex)?.id ?? '',
-          cadence: stage.schedule.cadence,
-          ...(stage.schedule.slots?.length ? { slots: stage.schedule.slots } : {}),
-        },
-        seasonRunId: runId,
-        stageSpecId: stage.id,
-        groupId: group.id,
-        maxOvers: competition.matchFormat?.overs ?? 50,
-        seriesType: competition.label,
-        kind: 'series',
+          group: {
+            groupId: group.id,
+            groupLabel: group.label,
+            entrants: group.entrants,
+            fixtures: group.fixtures,
+            startDate,
+            league,
+            competition,
+          },
+          multi: result.groups.length > 1,
+          leagueTeams: participants,
+        }),
         // Seeded fixtures are meant to be VISIBLE — the whole point is logging in as a rep
         // and seeing them. Approved first: the API refuses `released` without it.
         approved: true,
         approvedAt: new Date().toISOString(),
         released: true,
         releasedAt: new Date().toISOString(),
-        version: 1,
       };
       await repo.putSeries(tenant, series);
       seriesOut.push(series);
-      groups.push({ id: group.id, label: group.label, entrants: group.entrants, seriesId });
+      groups.push({
+        id: group.id,
+        label: group.label,
+        entrants: group.entrants,
+        seriesId: series.id,
+      });
     }
     stages.push({ specId: stage.id, status: 'generated', groups });
   }

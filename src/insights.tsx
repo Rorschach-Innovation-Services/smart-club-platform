@@ -6,7 +6,7 @@
  * operator per-client overview (fed by GET /platform/tenants/:slug/overview). Both
  * satisfy the minimal InsightsClub shape, so the panels are guaranteed identical.
  *
- * The derivation helpers are pure and exported for tests, mirroring src/leagues.ts.
+ * The derivation helpers are pure and exported for tests, mirroring packages/engine/src/leagues.ts.
  */
 
 import { Fragment, useState as useStateA } from 'react';
@@ -20,7 +20,7 @@ import {
   leagueOptionsForDistrict,
   clubTeamsForLeague,
   findByKey,
-} from './leagues';
+} from '../packages/engine/src/leagues';
 import type {
   InsightsClub,
   League,

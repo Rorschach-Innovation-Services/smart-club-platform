@@ -1,7 +1,8 @@
 /**
  * Fixture generation — pairings and the two ways of dating them.
  *
- * Split deliberately in two halves that used to be one loop in `generateRoundRobin`:
+ * Split deliberately in two halves that used to be one loop in the retired
+ * `generateRoundRobin`:
  *
  *   WHO plays WHOM   → `roundRobinPairings` (circle method, pure, no dates)
  *   WHEN they play   → a list of round dates, from either the legacy start-date stepping
@@ -10,14 +11,14 @@
  * Separating them is what lets one league schedule weekly inside Block 1 while another
  * plays Saturdays-only, without either knowing anything about round-robin rotation.
  *
- * `generateRoundRobin` in src/data.ts is now a thin wrapper over these, and must stay
- * behaviour-identical — its create/regenerate parity test in src/data.test.ts is the gate.
+ * This engine is the one implementation; the create/regenerate parity test in
+ * fixtures.test.ts is the gate.
  */
 
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import { slotForIndex } from './calendar';
-import type { IsoDate, IsoTime, TimeSlot } from '../types';
+import type { IsoDate, IsoTime, TimeSlot } from './types';
 
 dayjs.extend(utc);
 
@@ -161,7 +162,7 @@ export function fixturesFromDates(
 
 /**
  * Round-robin fixtures dated from a season calendar plan — the calendar-aware sibling of
- * `generateRoundRobin`. Pass `plan.dates` from `planRoundDates`.
+ * `legacyRoundDates`. Pass `plan.dates` from `planRoundDates`.
  */
 export function fixturesFromPlan(
   teamIds: (string | null)[],
