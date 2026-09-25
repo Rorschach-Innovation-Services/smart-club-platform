@@ -18,6 +18,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { currentSeasonLabel } from './data';
+import { ApiError, quickStartSeason } from './api';
 import { T20_SLOTS } from '../packages/engine/src/calendar';
 import {
   buildFlatSeasonRun,
@@ -35,6 +36,13 @@ import type {
   StageSpec,
   TenantConfig,
 } from './types';
+
+// Quick start posts straight to the server; the route is mocked here, the rest of the
+// api module stays real (ApiError in particular).
+vi.mock('./api', async () => {
+  const actual = await vi.importActual<typeof import('./api')>('./api');
+  return { ...actual, quickStartSeason: vi.fn() };
+});
 
 const calendar: SeasonCalendar = {
   id: 'cal',
@@ -206,6 +214,10 @@ const openConfirm = async (user: ReturnType<typeof userEvent.setup>, stageName: 
 /** Every "Group" picker in the confirm table, one per side, in participant order. */
 const groupPickers = () => within(dialog()).getAllByRole('combobox');
 const confirmBtn = () => within(dialog()).getByRole('button', { name: /confirm entrants/i });
+
+/** The stage timeline's current step (Awaiting entrants / Ready / Generated / Released). */
+const currentStep = (scope?: HTMLElement) =>
+  (scope ? within(scope) : screen).getByRole('listitem', { current: 'step' });
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -617,7 +629,7 @@ describe('order-sensitive staleness — a pure reorder on a knockout invalidates
   it('reordering a knockout’s confirmed seed line marks it stale, and Regenerate reappears', async () => {
     const { user, onPatchRun, rerenderRuns } = setup(KNOCKOUT_SEEDED, [generatedKnockoutRun()]);
     // Starting state: generated, nothing to regenerate.
-    expect(screen.getByText('Generated')).toBeVisible();
+    expect(currentStep()).toHaveTextContent(/^Generated/);
     expect(screen.queryByText(/needs regenerating/i)).toBeNull();
     expect(screen.queryByRole('button', { name: /regenerate \d+ fixtures/i })).toBeNull();
 
@@ -855,7 +867,7 @@ describe('semi-final pairing — the union decides within- or cross-group per se
       /Club 1 v Club 8/,
     );
 
-    await user.click(within(dialog()).getByRole('radio', { name: /^within-group$/i }));
+    await user.click(within(dialog()).getByRole('radio', { name: /^within-group/i }));
     // Now each pool's qualifiers meet each other first: A1 v A2, B1 v B2.
     const preview = within(dialog()).getByText(/first round:/i).parentElement!;
     expect(preview).toHaveTextContent(/Club 1 v Club 2/);
@@ -909,12 +921,12 @@ describe('semi-final pairing — the union decides within- or cross-group per se
       })),
     };
     rerenderRuns([run(POOLS_TOP_TWO, { stages: [poolsConfirmed, generated] })], series);
-    expect(within(cardFor(/^Semi-finals · /)).getByText('Generated')).toBeVisible();
+    expect(currentStep(cardFor(/^Semi-finals · /))).toHaveTextContent(/^Generated/);
     expect(within(cardFor(/^Semi-finals · /)).queryByText(/needs regenerating/i)).toBeNull();
 
     // Same qualifiers, different pairing — no entrant changed, so only the bracket moved.
     await openConfirm(user, /^Semi-finals · /);
-    await user.click(within(dialog()).getByRole('radio', { name: /^within-group$/i }));
+    await user.click(within(dialog()).getByRole('radio', { name: /^within-group/i }));
     await user.click(confirmBtn());
     const patch = onPatchRun.mock.calls[0][1];
     expect(patch.stages.find((s: { specId: string }) => s.specId === 'semis').status).toBe(
@@ -962,11 +974,141 @@ describe('semi-final pairing — the union decides within- or cross-group per se
     ]);
     await openConfirm(user, /^Semi-finals · /);
 
-    expect(within(dialog()).getByRole('radio', { name: /^within-group$/i })).toBeDisabled();
-    expect(within(dialog()).getByRole('radio', { name: /^cross-group$/i })).toBeEnabled();
+    expect(within(dialog()).getByRole('radio', { name: /^within-group/i })).toBeDisabled();
+    expect(within(dialog()).getByRole('radio', { name: /^cross-group/i })).toBeEnabled();
     expect(within(dialog()).getByText(/within-group is unavailable/i)).toBeVisible();
   });
 });
+
+describe('the confirm form explains why it asks, and draws the pairing choice', () => {
+  it('quotes the rule, says why a human types the order, and notes the trimmed prefill', async () => {
+    const { user } = setup(POOLS_TOP_TWO, [run(POOLS_TOP_TWO, { stages: [poolsConfirmed] })]);
+    await openConfirm(user, /^Semi-finals · /);
+
+    expect(within(dialog()).getByText(/^The rule:/).parentElement).toHaveTextContent(
+      /Top two from each pool/,
+    );
+    expect(within(dialog()).getByText(/^Why you.re asked:/).parentElement).toHaveTextContent(
+      /does not record results, so the finishing order is typed by you and recorded against your name/,
+    );
+    expect(
+      within(dialog()).getByText(
+        /Prefilled with the top 2 of each group; sides that did not qualify are not re-added\./,
+      ),
+    ).toBeVisible();
+  });
+
+  it('offers the semi-final pairing as cards, each with its first round drawn in miniature', async () => {
+    const { user } = setup(POOLS_TOP_TWO, [run(POOLS_TOP_TWO, { stages: [poolsConfirmed] })]);
+    await openConfirm(user, /^Semi-finals · /);
+
+    const group = within(dialog()).getByRole('radiogroup', { name: /semi-final pairing/i });
+    expect(within(group).getAllByRole('radio')).toHaveLength(4);
+    expect(
+      within(group)
+        .getByRole('radio', { name: /^within-group/i })
+        .closest('label'),
+    ).toHaveTextContent('A1 v A2 · B1 v B2');
+    expect(
+      within(group)
+        .getByRole('radio', { name: /^cross-group/i })
+        .closest('label'),
+    ).toHaveTextContent('A1 v B2 · B1 v A2');
+    expect(
+      within(dialog()).getByText(/Whether the semi-finals are within each group or across groups/),
+    ).toBeVisible();
+  });
+
+  it('explains the Position column once, above the table, not per row', async () => {
+    const { user } = setup(POOLS_TOP_TWO, [run(POOLS_TOP_TWO, { stages: [poolsConfirmed] })]);
+    await openConfirm(user, /^Pools · /);
+
+    expect(within(dialog()).getAllByText(/Where each side finished in its group/)).toHaveLength(1);
+    expect(within(dialog()).getAllByText(/^Why you.re asked:/)).toHaveLength(1);
+  });
+});
+
+describe('stage cards say where each stage is, where it plays and what it needs', () => {
+  it('walks the timeline and names the block, the narrative and what is asked', () => {
+    setup(SPLIT_LEAGUE, [
+      run(SPLIT_LEAGUE, {
+        stages: [
+          {
+            specId: 'double-round',
+            status: 'generated',
+            groups: [
+              { id: 'g0', label: 'Top Six', entrants: ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'] },
+              { id: 'g1', label: 'Bottom Six', entrants: ['c7', 'c8', 'c9', 'c10', 'c11', 'c12'] },
+            ],
+            audit: [],
+          },
+        ],
+      }),
+    ]);
+
+    const first = cardFor(/^Double round · /);
+    expect(currentStep(first)).toHaveTextContent(
+      /^GeneratedApprove and release from the Fixtures list$/,
+    );
+    expect(within(first).getByText(/^Plays in Block 1 · /)).toBeVisible();
+    expect(within(first).getByText(/^Stage 1 · Round-robin stage · /)).toBeVisible();
+    // A generated stage no longer shows it as a hint; the card still says it.
+    expect(
+      within(first).getByText(/What the platform needs from you:/).parentElement,
+    ).toHaveTextContent(/Which sides play in each group/);
+
+    // The final round waits on the admin: its sides are chosen from the first stage.
+    const second = cardFor(/^Final round · /);
+    expect(currentStep(second)).toHaveTextContent(/^Awaiting entrants/);
+    expect(currentStep(second)).toHaveTextContent(/Which sides play in each group/);
+    expect(within(second).getByText(/^Plays in Block 2 · /)).toBeVisible();
+    expect(within(second).getByRole('button', { name: /confirm entrants/i })).toBeVisible();
+  });
+
+  it('reads Ready before generation and Released once every group is out', async () => {
+    const readyStage = { specId: 'league', status: 'ready' as const, groups: [], audit: [] };
+    const { user, onGenerate, rerenderRuns } = setup(ONE_STAGE_FOR_CARDS, [
+      run(ONE_STAGE_FOR_CARDS, { stages: [readyStage] }),
+    ]);
+    expect(currentStep()).toHaveTextContent(/^ReadyGenerate to create the fixtures$/);
+
+    await user.click(screen.getByRole('button', { name: /generate \d+ fixtures/i }));
+    const { series, groups } = seriesFromGenerate(onGenerate.mock.calls[0], { released: true });
+    rerenderRuns(
+      [
+        run(ONE_STAGE_FOR_CARDS, {
+          stages: [
+            {
+              specId: 'league',
+              status: 'generated',
+              groups: groups.map((g) => ({
+                id: g.id,
+                label: 'Group A',
+                entrants: [],
+                seriesId: g.seriesId,
+              })),
+              audit: [],
+            },
+          ],
+        }),
+      ],
+      series,
+    );
+    expect(currentStep()).toHaveTextContent(/^Released$/);
+  });
+
+  it('keeps Start a season to an outline button once a season is on screen', () => {
+    setup(SPLIT_LEAGUE, [run(SPLIT_LEAGUE)]);
+    expect(screen.getByRole('button', { name: /start a season/i })).not.toHaveClass('btn-teal');
+  });
+});
+
+const ONE_STAGE_FOR_CARDS: CompetitionStructure = {
+  id: 'flat-cards',
+  name: 'One round robin',
+  version: 1,
+  stages: [stage({ id: 'league', name: 'League' })],
+} as unknown as CompetitionStructure;
 
 /* ─────────────────────────────────────────────────────────────────────────────
    Schedule staleness from a structure rebase. The server marks `staleSchedule` on any
@@ -990,7 +1132,7 @@ describe('a rebase-changed schedule — "Needs regenerating" only once there are
 
     // Nothing generated: generating simply uses the new schedule, nothing is stale.
     expect(screen.queryByText(/needs regenerating/i)).toBeNull();
-    expect(screen.getByText(/ready to generate/i)).toBeVisible();
+    expect(currentStep()).toHaveTextContent(/^Ready/);
 
     await user.click(screen.getByRole('button', { name: /generate \d+ fixtures/i }));
     const { series, groups } = seriesFromGenerate(onGenerate.mock.calls[0]);
@@ -1008,7 +1150,7 @@ describe('a rebase-changed schedule — "Needs regenerating" only once there are
 
     // Generated, same pairings, no marker: plain "Generated".
     rerenderRuns([run(ONE_STAGE, { stages: [generated] })], series);
-    expect(screen.getByText('Generated')).toBeVisible();
+    expect(currentStep()).toHaveTextContent(/^Generated/);
     expect(screen.queryByText(/needs regenerating/i)).toBeNull();
 
     // Generated AND marked: the pairings still match, so only the marker can say so.
@@ -1133,14 +1275,14 @@ describe('a chained stage notices when its feeder now runs into its fixtures', (
     await generateThenLand(true, { playoffDate: '2026-12-05', feederLast: '2026-09-19' });
     const card = cardFor(/^Play-off · /);
     expect(within(card).queryByText(/needs regenerating/i)).toBeNull();
-    expect(within(card).getByText('Generated')).toBeVisible();
+    expect(currentStep(card)).toHaveTextContent(/^Generated/);
   });
 
   it('never flags an unchained stage, even when it overlaps the stage before it', async () => {
     await generateThenLand(false, { feederLast: 'playoff-start' });
     const card = cardFor(/^Play-off · /);
     expect(within(card).queryByText(/needs regenerating/i)).toBeNull();
-    expect(within(card).getByText('Generated')).toBeVisible();
+    expect(currentStep(card)).toHaveTextContent(/^Generated/);
   });
 });
 
@@ -1590,9 +1732,10 @@ describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
   // behaviour is covered by admin-create-series.dom.test.tsx) — this boundary only cares
   // that the launcher hands it the right args and mounts it in place. It is reached ONLY
   // via the ad-hoc option now — every real league routes to a season form instead.
-  const stubRenderSeriesForm =
-    (spy: ReturnType<typeof vi.fn>) =>
-    ({ onBack }: { onBack: () => void }) => {
+  // A named function, not an arrow: it is a render prop, and the name keeps it
+  // identifiable (react/display-name).
+  const stubRenderSeriesForm = (spy: ReturnType<typeof vi.fn>) =>
+    function StubSeriesForm({ onBack }: { onBack: () => void }) {
       spy({ onBack });
       return (
         <div>
@@ -1624,6 +1767,10 @@ describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
     // The one season-capable league routes straight into StartSeasonForm.
     await user.click(screen.getByRole('button', { name: /^continue$/i }));
     expect(screen.getByRole('button', { name: /^start season$/i })).toBeInTheDocument();
+    // Under the primary button: what the admin will do after starting, in order.
+    expect(screen.getByText('What happens next').nextElementSibling).toHaveTextContent(
+      /Confirm entrants.*finishing order.*Generate fixtures.*Approve.*Release/,
+    );
 
     await user.click(screen.getByRole('button', { name: /^back$/i }));
 
@@ -1634,48 +1781,25 @@ describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('routes a non-capable league to the flat-season dialog, and Back returns to the picker', async () => {
-    const onClose = vi.fn();
-    const user = userEvent.setup();
-    const spy = vi.fn();
-    // No competitions bound to this league at all (unlike `league()` above, which always
-    // sets one) — this is the every-tenant-admin-created-league case, always flat.
-    const flatLeague = {
-      key: 'friendlies',
-      label: 'Friendlies',
-      group: 'Senior',
-      district: 'All districts',
-    } as unknown as League;
-    const config = { structures: [], calendars: [] } as unknown as TenantConfig;
+  it('says plainly when a league has a competition its operator set up', () => {
+    render(<GenerateFixturesLauncher {...launcherProps()} />);
 
-    render(
-      <GenerateFixturesLauncher
-        {...launcherProps({
-          allLeagues: [flatLeague],
-          config,
-          onClose,
-          renderSeriesForm: stubRenderSeriesForm(spy),
-        })}
-      />,
+    expect(screen.getByRole('dialog', { name: /^start a season$/i })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /This league has a competition set up by your operator: 50 Over \(Split league with mid-season swap\)/,
+      ),
+    ).toBeInTheDocument();
+    // Outside a HelpProvider the help link falls back to the guide page.
+    expect(screen.getByRole('link', { name: /how does this work/i })).toHaveAttribute(
+      'href',
+      expect.stringContaining('league-structures-tutorial'),
     );
-
-    await user.click(screen.getByRole('button', { name: /^continue$/i }));
-
-    // The flat-season dialog, not the ad-hoc series form — and it names the league.
-    expect(screen.getByRole('dialog', { name: /start.*flat season/i })).toBeInTheDocument();
-    expect(screen.getByText(/Friendlies has no competition bound to it/)).toBeInTheDocument();
-    expect(screen.queryByText('stub series form')).toBeNull();
-    expect(spy).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole('button', { name: /^back$/i }));
-
-    // Back at the league picker, without the launcher having been told to close.
-    expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
-    expect(screen.queryByRole('dialog', { name: /start.*flat season/i })).toBeNull();
-    expect(onClose).not.toHaveBeenCalled();
+    // A bound league continues to the season form — no quick start on offer.
+    expect(screen.queryByRole('radiogroup', { name: /how the season is played/i })).toBeNull();
   });
 
-  it('falls back to the league picker if the flat step’s league vanishes mid-flow', async () => {
+  it('falls back to the league picker if the chosen league vanishes mid-flow', async () => {
     const flatLeague = {
       key: 'friendlies',
       label: 'Friendlies',
@@ -1683,23 +1807,19 @@ describe('GenerateFixturesLauncher — Back out of "Start a season"', () => {
       district: 'All districts',
     } as unknown as League;
     const onClose = vi.fn();
-    const user = userEvent.setup();
 
     const { rerender } = render(
       <GenerateFixturesLauncher {...launcherProps({ allLeagues: [flatLeague], onClose })} />,
     );
-
-    await user.click(screen.getByRole('button', { name: /^continue$/i }));
-    expect(screen.getByRole('dialog', { name: /start.*flat season/i })).toBeInTheDocument();
+    expect(screen.getByRole('radiogroup', { name: /how the season is played/i })).toBeVisible();
 
     // The league is gone from config — deleted in another tab, picked up by this
-    // console's own refetch — while the admin is still sitting on the flat-season step.
-    // `step` stays 'flat' in this component's own state; only `allLeagues` changed.
+    // console's own refetch — while the admin is looking at its quick start.
     rerender(<GenerateFixturesLauncher {...launcherProps({ allLeagues: [], onClose })} />);
 
-    // Back at the picker — not a dead modal the admin can only abandon by refreshing.
+    // Back to a plain picker — not a form for a league that no longer exists.
+    expect(screen.queryByRole('radiogroup', { name: /how the season is played/i })).toBeNull();
     expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
-    expect(screen.queryByRole('dialog', { name: /start.*flat season/i })).toBeNull();
     expect(onClose).not.toHaveBeenCalled();
   });
 
@@ -2030,10 +2150,12 @@ describe('buildFlatSeasonRun', () => {
 });
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   StartFlatSeasonForm — reached through the launcher for any non-capable league.
+   Quick start — a league with no competition starts a season from a starter shape.
+   The server builds the competition, structure, calendar and run in one call; the form
+   previews the season as the same narrative the operator console shows.
    ───────────────────────────────────────────────────────────────────────────── */
 
-describe('StartFlatSeasonForm', () => {
+describe('Quick start', () => {
   const flatLeague = {
     key: 'friendlies',
     label: 'Friendlies',
@@ -2041,240 +2163,148 @@ describe('StartFlatSeasonForm', () => {
     district: 'All districts',
   } as unknown as League;
 
-  const config = {
-    structures: [],
-    calendars: [calendar],
-  } as unknown as TenantConfig;
-
-  // The top-of-file `clubs` fixture is registered for 'premier', not 'friendlies' — a
-  // separate roster so `leagueParticipants` actually finds sides for this league.
+  // The top-of-file `clubs` fixture is registered for 'premier', not 'friendlies'.
   const friendliesClubs = clubs.map((c) => ({ ...c, leagues: ['friendlies'] })) as Club[];
 
+  const mockedQuickStart = vi.mocked(quickStartSeason);
+
   const setup = (over: Record<string, unknown> = {}) => {
-    const onCreateRun = vi.fn().mockImplementation((run: SeasonRun) => Promise.resolve(run));
-    const onGenerateStage = vi.fn().mockResolvedValue(undefined);
+    const onSeasonSetupChanged = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
-    const toast = vi.fn();
     const user = userEvent.setup();
     render(
       <GenerateFixturesLauncher
         clubs={friendliesClubs}
         allLeagues={[flatLeague]}
-        config={config}
+        config={{ structures: [], calendars: [calendar] } as unknown as TenantConfig}
         existingRuns={[]}
-        onCreateRun={onCreateRun}
-        onGenerateStage={onGenerateStage}
+        onCreateRun={vi.fn()}
+        onSeasonSetupChanged={onSeasonSetupChanged}
         renderSeriesForm={() => <div>stub series form</div>}
         onClose={onClose}
-        toast={toast}
+        toast={vi.fn()}
         {...over}
       />,
     );
-    return { user, onCreateRun, onGenerateStage, onClose, toast };
+    return { user, onSeasonSetupChanged, onClose };
   };
 
-  const openFlatDialog = async (user: ReturnType<typeof userEvent.setup>) => {
-    await user.click(screen.getByRole('button', { name: /^continue$/i }));
-    return screen.getByRole('dialog', { name: /start.*flat season/i });
-  };
+  const shapes = () => screen.getByRole('radiogroup', { name: /how the season is played/i });
+  const startBtn = () => screen.getByRole('button', { name: /^start season$/i });
 
-  const fillCustomDates = async (
-    user: ReturnType<typeof userEvent.setup>,
-    dialog: HTMLElement,
-    start: string,
-    end: string,
-  ) => {
-    const startInput = within(dialog).getByLabelText(/start date/i);
-    const endInput = within(dialog).getByLabelText(/end date/i);
-    await user.clear(startInput);
-    await user.type(startInput, start);
-    await user.clear(endInput);
-    await user.type(endInput, end);
-  };
+  beforeEach(() => {
+    mockedQuickStart.mockReset();
+    mockedQuickStart.mockResolvedValue({
+      run: {} as SeasonRun,
+      competitionId: 'comp-1',
+      structureId: 'st-1',
+      calendarId: 'cal',
+    });
+  });
 
-  /** Picks the one operator calendar on offer — the form defaults to "Custom dates". */
-  const selectCalendar = async (user: ReturnType<typeof userEvent.setup>, dialog: HTMLElement) =>
-    user.selectOptions(within(dialog).getByRole('combobox', { name: 'Dates' }), calendar.id);
+  it('says the league has no competition and offers the starter shapes, flat first', () => {
+    setup();
 
-  it('blocks a duplicate label for the same league', async () => {
-    // The label field defaults to the real current season — match `existingRuns` to
-    // whatever that resolves to right now, rather than assuming a fixed value.
-    const existingRuns = [
-      buildFlatSeasonRun({
-        id: 'run-existing',
-        league: flatLeague,
-        seasonLabel: currentSeasonLabel(),
-        calendar,
-        seriesType: 'Twenty20 (16-25 overs)',
-        overs: 20,
-      }),
-    ];
-    const { user } = setup({ existingRuns });
-    const dialog = await openFlatDialog(user);
-
-    expect(within(dialog).getByDisplayValue(currentSeasonLabel())).toBeInTheDocument();
     expect(
-      within(dialog).getByText(/flat season with that label is already running/i),
-    ).toBeInTheDocument();
-    expect(within(dialog).getByRole('button', { name: /^start season$/i })).toBeDisabled();
+      screen.getByText(
+        /No competition has been set up for this league yet\. Quick-start one below/,
+      ),
+    ).toBeVisible();
+    const cards = within(shapes()).getAllByRole('radio');
+    expect(cards).toHaveLength(5);
+    expect(within(shapes()).getByRole('radio', { name: /^flat round robin/i })).toBeChecked();
+    // Each card carries its first stage's example from the stage-kind registry.
+    expect(within(shapes()).getAllByText(/^e\.g\. /).length).toBeGreaterThan(0);
   });
 
-  it('blocks fewer than two registered sides', async () => {
-    const { user } = setup({ clubs: [] });
-    const dialog = await openFlatDialog(user);
+  it('previews the season as a narrative against the registered sides and the calendar', async () => {
+    const { user } = setup();
 
-    expect(within(dialog).getByText(/at least two sides must be registered/i)).toBeInTheDocument();
-    expect(within(dialog).getByRole('button', { name: /^start season$/i })).toBeDisabled();
-  });
+    expect(
+      screen.getByText(/Stage 1 · Round-robin stage · all 12 sides in one group · everyone plays/),
+    ).toBeVisible();
 
-  it('blocks custom dates where the end is before the start', async () => {
-    const { user } = setup({
-      config: { structures: [], calendars: [] } as unknown as TenantConfig,
-    });
-    const dialog = await openFlatDialog(user);
-
-    await fillCustomDates(user, dialog, '2026-12-01', '2026-09-01');
-
-    expect(within(dialog).getByRole('button', { name: /^start season$/i })).toBeDisabled();
-  });
-
-  it('creates the run then generates its fixtures, in order, with the synthetic competition', async () => {
-    const { user, onCreateRun, onGenerateStage, onClose } = setup();
-    const dialog = await openFlatDialog(user);
-    await selectCalendar(user, dialog);
-
-    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
-
-    expect(onCreateRun).toHaveBeenCalled();
-    expect(onGenerateStage).toHaveBeenCalled();
-    const createOrder = onCreateRun.mock.invocationCallOrder[0];
-    const generateOrder = onGenerateStage.mock.invocationCallOrder[0];
-    expect(createOrder).toBeLessThan(generateOrder);
-
-    const [payloads] = onGenerateStage.mock.calls[0];
-    expect(payloads[0].competition).toMatchObject({
-      id: '__flat__',
-      label: 'Twenty20 (16-25 overs)',
-      matchFormat: { overs: 20 },
-    });
-    expect(onClose).toHaveBeenCalled();
-  });
-
-  it('carries the chosen series type and overs into the synthetic competition, independently', async () => {
-    // Overs and Series Type are separate controls — nothing here should infer one from
-    // the other, so picking a One-Day type with 50 overs must produce exactly that label
-    // and overs count, not the Twenty20 default either field started at.
-    const { user, onGenerateStage } = setup();
-    const dialog = await openFlatDialog(user);
-    await selectCalendar(user, dialog);
-
-    await user.selectOptions(within(dialog).getByLabelText('Series Type'), 'One-Day (40-50 overs)');
-    const oversInput = within(dialog).getByLabelText('Overs');
-    await user.clear(oversInput);
-    await user.type(oversInput, '50');
-
-    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
-
-    const [payloads] = onGenerateStage.mock.calls[0];
-    expect(payloads[0].competition).toMatchObject({
-      label: 'One-Day (40-50 overs)',
-      matchFormat: { overs: 50 },
-    });
-  });
-
-  it('still closes and points at the Seasons panel when generation fails', async () => {
-    const onGenerateStage = vi.fn().mockRejectedValue(new Error('nope'));
-    const { user, onClose, toast } = setup({ onGenerateStage });
-    const dialog = await openFlatDialog(user);
-    await selectCalendar(user, dialog);
-
-    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
-
-    expect(onClose).toHaveBeenCalled();
-    expect(toast).toHaveBeenCalledWith(
-      expect.stringMatching(/generate the fixtures from the seasons panel/i),
+    await user.click(
+      within(shapes()).getByRole('radio', { name: /^seeded pools → cross-pool semis/i }),
     );
+    expect(
+      screen.getByText(/Stage 1 · Round-robin stage · 12 sides seeded into 2 groups/),
+    ).toBeVisible();
+    expect(screen.getByText(/^Stage 2 · Knockout stage/)).toBeVisible();
+    // Two blocks on the calendar: each stage gets a "plays in" choice, prefilled.
+    expect(screen.getByRole('combobox', { name: 'Stage 1 plays in' })).toHaveValue('0');
+    expect(screen.getByRole('combobox', { name: 'Stage 2 plays in' })).toHaveValue('1');
   });
 
-  it('guards against a double-submit — a rapid second click creates nothing extra', async () => {
-    // Never resolves within this test — the button's own `busy` disable is what has to
-    // stop the second click from reaching `onCreate` at all, not a fast round trip.
-    const onCreateRun = vi.fn(() => new Promise<SeasonRun>(() => {}));
-    const { user } = setup({ onCreateRun });
-    const dialog = await openFlatDialog(user);
-    await selectCalendar(user, dialog);
+  it('posts the quick start, refetches, then shows what happens next', async () => {
+    const { user, onSeasonSetupChanged } = setup();
 
-    const startBtn = within(dialog).getByRole('button', { name: /^start season$/i });
-    // Not awaited individually — this is the rapid double-click the busy guard exists
-    // for. A guard that only worked when the two clicks were serialised wouldn't be
-    // proving anything a disabled-button check couldn't.
-    await Promise.all([user.click(startBtn), user.click(startBtn)]);
+    await user.click(
+      within(shapes()).getByRole('radio', { name: /^seeded pools → cross-pool semis/i }),
+    );
+    // Keep the knockout in the first block, straight after the groups.
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Stage 2 plays in' }), '0');
+    await user.selectOptions(screen.getByLabelText('Series Type'), 'One-Day (40-50 overs)');
+    await user.clear(screen.getByLabelText('Overs'));
+    await user.type(screen.getByLabelText('Overs'), '50');
+    await user.type(screen.getByLabelText('Ball type'), 'White');
+    await user.click(startBtn());
 
-    expect(onCreateRun).toHaveBeenCalledTimes(1);
+    expect(mockedQuickStart).toHaveBeenCalledTimes(1);
+    expect(mockedQuickStart).toHaveBeenCalledWith({
+      leagueKey: 'friendlies',
+      templateId: 'pools-to-knockout',
+      seasonLabel: currentSeasonLabel(),
+      calendar: { id: 'cal' },
+      matchFormat: { label: 'One-Day (40-50 overs)', overs: 50, ballType: 'White' },
+      placement: [0, 0],
+    });
+    expect(onSeasonSetupChanged).toHaveBeenCalledTimes(1);
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/Friendlies · .* has started/);
+    const next = screen.getAllByRole('listitem').map((li) => li.textContent);
+    expect(next.join('|')).toMatch(/Confirm entrants.*Generate fixtures.*Approve.*Release/);
+    expect(screen.queryByRole('radiogroup', { name: /how the season is played/i })).toBeNull();
   });
 
-  it('keeps the modal open with an inline error when create fails outright', async () => {
-    const onCreateRun = vi.fn().mockRejectedValue(new Error('boom'));
-    const onGenerateStage = vi.fn();
-    const { user } = setup({ onCreateRun, onGenerateStage });
-    const dialog = await openFlatDialog(user);
-    await selectCalendar(user, dialog);
+  it('sends custom dates as a label with a start and an end, and no placement', async () => {
+    const { user } = setup();
 
-    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Dates' }), 'Custom dates');
+    expect(screen.getByText(/The first and last date a match may be played/)).toBeVisible();
+    expect(startBtn()).toBeDisabled();
+
+    await user.type(screen.getByLabelText('Start date'), '2026-09-05');
+    await user.type(screen.getByLabelText('End date'), '2026-12-12');
+    await user.click(startBtn());
+
+    expect(mockedQuickStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateId: 'flat-round-robin',
+        calendar: { label: currentSeasonLabel(), start: '2026-09-05', end: '2026-12-12' },
+      }),
+    );
+    expect(mockedQuickStart.mock.calls[0][0]).not.toHaveProperty('placement');
+  });
+
+  it('keeps the form open with the server’s reason when the quick start is refused', async () => {
+    mockedQuickStart.mockRejectedValue(
+      new ApiError(400, 'That season is already running for this league.'),
+    );
+    const { user, onSeasonSetupChanged } = setup();
+
+    await user.click(startBtn());
 
     expect(
-      await within(dialog).findByText(/could not start the season — try again/i),
-    ).toBeInTheDocument();
-    expect(onGenerateStage).not.toHaveBeenCalled();
-    // Still open — a failed create must not discard the admin's half-filled form.
-    expect(screen.getByRole('dialog', { name: /start.*flat season/i })).toBeInTheDocument();
+      await screen.findByText('That season is already running for this league.'),
+    ).toBeVisible();
+    expect(onSeasonSetupChanged).not.toHaveBeenCalled();
+    expect(shapes()).toBeVisible();
   });
 
-  it('shows no inline error when the rejection was already toasted', async () => {
-    // withToast (main.tsx) flags a rethrown error `alreadyToasted` once it has surfaced
-    // its own toast — an inline message on top of that would tell the admin the same
-    // thing twice.
-    const toasted = Object.assign(new Error('surfaced elsewhere'), { alreadyToasted: true });
-    const onCreateRun = vi.fn().mockRejectedValue(toasted);
-    const onGenerateStage = vi.fn();
-    const { user } = setup({ onCreateRun, onGenerateStage });
-    const dialog = await openFlatDialog(user);
-    await selectCalendar(user, dialog);
-
-    await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
-
-    // Wait for the busy state to settle back (the button reads "Start season" again)
-    // before asserting the error never appeared.
-    await within(dialog).findByRole('button', { name: /^start season$/i });
-    expect(within(dialog).queryByText(/could not start the season/i)).toBeNull();
-    expect(onGenerateStage).not.toHaveBeenCalled();
-  });
-
-  describe('Scheduling options', () => {
-    it('carries a chosen cadence, first round and time slots through to the created run', async () => {
-      // A small roster — every-n-weeks over 11 rounds wouldn't fit block 1's ~13 weeks,
-      // and a "does not fit" state disables Start season, which isn't what this test is
-      // checking. Four sides need only three rounds either way.
-      const { user, onCreateRun } = setup({ clubs: friendliesClubs.slice(0, 4) });
-      const dialog = await openFlatDialog(user);
-      await selectCalendar(user, dialog);
-
-      await user.click(within(dialog).getByRole('button', { name: 'Scheduling options' }));
-      await user.click(within(dialog).getByRole('button', { name: 'Every 2 weeks' }));
-      await user.click(within(dialog).getByRole('button', { name: 'Morning & afternoon' }));
-
-      const firstRoundInput = within(dialog).getByLabelText(/first round/i);
-      // Well inside block 1's range (2026-09-12 → 2026-12-12).
-      await user.type(firstRoundInput, '2026-10-01');
-
-      await user.click(within(dialog).getByRole('button', { name: /^start season$/i }));
-
-      expect(onCreateRun).toHaveBeenCalled();
-      const [run] = onCreateRun.mock.calls[0];
-      const schedule = run.structureSnapshot.stages[0].schedule;
-      expect(schedule.cadence).toEqual({ kind: 'every-n-weeks', n: 2 });
-      expect(schedule.slots).toEqual(T20_SLOTS);
-      expect(run.calendarSnapshot.blocks[0].start).toBe('2026-10-01');
-    });
+  it('refuses to start with fewer than two registered sides', () => {
+    setup({ clubs: [] });
+    expect(screen.getByText(/at least two sides must be registered/i)).toBeVisible();
+    expect(startBtn()).toBeDisabled();
   });
 });

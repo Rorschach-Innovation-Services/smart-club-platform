@@ -113,6 +113,7 @@ import { DocPreviewModal } from './DocPreviewModal';
 import { RegLinkModal } from './RegLinkModal';
 import { PlayerDetailModal } from './PlayerDetailModal';
 import { ClubNameModal } from './ClubNameModal';
+import { SeriesOriginPill } from './season-run';
 
 /* ─── Compliance doc upload — presigned S3 PUT, then mark uploaded ─── */
 interface DocUploadButtonProps {
@@ -4977,6 +4978,7 @@ export function ClubFixturesView({ club, allSeries, clubs, toast, onSendFixtures
                     </div>
                   </div>
                   <div className="club-fix-series-tags">
+                    <SeriesOriginPill series={s} />
                     {(s.tags || []).map((t, i) => (
                       <Pill key={i} tone="muted">
                         {t}

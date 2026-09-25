@@ -81,6 +81,7 @@ import {
 } from './admin';
 import { AdminInsightsPage, AdminLeagueDetailPage } from './insights';
 import { parseSupport } from './support';
+import { HelpProvider } from './help/HelpDrawer';
 import {
   ClubHome,
   AffiliationForm,
@@ -2613,6 +2614,7 @@ function Shell({
             tenantConfig={tenantConfig && { ...tenantConfig, structures: allStructures }}
             allLeagues={allLeagues}
             onCreateSeasonRun={createSeasonRun}
+            onSeasonSetupChanged={refetchSeasonSetup}
             onPatchSeasonRun={patchSeasonRun}
             onDeleteSeasonRun={deleteSeasonRun}
             onRebaseSeasonRun={rebaseSeasonRun}
@@ -2810,7 +2812,14 @@ function Shell({
           .slice(0, 2)
           .join('');
 
-  return (
+  // After a quick start (POST /season-runs/quick-start) the server has made the
+  // competition, its structure and calendar, and the run in one go — so both the runs list
+  // and the tenant config (where leagues carry their competitions) are stale.
+  function refetchSeasonSetup() {
+    return Promise.all([invalidate(qk.seasonRuns()), invalidate(qk.tenantConfig())]);
+  }
+
+  const shellView = (
     <div data-screen-label={role === 'admin' ? 'Admin · ' + view : 'Club · ' + view}>
       <header className="app-header">
         <div className="h-logo">
@@ -3149,6 +3158,9 @@ function Shell({
       )}
     </div>
   );
+
+  // One help drawer for the whole admin/club shell: every HelpLink inside opens it.
+  return <HelpProvider>{shellView}</HelpProvider>;
 }
 
 /* ─── Filtered admin views (Affiliation / Docs / CQI) ─── */

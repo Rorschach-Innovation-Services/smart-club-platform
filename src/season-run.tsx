@@ -24,12 +24,19 @@ import {
   Card,
   Choice,
   EmptyState,
+  FieldGuide,
+  HowSeasonsWork,
   Icon,
   InfoDot,
+  NextSteps,
+  OptionCards,
   Pill,
+  StatusTimeline,
   useEscapeClose,
+  type StatusStep,
 } from './atoms';
-import { ApiError } from './api';
+import { ApiError, quickStartSeason, type QuickStartSeasonRequest } from './api';
+import { HelpLink } from './help/HelpDrawer';
 import {
   CADENCE_LABELS,
   T20_SLOTS,
@@ -49,9 +56,14 @@ import {
   poolQualifiersFor,
   type StageMaterialisation,
 } from '../packages/engine/src/structure';
-import { describeStage } from '../packages/engine/src/narrative';
+import { describeStage, describeStructure } from '../packages/engine/src/narrative';
 import { materialiseRun } from '../packages/engine/src/run';
-import { stageTitle } from '../packages/engine/src/stage-kinds';
+import { STAGE_KINDS, stageKindFor, stageTitle } from '../packages/engine/src/stage-kinds';
+import {
+  STRUCTURE_TEMPLATES,
+  defaultPlacement,
+  instantiateTemplate,
+} from '../packages/engine/src/templates';
 import {
   DEFAULT_SERIES_OVERS,
   SERIES_TYPES,
@@ -129,12 +141,80 @@ function Modal({
 
 type KnockoutPairing = 'seeded' | 'cross-pool' | 'within-pool';
 
+/** A pairing's first round in miniature, as plain text. */
+const PAIRING_DIAGRAMS: Record<KnockoutPairing, string> = {
+  'cross-pool': 'A1 v B2 · B1 v A2',
+  'within-pool': 'A1 v A2 · B1 v B2',
+  seeded: '1 v 4 · 2 v 3, by position over every group',
+};
+
 /** How a pairing reads in a sentence — the console says "group", never "pool". */
 const PAIRING_LABELS: Record<KnockoutPairing, string> = {
   seeded: 'seeded',
   'cross-pool': 'cross-group',
   'within-pool': 'within-group',
 };
+
+/** What happens after a season starts, in order. Shown under both ways to start one. */
+const SEASON_NEXT_STEPS: Array<{ title: string; desc: string }> = [
+  {
+    title: 'Confirm entrants',
+    desc: 'Check who plays in each group. Where a stage depends on results, you’ll type the finishing order.',
+  },
+  {
+    title: 'Generate fixtures',
+    desc: 'Each stage builds its fixtures inside its block, one series per group.',
+  },
+  {
+    title: 'Approve',
+    desc: 'Check the draft fixtures on the Fixtures list and sign them off.',
+  },
+  {
+    title: 'Release',
+    desc: 'Publish them to every club’s portal. Venues or start times can be held back.',
+  },
+];
+
+/**
+ * What a stage will need the admin to type, as a sentence. The registry phrases most of
+ * these as the object of "you will be asked for …" ("the seeding order of …"), so a
+ * lower-case entry gets that lead-in; "Nothing extra." entries already stand alone.
+ *
+ * A stage whose sides are chosen by hand still needs them confirmed even when its format
+ * asks for nothing more — saying "Nothing extra" there contradicts the Confirm button.
+ */
+function whatYouWillBeAsked(stage: StageSpec): string {
+  const asked = STAGE_KINDS[stageKindFor(stage.format)].youWillBeAsked;
+  if (/^nothing extra/i.test(asked) && stage.entrants.kind === 'manual')
+    return 'Which sides play in each group. You confirm them before this stage can generate.';
+  return /^[a-z]/.test(asked) ? `You’ll be asked for ${asked}` : asked;
+}
+
+/**
+ * Where a series without a season stage came from (null for a season-stage series).
+ *
+ * "Imported schedule" is a bulk import: the Plan B importer's `s-planb-` ids, or a series
+ * that names its league but carries neither a calendar binding nor a season run. Anything
+ * else was made by hand through Create series.
+ */
+export function seriesOrigin(s: Series): 'imported' | 'stand-alone' | null {
+  if (s.seasonRunId) return null;
+  if (String(s.id).startsWith('s-planb-')) return 'imported';
+  if (!s.schedule && s.leagueKey) return 'imported';
+  return 'stand-alone';
+}
+
+/** The pill that marks a series outside every season stage, with its explainer. */
+export function SeriesOriginPill({ series }: { series: Series }) {
+  const origin = seriesOrigin(series);
+  if (!origin) return null;
+  return (
+    <span className="series-origin" title="Not part of a season stage; cannot be regenerated.">
+      <Pill tone="muted">{origin === 'imported' ? 'Imported schedule' : 'Stand-alone series'}</Pill>
+      <HelpLink topic="legacy-series">What is this?</HelpLink>
+    </span>
+  );
+}
 
 /**
  * The grouping a rebase cleared, from the most recent rebase entry that carries one.
@@ -280,7 +360,7 @@ function StartSeasonForm({
           here.
         </p>
         <p style={{ ...HINT }}>
-          In the meantime, Generate fixtures still runs a flat season for any league.
+          In the meantime, any league can quick-start a season from the league picker.
         </p>
         <div style={{ marginTop: 16 }}>
           <Btn tone="outline" onClick={onClose}>
@@ -426,9 +506,13 @@ function StartSeasonForm({
         <Btn tone="teal" onClick={submit} disabled={!!problems.length || busy}>
           {busy ? 'Starting…' : 'Start season'}
         </Btn>
-        <Btn tone="outline" onClick={onClose}>
+        <Btn tone="ghost" onClick={onClose}>
           Cancel
         </Btn>
+      </div>
+      <div className="sr-next">
+        <div className="sr-next-t">What happens next</div>
+        <NextSteps steps={SEASON_NEXT_STEPS} />
       </div>
     </div>
   );
@@ -589,6 +673,8 @@ export function buildFlatSeasonRun(args: {
   };
 }
 
+// Unreachable from the launcher since Quick start replaced it; the server phase deletes it.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function StartFlatSeasonForm({
   clubs,
   league,
@@ -1214,19 +1300,328 @@ function StartFlatSeasonForm({
   );
 }
 
-/* ─── Generate fixtures — the single entry point, routed by league ─── */
+/* ─── Quick start — a season for a league with no competition yet ───
+ *
+ * The operator's season wizard is the full tool. This is the short path an admin can take
+ * alone: pick one of the starter shapes, a calendar, a label and a match format, and the
+ * server makes the competition, structure, calendar and run in one call
+ * (POST /season-runs/quick-start). The preview is the same `describeStructure` narrative
+ * the operator console shows, so what the admin reads is what the server will build.
+ */
+
+/** The dates select's value for "type my own start and end". */
+const CUSTOM_DATES = '__custom__';
+
+function QuickStartForm({
+  clubs,
+  league,
+  config,
+  onStarted,
+  onClose,
+}: {
+  clubs: Club[];
+  league: League;
+  config: TenantConfig;
+  /** Refetch whatever the new season touched (the runs list, the tenant config). */
+  onStarted?: () => Promise<unknown> | void;
+  onClose: () => void;
+}) {
+  const calendars = config.calendars ?? [];
+  const templateName = useId();
+  const [templateId, setTemplateId] = useState(STRUCTURE_TEMPLATES[0].id);
+  const [calendarId, setCalendarId] = useState(calendars[0]?.id ?? CUSTOM_DATES);
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  // Only the stages the admin moved; everything else follows `defaultPlacement`, so a
+  // change of shape or calendar starts from the sensible default again.
+  const [placementEdits, setPlacementEdits] = useState<Record<number, number>>({});
+  const [seasonLabel, setSeasonLabel] = useState(currentSeasonLabel());
+  const [seriesType, setSeriesType] = useState<string>(SERIES_TYPES[0]);
+  const [overs, setOvers] = useState(DEFAULT_SERIES_OVERS);
+  const [ballType, setBallType] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [started, setStarted] = useState<string | null>(null);
+
+  const template = STRUCTURE_TEMPLATES.find((t) => t.id === templateId) ?? STRUCTURE_TEMPLATES[0];
+  const label = seasonLabel.trim();
+  const operatorCalendar = calendars.find((c) => c.id === calendarId);
+  const customValid =
+    ISO_DATE_RE.test(startDate) && ISO_DATE_RE.test(endDate) && endDate >= startDate;
+  // Custom dates are one block — the same shape the server makes from them.
+  const calendar: SeasonCalendar | undefined =
+    operatorCalendar ??
+    (customValid
+      ? {
+          id: 'quick-start-preview',
+          label: label || 'Season',
+          blocks: [{ id: 'b1', label: 'Block 1', start: startDate, end: endDate }],
+        }
+      : undefined);
+  const blockCount = calendar?.blocks.length ?? 0;
+  const placement = defaultPlacement(template, blockCount).map((b, i) => placementEdits[i] ?? b);
+  const teams = leagueParticipants(clubs, league.key);
+  const narrative = describeStructure(
+    instantiateTemplate(template, calendar, undefined, placement),
+    calendar,
+    teams.length,
+  );
+
+  const problems: string[] = [];
+  if (!label) problems.push('Give the season a label.');
+  if (!operatorCalendar && !customValid)
+    problems.push(
+      'Give the season a start date and an end date, with the end on or after the start.',
+    );
+  if (teams.length < 2) problems.push('At least two sides must be registered for this league.');
+
+  async function submit() {
+    if (problems.length || busy) return;
+    setErr('');
+    setBusy(true);
+    const body: QuickStartSeasonRequest = {
+      leagueKey: league.key,
+      templateId: template.id,
+      seasonLabel: label,
+      calendar: operatorCalendar
+        ? { id: operatorCalendar.id }
+        : { label, start: startDate, end: endDate },
+      matchFormat: {
+        label: seriesType,
+        overs,
+        ...(ballType.trim() ? { ballType: ballType.trim() } : {}),
+      },
+      ...(blockCount >= 2 ? { placement } : {}),
+    };
+    try {
+      await quickStartSeason(body);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Could not start the season — try again');
+      setBusy(false);
+      return;
+    }
+    // The season exists from here on. A failed refetch only means the Seasons card is a
+    // moment behind; it must not read as a failed start.
+    try {
+      await onStarted?.();
+    } catch {
+      /* the next refetch catches up */
+    }
+    setBusy(false);
+    setStarted(label);
+  }
+
+  if (started) {
+    return (
+      <div style={{ display: 'grid', gap: 16 }}>
+        <div className="sr-callout" role="status">
+          <strong>
+            {league.label} · {started} has started.
+          </strong>{' '}
+          Its stages are on the Seasons card. Work through them in this order.
+        </div>
+        <NextSteps steps={SEASON_NEXT_STEPS} />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Btn tone="teal" onClick={onClose}>
+            Done
+          </Btn>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'grid', gap: 16 }}>
+      <div className="field">
+        <div className="field-label">How the season is played</div>
+        <OptionCards
+          name={templateName}
+          label="How the season is played"
+          value={templateId}
+          onChange={(id) => {
+            setTemplateId(id);
+            setPlacementEdits({});
+          }}
+          options={STRUCTURE_TEMPLATES.map((t) => ({
+            value: t.id,
+            title: t.name,
+            desc: t.whenToUse,
+            eg: STAGE_KINDS[stageKindFor(t.stages[0].format)].eg,
+          }))}
+        />
+      </div>
+
+      <div className="field">
+        <div className="field-label">
+          Dates <span className="req">*</span>
+        </div>
+        <select
+          className="field-select"
+          aria-label="Dates"
+          value={calendarId}
+          onChange={(e) => {
+            setCalendarId(e.target.value);
+            setPlacementEdits({});
+          }}
+        >
+          {calendars.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.label} ·{' '}
+              {c.blocks.length
+                ? `${formatIsoDate(c.blocks[0].start)} → ${formatIsoDate(c.blocks[c.blocks.length - 1].end)}`
+                : 'no playing blocks'}
+            </option>
+          ))}
+          <option value={CUSTOM_DATES}>Custom dates</option>
+        </select>
+        {!operatorCalendar && (
+          <>
+            <div className="sr-date-pair">
+              <label className="sr-date">
+                <span className="field-label">Start date</span>
+                <input
+                  type="date"
+                  className="field-input"
+                  aria-label="Start date"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                />
+              </label>
+              <label className="sr-date">
+                <span className="field-label">End date</span>
+                <input
+                  type="date"
+                  className="field-input"
+                  aria-label="End date"
+                  value={endDate}
+                  min={startDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                />
+              </label>
+            </div>
+            <FieldGuide id="block-dates" />
+          </>
+        )}
+      </div>
+
+      {calendar && blockCount >= 2 && (
+        <div className="field">
+          <div className="field-label">Where each stage plays</div>
+          <div className="sr-placement">
+            {template.stages.map((st, i) => (
+              <label key={st.id} className="sr-placement-row">
+                <span>
+                  Stage {i + 1} · {st.name} plays in
+                </span>
+                <select
+                  className="field-select"
+                  aria-label={`Stage ${i + 1} plays in`}
+                  value={placement[i]}
+                  onChange={(e) =>
+                    setPlacementEdits((p) => ({ ...p, [i]: Number(e.target.value) }))
+                  }
+                >
+                  {calendar.blocks.map((b, bi) => (
+                    <option key={b.id} value={bi}>
+                      {b.label} · {formatIsoDate(b.start)} → {formatIsoDate(b.end)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="field">
+        <div className="field-label">
+          Season <span className="req">*</span>
+        </div>
+        <input
+          className="field-input"
+          aria-label="Season"
+          value={seasonLabel}
+          onChange={(e) => setSeasonLabel(e.target.value)}
+          maxLength={80}
+          placeholder="2026/27"
+          style={{ maxWidth: 200 }}
+        />
+      </div>
+
+      <div className="field">
+        <div className="field-label">Match format</div>
+        <div className="sr-format">
+          <BoundedNumber
+            ariaLabel="Overs"
+            min={1}
+            max={100}
+            style={{ width: 80 }}
+            value={overs}
+            onChange={setOvers}
+          />
+          <span style={{ fontSize: 12, color: 'var(--muted)' }}>overs</span>
+          <select
+            className="field-select"
+            aria-label="Series Type"
+            value={seriesType}
+            onChange={(e) => setSeriesType(e.target.value)}
+            style={{ width: 200 }}
+          >
+            {SERIES_TYPES.map((t) => (
+              <option key={t}>{t}</option>
+            ))}
+          </select>
+          <input
+            className="field-input"
+            aria-label="Ball type"
+            placeholder="Ball type (optional)"
+            value={ballType}
+            onChange={(e) => setBallType(e.target.value)}
+            style={{ width: 160 }}
+          />
+        </div>
+      </div>
+
+      <div className="sr-preview">
+        <div className="sr-preview-t">
+          How it will run, with the {teams.length} side{teams.length === 1 ? '' : 's'} registered
+          for {league.label}
+        </div>
+        {narrative.map((line) => (
+          <p key={line}>{line}</p>
+        ))}
+        {!calendar && <p className="sr-preview-note">Dates appear once the season has them.</p>}
+      </div>
+
+      {problems.map((p, i) => (
+        <div key={i} style={ERR}>
+          {p}
+        </div>
+      ))}
+      {err && <div style={ERR}>{err}</div>}
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <Btn tone="teal" onClick={submit} disabled={!!problems.length || busy}>
+          {busy ? 'Starting…' : 'Start season'}
+        </Btn>
+        <Btn tone="ghost" onClick={onClose} disabled={busy}>
+          Cancel
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Start a season — the single entry point, routed by league ─── */
 
 /** The select's sentinel for "no particular league" — a hand-picked, ad-hoc series. */
 const AD_HOC = '__ad-hoc__';
 
 /**
- * One button, two engines. The admin used to choose the ENGINE first — "Start a season"
- * versus "Create series" — which only makes sense once you already know whether your
- * league has a competition bound to it. Here they choose the LEAGUE, and the console picks
- * the engine: a season-capable league swaps this same modal to `StartSeasonForm`; every
- * other real league gets `StartFlatSeasonForm` — a season too, just a synthesized flat one.
- * Only "ad-hoc" (a genuine one-off, no league at all) reaches the embedded Create-series
- * flow.
+ * One button, routed by LEAGUE. A league with a competition its operator set up continues
+ * to `StartSeasonForm`; a league without one gets Quick start in place, under a plain
+ * statement of which case it is. Only "one-off" (no league at all) reaches the embedded
+ * Create-series flow.
  */
 export function GenerateFixturesLauncher({
   clubs,
@@ -1234,7 +1629,7 @@ export function GenerateFixturesLauncher({
   config,
   existingRuns,
   onCreateRun,
-  onGenerateStage,
+  onSeasonSetupChanged,
   renderSeriesForm,
   onClose,
   toast,
@@ -1244,13 +1639,15 @@ export function GenerateFixturesLauncher({
   config: TenantConfig;
   existingRuns: SeasonRun[];
   onCreateRun: (run: SeasonRun) => Promise<SeasonRun | void>;
-  /** Same shape as `SeasonRunsPanel`'s `onGenerate` — the flat-season form needs it too,
-   *  to auto-generate its one stage's fixtures right after creating the run. */
-  onGenerateStage: (
+  /** Unused since Quick start replaced the flat-season form; kept until that form is
+   *  deleted with the server phase. */
+  onGenerateStage?: (
     payloads: GenerateGroupPayload[],
     run: SeasonRun,
     stage: StageSpec,
   ) => Promise<void>;
+  /** Refetch the runs list and tenant config after a quick start made a new season. */
+  onSeasonSetupChanged?: () => Promise<unknown> | void;
   /** Rendered in place for the ad-hoc path ONLY — a render prop, not an import, because
    *  admin.tsx (which owns CreateSeriesForm) imports FROM season-run.tsx, not the other
    *  way around. There is no league to prefill: ad-hoc means the admin picks by hand. */
@@ -1261,7 +1658,7 @@ export function GenerateFixturesLauncher({
   const capable = seasonCapableLeagues(allLeagues);
   const isCapable = (key: string) => capable.some((l) => l.key === key);
   const [leagueKey, setLeagueKey] = useState(allLeagues[0]?.key ?? AD_HOC);
-  const [step, setStep] = useState<'pick' | 'season' | 'flat' | 'series'>('pick');
+  const [step, setStep] = useState<'pick' | 'season' | 'series'>('pick');
 
   if (step === 'season') {
     return (
@@ -1288,41 +1685,6 @@ export function GenerateFixturesLauncher({
     );
   }
 
-  if (step === 'flat') {
-    const league = findByKey(allLeagues, leagueKey) as League | undefined;
-    // The picked league can vanish between steps — deleted in another tab, then this
-    // console's own config refetch drops it from `allLeagues`. `return null` here left the
-    // admin staring at a dead, uncloseable modal (the launcher's only escape hatches are
-    // inside the steps it renders). Falling back to the picker is always a safe, honest
-    // state: it just means "pick again".
-    if (league) {
-      return (
-        <Modal
-          title={
-            <>
-              Start a <em>flat season</em>
-            </>
-          }
-          onClose={onClose}
-        >
-          <StartFlatSeasonForm
-            clubs={clubs}
-            league={league}
-            config={config}
-            existingRuns={existingRuns}
-            onCreate={onCreateRun}
-            onGenerateStage={onGenerateStage}
-            onClose={onClose}
-            onBack={() => setStep('pick')}
-            toast={toast}
-          />
-        </Modal>
-      );
-    }
-    // No league to hand the form — fall through to the pick step below rather than
-    // returning null (a dead modal with no close button).
-  }
-
   if (step === 'series') {
     return (
       <Modal
@@ -1339,28 +1701,39 @@ export function GenerateFixturesLauncher({
     );
   }
 
+  // The picked league can vanish while the modal is open — deleted in another tab, then
+  // this console's own config refetch drops it — which simply reads as "pick again".
+  const league =
+    leagueKey === AD_HOC ? undefined : (findByKey(allLeagues, leagueKey) as League | undefined);
+  const bound = !!league && isCapable(league.key);
+  const structureName = (id: string) =>
+    (config.structures ?? []).find((s) => s.id === id)?.name ?? 'structure missing';
+
   function submit() {
     if (leagueKey === AD_HOC) return setStep('series');
-    setStep(isCapable(leagueKey) ? 'season' : 'flat');
+    if (bound) setStep('season');
   }
 
   return (
-    <Modal eyebrow="Fixtures" title="Generate fixtures" onClose={onClose}>
-      <div style={{ display: 'grid', gap: 14 }}>
+    <Modal eyebrow="Fixtures" title="Start a season" wide={!!league && !bound} onClose={onClose}>
+      <div style={{ display: 'grid', gap: 16 }}>
         <div className="field">
           <div className="field-label">
             League <span className="req">*</span>
           </div>
           <select
             className="field-select"
-            value={leagueKey}
+            aria-label="League"
+            value={league || leagueKey === AD_HOC ? leagueKey : ''}
             onChange={(e) => setLeagueKey(e.target.value)}
           >
-            {/* Existing tests select by `value`, not by label text or position, so
-                grouping into optgroups and dropping the "· flat/structured season" suffix
-                is safe — nothing here relied on either. */}
+            {!league && leagueKey !== AD_HOC && (
+              <option value="" disabled>
+                Pick a league
+              </option>
+            )}
             {allLeagues.some((l) => isCapable(l.key)) && (
-              <optgroup label="Structured seasons — set up by your platform operator">
+              <optgroup label="Competition set up by your operator">
                 {allLeagues
                   .filter((l) => isCapable(l.key))
                   .map((l) => (
@@ -1371,7 +1744,7 @@ export function GenerateFixturesLauncher({
               </optgroup>
             )}
             {allLeagues.some((l) => !isCapable(l.key)) && (
-              <optgroup label="Flat seasons — one flat round robin until a competition is bound">
+              <optgroup label="No competition yet — quick start one">
                 {allLeagues
                   .filter((l) => !isCapable(l.key))
                   .map((l) => (
@@ -1383,21 +1756,47 @@ export function GenerateFixturesLauncher({
             )}
             <option value={AD_HOC}>One-off series or tournament — pick the sides by hand</option>
           </select>
-          <p style={HINT}>
-            A league runs flat — one round robin — until your platform operator binds a competition
-            to it in the operator console (Season setup). Structured leagues follow their
-            competition&apos;s stages.
-          </p>
         </div>
 
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Btn tone="teal" onClick={submit}>
-            Continue
-          </Btn>
-          <Btn tone="outline" onClick={onClose}>
-            Cancel
-          </Btn>
-        </div>
+        {league && (
+          <div className="sr-callout">
+            {bound ? (
+              <p>
+                This league has a competition set up by your operator:{' '}
+                {(league.competitions ?? [])
+                  .map((c) => `${c.label} (${structureName(c.structureId)})`)
+                  .join('; ')}
+                .
+              </p>
+            ) : (
+              <p>
+                No competition has been set up for this league yet. Quick-start one below, or ask
+                your operator to set one up in the season wizard.
+              </p>
+            )}
+            <HelpLink topic="blocks-vs-stages" />
+          </div>
+        )}
+
+        {league && !bound ? (
+          <QuickStartForm
+            key={league.key}
+            clubs={clubs}
+            league={league}
+            config={config}
+            onStarted={onSeasonSetupChanged}
+            onClose={onClose}
+          />
+        ) : (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Btn tone="teal" onClick={submit} disabled={!league && leagueKey !== AD_HOC}>
+              Continue
+            </Btn>
+            <Btn tone="ghost" onClick={onClose}>
+              Cancel
+            </Btn>
+          </div>
+        )}
       </div>
     </Modal>
   );
@@ -1643,41 +2042,47 @@ function EntrantConfirmForm({
     }
   }
 
+  // The prefill carried only the top q of each earlier group (`qualifiersPerGroup`), so a
+  // side missing from the form is one that did not qualify, not one the platform lost.
+  const qualifiers = note?.qualifiersPerGroup;
+  const trimmedPrefill =
+    Number.isInteger(qualifiers) &&
+    (qualifiers as number) > 0 &&
+    materialisation.status === 'awaiting-entrants' &&
+    !stageRun?.groups?.length &&
+    suggested.length > 0;
+  const whyAsked = (
+    <p className="sr-why">
+      <span className="sr-callout-k">Why you&apos;re asked:</span> The platform does not record
+      results, so the finishing order is typed by you and recorded against your name.{' '}
+      <HelpLink topic="standings-typed-by-human" />
+    </p>
+  );
+
   return (
     <div>
       {note && (
-        <div
-          style={{
-            border: '1px solid var(--line)',
-            borderLeft: '3px solid var(--brand-primary, #16332B)',
-            borderRadius: 8,
-            padding: '10px 12px',
-            marginBottom: 14,
-            fontSize: 13,
-            lineHeight: 1.55,
-          }}
-        >
-          <strong>The rule:</strong> {note.detail}
+        <div className="sr-callout" style={{ marginBottom: 16 }}>
+          <p>
+            <span className="sr-callout-k">The rule:</span> {note.detail}
+          </p>
           {note.carryPoints && (
-            <div style={{ ...HINT, marginTop: 6 }}>
+            <p className="sr-callout-sub">
               Points move with the position, not the team — enter the points each side takes on.
-            </div>
+            </p>
           )}
+          {trimmedPrefill && (
+            <p className="sr-callout-sub">
+              Prefilled with the top {qualifiers} of each group; sides that did not qualify are not
+              re-added.
+            </p>
+          )}
+          {whyAsked}
         </div>
       )}
 
       {ranked && (
-        <div
-          style={{
-            border: '1px solid var(--line)',
-            borderLeft: '3px solid var(--accent, #C9A227)',
-            borderRadius: 8,
-            padding: '10px 12px',
-            marginBottom: 14,
-            fontSize: 13,
-            lineHeight: 1.55,
-          }}
-        >
+        <div className="sr-callout" style={{ marginBottom: 16 }}>
           {rankedReason === 'seeding' ? (
             <>
               <strong>Seeded knockout.</strong> Position 1 is the top seed — set each side&apos;s
@@ -1690,59 +2095,42 @@ function EntrantConfirmForm({
               side&apos;s finishing position, not just which group it was in.
             </>
           )}
+          {!note && whyAsked}
         </div>
       )}
 
       {pairing && (
-        <fieldset
-          style={{
-            border: '1px solid var(--line)',
-            borderRadius: 8,
-            padding: '10px 12px',
-            margin: '0 0 14px',
-          }}
-        >
-          <legend style={{ fontSize: 12.5, fontWeight: 700, padding: '0 4px' }}>
-            Semi-final pairing
-          </legend>
-          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5 }}>
-            {(
-              [
-                ['default', `Structure default (${PAIRING_LABELS[pairing.structureDefault]})`],
-                ['cross-pool', 'Cross-group'],
-                ['within-pool', 'Within-group'],
-                ['seeded', 'Seeded over the full field'],
-              ] as const
-            ).map(([value, label]) => {
-              const disabled = value === 'within-pool' && withinRefused;
-              return (
-                <label
-                  key={value}
-                  title={
-                    disabled
-                      ? 'Within-group needs 2, 4, 8… groups, each sending the same number (2, 4, 8…) of qualifiers'
-                      : undefined
-                  }
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    cursor: disabled ? 'not-allowed' : 'pointer',
-                    opacity: disabled ? 0.55 : 1,
-                  }}
-                >
-                  <input
-                    type="radio"
-                    name={pairingName}
-                    checked={pairingChoice === value}
-                    disabled={disabled}
-                    onChange={() => setPairingChoice(value)}
-                  />
-                  {label}
-                </label>
-              );
-            })}
-          </div>
+        <fieldset className="sr-pairing">
+          <legend>Semi-final pairing</legend>
+          <OptionCards<KnockoutPairing | 'default'>
+            name={pairingName}
+            label="Semi-final pairing"
+            compact
+            value={pairingChoice}
+            onChange={setPairingChoice}
+            options={[
+              {
+                value: 'default',
+                title: `Structure default (${PAIRING_LABELS[pairing.structureDefault]})`,
+                desc: PAIRING_DIAGRAMS[pairing.structureDefault],
+              },
+              { value: 'cross-pool', title: 'Cross-group', desc: PAIRING_DIAGRAMS['cross-pool'] },
+              {
+                value: 'within-pool',
+                title: 'Within-group',
+                desc: PAIRING_DIAGRAMS['within-pool'],
+                disabled: withinRefused,
+                disabledReason:
+                  'Needs 2, 4, 8… groups, each sending the same number (2, 4, 8…) of qualifiers.',
+              },
+              {
+                value: 'seeded',
+                title: 'Seeded over the full field',
+                desc: PAIRING_DIAGRAMS.seeded,
+              },
+            ]}
+          />
+          <FieldGuide id="semi-final-pairing" />
           <p style={HINT}>
             Applies to this season only — the structure keeps its default for the next one.
             {withinRefused &&
@@ -1761,6 +2149,13 @@ function EntrantConfirmForm({
             </div>
           )}
         </fieldset>
+      )}
+
+      {/* Once, above the table — not in every row. */}
+      {ranked && (
+        <div className="sr-position-guide">
+          <FieldGuide id="position-column" />
+        </div>
       )}
 
       <div className="tbl-w" style={{ maxHeight: 420, overflowY: 'auto' }}>
@@ -1911,7 +2306,7 @@ function EntrantConfirmForm({
         <Btn tone="teal" onClick={submit} disabled={!!problems.length || busy}>
           {busy ? 'Confirming…' : 'Confirm entrants'}
         </Btn>
-        <Btn tone="outline" onClick={onCancel}>
+        <Btn tone="ghost" onClick={onCancel}>
           Cancel
         </Btn>
       </div>
@@ -1930,6 +2325,8 @@ function StageCard({
   stageSeries,
   feederSeries,
   registered,
+  calendar,
+  narrative,
   onConfirm,
   onGenerate,
   busy,
@@ -1937,6 +2334,10 @@ function StageCard({
   /** The EFFECTIVE stage — the run's `pairingOverride` already applied. */
   stage: StageSpec;
   index: number;
+  /** The run's frozen calendar — where "Plays in Block N" reads its dates from. */
+  calendar: SeasonCalendar;
+  /** This stage's sentence from `describeStructure` over the run's snapshot. */
+  narrative?: string;
   stageRun: StageRun | undefined;
   materialisation: StageMaterialisation;
   seriesById: (id: string) => Series | undefined;
@@ -2061,6 +2462,49 @@ function StageCard({
     else onGenerate();
   }
 
+  // Where the stage is in its life: Awaiting entrants → Ready → Generated → Released.
+  // Released means every group's series is out; a partly released stage is still Generated.
+  const awaiting = materialisation.status === 'awaiting-entrants';
+  const releasedAll =
+    generated &&
+    ready &&
+    materialisation.groups.length > 0 &&
+    materialisation.groups.every((g) => !!linkedFor(g.id)?.released);
+  const currentStep = awaiting ? 0 : !generated ? 1 : releasedAll ? 3 : 2;
+  const asked = whatYouWillBeAsked(stage);
+  const stepHints = [
+    asked,
+    'Generate to create the fixtures',
+    'Approve and release from the Fixtures list',
+    undefined,
+  ];
+  const timeline: StatusStep[] = ['Awaiting entrants', 'Ready', 'Generated', 'Released'].map(
+    (label, i) => ({
+      label,
+      state: i < currentStep ? 'done' : i === currentStep ? 'current' : 'todo',
+      hint: i === currentStep ? stepHints[i] : undefined,
+    }),
+  );
+
+  // "Plays in Block 2 (After the break) · 16 Jan → 27 Mar 2027": the planned dates once
+  // the stage has groups to plan, else the block's own dates.
+  const blockNo = stage.schedule.blockIndex + 1;
+  const block = findBlock(calendar, stage.schedule.blockIndex);
+  const planned = ready
+    ? materialisation.groups.flatMap((g) => g.plan.dates).sort()
+    : ([] as string[]);
+  const span = planned.length
+    ? [planned[0], planned[planned.length - 1]]
+    : block
+      ? [block.start, block.end]
+      : null;
+  const blockLabel = block?.label?.trim();
+  const playsIn = `Plays in Block ${blockNo}${
+    blockLabel && blockLabel !== `Block ${blockNo}` ? ` (${blockLabel})` : ''
+  }${span ? ` · ${formatIsoDate(span[0])} → ${formatIsoDate(span[1])}` : ''}${
+    block ? '' : ' · not on this season’s calendar'
+  }`;
+
   return (
     <div
       style={{
@@ -2080,20 +2524,14 @@ function StageCard({
         <h3 style={{ fontWeight: 700, fontSize: 14, margin: 0 }}>
           {stage.name} · {stageTitle(stage.format)}
         </h3>
-        {/* Stale before Generated: a generated stage whose pairing, schedule or feeder
-            moved is still 'generated' in the run, and a teal pill there contradicted the
-            coral line and the Regenerate button right below it. */}
+        {/* The timeline below carries the ordinary status; a pill appears only when
+            something needs attention. Stale before everything: a generated stage whose
+            pairing, schedule or feeder moved is still 'generated' in the run. */}
         {stale ? (
           <Pill tone="coral">Needs regenerating</Pill>
-        ) : generated ? (
-          <Pill tone="teal">Generated</Pill>
-        ) : ready && fits ? (
-          <Pill tone="muted">Ready to generate</Pill>
-        ) : ready ? (
+        ) : ready && !fits ? (
           <Pill tone="coral">Doesn’t fit</Pill>
-        ) : (
-          <Pill tone="muted">Awaiting entrants</Pill>
-        )}
+        ) : null}
         <InfoDot
           title="Stage status"
           options={[
@@ -2122,6 +2560,20 @@ function StageCard({
             },
           ]}
         />
+      </div>
+
+      <div className="sr-stage-tl">
+        <StatusTimeline steps={timeline} />
+      </div>
+      <div className="sr-stage-meta">
+        <p className="sr-stage-block">{playsIn}</p>
+        {narrative && <p>{narrative}</p>}
+        {/* While awaiting entrants the timeline's hint already says this. */}
+        {!awaiting && (
+          <p>
+            <span className="sr-stage-k">What the platform needs from you:</span> {asked}
+          </p>
+        )}
       </div>
 
       {materialisation.status === 'awaiting-entrants' ? (
@@ -2197,7 +2649,7 @@ function StageCard({
               — regenerate to bring the series into line.
             </p>
           )}
-          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' }}>
             {/* A GENERATED stage still offers Regenerate when its fixtures have drifted
                 from the series they produced — otherwise an upstream change leaves the
                 card showing one bracket and the clubs holding another, with no way back.
@@ -2214,14 +2666,17 @@ function StageCard({
                     : `${stale ? 'Regenerate' : 'Generate'} ${materialisation.totalFixtures} fixtures`}
               </Btn>
             )}
-            <Btn tone="outline" size="sm" onClick={onConfirm}>
+            <Btn tone="ghost" size="sm" onClick={onConfirm}>
               {generated ? 'Change entrants' : 'Edit entrants'}
             </Btn>
+            {stale && (
+              <HelpLink topic="what-regenerate-destroys">What regenerating replaces</HelpLink>
+            )}
           </div>
           {generated && (
             <p style={HINT}>
               Fixtures live as {materialisation.groups.length} series — approve and release them
-              from the list above.
+              from the Fixtures list.
             </p>
           )}
         </>
@@ -2254,6 +2709,9 @@ function StageCard({
               : `${releasedLinked.length} of this stage's series have been RELEASED`}{' '}
             — clubs and players have already been sent those fixtures. Regenerating replaces them
             with {totalFixtures} new ones and there is no undo.
+          </p>
+          <p style={{ margin: '0 0 12px' }}>
+            <HelpLink topic="what-regenerate-destroys">What regenerating replaces</HelpLink>
           </p>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
             <Btn tone="outline" size="sm" onClick={() => setConfirmRegen(false)}>
@@ -2447,7 +2905,7 @@ function StructureReviewModal({
       <p style={{ fontSize: 13, lineHeight: 1.6, margin: '0 0 12px' }}>
         This season runs v{fromVersion}; the structure is now v{live.version}. Applying it changes
         how this season&apos;s stages are set up — the fixtures only change where you regenerate
-        them.
+        them. <HelpLink topic="structure-versions-and-rebase" />
       </p>
       <div style={{ display: 'grid', gap: 8 }}>
         {changes.map((c) => (
@@ -2686,7 +3144,18 @@ export function SeasonRunsPanel({
     // `stages` are the EFFECTIVE specs (pairing overrides applied), index-aligned with
     // `structure.stages` and `materialisations`.
     const { stages, materialisations } = materialiseRun(active, participants);
-    return { league, competition, participants, structure, calendar, stages, materialisations };
+    // One sentence per stage, told from the run's own frozen structure and calendar.
+    const narratives = describeStructure(structure, calendar, participants.length);
+    return {
+      league,
+      competition,
+      participants,
+      structure,
+      calendar,
+      stages,
+      materialisations,
+      narratives,
+    };
   }, [active, allLeagues, clubs]);
 
   /** One generate payload per materialised group of `stage`, against `run`. */
@@ -2880,11 +3349,16 @@ export function SeasonRunsPanel({
             <EmptyState
               icon={Icon.Shield}
               title="No season running"
-              sub="Generate fixtures to work through a structured competition stage by stage, or to run a flat season for any other league."
+              sub="Start a season to work through a league's competition stage by stage."
               action={
-                <Btn tone="teal" icon={Icon.Plus} onClick={onOpenLauncher}>
-                  Start a season
-                </Btn>
+                <>
+                  <div className="sr-empty-hsw">
+                    <HowSeasonsWork compact />
+                  </div>
+                  <Btn tone="teal" icon={Icon.Plus} onClick={onOpenLauncher}>
+                    Start a season
+                  </Btn>
+                </>
               }
             />
           )}
@@ -2932,7 +3406,9 @@ export function SeasonRunsPanel({
         title="Seasons"
         sub="Each stage confirms who plays, then generates its fixtures. A stage whose teams depend on earlier results waits for you."
         action={
-          <Btn tone="teal" size="sm" icon={Icon.Plus} onClick={onOpenLauncher}>
+          // Outline, not filled: with a season on screen the stage cards' own buttons are
+          // the work, and a page has one filled button per surface.
+          <Btn tone="outline" size="sm" icon={Icon.Plus} onClick={onOpenLauncher}>
             Start a season
           </Btn>
         }
@@ -3000,7 +3476,7 @@ export function SeasonRunsPanel({
               >
                 <span style={{ flex: 1, minWidth: 220 }}>
                   This season runs structure v{active.structureSnapshot.version}; the template is
-                  now v{skew.version}.
+                  now v{skew.version}. <HelpLink topic="structure-versions-and-rebase" />
                 </span>
                 <Btn tone="outline" size="sm" onClick={() => setReviewing(skew)}>
                   Review changes
@@ -3024,6 +3500,8 @@ export function SeasonRunsPanel({
                   stageSeries={seriesOfStage(active.id, spec.id)}
                   feederSeries={feeder ? seriesOfStage(active.id, feeder.id) : undefined}
                   registered={runContext.participants.map((p) => p.teamId)}
+                  calendar={runContext.calendar}
+                  narrative={runContext.narratives[i]}
                   busy={busyStage === spec.id}
                   onConfirm={() => setConfirming({ run: active, stage: spec })}
                   onGenerate={async () => {

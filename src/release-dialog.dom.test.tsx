@@ -41,6 +41,24 @@ describe('ReleaseDialog', () => {
     expect(screen.queryByText(/notifications sent/i)).toBeNull();
   });
 
+  it('previews what clubs will see, live, as the withhold boxes change', async () => {
+    const { user } = setup();
+    const preview = () => screen.getByText(/^Clubs will see:/).parentElement!;
+
+    expect(preview()).toHaveTextContent('Clubs will see: dates and opponents, venues, start times');
+
+    await user.click(screen.getByRole('checkbox', { name: /withhold venues/i }));
+    expect(preview()).toHaveTextContent('Clubs will see: dates and opponents, start times');
+
+    await user.click(screen.getByRole('checkbox', { name: /withhold start times/i }));
+    expect(preview()).toHaveTextContent(/^Clubs will see: dates and opponents$/);
+
+    await user.click(screen.getByRole('checkbox', { name: /withhold venues/i }));
+    expect(preview()).toHaveTextContent('Clubs will see: dates and opponents, venues');
+    // The field guide explains what withholding does.
+    expect(screen.getByText(/Release the dates now, but hide grounds or start times/)).toBeTruthy();
+  });
+
   it('confirms with an empty mask when nothing is withheld', async () => {
     const { user, onConfirm } = setup();
     await user.click(releaseBtn());

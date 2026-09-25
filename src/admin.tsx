@@ -118,7 +118,12 @@ import type {
   Weekday,
   WithheldField,
 } from './types';
-import { SeasonRunsPanel, GenerateFixturesLauncher } from './season-run';
+import {
+  SeasonRunsPanel,
+  GenerateFixturesLauncher,
+  SeriesOriginPill,
+  seriesOrigin,
+} from './season-run';
 import { VenuesCard } from './venues-card';
 import { cqiBandTone, cqiBandRows, docComplianceRows, docTone } from './insights';
 import {
@@ -166,6 +171,7 @@ import {
   playerStatusPill,
   InfoDot,
   ScrollX,
+  FieldGuide,
 } from './atoms';
 
 /* ─── Local view-state shapes — explicit type params for `useState(null)` state that is
@@ -288,6 +294,8 @@ interface AdminFixturesProps {
   tenantConfig?;
   allLeagues?: League[];
   onCreateSeasonRun?;
+  /** Refetch the runs list and tenant config after the launcher's quick start. */
+  onSeasonSetupChanged?: () => Promise<unknown> | void;
   onPatchSeasonRun?;
   onDeleteSeasonRun?;
   onRebaseSeasonRun?;
@@ -372,6 +380,34 @@ export function seasonSummaryRows(allSeries: Series[]) {
   });
 }
 
+/**
+ * A series' release state as pills: Draft / Approved / Released, anything withheld from
+ * clubs, and — for a released series clubs can't see yet (juniors) — the date they will.
+ * Without that last one a released-but-hidden series reads as "Released" while clubs
+ * still see nothing, and gets reported as a bug.
+ */
+function SeriesStatusPills({ series: s }: { series: Series }) {
+  const activatesLater = !!s.activateFrom && !isActivated(s.activateFrom, todayIso());
+  return (
+    <>
+      {s.released ? (
+        <Pill tone="teal">Released</Pill>
+      ) : s.approved ? (
+        <Pill tone="gold">Approved</Pill>
+      ) : (
+        <Pill tone="muted">Draft</Pill>
+      )}
+      {s.released && s.withheld?.venue && <Pill tone="gold">Withheld venues</Pill>}
+      {s.released && s.withheld?.time && <Pill tone="gold">Withheld times</Pill>}
+      {activatesLater && (
+        <span title={`Hidden from clubs until ${formatIsoDate(s.activateFrom)}`}>
+          <Pill tone="muted">Activates {formatIsoDate(s.activateFrom)}</Pill>
+        </span>
+      )}
+    </>
+  );
+}
+
 export function AdminFixtures({
   clubs,
   allSeries,
@@ -397,6 +433,7 @@ export function AdminFixtures({
   tenantConfig,
   allLeagues = [],
   onCreateSeasonRun,
+  onSeasonSetupChanged,
   onPatchSeasonRun,
   onDeleteSeasonRun,
   onRebaseSeasonRun,
@@ -478,7 +515,8 @@ export function AdminFixtures({
   }
 
   // Release opens the ReleaseDialog (where venues/times can be withheld); recall and
-  // reveal use the shared .fix-confirm modal. Used by header, card, and bottom bar.
+  // reveal use the shared .fix-confirm modal. Dispatched from FixtureTable's release bar —
+  // the one place on the page these actions live.
   function askRelease(s) {
     setReleaseFor(s);
   }
@@ -544,6 +582,10 @@ export function AdminFixtures({
         <div className="ph-actions">
           <InfoDot title="Fixture actions" align="end">
             <p>
+              The pills show the selected series&apos; status. Approve, release, reveal and recall
+              are in the release bar under its fixtures.
+            </p>
+            <p>
               <strong>Generate fixtures</strong> — build a season’s schedule stage by stage, or a
               flat/ad-hoc series.
             </p>
@@ -571,39 +613,14 @@ export function AdminFixtures({
           <Btn tone="outline" icon={Icon.Plus} size="sm" onClick={() => setLauncherOpen(true)}>
             Generate fixtures
           </Btn>
-          {/* Primary CTA — always visible. State reflects the active series.
-              Release is gated on admin approval; approve first, then release. */}
-          {active &&
-            (active.released ? (
-              <>
-                {onReveal && active.withheld?.venue && (
-                  <Btn tone="teal" size="sm" onClick={() => reveal(active, 'venue')}>
-                    Reveal venues
-                  </Btn>
-                )}
-                {onReveal && active.withheld?.time && (
-                  <Btn tone="teal" size="sm" onClick={() => reveal(active, 'time')}>
-                    Reveal times
-                  </Btn>
-                )}
-                <Btn tone="outline" size="sm" onClick={() => askRecall(active)}>
-                  Recall release
-                </Btn>
-              </>
-            ) : active.approved ? (
-              <>
-                <Btn tone="outline" size="sm" onClick={() => unapprove(active)}>
-                  Withdraw approval
-                </Btn>
-                <Btn tone="teal" size="sm" icon={Icon.Arrow} onClick={() => askRelease(active)}>
-                  Release to clubs
-                </Btn>
-              </>
-            ) : (
-              <Btn tone="teal" size="sm" icon={Icon.Check} onClick={() => approve(active)}>
-                Approve fixtures
-              </Btn>
-            ))}
+          {/* Status only. Approve, release, reveal and recall live in ONE place — the
+              release bar under the active series' fixtures — so the page never offers the
+              same action twice. */}
+          {active && (
+            <span className="fix-head-status" title={`Status of ${active.name}`}>
+              <SeriesStatusPills series={active} />
+            </span>
+          )}
         </div>
       </div>
 
@@ -673,7 +690,7 @@ export function AdminFixtures({
         )
       ) : (
         <>
-          {/* Series cards strip — each card has its own quick release/recall button */}
+          {/* Series cards strip — status only; actions live in the release bar below */}
           <div className="series-strip">
             {allSeries.map((s) => {
               const agg = seriesAgg(s);
@@ -687,25 +704,7 @@ export function AdminFixtures({
                 >
                   <div className="series-card-head">
                     <div className="series-card-name">{s.name}</div>
-                    {/* A released-but-not-yet-active series (juniors) reads as "Released"
-                        everywhere else while clubs still can't see it — say so plainly, or
-                        an admin will report it as a bug. */}
-                    {s.released && !isActivated(s.activateFrom, todayIso()) ? (
-                      <div
-                        className="series-card-draft"
-                        title={`Released, but hidden from clubs until ${formatIsoDate(s.activateFrom)}`}
-                      >
-                        Hidden until {formatIsoDate(s.activateFrom)}
-                      </div>
-                    ) : s.released ? (
-                      <div className="series-card-released">Released</div>
-                    ) : (
-                      <div className="series-card-draft">Draft</div>
-                    )}
-                    {/* Withheld-field badges — a released series can hold back venues and/or
-                        times; both can coexist with the "Hidden until …" activation badge. */}
-                    {s.released && s.withheld?.venue && <Pill tone="gold">Venues withheld</Pill>}
-                    {s.released && s.withheld?.time && <Pill tone="gold">Times withheld</Pill>}
+                    <SeriesStatusPills series={s} />
                   </div>
                   <div
                     style={{
@@ -734,22 +733,13 @@ export function AdminFixtures({
                       </div>
                     </div>
                   </div>
-                  {/* Quick action — stops card click so it doesn't also switch tab */}
-                  <div className="series-card-cta" onClick={(e) => e.stopPropagation()}>
-                    {s.released ? (
-                      <button className="series-card-btn recall" onClick={() => askRecall(s)}>
-                        ↺ Recall draft
-                      </button>
-                    ) : s.approved ? (
-                      <button className="series-card-btn release" onClick={() => askRelease(s)}>
-                        Release to clubs →
-                      </button>
-                    ) : (
-                      <button className="series-card-btn release" onClick={() => approve(s)}>
-                        Approve fixtures ✓
-                      </button>
-                    )}
-                  </div>
+                  {seriesOrigin(s) && (
+                    // Its own click target: opening the explainer must not also switch
+                    // the active series underneath it.
+                    <div className="series-card-origin" onClick={(e) => e.stopPropagation()}>
+                      <SeriesOriginPill series={s} />
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -870,10 +860,7 @@ export function AdminFixtures({
             onCreateSeasonRun ||
             (() => Promise.reject(new Error('season-run creation is not wired for this host')))
           }
-          onGenerateStage={
-            onGenerateStageSeries ||
-            (() => Promise.reject(new Error('stage generation is not wired for this host')))
-          }
+          onSeasonSetupChanged={onSeasonSetupChanged}
           // No league prefill — every real league now starts a season (structured or
           // flat) through the launcher's own forms above. This embedded form is reached
           // ONLY via the ad-hoc option, where there is no league to prefill at all.
@@ -1742,7 +1729,7 @@ export function FixtureTable({
                 </Btn>
               )}
               <Btn tone="outline" onClick={() => onAskRecall?.(series)}>
-                Recall draft
+                Recall release
               </Btn>
             </>
           ) : series.approved ? (
@@ -2251,6 +2238,7 @@ function EditFixtureRow({
                       {clashMark('custom')}
                     </option>
                   </select>
+                  <FieldGuide id="venue-mode" />
                 </div>
                 <div className="fix-edit-field">
                   <label htmlFor={`${uid}-custom`}>Custom venue</label>
