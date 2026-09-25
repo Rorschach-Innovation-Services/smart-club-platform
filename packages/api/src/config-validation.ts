@@ -118,6 +118,8 @@ export const KNOCKOUT_PAIRINGS: ReadonlySet<string> = new Set([
   'within-pool',
 ]);
 const START_AFTER_KINDS = new Set(['previous-stage']);
+/** `CompetitionStructure.source` — provenance only; absent means operator-authored. */
+const STRUCTURE_SOURCES: ReadonlySet<string> = new Set(['operator', 'quick-start', 'migration']);
 
 /**
  * How many groups a stage declares. No group plan ⇒ the stage plays as one group, which
@@ -208,6 +210,8 @@ export function validateStructures(
       throw new HttpError(400, 'structure names must be 80 characters or fewer');
     if (!Number.isInteger(st.version) || st.version < 1)
       throw new HttpError(400, `"${name}" needs a whole version number of 1 or more`);
+    if (st.source !== undefined && !STRUCTURE_SOURCES.has(st.source))
+      throw new HttpError(400, `"${name}" has an unknown source`);
 
     if (!Array.isArray(st.stages) || st.stages.length === 0)
       throw new HttpError(400, `"${name}" needs at least one stage`);

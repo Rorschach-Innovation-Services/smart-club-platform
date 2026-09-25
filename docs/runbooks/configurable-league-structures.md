@@ -296,6 +296,64 @@ else changed the season. Refetch and review again.
 - **Calendars are not rebased.** A calendar edit still doesn't reach a running season's
   `calendarSnapshot`. Only standalone series follow a calendar edit on regenerate.
 
+## 8. Migrate flat runs (added 2026-09-25)
+
+Flat seasons used to be stored under a sentinel competition id, `__flat__`, with no
+competition, structure or (for custom dates) calendar in tenant config. Quick start replaces
+them (`POST /season-runs/quick-start`, see [docs/api/series.md](../api/series.md#quick-start)),
+and `POST /season-runs` now answers `400` to `__flat__`. Every run already stored under the
+sentinel has to be moved onto a real competition **before** a build that rejects `__flat__`
+is deployed. Otherwise the new client can't read, regenerate or rebase those runs.
+
+For each flat run, `scripts/migrate-flat-runs.ts`:
+
+- **Structure.** Mints one structure per run (`st-flat-<run id>`, version 1,
+  `templateId: flat-round-robin`, `source: migration`). It copies the run's own snapshot,
+  so stage `stage-1` and every schedule field stay as they are. The series'
+  `stageSpecId`, the run's stages and the series ids stay valid across a later rebase.
+- **Calendar.** Chooses a calendar in this order:
+  1. The snapshot's id is an operator calendar in config: reuse it.
+  2. Some config calendar has the same block dates: reuse it, and rewrite the run's
+     `calendarSnapshot.id` and its series' `schedule.calendarId` to that calendar.
+  3. Otherwise, append the snapshot as a calendar labelled with the run's season.
+
+  Custom-date flat runs of one league all used the id `cal-flat-<league>`. When two
+  seasons of one league have different dates, the second one gets `<id>-<run id>` instead.
+
+- **Competition.** Adds `cmp-flat-<run id>` to the run's league, labelled with the run's
+  series type. If the league no longer exists, the run is reported and skipped (it stays
+  on `__flat__`).
+- **Run.** Rewrites the run onto the new competition and structure, and drops
+  `flatFormat`.
+
+Before writing anything, the new config goes through the same calendar, structure and
+competition validators the operator route uses. If it fails them, that tenant is skipped
+and the reason is reported. Series and runs are written with version checks. A run changed
+mid-migration is reported, and re-running finishes it. The run is written last and marks
+the run as done, so a re-run after a crash picks up where it stopped. Once a tenant is fully
+migrated, a second run finds nothing.
+
+```bash
+# dev first. Dry-run prints a per-tenant table (run, league, calendar action, structure,
+# competition, series rewritten) and writes nothing.
+sst shell --stage dev -- npx tsx packages/api/scripts/migrate-flat-runs.ts
+sst shell --stage dev -- npx tsx packages/api/scripts/migrate-flat-runs.ts --confirm
+# A second run should report "0 of 0 flat run(s)" unless some runs were skipped (e.g. a deleted league).
+sst shell --stage dev -- npx tsx packages/api/scripts/migrate-flat-runs.ts
+
+# Then prod, the same three steps. Do this BEFORE deploying the build that rejects __flat__.
+sst shell --stage prod -- npx tsx packages/api/scripts/migrate-flat-runs.ts
+sst shell --stage prod -- npx tsx packages/api/scripts/migrate-flat-runs.ts --confirm
+```
+
+Read the dry-run's skipped list before you confirm. Skipped runs stay on `__flat__`, and a
+client that no longer understands the sentinel can't show them properly. Either restore the
+league or delete the run.
+
+**Calendar delete guard.** After migration, the operator portal refuses to delete a calendar
+while a season run's `calendarSnapshot.id` still names it (`409 "N season runs were started
+on …"`). It already refused while a series was scheduled against it.
+
 ## Known limitations to communicate
 
 - **Standings are typed by a human.** There is no results model, so a stage that depends on

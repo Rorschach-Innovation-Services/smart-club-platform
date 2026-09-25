@@ -2574,6 +2574,44 @@ describe('season calendars (ADR 0008)', () => {
     assert.equal(res.status, 200);
     assert.deepEqual((await repo.getTenantConfig(T))?.calendars, []);
   });
+
+  // A run snapshots its calendar, so deleting the live one can't reshape it — but the
+  // snapshot's id is how the run's series and competition name it, so a calendar a season
+  // was started on is guarded like one a series is scheduled against.
+  test('deleting a calendar a season run was started on is blocked', async () => {
+    assert.equal((await putCalendars([validCalendar()])).status, 200);
+    await repo.putSeasonRun(T, {
+      id: 'cal-bound-run',
+      leagueKey: 'premier-men',
+      competitionId: 'comp-1',
+      seasonLabel: '2026/27',
+      structureSnapshot: {
+        id: 'st-x',
+        name: 'Flat',
+        version: 1,
+        stages: [
+          {
+            id: 'stage-1',
+            name: 'League',
+            format: { kind: 'round-robin', legs: 1 },
+            entrants: { kind: 'all-registered' },
+            schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+          },
+        ],
+      },
+      calendarSnapshot: validCalendar(),
+      stages: [],
+      version: 1,
+    });
+
+    const res = await putCalendars([]);
+    assert.equal(res.status, 409);
+    assert.match(await errorOf(res), /1 season run was started on "2026\/27"/);
+    assert.equal((await repo.getTenantConfig(T))?.calendars?.length, 1, 'calendar survives');
+
+    await repo.deleteSeasonRun(T, 'cal-bound-run');
+    assert.equal((await putCalendars([])).status, 200, 'unguarded once the run is gone');
+  });
 });
 
 /**

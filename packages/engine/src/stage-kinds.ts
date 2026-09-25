@@ -3,7 +3,7 @@
  *
  * One registry per control — format, teams, cadence — so the operator console's option
  * lists, the "(i)" explainers and the season narrative all quote the same sentences.
- * Source: docs/guides/league-structures-tutorial.html, Parts One and Four.
+ * Source: public/guides/league-structures-tutorial.html, Parts One and Four.
  *
  * Vocabulary: a calendar date range is a BLOCK; a phase of play is a STAGE; teams split
  * into GROUPS (never "pools" in copy — `pairing: 'cross-pool'` is a stored value, not a

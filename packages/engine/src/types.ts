@@ -247,6 +247,12 @@ export interface CompetitionStructure {
   version: number;
   /** Provenance only — which starter template this was cloned from, if any. */
   templateId?: string;
+  /**
+   * Who authored it: an operator (portal/wizard), an admin's quick start (the server
+   * instantiated a template on their behalf), or the flat-run migration. Absent ⇒
+   * `operator`, the pre-existing meaning. Provenance only, like `templateId`.
+   */
+  source?: 'operator' | 'quick-start' | 'migration';
   stages: StageSpec[];
 }
 

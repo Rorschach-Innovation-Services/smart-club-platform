@@ -16,7 +16,14 @@
  * Only the fetch boundary is stubbed; the real request() pipeline runs.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ApiError, getMe, getTenant, setAuthLostHandler, setTokenProvider } from './api';
+import {
+  ApiError,
+  getMe,
+  getTenant,
+  quickStartSeason,
+  setAuthLostHandler,
+  setTokenProvider,
+} from './api';
 
 const SESSION_EXPIRED = 'Your session has expired — please sign in again.';
 
@@ -111,5 +118,29 @@ describe('request auth contract', () => {
     expect(err.message).toBe('missing bearer token');
     const [, init] = (fetch as any).mock.calls[0];
     expect(init.headers.authorization).toBeUndefined();
+  });
+});
+
+describe('quickStartSeason', () => {
+  it('POSTs the request body to /season-runs/quick-start and returns the server payload', async () => {
+    const payload = {
+      run: { id: 'run-1' },
+      competitionId: 'cmp_1',
+      structureId: 'st_1',
+      calendarId: 'cal_1',
+    };
+    (fetch as any).mockResolvedValueOnce(okResponse(payload));
+    const body = {
+      leagueKey: 'premier-men',
+      templateId: 'flat-round-robin',
+      seasonLabel: '2026/27',
+      calendar: { label: '2026/27', start: '2026-09-13', end: '2027-03-28' },
+    };
+    const res = await quickStartSeason(body);
+    const [url, init] = (fetch as any).mock.calls[0];
+    expect(new URL(url).pathname).toBe('/season-runs/quick-start');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual(body);
+    expect(res).toEqual(payload);
   });
 });

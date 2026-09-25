@@ -202,3 +202,17 @@ describe('back-compat: structures saved before these fields existed', () => {
       'two stages sharing a block without chaining — the old overlap is still expressible',
     ));
 });
+
+describe('source (provenance)', () => {
+  test('each known source is accepted, and absent still validates', () => {
+    for (const source of ['operator', 'quick-start', 'migration'] as const)
+      assert.doesNotThrow(() => validateStructures([{ ...structure([pools()]), source }]));
+    accepts([pools()], 'no source ⇒ operator, the pre-existing meaning');
+  });
+  test('an unknown source is rejected', () =>
+    assert.throws(
+      () =>
+        validateStructures([{ ...structure([pools()]), source: 'admin' as unknown as 'operator' }]),
+      (err: unknown) => err instanceof HttpError && /unknown source/.test(err.message),
+    ));
+});

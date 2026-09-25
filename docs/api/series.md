@@ -32,15 +32,69 @@ flight — the same defensive snapshotting `Series.participants` uses for team i
 Both are **stripped from PATCH** rather than rejected, so a client round-tripping a whole
 run object doesn't get a confusing 400.
 
-| Route                     | Auth  | Notes                                                                                                                                                                                                                                                          |
-| ------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /season-runs`        | admin | `200 → SeasonRun[]`. Admin-only: the frozen `structureSnapshot` embeds each stage's `schedule.slots` (kick-off times a series may withhold, ADR 0011), and the only caller is the admin-gated console. Reps read fixtures through the projected `GET /series`. |
-| `POST /season-runs`       | admin | Requires `id`, `leagueKey`, `seasonLabel` and both snapshots. Sets `version: 1`, stamps `createdAt`/`createdBy`. `409` on a duplicate id — never silently overwrite a live season.                                                                             |
-| `GET /season-runs/:id`    | admin | `200 → SeasonRun` · `404`. Admin-only for the same reason as the list: the frozen `structureSnapshot` embeds each stage's `schedule.slots`. Reps read fixtures through the projected `GET /series`.                                                            |
-| `PATCH /season-runs/:id`  | admin | Partial update — stage status, group entrants, `carriedPoints`, audit entries. Send the current `version`; mismatch → `409 "season run changed; refetch"`. Two admins resolving the same stage is a real scenario.                                             |
-| `DELETE /season-runs/:id` | admin | `200 → { ok: true }`. **Does not delete the series its stages produced** — those are real, possibly-released fixtures clubs have seen. Orphaning a back-pointer is recoverable; deleting a published schedule is not.                                          |
+| Route                           | Auth  | Notes                                                                                                                                                                                                                                                                            |
+| ------------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /season-runs`              | admin | `200 → SeasonRun[]`. Admin-only: the frozen `structureSnapshot` embeds each stage's `schedule.slots` (kick-off times a series may withhold, ADR 0011), and the only caller is the admin-gated console. Reps read fixtures through the projected `GET /series`.                   |
+| `POST /season-runs`             | admin | Requires `id`, `leagueKey`, `seasonLabel` and both snapshots. Sets `version: 1`, stamps `createdAt`/`createdBy`. `409` on a duplicate id — never silently overwrite a live season. `400 "flat seasons are no longer supported; use quick start"` on `competitionId: "__flat__"`. |
+| `POST /season-runs/quick-start` | admin | Start a season for a league with no competition bound: the server writes calendar + structure + binding, then creates the run. See [Quick start](#quick-start) below.                                                                                                            |
+| `GET /season-runs/:id`          | admin | `200 → SeasonRun` · `404`. Admin-only for the same reason as the list: the frozen `structureSnapshot` embeds each stage's `schedule.slots`. Reps read fixtures through the projected `GET /series`.                                                                              |
+| `PATCH /season-runs/:id`        | admin | Partial update — stage status, group entrants, `carriedPoints`, audit entries. Send the current `version`; mismatch → `409 "season run changed; refetch"`. Two admins resolving the same stage is a real scenario.                                                               |
+| `DELETE /season-runs/:id`       | admin | `200 → { ok: true }`. **Does not delete the series its stages produced** — those are real, possibly-released fixtures clubs have seen. Orphaning a back-pointer is recoverable; deleting a published schedule is not.                                                            |
 
 Season runs are swept by tenant erasure and by cohort clearing, like series.
+
+### Quick start
+
+`POST /season-runs/quick-start` lets an admin start a season for a league with no
+competition bound. The admin names a template, and the server builds and stores the
+structure. Admins never send a structure body: structures stay operator-authored (ADR 0006),
+and this route applies the operator's templates for them.
+
+```jsonc
+{
+  "leagueKey": "premier-men",
+  "templateId": "pools-to-knockout", // must be in STRUCTURE_TEMPLATES
+  "seasonLabel": "2026/27",
+  "calendar": { "id": "cal-2627" }, // or { "label": "2026/27", "start": "2026-09-13", "end": "2027-03-28" }
+  "matchFormat": { "label": "T20", "overs": 20, "ballType": "Pink" }, // optional
+  "placement": [0, 1], // optional: one block position per template stage
+}
+```
+
+It runs these steps in one handler:
+
+1. **Calendar.** `{ id }` must already be in config. New dates become
+   `{ id: <server id>, label, blocks: [{ id: "b1", label: "Season", start, end }] }` and are
+   appended to config.
+2. **Structure.** The server instantiates the template against that calendar and names it
+   `"<league label> · <template name>"`. It gets `version: 1` and `source: "quick-start"`.
+   `placement` wins over the default placement. A stage in the same block as the stage
+   before it chains after it (`startAfter: "previous-stage"`).
+3. **Competition.** `{ id, label: matchFormat.label ?? template name, matchFormat,
+structureId, calendarId }` is appended to the league.
+4. **Config write.** Config is written through the same function `PUT /platform/tenants/:slug`
+   uses, so all of that route's validators and referrer guards run here too.
+5. **Run.** The run is created exactly as `POST /season-runs` creates one, with snapshots
+   of the structure and calendar that were just written. Every stage starts as
+   `awaiting-entrants`.
+
+| Status | When                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `201`  | `{ run, competitionId, structureId, calendarId }`                                                                                                                                                                                                                                                                                                                                                   |
+| `400`  | Any of these: the template is missing or unknown; `seasonLabel` is blank; the league is unknown; the calendar has the wrong shape or an unknown id; a date is not strict `YYYY-MM-DD`; the end is before the start; `placement` doesn't give each stage an integer inside the calendar's blocks; `matchFormat` is malformed; or a config validator rejects the result (e.g. the 20-calendar limit). |
+| `403`  | The caller is not an admin.                                                                                                                                                                                                                                                                                                                                                                         |
+| `409`  | The league already has a competition on that calendar (start the season from that competition through the normal path), or a run with the same `leagueKey` + `seasonLabel` already exists.                                                                                                                                                                                                          |
+| `500`  | The config write succeeded but the run write failed (see below).                                                                                                                                                                                                                                                                                                                                    |
+
+**Not atomic.** Config and the run are two items, and the config write lands first. If the
+run write then fails, the competition exists with no season. The response is a `500` whose
+message names the new competition id, and the failure is logged and sent to Sentry. The
+admin then starts the season from that competition through the normal Start a season path.
+
+**`CompetitionStructure.source`** records who authored a structure: `operator`,
+`quick-start` or `migration` (the flat-run migration). Absent means `operator`, as before.
+It is provenance only, like `templateId`. The operator PUT validates it against that enum
+and never strips it.
 
 ## Venues & allocation
 
