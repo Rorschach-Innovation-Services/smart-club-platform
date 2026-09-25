@@ -13,9 +13,21 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { useState } from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { BoundedNumber } from './atoms';
+import {
+  BoundedNumber,
+  FieldGuide,
+  HowSeasonsWork,
+  InfoDot,
+  NextSteps,
+  OptionCards,
+  StatusTimeline,
+  type OptionCard,
+  type StatusStep,
+} from './atoms';
+import { InfoTip } from './platform-wizard';
+import { FIELD_GUIDES } from './help/field-guides';
 
 /** A realistic host: the component is controlled, so the parent owns the value. */
 function Host({
@@ -161,5 +173,179 @@ describe('BoundedNumber', () => {
 
     expect(box()).toHaveFocus();
     expect(box()).toHaveValue(123);
+  });
+});
+
+/* ─── Explainer components ─── */
+
+type Cadence = 'weekly' | 'every-n' | 'spread';
+
+const CADENCE_OPTIONS: OptionCard<Cadence>[] = [
+  { value: 'weekly', title: 'Weekly', desc: 'One round a week.', eg: 'Every Sunday' },
+  { value: 'every-n', title: 'Every N weeks', desc: 'One round every few weeks.' },
+  {
+    value: 'spread',
+    title: 'Spread evenly',
+    desc: 'Rounds spaced to the block end.',
+    disabled: true,
+    disabledReason: 'Needs a block end date first.',
+  },
+];
+
+function CadenceHost({ onChange }: { onChange?: (v: Cadence) => void }) {
+  const [value, setValue] = useState<Cadence>('weekly');
+  return (
+    <OptionCards
+      name="cadence"
+      label="Cadence"
+      value={value}
+      onChange={(v) => {
+        setValue(v);
+        onChange?.(v);
+      }}
+      options={CADENCE_OPTIONS}
+    />
+  );
+}
+
+describe('OptionCards', () => {
+  it('selects a card when it is clicked anywhere', async () => {
+    const user = userEvent.setup();
+    render(<CadenceHost />);
+
+    await user.click(screen.getByText('One round every few weeks.'));
+
+    expect(screen.getByRole('radio', { name: /every n weeks/i })).toBeChecked();
+    expect(screen.getByRole('radio', { name: /^weekly/i })).not.toBeChecked();
+  });
+
+  it('moves the selection with the arrow keys, as native radios do', async () => {
+    const user = userEvent.setup();
+    render(<CadenceHost />);
+
+    await user.tab();
+    expect(screen.getByRole('radio', { name: /^weekly/i })).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+
+    expect(screen.getByRole('radio', { name: /every n weeks/i })).toBeChecked();
+  });
+
+  it('shows the example and the reason a card is unavailable', () => {
+    render(<CadenceHost />);
+    expect(screen.getByText('e.g. Every Sunday')).toBeInTheDocument();
+    expect(screen.getByText('Needs a block end date first.')).toBeInTheDocument();
+  });
+
+  it('does not select a disabled card', async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<CadenceHost onChange={onChange} />);
+
+    await user.click(screen.getByText('Spread evenly'));
+
+    expect(screen.getByRole('radio', { name: /spread evenly/i })).toBeDisabled();
+    expect(screen.getByRole('radio', { name: /spread evenly/i })).not.toBeChecked();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('StatusTimeline', () => {
+  const steps: StatusStep[] = [
+    { label: 'Draft', state: 'done' },
+    { label: 'Approved', state: 'current', hint: 'Release when grounds are settled' },
+    { label: 'Released', state: 'todo', hint: 'Never shown' },
+  ];
+
+  it('names every step and its state for assistive tech', () => {
+    render(<StatusTimeline steps={steps} />);
+    expect(
+      screen.getByRole('list', {
+        name: 'Draft: done, Approved: current, Released: not started',
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it('marks the current step and shows only its hint', () => {
+    render(<StatusTimeline steps={steps} />);
+    const current = screen.getByText('Approved').closest('li');
+    expect(current).toHaveAttribute('aria-current', 'step');
+    expect(screen.getByText('Release when grounds are settled')).toBeInTheDocument();
+    expect(screen.queryByText('Never shown')).not.toBeInTheDocument();
+  });
+});
+
+describe('NextSteps', () => {
+  it('numbers the steps in order', () => {
+    render(
+      <NextSteps
+        steps={[
+          { title: 'Confirm teams', desc: 'Check the sides in each group.' },
+          { title: 'Generate', desc: 'Make the fixtures.' },
+          { title: 'Release', desc: 'Clubs see them.' },
+        ]}
+      />,
+    );
+    const items = screen.getAllByRole('listitem');
+    expect(items.map((li) => li.textContent)).toEqual([
+      '1Confirm teamsCheck the sides in each group.',
+      '2GenerateMake the fixtures.',
+      '3ReleaseClubs see them.',
+    ]);
+  });
+});
+
+describe('FieldGuide', () => {
+  it('renders the meaning, use, example and convention for a field', () => {
+    render(<FieldGuide id="block-dates" />);
+    expect(screen.getByText(FIELD_GUIDES['block-dates'].meaning)).toBeInTheDocument();
+    expect(screen.getByText(/Every stage in the block plans its rounds/)).toBeInTheDocument();
+    expect(screen.getByText('e.g. Block 1: 2026-09-13 to 2026-12-13.')).toBeInTheDocument();
+    expect(screen.getByText(/Dates are YYYY-MM-DD/)).toBeInTheDocument();
+  });
+});
+
+describe('HowSeasonsWork', () => {
+  it('shows the pipeline and the four ideas', () => {
+    render(<HowSeasonsWork />);
+    const nodes = within(screen.getByRole('list', { name: /how a season is put together/i }))
+      .getAllByRole('listitem')
+      .map((li) => li.textContent);
+    expect(nodes).toEqual(['Competition', 'Season', 'Stage', 'Group', 'Fixtures']);
+    expect(screen.getAllByRole('heading', { level: 4 })).toHaveLength(4);
+    expect(screen.getByText(/The operator builds the shape once/)).toBeInTheDocument();
+  });
+
+  it('compact mode links to the blocks-and-stages explainer', () => {
+    render(<HowSeasonsWork compact />);
+    expect(screen.queryAllByRole('heading', { level: 4 })).toHaveLength(0);
+    expect(screen.getByRole('link', { name: /how does this work/i })).toBeInTheDocument();
+  });
+});
+
+describe('InfoTip is InfoDot', () => {
+  it('is the same component', () => {
+    expect(InfoTip).toBe(InfoDot);
+  });
+
+  it('keeps only one popover open at a time across both names', async () => {
+    const user = userEvent.setup();
+    render(
+      <div>
+        <InfoDot title="Cadence">How often rounds are played.</InfoDot>
+        <InfoTip label="About seeding">Strongest side first.</InfoTip>
+      </div>,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Cadence' }));
+    expect(screen.getByRole('tooltip')).toHaveTextContent('How often rounds are played.');
+
+    await user.click(screen.getByRole('button', { name: 'About seeding' }));
+    const pops = screen.getAllByRole('tooltip');
+    expect(pops).toHaveLength(1);
+    expect(pops[0]).toHaveTextContent('Strongest side first.');
+    expect(screen.getByRole('button', { name: 'Cadence' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
   });
 });
