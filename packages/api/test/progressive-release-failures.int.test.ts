@@ -230,7 +230,9 @@ describe('(2) release requires approval — withheld is not stored on the 400', 
       version: await ver('s2-noappr'),
     });
     assert.equal(res.status, 400);
-    assert.match(((await res.json()) as { error: string }).error, /fixtures must be approved/);
+    const body = (await res.json()) as { error: string; code?: string };
+    assert.match(body.error, /fixtures must be approved/);
+    assert.equal(body.code, 'not_approved');
     const stored = await repo.getSeries('dolphins', 's2-noappr');
     assert.equal(stored!.released, false, 'not released');
     assert.equal(stored!.withheld, undefined, 'withheld never persisted on the rejected release');

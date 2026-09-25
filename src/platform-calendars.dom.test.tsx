@@ -309,12 +309,17 @@ describe('CalendarsCard — deleting a bound calendar cascades to its competitio
     expect(patch.leagues[0].competitions[0]).toMatchObject({ id: 'c2', calendarId: 'cal2' });
   });
 
-  it('surfaces a save rejection via toast and deletes nothing locally', async () => {
+  it('shows a refused delete inside the confirm box, which stays open, and deletes nothing', async () => {
     // The series-scheduled guard: the server 409s rather than orphan a running series.
     const bound = cal({ id: 'cal1', label: 'Cal 1' });
     const save = vi
       .fn()
-      .mockRejectedValue(new ApiError(409, 'A series already schedules against this calendar.'));
+      .mockRejectedValue(
+        new ApiError(
+          409,
+          '1 series is scheduled against "Cal 1" — reschedule it before deleting the calendar',
+        ),
+      );
     const toast = vi.fn();
     const user = userEvent.setup();
     const config = { calendars: [bound] } as unknown as TenantConfig;
@@ -325,7 +330,16 @@ describe('CalendarsCard — deleting a bound calendar cascades to its competitio
     await user.click(within(screen.getByRole('row', { name: /cal 1/i })).getByText(/delete/i));
     await user.click(screen.getByRole('button', { name: /yes, delete/i }));
 
-    expect(toast).toHaveBeenCalledWith('A series already schedules against this calendar.', 'warn');
+    // Inline, where the operator is looking — not a toast that vanishes.
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '1 series is scheduled against "Cal 1" — reschedule it before deleting the calendar',
+    );
+    expect(toast).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /yes, delete/i })).toBeInTheDocument();
+    // Cancel clears it: reopening the box starts clean.
+    await user.click(screen.getByRole('button', { name: /cancel/i }));
+    await user.click(within(screen.getByRole('row', { name: /cal 1/i })).getByText(/delete/i));
+    expect(screen.queryByRole('alert')).toBeNull();
     // Nothing removed locally — the calendar's row is still there.
     expect(screen.getByRole('row', { name: /cal 1/i })).toBeInTheDocument();
   });

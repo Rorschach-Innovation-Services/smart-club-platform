@@ -120,7 +120,8 @@ const SESSION_EXPIRED = 'Your session has expired — please sign in again.';
 // withToast (main.tsx) and ReleaseDialog match one source instead of duplicating the
 // literals (ADR 0011).
 export const SERIES_CONFLICT_MESSAGE = 'series changed; refetch';
-export const SERIES_CONFLICT_FRIENDLY = 'Someone else just changed this — refreshing.';
+export const SERIES_CONFLICT_FRIENDLY =
+  'Someone else changed this at the same time. It has been refreshed — try again.';
 
 export class ApiError extends Error {
   status: number;

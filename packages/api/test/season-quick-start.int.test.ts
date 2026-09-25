@@ -82,6 +82,7 @@ const quickStart = (body: unknown, auth = ADMIN) =>
   });
 
 const errorOf = async (res: Response) => ((await res.json()) as { error: string }).error;
+const codeOf = async (res: Response) => ((await res.json()) as { code?: string }).code;
 
 interface QuickStartResponse {
   run: SeasonRun;
@@ -216,6 +217,12 @@ describe('POST /season-runs/quick-start — guards', () => {
       const res = await quickStart({ ...valid, calendar });
       assert.equal(res.status, 400, JSON.stringify(calendar));
     }
+    // The date refusals are coded so the console can say how to type a date.
+    for (const calendar of [
+      { label: 'X', start: '2030-02-31', end: '2031-03-31' },
+      { label: 'X', start: '2031-03-31', end: '2030-09-01' },
+    ])
+      assert.equal(await codeOf(await quickStart({ ...valid, calendar })), 'invalid_dates');
   });
 
   test('placement must be one in-range whole number per stage', async () => {
@@ -228,10 +235,9 @@ describe('POST /season-runs/quick-start — guards', () => {
       );
     // The message describes the 0-based check it made, not 1-based block labels.
     const res = await quickStart({ ...pools, placement: [0, 2] });
-    assert.match(
-      ((await res.json()) as { error: string }).error,
-      /each stage's block must be between 0 and 1 \(0 = first block\)$/,
-    );
+    const body = (await res.json()) as { error: string; code?: string };
+    assert.match(body.error, /each stage's block must be between 0 and 1 \(0 = first block\)$/);
+    assert.equal(body.code, 'bad_placement');
   });
 
   test('a malformed matchFormat is a 400', async () => {
@@ -263,7 +269,9 @@ describe('POST /season-runs/quick-start — guards', () => {
       calendar: { id: 'cal-2627' },
     });
     assert.equal(res.status, 409);
-    assert.match(await errorOf(res), /already has a competition on "2026\/27"/);
+    const body = (await res.json()) as { error: string; code?: string };
+    assert.match(body.error, /already has a competition on "2026\/27"/);
+    assert.equal(body.code, 'competition_exists');
   });
 });
 
@@ -327,7 +335,9 @@ describe('POST /season-runs/quick-start — custom dates', () => {
       calendar: { label: 'Again', start: '2026-09-13', end: '2027-03-28' },
     });
     assert.equal(res.status, 409);
-    assert.match(await errorOf(res), /already running/);
+    const body = (await res.json()) as { error: string; code?: string };
+    assert.match(body.error, /already running/);
+    assert.equal(body.code, 'season_exists');
   });
 
   test('the league is now bound to its new calendar, so quick start on it 409s', async () => {

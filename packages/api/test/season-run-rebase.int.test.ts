@@ -309,6 +309,8 @@ describe('POST /season-runs/:id/rebase — guards', () => {
     // The admin reviewed v3; the live structure is v2.
     const res = await rebase('sr-live409', { structureVersion: 3, version: 1 });
     assert.equal(res.status, 409);
+    // Coded so the console can say "reopen Review changes" rather than string-match.
+    assert.equal(((await res.json()) as { code?: string }).code, 'structure_changed');
     const stored = await repo.getSeasonRun('dolphins', 'sr-live409');
     assert.equal(stored?.structureSnapshot.version, 1);
     assert.equal(stored?.version, 1);

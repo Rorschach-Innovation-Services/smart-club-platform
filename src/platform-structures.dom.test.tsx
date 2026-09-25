@@ -921,7 +921,7 @@ describe('StructuresCard — deleting a bound structure cascades to its competit
     expect(patch.leagues[0].competitions[0]).toMatchObject({ id: 'c2', structureId: 'flat-two' });
   });
 
-  it('surfaces a save rejection via toast and deletes nothing locally', async () => {
+  it('shows a refused delete inside the confirm box, which stays open, and deletes nothing', async () => {
     // A running season keeps its own snapshot, but the server still 409s while a league
     // is bound to the structure — the version-drift guard.
     const bound = structure({ id: 'flat-one', name: 'Flat one' });
@@ -938,7 +938,11 @@ describe('StructuresCard — deleting a bound structure cascades to its competit
     await user.click(within(screen.getByRole('row', { name: /flat one/i })).getByText(/delete/i));
     await user.click(screen.getByRole('button', { name: /yes, delete/i }));
 
-    expect(toast).toHaveBeenCalledWith('A league is still bound to this structure.', 'warn');
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'A league is still bound to this structure.',
+    );
+    expect(toast).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /yes, delete/i })).toBeInTheDocument();
     // Nothing removed locally — the structure's row is still there.
     expect(screen.getByRole('row', { name: /flat one/i })).toBeInTheDocument();
   });
