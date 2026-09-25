@@ -14,21 +14,9 @@
  * displayable state that the console shows before anyone generates anything.
  */
 
-import { addDays, describeCadence, findBlock, planRoundDates, type DatePlan } from './calendar';
-import {
-  describeEntrants,
-  groupSizes,
-  resolveEntrants,
-  type ResolveContext,
-  type ResolvedGroup,
-} from './entrants';
-import {
-  describeFormat,
-  isPoolKnockout,
-  poolPairings,
-  roundCountForFormat,
-  roundsForFormat,
-} from './formats';
+import { addDays, findBlock, planRoundDates, type DatePlan } from './calendar';
+import { groupSizes, resolveEntrants, type ResolveContext, type ResolvedGroup } from './entrants';
+import { isPoolKnockout, poolPairings, roundCountForFormat, roundsForFormat } from './formats';
 import { fixturesFromDates, type GeneratedFixture } from './fixtures';
 import type {
   CompetitionStructure,
@@ -404,22 +392,6 @@ export function previewFitAll(
       ...(notBefore ? { notBefore } : {}),
     };
   });
-}
-
-/**
- * A stage as one plain-English sentence — the primary artefact of the operator console's
- * collapsed stage row. An operator should be able to read a whole structure without
- * expanding anything, so this has to carry the real meaning, not a type name.
- *
- * "2 groups of 6 · plays every team twice, home and away · weekly, Block 1"
- */
-export function describeStage(stage: StageSpec, calendar?: SeasonCalendar): string {
-  const block = calendar ? findBlock(calendar, stage.schedule.blockIndex) : undefined;
-  const where = block
-    ? `${describeCadence(stage.schedule.cadence)}, ${block.label}`
-    : describeCadence(stage.schedule.cadence);
-  const doubleHeader = stage.schedule.roundsPerDay === 2 ? ', double-headers' : '';
-  return `${describeEntrants(stage.entrants)} · ${describeFormat(stage.format)} · ${where}${doubleHeader}`;
 }
 
 /**

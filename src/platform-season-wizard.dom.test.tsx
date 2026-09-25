@@ -228,6 +228,57 @@ describe('SeasonSetupWizard', () => {
     expect(patch.structures[0].stages[1].schedule.blockIndex).toBe(1);
   });
 
+  it('keeps an explicit "plays in" choice when the operator goes Back to step 0', async () => {
+    const { user, save } = setup({
+      calendars: [existingCalendar],
+      leagues: [league(), league({ key: 'promo', label: 'Promotion Men' })],
+    });
+
+    await user.click(screen.getByRole('radio', { name: /use an existing calendar/i }));
+    await user.click(continueBtn());
+    await user.selectOptions(screen.getByRole('combobox', { name: /add a league/i }), 'premier');
+    await user.click(screen.getByRole('button', { name: /split league with mid-season swap/i }));
+    await user.selectOptions(screen.getByRole('combobox', { name: /add a league/i }), 'promo');
+    await user.click(
+      screen.getAllByRole('button', { name: /split league with mid-season swap/i })[1],
+    );
+
+    // One set of controls for the shared instance, not one per league — prefilled with
+    // the default rule (stage 2 after the break, in Block 2).
+    const stage2 = () =>
+      screen.getByRole('combobox', {
+        name: /split league with mid-season swap: stage 2 plays in/i,
+      });
+    expect(screen.getAllByRole('combobox', { name: /stage 2 plays in/i })).toHaveLength(1);
+    expect(stage2()).toHaveValue('1');
+
+    // The operator keeps the final round in Block 1, then goes back and forward again.
+    await user.selectOptions(stage2(), '0');
+    await user.click(screen.getByRole('button', { name: /^back$/i }));
+    await user.click(continueBtn());
+    expect(stage2()).toHaveValue('0');
+
+    await user.click(continueBtn());
+    await user.click(screen.getByRole('button', { name: /create season/i }));
+
+    const patch = save.mock.calls[0][0];
+    expect(patch.structures).toHaveLength(1);
+    const [first, second] = patch.structures[0].stages;
+    expect(first.schedule.blockIndex).toBe(0);
+    expect(second.schedule.blockIndex).toBe(0);
+    // Sharing a block with the stage before it, the final round is chained after it.
+    expect(second.schedule.startAfter).toBe('previous-stage');
+  });
+
+  it('offers no "plays in" choice on a one-block calendar', async () => {
+    const { user } = setup();
+    await fillSeasonLabel(user);
+    await user.click(continueBtn());
+    await user.selectOptions(screen.getByRole('combobox', { name: /add a league/i }), 'premier');
+    await user.click(screen.getByRole('button', { name: /split league with mid-season swap/i }));
+    expect(screen.queryByRole('combobox', { name: /plays in/i })).toBeNull();
+  });
+
   it('shows a fit warning when a bound structure names a block the draft calendar lacks', async () => {
     const { user } = setup({ structures: [twoBlockStructure] });
 

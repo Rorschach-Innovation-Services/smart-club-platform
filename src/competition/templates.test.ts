@@ -1,13 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import {
   STRUCTURE_TEMPLATES,
+  applyPlacement,
   blankStructure,
+  defaultPlacement,
+  templateBlockIndexForStage,
   findTemplate,
   instantiateTemplate,
   parseStructureJson,
   structureToJson,
 } from './templates';
-import { materialiseStage, describeStage } from './structure';
+import { materialiseStage } from './structure';
+import { describeStage } from './narrative';
 import { T20_SLOTS } from './calendar';
 import type { SeasonCalendar } from '../types';
 
@@ -121,6 +125,51 @@ describe('instantiateTemplate', () => {
     );
     expect(describeStage(st.stages[1], CAL)).toContain('swaps with first in the bottom group');
     expect(describeStage(st.stages[1], CAL)).toContain('Block 2');
+  });
+
+  describe('explicit placement', () => {
+    it('lets an explicit placement win over the default rule', () => {
+      const st = instantiateTemplate(findTemplate('split-league-swap')!, CAL, undefined, [0, 0]);
+      expect(st.stages.map((s) => s.schedule.blockIndex)).toEqual([0, 0]);
+    });
+
+    it('defaults to the old rule: first stage in block 1, the rest in block 2 when it exists', () => {
+      for (const t of STRUCTURE_TEMPLATES) {
+        const single: SeasonCalendar = { ...CAL, blocks: [CAL.blocks[0]] };
+        expect(defaultPlacement(t, 2), t.id).toEqual(
+          t.stages.map((_, i) => templateBlockIndexForStage(i, CAL)),
+        );
+        expect(defaultPlacement(t, 1), t.id).toEqual(
+          t.stages.map((_, i) => templateBlockIndexForStage(i, single)),
+        );
+        expect(
+          instantiateTemplate(t, CAL).stages.map((s) => s.schedule.blockIndex),
+          t.id,
+        ).toEqual(defaultPlacement(t, 2));
+      }
+    });
+
+    it('chains a stage only when it shares a block with the stage before it', () => {
+      const t = findTemplate('pools-to-knockout-within')!;
+      const sameBlock = instantiateTemplate(t, CAL, undefined, [0, 0]);
+      expect(sameBlock.stages[0].schedule.startAfter).toBeUndefined();
+      expect(sameBlock.stages[1].schedule.startAfter).toBe('previous-stage');
+
+      const split = instantiateTemplate(t, CAL, undefined, [0, 1]);
+      expect('startAfter' in split.stages[1].schedule).toBe(false);
+    });
+
+    it('re-chains when a placement is applied to stages placed differently before', () => {
+      const t = findTemplate('split-league-swap')!;
+      const chained = instantiateTemplate(t, CAL, undefined, [0, 0]);
+      const moved = applyPlacement(chained.stages, [0, 1]);
+      expect(moved.map((s) => s.schedule.blockIndex)).toEqual([0, 1]);
+      expect('startAfter' in moved[1].schedule).toBe(false);
+      const back = applyPlacement(moved, [1, 1]);
+      expect(back[1].schedule.startAfter).toBe('previous-stage');
+      // Everything else on the schedule survives.
+      expect(back[1].schedule.cadence).toEqual({ kind: 'weekly' });
+    });
   });
 
   // Every T20 Pink Ball competition plays a morning and an afternoon match per day, so

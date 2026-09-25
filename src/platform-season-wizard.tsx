@@ -25,10 +25,13 @@ import { groupSizes } from './competition/entrants';
 import { derivedEntrantTotal, previewFitAll } from './competition/structure';
 import {
   STRUCTURE_TEMPLATES,
+  applyPlacement,
+  defaultPlacement,
+  findTemplate,
   instantiateTemplate,
   newStructureId,
-  templateBlockIndexForStage,
 } from './competition/templates';
+import { stageTitle } from './help/stage-kinds';
 import type {
   Competition,
   CompetitionStructure,
@@ -96,7 +99,7 @@ function Host({ onClose, children }: { onClose: () => void; children?: ReactNode
           <div className="task-modal-head-text">
             <div className="task-modal-head-eyebrow">Platform · Season setup</div>
             <div className="task-modal-head-title" id={titleId}>
-              Set up a <em>season</em>
+              Set up the season calendar &amp; <em>competitions</em>
             </div>
           </div>
           <button className="task-modal-close" onClick={onClose} title="Close">
@@ -212,7 +215,7 @@ function LeagueSetupRow({
           options={[
             {
               label: 'Start from a template',
-              desc: 'Begin from a ready-made shape (flat league, split league, pools + knockout) and it becomes a new structure for this client.',
+              desc: 'Begin from a ready-made shape (flat league, split league, groups + knockout) and it becomes a new structure for this client.',
               eg: 'a new club using the "Split league with mid-season swap" template',
             },
             {
@@ -350,6 +353,107 @@ function LeagueSetupRow({
   );
 }
 
+/** One NEW template structure held in this run, and the leagues sharing it. */
+interface HeldInstance {
+  structure: CompetitionStructure;
+  leagueLabels: string[];
+}
+
+/** The distinct new template instances the added leagues hold, in add order. */
+function newTemplateInstances(
+  addedKeys: string[],
+  choices: Record<string, LeagueChoice>,
+  leagues: League[],
+): HeldInstance[] {
+  const byId = new Map<string, HeldInstance>();
+  for (const key of addedKeys) {
+    const c = choices[key];
+    if (!c || c.mode !== 'template' || !c.isNew || !c.structure) continue;
+    const label = leagues.find((l) => l.key === key)?.label ?? key;
+    const held = byId.get(c.structure.id);
+    if (held) held.leagueLabels.push(label);
+    else byId.set(c.structure.id, { structure: c.structure, leagueLabels: [label] });
+  }
+  return [...byId.values()];
+}
+
+/**
+ * "Plays in" — which block each stage of a new template structure plays in. Shown once
+ * per shared instance (every league picking the template shares it), and only when the
+ * calendar has two or more blocks: with one block there is nothing to choose.
+ */
+function PlacementSection({
+  calendar,
+  instances,
+  onPlace,
+}: {
+  calendar: SeasonCalendar;
+  instances: HeldInstance[];
+  onPlace: (structureId: string, stageIndex: number, blockIndex: number) => void;
+}) {
+  if ((calendar.blocks?.length ?? 0) < 2 || instances.length === 0) return null;
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div style={{ ...SECTION, display: 'flex', alignItems: 'center', gap: 2 }}>
+        Where each stage plays
+        <InfoDot title="Plays in">
+          <p>
+            A block is a stretch of dates on the calendar. A stage is a phase of play. Each stage
+            plays in one block. By default the first stage takes Block 1 and the rest take Block 2.
+          </p>
+          <p>
+            Two stages in the same block play one after the other: the later one starts after the
+            earlier one finishes.
+          </p>
+        </InfoDot>
+      </div>
+      {instances.map(({ structure, leagueLabels }) => (
+        <div key={structure.id} style={rowBox}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>{structure.name}</div>
+          <div style={{ fontSize: 11.5, color: 'var(--muted-2)', marginBottom: 8 }}>
+            Used by {leagueLabels.join(', ')}
+          </div>
+          {structure.stages.map((stage, i) => (
+            <div
+              key={stage.id}
+              style={{
+                display: 'flex',
+                gap: 8,
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                fontSize: 12.5,
+                marginBottom: 6,
+              }}
+            >
+              <span style={{ minWidth: 220 }}>
+                Stage {i + 1} · {stageTitle(stage.format)} · {stage.name}
+              </span>
+              <span style={{ color: 'var(--muted)' }}>plays in</span>
+              <select
+                className="field-select"
+                aria-label={`${structure.name}: stage ${i + 1} plays in`}
+                value={String(stage.schedule.blockIndex)}
+                onChange={(e) => onPlace(structure.id, i, Number(e.target.value))}
+              >
+                {stage.schedule.blockIndex >= calendar.blocks.length && (
+                  <option value={String(stage.schedule.blockIndex)}>
+                    {`Block ${stage.schedule.blockIndex + 1} (not on this calendar)`}
+                  </option>
+                )}
+                {calendar.blocks.map((b, bi) => (
+                  <option key={b.id} value={String(bi)}>
+                    {`Block ${bi + 1} — ${b.label} · ${formatIsoDate(b.start)} → ${formatIsoDate(b.end)}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 const rowBox: CSSProperties = {
   border: '1px solid var(--line)',
   borderRadius: 10,
@@ -424,7 +528,67 @@ export function SeasonSetupWizard({
       (c) => c.isNew && c.structure?.templateId === t.id,
     );
     if (pending?.structure) return { structure: pending.structure, isNew: true };
-    return { structure: instantiateTemplate(t, calDraft ?? undefined), isNew: true };
+    return {
+      structure: instantiateTemplate(
+        t,
+        calDraft ?? undefined,
+        undefined,
+        placementFor(t, calDraft ?? undefined),
+      ),
+      isNew: true,
+    };
+  };
+  /**
+   * The operator's explicit "plays in" choices, per template, one entry per stage
+   * (`undefined` = not set, so the default rule still applies). Keyed by template id
+   * because a template instance is SHARED by every league that picks it in this run —
+   * one set of choices per instance, not per league.
+   */
+  const [placements, setPlacements] = useState<Record<string, Array<number | undefined>>>({});
+
+  /**
+   * Where a template's stages play on `cal`: the operator's explicit choice where they
+   * made one (and the block still exists), else `defaultPlacement`.
+   */
+  const placementFor = (
+    t: (typeof STRUCTURE_TEMPLATES)[number],
+    cal: SeasonCalendar | undefined,
+  ): number[] => {
+    const blockCount = cal?.blocks?.length ?? 0;
+    const defaults = defaultPlacement(t, blockCount);
+    const explicit = placements[t.id] ?? [];
+    return defaults.map((d, i) => {
+      const chosen = explicit[i];
+      return chosen !== undefined && chosen < blockCount ? chosen : d;
+    });
+  };
+
+  /** Set one stage's block on a shared template instance, for every league holding it. */
+  const setStagePlacement = (structureId: string, stageIndex: number, blockIndex: number) => {
+    const held = Object.values(leagueChoices).find(
+      (c) => c.structure?.id === structureId,
+    )?.structure;
+    if (!held) return;
+    if (held.templateId) {
+      const templateId = held.templateId;
+      setPlacements((prev) => {
+        const next = [...(prev[templateId] ?? [])];
+        next[stageIndex] = blockIndex;
+        return { ...prev, [templateId]: next };
+      });
+    }
+    const placement = held.stages.map((st, i) =>
+      i === stageIndex ? blockIndex : st.schedule.blockIndex,
+    );
+    const updated = { ...held, stages: applyPlacement(held.stages, placement) };
+    setLeagueChoices((prev) => {
+      const next = { ...prev };
+      for (const key of Object.keys(next)) {
+        if (next[key].structure?.id === structureId)
+          next[key] = { ...next[key], structure: updated };
+      }
+      return next;
+    });
   };
   const choiceFor = (key: string) => leagueChoices[key] ?? SKIP;
   const setChoiceFor = (key: string, c: LeagueChoice) =>
@@ -443,13 +607,16 @@ export function SeasonSetupWizard({
 
   /**
    * Leaving step 0: re-derive every held NEW template structure's stage block positions
-   * against the CURRENT `calDraft`, using the same rule `instantiateTemplate` applies at
-   * pick time. A template is instantiated once, at pick time, against whatever `calDraft`
-   * looked like then — but the operator can go Back to step 0 and change the calendar's
-   * block count afterwards. A shrink is caught by the fit verdict (it just warns); a GROW
-   * is the dangerous direction, because a later stage stays at block position 0 or 1
-   * exactly as minted, silently pointing at the wrong (now-existing) block rather than the
-   * new one the operator actually added.
+   * against the CURRENT `calDraft`. A template is instantiated once, at pick time, against
+   * whatever `calDraft` looked like then — but the operator can go Back to step 0 and
+   * change the calendar's block count afterwards. A shrink is caught by the fit verdict
+   * (it just warns); a GROW is the dangerous direction, because a later stage stays at
+   * block position 0 or 1 exactly as minted, silently pointing at the wrong (now-existing)
+   * block rather than the new one the operator actually added.
+   *
+   * Only stages the operator has NOT placed explicitly are re-derived (`placementFor`):
+   * an explicit "plays in" choice survives the round trip, unless the block it names no
+   * longer exists. Chaining is recomputed to match (`applyPlacement`).
    *
    * Only `isNew` template structures are touched — `isNew: false` choices are library
    * structures, unaffected by this wizard's own calendar draft. Structures shared by more
@@ -461,13 +628,11 @@ export function SeasonSetupWizard({
       const remapped = new Map<string, CompetitionStructure>();
       for (const choice of Object.values(leagueChoices)) {
         const s = choice.structure;
-        if (choice.mode === 'template' && choice.isNew && s && !remapped.has(s.id)) {
+        const template = s?.templateId ? findTemplate(s.templateId) : undefined;
+        if (choice.mode === 'template' && choice.isNew && s && template && !remapped.has(s.id)) {
           remapped.set(s.id, {
             ...s,
-            stages: s.stages.map((stage, i) => ({
-              ...stage,
-              schedule: { ...stage.schedule, blockIndex: templateBlockIndexForStage(i, calDraft) },
-            })),
+            stages: applyPlacement(s.stages, placementFor(template, calDraft)),
           });
         }
       }
@@ -731,7 +896,7 @@ export function SeasonSetupWizard({
           <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
             Most leagues keep the simple flat series flow and need nothing here. Add only the
             leagues that run a <strong>structured competition</strong> on{' '}
-            <strong>{calDraft.label}</strong> — a split league, pools, a knockout. Every choice
+            <strong>{calDraft.label}</strong> — a split league, groups, a knockout. Every choice
             stays editable from the structures and competitions cards afterwards.
           </p>
           {leagues.length === 0 ? (
@@ -810,6 +975,11 @@ export function SeasonSetupWizard({
                       </p>
                     </div>
                   )}
+                  <PlacementSection
+                    calendar={calDraft}
+                    instances={newTemplateInstances(addedKeys, leagueChoices, leagues)}
+                    onPlace={setStagePlacement}
+                  />
                 </>
               );
             })()

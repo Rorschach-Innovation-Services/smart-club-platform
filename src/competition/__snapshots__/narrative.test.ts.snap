@@ -1,0 +1,69 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`describeStructure > tells the flat-round-robin template on a one-block calendar 1`] = `
+[
+  "Stage 1 · Round-robin stage · all 12 sides in one group · everyone plays everyone once · weekly in Block 1, 13 Sep – 22 Nov 2026.",
+]
+`;
+
+exports[`describeStructure > tells the flat-round-robin template on a two-block calendar 1`] = `
+[
+  "Stage 1 · Round-robin stage · all 12 sides in one group · everyone plays everyone once · weekly in Block 1, 13 Sep – 22 Nov 2026.",
+]
+`;
+
+exports[`describeStructure > tells the pools-to-knockout template on a one-block calendar 1`] = `
+[
+  "Stage 1 · Round-robin stage · 12 sides seeded into 2 groups of 6 (snake) · everyone plays everyone once · weekly in Block 1, 13 Sep – 11 Oct 2026.",
+  "Stage 2 · Knockout stage · top 2 per group from Stage 1 · semi-finals across groups (A1 v B2, B1 v A2), then a final · starts the week after Stage 1, in Block 1, 18 Oct – 25 Oct 2026.",
+]
+`;
+
+exports[`describeStructure > tells the pools-to-knockout template on a two-block calendar 1`] = `
+[
+  "Stage 1 · Round-robin stage · 12 sides seeded into 2 groups of 6 (snake) · everyone plays everyone once · weekly in Block 1, 13 Sep – 11 Oct 2026.",
+  "Stage 2 · Knockout stage · top 2 per group from Stage 1 · semi-finals across groups (A1 v B2, B1 v A2), then a final · weekly in Block 2, 18 Jan – 25 Jan 2027.",
+]
+`;
+
+exports[`describeStructure > tells the pools-to-knockout-within template on a one-block calendar 1`] = `
+[
+  "Stage 1 · Round-robin stage · 12 sides seeded into 2 groups of 6 (snake) · everyone plays everyone once · weekly in Block 1, 13 Sep – 11 Oct 2026.",
+  "Stage 2 · Knockout stage · top 2 per group from Stage 1 · semi-finals within each group, then a final · starts the week after Stage 1, in Block 1, 18 Oct – 25 Oct 2026.",
+]
+`;
+
+exports[`describeStructure > tells the pools-to-knockout-within template on a two-block calendar 1`] = `
+[
+  "Stage 1 · Round-robin stage · 12 sides seeded into 2 groups of 6 (snake) · everyone plays everyone once · weekly in Block 1, 13 Sep – 11 Oct 2026.",
+  "Stage 2 · Knockout stage · top 2 per group from Stage 1 · semi-finals within each group, then a final · weekly in Block 2, 18 Jan – 25 Jan 2027.",
+]
+`;
+
+exports[`describeStructure > tells the split-league-swap template on a one-block calendar 1`] = `
+[
+  "Stage 1 · Round-robin stage · chosen by the admin into 2 groups of 6 · everyone plays everyone twice, home and away · weekly in Block 1, 13 Sep – 15 Nov 2026.",
+  "Stage 2 · Round-robin stage · chosen by the admin from Stage 1 into 2 groups of 6 · everyone plays everyone once · starts the week after Stage 1, in Block 1 · does not fit the block (1 round over).",
+]
+`;
+
+exports[`describeStructure > tells the split-league-swap template on a two-block calendar 1`] = `
+[
+  "Stage 1 · Round-robin stage · chosen by the admin into 2 groups of 6 · everyone plays everyone twice, home and away · weekly in Block 1, 13 Sep – 15 Nov 2026.",
+  "Stage 2 · Round-robin stage · chosen by the admin from Stage 1 into 2 groups of 6 · everyone plays everyone once · weekly in Block 2, 18 Jan – 15 Feb 2027.",
+]
+`;
+
+exports[`describeStructure > tells the stream-and-cup template on a one-block calendar 1`] = `
+[
+  "Stage 1 · Round-robin stage · chosen by the admin into 2 groups of 6 · everyone plays everyone once · weekly in Block 1, 13 Sep – 11 Oct 2026.",
+  "Stage 2 · Knockout stage · chosen by the admin from Stage 1 · a seeded knockout, size set by the admin · starts the week after Stage 1, in Block 1.",
+]
+`;
+
+exports[`describeStructure > tells the stream-and-cup template on a two-block calendar 1`] = `
+[
+  "Stage 1 · Round-robin stage · chosen by the admin into 2 groups of 6 · everyone plays everyone once · weekly in Block 1, 13 Sep – 11 Oct 2026.",
+  "Stage 2 · Knockout stage · chosen by the admin from Stage 1 · a seeded knockout, size set by the admin · weekly in Block 2.",
+]
+`;

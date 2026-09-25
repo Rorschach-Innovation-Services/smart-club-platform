@@ -65,7 +65,7 @@ type Step = 'upload' | 'sections' | 'teams' | 'plan' | 'commit';
 /* ─── Guidance copy — named consts, greppable/testable per the plan's guidance rule ─── */
 
 const UPLOAD_INTRO =
-  'Upload the client’s league-structure workbook (the sheet listing every club’s ' +
+  'Upload the client’s team entries workbook (the sheet listing every club’s ' +
   'teams per league/division). Nothing is written yet — this only reads the file and shows ' +
   'you what it found.';
 const SECTIONS_INTRO =
@@ -88,7 +88,7 @@ const COMMIT_INTRO =
 const DEAD_END_TITLE = "This workbook layout isn't supported yet";
 const DEAD_END_SUB =
   'No section-shaped blocks were found in any sheet. Send the pack to support — the ' +
-  'engineer import CLI can still bring this client’s structure in while the parser learns ' +
+  'engineer import CLI can still bring this client’s team entries in while the parser learns ' +
   'this layout.';
 const SUGGESTION_TIP =
   'The league picker prefilled its best guess from the section header. It stays flagged — ' +
@@ -150,7 +150,7 @@ function DraftLeagueModal({
       <div className="task-modal" role="dialog" aria-modal="true" aria-label="Create league">
         <div className="task-modal-head">
           <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Structure intake · New league</div>
+            <div className="task-modal-head-eyebrow">Team entries import · New league</div>
             <div className="task-modal-head-title">
               Create <em>{label || 'league'}</em>
             </div>
@@ -474,13 +474,13 @@ export function StructureIntakeWizard({ toast }: { toast: Toast }) {
       <div className="page-head">
         <div className="ph-left">
           <div className="ph-crumb">
-            Platform / Clients / {configQ.data.branding?.name ?? slug} / Structure intake
+            Platform / Clients / {configQ.data.branding?.name ?? slug} / Team entries import
           </div>
           <h1 className="ph-title">
-            League structure <em>intake</em>
+            Team entries <em>import</em>
           </h1>
           <p className="ph-desc">
-            Turn a client's league-structure workbook into per-club team plans without an engineer
+            Turn a client's team entries workbook into per-club team plans without an engineer
             running the import script.
           </p>
         </div>
@@ -992,7 +992,7 @@ export function StructureIntakeWizard({ toast }: { toast: Toast }) {
                     tone="teal"
                     size="sm"
                     onClick={() => {
-                      toast('Structure intake complete');
+                      toast('Team entries import complete');
                       navigate(`/platform/tenants/${slug}/overview`);
                     }}
                   >
@@ -1030,7 +1030,7 @@ export function StructureIntakeWizard({ toast }: { toast: Toast }) {
               slug={slug}
               initialName={target.raw}
               districts={configQ.data?.districts?.length ? configQ.data.districts : DISTRICTS}
-              eyebrow="Structure intake · New club"
+              eyebrow="Team entries import · New club"
               onClose={() => setCreateClubFor(null)}
               onCreated={(club) => {
                 // Build the minimal InsightsClub the wizard actually reads (name for the

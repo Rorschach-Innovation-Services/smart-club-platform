@@ -49,13 +49,14 @@ import { formatStampDay } from './dates';
 import {
   chainFeeder,
   crossPoolSourceStage,
-  describeStage,
   feedsPoolKnockout,
   materialiseStage,
   materialiseStructure,
   poolQualifiersFor,
   type StageMaterialisation,
 } from './competition/structure';
+import { describeStage } from './competition/narrative';
+import { stageTitle } from './help/stage-kinds';
 import {
   DEFAULT_SERIES_OVERS,
   SERIES_TYPES,
@@ -1764,7 +1765,7 @@ function EntrantConfirmForm({
           ) : (
             <>
               <strong>Order matters here.</strong> A later stage pairs these groups across each
-              other — the pool winner against another pool&apos;s runner-up — so set each
+              other — the group winner against another group&apos;s runner-up — so set each
               side&apos;s finishing position, not just which group it was in.
             </>
           )}
@@ -1832,7 +1833,7 @@ function EntrantConfirmForm({
               {pairingPreview.fellBack && (
                 <div style={{ ...HINT, color: 'var(--coral)' }}>
                   These groups can’t be drawn {PAIRING_LABELS[chosenPairing!]} — it would be paired
-                  as a seeded bracket over the full field. Check the pool stage’s finishing
+                  as a seeded bracket over the full field. Check the group stage’s finishing
                   positions and who qualified.
                 </div>
               )}
@@ -1851,7 +1852,7 @@ function EntrantConfirmForm({
                   Group
                   <InfoDot title="Group">
                     <p>
-                      Which pool each side plays in this stage. Choose <strong>Not playing</strong>{' '}
+                      Which group each side plays in this stage. Choose <strong>Not playing</strong>{' '}
                       to leave a side out. The group names come from the structure (e.g. Top Six,
                       Bottom Six).
                     </p>
@@ -1865,7 +1866,7 @@ function EntrantConfirmForm({
                     <InfoDot title="Position">
                       <p>
                         Where each side finished in the earlier stage — it sets the seeding for a
-                        knockout or the order for a cross-pool draw.
+                        knockout or the order for a cross-group draw.
                       </p>
                     </InfoDot>
                   </span>
@@ -2155,7 +2156,9 @@ function StageCard({
         </span>
         {/* A heading, not a styled span: this is the title of a section a screen reader
             should be able to jump to, and the season is a list of these. */}
-        <h3 style={{ fontWeight: 700, fontSize: 14, margin: 0 }}>{stage.name}</h3>
+        <h3 style={{ fontWeight: 700, fontSize: 14, margin: 0 }}>
+          {stage.name} · {stageTitle(stage.format)}
+        </h3>
         {/* Stale before Generated: a generated stage whose pairing, schedule or feeder
             moved is still 'generated' in the run, and a teal pill there contradicted the
             coral line and the Regenerate button right below it. */}

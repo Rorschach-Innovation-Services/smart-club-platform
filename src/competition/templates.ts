@@ -201,9 +201,9 @@ export function findTemplate(id: string): StructureTemplate | undefined {
  * before the mid-season break, deciders after it — and an operator who wants otherwise
  * just changes the dropdown.
  *
- * Shared by `instantiateTemplate` (mapping at pick time) and the season wizard's step-0
- * Continue handler (re-mapping a held NEW structure if the operator goes back and changes
- * the calendar's block count after picking a template) — one rule, so the two can't drift.
+ * The same rule as `defaultPlacement`, per stage. Kept for callers that place one stage
+ * at a time; `defaultPlacement` is what `instantiateTemplate` and the season wizard use,
+ * and an operator's explicit "plays in" choice overrides both.
  */
 export function templateBlockIndexForStage(
   i: number,
@@ -216,37 +216,71 @@ export function templateBlockIndexForStage(
   return i === 0 ? 0 : second;
 }
 
-/** Clone a template into an editable structure bound to a real calendar. */
+/**
+ * The block each of a template's stages plays in when the operator hasn't said: the
+ * `templateBlockIndexForStage` rule over a calendar of `blockCount` blocks. It is the
+ * PREFILL for the "plays in" choice, never a decision made on the operator's behalf.
+ */
+export function defaultPlacement(template: StructureTemplate, blockCount: number): number[] {
+  const second = blockCount > 1 ? 1 : 0;
+  return template.stages.map((_, i) => (i === 0 ? 0 : second));
+}
+
+/**
+ * Put each stage in its block and keep chaining consistent with the result: a stage in
+ * the same block as the stage before it gets `startAfter: 'previous-stage'` (otherwise
+ * both would date from the block start and overlap); any other stage has the key removed,
+ * because validation rejects a chained stage with no earlier stage in its block.
+ *
+ * Only `blockIndex` and `startAfter` change — every other schedule field is kept.
+ */
+export function applyPlacement(stages: StageSpec[], placement: number[]): StageSpec[] {
+  return stages.map((stage, i) => {
+    const blockIndex = placement[i] ?? stage.schedule.blockIndex;
+    const prev = i > 0 ? (placement[i - 1] ?? stages[i - 1].schedule.blockIndex) : undefined;
+    const { startAfter: _startAfter, ...rest } = stage.schedule;
+    void _startAfter;
+    return {
+      ...stage,
+      schedule: {
+        ...rest,
+        blockIndex,
+        ...(i > 0 && blockIndex === prev ? { startAfter: 'previous-stage' as const } : {}),
+      },
+    };
+  });
+}
+
+/**
+ * Clone a template into an editable structure bound to a real calendar.
+ *
+ * `placement` (one block position per stage) is the operator's explicit choice and wins
+ * when given; without it the stages take `defaultPlacement`. Either way stages sharing a
+ * block with the stage before them are chained (`applyPlacement`).
+ */
 export function instantiateTemplate(
   template: StructureTemplate,
   calendar: SeasonCalendar | undefined,
   name?: string,
+  placement?: number[],
 ): CompetitionStructure {
+  const defaults = defaultPlacement(template, calendar?.blocks?.length ?? 0);
+  const blocks = template.stages.map((_, i) => placement?.[i] ?? defaults[i]);
+  const copies = template.stages.map((stage) => ({
+    ...stage,
+    schedule: {
+      ...stage.schedule,
+      // Fresh copies, and only when the template has slots at all — never an explicit
+      // `slots: undefined` key (the whole branch omits the key to mean "no set times").
+      ...(stage.schedule.slots ? { slots: stage.schedule.slots.map((s) => ({ ...s })) } : {}),
+    },
+  }));
   return {
     id: newStructureId(),
     name: name?.trim() || template.name,
     version: 1,
     templateId: template.id,
-    stages: template.stages.map((stage, i) => {
-      const blockIndex = templateBlockIndexForStage(i, calendar);
-      return {
-        ...stage,
-        schedule: {
-          ...stage.schedule,
-          blockIndex,
-          // A single-block calendar lands every stage in block 0, where an unchained
-          // later stage would overlap the one before it (dates always count from the
-          // block start). Chain it instead; with two blocks the stages are already
-          // separated and the key is omitted.
-          ...(i > 0 && blockIndex === templateBlockIndexForStage(i - 1, calendar)
-            ? { startAfter: 'previous-stage' as const }
-            : {}),
-          // Fresh copies, and only when the template has slots at all — never an explicit
-          // `slots: undefined` key (the whole branch omits the key to mean "no set times").
-          ...(stage.schedule.slots ? { slots: stage.schedule.slots.map((s) => ({ ...s })) } : {}),
-        },
-      };
-    }),
+    stages: applyPlacement(copies, blocks),
   };
 }
 

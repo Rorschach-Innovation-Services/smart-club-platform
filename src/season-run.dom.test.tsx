@@ -227,7 +227,7 @@ describe('a stage that needs a human — the rule is shown, never executed', () 
       }),
     ]);
 
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
 
     expect(
       within(dialog()).getByText(/Top Six 6th ↔ Bottom Six 1st, points carried/),
@@ -254,7 +254,7 @@ describe('a stage that needs a human — the rule is shown, never executed', () 
       }),
     ]);
 
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
     expect(within(dialog()).getByRole('columnheader', { name: /carried points/i })).toBeVisible();
   });
 
@@ -275,7 +275,7 @@ describe('a stage that needs a human — the rule is shown, never executed', () 
       }),
     ]);
 
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
     // Perform the swap by hand, exactly as the rule describes: club 6 down, club 7 up.
     await user.selectOptions(groupPickers()[5], '1');
     await user.selectOptions(groupPickers()[6], '0');
@@ -312,7 +312,7 @@ describe('the confirm form refuses a season that would generate nothing', () => 
 
   it('blocks an empty group — the structure asked for it and nobody is in it', async () => {
     const { user, onPatchRun } = setup(SPLIT_LEAGUE, [readyRun()]);
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
 
     // Empty the Bottom Six entirely.
     for (const i of [6, 7, 8, 9, 10, 11]) await user.selectOptions(groupPickers()[i], '');
@@ -324,7 +324,7 @@ describe('the confirm form refuses a season that would generate nothing', () => 
 
   it('blocks a group of one, which would play nobody', async () => {
     const { user } = setup(SPLIT_LEAGUE, [readyRun()]);
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
 
     for (const i of [7, 8, 9, 10, 11]) await user.selectOptions(groupPickers()[i], '');
 
@@ -336,7 +336,7 @@ describe('the confirm form refuses a season that would generate nothing', () => 
 
   it('flags a group that does not match the size the structure asks for', async () => {
     const { user } = setup(SPLIT_LEAGUE, [readyRun()]);
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
 
     await user.selectOptions(groupPickers()[11], '0'); // 7 in the Top Six, 5 in the Bottom
 
@@ -363,7 +363,7 @@ describe('the confirm form refuses a season that would generate nothing', () => 
         ],
       }),
     ]);
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
 
     await user.selectOptions(groupPickers()[11], ''); // c12 sits out
     await user.selectOptions(groupPickers()[0], '1'); // rebalance to 5 / 6
@@ -396,7 +396,7 @@ describe('cross-pool — the order inside a pool is load-bearing', () => {
 
   it('asks for a finishing position, not just which pool a side was in', async () => {
     const { user } = setup(POOLS_THEN_CROSS, [pooledRun()]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
 
     // The bracket pairs the winner of A against the runner-up of B, so registration
     // order is not a ranking of anything and must not decide the semi-finals.
@@ -406,7 +406,7 @@ describe('cross-pool — the order inside a pool is load-bearing', () => {
 
   it('refuses two sides in the same position', async () => {
     const { user } = setup(POOLS_THEN_CROSS, [pooledRun()]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
 
     const positions = within(dialog()).getAllByRole('spinbutton');
     await user.clear(positions[1]);
@@ -418,7 +418,7 @@ describe('cross-pool — the order inside a pool is load-bearing', () => {
 
   it('stores each pool in the confirmed finishing order', async () => {
     const { user, onPatchRun } = setup(POOLS_THEN_CROSS, [pooledRun()]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
 
     // Reverse Pool A: the side registered last finished first.
     const positions = within(dialog()).getAllByRole('spinbutton');
@@ -472,7 +472,7 @@ describe('the Position column also appears on a seeded knockout and a non-adjace
 
   it('asks a seeded knockout for the seed line, not just who is in the draw', async () => {
     const { user } = setup(KNOCKOUT_SEEDED, [generatedKnockoutRun()]);
-    await openConfirm(user, /^Cup$/);
+    await openConfirm(user, /^Cup · /);
 
     expect(within(dialog()).getByText(/seeded knockout/i)).toBeVisible();
     expect(within(dialog()).getByRole('columnheader', { name: /position/i })).toBeVisible();
@@ -480,7 +480,7 @@ describe('the Position column also appears on a seeded knockout and a non-adjace
 
   it('reordering a knockout’s positions before confirming reorders the resulting seed line', async () => {
     const { user, onPatchRun } = setup(KNOCKOUT_SEEDED, [generatedKnockoutRun()]);
-    await openConfirm(user, /^Cup$/);
+    await openConfirm(user, /^Cup · /);
 
     const positions = within(dialog()).getAllByRole('spinbutton');
     // Swap seed 1 and seed 2 — c1 was first, c2 second.
@@ -544,7 +544,7 @@ describe('the Position column also appears on a seeded knockout and a non-adjace
         ],
       }),
     ]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
 
     // Not adjacent — Streams sits between Pools and the Cup — but the derivation names
     // Pools directly, so it still gets ranked ordering.
@@ -566,7 +566,7 @@ describe('the Position column also appears on a seeded knockout and a non-adjace
         ],
       }),
     ]);
-    await openConfirm(user, /^Streams$/);
+    await openConfirm(user, /^Streams · /);
     expect(within(dialog()).queryByText(/order matters here/i)).toBeNull();
     expect(within(dialog()).queryByRole('columnheader', { name: /position/i })).toBeNull();
   });
@@ -621,7 +621,7 @@ describe('order-sensitive staleness — a pure reorder on a knockout invalidates
     expect(screen.queryByText(/needs regenerating/i)).toBeNull();
     expect(screen.queryByRole('button', { name: /regenerate \d+ fixtures/i })).toBeNull();
 
-    await openConfirm(user, /^Cup$/);
+    await openConfirm(user, /^Cup · /);
     const positions = within(dialog()).getAllByRole('spinbutton');
     await user.clear(positions[0]);
     await user.type(positions[0], '2');
@@ -670,7 +670,7 @@ describe('order-sensitive staleness — a pure reorder on a knockout invalidates
     const { user, onPatchRun, rerenderRuns } = setup(POOLS_THEN_CROSS, [generatedPoolsRun()]);
     expect(screen.queryByText(/needs regenerating/i)).toBeNull();
 
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
     // Reverse the finishing order within Pool A — same six sides, different positions.
     const positions = within(dialog()).getAllByRole('spinbutton');
     await user.clear(positions[0]);
@@ -694,7 +694,7 @@ describe('order-sensitive staleness — a pure reorder on a knockout invalidates
 describe('the audit trail — who decided the relegation', () => {
   it('records an accepted suggestion as accepted', async () => {
     const { user, onPatchRun } = setup(POOLS_THEN_CROSS, [run(POOLS_THEN_CROSS)]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
     await user.click(confirmBtn());
 
     const entry = onPatchRun.mock.calls[0][1].stages[0].audit.at(-1);
@@ -704,7 +704,7 @@ describe('the audit trail — who decided the relegation', () => {
 
   it('records an overridden suggestion as overridden', async () => {
     const { user, onPatchRun } = setup(POOLS_THEN_CROSS, [run(POOLS_THEN_CROSS)]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
 
     // Reordering inside a pool IS an override: for a cross-pool bracket the order is
     // the decision, so A1-v-B2 changing is exactly what the trail has to record.
@@ -746,7 +746,7 @@ describe('the audit trail — who decided the relegation', () => {
       }),
     ]);
 
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
     await user.click(confirmBtn());
 
     const audit = onPatchRun.mock.calls[0][1].stages[0].audit;
@@ -847,7 +847,7 @@ describe('semi-final pairing — the union decides within- or cross-group per se
     const { user, onPatchRun } = setup(POOLS_TOP_TWO, [
       run(POOLS_TOP_TWO, { stages: [poolsConfirmed] }),
     ]);
-    await openConfirm(user, /^Semi-finals$/);
+    await openConfirm(user, /^Semi-finals · /);
 
     // The structure's default is pre-selected, and its bracket is previewed: A1 v B2.
     expect(within(dialog()).getByRole('radio', { name: /structure default/i })).toBeChecked();
@@ -873,7 +873,7 @@ describe('semi-final pairing — the union decides within- or cross-group per se
     const { user, onPatchRun } = setup(POOLS_TOP_TWO, [
       run(POOLS_TOP_TWO, { stages: [poolsConfirmed] }),
     ]);
-    await openConfirm(user, /^Semi-finals$/);
+    await openConfirm(user, /^Semi-finals · /);
     await user.click(confirmBtn());
 
     const semis = onPatchRun.mock.calls[0][1].stages.find(
@@ -897,7 +897,7 @@ describe('semi-final pairing — the union decides within- or cross-group per se
 
     // Generate the cross-group semis, then land them the way a real generate would.
     await user.click(
-      within(cardFor(/^Semi-finals$/)).getByRole('button', { name: /generate \d+ fixtures/i }),
+      within(cardFor(/^Semi-finals · /)).getByRole('button', { name: /generate \d+ fixtures/i }),
     );
     const { series, groups } = seriesFromGenerate(onGenerate.mock.calls[0]);
     const generated = {
@@ -909,11 +909,11 @@ describe('semi-final pairing — the union decides within- or cross-group per se
       })),
     };
     rerenderRuns([run(POOLS_TOP_TWO, { stages: [poolsConfirmed, generated] })], series);
-    expect(within(cardFor(/^Semi-finals$/)).getByText('Generated')).toBeVisible();
-    expect(within(cardFor(/^Semi-finals$/)).queryByText(/needs regenerating/i)).toBeNull();
+    expect(within(cardFor(/^Semi-finals · /)).getByText('Generated')).toBeVisible();
+    expect(within(cardFor(/^Semi-finals · /)).queryByText(/needs regenerating/i)).toBeNull();
 
     // Same qualifiers, different pairing — no entrant changed, so only the bracket moved.
-    await openConfirm(user, /^Semi-finals$/);
+    await openConfirm(user, /^Semi-finals · /);
     await user.click(within(dialog()).getByRole('radio', { name: /^within-group$/i }));
     await user.click(confirmBtn());
     const patch = onPatchRun.mock.calls[0][1];
@@ -922,7 +922,7 @@ describe('semi-final pairing — the union decides within- or cross-group per se
     );
 
     rerenderRuns([run(POOLS_TOP_TWO, { stages: patch.stages })]);
-    const card = cardFor(/^Semi-finals$/);
+    const card = cardFor(/^Semi-finals · /);
     expect(within(card).getByText(/needs regenerating/i)).toBeVisible();
     expect(within(card).getByRole('button', { name: /regenerate \d+ fixtures/i })).toBeVisible();
   });
@@ -960,7 +960,7 @@ describe('semi-final pairing — the union decides within- or cross-group per se
     const { user } = setup(THREE_POOLS, [
       run(THREE_POOLS, { stages: [threeConfirmed, semisReady] }),
     ]);
-    await openConfirm(user, /^Semi-finals$/);
+    await openConfirm(user, /^Semi-finals · /);
 
     expect(within(dialog()).getByRole('radio', { name: /^within-group$/i })).toBeDisabled();
     expect(within(dialog()).getByRole('radio', { name: /^cross-group$/i })).toBeEnabled();
@@ -1068,7 +1068,7 @@ describe('a chained stage notices when its feeder now runs into its fixtures', (
       run(structure, { stages: [playoffReady] }),
     ]);
     await user.click(
-      within(cardFor(/^Play-off$/)).getByRole('button', { name: /generate \d+ fixtures/i }),
+      within(cardFor(/^Play-off · /)).getByRole('button', { name: /generate \d+ fixtures/i }),
     );
     const { series, groups } = seriesFromGenerate(onGenerate.mock.calls[0]);
     const playoff = series.map(
@@ -1121,7 +1121,7 @@ describe('a chained stage notices when its feeder now runs into its fixtures', (
   it('flags a chained stage once its regenerated feeder runs into its fixtures', async () => {
     // The feeder's last round now lands on the play-off's opening date.
     await generateThenLand(true, { feederLast: 'playoff-start' });
-    const card = cardFor(/^Play-off$/);
+    const card = cardFor(/^Play-off · /);
     expect(within(card).getByText(/needs regenerating/i)).toBeVisible();
     expect(
       within(card).getByText(/the stage this one follows now runs into these fixtures/i),
@@ -1131,14 +1131,14 @@ describe('a chained stage notices when its feeder now runs into its fixtures', (
   it('leaves a chained stage alone when its own opener is merely rescheduled later', async () => {
     // A rained-off play-off pushed into December, well clear of the feeder's last round.
     await generateThenLand(true, { playoffDate: '2026-12-05', feederLast: '2026-09-19' });
-    const card = cardFor(/^Play-off$/);
+    const card = cardFor(/^Play-off · /);
     expect(within(card).queryByText(/needs regenerating/i)).toBeNull();
     expect(within(card).getByText('Generated')).toBeVisible();
   });
 
   it('never flags an unchained stage, even when it overlaps the stage before it', async () => {
     await generateThenLand(false, { feederLast: 'playoff-start' });
-    const card = cardFor(/^Play-off$/);
+    const card = cardFor(/^Play-off · /);
     expect(within(card).queryByText(/needs regenerating/i)).toBeNull();
     expect(within(card).getByText('Generated')).toBeVisible();
   });
@@ -1325,7 +1325,7 @@ describe('a rebase-cleared stage re-confirms from where the season actually was'
         ],
       }),
     ]);
-    await openConfirm(user, /^Double round$/);
+    await openConfirm(user, /^Double round · /);
 
     const pickerFor = (side: string) => {
       const row = within(dialog())
@@ -1470,7 +1470,7 @@ describe('the swap prefill starts from where the previous stage ended', () => {
         ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'],
       ),
     ]);
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
 
     expect(groupOf('Club 7')).toBe('Top Six');
     expect(groupOf('Club 12')).toBe('Top Six');
@@ -1483,7 +1483,7 @@ describe('the swap prefill starts from where the previous stage ended', () => {
     const top = ['c7', 'c8', 'c9', 'c10', 'c11', 'c12'];
     const bottom = ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'];
     const { user, onPatchRun } = setup(SPLIT_LEAGUE, [stage1Confirmed(top, bottom)]);
-    await openConfirm(user, /^Final round$/);
+    await openConfirm(user, /^Final round · /);
     await user.click(confirmBtn());
 
     const finalRound = onPatchRun.mock.calls[0][1].stages.find(
@@ -1520,7 +1520,7 @@ describe('a group is called the same thing wherever it is written', () => {
 
   it('stores Group A and Group B, not Group 1 and Group 2', async () => {
     const { user, onPatchRun } = setup(UNNAMED, [run(UNNAMED)]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
     await user.click(confirmBtn());
 
     const stored = onPatchRun.mock.calls[0][1].stages[0].groups.map(
@@ -1531,7 +1531,7 @@ describe('a group is called the same thing wherever it is written', () => {
 
   it('shows the admin the same names it is about to store', async () => {
     const { user } = setup(UNNAMED, [run(UNNAMED)]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
     const shown = Array.from((groupPickers()[0] as HTMLSelectElement).options).map((o) => o.text);
     expect(shown).toEqual(['Not playing', 'Group A', 'Group B']);
   });
@@ -1559,7 +1559,7 @@ describe('two groups may share a name', () => {
   it('renders both without a duplicate-key warning, and keeps them distinct', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { user, onPatchRun } = setup(SAME_NAME, [run(SAME_NAME)]);
-    await openConfirm(user, /^Pools$/);
+    await openConfirm(user, /^Pools · /);
 
     expect(spy.mock.calls.some((c) => String(c[0]).includes('same key'))).toBe(false);
 

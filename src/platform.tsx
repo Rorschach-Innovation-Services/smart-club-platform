@@ -867,7 +867,7 @@ function OnboardingCard({
             size="sm"
             onClick={() => navigate(`/platform/tenants/${slug}/structure-intake`)}
           >
-            Structure
+            Team entries import
           </Btn>
           <Btn
             tone="outline"

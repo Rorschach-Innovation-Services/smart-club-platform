@@ -43,21 +43,29 @@ import {
 import {
   chainFeeder,
   derivedEntrantTotal,
-  describeStage,
   previewFitAll,
   previewRounds,
 } from './competition/structure';
+import { describeStage } from './competition/narrative';
 import { groupSizes } from './competition/entrants';
 import { isPoolKnockout, roundsForFormat } from './competition/formats';
 import {
   STRUCTURE_TEMPLATES,
   blankStage,
   blankStructure,
+  defaultPlacement,
   instantiateTemplate,
   newStructureId,
   parseStructureJson,
   structureToJson,
 } from './competition/templates';
+import {
+  CADENCE_KINDS,
+  ENTRANT_KINDS,
+  STAGE_KINDS,
+  stageKindFor,
+  stageTitle,
+} from './help/stage-kinds';
 import type {
   Cadence,
   Competition,
@@ -212,84 +220,38 @@ function Modal({
 /* ─── Stage editor ─── */
 
 // `help` is a full sentence (not a fragment) so it reads on its own — used both in
-// the Format info-popover and as the live hint under the select. `describeFormat`
-// stays as-is for the collapsed-row subtitle it was written for.
+// the Format info-popover and as the live hint under the select. Label, help and example
+// all come from the STAGE_KINDS registry, so the picker, its explainer and the season
+// narrative quote the same words. `describeFormat` stays as-is for the collapsed-row
+// subtitle it was written for.
+//
+// Every value the server accepts is listed: triple round robin (legs 1–3 are valid) and
+// the "entered by hand" escape hatch (reachable through JSON import) both used to be
+// missing, which rendered such a stage as the wrong choice — or a blank select — and
+// retyped it on any touch.
+const FORMAT_VALUES: FormatSpec[] = [
+  { kind: 'round-robin', legs: 1 },
+  { kind: 'round-robin', legs: 2 },
+  { kind: 'round-robin', legs: 3 },
+  { kind: 'knockout', pairing: 'seeded' },
+  { kind: 'knockout', pairing: 'cross-pool' },
+  { kind: 'knockout', pairing: 'within-pool' },
+  { kind: 'single-match' },
+  { kind: 'manual' },
+];
 const FORMAT_OPTIONS: Array<{
   label: string;
   value: FormatSpec;
   help: string;
   eg: string;
-}> = [
-  {
-    label: 'Single round robin',
-    value: { kind: 'round-robin', legs: 1 },
-    help: 'Every side plays every other side once. Standings decide the winner — no knockout.',
-    eg: 'a short league where 12 sides each play 11 matches',
-  },
-  {
-    label: 'Double round robin',
-    value: { kind: 'round-robin', legs: 2 },
-    help: 'Every side plays every other side twice, once home and once away.',
-    eg: 'a full home-and-away league season',
-  },
-  // The server accepts legs 1–3 and the generator implements 3; leaving it off the list
-  // rendered a three-leg stage as "Single round robin" and retyped it on any touch.
-  {
-    label: 'Triple round robin',
-    value: { kind: 'round-robin', legs: 3 },
-    help: 'Every side plays every other side three times.',
-    eg: 'a small 4-team pool that needs more matches to separate sides',
-  },
-  {
-    label: 'Knockout — seeded',
-    value: { kind: 'knockout', pairing: 'seeded' },
-    help: 'A single-elimination bracket seeded by rank — top seed meets bottom seed, and losers are out.',
-    eg: 'an end-of-season playoff: 1st v 4th, 2nd v 3rd, then the final',
-  },
-  {
-    label: 'Knockout — cross-pool',
-    value: { kind: 'knockout', pairing: 'cross-pool' },
-    help: 'A bracket that crosses groups — the winner of one pool meets the runner-up of another.',
-    eg: 'Pool A winner v Pool B runner-up in the semi-finals',
-  },
-  {
-    label: 'Knockout — within-group',
-    value: { kind: 'knockout', pairing: 'within-pool' },
-    help: "Each group's qualifiers play their own semi-final (A1 v A2, B1 v B2); the winners meet in the final.",
-    eg: 'two pools of five, top two each — A1 v A2 and B1 v B2, then the final',
-  },
-  {
-    label: 'Single match',
-    value: { kind: 'single-match' },
-    help: 'One fixture between two sides — a final or any other one-off.',
-    eg: 'a grand final',
-  },
-  // The ADR's escape hatch. Reachable through JSON import and accepted by the server's
-  // FORMAT_KINDS, so leaving it off the list rendered a blank Format select on a stage
-  // that was perfectly valid — and any touch of the control would silently retype it.
-  {
-    label: 'Entered by hand',
-    value: { kind: 'manual' },
-    help: 'No fixtures are generated. An administrator types in each match themselves.',
-    eg: 'an invitational with no fixed pattern',
-  },
-];
+}> = FORMAT_VALUES.map((value) => {
+  const k = STAGE_KINDS[stageKindFor(value)];
+  return { label: k.title, value, help: k.does, eg: k.eg };
+});
 
+/** The picker label for a format — its STAGE_KINDS title, which is unique per option. */
 function formatLabel(f: FormatSpec): string {
-  if (f.kind === 'round-robin')
-    return f.legs === 3
-      ? 'Triple round robin'
-      : f.legs === 2
-        ? 'Double round robin'
-        : 'Single round robin';
-  if (f.kind === 'knockout')
-    return f.pairing === 'cross-pool'
-      ? 'Knockout — cross-pool'
-      : f.pairing === 'within-pool'
-        ? 'Knockout — within-group'
-        : 'Knockout — seeded';
-  if (f.kind === 'single-match') return 'Single match';
-  return 'Entered by hand';
+  return STAGE_KINDS[stageKindFor(f)].title;
 }
 
 /**
@@ -376,57 +338,37 @@ function previewStages(
   });
 }
 
-// "…in one group" is not decoration. `all-registered` cannot be split — the type carries
-// no group plan — and an operator who picks it expecting pools discovers that three
-// screens later, mid-season, in a modal that offers "Group A" and nothing else. The
-// constraint belongs in the name of the choice.
+// "Every registered side" cannot be split — the type carries no group plan — and an
+// operator who picks it expecting groups discovers that three screens later, mid-season,
+// in a modal that offers "Group A" and nothing else. Its help sentence says so up front.
+// Copy comes from ENTRANT_KINDS / CADENCE_KINDS; the `key`s are the stored kinds.
 const ENTRANT_OPTIONS = [
   {
     key: 'all-registered',
-    label: 'Every registered side, in one group',
-    help: 'Every side entered in the league plays in a single group. This kind cannot be split into pools.',
-    eg: 'a 12-team league that all plays each other',
+    label: ENTRANT_KINDS['all-registered'].title,
+    help: ENTRANT_KINDS['all-registered'].does,
+    eg: ENTRANT_KINDS['all-registered'].eg,
   },
   {
     key: 'seeded-split',
     label: 'Seeded into groups',
-    help: 'Sides are divided into pools by seeding order — set how many groups and how below.',
-    eg: '12 sides split into a Top Six and a Bottom Six',
+    help: 'Sides are split into groups by seed order. Choose snake or top-down below.',
+    eg: `${ENTRANT_KINDS['seeded-split-snake'].eg} Or ${ENTRANT_KINDS['seeded-split-blocks'].eg}`,
   },
   {
     key: 'manual',
-    label: 'Entered by an administrator',
-    help: "An administrator chooses who plays. Use this when a stage's teams come from an earlier stage's results.",
-    eg: 'the four semi-finalists carried through to a knockout',
+    label: ENTRANT_KINDS.manual.title,
+    help: ENTRANT_KINDS.manual.does,
+    eg: ENTRANT_KINDS.manual.eg,
   },
 ] as const;
 
-const CADENCE_OPTIONS = [
-  {
-    key: 'weekly',
-    label: 'Weekly',
-    help: 'One round is played every week.',
-    eg: 'a Saturday league',
-  },
-  {
-    key: 'every-n-weeks',
-    label: 'Every N weeks',
-    help: 'One round every few weeks — set the gap. For leagues that skip some weekends.',
-    eg: 'a fortnightly midweek league (every 2 weeks)',
-  },
-  {
-    key: 'weekdays',
-    label: 'Set days only',
-    help: 'Matches only on the weekdays you pick (e.g. Saturday and Sunday). Rounds fill those days.',
-    eg: 'a weekend festival playing both Sat and Sun',
-  },
-  {
-    key: 'spread',
-    label: 'Spread across block',
-    help: 'Rounds are spaced evenly across the whole playing block, however long it runs.',
-    eg: 'six rounds spread evenly over a 12-week block',
-  },
-] as const;
+const CADENCE_OPTIONS = (['weekly', 'every-n-weeks', 'weekdays', 'spread'] as const).map((key) => ({
+  key,
+  label: CADENCE_KINDS[key].title,
+  help: CADENCE_KINDS[key].does,
+  eg: CADENCE_KINDS[key].eg,
+}));
 
 function Select({
   value,
@@ -504,7 +446,7 @@ function GroupPlanEditor({
         <option value="sizes">Exact sizes</option>
       </Select>
       <InfoDot
-        title="Group plan — how sides divide into pools"
+        title="Group plan — how sides divide into groups"
         options={[
           {
             label: 'Even groups',
@@ -688,6 +630,9 @@ function StageRow({
             <span style={{ fontSize: 11, color: 'var(--muted-2)', fontWeight: 700 }}>
               STAGE {index + 1}
             </span>
+            <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>
+              {stageTitle(stage.format)}
+            </span>
             <span style={{ fontWeight: 700, fontSize: 13.5 }}>
               {stage.name || 'Untitled stage'}
             </span>
@@ -863,21 +808,21 @@ function StageRow({
                   }
                   label="Seeding method"
                 >
-                  <option value="blocks">Top-down blocks</option>
+                  <option value="blocks">Top-down</option>
                   <option value="snake">Snake</option>
                 </Select>
                 <InfoDot
                   title="Seeding method — how seeds fill the groups"
                   options={[
                     {
-                      label: 'Top-down blocks',
-                      desc: 'Seeds fill one group at a time: 1–6 into the first group, 7–12 into the next.',
-                      eg: 'a Premier pool (seeds 1–6) and a Reserve pool (seeds 7–12)',
+                      label: 'Top-down',
+                      desc: ENTRANT_KINDS['seeded-split-blocks'].does,
+                      eg: ENTRANT_KINDS['seeded-split-blocks'].eg,
                     },
                     {
                       label: 'Snake',
-                      desc: 'A serpentine draft — 1→A, 2→B, 3→C, then back — so no group gets all the top seeds.',
-                      eg: 'two balanced pools, each with a mix of strong and weak sides',
+                      desc: ENTRANT_KINDS['seeded-split-snake'].does,
+                      eg: ENTRANT_KINDS['seeded-split-snake'].eg,
                     },
                   ]}
                 />
@@ -900,7 +845,7 @@ function StageRow({
           {stage.entrants.kind === 'all-registered' && (
             <p style={HINT}>
               One group of everyone — this kind can&apos;t be split, and switching to it discards
-              any group plan. To make pools, choose <strong>Seeded into groups</strong>: with no
+              any group plan. To make groups, choose <strong>Seeded into groups</strong>: with no
               seeding supplied it blocks the registration order, which is the same list this stage
               already draws on.
             </p>
@@ -924,7 +869,7 @@ function StageRow({
             info={
               <InfoDot title="Group names">
                 <p>
-                  What each pool is called — these labels show on the admin’s “confirm entrants”
+                  What each group is called — these labels show on the admin’s “confirm entrants”
                   screen and on fixtures (e.g. <strong>Top Six</strong>, <strong>Bottom Six</strong>
                   ). Leave blank to fall back to Group A, Group B…
                 </p>
@@ -1089,7 +1034,7 @@ function StageRow({
             Start after the previous stage in this block
             <InfoDot title="Start after the previous stage">
               <p>
-                Lets two stages share one playing block without overlapping — pools, then their
+                Lets two stages share one playing block without overlapping — groups, then their
                 semi-finals and final. This stage&apos;s rounds begin after the previous stage in
                 the same block finishes, still on the block&apos;s usual playing day.
               </p>
@@ -1394,7 +1339,7 @@ function DerivationEditor({
               <InfoDot title="Qualifiers per group">
                 <p>
                   How many sides go through from <strong>each</strong> group of the earlier stage —
-                  2 means the top two of every pool. Leave it blank when the number isn&apos;t
+                  2 means the top two of every group. Leave it blank when the number isn&apos;t
                   fixed.
                 </p>
               </InfoDot>
@@ -2103,6 +2048,20 @@ function StartPicker({
   // having to re-derive it.
   const [calendarId, setCalendarId] = useState(calendars[0]?.id ?? '');
   const calendar = calendars.find((c) => c.id === calendarId) ?? calendars[0];
+  const blockCount = calendar?.blocks?.length ?? 0;
+  // With two or more blocks, picking a template first asks which block each stage plays
+  // in (prefilled with the default rule). With one block there is nothing to choose, so
+  // a template is picked in one click as before.
+  const [chosen, setChosen] = useState<(typeof STRUCTURE_TEMPLATES)[number] | null>(null);
+  const [placement, setPlacement] = useState<number[]>([]);
+  function chooseTemplate(t: (typeof STRUCTURE_TEMPLATES)[number]) {
+    if (blockCount < 2) {
+      onPick(instantiateTemplate(t, calendar));
+      return;
+    }
+    setChosen(t);
+    setPlacement(defaultPlacement(t, blockCount));
+  }
 
   function doImport() {
     const parsed = parseStructureJson(json);
@@ -2156,7 +2115,15 @@ function StartPicker({
       {calendars.length > 1 && (
         <div style={{ marginBottom: 14 }}>
           <div className="field-label">Season calendar</div>
-          <Select value={calendarId} onChange={setCalendarId} width={240} label="Season calendar">
+          <Select
+            value={calendarId}
+            onChange={(v) => {
+              setCalendarId(v);
+              setChosen(null);
+            }}
+            width={240}
+            label="Season calendar"
+          >
             {calendars.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.label}
@@ -2229,27 +2196,84 @@ function StartPicker({
       <div style={{ ...SECTION, marginTop: 18 }}>Or start from a template</div>
       <div style={{ display: 'grid', gap: 10 }}>
         {STRUCTURE_TEMPLATES.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => onPick(instantiateTemplate(t, calendar))}
-            style={{
-              textAlign: 'left',
-              border: '1px solid var(--line)',
-              borderRadius: 10,
-              padding: '12px 14px',
-              background: 'var(--white, #fff)',
-              cursor: 'pointer',
-            }}
-          >
-            <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 3 }}>{t.name}</div>
-            <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5 }}>
-              {t.whenToUse}
-            </div>
-            <div style={{ fontSize: 11.5, color: 'var(--muted-2)', marginTop: 5 }}>
-              {t.stages.length} stage{t.stages.length === 1 ? '' : 's'} · {t.examples}
-            </div>
-          </button>
+          <div key={t.id}>
+            <button
+              type="button"
+              onClick={() => chooseTemplate(t)}
+              aria-pressed={chosen?.id === t.id}
+              style={{
+                width: '100%',
+                textAlign: 'left',
+                border:
+                  chosen?.id === t.id
+                    ? '2px solid var(--brand-primary, #16332B)'
+                    : '1px solid var(--line)',
+                borderRadius: 10,
+                padding: '12px 14px',
+                background: 'var(--white, #fff)',
+                cursor: 'pointer',
+              }}
+            >
+              <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 3 }}>{t.name}</div>
+              <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5 }}>
+                {t.whenToUse}
+              </div>
+              <div style={{ fontSize: 11.5, color: 'var(--muted-2)', marginTop: 5 }}>
+                {t.stages.length} stage{t.stages.length === 1 ? '' : 's'} · {t.examples}
+              </div>
+            </button>
+            {chosen?.id === t.id && calendar && (
+              <div style={{ padding: '10px 14px 4px' }}>
+                {t.stages.map((stage, i) => (
+                  <div
+                    key={stage.id}
+                    style={{
+                      display: 'flex',
+                      gap: 8,
+                      alignItems: 'center',
+                      flexWrap: 'wrap',
+                      fontSize: 12.5,
+                      marginBottom: 6,
+                    }}
+                  >
+                    <span style={{ minWidth: 220 }}>
+                      Stage {i + 1} · {stageTitle(stage.format)} · {stage.name}
+                    </span>
+                    <span style={{ color: 'var(--muted)' }}>plays in</span>
+                    <Select
+                      value={String(placement[i] ?? 0)}
+                      onChange={(v) =>
+                        setPlacement((prev) => prev.map((b, j) => (j === i ? Number(v) : b)))
+                      }
+                      label={`Stage ${i + 1} plays in`}
+                    >
+                      {calendar.blocks.map((b, bi) => (
+                        <option key={b.id} value={String(bi)}>
+                          {`Block ${bi + 1} — ${b.label} · ${formatIsoDate(b.start)} → ${formatIsoDate(b.end)}`}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                ))}
+                <p style={HINT}>
+                  Two stages in the same block play one after the other: the later one starts after
+                  the earlier one finishes.
+                </p>
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <Btn
+                    tone="teal"
+                    size="sm"
+                    onClick={() => onPick(instantiateTemplate(t, calendar, undefined, placement))}
+                  >
+                    Use this template
+                  </Btn>
+                  <Btn tone="ghost" size="sm" onClick={() => setChosen(null)}>
+                    Choose another
+                  </Btn>
+                </div>
+              </div>
+            )}
+          </div>
         ))}
       </div>
 
@@ -2381,7 +2405,7 @@ export function StructuresCard({
         <EmptyState
           icon={Icon.Shield}
           title="No structures yet"
-          sub="Most leagues are one flat round robin, but a split league or a pools-and-knockout needs a structure. Start from a template that matches how the league actually runs."
+          sub="Most leagues are one flat round robin, but a split league or groups-then-knockout needs a structure. Start from a template that matches how the league actually runs."
           action={
             <Btn tone="teal" icon={Icon.Plus} onClick={() => setPicking(true)}>
               Create your first structure
