@@ -130,6 +130,7 @@ import type {
   League,
   RequiredDoc,
   Membership,
+  SeasonCalendar,
   SeasonRun,
   StageRun,
   StageSpec,
@@ -3327,19 +3328,20 @@ app.post('/clubs/:id/send-fixtures', async (c) => {
  * confirmed, so a later regenerate reproduces the same dates. Unlike a competition's
  * binding (`validateCompetitions`), a series names a concrete BLOCK, not a position — it
  * is generated once against whatever calendar was current at the time, not resolved
- * through a structure. Checked against the tenant's OWN config, so a dangling
- * calendarId/blockId can never be written from either POST or PATCH.
+ * through a structure. Checked against the calendars the series is ALLOWED to name, so a
+ * dangling calendarId/blockId can never be written from either POST or PATCH — see
+ * `seriesScheduleCalendars` for which calendars those are.
  */
 function validateSeriesSchedule(
   schedule: unknown,
-  config: TenantConfig,
+  calendars: SeasonCalendar[],
 ): asserts schedule is SeriesSchedule {
   const sched = schedule as Partial<SeriesSchedule> | undefined;
   if (!sched || typeof sched !== 'object')
     throw new HttpError(400, 'series schedule must be an object');
   if (typeof sched.calendarId !== 'string' || !sched.calendarId.trim())
     throw new HttpError(400, 'series schedule needs a calendarId');
-  const calendar = (config.calendars ?? []).find((cal) => cal.id === sched.calendarId);
+  const calendar = calendars.find((cal) => cal.id === sched.calendarId);
   if (!calendar)
     throw new HttpError(400, `series schedule points at a calendar that doesn't exist`);
   if (typeof sched.blockId !== 'string' || !sched.blockId.trim())
@@ -3355,6 +3357,27 @@ function validateSeriesSchedule(
     throw new HttpError(400, 'series schedule roundsPerDay must be 1 or 2');
   if (sched.roundsPerDay === 2 && (sched.slots ?? []).length !== 2)
     throw new HttpError(400, 'series schedule needs exactly two slots for two rounds per day');
+}
+
+/**
+ * The calendars a series schedule may name. A season-run series is generated from the
+ * run's frozen `calendarSnapshot` — which may exist nowhere in tenant config (a flat
+ * season with custom dates synthesises `cal-flat-<league>`), and was already validated at
+ * `POST /season-runs` — so it is checked against that snapshot alone. Every other series
+ * binds to the tenant's live `config.calendars`.
+ */
+async function seriesScheduleCalendars(
+  tenant: string,
+  seasonRunId: unknown,
+): Promise<SeasonCalendar[]> {
+  if (typeof seasonRunId === 'string') {
+    const run = await repo.getSeasonRun(tenant, seasonRunId);
+    if (!run) throw new HttpError(400, `series names a season run that doesn't exist`);
+    return [run.calendarSnapshot];
+  }
+  const config = await repo.getTenantConfig(tenant);
+  if (!config) throw new HttpError(404, 'tenant not found');
+  return config.calendars ?? [];
 }
 
 app.get('/series', async (c) => {
@@ -3399,16 +3422,18 @@ app.post('/series', requireAdmin, async (c) => {
   if (await repo.getSeries(tenant, series.id))
     throw new HttpError(409, 'a series with that id already exists');
   // A schedule binding is optional (legacy series schedule from startDate/endDate), but
-  // when present it must name a real calendarId/blockId on THIS tenant with a valid
-  // cadence — regenerate trusts it blindly, so a dangling reference here would only
-  // surface much later as a silent no-op. Unlike PATCH, `null` is NOT a special case
-  // here — there is no stored binding on a brand-new series for it to clear, so it just
-  // 400s through the same "must be an object" guard as any other non-object.
-  if (series.schedule !== undefined) {
-    const config = await repo.getTenantConfig(tenant);
-    if (!config) throw new HttpError(404, 'tenant not found');
-    validateSeriesSchedule(series.schedule, config);
-  }
+  // when present it must name a real calendarId/blockId with a valid cadence — regenerate
+  // trusts it blindly, so a dangling reference here would only surface much later as a
+  // silent no-op. "Real" means on the season run's calendar snapshot for a run-backed
+  // series, else on THIS tenant's config (`seriesScheduleCalendars`). Unlike PATCH, `null`
+  // is NOT a special case here — there is no stored binding on a brand-new series for it
+  // to clear, so it just 400s through the same "must be an object" guard as any other
+  // non-object.
+  if (series.schedule !== undefined)
+    validateSeriesSchedule(
+      series.schedule,
+      await seriesScheduleCalendars(tenant, series.seasonRunId),
+    );
   // Fixtures are generated client-side and POSTed whole.
   series.version = 1;
   // A brand-new series is a DRAFT (ADR 0011): release and approval are earned via PATCH,
@@ -3452,9 +3477,10 @@ app.patch('/series/:id', requireAdmin, async (c) => {
     // Passed through as-is below; `updateSeries` spreads the patch over `current`, so
     // this null overwrites whatever binding was stored.
   } else if (patch.schedule !== undefined) {
-    const config = await repo.getTenantConfig(ra.tenant);
-    if (!config) throw new HttpError(404, 'tenant not found');
-    validateSeriesSchedule(patch.schedule, config);
+    // Validate against the series as it will be STORED: the patch may carry its own
+    // `seasonRunId`, otherwise the stored one decides snapshot-vs-config.
+    const seasonRunId = 'seasonRunId' in patch ? patch.seasonRunId : current.seasonRunId;
+    validateSeriesSchedule(patch.schedule, await seriesScheduleCalendars(ra.tenant, seasonRunId));
   }
   // ── Progressive release (ADR 0011) ──
   // `revealedAt` is server-owned audit; never accept it off the wire.

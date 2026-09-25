@@ -20,7 +20,7 @@ import userEvent from '@testing-library/user-event';
 import { AdminFixtures, FixtureTable, SCHEDULE_COLS } from './admin';
 import { ApiError } from './api';
 import { renderWithProviders } from './test-utils';
-import type { Clash, Club, SeasonCalendar, Series, TenantConfig } from './types';
+import type { Clash, Club, SeasonCalendar, SeasonRun, Series, TenantConfig } from './types';
 
 const calendar: SeasonCalendar = {
   id: 'cal',
@@ -68,6 +68,7 @@ const setup = (
     onUpdateSeries?: ReturnType<typeof vi.fn>;
     onCheckClashes?: ReturnType<typeof vi.fn>;
     toast?: ReturnType<typeof vi.fn>;
+    allSeasonRuns?: SeasonRun[];
   } = {},
 ) => {
   // Resolve by default: onSave now closes the row only once the write promise lands, so a
@@ -82,6 +83,7 @@ const setup = (
       series={s}
       clubs={clubs}
       allCalendars={[calendar]}
+      allSeasonRuns={extra.allSeasonRuns}
       onUpdateSeries={onUpdateSeries}
       onDeleteSeries={vi.fn()}
       onDuplicateSeries={vi.fn()}
@@ -473,6 +475,30 @@ describe('adding a fixture', () => {
     // 29 Aug, which is outside the playing block entirely.
     const added = resultingFixtures(onUpdateSeries, s).at(-1)!;
     expect(added.date).toBe('2026-10-03');
+  });
+
+  it('dates through the season run snapshot when the calendar exists only there', async () => {
+    // A flat season with custom dates synthesises `cal-flat-<league>` inside the run and
+    // never in tenant config, so looking only at `allCalendars` fell back to the legacy
+    // +7-day step (29 Aug) instead of the snapshot block.
+    const flatCalendar: SeasonCalendar = {
+      id: 'cal-flat-friendlies',
+      label: '2026/27',
+      blocks: [{ id: 'b1', label: 'Season', start: '2026-10-03', end: '2027-03-27' }],
+      breaks: [],
+      excludeDates: [],
+    };
+    const run = { id: 'run-1', calendarSnapshot: flatCalendar } as unknown as SeasonRun;
+    const s = series({
+      seasonRunId: 'run-1',
+      schedule: { calendarId: 'cal-flat-friendlies', blockId: 'b1', cadence: { kind: 'weekly' } },
+    } as Partial<Series>);
+    const { user, onUpdateSeries } = setup(s, { allSeasonRuns: [run] });
+    await user.click(screen.getByRole('button', { name: /add fixture/i }));
+
+    // Block opens 3 Oct; round 4 weekly is 24 Oct.
+    const added = resultingFixtures(onUpdateSeries, s).at(-1)!;
+    expect(added.date).toBe('2026-10-24');
   });
 
   it('never proposes a side against itself', async () => {

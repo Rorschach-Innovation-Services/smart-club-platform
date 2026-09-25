@@ -761,6 +761,7 @@ export function AdminFixtures({
               onUnapprove={unapprove}
               toast={toast}
               allCalendars={allCalendars}
+              allSeasonRuns={allSeasonRuns}
               onAllocateVenues={onAllocateVenues}
               onCheckClashes={onCheckClashes}
             />
@@ -1099,6 +1100,7 @@ export function FixtureTable({
   onUnapprove,
   toast,
   allCalendars = [] as SeasonCalendar[],
+  allSeasonRuns = [] as SeasonRun[],
   onAllocateVenues,
   onCheckClashes,
 }) {
@@ -1142,7 +1144,18 @@ export function FixtureTable({
     // "+7 days from the last fixture" would step straight into the mid-season break —
     // the exact defect season calendars exist to remove — and it parsed with a lenient
     // `new Date()` in a module that otherwise went strict-dayjs everywhere.
-    const calendar = allCalendars.find((c) => c.id === series.schedule?.calendarId);
+    // A season-run series is bound to its run's frozen `calendarSnapshot`, which may exist
+    // nowhere in tenant config (a flat season with custom dates synthesises
+    // `cal-flat-<league>`), so resolve it from the run; only a run-less series looks in
+    // the tenant's calendars.
+    const run = series.seasonRunId
+      ? allSeasonRuns.find((r) => r.id === series.seasonRunId)
+      : undefined;
+    const calendar = series.seasonRunId
+      ? run?.calendarSnapshot.id === series.schedule?.calendarId
+        ? run?.calendarSnapshot
+        : undefined
+      : allCalendars.find((c) => c.id === series.schedule?.calendarId);
     const planned =
       series.schedule && calendar
         ? planRoundDates({
