@@ -1411,7 +1411,10 @@ function PreviewRail({
   previewTeams,
   onPreviewTeams,
   uncovered = [],
+  scopeEcho,
 }: {
+  /** Which seasons the edit is for, echoed beside the rail's calendar line. */
+  scopeEcho?: string;
   structure: CompetitionStructure;
   calendar: SeasonCalendar | undefined;
   /** `previewStages` over this structure — one per stage, in order. */
@@ -1511,6 +1514,11 @@ function PreviewRail({
       }}
     >
       <div style={{ ...SECTION, margin: '0 0 8px' }}>Preview</div>
+      {/* Names where the dates come from, and which seasons the edit is for. */}
+      <div data-testid="rail-scope" style={{ ...HINT, margin: '-4px 0 10px' }}>
+        {calendar ? `Previewing on ${calendar.label}` : 'No calendar to preview on'}
+        {scopeEcho ? ` · ${scopeEcho}` : ''}
+      </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
         <BoundedNumber
           min={2}
@@ -1630,6 +1638,49 @@ function PreviewRail({
 
 /* ─── Structure editor ─── */
 
+/** One competition that binds the structure being edited — a season using it. */
+type StructureBinding = {
+  league: string;
+  leagueKey: string;
+  competition: string;
+  competitionId: string;
+  calendarId: string;
+};
+
+/**
+ * Repoint one competition from the structure being edited to its own fork. The card
+ * re-checks `fromStructureId` against the FRESH config before writing anything.
+ */
+type Rebind = { leagueKey: string; competitionId: string; fromStructureId: string };
+
+/** The scoped competition moved or vanished while the editor was open — nothing was written. */
+class BindingChangedError extends Error {
+  constructor() {
+    super('This season’s binding changed while you were editing — reopen and try again');
+    this.name = 'BindingChangedError';
+  }
+}
+
+/**
+ * One season's own copy of a structure, forked from the editor's draft. Same minting
+ * idiom as the season wizard's `cloneForLeague`: a fresh id, and `source` / `templateId`
+ * dropped, so the copy reads as operator-authored and can never become a template's
+ * reuse prefill. Named for the season's calendar, once.
+ */
+function forkForSeason(draft: CompetitionStructure, calendarLabel: string): CompetitionStructure {
+  const { source: _source, templateId: _templateId, ...rest } = draft;
+  void _source;
+  void _templateId;
+  const base = draft.name.trim();
+  const name = base.endsWith(` · ${calendarLabel}`) ? base : `${base} · ${calendarLabel}`;
+  return {
+    ...rest,
+    id: newStructureId(),
+    name: name.slice(0, 80).trim(),
+    stages: JSON.parse(JSON.stringify(draft.stages)) as StageSpec[],
+  };
+}
+
 function StructureEditor({
   initial,
   calendars,
@@ -1650,8 +1701,12 @@ function StructureEditor({
    * (the server only accepts blocks that are on the bound calendar), and it is what lets
    * the editor refuse a save the API would reject for the whole tenant.
    */
-  bindings?: Array<{ league: string; competition: string; calendarId: string }>;
-  onSave: (s: CompetitionStructure) => Promise<void>;
+  bindings?: StructureBinding[];
+  /**
+   * `rebind` is set only for a per-season fork: `s` is then a NEW structure, and the
+   * named competition is repointed at it in the same write.
+   */
+  onSave: (s: CompetitionStructure, opts?: { rebind?: Rebind }) => Promise<void>;
   onClose: () => void;
   toast: Toast;
 }) {
@@ -1684,7 +1739,22 @@ function StructureEditor({
   const [expanded, setExpanded] = useState<string | null>(initial.stages[0]?.id ?? null);
   const [saveErr, setSaveErr] = useState('');
   const [busy, setBusy] = useState(false);
-  const calendar = calendars.find((c) => c.id === calendarId);
+  /**
+   * The editing scope: -1 = every season using this structure, otherwise the index of one
+   * binding. Scoped to a binding, the preview runs against THAT season's calendar (no
+   * separate preview choice), and only that binding's calendar rules apply.
+   */
+  const [scope, setScope] = useState(-1);
+  const scoped = scope >= 0 ? bindings[scope] : undefined;
+  // Two or more seasons share the structure: a scoped save forks. With one, a plain save
+  // already affects only that season.
+  const forking = !!scoped && bindings.length >= 2;
+  const inScope = scoped ? [scoped] : bindings;
+  const calendarLabelOf = (id: string) => calendars.find((c) => c.id === id)?.label ?? id;
+  const bindingLabel = (b: StructureBinding) => `${b.league} · ${calendarLabelOf(b.calendarId)}`;
+  const seasons = (n: number) => `${n} season${n === 1 ? '' : 's'}`;
+  const effectiveCalendarId = scoped ? scoped.calendarId : calendarId;
+  const calendar = calendars.find((c) => c.id === effectiveCalendarId);
 
   const patchStage = (i: number, patch: Partial<StageSpec>) =>
     setDraft((d) => ({
@@ -1797,12 +1867,12 @@ function StructureEditor({
   }
   // Deduped by calendar: one structure is routinely bound by several leagues, and three
   // identical lines naming the same calendar is noise, not information.
-  for (const calId of [...new Set(bindings.map((b) => b.calendarId))]) {
+  for (const calId of [...new Set(inScope.map((b) => b.calendarId))]) {
     const bound = calendars.find((c) => c.id === calId);
     if (!bound) continue;
     const orphans = stagesOffCalendar(draft.stages, bound);
     if (!orphans.length) continue;
-    const who = bindings
+    const who = inScope
       .filter((b) => b.calendarId === calId)
       .map((b) => `${b.competition} (${b.league})`)
       .join(', ');
@@ -1837,8 +1907,8 @@ function StructureEditor({
     );
   const uncovered: Array<{ calendarLabel?: string; lines: string[] }> = [];
   if (calendar && offPreview.length === 0) uncovered.push({ lines: uncoveredLines(calendar) });
-  for (const calId of [...new Set(bindings.map((b) => b.calendarId))]) {
-    if (calId === calendarId) continue;
+  for (const calId of [...new Set(inScope.map((b) => b.calendarId))]) {
+    if (calId === effectiveCalendarId) continue;
     const bound = calendars.find((c) => c.id === calId);
     if (!bound || stagesOffCalendar(draft.stages, bound).length > 0) continue;
     uncovered.push({ calendarLabel: bound.label, lines: uncoveredLines(bound) });
@@ -1850,11 +1920,36 @@ function StructureEditor({
     setBusy(true);
     try {
       const next: CompetitionStructure = { ...draft, name: draft.name.trim() };
-      await onSave(next);
-      toast(`${draft.name.trim()} · saved`);
+      if (forking && scoped) {
+        // Copy-on-write: this season gets its own structure and the others keep the
+        // original, byte-unchanged. A season ALREADY RUNNING on this competition is not
+        // offered these edits: its snapshot references the ORIGINAL structure id, and
+        // both the console's skew check (season-run.tsx, `structures.find(s => s.id ===
+        // active.structureSnapshot.id)`) and the server's rebase route
+        // (`POST /season-runs/:id/rebase`, same lookup) follow that id — never the
+        // competition's current `structureId`. The original's version doesn't move, so no
+        // "Review changes" appears; the fork only shapes seasons started from now on.
+        const calLabel = calendarLabelOf(scoped.calendarId);
+        const clone = forkForSeason(next, calLabel);
+        await onSave(clone, {
+          rebind: {
+            leagueKey: scoped.leagueKey,
+            competitionId: scoped.competitionId,
+            fromStructureId: initial.id,
+          },
+        });
+        toast(`Created ${clone.name} for ${scoped.league} · ${calLabel}`);
+      } else {
+        await onSave(next);
+        toast(`${draft.name.trim()} · saved`);
+      }
       onClose();
     } catch (e) {
-      setSaveErr(describeError(e, 'Could not save — try again'));
+      setSaveErr(
+        e instanceof BindingChangedError
+          ? e.message
+          : describeError(e, 'Could not save — try again'),
+      );
     } finally {
       setBusy(false);
     }
@@ -1881,29 +1976,77 @@ function StructureEditor({
             placeholder="e.g. Split league with mid-season swap"
           />
         </div>
-        <div>
-          <div className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            Show dates from
-            <InfoDot title="Show dates from">
-              <p>
-                A <strong>preview only</strong>. Structures don’t belong to a calendar — a stage
-                binds to a block by position, and the real calendar is chosen when a league binds
-                this structure. Pick one here just to see real dates and check the stages fit.
-              </p>
-            </InfoDot>
+        {bindings.length > 0 && (
+          <div>
+            <div className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              Edit for
+              <InfoDot title="Edit for">
+                <p>
+                  Edit the structure for <strong>every season</strong> using it, or for{' '}
+                  <strong>one season</strong>. Editing for one season gives that season its own copy
+                  when others share the structure; the others keep the current one.
+                </p>
+              </InfoDot>
+            </div>
+            <Select
+              value={String(scope)}
+              onChange={(v) => setScope(Number(v))}
+              width={300}
+              label="Edit for"
+            >
+              <option value="-1">{`All seasons using this structure (${bindings.length})`}</option>
+              {bindings.map((b, i) => (
+                <option key={`${b.leagueKey}|${b.competitionId}`} value={String(i)}>
+                  {`${bindingLabel(b)}${
+                    bindings.filter((o) => bindingLabel(o) === bindingLabel(b)).length > 1
+                      ? ` (${b.competition})`
+                      : ''
+                  }${bindings.length === 1 ? ' — only season using it' : ''}`}
+                </option>
+              ))}
+            </Select>
           </div>
-          <Select value={calendarId} onChange={pickCalendar} width={260} label="Show dates from">
-            <option value="">No calendar</option>
-            {calendars.map((c) => (
-              <option key={c.id} value={c.id}>
-                {`${c.label} · ${calendarSpan(c)}`}
-              </option>
-            ))}
-          </Select>
-        </div>
+        )}
+        {!scoped && (
+          <div>
+            <div className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              Show dates from
+              <InfoDot title="Show dates from">
+                <p>
+                  A <strong>preview only</strong>. Structures don’t belong to a calendar — a stage
+                  binds to a block by position, and the real calendar is chosen when a league binds
+                  this structure. Pick one here just to see real dates and check the stages fit.
+                </p>
+              </InfoDot>
+            </div>
+            <Select value={calendarId} onChange={pickCalendar} width={260} label="Show dates from">
+              <option value="">No calendar</option>
+              {calendars.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {`${c.label} · ${calendarSpan(c)}`}
+                </option>
+              ))}
+            </Select>
+          </div>
+        )}
         <Btn tone="outline" size="sm" onClick={copyJson}>
           Copy JSON
         </Btn>
+      </div>
+      {/* What is being edited, always in view — the dropdown alone only implies it. */}
+      <div data-testid="edit-scope-line" style={{ ...WARN, marginTop: 8 }}>
+        {bindings.length === 0 ? (
+          'Not bound to any season yet.'
+        ) : scoped ? (
+          <>
+            Editing for <strong>{bindingLabel(scoped)}</strong> — saving affects only this season.
+          </>
+        ) : (
+          <>
+            Editing for <strong>all {seasons(bindings.length)}</strong> using this structure —
+            saving affects every one of them.
+          </>
+        )}
       </div>
 
       <div
@@ -1921,7 +2064,7 @@ function StructureEditor({
               on the tenant, and no competition binds this structure yet. "No calendar"
               would otherwise read as "you haven't picked one", while the real message is
               "we can't tell, and only you can say". */}
-          {!calendar && !calendarChosen && offPreview.length > 0 && (
+          {!calendar && !calendarChosen && !scoped && offPreview.length > 0 && (
             <div
               style={{
                 border: '1px solid var(--line)',
@@ -1959,7 +2102,7 @@ function StructureEditor({
             >
               {offPreview.length === 1 ? 'One stage plays' : `${offPreview.length} stages play`} a
               block position <strong>{calendar.label}</strong> doesn&apos;t have.
-              {bindings.length > 0 ? (
+              {bindings.length > 0 && !scoped ? (
                 <div style={{ ...HINT, marginTop: 6 }}>
                   This structure is bound while{' '}
                   {[...new Set(bindings.map((b) => `${b.competition} (${b.league})`))].join(', ')}{' '}
@@ -2019,6 +2162,13 @@ function StructureEditor({
           previewTeams={previewTeams}
           onPreviewTeams={setPreviewTeams}
           uncovered={uncovered}
+          scopeEcho={
+            bindings.length === 0
+              ? undefined
+              : scoped
+                ? `for ${bindingLabel(scoped)} only`
+                : `for all ${seasons(bindings.length)}`
+          }
         />
       </div>
 
@@ -2029,14 +2179,36 @@ function StructureEditor({
       ))}
       {saveErr && <div style={ERR}>{saveErr}</div>}
 
-      <div className="insights-callout" style={{ marginTop: 16 }}>
-        Saving creates a <strong>new version</strong> of this structure. Any season already running
-        keeps the version it started with, so your changes only affect seasons started from now on.
-      </div>
+      {forking ? (
+        <div className="insights-callout" data-testid="fork-note" style={{ marginTop: 16 }}>
+          <div>
+            Saving creates <strong>this season’s own copy</strong> of the structure; the other{' '}
+            {seasons(bindings.length - 1)} {bindings.length - 1 === 1 ? 'keeps' : 'keep'} the
+            current one.
+          </div>
+          <div style={{ marginTop: 6 }}>
+            A season already started on this competition keeps the shape it started with and will
+            NOT be offered these changes — to change a running season, edit for all seasons and use
+            Review changes in the admin console.
+          </div>
+        </div>
+      ) : (
+        <div className="insights-callout" style={{ marginTop: 16 }}>
+          Saving creates a <strong>new version</strong> of this structure. Any season already
+          running keeps the version it started with, so your changes only affect seasons started
+          from now on.
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
         <Btn tone="teal" onClick={submit} disabled={!!errors.length || busy}>
-          {busy ? 'Saving…' : 'Save structure'}
+          {busy
+            ? 'Saving…'
+            : bindings.length === 0
+              ? 'Save structure'
+              : scoped
+                ? 'Save for this season only'
+                : `Save for all ${seasons(bindings.length)}`}
         </Btn>
         <Btn tone="outline" onClick={onClose}>
           Cancel
@@ -2284,20 +2456,57 @@ export function StructuresCard({
     }
   }
 
-  const upsert = (structure: CompetitionStructure) =>
-    saveStructures((fresh) => {
-      const i = fresh.findIndex((s) => s.id === structure.id);
-      if (i === -1) return [...fresh, structure];
-      // Editing mints a new VERSION — but the number itself is SERVER-OWNED (ADR 0008
-      // phase 1): the server deep-compares this against the stored structure and decides
-      // whether anything actually changed. `save`'s response seeds the query cache, so
-      // the real version flows back from there rather than being guessed here. Running
-      // seasons hold their own snapshot, so this never reshapes a season in flight — it
-      // only affects seasons started from here on.
-      const next = [...fresh];
-      next[i] = structure;
-      return next;
-    }, 'Could not save structure');
+  /**
+   * A per-season fork: the clone appended, and ONLY the scoped competition repointed at
+   * it, in one PUT. Rebuilt against the fresh config like every other write here — and if
+   * the competition vanished or no longer binds the structure the editor opened, refused
+   * without writing anything (the wizard commit's identical-binding care).
+   */
+  async function forkSave(clone: CompetitionStructure, rebind: Rebind): Promise<void> {
+    try {
+      const current = await api.platformGetTenant(slug);
+      const leagues = current.leagues ?? [];
+      const league = leagues.find((l) => l.key === rebind.leagueKey);
+      const competition = league?.competitions?.find((c) => c.id === rebind.competitionId);
+      if (!league || !competition || competition.structureId !== rebind.fromStructureId)
+        throw new BindingChangedError();
+      await save({
+        structures: [...(current.structures ?? []), clone],
+        leagues: leagues.map((l) =>
+          l === league
+            ? {
+                ...l,
+                competitions: (l.competitions ?? []).map((c) =>
+                  c === competition ? { ...c, structureId: clone.id } : c,
+                ),
+              }
+            : l,
+        ),
+      });
+    } catch (e) {
+      // The refusal is shown inline by the editor; anything else also toasts, as before.
+      if (!(e instanceof BindingChangedError))
+        toast(describeError(e, 'Could not save structure'), 'warn');
+      throw e;
+    }
+  }
+
+  const upsert = (structure: CompetitionStructure, opts?: { rebind?: Rebind }) =>
+    opts?.rebind
+      ? forkSave(structure, opts.rebind)
+      : saveStructures((fresh) => {
+          const i = fresh.findIndex((s) => s.id === structure.id);
+          if (i === -1) return [...fresh, structure];
+          // Editing mints a new VERSION — but the number itself is SERVER-OWNED (ADR 0008
+          // phase 1): the server deep-compares this against the stored structure and decides
+          // whether anything actually changed. `save`'s response seeds the query cache, so
+          // the real version flows back from there rather than being guessed here. Running
+          // seasons hold their own snapshot, so this never reshapes a season in flight — it
+          // only affects seasons started from here on.
+          const next = [...fresh];
+          next[i] = structure;
+          return next;
+        }, 'Could not save structure');
 
   async function onDelete(structure: CompetitionStructure) {
     setDeleteErr('');
@@ -2343,7 +2552,15 @@ export function StructuresCard({
     (config.leagues ?? []).flatMap((l) =>
       (l.competitions ?? [])
         .filter((c) => c.structureId === id)
-        .map((c) => ({ league: l.label, competition: c.label, calendarId: c.calendarId })),
+        .map(
+          (c): StructureBinding => ({
+            league: l.label,
+            leagueKey: l.key,
+            competition: c.label,
+            competitionId: c.id,
+            calendarId: c.calendarId,
+          }),
+        ),
     );
 
   /** "<league> · <calendar>" per distinct binding pair, in config order. */

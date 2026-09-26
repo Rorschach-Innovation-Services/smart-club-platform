@@ -182,6 +182,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
       'Rebase moves a running season onto the latest version. The server fetches the structure itself, and refuses if it changed again after you reviewed it.',
       'Existing series are never touched. A stage whose teams setting changed goes back to awaiting entrants. A stage whose schedule changed is marked “Needs regenerating”.',
       'The calendar is not rebased. A season keeps the calendar copy it started with.',
+      'An edit made for one season gives that season its own copy of the structure. The other seasons keep the original, and a season already running keeps the shape it started with.',
     ],
     example:
       'Premier Men’s season started on version 3. The operator moves the final round to Block 2, which makes version 4. Rebase moves the season to version 4 and marks the final round “Needs regenerating”. The Top Six fixtures already released stay as they are.',
