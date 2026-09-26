@@ -27,6 +27,7 @@ import type {
   StageRun,
   StageSpec,
 } from '../src/types.js';
+import { bindCompetition, startRunBody } from './season-run-harness.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
 const DDB_PORT = 4639; // next free odd port after veterans-requests (4637)
@@ -270,6 +271,13 @@ before(async () => {
 
   const cfg = await repo.getTenantConfig('dolphins');
   await repo.putTenantConfig({ ...cfg!, structures: [V2, LEGACY_V2, REVEAL_V2] });
+  // POST /season-runs freezes what config binds: comp-1 on premier-men runs the live V2.
+  await bindCompetition(repo, 'dolphins', {
+    leagueKey: 'premier-men',
+    competitionId: 'comp-1',
+    structure: V2,
+    calendar: CALENDAR,
+  });
 });
 
 after(() => {
@@ -523,7 +531,7 @@ describe('pairingOverride guard on the season-run write paths', () => {
       method: 'POST',
       headers: headers(ADMIN),
       body: JSON.stringify(
-        run({
+        startRunBody({
           id: 'sr-po-post',
           stages: [{ specId: 'ko', status: 'ready', groups: [], pairingOverride: 'x' as never }],
         }),
@@ -531,5 +539,22 @@ describe('pairingOverride guard on the season-run write paths', () => {
     });
     assert.equal(res.status, 400);
     assert.equal(await repo.getSeasonRun('dolphins', 'sr-po-post'), null);
+
+    // Control: the same body with a known override starts — so the 400 above was the
+    // override, not the binding.
+    const ok = await app.request('/season-runs', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify(
+        startRunBody({
+          id: 'sr-po-post',
+          stages: [{ specId: 'ko', status: 'ready', groups: [], pairingOverride: 'within-pool' }],
+        }),
+      ),
+    });
+    assert.equal(ok.status, 201, await ok.clone().text());
+    const stored = await repo.getSeasonRun('dolphins', 'sr-po-post');
+    assert.equal(stored?.structureSnapshot.version, V2.version, 'froze the live structure');
+    assert.equal(stored?.stages[0]?.pairingOverride, 'within-pool');
   });
 });

@@ -2597,8 +2597,64 @@ describe('StartSeasonForm — picking among seasons of the same competition', ()
     expect(screen.getByRole('button', { name: /show past seasons \(1\)/i })).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: /^start season$/i }));
-    expect(onCreateRun).toHaveBeenCalledWith(
-      expect.objectContaining({ competitionId: 'c-now', calendarSnapshot: calendar }),
+    expect(onCreateRun).toHaveBeenCalledWith(expect.objectContaining({ competitionId: 'c-now' }));
+  });
+
+  it('sends only the binding — the server fetches the snapshots and defaults the stages', async () => {
+    // A tab that cached config before an operator edit used to freeze the OLD calendar
+    // into the new season; the body now carries nothing the server could be misled by.
+    const { user, onCreateRun } = await open([comp('c-now', '50 Over', 'cal')]);
+    await user.click(screen.getByRole('button', { name: /^start season$/i }));
+
+    expect(onCreateRun).toHaveBeenCalledTimes(1);
+    const body = onCreateRun.mock.calls[0]![0] as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(
+      ['competitionId', 'id', 'leagueKey', 'seasonLabel', 'version'].sort(),
     );
+    expect(body).not.toHaveProperty('structureSnapshot');
+    expect(body).not.toHaveProperty('calendarSnapshot');
+    expect(body).not.toHaveProperty('stages');
+    expect(body).toMatchObject({ leagueKey: 'premier', competitionId: 'c-now', version: 1 });
+  });
+});
+
+describe('GenerateFixturesLauncher — refetches tenant config on open', () => {
+  it('asks the host to refresh config once when it opens, not on every render', async () => {
+    const onRefreshConfig = vi.fn().mockResolvedValue(undefined);
+    const props = {
+      clubs,
+      allLeagues: [league(SPLIT_LEAGUE.id)],
+      config: { structures: [SPLIT_LEAGUE], calendars: [calendar] } as unknown as TenantConfig,
+      existingRuns: [],
+      onCreateRun: vi.fn(),
+      onRefreshConfig,
+      onClose: vi.fn(),
+      toast: vi.fn(),
+    };
+    const { rerender } = render(<GenerateFixturesLauncher {...props} />);
+    expect(onRefreshConfig).toHaveBeenCalledTimes(1);
+
+    // The refetched config arriving re-renders the launcher — that must not refetch again.
+    rerender(<GenerateFixturesLauncher {...props} config={{ ...props.config }} />);
+    await userEvent.setup().click(screen.getByRole('button', { name: /^continue$/i }));
+    expect(onRefreshConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed refresh leaves the launcher usable', async () => {
+    const onRefreshConfig = vi.fn().mockRejectedValue(new Error('offline'));
+    render(
+      <GenerateFixturesLauncher
+        clubs={clubs}
+        allLeagues={[league(SPLIT_LEAGUE.id)]}
+        config={{ structures: [SPLIT_LEAGUE], calendars: [calendar] } as unknown as TenantConfig}
+        existingRuns={[]}
+        onCreateRun={vi.fn()}
+        onRefreshConfig={onRefreshConfig}
+        onClose={vi.fn()}
+        toast={vi.fn()}
+      />,
+    );
+    await userEvent.setup().click(screen.getByRole('button', { name: /^continue$/i }));
+    expect(screen.getByRole('button', { name: /^start season$/i })).toBeVisible();
   });
 });

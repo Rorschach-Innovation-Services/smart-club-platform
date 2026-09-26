@@ -863,6 +863,9 @@ export function AdminFixtures({
             (() => Promise.reject(new Error('season-run creation is not wired for this host')))
           }
           onSeasonSetupChanged={onSeasonSetupChanged}
+          // Same refetch (runs + tenant config): opening the launcher must show what the
+          // server will freeze into the new season, not a config cached earlier.
+          onRefreshConfig={onSeasonSetupChanged}
           onClose={() => setLauncherOpen(false)}
           toast={toast}
         />

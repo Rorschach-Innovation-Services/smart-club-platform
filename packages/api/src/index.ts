@@ -3869,6 +3869,14 @@ const FLAT_COMPETITION_ID = '__flat__';
  * Validate and store a new season run — the whole of `POST /season-runs`, shared with the
  * quick start so a quick-started run passes exactly the checks a client-built one does.
  * Stamps the server-owned fields (`version: 1`, `createdAt/By`) and returns the stored run.
+ *
+ * The snapshots are SERVER-FETCHED at start — the same rule as rebase and quick start. The
+ * run's `leagueKey` → `competitionId` binding is resolved against the live tenant config
+ * and the competition's structure + calendar are deep-copied into `structureSnapshot` /
+ * `calendarSnapshot`; anything the client sent for them is ignored. A stale admin tab
+ * (tenant config cached before an operator edited the calendar) can therefore no longer
+ * freeze outdated dates into a new season. Client-sent `stages` must all name stages on
+ * the RESOLVED structure; absent, every stage starts `awaiting-entrants`.
  */
 async function createSeasonRun(
   tenant: string,
@@ -3881,17 +3889,6 @@ async function createSeasonRun(
   // caller deserves the 400 that says what is wrong.
   if (typeof run.seasonLabel !== 'string' || !run.seasonLabel.trim())
     throw new HttpError(400, 'season run needs a season label');
-  // The snapshots are the whole point: a run must keep the structure and calendar it
-  // STARTED with, so a later operator edit can never reshape a season in flight.
-  if (!run.structureSnapshot?.stages?.length)
-    throw new HttpError(400, 'season run needs a structure snapshot');
-  if (!run.calendarSnapshot?.blocks?.length)
-    throw new HttpError(400, 'season run needs a calendar snapshot');
-  // The snapshots are client-supplied and then drive fixture materialisation for the
-  // whole season. Re-use the operator-path guards rather than trusting them: a malformed
-  // snapshot is exactly as damaging here, and it is frozen for the life of the run.
-  validateStructures([run.structureSnapshot]);
-  validateCalendars([run.calendarSnapshot]);
   if (!run.competitionId?.trim()) throw new HttpError(400, 'season run needs a competition');
   if (run.competitionId === FLAT_COMPETITION_ID)
     throw new HttpError(400, 'flat seasons are no longer supported; use quick start');
@@ -3900,10 +3897,56 @@ async function createSeasonRun(
   if ((run.stages?.length ?? 0) > 20)
     throw new HttpError(400, 'a season run is limited to 20 stages');
   for (const stage of run.stages ?? []) if (stage) assertValidStageRunFields(stage);
+
+  // Resolve the binding against LIVE config: the snapshots are the whole point (a run keeps
+  // the structure and calendar it STARTED with, so a later operator edit can never reshape
+  // a season in flight), so what gets frozen must be what config says now, not what a
+  // client happened to have cached.
+  const config = await repo.getTenantConfig(tenant);
+  if (!config) throw new HttpError(404, 'tenant not found');
+  const league = (config.leagues ?? []).find((l) => l.key === run.leagueKey);
+  if (!league) throw new HttpError(400, 'unknown league');
+  const competition = (league.competitions ?? []).find((cm) => cm.id === run.competitionId);
+  // Same wording + code as the generate route's 409: the competition was unbound (or
+  // never bound) while the admin's view still showed it.
+  if (!competition)
+    throw new HttpError(400, 'competition no longer bound to this league', {
+      code: 'competition_unbound',
+    });
+  const structure = (config.structures ?? []).find((st) => st.id === competition.structureId);
+  if (!structure)
+    throw new HttpError(400, "the competition's structure no longer exists", {
+      code: 'structure_missing',
+    });
+  const calendar = (config.calendars ?? []).find((cl) => cl.id === competition.calendarId);
+  if (!calendar)
+    throw new HttpError(400, "the competition's calendar no longer exists", {
+      code: 'calendar_missing',
+    });
+  run.structureSnapshot = structuredClone(structure);
+  run.calendarSnapshot = structuredClone(calendar);
+  // Config is written through the operator validators, but the snapshot is frozen for the
+  // life of the run — re-check what will actually be stored rather than trust it.
+  validateStructures([run.structureSnapshot]);
+  validateCalendars([run.calendarSnapshot]);
+
+  const specIds = new Set(run.structureSnapshot.stages.map((s) => s.id));
+  if (Array.isArray(run.stages)) {
+    // A stale client can name stages from an older version of the structure.
+    for (const stage of run.stages)
+      if (stage && !specIds.has(stage.specId))
+        throw new HttpError(400, `stage ${stage.specId} is not on the bound structure`);
+  } else {
+    run.stages = run.structureSnapshot.stages.map((s) => ({
+      specId: s.id,
+      status: 'awaiting-entrants',
+      groups: [],
+    }));
+  }
+
   if (await repo.getSeasonRun(tenant, run.id))
     throw new HttpError(409, 'a season run with that id already exists');
   run.version = 1;
-  run.stages = Array.isArray(run.stages) ? run.stages : [];
   run.createdAt = now();
   run.createdBy = by;
   await repo.putSeasonRun(tenant, run);

@@ -16,7 +16,7 @@
  * One stage-group becomes one Series, so everything downstream (approval, release, the
  * player broadcast, travel cost) is the existing, tested path.
  */
-import { useMemo, useState, useId, type CSSProperties } from 'react';
+import { useEffect, useMemo, useState, useId, type CSSProperties } from 'react';
 import {
   BoundedNumber,
   Btn,
@@ -288,6 +288,15 @@ function defaultCompetitionId(league: League | undefined, calendars: SeasonCalen
 
 /* ─── Start a season ─── */
 
+/**
+ * Body of `POST /season-runs` as the console sends it. The server fetches the snapshots
+ * and defaults the stages itself, so the client names only the binding and the label.
+ */
+export type StartSeasonRunRequest = Pick<
+  SeasonRun,
+  'id' | 'leagueKey' | 'competitionId' | 'seasonLabel' | 'version'
+>;
+
 function StartSeasonForm({
   clubs,
   allLeagues,
@@ -303,7 +312,7 @@ function StartSeasonForm({
   allLeagues: League[];
   config: TenantConfig;
   existingRuns: SeasonRun[];
-  onCreate: (run: SeasonRun) => Promise<SeasonRun | void>;
+  onCreate: (run: StartSeasonRunRequest) => Promise<SeasonRun | void>;
   onClose: () => void;
   toast: Toast;
   /** Preselected by the launcher — the admin already chose this league there. */
@@ -362,19 +371,14 @@ function StartSeasonForm({
     setErr('');
     setBusy(true);
     try {
+      // No snapshots and no stages: the server resolves the competition's live structure
+      // and calendar and freezes THOSE (ADR 0014), so a config this tab cached before an
+      // operator edit can never leak outdated dates into the new season.
       await onCreate({
         id: 'run-' + Date.now(),
         leagueKey: league.key,
         competitionId: competition.id,
         seasonLabel: seasonLabel.trim(),
-        // Frozen at start: a later structure edit must never reshape a season in flight.
-        structureSnapshot: structure,
-        calendarSnapshot: calendar,
-        stages: structure.stages.map((s) => ({
-          specId: s.id,
-          status: 'awaiting-entrants' as const,
-          groups: [],
-        })),
         version: 1,
       });
       toast(`${league.label} · ${competition.label} · ${seasonLabel.trim()} started`);
@@ -985,6 +989,7 @@ export function GenerateFixturesLauncher({
   existingRuns,
   onCreateRun,
   onSeasonSetupChanged,
+  onRefreshConfig,
   onClose,
   toast,
 }: {
@@ -992,9 +997,15 @@ export function GenerateFixturesLauncher({
   allLeagues: League[];
   config: TenantConfig;
   existingRuns: SeasonRun[];
-  onCreateRun: (run: SeasonRun) => Promise<SeasonRun | void>;
+  onCreateRun: (run: StartSeasonRunRequest) => Promise<SeasonRun | void>;
   /** Refetch the runs list and tenant config after a quick start made a new season. */
   onSeasonSetupChanged?: () => Promise<unknown> | void;
+  /**
+   * Refetch tenant config when the launcher opens, so the preview and fit it shows are
+   * built from the calendar and structure the server will freeze — not a copy cached
+   * before an operator edit.
+   */
+  onRefreshConfig?: () => Promise<unknown> | void;
   onClose: () => void;
   toast: Toast;
 }) {
@@ -1002,6 +1013,12 @@ export function GenerateFixturesLauncher({
   const isCapable = (key: string) => capable.some((l) => l.key === key);
   const [leagueKey, setLeagueKey] = useState(allLeagues[0]?.key ?? '');
   const [step, setStep] = useState<'pick' | 'season'>('pick');
+  // Once per open (the host mounts the launcher only while it is open). A failed refetch
+  // leaves the cached config on screen — the server still freezes the live copy.
+  useEffect(() => {
+    void Promise.resolve(onRefreshConfig?.()).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (step === 'season') {
     return (

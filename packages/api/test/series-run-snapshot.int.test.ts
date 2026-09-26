@@ -144,12 +144,10 @@ before(async () => {
   assert.ok(config, 'seeded tenant config');
   await repo.putTenantConfig({ ...config, calendars: [] });
 
-  const res = await app.request('/season-runs', {
-    method: 'POST',
-    headers: headers(ADMIN),
-    body: JSON.stringify(RUN),
-  });
-  assert.equal(res.status, 201, await res.text());
+  // Stored directly: `POST /season-runs` now freezes only what tenant config binds, so a
+  // run whose calendar lives nowhere but its snapshot is legacy data (pre-migration flat
+  // runs, or a calendar deleted after start) — which is exactly what this guard must read.
+  await repo.putSeasonRun('dolphins', { ...RUN, createdAt: new Date().toISOString() });
 });
 
 after(() => {

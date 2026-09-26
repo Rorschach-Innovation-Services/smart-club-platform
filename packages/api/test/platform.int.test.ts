@@ -24,6 +24,8 @@ import {
 } from '@aws-sdk/client-s3';
 // Pure module (no env reads at load) — safe to import before the env block below.
 import { DEFAULT_REQUIRED_DOCS, resolveRequiredDocs } from '../src/catalogue.js';
+import type { CompetitionStructure, SeasonCalendar } from '../src/types.js';
+import { bindCompetition } from './season-run-harness.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load,
 // index.ts reads TUTORIALS_BASE_URL / TUTORIALS_BUCKET at module load.
@@ -3403,30 +3405,33 @@ describe('season runs (ADR 0008)', () => {
   const REP = devAuthAs('sr-rep', 'rep@sr', [{ tenantId: T, role: 'rep', clubIds: ['alpha'] }]);
   const H = (auth: string) => tenantHeaders(auth, T);
 
+  const STRUCTURE: CompetitionStructure = {
+    id: 'split',
+    name: 'Split',
+    version: 1,
+    stages: [
+      {
+        id: 's1',
+        name: 'Double round',
+        format: { kind: 'round-robin', legs: 2 },
+        entrants: { kind: 'manual' },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+      },
+    ],
+  };
+  const CALENDAR: SeasonCalendar = {
+    id: 'cal',
+    label: '2026/27',
+    blocks: [{ id: 'b1', label: 'Block 1', start: '2026-09-13', end: '2026-12-13' }],
+  };
+  // Snapshots still ride along for the repo-seeded runs below; POST ignores them.
   const run = (extra: Record<string, unknown> = {}) => ({
     id: 'run-1',
     leagueKey: 'premier',
     competitionId: 'c1',
     seasonLabel: '2026/27',
-    structureSnapshot: {
-      id: 'split',
-      name: 'Split',
-      version: 1,
-      stages: [
-        {
-          id: 's1',
-          name: 'Double round',
-          format: { kind: 'round-robin', legs: 2 },
-          entrants: { kind: 'manual' },
-          schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
-        },
-      ],
-    },
-    calendarSnapshot: {
-      id: 'cal',
-      label: '2026/27',
-      blocks: [{ id: 'b1', label: 'Block 1', start: '2026-09-13', end: '2026-12-13' }],
-    },
+    structureSnapshot: STRUCTURE,
+    calendarSnapshot: CALENDAR,
     stages: [],
     version: 1,
     ...extra,
@@ -3442,6 +3447,13 @@ describe('season runs (ADR 0008)', () => {
       submissionDeadline: '2026-12-31',
       knownClubs: [],
       leagues: [],
+    });
+    // POST /season-runs freezes the structure + calendar config binds to the competition.
+    await bindCompetition(repo, T, {
+      leagueKey: 'premier',
+      competitionId: 'c1',
+      structure: STRUCTURE,
+      calendar: CALENDAR,
     });
   });
 
@@ -3467,11 +3479,12 @@ describe('season runs (ADR 0008)', () => {
     assert.equal((await post(run({ id: 'rep-run' }), REP)).status, 403);
   });
 
-  test('rejects a run missing its structure or calendar snapshot', async () => {
-    const noStructure = await post(run({ id: 'r2', structureSnapshot: undefined }));
-    assert.equal(noStructure.status, 400);
-    const noCalendar = await post(run({ id: 'r3', calendarSnapshot: undefined }));
-    assert.equal(noCalendar.status, 400);
+  test('rejects a run whose competition is not bound in config', async () => {
+    // Snapshots are server-fetched, so the binding is what must resolve.
+    const unbound = await post(run({ id: 'r2', competitionId: 'c-unbound' }));
+    assert.equal(unbound.status, 400);
+    const unknownLeague = await post(run({ id: 'r3', leagueKey: 'nope' }));
+    assert.equal(unknownLeague.status, 400);
   });
 
   test('rejects a duplicate id rather than silently overwriting a live season', async () => {

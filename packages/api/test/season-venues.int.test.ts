@@ -17,6 +17,7 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import type { CompetitionStructure, SeasonCalendar, SeasonRun, Venue } from '../src/types.js';
+import { bindCompetition, startRunBody } from './season-run-harness.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
 const DDB_PORT = 4607; // distinct from api.int (4599), platform.int (4601), logo-offline (4603), backfill-team (4605)
@@ -37,6 +38,7 @@ const devAuth = (email: string, memberships: unknown) =>
 const ADMIN = devAuth('admin@test', [{ tenantId: 'dolphins', role: 'admin', clubIds: [] }]);
 const ADMIN2 = devAuth('other@test', [{ tenantId: 'dolphins', role: 'admin', clubIds: [] }]);
 const REP = devAuth('rep@test', [{ tenantId: 'dolphins', role: 'rep', clubIds: ['testers'] }]);
+const OPERATOR = devAuth('operator@platform', [{ tenantId: '*', role: 'operator', clubIds: [] }]);
 
 const headers = (auth: string) => ({
   'x-tenant': 'dolphins',
@@ -134,6 +136,13 @@ before(async () => {
   await seed.seedTenantConfig('dolphins');
   ({ app } = await import('../src/index.js'));
   repo = await import('../src/repo.js');
+  // POST /season-runs freezes what CONFIG binds, so the run's structure + calendar live there.
+  await bindCompetition(repo, 'dolphins', {
+    leagueKey: 'premier-men',
+    competitionId: 'comp-1',
+    structure: STRUCTURE,
+    calendar: CALENDAR,
+  });
 });
 
 after(() => {
@@ -271,61 +280,153 @@ describe('DELETE /venues/:id', () => {
   });
 });
 
+const postRun = (body: unknown, auth = ADMIN) =>
+  app.request('/season-runs', {
+    method: 'POST',
+    headers: headers(auth),
+    body: JSON.stringify(body),
+  });
+
+/**
+ * Seed a throwaway binding for one test, then put config back exactly as it was — a
+ * deliberately malformed structure or calendar left in config would 400 every later
+ * operator calendar write in this file.
+ */
+async function withBinding(
+  opts: { competitionId: string; structure?: CompetitionStructure; calendar?: SeasonCalendar },
+  body: () => Promise<void>,
+) {
+  const before = await repo.getTenantConfig('dolphins');
+  await bindCompetition(repo, 'dolphins', {
+    leagueKey: 'premier-men',
+    competitionId: opts.competitionId,
+    structure: opts.structure ?? STRUCTURE,
+    calendar: opts.calendar ?? CALENDAR,
+  });
+  try {
+    await body();
+  } finally {
+    await repo.putTenantConfig(before!);
+  }
+}
+
 describe('POST /season-runs', () => {
   test('admin starts a season; version, createdAt and createdBy are stamped server-side', async () => {
-    const res = await app.request('/season-runs', {
-      method: 'POST',
-      headers: headers(ADMIN),
-      // A client-supplied version/createdBy must not be trusted — the server owns both.
-      body: JSON.stringify({ ...run(), version: 99, createdBy: 'someone-else@test' }),
-    });
+    // A client-supplied version/createdBy must not be trusted — the server owns both.
+    const res = await postRun({ ...startRunBody(), version: 99, createdBy: 'someone-else@test' });
     assert.equal(res.status, 201);
     const body = (await res.json()) as SeasonRun;
     assert.equal(body.version, 1);
     assert.equal(body.createdBy, 'admin@test');
     assert.ok(body.createdAt, 'createdAt should be stamped');
-    assert.deepEqual(body.stages, []);
+    // No stages sent: every stage of the bound structure starts awaiting entrants.
+    assert.deepEqual(body.stages, [{ specId: 'stage-1', status: 'awaiting-entrants', groups: [] }]);
+    // The snapshots are the bound competition's LIVE structure + calendar.
+    assert.deepEqual(body.structureSnapshot, STRUCTURE);
+    assert.deepEqual(body.calendarSnapshot, CALENDAR);
   });
 
   test('a duplicate id is a 409, not a silent overwrite of a live season', async () => {
-    const res = await app.request('/season-runs', {
-      method: 'POST',
-      headers: headers(ADMIN),
-      body: JSON.stringify(run({ seasonLabel: 'clobber attempt' })),
-    });
+    const res = await postRun(startRunBody({ seasonLabel: 'clobber attempt' }));
     assert.equal(res.status, 409);
     const still = await repo.getSeasonRun('dolphins', 'sr-1');
     assert.equal(still?.seasonLabel, '2026/27');
   });
 
   test('a club rep cannot start a season', async () => {
-    const res = await app.request('/season-runs', {
-      method: 'POST',
-      headers: headers(REP),
-      body: JSON.stringify(run({ id: 'sr-rep' })),
-    });
+    const res = await postRun(startRunBody({ id: 'sr-rep' }), REP);
     assert.equal(res.status, 403);
   });
 
-  test('missing snapshots are rejected — they are the whole point of a run', async () => {
-    for (const [field, body] of [
-      ['structure', { ...run({ id: 'sr-x' }), structureSnapshot: undefined }],
-      ['calendar', { ...run({ id: 'sr-x' }), calendarSnapshot: undefined }],
-    ] as const) {
-      const res = await app.request('/season-runs', {
-        method: 'POST',
-        headers: headers(ADMIN),
-        body: JSON.stringify(body),
+  test('a stale client cannot freeze its cached snapshots — config wins', async () => {
+    // The prod bug: an admin tab cached tenant config, an operator then moved the dates,
+    // and the tab's Start season froze the OLD calendar into the new run.
+    const outdated: SeasonCalendar = {
+      ...CALENDAR,
+      blocks: [{ id: 'b1', label: 'Block 1', start: '2026-08-01', end: '2026-08-30' }],
+    };
+    const res = await postRun(
+      startRunBody({
+        id: 'sr-stale',
+        seasonLabel: 'stale tab',
+        calendarSnapshot: outdated,
+        structureSnapshot: { ...STRUCTURE, name: 'Cached long ago' },
+      }),
+    );
+    assert.equal(res.status, 201);
+    const stored = await repo.getSeasonRun('dolphins', 'sr-stale');
+    assert.deepEqual(stored?.calendarSnapshot, CALENDAR);
+    assert.equal(stored?.structureSnapshot.name, 'Flat round robin');
+  });
+
+  test('stage ids from a different structure are rejected', async () => {
+    const res = await postRun(
+      startRunBody({
+        id: 'sr-wrong-stages',
+        stages: [{ specId: 'stage-from-v0', status: 'awaiting-entrants', groups: [] }],
+      }),
+    );
+    assert.equal(res.status, 400);
+    assert.match(
+      ((await res.json()) as { error: string }).error,
+      /stage stage-from-v0 is not on the bound structure/,
+    );
+    assert.equal(await repo.getSeasonRun('dolphins', 'sr-wrong-stages'), null);
+  });
+
+  test('the binding must resolve: unknown league, unbound competition', async () => {
+    const league = await postRun(startRunBody({ id: 'sr-x', leagueKey: 'no-such-league' }));
+    assert.equal(league.status, 400);
+    assert.match(((await league.json()) as { error: string }).error, /unknown league/);
+
+    const comp = await postRun(startRunBody({ id: 'sr-x', competitionId: 'comp-gone' }));
+    assert.equal(comp.status, 400);
+    const body = (await comp.json()) as { error: string; code?: string };
+    assert.equal(body.code, 'competition_unbound');
+    assert.equal(await repo.getSeasonRun('dolphins', 'sr-x'), null);
+  });
+
+  test('a competition whose structure or calendar is missing from config is rejected', async () => {
+    const before = await repo.getTenantConfig('dolphins');
+    try {
+      const league = before!.leagues!.find((l) => l.key === 'premier-men')!;
+      await repo.putTenantConfig({
+        ...before!,
+        leagues: before!.leagues!.map((l) =>
+          l === league
+            ? {
+                ...l,
+                competitions: [
+                  ...(l.competitions ?? []),
+                  { id: 'comp-nost', label: 'x', structureId: 'st-gone', calendarId: CALENDAR.id },
+                  {
+                    id: 'comp-nocal',
+                    label: 'x',
+                    structureId: STRUCTURE.id,
+                    calendarId: 'cal-gone',
+                  },
+                ],
+              }
+            : l,
+        ),
       });
-      assert.equal(res.status, 400, `a run with no ${field} snapshot should 400`);
+      const st = await postRun(startRunBody({ id: 'sr-x', competitionId: 'comp-nost' }));
+      assert.equal(st.status, 400);
+      assert.match(((await st.json()) as { error: string }).error, /structure/);
+      const cal = await postRun(startRunBody({ id: 'sr-x', competitionId: 'comp-nocal' }));
+      assert.equal(cal.status, 400);
+      assert.match(((await cal.json()) as { error: string }).error, /calendar/);
+    } finally {
+      await repo.putTenantConfig(before!);
     }
   });
 
-  test('a MALFORMED snapshot is rejected by the same guard the operator path uses', async () => {
-    // The snapshot is frozen for the season and drives every fixture, so trusting a
-    // client-supplied one would bake the damage in permanently.
+  test('a MALFORMED structure is rejected by the same guard the operator path uses', async () => {
+    // The snapshot is frozen for the season and drives every fixture, so even config
+    // (normally operator-validated) is re-checked before it is baked in permanently.
     const forwardRef: CompetitionStructure = {
       ...STRUCTURE,
+      id: 'st-bad',
       stages: [
         {
           ...STRUCTURE.stages[0]!,
@@ -338,30 +439,81 @@ describe('POST /season-runs', () => {
         },
       ],
     };
-    const res = await app.request('/season-runs', {
-      method: 'POST',
-      headers: headers(ADMIN),
-      body: JSON.stringify(run({ id: 'sr-bad', structureSnapshot: forwardRef })),
+    await withBinding({ competitionId: 'comp-bad', structure: forwardRef }, async () => {
+      const res = await postRun(startRunBody({ id: 'sr-bad', competitionId: 'comp-bad' }));
+      assert.equal(res.status, 400);
+      assert.equal(await repo.getSeasonRun('dolphins', 'sr-bad'), null);
     });
-    assert.equal(res.status, 400);
-    assert.equal(await repo.getSeasonRun('dolphins', 'sr-bad'), null);
   });
 
-  test('a snapshot calendar with an inverted block is rejected', async () => {
-    const res = await app.request('/season-runs', {
-      method: 'POST',
-      headers: headers(ADMIN),
-      body: JSON.stringify(
-        run({
-          id: 'sr-cal',
-          calendarSnapshot: {
-            ...CALENDAR,
-            blocks: [{ id: 'b1', label: 'Block 1', start: '2026-12-13', end: '2026-09-13' }],
-          },
-        }),
-      ),
+  test('a calendar with an inverted block is rejected', async () => {
+    const inverted: SeasonCalendar = {
+      ...CALENDAR,
+      id: 'cal-bad',
+      blocks: [{ id: 'b1', label: 'Block 1', start: '2026-12-13', end: '2026-09-13' }],
+    };
+    await withBinding({ competitionId: 'comp-cal', calendar: inverted }, async () => {
+      const res = await postRun(startRunBody({ id: 'sr-cal', competitionId: 'comp-cal' }));
+      assert.equal(res.status, 400);
+      assert.equal(await repo.getSeasonRun('dolphins', 'sr-cal'), null);
     });
-    assert.equal(res.status, 400);
+  });
+});
+
+describe('a started season keeps its start-time calendar; a restart takes the new one', () => {
+  // Regression for the prod report: operator edits a calendar's dates, admin deletes the
+  // season and starts it again — the new run must carry the NEW dates, while a run left
+  // running keeps the copy it started with.
+  const FRESH: SeasonCalendar = {
+    id: 'cal-fresh',
+    label: 'Fresh 2026/27',
+    blocks: [{ id: 'b1', label: 'Block 1', start: '2026-09-13', end: '2026-12-13' }],
+  };
+  const EXTENDED: SeasonCalendar = {
+    ...FRESH,
+    blocks: [{ id: 'b1', label: 'Block 1', start: '2026-09-13', end: '2027-02-28' }],
+  };
+
+  test('start → operator extends the calendar → run unchanged → delete + restart → new dates', async () => {
+    await bindCompetition(repo, 'dolphins', {
+      leagueKey: 'premier-men',
+      competitionId: 'comp-fresh',
+      structure: STRUCTURE,
+      calendar: FRESH,
+    });
+    const body = startRunBody({ id: 'sr-fresh', competitionId: 'comp-fresh' });
+    assert.equal((await postRun(body)).status, 201);
+
+    // The operator's real write path, not a repo poke.
+    const cfg = await repo.getTenantConfig('dolphins');
+    const put = await app.request('/platform/tenants/dolphins', {
+      method: 'PUT',
+      headers: { 'x-dev-auth': OPERATOR, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        calendars: cfg!.calendars!.map((c) => (c.id === FRESH.id ? EXTENDED : c)),
+      }),
+    });
+    assert.equal(put.status, 200, await put.clone().text());
+
+    const running = (await (
+      await app.request('/season-runs/sr-fresh', { headers: headers(ADMIN) })
+    ).json()) as SeasonRun;
+    assert.deepEqual(running.calendarSnapshot, FRESH, 'a running season keeps its start-time copy');
+
+    const del = await app.request('/season-runs/sr-fresh', {
+      method: 'DELETE',
+      headers: headers(ADMIN),
+    });
+    assert.ok(del.ok, `delete should succeed, got ${del.status}`);
+    // The same body a stale console would send again — no snapshots in it at all.
+    const again = await postRun(body);
+    assert.equal(again.status, 201);
+    const restarted = (await again.json()) as SeasonRun;
+    assert.deepEqual(restarted.calendarSnapshot.blocks, EXTENDED.blocks);
+    assert.deepEqual(
+      (await repo.getSeasonRun('dolphins', 'sr-fresh'))?.calendarSnapshot.blocks,
+      EXTENDED.blocks,
+    );
   });
 });
 
