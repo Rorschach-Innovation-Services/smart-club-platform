@@ -41,7 +41,8 @@ export const FIELD_GUIDES: Record<FieldGuideId, FieldGuide> = {
     meaning: 'The first and last date a match may be played in this block.',
     howUsed: 'Every stage in the block plans its rounds between these two dates, both included.',
     example: 'Block 1: 2026-09-13 to 2026-12-13.',
-    convention: 'Dates are YYYY-MM-DD. A block that ends before it starts is refused.',
+    convention:
+      'Dates are YYYY-MM-DD. A block that ends before it starts is refused. Name blocks after time ("Block 1", "First half"), never after a format — a format is a competition on the league.',
   },
   breaks: {
     label: 'Breaks',

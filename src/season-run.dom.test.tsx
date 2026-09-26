@@ -2246,6 +2246,16 @@ describe('Quick start', () => {
       expect(screen.queryByRole('button', { name: /^continue$/i })).toBeNull();
     });
 
+    it('says the operator can renew last season’s structure instead', () => {
+      setup(bound(endingOn(addDays(todayIso(), -1))));
+
+      expect(
+        screen.getByText(
+          "Your operator can also renew last season's Old league in the season wizard.",
+        ),
+      ).toBeVisible();
+    });
+
     it('continues to the season form while a calendar is still running', () => {
       setup(bound(endingOn(addDays(todayIso(), 1))));
 
@@ -2253,6 +2263,72 @@ describe('Quick start', () => {
       expect(screen.getByText(/has a competition set up by your operator/)).toBeVisible();
       expect(screen.getByRole('button', { name: /^continue$/i })).toBeInTheDocument();
     });
+  });
+
+  it('warns when the chosen calendar keeps a block nothing on it plays in', async () => {
+    const { user } = setup();
+
+    // Flat round robin on the two-block calendar: Block 2 is left empty.
+    expect(
+      screen.getByText(/^2026\/27: Block 2 \(.*\) — no competition on this calendar uses it$/),
+    ).toBeVisible();
+
+    // Custom dates are one block the new season always fills — nothing to warn about.
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Dates' }), 'Custom dates');
+    await user.type(screen.getByLabelText('Start date'), '2026-09-05');
+    await user.type(screen.getByLabelText('End date'), '2026-12-12');
+    expect(screen.queryByText(/no competition on this calendar uses it/)).toBeNull();
+  });
+
+  it('counts competitions other leagues already run on the calendar', () => {
+    // Another league's structure plays Block 2, so between them the calendar is covered.
+    const blockTwo = {
+      id: 'st-b2',
+      name: 'Second half',
+      version: 1,
+      stages: [
+        stage({
+          id: 'late',
+          name: 'Late',
+          schedule: { blockIndex: 1, cadence: { kind: 'weekly' } },
+        }),
+      ],
+    };
+    const other = {
+      key: 'div1',
+      label: 'Division 1',
+      competitions: [{ id: 'cx', label: 'League', structureId: 'st-b2', calendarId: 'cal' }],
+    };
+    setup({
+      allLeagues: [flatLeague],
+      config: {
+        structures: [blockTwo],
+        calendars: [calendar],
+        leagues: [flatLeague, other],
+      } as unknown as TenantConfig,
+    });
+
+    expect(screen.queryByText(/no competition on this calendar uses it/)).toBeNull();
+  });
+
+  it('repeats the server’s coverage warnings once the season has started', async () => {
+    mockedQuickStart.mockResolvedValue({
+      run: {} as SeasonRun,
+      competitionId: 'comp-1',
+      structureId: 'st-1',
+      calendarId: 'cal',
+      warnings: ['2026/27: Block 2 (from the server) — no competition on this calendar uses it'],
+    });
+    const { user } = setup();
+
+    await user.click(startBtn());
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/has started/);
+    expect(
+      screen.getByText(
+        '2026/27: Block 2 (from the server) — no competition on this calendar uses it',
+      ),
+    ).toBeVisible();
   });
 
   it('refuses to start with fewer than two registered sides', () => {
@@ -2415,5 +2491,114 @@ describe('the affiliation gate on Confirm entrants', () => {
     expect(patch.stages[0].groups[0].entrants).toHaveLength(11);
     expect(patch.stages[0].groups[0].entrants).toContain('c1');
     expect(patch.stages[0].groups[0].entrants).not.toContain('c2');
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   StartSeasonForm — the competition picker once reuse mints one competition per
+   season. Each option names its calendar, the current season is preselected (not the
+   oldest), and ended seasons wait behind "Show past seasons".
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('StartSeasonForm — picking among seasons of the same competition', () => {
+  const yesterday = addDays(todayIso(), -1);
+  const pastCalendar: SeasonCalendar = {
+    id: 'cal-old',
+    label: '2025/26',
+    blocks: [{ id: 'o1', label: 'Block 1', start: addDays(yesterday, -120), end: yesterday }],
+    breaks: [],
+    excludeDates: [],
+  };
+  const laterCalendar: SeasonCalendar = {
+    id: 'cal-later',
+    label: '2027/28',
+    blocks: [
+      {
+        id: 'l1',
+        label: 'Block 1',
+        start: addDays(todayIso(), 400),
+        end: addDays(todayIso(), 500),
+      },
+    ],
+    breaks: [],
+    excludeDates: [],
+  };
+  const comp = (id: string, label: string, calendarId: string) => ({
+    id,
+    label,
+    structureId: SPLIT_LEAGUE.id,
+    calendarId,
+  });
+
+  const open = async (competitions: ReturnType<typeof comp>[]) => {
+    const onCreateRun = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <GenerateFixturesLauncher
+        clubs={clubs}
+        allLeagues={[{ ...league(SPLIT_LEAGUE.id), competitions } as unknown as League]}
+        config={
+          {
+            structures: [SPLIT_LEAGUE],
+            calendars: [pastCalendar, calendar, laterCalendar],
+          } as unknown as TenantConfig
+        }
+        existingRuns={[]}
+        onCreateRun={onCreateRun}
+        onClose={vi.fn()}
+        toast={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: /^continue$/i }));
+    return { user, onCreateRun };
+  };
+  const picker = () => screen.getByRole('combobox', { name: 'Competition' });
+  const optionTexts = () =>
+    within(picker())
+      .getAllByRole('option')
+      .map((o) => o.textContent);
+
+  it('labels each option with its calendar and preselects the newest current season', async () => {
+    // Config order is creation order: the ended season comes first.
+    await open([
+      comp('c-old', '50 Over', 'cal-old'),
+      comp('c-now', '50 Over', 'cal'),
+      comp('c-next', '50 Over', 'cal-later'),
+    ]);
+
+    expect(optionTexts()).toEqual(['50 Over · 2027/28', '50 Over · 2026/27']);
+    expect(picker()).toHaveValue('c-next');
+  });
+
+  it('keeps ended seasons behind “Show past seasons” until asked', async () => {
+    const { user } = await open([
+      comp('c-old', 'T20', 'cal-old'),
+      comp('c-t20', 'T20', 'cal'),
+      comp('c-50', '50 Over', 'cal'),
+    ]);
+
+    expect(optionTexts()).toEqual(['T20 · 2026/27', '50 Over · 2026/27']);
+    expect(picker()).toHaveValue('c-t20');
+
+    await user.click(screen.getByRole('button', { name: /show past seasons/i }));
+
+    expect(optionTexts()).toEqual(['T20 · 2026/27', '50 Over · 2026/27', 'T20 · 2025/26']);
+    expect(picker()).toHaveValue('c-t20');
+  });
+
+  it('skips the dropdown for one current season even with an ended one beside it', async () => {
+    const { user, onCreateRun } = await open([
+      comp('c-old', '50 Over', 'cal-old'),
+      comp('c-now', '50 Over', 'cal'),
+    ]);
+
+    expect(screen.queryByRole('combobox', { name: 'Competition' })).toBeNull();
+    expect(screen.getByText('50 Over · 2026/27')).toBeVisible();
+    expect(screen.getByRole('button', { name: /show past seasons \(1\)/i })).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: /^start season$/i }));
+    expect(onCreateRun).toHaveBeenCalledWith(
+      expect.objectContaining({ competitionId: 'c-now', calendarSnapshot: calendar }),
+    );
   });
 });

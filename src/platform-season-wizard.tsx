@@ -33,6 +33,7 @@ import { HelpLink } from './help/HelpDrawer';
 import { CalendarForm } from './platform-calendars';
 import {
   DEFAULT_PREVIEW_TEAMS,
+  NON_OPERATOR_GROUPS,
   StageRow,
   StructureNarrative,
   TEMPLATE_CARDS,
@@ -41,7 +42,13 @@ import {
 import { StepIntro } from './platform-wizard';
 import { calendarSpan, formatIsoDate } from '../packages/engine/src/calendar';
 import { groupSizes } from '../packages/engine/src/entrants';
-import { derivedEntrantTotal, previewFitAll } from '../packages/engine/src/structure';
+import {
+  blockOverrun,
+  derivedEntrantTotal,
+  previewFitAll,
+  uncoveredBlocks,
+} from '../packages/engine/src/structure';
+import { describeBlockOverrun, describeUncoveredBlock } from '../packages/engine/src/narrative';
 import {
   STRUCTURE_TEMPLATES,
   applyPlacement,
@@ -136,6 +143,120 @@ function fitVerdict(
     : { ok: true, text: '✓ Fits the calendar' };
 }
 
+/** Operator-authored: hand-made in the structures card or minted by this wizard (ADR 0014). */
+const isOperatorStructure = (s: CompetitionStructure) =>
+  s.source === undefined || s.source === 'operator';
+
+/** One prior format stream a league can run again on the draft calendar. */
+export interface ReusableCompetition {
+  competition: Competition;
+  structure: CompetitionStructure;
+  /** The calendar the competition was last bound to — "(2025/26)" on the reuse row. */
+  calendarLabel: string;
+}
+
+/**
+ * A league's "same as last season" candidates. Over its competitions, keep those whose
+ * structure resolves AND is operator-authored (quick-start and migrated structures are
+ * per-league stampings, never reused — ADR 0014) AND whose (structure, label) pair is not
+ * already bound on the draft calendar. The same pair bound on several past calendars is
+ * one stream: keep the competition on the most RECENT calendar (latest block end; a
+ * calendar that no longer exists counts as the oldest).
+ */
+export function reusableCompetitions(
+  league: League,
+  structures: CompetitionStructure[],
+  calendars: SeasonCalendar[],
+  draftCalendarId: string,
+): ReusableCompetition[] {
+  const comps = league.competitions ?? [];
+  const pairKey = (c: Competition) => JSON.stringify([c.structureId, c.label]);
+  const boundHere = new Set(comps.filter((c) => c.calendarId === draftCalendarId).map(pairKey));
+  /** Latest block end as an ISO date — '' (sorts first) for a missing or empty calendar. */
+  const recency = (calendarId: string) =>
+    (calendars.find((c) => c.id === calendarId)?.blocks ?? []).reduce(
+      (max, b) => (b.end > max ? b.end : max),
+      '',
+    );
+  const best = new Map<string, { row: ReusableCompetition; end: string }>();
+  for (const competition of comps) {
+    const structure = structures.find((s) => s.id === competition.structureId);
+    if (!structure || !isOperatorStructure(structure)) continue;
+    const key = pairKey(competition);
+    if (boundHere.has(key)) continue;
+    const end = recency(competition.calendarId);
+    const held = best.get(key);
+    if (held && held.end >= end) continue;
+    const calendarLabel =
+      calendars.find((c) => c.id === competition.calendarId)?.label ?? 'an earlier calendar';
+    best.set(key, { row: { competition, structure, calendarLabel }, end });
+  }
+  return [...best.values()].map((b) => b.row);
+}
+
+/** "50 overs · Red ball" — empty when the competition carries no match format. */
+function matchFormatSummary(format: Competition['matchFormat']): string {
+  if (!format) return '';
+  const ball = format.ballType?.trim();
+  return [
+    format.overs ? `${format.overs} overs` : '',
+    ball ? (/ball$/i.test(ball) ? ball : `${ball} ball`) : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+/**
+ * A league's own copy of a quick-start or migrated structure. Adopting one never binds
+ * the admin-minted instance to another league: the copy gets a fresh id, is operator-
+ * authored (no `source`, like a hand-made structure), and is named for the adopting league.
+ */
+function cloneForLeague(league: League, original: CompetitionStructure): CompetitionStructure {
+  // `source` is dropped so the copy reads as operator-authored, and `templateId` is
+  // dropped so a league-named clone can never become `resolveTemplate`'s prefill for a
+  // future template pick — the exact coupling the operator-only reuse rule exists to
+  // prevent, resurfacing through the clone.
+  const { source: _source, templateId: _templateId, ...rest } = original;
+  void _source;
+  void _templateId;
+  // Quick-start structures are already named "<league> · <template>"; don't stack the
+  // adopting league's own name onto itself ("Premier Men · Premier Men · …").
+  const name = original.name.startsWith(`${league.label} · `)
+    ? original.name
+    : `${league.label} · ${original.name}`;
+  return {
+    ...rest,
+    id: newStructureId(),
+    name: name.slice(0, 80).trim(),
+    stages: JSON.parse(JSON.stringify(original.stages)) as StageSpec[],
+  };
+}
+
+/** Gold, never blocking: a calendar block this one structure leaves empty. */
+function UncoveredLines({
+  structure,
+  calendar,
+}: {
+  structure: CompetitionStructure;
+  calendar: SeasonCalendar;
+}) {
+  const blocks = uncoveredBlocks(structure, calendar);
+  if (blocks.length === 0) return null;
+  return (
+    <>
+      {blocks.map((b) => (
+        <div
+          key={b.id}
+          className="uncovered-block"
+          style={{ fontSize: 12, marginTop: 6, color: 'var(--gold, #B7791F)' }}
+        >
+          {describeUncoveredBlock(b, calendar.blocks.indexOf(b))}
+        </div>
+      ))}
+    </>
+  );
+}
+
 /** How a league's structure is sourced. Compact cards: two options, one line each. */
 const MODE_CARDS = (hasStructures: boolean): OptionCard<'template' | 'existing'>[] => [
   {
@@ -208,6 +329,20 @@ function AdjustStages({
 }
 
 /**
+ * A chooser pick's overrun of `calendar`, or null. Only a library pick or an adoption
+ * ('existing' mode) can overrun: a template pick re-derives its block positions against the
+ * calendar, so it is exempt.
+ */
+function pickOverrun(
+  choice: LeagueChoice | undefined,
+  calendar: SeasonCalendar,
+): { block: number; has: number } | null {
+  return choice?.mode === 'existing' && choice.structure
+    ? blockOverrun(choice.structure, calendar)
+    : null;
+}
+
+/**
  * One ADDED league's row in the "League structures" step. Leagues appear here only after
  * the operator picks them from the "Add a league" select — the step is opt-IN, because a
  * tenant runs a structured competition in a handful of its leagues while the other two
@@ -244,8 +379,15 @@ function LeagueSetupRow({
   };
 }) {
   const [adjusting, setAdjusting] = useState(false);
+  // A library pick or an adoption keeps its stages' block positions (only a template pick
+  // re-derives them against the calendar), so one playing past the draft calendar's last
+  // block is a hard stop — the server would 400 the binding. Left out of the plan until the
+  // calendar grows or the operator picks differently.
+  const overrun = pickOverrun(choice, calendar);
   const verdict =
-    choice.mode !== 'skip' && choice.structure ? fitVerdict(choice.structure, calendar) : null;
+    choice.mode !== 'skip' && choice.structure && !overrun
+      ? fitVerdict(choice.structure, calendar)
+      : null;
 
   return (
     <div style={rowBox}>
@@ -308,15 +450,31 @@ function LeagueSetupRow({
           style={{ marginTop: 12 }}
         >
           <option value="">Structure…</option>
-          {structures.map((s) => (
+          {structures.filter(isOperatorStructure).map((s) => (
             <option key={s.id} value={s.id}>
               {s.name}
             </option>
           ))}
+          {NON_OPERATOR_GROUPS.map(({ source, label }) => {
+            const inGroup = structures.filter((s) => s.source === source);
+            if (inGroup.length === 0) return null;
+            return (
+              <optgroup key={source} label={label}>
+                {inGroup.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </optgroup>
+            );
+          })}
         </select>
       )}
 
-      {choice.mode !== 'skip' && choice.structure && (
+      {overrun && choice.structure && (
+        <div style={ERR}>{describeBlockOverrun(choice.structure, overrun)}</div>
+      )}
+      {choice.mode !== 'skip' && choice.structure && !overrun && (
         <div className="template-detail">
           <div className="stage-field-label">What {choice.structure.name} does</div>
           <StructureNarrative
@@ -351,10 +509,16 @@ function LeagueSetupRow({
                 />
               )}
             </>
-          ) : (
+          ) : isOperatorStructure(choice.structure) ? (
             <p style={HINT}>
               {choice.structure.name} is already in this client&rsquo;s library. Edit its stages
               from the Competition structures card.
+            </p>
+          ) : (
+            <p style={HINT}>
+              {league.label} gets its own copy, named &ldquo;
+              {`${league.label} · ${choice.structure.name}`.slice(0, 80).trim()}&rdquo; — the
+              original stays with the league it was made for.
             </p>
           )}
         </div>
@@ -431,6 +595,9 @@ function LeagueSetupRow({
             </p>
           </InfoDot>
         </div>
+      )}
+      {choice.mode !== 'skip' && choice.structure && !overrun && (
+        <UncoveredLines structure={choice.structure} calendar={calendar} />
       )}
     </div>
   );
@@ -529,6 +696,114 @@ const rowBox: CSSProperties = {
   borderRadius: 10,
   padding: 12,
   marginBottom: 10,
+};
+
+/** A reuse row: the prior competition, its league, and where the pair is being taken. */
+type ReuseRowData = ReusableCompetition & { league: League };
+
+/**
+ * One "Same as last season" row: a prior format stream the league can run again on the
+ * draft calendar, bound to the SAME structure (no new structure is written). Unticked by
+ * default; ticked, it tells the structure as a story with its fit and any block it leaves
+ * empty. A structure that plays past the draft calendar's last block can't be ticked.
+ */
+function ReuseRow({
+  row,
+  calendar,
+  ticked,
+  onTick,
+  onChooseDifferently,
+}: {
+  row: ReuseRowData;
+  calendar: SeasonCalendar;
+  ticked: boolean;
+  onTick: (ticked: boolean) => void;
+  onChooseDifferently: () => void;
+}) {
+  const overrun = blockOverrun(row.structure, calendar);
+  const format = matchFormatSummary(row.competition.matchFormat);
+  const showDetail = ticked && !overrun;
+  const verdict = showDetail ? fitVerdict(row.structure, calendar) : null;
+  const inputId = `reuse-${row.competition.id}`;
+  const overrunId = `${inputId}-overrun`;
+  return (
+    <div style={rowBox}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <input
+          type="checkbox"
+          id={inputId}
+          checked={showDetail}
+          disabled={!!overrun}
+          aria-describedby={overrun ? overrunId : undefined}
+          onChange={(e) => onTick(e.target.checked)}
+          style={{ marginTop: 3 }}
+        />
+        <label htmlFor={inputId} style={{ flex: 1, cursor: overrun ? 'default' : 'pointer' }}>
+          <div style={{ fontWeight: 600, fontSize: 13 }}>
+            {`${row.league.label} — Same as last season: ${row.structure.name} (${row.calendarLabel})`}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
+            {[row.competition.label, format].filter(Boolean).join(' · ')}
+          </div>
+        </label>
+        <button
+          type="button"
+          className="text-btn"
+          aria-label={`Choose differently for ${row.league.label}`}
+          onClick={onChooseDifferently}
+        >
+          Choose differently
+        </button>
+      </div>
+      {overrun && (
+        <div id={overrunId} style={ERR}>
+          {describeBlockOverrun(row.structure, overrun)}
+        </div>
+      )}
+      {showDetail && (
+        <div className="template-detail">
+          <div className="stage-field-label">What {row.structure.name} does</div>
+          <StructureNarrative
+            structure={row.structure}
+            calendar={calendar}
+            teamCount={DEFAULT_PREVIEW_TEAMS}
+            assumed
+          />
+          {verdict && (
+            <div
+              style={{
+                fontSize: 12,
+                marginTop: 8,
+                color: verdict.ok ? 'var(--muted)' : 'var(--gold, #B7791F)',
+              }}
+            >
+              {verdict.text}
+            </div>
+          )}
+          <UncoveredLines structure={row.structure} calendar={calendar} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** What one competition in this run will be, for review, the Create count and commit. */
+interface PlannedCompetition {
+  league: League;
+  label: string;
+  /** The structure as chosen — for `cloned`, the ORIGINAL the league's copy is made from. */
+  structure: CompetitionStructure;
+  /** reused: last season's structure again · new: template instance · existing: library
+      structure · cloned: the league's own copy of a quick-start/migrated structure. */
+  kind: 'reused' | 'new' | 'existing' | 'cloned';
+  matchFormat?: Competition['matchFormat'];
+}
+
+const PLANNED_KIND_TEXT: Record<PlannedCompetition['kind'], (name: string) => string> = {
+  reused: (name) => `same as last season (${name})`,
+  new: (name) => `new structure (${name})`,
+  existing: (name) => `existing structure (${name})`,
+  cloned: (name) => `own copy of ${name}`,
 };
 
 /** Step 0's calendar source. Shown only when the client already has a calendar. */
@@ -725,6 +1000,81 @@ export function SeasonSetupWizard({
   const setChoiceFor = (key: string, c: LeagueChoice) =>
     setLeagueChoices((prev) => ({ ...prev, [key]: c }));
 
+  // ── Step 2: same as last season ──
+  /** Ticked reuse rows, keyed by the PRIOR competition's id. Every row starts unticked. */
+  const [reuseTicks, setReuseTicks] = useState<Record<string, boolean>>({});
+  /**
+   * Every league's reuse rows against the draft calendar. A league in the chooser
+   * (`addedKeys` — "Choose differently" puts it there) shows none of its rows; removing it
+   * from the chooser brings them back.
+   */
+  const reuseRows: ReuseRowData[] = calDraft
+    ? leagues.flatMap((league) =>
+        addedKeys.includes(league.key)
+          ? []
+          : reusableCompetitions(league, structures, calendars, calDraft.id).map((r) => ({
+              ...r,
+              league,
+            })),
+      )
+    : [];
+  const tickableReuse = calDraft
+    ? reuseRows.filter((r) => !blockOverrun(r.structure, calDraft))
+    : [];
+  const chooseDifferently = (key: string) => {
+    setReuseTicks((prev) => {
+      const next = { ...prev };
+      for (const r of reuseRows) if (r.league.key === key) delete next[r.competition.id];
+      return next;
+    });
+    addLeague(key);
+  };
+
+  /**
+   * Every competition this run will write, in league order: the league's ticked reuse rows,
+   * then its chooser pick. A pick identical to a binding the league already has on the
+   * draft calendar (same structure + label) is left out — commit would drop it anyway.
+   */
+  const plannedCompetitions = (): PlannedCompetition[] => {
+    if (!calDraft) return [];
+    return leagues.flatMap((league) => {
+      const reused: PlannedCompetition[] = tickableReuse
+        .filter((r) => r.league.key === league.key && reuseTicks[r.competition.id])
+        .map((r) => ({
+          league,
+          label: r.competition.label,
+          structure: r.structure,
+          kind: 'reused',
+          matchFormat: r.competition.matchFormat,
+        }));
+      const c = leagueChoices[league.key];
+      const picked: PlannedCompetition[] =
+        c && c.mode !== 'skip' && c.structure && !pickOverrun(c, calDraft)
+          ? [
+              {
+                league,
+                label: c.label.trim() || c.structure.name,
+                structure: c.structure,
+                kind: c.isNew ? 'new' : isOperatorStructure(c.structure) ? 'existing' : 'cloned',
+                ...(c.overs || c.ballType
+                  ? { matchFormat: { overs: c.overs, ballType: c.ballType || undefined } }
+                  : {}),
+              },
+            ]
+          : [];
+      return [...reused, ...picked].filter(
+        (p) =>
+          p.kind === 'cloned' ||
+          !(league.competitions ?? []).some(
+            (e) =>
+              e.structureId === p.structure.id &&
+              e.calendarId === calDraft.id &&
+              e.label === p.label,
+          ),
+      );
+    });
+  };
+
   // ── Step 3: review & commit ──
   const [committing, setCommitting] = useState(false);
   const [commitErr, setCommitErr] = useState('');
@@ -823,28 +1173,47 @@ export function SeasonSetupWizard({
             .map((c) => [c.structure!.id, c.structure!] as const),
         ).values(),
       ];
-      const nextStructures = [...(fresh.structures ?? []), ...newStructures];
+      // A quick-start or migrated structure adopted in the chooser is written as the
+      // adopting league's OWN copy — one per league, even when two adopt the same original.
+      const clones: CompetitionStructure[] = [];
 
+      const planned = plannedCompetitions();
       const created: Array<{ league: string; label: string }> = [];
       const freshLeagues = fresh.leagues ?? [];
       const nextLeagues = freshLeagues.map((fl) => {
-        const choice = leagueChoices[fl.key];
-        if (!choice || choice.mode === 'skip' || !choice.structure) return fl;
-        // A concurrent session may have already bound this league on this calendar —
-        // don't double it up.
-        if ((fl.competitions ?? []).some((c) => c.calendarId === calDraft.id)) return fl;
-        const competition: Competition = {
-          id: newStructureId('comp'),
-          label: choice.label.trim() || choice.structure.name,
-          structureId: choice.structure.id,
-          calendarId: calDraft.id,
-          ...(choice.overs || choice.ballType
-            ? { matchFormat: { overs: choice.overs, ballType: choice.ballType || undefined } }
-            : {}),
-        };
-        created.push({ league: fl.label, label: competition.label });
-        return { ...fl, competitions: [...(fl.competitions ?? []), competition] };
+        const existing = fl.competitions ?? [];
+        const additions: Competition[] = [];
+        for (const p of planned.filter((x) => x.league.key === fl.key)) {
+          let structureId = p.structure.id;
+          if (p.kind === 'cloned') {
+            const clone = cloneForLeague(fl, p.structure);
+            clones.push(clone);
+            structureId = clone.id;
+          }
+          // Only an IDENTICAL binding (a concurrent session, or last season's pair already
+          // run here) is dropped. Two format streams routinely share one structure on one
+          // calendar, differing only in label — both must land.
+          if (
+            [...existing, ...additions].some(
+              (c) =>
+                c.structureId === structureId &&
+                c.calendarId === calDraft.id &&
+                c.label === p.label,
+            )
+          )
+            continue;
+          additions.push({
+            id: newStructureId('comp'),
+            label: p.label,
+            structureId,
+            calendarId: calDraft.id,
+            ...(p.matchFormat ? { matchFormat: { ...p.matchFormat } } : {}),
+          });
+          created.push({ league: fl.label, label: p.label });
+        }
+        return additions.length > 0 ? { ...fl, competitions: [...existing, ...additions] } : fl;
       });
+      const nextStructures = [...(fresh.structures ?? []), ...newStructures, ...clones];
 
       await save({ calendars: nextCalendars, structures: nextStructures, leagues: nextLeagues });
       toast(`${calDraft.label} · season set up`);
@@ -857,6 +1226,7 @@ export function SeasonSetupWizard({
   }
 
   const footRow: CSSProperties = { display: 'flex', gap: 8, marginTop: 18 };
+  const planned = plannedCompetitions();
 
   if (done) {
     return (
@@ -868,8 +1238,8 @@ export function SeasonSetupWizard({
           {done.created.length === 0 && (
             <li>No leagues were bound to a competition — the calendar alone was written.</li>
           )}
-          {done.created.map((c) => (
-            <li key={c.league}>
+          {done.created.map((c, i) => (
+            <li key={`${c.league}-${i}`}>
               {c.league}: <strong>{c.label}</strong>
             </li>
           ))}
@@ -1020,33 +1390,81 @@ export function SeasonSetupWizard({
             />
           ) : (
             (() => {
-              const boundHere = leagues.filter((l) =>
-                (l.competitions ?? []).some((comp) => comp.calendarId === calDraft.id),
+              const boundHere = leagues.flatMap((l) =>
+                (l.competitions ?? [])
+                  .filter((comp) => comp.calendarId === calDraft.id)
+                  .map((comp) => ({ league: l, comp })),
               );
+              const reuseListed = new Set(reuseRows.map((r) => r.league.key));
               const addable = leagues.filter(
                 (l) =>
                   !addedKeys.includes(l.key) &&
+                  !reuseListed.has(l.key) &&
                   !(l.competitions ?? []).some((comp) => comp.calendarId === calDraft.id),
               );
               return (
                 <>
+                  {reuseRows.length > 0 && (
+                    <>
+                      <div style={SECTION}>Same as last season</div>
+                      <p style={{ ...HINT, margin: '0 0 8px' }}>
+                        These leagues ran a structured competition before. Tick the ones to run
+                        again on {calDraft.label} — each gets a new competition on the same
+                        structure, nothing is re-created.
+                      </p>
+                      {tickableReuse.length > 0 && (
+                        <div style={{ display: 'flex', gap: 12, marginBottom: 8 }}>
+                          <button
+                            type="button"
+                            className="text-btn"
+                            onClick={() =>
+                              setReuseTicks((prev) => ({
+                                ...prev,
+                                ...Object.fromEntries(
+                                  tickableReuse.map((r) => [r.competition.id, true]),
+                                ),
+                              }))
+                            }
+                          >
+                            Select all {tickableReuse.length}
+                          </button>
+                          <button
+                            type="button"
+                            className="text-btn"
+                            onClick={() => setReuseTicks({})}
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      )}
+                      {reuseRows.map((r) => (
+                        <ReuseRow
+                          key={r.competition.id}
+                          row={r}
+                          calendar={calDraft}
+                          ticked={!!reuseTicks[r.competition.id]}
+                          onTick={(ticked) =>
+                            setReuseTicks((prev) => ({ ...prev, [r.competition.id]: ticked }))
+                          }
+                          onChooseDifferently={() => chooseDifferently(r.league.key)}
+                        />
+                      ))}
+                    </>
+                  )}
                   {boundHere.length > 0 && (
                     <div style={{ ...rowBox, background: 'var(--paper, transparent)' }}>
                       <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 4 }}>
                         Already set up on {calDraft.label}
                       </div>
-                      {boundHere.map((l) => {
-                        const comp = (l.competitions ?? []).find(
-                          (c) => c.calendarId === calDraft.id,
-                        );
+                      {boundHere.map(({ league: l, comp }) => {
                         const structName =
-                          structures.find((s) => s.id === comp?.structureId)?.name ?? 'a structure';
+                          structures.find((s) => s.id === comp.structureId)?.name ?? 'a structure';
                         return (
                           <div
-                            key={l.key}
+                            key={comp.id}
                             style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 2 }}
                           >
-                            {l.label} — {comp?.label} · {structName}
+                            {l.label} — {comp.label} · {structName}
                           </div>
                         );
                       })}
@@ -1061,7 +1479,7 @@ export function SeasonSetupWizard({
                         league={l}
                         calendar={calDraft}
                         defaults={competitionDefaults}
-                        structures={operatorStructures}
+                        structures={structures}
                         choice={choiceFor(l.key)}
                         sharedWith={sharersOf(l.key)}
                         onChange={(c) => setChoiceFor(l.key, c)}
@@ -1133,79 +1551,76 @@ export function SeasonSetupWizard({
             </li>
           </ul>
 
-          <div style={SECTION}>Leagues</div>
-          {leagues
-            .filter((l) => {
-              const c = leagueChoices[l.key];
-              const already = (l.competitions ?? []).some(
-                (comp) => comp.calendarId === calDraft.id,
-              );
-              return !already && c && c.mode !== 'skip' && c.structure;
-            })
-            .map((l) => {
-              const c = leagueChoices[l.key];
-              const verdict = c?.structure ? fitVerdict(c.structure, calDraft) : null;
-              return (
-                <div key={l.key} style={{ ...rowBox, fontSize: 12.5 }}>
-                  <div style={{ marginBottom: 8 }}>
-                    <strong>{l.label}</strong>: {c?.label} ·{' '}
-                    <span style={{ color: 'var(--muted)' }}>
-                      {c?.isNew
-                        ? `new structure (${c.structure?.name})`
-                        : `existing structure (${c?.structure?.name})`}
-                    </span>
-                  </div>
-                  {c?.structure && (
-                    <StructureNarrative
-                      structure={c.structure}
-                      calendar={calDraft}
-                      teamCount={DEFAULT_PREVIEW_TEAMS}
-                      assumed
-                    />
-                  )}
-                  {verdict && (
-                    <div
-                      style={{
-                        marginTop: 8,
-                        color: verdict.ok ? 'var(--muted)' : 'var(--gold, #B7791F)',
-                      }}
-                    >
-                      {verdict.text}
-                    </div>
-                  )}
+          <div style={SECTION}>Competitions</div>
+          {planned.length === 0 && (
+            <div style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 4 }}>
+              No competitions — only the calendar is written.
+            </div>
+          )}
+          {planned.map((p, i) => {
+            const verdict = fitVerdict(p.structure, calDraft);
+            const format = matchFormatSummary(p.matchFormat);
+            return (
+              <div key={`${p.league.key}-${i}`} style={{ ...rowBox, fontSize: 12.5 }}>
+                <div style={{ marginBottom: 8 }}>
+                  <strong>{p.league.label}</strong>: {p.label}
+                  {format ? ` (${format})` : ''} ·{' '}
+                  <span style={{ color: 'var(--muted)' }}>
+                    {PLANNED_KIND_TEXT[p.kind](p.structure.name)}
+                  </span>
                 </div>
-              );
-            })}
+                <StructureNarrative
+                  structure={p.structure}
+                  calendar={calDraft}
+                  teamCount={DEFAULT_PREVIEW_TEAMS}
+                  assumed
+                />
+                <div
+                  style={{
+                    marginTop: 8,
+                    color: verdict.ok ? 'var(--muted)' : 'var(--gold, #B7791F)',
+                  }}
+                >
+                  {verdict.text}
+                </div>
+                <UncoveredLines structure={p.structure} calendar={calDraft} />
+              </div>
+            );
+          })}
 
           <div style={SECTION}>Unchanged</div>
           {(() => {
-            // Named individually only when there is something individual to say — a league
-            // already bound on this calendar, or one the operator added but never gave a
-            // structure. The untouched majority collapses to a count: listing 27 lines of
-            // "(skipped)" buried the two lines that mattered.
-            const alreadyBound = leagues.filter((l) =>
-              (l.competitions ?? []).some((comp) => comp.calendarId === calDraft.id),
+            // Named individually only when there is something individual to say — a
+            // competition already bound on this calendar, or a league the operator added but
+            // never gave a structure. The untouched majority collapses to a count: listing 27
+            // lines of "(skipped)" buried the two lines that mattered.
+            const alreadyBound = leagues.flatMap((l) =>
+              (l.competitions ?? [])
+                .filter((comp) => comp.calendarId === calDraft.id)
+                .map((comp) => ({ league: l, comp })),
             );
             const incomplete = leagues.filter((l) => {
               const c = leagueChoices[l.key];
-              return !alreadyBound.includes(l) && c && c.mode !== 'skip' && !c.structure;
+              return c && c.mode !== 'skip' && !c.structure;
             });
-            const untouched =
-              leagues.length -
-              alreadyBound.length -
-              incomplete.length -
-              leagues.filter((l) => {
-                const c = leagueChoices[l.key];
-                return !alreadyBound.includes(l) && c && c.mode !== 'skip' && !!c.structure;
-              }).length;
+            const overrunning = leagues.filter(
+              (l) => !!pickOverrun(leagueChoices[l.key], calDraft),
+            );
+            const named = new Set([
+              ...alreadyBound.map((b) => b.league.key),
+              ...incomplete.map((l) => l.key),
+              ...overrunning.map((l) => l.key),
+              ...planned.map((p) => p.league.key),
+            ]);
+            const untouched = leagues.filter((l) => !named.has(l.key)).length;
             return (
               <>
-                {alreadyBound.map((l) => (
+                {alreadyBound.map(({ league: l, comp }) => (
                   <div
-                    key={l.key}
+                    key={comp.id}
                     style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 4 }}
                   >
-                    {l.label} (already set up on this calendar)
+                    {l.label} — {comp.label} (already set up on this calendar)
                   </div>
                 ))}
                 {incomplete.map((l) => (
@@ -1214,6 +1629,15 @@ export function SeasonSetupWizard({
                     style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 4 }}
                   >
                     {l.label} (added, but no structure picked — left unchanged)
+                  </div>
+                ))}
+                {overrunning.map((l) => (
+                  <div
+                    key={l.key}
+                    style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 4 }}
+                  >
+                    {l.label} (its structure plays past this calendar&rsquo;s last block — left
+                    unchanged)
                   </div>
                 ))}
                 {untouched > 0 && (
@@ -1232,7 +1656,11 @@ export function SeasonSetupWizard({
               Back
             </Btn>
             <Btn tone="teal" size="sm" onClick={commit} disabled={committing}>
-              {committing ? 'Creating…' : 'Create season'}
+              {committing
+                ? 'Creating…'
+                : planned.length === 0
+                  ? 'Create season'
+                  : `Create season · ${planned.length} competition${planned.length === 1 ? '' : 's'}`}
             </Btn>
           </div>
         </>

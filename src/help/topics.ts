@@ -32,6 +32,7 @@ export type HelpTopicId =
   | 'what-regenerate-destroys'
   | 'structure-versions-and-rebase'
   | 'blocks-vs-stages'
+  | 'blocks-vs-competitions'
   | 'legacy-series'
   | 'competition-defaults';
 
@@ -195,9 +196,24 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
       'A block is a stretch of the season calendar, such as Block 1, 13 Sep – 13 Dec 2026. It says when play can happen.',
       'A stage is a phase of a competition, such as a round-robin stage or a knockout stage. It says who plays whom.',
       'Each stage plays in one block. Two stages can share a block, one after the other, or sit in different blocks either side of a break.',
+      'A block is not a match format either. Two formats played side by side, such as T20 and 30 Over, are two competitions on the league, not two blocks. See “Blocks and competitions”.',
     ],
     example:
       'KZNCU Premier Men T20 plays its round-robin stage in Block 1 and its knockout stage in Block 2, after the mid-season break. EMCU Division 1 30 Over plays both stages in Block 1, with the semi-finals starting the week after the groups finish.',
+  },
+  'blocks-vs-competitions': {
+    id: 'blocks-vs-competitions',
+    title: 'Blocks and competitions',
+    summary:
+      'Does anything — standings, qualification, the winner — survive the boundary? If yes, they are blocks of one competition. If no, they are separate competitions.',
+    body: [
+      'A block is a stretch of time on the season calendar, such as Block 1 or First half. It says when play can happen, and nothing else.',
+      'A competition is one of a league’s format streams. It has its own structure, its own match format and its own winner.',
+      'Naming blocks after formats, such as a T20 block and a 30 Over block, breaks this. One competition cannot be 20 overs in one block and 30 in the next, nothing carries from one format to the other, and the two formats often overlap in time.',
+      'So ask whether anything carries across the boundary. If the standings, the qualifiers or the winner carry over, it is one competition across two blocks. If nothing does, it is two competitions.',
+    ],
+    example:
+      'EMCU Division 1 plays a T20 and a 30 Over format side by side. That is two competitions on the league, each with its own structure, both on the same calendar. KZNCU Premier Men plays Block 1 and Block 2 either side of the mid-season break, and the round-robin standings carry into the second half. That is one competition across two blocks.',
   },
   'legacy-series': {
     id: 'legacy-series',

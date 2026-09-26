@@ -13,8 +13,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { CalendarsCard } from './platform-calendars';
-import type { League, SeasonCalendar, TenantConfig } from './types';
+import { CalendarsCard, FORMAT_LIKE_LABEL } from './platform-calendars';
+import { HelpProvider } from './help/HelpDrawer';
+import type { CompetitionStructure, League, SeasonCalendar, TenantConfig } from './types';
 import * as api from './api';
 import { ApiError } from './api';
 
@@ -296,8 +297,10 @@ describe('CalendarsCard — deleting a bound calendar cascades to its competitio
 
     await user.click(within(screen.getByRole('row', { name: /cal 1/i })).getByText(/delete/i));
 
-    // The confirm dialog names the affected league before anything is deleted.
-    expect(screen.getByText(/premier men/i)).toBeVisible();
+    // The confirm dialog names the affected league before anything is deleted. Scoped to
+    // the box: the card's own bindings lines name the league too.
+    const box = document.querySelector<HTMLElement>('.fix-confirm-box')!;
+    expect(within(box).getByText(/premier men/i)).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: /yes, delete/i }));
 
@@ -377,5 +380,199 @@ describe('CalendarForm — field guides and the worked example', () => {
 
     await user.click(screen.getByRole('button', { name: /hide the worked example/i }));
     expect(screen.queryByText(/ten-round league would otherwise schedule/i)).toBeNull();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Blocks are time, not formats. Operators have modelled "T20" and "30 Over" as two
+   overlapping blocks of one calendar; the form now says what that should be instead
+   (two competitions on the league) without ever refusing the save.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+const renderWithHelp = (config: TenantConfig) => {
+  const save = vi.fn().mockResolvedValue({});
+  const user = userEvent.setup();
+  vi.mocked(api.platformGetTenant).mockResolvedValue(config);
+  render(
+    <HelpProvider>
+      <CalendarsCard slug="dolphins" config={config} save={save} toast={vi.fn()} />
+    </HelpProvider>,
+  );
+  return { user, save };
+};
+
+const editRow = async (user: ReturnType<typeof userEvent.setup>, name: RegExp) =>
+  user.click(within(screen.getByRole('row', { name })).getByText(/edit/i));
+
+const HINT_TEXT = /this looks like a match format/i;
+
+describe('CalendarForm — blocks are time, not formats', () => {
+  it('explains an overlap as two competitions and links to the difference', async () => {
+    const overlapping = cal({
+      blocks: [
+        { id: 'b1', label: 'Block 1', start: '2026-09-12', end: '2026-12-12' },
+        { id: 'b2', label: 'Block 2', start: '2026-11-01', end: '2027-02-01' },
+      ],
+    });
+    const { user } = renderWithHelp({ calendars: [overlapping] } as unknown as TenantConfig);
+    await editRow(user, /2026\/27/i);
+
+    expect(
+      screen.getByText(
+        /Block 1 and Block 2 overlap\. Blocks are stretches of time — two formats running side by side are two competitions on the league, not two blocks\./,
+      ),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: /what's the difference\?/i }));
+    expect(screen.getByRole('dialog', { name: 'Blocks and competitions' })).toBeVisible();
+  });
+
+  it('hints under blocks named after a format, and not under blocks named after time', async () => {
+    const formatBlocks = cal({
+      blocks: [
+        { id: 'b1', label: 'T20', start: '2026-09-12', end: '2026-10-12' },
+        { id: 'b2', label: '30 Over', start: '2026-10-13', end: '2026-11-12' },
+        { id: 'b3', label: 'First half', start: '2026-11-13', end: '2026-12-12' },
+        { id: 'b4', label: 'Block 1', start: '2027-01-13', end: '2027-02-12' },
+      ],
+    });
+    const { user } = renderWithHelp({ calendars: [formatBlocks] } as unknown as TenantConfig);
+    await editRow(user, /2026\/27/i);
+
+    // One hint per format-named block, none for the two time-named ones.
+    expect(screen.getAllByText(HINT_TEXT)).toHaveLength(2);
+  });
+
+  it('matches formats on word boundaries only', () => {
+    for (const label of ['T20', '30 Over', '50 overs', 'Pink Ball', 'T10 Bash'])
+      expect(FORMAT_LIKE_LABEL.test(label)).toBe(true);
+    for (const label of ['First half', 'Block 1', 'Crossover', 'Handover', '2026/27'])
+      expect(FORMAT_LIKE_LABEL.test(label)).toBe(false);
+  });
+
+  it('hints under a calendar label named after a format, and still saves', async () => {
+    const { user, save } = renderWithHelp({
+      calendars: [cal({ label: 'T20 Cup' })],
+    } as unknown as TenantConfig);
+    await editRow(user, /t20 cup/i);
+
+    expect(screen.getByText(HINT_TEXT)).toBeVisible();
+    await user.click(screen.getByRole('button', { name: /^save/i }));
+    expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it('never blocks saving a calendar whose block is named after a format', async () => {
+    const { user, save } = renderWithHelp({
+      calendars: [
+        cal({ blocks: [{ id: 'b1', label: 'T20', start: '2026-09-12', end: '2026-12-12' }] }),
+      ],
+    } as unknown as TenantConfig);
+    await editRow(user, /2026\/27/i);
+
+    expect(screen.getByText(HINT_TEXT)).toBeVisible();
+    await user.click(screen.getByRole('button', { name: /^save/i }));
+    expect(save).toHaveBeenCalledTimes(1);
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Who uses each calendar, and which of its blocks nobody plays in. Aggregated across
+   every competition on the calendar: T20 in Block 1 and 50 Over in Block 2 is two
+   competitions sharing one calendar, and covers it.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('CalendarsCard — competitions on each calendar', () => {
+  const twoBlocks = cal({
+    blocks: [
+      { id: 'b1', label: 'Block 1', start: '2026-09-12', end: '2026-12-12' },
+      { id: 'b2', label: 'Block 2', start: '2027-01-16', end: '2027-03-27' },
+    ],
+  });
+
+  const structureIn = (id: string, name: string, version: number, blockIndex: number) =>
+    ({
+      id,
+      name,
+      version,
+      stages: [
+        {
+          id: `${id}-s1`,
+          name: 'League',
+          format: { kind: 'round-robin', legs: 1 },
+          entrants: { kind: 'all-registered' },
+          schedule: { blockIndex, cadence: { kind: 'weekly' } },
+        },
+      ],
+    }) as unknown as CompetitionStructure;
+
+  const leagueWith = (
+    competitions: Array<{ id: string; label: string; structureId: string; calendarId: string }>,
+  ) =>
+    ({
+      key: 'premier',
+      label: 'Premier Men',
+      group: 'Senior',
+      district: 'All districts',
+      competitions,
+    }) as unknown as League;
+
+  const renderCard = (config: Partial<TenantConfig>) =>
+    render(
+      <CalendarsCard
+        slug="dolphins"
+        config={config as unknown as TenantConfig}
+        save={vi.fn()}
+        toast={vi.fn()}
+      />,
+    );
+
+  it('lists each competition with its structure name and version', () => {
+    renderCard({
+      calendars: [twoBlocks],
+      structures: [structureIn('s1', 'Pools and knockout', 3, 0)],
+      leagues: [
+        leagueWith([
+          { id: 'c1', label: 'T20', structureId: 's1', calendarId: 'cal2627' },
+          { id: 'c2', label: '50 Over', structureId: 'gone', calendarId: 'cal2627' },
+        ]),
+      ],
+    });
+
+    expect(screen.getByText('Premier Men — T20 (Pools and knockout v3)')).toBeVisible();
+    expect(screen.getByText('Premier Men — 50 Over (structure missing)')).toBeVisible();
+  });
+
+  it('says so when no competition uses the calendar, and raises no coverage warning', () => {
+    renderCard({ calendars: [twoBlocks], structures: [], leagues: [] });
+
+    expect(screen.getByText('No competitions on this calendar yet.')).toBeVisible();
+    expect(screen.queryByText(/no competition on this calendar uses it/i)).toBeNull();
+  });
+
+  it('warns about a block no competition on the calendar plays in', () => {
+    renderCard({
+      calendars: [twoBlocks],
+      structures: [structureIn('s1', 'Flat league', 1, 0)],
+      leagues: [leagueWith([{ id: 'c1', label: 'T20', structureId: 's1', calendarId: 'cal2627' }])],
+    });
+
+    const lines = screen.getAllByText(/no competition on this calendar uses it/i);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toHaveTextContent(/Block 2/);
+  });
+
+  it('raises nothing when the competitions cover every block between them', () => {
+    renderCard({
+      calendars: [twoBlocks],
+      structures: [structureIn('s1', 'Flat league', 1, 0), structureIn('s2', 'Knockout', 1, 1)],
+      leagues: [
+        leagueWith([
+          { id: 'c1', label: 'T20', structureId: 's1', calendarId: 'cal2627' },
+          { id: 'c2', label: '50 Over', structureId: 's2', calendarId: 'cal2627' },
+        ]),
+      ],
+    });
+
+    expect(screen.queryByText(/no competition on this calendar uses it/i)).toBeNull();
   });
 });
