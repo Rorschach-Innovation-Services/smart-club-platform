@@ -2,6 +2,8 @@
 <html lang="en-ZA">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <title>Setting up how a league works — Smart Club Platform</title>
 <style>
   /* ── Print setup ──────────────────────────────────────────────────────────
@@ -53,11 +55,9 @@
 
   /* ── Cover ─────────────────────────────────────────────────────────────── */
   .cover {
-    height: 247mm;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
-    break-after: page;
   }
   .cover-top { border-top: 3px solid var(--green); padding-top: 10mm; }
   .cover-eyebrow {
@@ -105,7 +105,6 @@
   .pipeline .arm { height: 1px; background: var(--green); width: 7mm; }
 
   /* ── Parts and sections ────────────────────────────────────────────────── */
-  .part { break-before: page; }
   .part-head { border-top: 3px solid var(--green); padding-top: 5mm; margin-bottom: 8mm; }
   .part-num {
     font-family: "Helvetica Neue", Helvetica, sans-serif;
@@ -122,12 +121,10 @@
   h3 {
     font-size: 12.5pt; font-weight: 600; color: var(--green);
     margin: 9mm 0 2.5mm; letter-spacing: -0.01em;
-    break-after: avoid;
   }
   h4 {
     font-size: 10pt; font-weight: 700; color: var(--ink);
     margin: 6mm 0 1.5mm; letter-spacing: 0.01em;
-    break-after: avoid;
   }
   p { margin: 0 0 3.5mm; max-width: 15.5cm; }
   ul, ol { margin: 0 0 3.5mm; padding-left: 5mm; max-width: 15cm; }
@@ -135,7 +132,6 @@
   strong { font-weight: 600; }
 
   /* ── Contents ──────────────────────────────────────────────────────────── */
-  .toc { break-after: page; }
   .toc ol { list-style: none; padding: 0; max-width: 14cm; counter-reset: toc; }
   .toc li {
     display: flex; gap: 4mm; align-items: baseline;
@@ -153,7 +149,6 @@
   .steps { counter-reset: step; margin: 0 0 6mm; }
   .step {
     position: relative; padding: 0 0 0 13mm; margin: 0 0 6mm;
-    break-inside: avoid;
   }
   .step::before {
     counter-increment: step; content: counter(step);
@@ -169,7 +164,7 @@
 
   /* ── Callouts. Three kinds, three meanings, no decoration. ─────────────── */
   .note, .warn, .why {
-    padding: 4mm 5mm; margin: 0 0 4.5mm; break-inside: avoid;
+    padding: 4mm 5mm; margin: 0 0 4.5mm;
     font-size: 9.8pt; line-height: 1.55; max-width: 15.5cm;
   }
   .note { background: var(--green-tint); border-left: 2.5pt solid var(--green-mid); }
@@ -188,7 +183,7 @@
   /* ── Tables ────────────────────────────────────────────────────────────── */
   table {
     width: 100%; border-collapse: collapse; margin: 0 0 5mm;
-    font-size: 9.5pt; break-inside: avoid;
+    font-size: 9.5pt;
   }
   th {
     text-align: left; font-size: 8pt; font-weight: 700;
@@ -200,13 +195,6 @@
   tbody tr:last-child td { border-bottom: none; }
   .t-narrow td:first-child, .t-narrow th:first-child { width: 32%; }
 
-  /* One table in this document is longer than a page (the message reference). Keeping
-     it whole strands its own part heading on an otherwise empty page, so this one is
-     allowed to break — with the header row repeated on each page it lands on, and rows
-     kept intact. */
-  .t-long { break-inside: auto; }
-  .t-long thead { display: table-header-group; }
-  .t-long tr { break-inside: avoid; }
 
   /* ── UI chrome references — what the operator actually sees ────────────── */
   .ui {
@@ -225,7 +213,7 @@
   .pill.coral { background: #F8E4E0; color: #9B3A2A; }
 
   /* ── The worked-structure diagram ──────────────────────────────────────── */
-  .flow { margin: 0 0 5mm; break-inside: avoid; }
+  .flow { margin: 0 0 5mm; }
   .flow-stage {
     border: 1px solid var(--rule); border-left: 3px solid var(--green-mid);
     padding: 3mm 4mm; margin-bottom: 2mm; background: #fff;
@@ -258,9 +246,163 @@
     font-family: "Helvetica Neue", Helvetica, sans-serif;
     font-size: 8.5pt; color: var(--ink-3);
   }
+  /* ── Pagination (print only) ───────────────────────────────────────────────
+     Everything that exists because of the A4 page — the full-height cover, a part
+     per page, keep-together rules — lives here, so the screen layer below never
+     inherits page geometry. */
+  @media print {
+    .cover { height: 247mm; break-after: page; }
+    .toc { break-after: page; }
+    .part { break-before: page; }
+    h3, h4 { break-after: avoid; }
+    .step, .note, .warn, .why, .flow { break-inside: avoid; }
+    table { break-inside: avoid; }
+
+    /* One table in this document is longer than a page (the message reference). Keeping
+       it whole strands its own part heading on an otherwise empty page, so this one is
+       allowed to break — with the header row repeated on each page it lands on, and rows
+       kept intact. */
+    .t-long { break-inside: auto; }
+    .t-long thead { display: table-header-group; }
+    .t-long tr { break-inside: avoid; }
+
+    .rail, .to-top { display: none; }
+  }
+
+  /* Contents entries are links; the anchor must not change the printed row. */
+  .toc li > a { display: contents; color: inherit; text-decoration: none; }
+
+  /* ── Screen ────────────────────────────────────────────────────────────────
+     The same document read in a browser (the help drawer deep-links here). One
+     centred column, no page geometry, the Contents as working navigation, and a
+     sticky parts rail on wide screens. Print is untouched: all of this is
+     screen-scoped. */
+  @media screen {
+    html { scroll-behavior: smooth; }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+    body {
+      background: var(--paper);
+      font-size: 1.05rem; line-height: 1.7;
+      max-width: 44rem; margin: 0 auto; padding: 0 1.5rem 5rem;
+    }
+    [id] { scroll-margin-top: 1.5rem; }
+
+    p, ul, ol, .note, .warn, .why, .lead-in, .part-head .lede { max-width: none; }
+
+    /* Cover → hero: natural height, everything together, Contents straight after. */
+    .cover { display: block; padding: 3rem 0 2.5rem; }
+    .cover-top { padding-top: 1.5rem; }
+    .cover h1 { font-size: clamp(2rem, 6vw, 2.9rem); margin-top: 1rem; max-width: none; }
+    .cover .sub { font-size: 1.15rem; margin-top: 1rem; max-width: 36rem; }
+    .cover-bottom { margin-top: 2.25rem; }
+    .pipeline-cap { margin-bottom: 0.75rem; }
+    .pipeline { flex-wrap: wrap; row-gap: 0.5rem; margin-bottom: 2rem; }
+    .pipeline .node { padding: 0.5rem 0.75rem; }
+    .pipeline .arm { width: 1.1rem; }
+    .cover-foot { gap: 1.5rem; padding-top: 1rem; }
+
+    /* Parts separate by space and the existing top rule, not by page breaks. */
+    .toc, .part { margin-top: 3.5rem; }
+    .toc { margin-top: 0; }
+    .part-head { padding-top: 1.25rem; margin-bottom: 1.75rem; }
+    h2 { font-size: clamp(1.6rem, 4vw, 1.95rem); }
+    h3 { font-size: 1.3rem; margin: 2.25rem 0 0.6rem; }
+    h4 { font-size: 1.05rem; margin: 1.5rem 0 0.4rem; }
+    p, ul, ol { margin-bottom: 1rem; }
+    ul, ol { padding-left: 1.4rem; }
+
+    .note, .warn, .why { font-size: 0.97rem; padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+
+    /* Contents as navigation. */
+    .toc ol { max-width: none; }
+    .toc li { padding: 0; font-size: 1rem; }
+    .toc li > a {
+      display: flex; gap: 1rem; align-items: baseline; width: 100%;
+      padding: 0.7rem 0.25rem;
+    }
+    .toc li > a:hover .t, .toc li > a:focus-visible .t { color: var(--green-mid); text-decoration: underline; text-underline-offset: 3px; }
+    .toc .n { min-width: 3.25rem; }
+    .toc .d { max-width: 18rem; }
+    @media (max-width: 40rem) {
+      .toc li > a { flex-wrap: wrap; row-gap: 0.1rem; }
+      .toc .d { margin-left: 4.25rem; text-align: left; max-width: none; width: 100%; }
+    }
+
+    /* A drawer deep-link visibly lands: brief gold accent on the target heading. */
+    :target { animation: land 2.4s ease-out; }
+    @keyframes land {
+      0%, 55% { box-shadow: -0.75rem 0 0 -0.45rem var(--gold); }
+      100%    { box-shadow: -0.75rem 0 0 -0.45rem transparent; }
+    }
+    h2:target, h3:target, h4:target { box-shadow: -0.75rem 0 0 -0.45rem var(--gold); animation: land 2.4s ease-out forwards; }
+    @media (prefers-reduced-motion: reduce) { :target, h2:target, h3:target, h4:target { animation: none; } }
+
+    /* Tables scroll sideways on narrow screens instead of forcing the page wider. */
+    table { font-size: 0.93rem; margin-bottom: 1.5rem; }
+    @media (max-width: 40rem) {
+      table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      td, th { min-width: 8rem; }
+    }
+
+    .terms dd { font-size: 1rem; }
+    .colophon { margin-top: 3rem; }
+
+    /* Parts rail: hidden until there is room beside the column. */
+    .rail { display: none; }
+    @media (min-width: 1100px) {
+      body { max-width: calc(44rem + 16rem); padding-left: calc(1.5rem + 16rem); }
+      .rail {
+        display: block; position: fixed; top: 2.5rem;
+        left: calc(max(0px, (100vw - 60rem) / 2) + 1.5rem);
+        width: 13rem; max-height: calc(100vh - 5rem); overflow-y: auto;
+        font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 0.85rem;
+      }
+      .rail-cap {
+        font-size: 0.7rem; font-weight: 700; letter-spacing: 0.16em;
+        text-transform: uppercase; color: var(--gold); margin: 0 0 0.75rem;
+      }
+      .rail ol { list-style: none; padding: 0; margin: 0; border-left: 1px solid var(--rule); }
+      .rail li { margin: 0; }
+      .rail a {
+        display: block; padding: 0.35rem 0 0.35rem 0.85rem; margin-left: -1px;
+        border-left: 2px solid transparent; color: var(--ink-2); text-decoration: none; line-height: 1.35;
+      }
+      .rail a:hover, .rail a:focus-visible { color: var(--green); border-left-color: var(--green-mid); }
+      .rail .rn { display: block; font-size: 0.65rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-3); }
+    }
+
+    .to-top {
+      position: fixed; right: 1rem; bottom: 1rem;
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 0.8rem; font-weight: 600; color: var(--green);
+      background: #fff; border: 1px solid var(--rule); border-radius: 999px;
+      padding: 0.45rem 0.9rem; text-decoration: none;
+      box-shadow: 0 1px 3px rgba(20, 32, 27, 0.12);
+    }
+    .to-top:hover, .to-top:focus-visible { border-color: var(--green-mid); }
+  }
 </style>
 </head>
 <body>
+
+<!-- Screen-only parts rail (wide screens) and back-to-top; hidden in print. -->
+<nav class="rail" aria-label="Parts">
+  <p class="rail-cap">Contents</p>
+  <ol>
+    <li><a href="#part-one"><span class="rn">One</span>How a season is put together</a></li>
+    <li><a href="#season-calendars"><span class="rn">Two</span>Season calendars</a></li>
+    <li><a href="#venues"><span class="rn">Three</span>Venues and competition defaults</a></li>
+    <li><a href="#competition-structures"><span class="rn">Four</span>Competition structures</a></li>
+    <li><a href="#binding"><span class="rn">Five</span>Binding a competition to a league</a></li>
+    <li><a href="#running-a-season"><span class="rn">Six</span>Running a season</a></li>
+    <li><a href="#allocating-grounds"><span class="rn">Seven</span>Allocating grounds</a></li>
+    <li><a href="#worked-examples"><span class="rn">Eight</span>Worked examples</a></li>
+    <li><a href="#messages"><span class="rn">Nine</span>What the messages mean</a></li>
+    <li><a href="#reference"><span class="rn">Ten</span>Reference</a></li>
+  </ol>
+</nav>
+<a class="to-top" href="#">Back to top</a>
 
 <!-- ══ COVER ══════════════════════════════════════════════════════════════ -->
 <section class="cover">
@@ -304,16 +446,16 @@
     <h2>What's in this guide</h2>
   </div>
   <ol>
-    <li><span class="n">One</span><span class="t">How a season is put together</span><span class="d">The four ideas everything else rests on, and the two ways in</span></li>
-    <li><span class="n">Two</span><span class="t">Season calendars</span><span class="d">Playing blocks, breaks and excluded dates</span></li>
-    <li><span class="n">Three</span><span class="t">Venues and competition defaults</span><span class="d">The ground list, why pinning matters, and the union's own defaults</span></li>
-    <li><span class="n">Four</span><span class="t">Competition structures</span><span class="d">Building the shape of a competition</span></li>
-    <li><span class="n">Five</span><span class="t">Binding a competition to a league</span><span class="d">Where structures meet real clubs</span></li>
-    <li><span class="n">Six</span><span class="t">Running a season</span><span class="d">The administrator's stage-by-stage walkthrough</span></li>
-    <li><span class="n">Seven</span><span class="t">Allocating grounds</span><span class="d">What the allocator does, and how to argue with it</span></li>
-    <li><span class="n">Eight</span><span class="t">Worked examples</span><span class="d">Four real KZNCU and EMCU competitions</span></li>
-    <li><span class="n">Nine</span><span class="t">What the messages mean</span><span class="d">Every warning, and what to do about it</span></li>
-    <li><span class="n">Ten</span><span class="t">Reference</span><span class="d">Glossary and who can do what</span></li>
+    <li><a href="#part-one"><span class="n">One</span><span class="t">How a season is put together</span><span class="d">The four ideas everything else rests on, and the two ways in</span></a></li>
+    <li><a href="#season-calendars"><span class="n">Two</span><span class="t">Season calendars</span><span class="d">Playing blocks, breaks and excluded dates</span></a></li>
+    <li><a href="#venues"><span class="n">Three</span><span class="t">Venues and competition defaults</span><span class="d">The ground list, why pinning matters, and the union's own defaults</span></a></li>
+    <li><a href="#competition-structures"><span class="n">Four</span><span class="t">Competition structures</span><span class="d">Building the shape of a competition</span></a></li>
+    <li><a href="#binding"><span class="n">Five</span><span class="t">Binding a competition to a league</span><span class="d">Where structures meet real clubs</span></a></li>
+    <li><a href="#running-a-season"><span class="n">Six</span><span class="t">Running a season</span><span class="d">The administrator's stage-by-stage walkthrough</span></a></li>
+    <li><a href="#allocating-grounds"><span class="n">Seven</span><span class="t">Allocating grounds</span><span class="d">What the allocator does, and how to argue with it</span></a></li>
+    <li><a href="#worked-examples"><span class="n">Eight</span><span class="t">Worked examples</span><span class="d">Four real KZNCU and EMCU competitions</span></a></li>
+    <li><a href="#messages"><span class="n">Nine</span><span class="t">What the messages mean</span><span class="d">Every warning, and what to do about it</span></a></li>
+    <li><a href="#reference"><span class="n">Ten</span><span class="t">Reference</span><span class="d">Glossary and who can do what</span></a></li>
   </ol>
 </section>
 

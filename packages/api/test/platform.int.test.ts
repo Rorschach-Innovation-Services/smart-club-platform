@@ -11,7 +11,7 @@
  * Same harness as api.int.test.ts: in-process dynalite + the real Hono app via
  * app.request(), auth via the LOCAL_AUTH x-dev-auth bypass.
  */
-import { test, before, after, describe } from 'node:test';
+import { test, before, beforeEach, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import { mockClient } from 'aws-sdk-client-mock';
@@ -3258,6 +3258,141 @@ describe('competition structures (ADR 0008)', () => {
       ],
     });
     assert.equal(res.status, 200);
+  });
+});
+
+/**
+ * Calendar coverage warnings: a calendar block NO competition bound to it plays in is
+ * reported in the PUT's `warnings` (never a 400), aggregated across every competition on
+ * the calendar, and only on the save that changed the calendar's blocks, its bindings, or
+ * the content of a structure bound to it.
+ */
+describe('calendar coverage warnings', () => {
+  const T = 'coverage';
+  const OP = platformHeaders(OPERATOR);
+  const COVERAGE_LINE =
+    '2026/27: Block 2 (Second half, 17 Jan 2027 → 26 Mar 2027) — no competition on this calendar uses it';
+
+  const stageIn = (id: string, blockIndex: number) => ({
+    id,
+    name: id,
+    format: { kind: 'round-robin' as const, legs: 1 as const },
+    entrants: { kind: 'manual' as const },
+    schedule: { blockIndex, cadence: { kind: 'weekly' as const } },
+  });
+  const calendar = {
+    id: 'season',
+    label: '2026/27',
+    blocks: [
+      { id: 'b1', label: 'First half', start: '2026-09-13', end: '2026-12-13' },
+      { id: 'b2', label: 'Second half', start: '2027-01-17', end: '2027-03-26' },
+    ],
+  };
+  const structures = [
+    { id: 'first-only', name: 'First half only', version: 1, stages: [stageIn('rr', 0)] },
+    { id: 'second-only', name: 'Second half only', version: 1, stages: [stageIn('rr', 1)] },
+    { id: 'overrun', name: 'Overrun', version: 1, stages: [stageIn('rr', 2)] },
+  ];
+  const league = (key: string, label: string, competitions: ReturnType<typeof comp>[]) => ({
+    key,
+    label,
+    group: 'Senior',
+    district: 'All districts',
+    competitions,
+  });
+  const comp = (id: string, label: string, structureId: string) => ({
+    id,
+    label,
+    structureId,
+    calendarId: 'season',
+  });
+  const put = (body: unknown) =>
+    app.request(`/platform/tenants/${T}`, {
+      method: 'PUT',
+      headers: OP,
+      body: JSON.stringify(body),
+    });
+  const warningsOf = async (res: Response) =>
+    ((await res.json()) as { warnings?: string[] }).warnings ?? [];
+
+  beforeEach(async () => {
+    await repo.putTenantConfig({
+      tenant: T,
+      branding: { name: 'Coverage Union', title: 'Cov', logoUrl: '', colors: {}, copy: {} },
+      submissionDeadline: '2026-12-31',
+      knownClubs: [],
+      leagues: [league('premier', 'Premier', [])],
+      calendars: [calendar],
+      structures,
+    });
+  });
+
+  test('binding a structure that uses only block 1 to a 2-block calendar warns', async () => {
+    const res = await put({
+      leagues: [league('premier', 'Premier', [comp('t20', 'T20', 'first-only')])],
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await warningsOf(res), [COVERAGE_LINE]);
+  });
+
+  test('two competitions covering the shared calendar between them do not warn', async () => {
+    const res = await put({
+      leagues: [
+        league('premier', 'Premier', [
+          comp('t20', 'T20', 'first-only'),
+          comp('fifty', '50 Over', 'second-only'),
+        ]),
+      ],
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await warningsOf(res), []);
+  });
+
+  test('a later save that leaves bindings and the calendar alone does not re-warn', async () => {
+    const first = await put({
+      leagues: [league('premier', 'Premier', [comp('t20', 'T20', 'first-only')])],
+    });
+    assert.deepEqual(await warningsOf(first), [COVERAGE_LINE]);
+    const renamed = await put({
+      leagues: [league('premier', 'Premier League', [comp('t20', 'T20', 'first-only')])],
+    });
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(await warningsOf(renamed), []);
+  });
+
+  test('a structures-only save that opens a gap on a bound calendar warns; a no-op resave does not', async () => {
+    const covering = {
+      id: 'both-halves',
+      name: 'Both halves',
+      version: 1,
+      stages: [stageIn('rr', 0), stageIn('ko', 1)],
+    };
+    const bind = await put({
+      structures: [...structures, covering],
+      leagues: [league('premier', 'Premier', [comp('t20', 'T20', 'both-halves')])],
+    });
+    assert.equal(bind.status, 200);
+    assert.deepEqual(await warningsOf(bind), [], 'a covering structure raises nothing');
+
+    // Only the structure changes: its block-2 stage moves into block 1. Neither the
+    // calendar's blocks nor the binding tuples change, yet Block 2 is now uncovered.
+    const moved = { ...covering, stages: [stageIn('rr', 0), stageIn('ko', 0)] };
+    const res = await put({ structures: [...structures, moved] });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await warningsOf(res), [COVERAGE_LINE]);
+
+    // Same content resaved (the client's version is ignored) — nothing changed, no nag.
+    const resave = await put({ structures: [...structures, { ...moved, version: 99 }] });
+    assert.equal(resave.status, 200);
+    assert.deepEqual(await warningsOf(resave), []);
+  });
+
+  test('a stage past the end of the bound calendar is still a 400', async () => {
+    const res = await put({
+      leagues: [league('premier', 'Premier', [comp('bad', 'Bad', 'overrun')])],
+    });
+    assert.equal(res.status, 400);
+    assert.match(((await res.json()) as { error: string }).error, /has only 2 blocks/);
   });
 });
 

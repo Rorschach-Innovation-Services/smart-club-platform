@@ -21,6 +21,7 @@ import {
   emptyPlayerFilters,
 } from './playerFilters';
 import { filterClearances } from './clearanceFilters';
+import { GUIDE_URL } from './help/HelpDrawer';
 import {
   DISTRICTS,
   DEFAULT_REQUIRED_DOCS,
@@ -573,7 +574,10 @@ export function AdminFixtures({
             Every league runs a season, stage by stage — on a competition your platform operator set
             up, or one you quick-start from a template. A one-off cup or festival is a season too:
             start it from the One-off tournament template. Home venues flow from the affiliation
-            form. Travel distance and fuel cost are calculated for every away fixture.
+            form. Travel distance and fuel cost are calculated for every away fixture.{' '}
+            <a className="help-link" href={GUIDE_URL} target="_blank" rel="noopener noreferrer">
+              Open the full guide
+            </a>
           </p>
         </div>
         <div className="ph-actions">

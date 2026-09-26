@@ -147,7 +147,9 @@ export function HelpDrawer({ topicId, onClose }: { topicId: string; onClose: () 
     return () => window.removeEventListener('keydown', onKey, true);
   }, [onClose]);
 
-  const guideHref = topic?.guideAnchor ? `${GUIDE_URL}#${topic.guideAnchor}` : null;
+  // A topic without its own section still links the guide's front page — the drawer is
+  // many users' only visible door to the full walkthrough.
+  const guideHref = topic?.guideAnchor ? `${GUIDE_URL}#${topic.guideAnchor}` : GUIDE_URL;
 
   return createPortal(
     <div className="help-drawer-root">

@@ -45,9 +45,14 @@ import {
   crossPoolSourceStage,
   feedsPoolKnockout,
   poolQualifiersFor,
+  uncoveredBlocksAcross,
   type StageMaterialisation,
 } from '../packages/engine/src/structure';
-import { describeStage, describeStructure } from '../packages/engine/src/narrative';
+import {
+  describeStage,
+  describeStructure,
+  describeUncoveredBlockAggregate,
+} from '../packages/engine/src/narrative';
 import { materialiseRun } from '../packages/engine/src/run';
 import { STAGE_KINDS, stageKindFor, stageTitle } from '../packages/engine/src/stage-kinds';
 import {
@@ -65,6 +70,7 @@ import {
 import { affiliationSubmitted, currentSeasonLabel } from './data';
 import type {
   Club,
+  Competition,
   CompetitionStructure,
   League,
   SeasonCalendar,
@@ -79,6 +85,8 @@ type Toast = (m: string, t?: string) => void;
 
 const ERR: CSSProperties = { color: 'var(--coral, #C0392B)', fontSize: 12, marginTop: 6 };
 const HINT: CSSProperties = { fontSize: 11.5, color: 'var(--muted-2)', margin: '6px 0 0' };
+/** Advisory, never blocking — the same gold the operator console uses for its warnings. */
+const WARN: CSSProperties = { color: 'var(--gold, #B7791F)', fontSize: 12, lineHeight: 1.5 };
 
 type KnockoutPairing = 'seeded' | 'cross-pool' | 'within-pool';
 
@@ -235,6 +243,49 @@ export function endedCalendarsOf(
   return [...ended.values()];
 }
 
+/** A competition's calendar exists, has blocks, and every one of them finished before `today`. */
+function competitionEnded(
+  comp: Competition,
+  calendars: SeasonCalendar[],
+  today: string = todayIso(),
+): boolean {
+  const cal = calendars.find((c) => c.id === comp.calendarId);
+  return !!cal && cal.blocks.length > 0 && cal.blocks.every((b) => daysBetween(b.end, today) > 0);
+}
+
+/** The first block's start, or '' when the calendar is missing or empty — sorts last. */
+function calendarStart(comp: Competition, calendars: SeasonCalendar[]): string {
+  const cal = calendars.find((c) => c.id === comp.calendarId);
+  return cal?.blocks.reduce((min, b) => (!min || b.start < min ? b.start : min), '') ?? '';
+}
+
+/**
+ * A league's competitions split into current and ended, each most-recent calendar first.
+ *
+ * Reusing a structure season after season mints one competition per season, so a league
+ * accumulates "T20" on 2025/26 AND on 2026/27. Config order is creation order, which put
+ * the dead season first and preselected it; this is the order the picker wants instead.
+ */
+export function competitionsByRecency(
+  league: League | undefined,
+  calendars: SeasonCalendar[],
+  today: string = todayIso(),
+): { current: Competition[]; ended: Competition[] } {
+  const newestFirst = (a: Competition, b: Competition) =>
+    calendarStart(b, calendars).localeCompare(calendarStart(a, calendars));
+  const all = league?.competitions ?? [];
+  return {
+    current: all.filter((c) => !competitionEnded(c, calendars, today)).sort(newestFirst),
+    ended: all.filter((c) => competitionEnded(c, calendars, today)).sort(newestFirst),
+  };
+}
+
+/** The competition preselected for a league: its newest current one, else its newest ended one. */
+function defaultCompetitionId(league: League | undefined, calendars: SeasonCalendar[]): string {
+  const { current, ended } = competitionsByRecency(league, calendars);
+  return (current[0] ?? ended[0])?.id ?? '';
+}
+
 /* ─── Start a season ─── */
 
 function StartSeasonForm({
@@ -263,14 +314,27 @@ function StartSeasonForm({
   const capable = seasonCapableLeagues(allLeagues);
   const [leagueKey, setLeagueKey] = useState(initialLeagueKey ?? capable[0]?.key ?? '');
   const league = capable.find((l) => l.key === leagueKey);
-  const [competitionId, setCompetitionId] = useState(league?.competitions?.[0]?.id ?? '');
+  const calendars = config.calendars ?? [];
+  const [competitionId, setCompetitionId] = useState(() =>
+    defaultCompetitionId(league, config.calendars ?? []),
+  );
+  const [showPast, setShowPast] = useState(false);
   const [seasonLabel, setSeasonLabel] = useState(currentSeasonLabel());
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
   const competition = league?.competitions?.find((c) => c.id === competitionId);
   const structure = (config.structures ?? []).find((s) => s.id === competition?.structureId);
-  const calendar = (config.calendars ?? []).find((c) => c.id === competition?.calendarId);
+  const calendar = calendars.find((c) => c.id === competition?.calendarId);
+  // Current competitions first; ended ones wait behind "Show past seasons" — unless every
+  // competition has ended, when there is nothing to hide them behind.
+  const { current, ended } = competitionsByRecency(league, calendars);
+  const pastHidden = current.length > 0 && !showPast;
+  const visible = pastHidden ? current : [...current, ...ended];
+  const optionLabel = (c: Competition) => {
+    const cal = calendars.find((x) => x.id === c.calendarId);
+    return cal ? `${c.label} · ${cal.label}` : c.label;
+  };
   const teams = league
     ? leagueParticipants(clubs, league.key, competition?.excludeTeamIds, {
         isAffiliated: affiliationSubmitted,
@@ -357,7 +421,8 @@ function StartSeasonForm({
           onChange={(e) => {
             const next = capable.find((l) => l.key === e.target.value);
             setLeagueKey(e.target.value);
-            setCompetitionId(next?.competitions?.[0]?.id ?? '');
+            setCompetitionId(defaultCompetitionId(next, calendars));
+            setShowPast(false);
           }}
         >
           {capable.map((l) => (
@@ -377,23 +442,48 @@ function StartSeasonForm({
         <div className="field-label">
           Competition <span className="req">*</span>
         </div>
-        {/* A league usually has ONE competition — a dropdown there implies a choice that
-            doesn't exist. The select only appears for leagues running parallel format
-            streams (e.g. a 50 Over and a T20 competition over the same clubs). */}
-        {(league?.competitions ?? []).length === 1 ? (
-          <div style={{ fontSize: 13.5, padding: '6px 0' }}>{league?.competitions?.[0]?.label}</div>
+        {/* A league usually has ONE current competition — a dropdown there implies a
+            choice that doesn't exist. The select only appears for leagues running parallel
+            format streams (e.g. a 50 Over and a T20 competition over the same clubs), or
+            once past seasons are revealed. Each option names its calendar: reuse mints one
+            competition per season, so "T20" alone is ambiguous. */}
+        {visible.length === 1 ? (
+          <div style={{ fontSize: 13.5, padding: '6px 0' }}>{optionLabel(visible[0])}</div>
         ) : (
           <select
             className="field-select"
+            aria-label="Competition"
             value={competitionId}
             onChange={(e) => setCompetitionId(e.target.value)}
           >
-            {(league?.competitions ?? []).map((c) => (
+            {visible.map((c) => (
               <option key={c.id} value={c.id}>
-                {c.label}
+                {optionLabel(c)}
               </option>
             ))}
           </select>
+        )}
+        {current.length > 0 && ended.length > 0 && (
+          <button
+            type="button"
+            style={{
+              ...HINT,
+              background: 'none',
+              border: 0,
+              padding: 0,
+              cursor: 'pointer',
+              textDecoration: 'underline',
+              display: 'block',
+            }}
+            onClick={() => {
+              // Hiding past seasons again must not leave a hidden one selected.
+              if (showPast && ended.some((c) => c.id === competitionId))
+                setCompetitionId(current[0].id);
+              setShowPast(!showPast);
+            }}
+          >
+            {showPast ? 'Hide past seasons' : `Show past seasons (${ended.length})`}
+          </button>
         )}
       </div>
 
@@ -548,6 +638,7 @@ function QuickStartForm({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [started, setStarted] = useState<string | null>(null);
+  const [startedWarnings, setStartedWarnings] = useState<string[]>([]);
 
   const template = STRUCTURE_TEMPLATES.find((t) => t.id === templateId) ?? STRUCTURE_TEMPLATES[0];
   const label = seasonLabel.trim();
@@ -569,11 +660,28 @@ function QuickStartForm({
   // Gated: an unaffiliated club's side is not counted into the preview. It can still be
   // included per side when entrants are confirmed.
   const teams = leagueParticipants(clubs, league.key, [], { isAffiliated: affiliationSubmitted });
-  const narrative = describeStructure(
-    instantiateTemplate(template, calendar, undefined, placement, defaults),
-    calendar,
-    teams.length,
-  );
+  // Built once: the narrative reads it, and so does the coverage preview below.
+  const instance = instantiateTemplate(template, calendar, undefined, placement, defaults);
+  const narrative = describeStructure(instance, calendar, teams.length);
+  // The same aggregate the server computes on success: every structure already bound to
+  // the chosen calendar (any league) plus this one. Custom dates are a single block the
+  // new structure always covers, so there is nothing to check there.
+  const uncovered = operatorCalendar
+    ? uncoveredBlocksAcross(
+        [
+          ...(config.leagues ?? [])
+            .flatMap((l) => l.competitions ?? [])
+            .filter((c) => c.calendarId === operatorCalendar.id)
+            .map((c) => (config.structures ?? []).find((st) => st.id === c.structureId))
+            .filter((st): st is CompetitionStructure => st !== undefined),
+          instance,
+        ],
+        operatorCalendar,
+      ).map(
+        (block) =>
+          `${operatorCalendar.label}: ${describeUncoveredBlockAggregate(block, operatorCalendar.blocks.indexOf(block))}`,
+      )
+    : [];
 
   const problems: string[] = [];
   if (!label) problems.push('Give the season a label.');
@@ -602,8 +710,10 @@ function QuickStartForm({
       },
       ...(blockCount >= 2 ? { placement } : {}),
     };
+    let warnings: string[] = [];
     try {
-      await quickStartSeason(body);
+      const res = await quickStartSeason(body);
+      warnings = res.warnings ?? [];
     } catch (e) {
       if (e instanceof ApiError) {
         // The competition was written but its season was not: refetch first, so the
@@ -632,6 +742,7 @@ function QuickStartForm({
       /* the next refetch catches up */
     }
     setBusy(false);
+    setStartedWarnings(warnings);
     setStarted(label);
   }
 
@@ -644,6 +755,11 @@ function QuickStartForm({
           </strong>{' '}
           Its stages are on the Seasons card. Work through them in this order.
         </div>
+        {startedWarnings.map((w) => (
+          <div key={w} style={WARN}>
+            {w}
+          </div>
+        ))}
         <NextSteps steps={SEASON_NEXT_STEPS} />
         <div style={{ display: 'flex', gap: 8 }}>
           <Btn tone="teal" onClick={onClose}>
@@ -816,6 +932,11 @@ function QuickStartForm({
         {narrative.map((line) => (
           <p key={line}>{line}</p>
         ))}
+        {uncovered.map((line) => (
+          <p key={line} style={WARN}>
+            {line}
+          </p>
+        ))}
         {!calendar && <p className="sr-preview-note">Dates appear once the season has them.</p>}
       </div>
 
@@ -917,6 +1038,14 @@ export function GenerateFixturesLauncher({
   const quickStart = !!league && (!bound || !!ended);
   const structureName = (id: string) =>
     (config.structures ?? []).find((s) => s.id === id)?.name ?? 'structure missing';
+  // The structure of the league's most recent ended competition — the one an operator
+  // would renew, so quick start isn't the only road and a duplicate isn't minted unknowingly.
+  const lastEnded = ended
+    ? competitionsByRecency(league, config.calendars ?? []).ended[0]
+    : undefined;
+  const renewable = lastEnded
+    ? (config.structures ?? []).find((s) => s.id === lastEnded.structureId)?.name
+    : undefined;
   // The sides a season would draw on, and how many the affiliation gate holds back — the
   // admin can still include those per side on Confirm entrants.
   const pool = league
@@ -978,11 +1107,19 @@ export function GenerateFixturesLauncher({
         {league && (
           <div className="sr-callout">
             {ended ? (
-              <p>
-                This league&apos;s competitions are on calendars that have ended (
-                {ended.map((c) => `${c.label}, ended ${formatIsoDate(c.end)}`).join('; ')}).
-                Quick-start the new season below, or ask your operator to bind a new calendar.
-              </p>
+              <>
+                <p>
+                  This league&apos;s competitions are on calendars that have ended (
+                  {ended.map((c) => `${c.label}, ended ${formatIsoDate(c.end)}`).join('; ')}).
+                  Quick-start the new season below, or ask your operator to bind a new calendar.
+                </p>
+                {renewable && (
+                  <p className="sr-callout-sub">
+                    Your operator can also renew last season&apos;s {renewable} in the season
+                    wizard.
+                  </p>
+                )}
+              </>
             ) : bound ? (
               <p>
                 This league has a competition set up by your operator:{' '}

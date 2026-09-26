@@ -3,15 +3,20 @@
  *
  * Covers the four load-bearing paths: a brand-new calendar with one league bound from a
  * template writing a single PUT; skipping every league writing only the calendar; picking
- * an EXISTING calendar upserting it rather than duplicating it; and the live fit verdict
- * turning into a warning when a bound structure names a block position the draft calendar
- * doesn't have.
+ * an EXISTING calendar upserting it rather than duplicating it; and a bound structure
+ * naming a block position the draft calendar doesn't have being refused on its row.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SeasonSetupWizard } from './platform-season-wizard';
-import type { CompetitionStructure, League, SeasonCalendar, TenantConfig } from './types';
+import type {
+  Competition,
+  CompetitionStructure,
+  League,
+  SeasonCalendar,
+  TenantConfig,
+} from './types';
 import * as api from './api';
 
 vi.mock('./api', async () => {
@@ -188,8 +193,8 @@ describe('SeasonSetupWizard', () => {
     await fillSeasonLabel(user);
     await user.click(continueBtn());
     await user.selectOptions(screen.getByRole('combobox', { name: /add a league/i }), 'premier');
-    // No operator structure exists, so "Use an existing structure" is not offered.
-    expect(screen.getByRole('radio', { name: /use an existing structure/i })).toBeDisabled();
+    // The template pick never prefills from a quick-start structure, even one cloned from
+    // the same template.
     await user.click(screen.getByRole('radio', { name: /flat round robin/i }));
     await user.click(continueBtn());
     await user.click(screen.getByRole('button', { name: /create season/i }));
@@ -201,7 +206,7 @@ describe('SeasonSetupWizard', () => {
     expect(patch.leagues[0].competitions[0].structureId).toBe(fresh.id);
   });
 
-  it('lists only operator structures under "Use an existing structure"', async () => {
+  it('lists operator structures first, then quick-start and migrated ones grouped', async () => {
     const quickStarted: CompetitionStructure = {
       ...twoBlockStructure,
       id: 'struct-qs',
@@ -222,9 +227,16 @@ describe('SeasonSetupWizard', () => {
     await user.click(screen.getByRole('radio', { name: /use an existing structure/i }));
     const select = screen.getByRole('combobox', { name: /structure for premier men/i });
     const names = Array.from(select.querySelectorAll('option')).map((o) => o.textContent);
-    expect(names).toContain('Split league');
-    expect(names).not.toContain('Quick-started league');
-    expect(names).not.toContain('Migrated flat season');
+    expect(names).toEqual([
+      'Structure…',
+      'Split league',
+      'Quick-started league',
+      'Migrated flat season',
+    ]);
+    const groups = Array.from(select.querySelectorAll('optgroup')).map((g) => g.label);
+    expect(groups).toEqual(['Created by admin quick start', 'Migrated flat seasons']);
+    // The operator's own structure is ungrouped, ahead of both groups.
+    expect(select.querySelector('optgroup option[value="struct-two-block"]')).toBeNull();
   });
 
   it('two leagues picking the same template share ONE structure', async () => {
@@ -332,11 +344,17 @@ describe('SeasonSetupWizard', () => {
     expect(screen.queryByRole('combobox', { name: /plays in/i })).toBeNull();
   });
 
-  it('shows a fit warning when a bound structure names a block the draft calendar lacks', async () => {
-    const { user } = setup({ structures: [twoBlockStructure] });
+  const OVERRUN_LINE =
+    'Split league plays in Block 2 but this calendar has only 1 block — extend the calendar or choose differently';
+
+  it('refuses an existing structure that plays past the draft calendar’s last block', async () => {
+    const { user } = setup({
+      structures: [twoBlockStructure],
+      leagues: [league(), league({ key: 'promo', label: 'Promotion Men' })],
+    });
 
     // A freshly-created calendar defaults to one block, but `twoBlockStructure`'s second
-    // stage names block position 1 — it cannot fit.
+    // stage names block position 1 — the server would 400 the binding.
     await fillSeasonLabel(user);
     await user.click(continueBtn());
 
@@ -345,7 +363,81 @@ describe('SeasonSetupWizard', () => {
     const picker = screen.getByRole('combobox', { name: /structure for premier men/i });
     await user.selectOptions(picker, 'struct-two-block');
 
-    expect(await screen.findByText(/⚠/)).toBeInTheDocument();
+    // The red line replaces the narrative, the fit verdict and any gold lines.
+    expect(screen.getByText(OVERRUN_LINE)).toBeInTheDocument();
+    expect(screen.queryByText(/⚠/)).toBeNull();
+    expect(screen.queryByText(/has no stage playing in it/)).toBeNull();
+    expect(screen.queryByText(/What Split league does/)).toBeNull();
+
+    await user.selectOptions(screen.getByRole('combobox', { name: /add a league/i }), 'promo');
+    const radios = screen.getAllByRole('radio', { name: /flat round robin/i });
+    await user.click(radios[radios.length - 1]);
+    await user.click(continueBtn());
+
+    // Only the template pick is planned; the overrunning pick is named as left unchanged.
+    expect(screen.getByRole('button', { name: /create season/i })).toHaveTextContent(
+      'Create season · 1 competition',
+    );
+    expect(screen.getByText(/Premier Men \(its structure plays past/)).toBeInTheDocument();
+  });
+
+  it('refuses a cloned adoption of a quick-start structure that overruns the draft calendar', async () => {
+    const quickStarted: CompetitionStructure = {
+      ...twoBlockStructure,
+      id: 'struct-qs',
+      name: 'Split league',
+      source: 'quick-start',
+    };
+    const { user, save } = setup({ structures: [quickStarted] });
+
+    await fillSeasonLabel(user);
+    await user.click(continueBtn());
+    await user.selectOptions(screen.getByRole('combobox', { name: /add a league/i }), 'premier');
+    await user.click(screen.getByRole('radio', { name: /use an existing structure/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /structure for premier men/i }),
+      'struct-qs',
+    );
+
+    expect(screen.getByText(OVERRUN_LINE)).toBeInTheDocument();
+    expect(screen.queryByText(/gets its own copy/)).toBeNull();
+
+    await user.click(continueBtn());
+    const create = screen.getByRole('button', { name: /create season/i });
+    expect(create).toHaveTextContent(/^Create season$/);
+    await user.click(create);
+    // Only the calendar is written — no clone, no competition.
+    const patch = save.mock.calls[0][0];
+    expect(patch.structures).toEqual([quickStarted]);
+    expect(patch.leagues[0].competitions ?? []).toHaveLength(0);
+  });
+
+  it('an overrunning pick becomes committable once the calendar grows the block it needs', async () => {
+    const { user, save } = setup({ structures: [twoBlockStructure] });
+
+    await fillSeasonLabel(user);
+    await user.click(continueBtn());
+    await user.selectOptions(screen.getByRole('combobox', { name: /add a league/i }), 'premier');
+    await user.click(screen.getByRole('radio', { name: /use an existing structure/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /structure for premier men/i }),
+      'struct-two-block',
+    );
+    expect(screen.getByText(OVERRUN_LINE)).toBeInTheDocument();
+
+    // Back to step 0 (its form remounts, so the label is refilled), add Block 2, return.
+    await user.click(screen.getByRole('button', { name: /^back$/i }));
+    await fillSeasonLabel(user);
+    await user.click(screen.getByRole('button', { name: /add block/i }));
+    await user.click(continueBtn());
+
+    expect(screen.queryByText(/plays in Block 2 but this calendar has only/)).toBeNull();
+    expect(screen.getByText(/What Split league does/)).toBeInTheDocument();
+    await user.click(continueBtn());
+    const create = screen.getByRole('button', { name: /create season/i });
+    expect(create).toHaveTextContent('Create season · 1 competition');
+    await user.click(create);
+    expect(save.mock.calls[0][0].leagues[0].competitions[0].structureId).toBe('struct-two-block');
   });
 });
 
@@ -533,5 +625,378 @@ describe('SeasonSetupWizard — explained', () => {
     ])
       expect(screen.getByText(step)).toBeVisible();
     expect(screen.getByText(/Fixtures & Venues → Start a season/)).toBeVisible();
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Same as last season: a league's prior format streams are listed on step 2 without
+   adding the league, unticked; a ticked row binds a NEW competition to the SAME
+   structure on the draft calendar and writes no structure.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('SeasonSetupWizard — same as last season', () => {
+  const lastSeason: SeasonCalendar = {
+    id: 'cal-prev',
+    label: '2025/26',
+    blocks: [
+      { id: 'p1', label: 'Block 1', start: '2025-09-13', end: '2025-12-13' },
+      { id: 'p2', label: 'Block 2', start: '2026-01-17', end: '2026-03-28' },
+    ],
+    breaks: [],
+    excludeDates: [],
+  };
+  const twoSeasonsAgo: SeasonCalendar = {
+    ...lastSeason,
+    id: 'cal-older',
+    label: '2024/25',
+    blocks: [
+      { id: 'o1', label: 'Block 1', start: '2024-09-14', end: '2024-12-14' },
+      { id: 'o2', label: 'Block 2', start: '2025-01-18', end: '2025-03-29' },
+    ],
+  };
+  /** One stage in block position 0 — leaves a two-block calendar's Block 2 empty. */
+  const oneBlockStructure: CompetitionStructure = {
+    id: 'struct-flat',
+    name: 'Flat league',
+    version: 1,
+    stages: [twoBlockStructure.stages[0]],
+  };
+  const fiftyOver: Competition = {
+    id: 'comp-50',
+    label: '50 Over (Red Ball)',
+    structureId: 'struct-two-block',
+    calendarId: 'cal-prev',
+    matchFormat: { overs: 50, ballType: 'Red' },
+  };
+  const t20: Competition = {
+    id: 'comp-t20',
+    label: 'T20 (Pink Ball)',
+    structureId: 'struct-two-block',
+    calendarId: 'cal-prev',
+    matchFormat: { overs: 20, ballType: 'Pink', label: 'T20' },
+  };
+
+  /** Onto the existing two-block 2026/27 calendar, then step 2. */
+  async function toStep2OnExisting(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole('radio', { name: /use an existing calendar/i }));
+    await user.click(continueBtn());
+  }
+  const createBtn = () => screen.getByRole('button', { name: /create season/i });
+
+  it('lists the prior competition unticked, naming its structure and old calendar', async () => {
+    const { user } = setup({
+      calendars: [existingCalendar, lastSeason],
+      structures: [twoBlockStructure],
+      leagues: [league({ competitions: [fiftyOver] })],
+    });
+    await toStep2OnExisting(user);
+
+    expect(
+      screen.getByText('Premier Men — Same as last season: Split league (2025/26)'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('50 Over (Red Ball) · 50 overs · Red ball')).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /50 Over/ })).not.toBeChecked();
+    // Listed without being added — and so not offered in "Add a league" either.
+    expect(screen.queryByRole('combobox', { name: /add a league/i })).toBeNull();
+  });
+
+  it('keeps the competition from the most recent calendar when a stream ran twice', async () => {
+    const { user } = setup({
+      calendars: [existingCalendar, twoSeasonsAgo, lastSeason],
+      structures: [twoBlockStructure],
+      leagues: [
+        league({
+          competitions: [
+            { ...fiftyOver, id: 'comp-50-new' },
+            { ...fiftyOver, id: 'comp-50-old', calendarId: 'cal-older' },
+          ],
+        }),
+      ],
+    });
+    await toStep2OnExisting(user);
+
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    expect(screen.getByText(/Same as last season: Split league \(2025\/26\)/)).toBeInTheDocument();
+  });
+
+  it('a ticked row commits a new competition on the same structure, matchFormat carried', async () => {
+    const { user, save } = setup({
+      calendars: [existingCalendar, lastSeason],
+      structures: [twoBlockStructure],
+      leagues: [league({ competitions: [fiftyOver] })],
+    });
+    await toStep2OnExisting(user);
+
+    await user.click(screen.getByRole('checkbox', { name: /50 Over/ }));
+    // Ticked, the row tells the structure as a story with its fit.
+    expect(screen.getByText('What Split league does')).toBeInTheDocument();
+    // (Its double round of 12 overruns Block 1 — a warning, never a block on the tick.)
+    expect(screen.getByText(/^⚠ /)).toBeInTheDocument();
+    await user.click(continueBtn());
+
+    expect(screen.getByText(/same as last season \(Split league\)/)).toBeInTheDocument();
+    expect(createBtn()).toHaveTextContent('Create season · 1 competition');
+    await user.click(createBtn());
+
+    const patch = save.mock.calls[0][0];
+    // Reuse writes no structure.
+    expect(patch.structures).toEqual([twoBlockStructure]);
+    const comps = patch.leagues[0].competitions as Competition[];
+    expect(comps).toHaveLength(2);
+    expect(comps[0]).toEqual(fiftyOver);
+    expect(comps[1].id).not.toBe('comp-50');
+    expect(comps[1]).toEqual({
+      id: comps[1].id,
+      label: '50 Over (Red Ball)',
+      structureId: 'struct-two-block',
+      calendarId: 'cal-existing',
+      matchFormat: { overs: 50, ballType: 'Red' },
+    });
+    expect(await screen.findByText(/is updated/i)).toBeInTheDocument();
+  });
+
+  it('an unticked row writes nothing', async () => {
+    const { user, save } = setup({
+      calendars: [existingCalendar, lastSeason],
+      structures: [twoBlockStructure],
+      leagues: [league({ competitions: [fiftyOver] })],
+    });
+    await toStep2OnExisting(user);
+    await user.click(continueBtn());
+    expect(createBtn()).toHaveTextContent(/^Create season$/);
+    await user.click(createBtn());
+
+    const patch = save.mock.calls[0][0];
+    expect(patch.structures).toEqual([twoBlockStructure]);
+    expect(patch.leagues[0].competitions).toEqual([fiftyOver]);
+  });
+
+  it('two streams on one structure tick independently and BOTH land on commit', async () => {
+    // The old per-league guard skipped a league already bound on the draft calendar, so
+    // the second stream (or both, given the friendly below) silently vanished.
+    const friendly: Competition = {
+      id: 'comp-friendly',
+      label: 'Friendly',
+      structureId: 'struct-two-block',
+      calendarId: 'cal-existing',
+    };
+    const { user, save } = setup({
+      calendars: [existingCalendar, lastSeason],
+      structures: [twoBlockStructure],
+      leagues: [league({ competitions: [fiftyOver, t20, friendly] })],
+    });
+    await toStep2OnExisting(user);
+
+    const fifty = screen.getByRole('checkbox', { name: /50 Over/ });
+    const pink = screen.getByRole('checkbox', { name: /T20/ });
+    await user.click(pink);
+    expect(pink).toBeChecked();
+    expect(fifty).not.toBeChecked();
+    await user.click(fifty);
+    await user.click(continueBtn());
+    expect(createBtn()).toHaveTextContent('Create season · 2 competitions');
+    await user.click(createBtn());
+
+    const comps = save.mock.calls[0][0].leagues[0].competitions as Competition[];
+    const added = comps.slice(3);
+    expect(added.map((c) => c.label).sort()).toEqual(['50 Over (Red Ball)', 'T20 (Pink Ball)']);
+    for (const c of added) {
+      expect(c.structureId).toBe('struct-two-block');
+      expect(c.calendarId).toBe('cal-existing');
+    }
+    expect(added.find((c) => c.label === 'T20 (Pink Ball)')?.matchFormat).toEqual(t20.matchFormat);
+    // The done screen names each competition.
+    expect(await screen.findByText('50 Over (Red Ball)')).toBeInTheDocument();
+    expect(screen.getByText('T20 (Pink Ball)')).toBeInTheDocument();
+  });
+
+  it('drops only an IDENTICAL binding another session already wrote', async () => {
+    const { user, save, config } = setup({
+      calendars: [existingCalendar, lastSeason],
+      structures: [twoBlockStructure],
+      leagues: [league({ competitions: [fiftyOver, t20] })],
+    });
+    // Between opening the wizard and creating, another tab renewed the T20 stream.
+    const renewedT20: Competition = { ...t20, id: 'comp-t20-renewed', calendarId: 'cal-existing' };
+    vi.mocked(api.platformGetTenant).mockResolvedValue({
+      ...config,
+      leagues: [league({ competitions: [fiftyOver, t20, renewedT20] })],
+    });
+    await toStep2OnExisting(user);
+    await user.click(screen.getByRole('button', { name: /select all 2/i }));
+    await user.click(continueBtn());
+    await user.click(createBtn());
+
+    const comps = save.mock.calls[0][0].leagues[0].competitions as Competition[];
+    expect(comps).toHaveLength(4);
+    expect(comps.filter((c) => c.label === 'T20 (Pink Ball)')).toHaveLength(2);
+    expect(comps[3]).toMatchObject({ label: '50 Over (Red Ball)', calendarId: 'cal-existing' });
+  });
+
+  it('"Select all" ticks every row and "Clear" unticks them', async () => {
+    const { user } = setup({
+      calendars: [existingCalendar, lastSeason],
+      structures: [twoBlockStructure],
+      leagues: [league({ competitions: [fiftyOver, t20] })],
+    });
+    await toStep2OnExisting(user);
+
+    await user.click(screen.getByRole('button', { name: 'Select all 2' }));
+    for (const box of screen.getAllByRole('checkbox')) expect(box).toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    for (const box of screen.getAllByRole('checkbox')) expect(box).not.toBeChecked();
+  });
+
+  it('"Choose differently" hides the league\'s rows and opens the chooser', async () => {
+    const { user } = setup({
+      calendars: [existingCalendar, lastSeason],
+      structures: [twoBlockStructure],
+      leagues: [league({ competitions: [fiftyOver, t20] })],
+    });
+    await toStep2OnExisting(user);
+
+    await user.click(
+      screen.getAllByRole('button', { name: /choose differently for premier men/i })[0],
+    );
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+    expect(screen.queryByText(/Same as last season:/)).toBeNull();
+    expect(screen.getByRole('radio', { name: /flat round robin/i })).toBeInTheDocument();
+
+    // Removing it from the chooser brings the rows back.
+    await user.click(screen.getByRole('button', { name: /^remove$/i }));
+    expect(screen.getAllByRole('checkbox')).toHaveLength(2);
+  });
+
+  it('refuses a row whose structure plays past the calendar’s last block', async () => {
+    const { user } = setup({
+      calendars: [lastSeason],
+      structures: [twoBlockStructure],
+      leagues: [league({ competitions: [fiftyOver] })],
+    });
+    // A new calendar starts with one block; the split league plays in Block 2.
+    await fillSeasonLabel(user);
+    await user.click(continueBtn());
+
+    expect(
+      screen.getByText(
+        'Split league plays in Block 2 but this calendar has only 1 block — extend the calendar or choose differently',
+      ),
+    ).toBeInTheDocument();
+    const box = screen.getByRole('checkbox', { name: /50 Over/ });
+    expect(box).toBeDisabled();
+    // The disabled checkbox names its reason for assistive tech.
+    expect(box).toHaveAccessibleDescription(
+      'Split league plays in Block 2 but this calendar has only 1 block — extend the calendar or choose differently',
+    );
+    expect(screen.queryByRole('button', { name: /select all/i })).toBeNull();
+  });
+
+  it('warns in gold about a block the structure leaves empty, and still creates', async () => {
+    const { user, save } = setup({
+      calendars: [existingCalendar, lastSeason],
+      structures: [oneBlockStructure],
+      leagues: [
+        league({
+          competitions: [{ ...fiftyOver, structureId: 'struct-flat', matchFormat: undefined }],
+        }),
+      ],
+    });
+    await toStep2OnExisting(user);
+    await user.click(screen.getByRole('checkbox', { name: /50 Over/ }));
+    expect(screen.getByText(/^Block 2 \(.+\) has no stage playing in it$/)).toBeInTheDocument();
+
+    await user.click(continueBtn());
+    expect(screen.getByText(/^Block 2 \(.+\) has no stage playing in it$/)).toBeInTheDocument();
+    expect(createBtn()).toBeEnabled();
+    await user.click(createBtn());
+    expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts reuse ticks and chooser picks on the Create button', async () => {
+    const { user } = setup({
+      calendars: [existingCalendar, lastSeason],
+      structures: [twoBlockStructure],
+      leagues: [
+        league({ competitions: [fiftyOver] }),
+        league({ key: 'promo', label: 'Promotion Men' }),
+      ],
+    });
+    await toStep2OnExisting(user);
+    await user.click(screen.getByRole('checkbox', { name: /50 Over/ }));
+    // Only the league with nothing reusable is offered in the chooser.
+    const add = screen.getByRole('combobox', { name: /add a league/i });
+    expect(Array.from(add.querySelectorAll('option')).map((o) => o.textContent)).toEqual([
+      'Add a league…',
+      'Promotion Men',
+    ]);
+    await user.selectOptions(add, 'promo');
+    await user.click(screen.getByRole('radio', { name: /flat round robin/i }));
+    await user.click(continueBtn());
+
+    expect(createBtn()).toHaveTextContent('Create season · 2 competitions');
+  });
+
+  it('adopting a quick-start structure clones it for the adopting league', async () => {
+    const quickStarted: CompetitionStructure = {
+      ...oneBlockStructure,
+      id: 'struct-qs',
+      name: 'Premier Men · Flat round robin',
+      templateId: 'flat-round-robin',
+      source: 'quick-start',
+    };
+    const { user, save } = setup({
+      calendars: [existingCalendar, lastSeason],
+      structures: [quickStarted],
+      leagues: [
+        // Bound to a quick-start structure: never a reuse row (ADR 0014).
+        league({
+          competitions: [{ ...fiftyOver, structureId: 'struct-qs', matchFormat: undefined }],
+        }),
+        league({ key: 'promo', label: 'Promotion Men' }),
+      ],
+    });
+    await toStep2OnExisting(user);
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+
+    for (const [key, name] of [
+      ['premier', /structure for premier men/i],
+      ['promo', /structure for promotion men/i],
+    ] as const) {
+      await user.selectOptions(screen.getByRole('combobox', { name: /add a league/i }), key);
+      const radios = screen.getAllByRole('radio', { name: /use an existing structure/i });
+      await user.click(radios[radios.length - 1]);
+      const select = screen.getByRole('combobox', { name });
+      expect(
+        select.querySelector('optgroup[label="Created by admin quick start"] option'),
+      ).toHaveTextContent('Premier Men · Flat round robin');
+      await user.selectOptions(select, 'struct-qs');
+    }
+    expect(screen.getByText(/Promotion Men gets its own copy/)).toBeInTheDocument();
+    await user.click(continueBtn());
+    expect(screen.getAllByText(/own copy of Premier Men · Flat round robin/)).toHaveLength(2);
+    await user.click(createBtn());
+
+    const patch = save.mock.calls[0][0];
+    // The original is untouched; each adopting league gets its OWN operator copy.
+    expect(patch.structures).toHaveLength(3);
+    expect(patch.structures[0]).toEqual(quickStarted);
+    const clones = patch.structures.slice(1) as CompetitionStructure[];
+    expect(clones.map((c) => c.name)).toEqual([
+      'Premier Men · Flat round robin',
+      'Promotion Men · Premier Men · Flat round robin',
+    ]);
+    expect(new Set(clones.map((c) => c.id)).size).toBe(2);
+    for (const c of clones) {
+      expect(c.id).not.toBe('struct-qs');
+      expect(c.source).toBeUndefined();
+      // No templateId either: a league-named clone must never become resolveTemplate's
+      // prefill for a future template pick.
+      expect(c.templateId).toBeUndefined();
+      expect(c.stages).toEqual(quickStarted.stages);
+    }
+    const promoComps = patch.leagues[1].competitions as Competition[];
+    expect(promoComps).toHaveLength(1);
+    expect(promoComps[0].structureId).toBe(clones[1].id);
+    expect(patch.leagues[0].competitions[1].structureId).toBe(clones[0].id);
   });
 });

@@ -46,12 +46,19 @@ import {
   type DatePlan,
 } from '../packages/engine/src/calendar';
 import {
+  blockOverrun,
   chainFeeder,
   derivedEntrantTotal,
   previewFitAll,
   previewRounds,
+  uncoveredBlocks,
 } from '../packages/engine/src/structure';
-import { describeStage, describeStructure } from '../packages/engine/src/narrative';
+import {
+  describeBlockOverrun,
+  describeStage,
+  describeStructure,
+  describeUncoveredBlock,
+} from '../packages/engine/src/narrative';
 import {
   FALLBACK_MATCH_DAYS,
   FALLBACK_TIME_SLOTS,
@@ -168,6 +175,9 @@ function ordinal(i: number): string {
 
 const ERR: CSSProperties = { color: 'var(--coral, #C0392B)', fontSize: 12, marginTop: 6 };
 const HINT: CSSProperties = { fontSize: 11.5, color: 'var(--muted-2)', margin: '6px 0 0' };
+/** Advisory, never blocking — the same gold the calendars card uses for its warnings. */
+const GOLD = 'var(--gold, #B7791F)';
+const WARN: CSSProperties = { color: GOLD, fontSize: 12, marginTop: 6, lineHeight: 1.5 };
 const SECTION: CSSProperties = {
   fontSize: 11,
   fontWeight: 700,
@@ -1400,6 +1410,7 @@ function PreviewRail({
   previews,
   previewTeams,
   onPreviewTeams,
+  uncovered = [],
 }: {
   structure: CompetitionStructure;
   calendar: SeasonCalendar | undefined;
@@ -1407,6 +1418,12 @@ function PreviewRail({
   previews: StagePreview[];
   previewTeams: number;
   onPreviewTeams: (n: number) => void;
+  /**
+   * Calendar blocks no stage plays in — the previewed calendar (no `calendarLabel`) and
+   * each other bound calendar ("On <label>: "). Advisory only: never part of the fit
+   * verdict below, because a shared calendar is often covered by a sibling competition.
+   */
+  uncovered?: Array<{ calendarLabel?: string; lines: string[] }>;
 }) {
   const rows = structure.stages.map((stage, i) => {
     const { sizes, derived, fits, plan } = previews[i];
@@ -1509,6 +1526,17 @@ function PreviewRail({
       <div style={{ marginBottom: 12 }}>
         <StructureNarrative structure={structure} calendar={calendar} teamCount={previewTeams} />
       </div>
+      {uncovered.some((u) => u.lines.length > 0) && (
+        <div style={{ marginBottom: 12 }}>
+          {uncovered.flatMap((u) =>
+            u.lines.map((line) => (
+              <div key={`${u.calendarLabel ?? ''}|${line}`} style={{ ...WARN, marginTop: 0 }}>
+                {u.calendarLabel ? `On ${u.calendarLabel}: ${line}` : line}
+              </div>
+            )),
+          )}
+        </div>
+      )}
 
       {rows.map((r, i) => (
         <div
@@ -1797,6 +1825,25 @@ function StructureEditor({
   const offPreview = calendar ? stagesOffCalendar(draft.stages, calendar) : draft.stages;
   const previews = previewStages(draft, calendar, previewTeams);
 
+  /*
+   * Blocks no stage plays in — the previewed calendar first, then each distinct bound
+   * calendar that isn't it. A calendar where a stage overruns its blocks is skipped: the
+   * red "Saving would be rejected" error (or the rail's off-calendar verdict) owns that
+   * calendar, and a gold aside about the opposite direction would only muddy it.
+   */
+  const uncoveredLines = (cal: SeasonCalendar) =>
+    uncoveredBlocks(draft, cal).map((block) =>
+      describeUncoveredBlock(block, cal.blocks.indexOf(block)),
+    );
+  const uncovered: Array<{ calendarLabel?: string; lines: string[] }> = [];
+  if (calendar && offPreview.length === 0) uncovered.push({ lines: uncoveredLines(calendar) });
+  for (const calId of [...new Set(bindings.map((b) => b.calendarId))]) {
+    if (calId === calendarId) continue;
+    const bound = calendars.find((c) => c.id === calId);
+    if (!bound || stagesOffCalendar(draft.stages, bound).length > 0) continue;
+    uncovered.push({ calendarLabel: bound.label, lines: uncoveredLines(bound) });
+  }
+
   async function submit() {
     if (errors.length || busy) return;
     setSaveErr('');
@@ -1971,6 +2018,7 @@ function StructureEditor({
           previews={previews}
           previewTeams={previewTeams}
           onPreviewTeams={setPreviewTeams}
+          uncovered={uncovered}
         />
       </div>
 
@@ -2298,6 +2346,20 @@ export function StructuresCard({
         .map((c) => ({ league: l.label, competition: c.label, calendarId: c.calendarId })),
     );
 
+  /** "<league> · <calendar>" per distinct binding pair, in config order. */
+  const bindingPairsFor = (id: string) => [
+    ...new Set(
+      (config.leagues ?? []).flatMap((l) =>
+        (l.competitions ?? [])
+          .filter((c) => c.structureId === id)
+          .map(
+            (c) =>
+              `${l.label} · ${calendars.find((cal) => cal.id === c.calendarId)?.label ?? c.calendarId}`,
+          ),
+      ),
+    ),
+  ];
+
   /**
    * Blocks a bound competition's calendar doesn't have — the editor will refuse to save.
    * `needed` is read off the structure itself (its highest position + 1, not a stored
@@ -2350,7 +2412,7 @@ export function StructuresCard({
               </thead>
               <tbody>
                 {structures.map((s) => {
-                  const leagues = usedBy(s.id);
+                  const pairs = bindingPairsFor(s.id);
                   const mismatch = mismatchFor(s);
                   return (
                     <tr key={s.id}>
@@ -2367,18 +2429,19 @@ export function StructuresCard({
                         <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>v{s.version}</span>
                       </td>
                       <td>
-                        <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>
-                          {leagues.length ? leagues.map((l) => l.label).join(', ') : '—'}
-                        </span>
-                        {/* The calendar those competitions run on. A structure is only
-                            valid against the calendar its blocks belong to, so which one
-                            that is belongs beside the binding, not three clicks away. */}
-                        {[...new Set(bindingsFor(s.id).map((b) => b.calendarId))].length > 0 && (
-                          <div style={{ fontSize: 11.5, color: 'var(--muted-2)' }}>
-                            {[...new Set(bindingsFor(s.id).map((b) => b.calendarId))]
-                              .map((id) => calendars.find((c) => c.id === id)?.label ?? id)
-                              .join(', ')}
-                          </div>
+                        {/* One line per binding pair — which league runs it on which
+                            calendar. A structure is only valid against the calendar its
+                            blocks belong to, so the pairing belongs beside the binding,
+                            not three clicks away; listing leagues and calendars apart
+                            loses which goes with which. */}
+                        {pairs.length ? (
+                          pairs.map((pair) => (
+                            <div key={pair} style={{ fontSize: 12.5, color: 'var(--muted)' }}>
+                              {pair}
+                            </div>
+                          ))
+                        ) : (
+                          <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>—</span>
                         )}
                         {mismatch && (
                           <div style={{ marginTop: 4 }}>
@@ -2521,7 +2584,7 @@ export function StructuresCard({
  * Structures not authored by an operator, listed apart in the competition picker so an
  * operator can still bind one deliberately but never mistakes it for a library structure.
  */
-const NON_OPERATOR_GROUPS = [
+export const NON_OPERATOR_GROUPS = [
   { source: 'quick-start', label: 'Created by admin quick start' },
   { source: 'migration', label: 'Migrated flat seasons' },
 ] as const;
@@ -2556,6 +2619,35 @@ export function CompetitionsEditor({
   const patch = (i: number, p: Partial<Competition>) =>
     setDraft((d) => d.map((c, j) => (i === j ? { ...c, ...p } : c)));
 
+  /**
+   * Blocks of this competition's calendar its structure never plays in. Per competition
+   * because that is what's actionable here — another stream on the same calendar may well
+   * cover the block (the calendars card shows that collective view). A warning only:
+   * never in `errors`, never disables Save. Suppressed when the pair overruns (below):
+   * the red line owns that pair, and a gold aside about the opposite direction would only
+   * muddy it — same rule as the structure editor's uncovered lines.
+   */
+  const uncoveredFor = (c: Competition): string[] => {
+    const structure = structures.find((s) => s.id === c.structureId);
+    const calendar = calendars.find((cal) => cal.id === c.calendarId);
+    if (!structure || !calendar || blockOverrun(structure, calendar)) return [];
+    return uncoveredBlocks(structure, calendar).map((block) =>
+      describeUncoveredBlock(block, calendar.blocks.indexOf(block)),
+    );
+  };
+
+  /**
+   * The red line when this competition's structure plays past its calendar's last block.
+   * A hard stop, like the structure editor's own bound-calendar overrun: the server would
+   * reject the binding (400), so Save is disabled until the pair fits.
+   */
+  const overrunFor = (c: Competition): string | null => {
+    const structure = structures.find((s) => s.id === c.structureId);
+    const calendar = calendars.find((cal) => cal.id === c.calendarId);
+    const o = structure && calendar ? blockOverrun(structure, calendar) : null;
+    return structure && o ? describeBlockOverrun(structure, o) : null;
+  };
+
   const errors: string[] = [];
   for (const c of draft) {
     if (!c.label.trim()) errors.push('Every competition needs a label.');
@@ -2564,9 +2656,11 @@ export function CompetitionsEditor({
   }
   if (new Set(draft.map((c) => c.label.trim())).size !== draft.length && draft.length)
     errors.push('Two competitions share a label.');
+  // Shown inline on the row, so not repeated in `errors` — but it blocks Save all the same.
+  const blocked = errors.length > 0 || draft.some((c) => overrunFor(c) !== null);
 
   async function submit() {
-    if (errors.length || busy) return;
+    if (blocked || busy) return;
     setErr('');
     setBusy(true);
     try {
@@ -2707,6 +2801,12 @@ export function CompetitionsEditor({
               }
             />
           </div>
+          {overrunFor(c) && <div style={{ ...ERR, marginTop: 0 }}>{overrunFor(c)}</div>}
+          {uncoveredFor(c).map((line) => (
+            <div key={line} style={{ ...WARN, marginTop: 0 }}>
+              {line}
+            </div>
+          ))}
         </div>
       ))}
 
@@ -2737,7 +2837,7 @@ export function CompetitionsEditor({
       {err && <div style={ERR}>{err}</div>}
 
       <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
-        <Btn tone="teal" onClick={submit} disabled={!!errors.length || busy}>
+        <Btn tone="teal" onClick={submit} disabled={blocked || busy}>
           {busy ? 'Saving…' : 'Save competitions'}
         </Btn>
         <Btn tone="outline" onClick={onClose}>

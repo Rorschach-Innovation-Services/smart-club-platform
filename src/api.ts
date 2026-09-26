@@ -509,6 +509,8 @@ export interface QuickStartSeasonResponse {
   competitionId: string;
   structureId: string;
   calendarId: string;
+  /** Calendar blocks no competition on the chosen calendar plays in; only when non-empty. */
+  warnings?: string[];
 }
 export const quickStartSeason = (body: QuickStartSeasonRequest) =>
   request<QuickStartSeasonResponse>('/season-runs/quick-start', { method: 'POST', body });

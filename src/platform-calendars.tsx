@@ -9,7 +9,7 @@
  * Lives outside platform.tsx (already 3,300 lines) and imports only from atoms/api/types,
  * so there is no import cycle back into the console shell.
  */
-import { useState, useEffect, type CSSProperties } from 'react';
+import { Fragment, useState, useEffect, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { Btn, Card, EmptyState, FieldGuide, Icon, InfoDot, Modal, Pill } from './atoms';
 import * as api from './api';
@@ -23,12 +23,42 @@ import {
   isValidIsoDate,
   todayIso,
 } from '../packages/engine/src/calendar';
-import type { SeasonBlock, SeasonBreak, SeasonCalendar, TenantConfig } from './types';
+import { uncoveredBlocksAcross } from '../packages/engine/src/structure';
+import { describeUncoveredBlockAggregate } from '../packages/engine/src/narrative';
+import { HelpLink } from './help/HelpDrawer';
+import type { HelpTopicId } from './help/topics';
+import type {
+  CompetitionStructure,
+  SeasonBlock,
+  SeasonBreak,
+  SeasonCalendar,
+  TenantConfig,
+} from './types';
 
 type Toast = (m: string, t?: string) => void;
 
 const ERR: CSSProperties = { color: 'var(--coral, #C0392B)', fontSize: 12, marginTop: 6 };
 const HINT: CSSProperties = { fontSize: 11.5, color: 'var(--muted-2)', margin: '8px 0 0' };
+const GOLD = 'var(--gold, #B7791F)';
+
+/**
+ * A label that reads like a match format rather than a stretch of time. Operators have
+ * named blocks "T20" and "30 Over" to model two formats — but formats are competitions on
+ * a league, and a block is only time. Leading AND trailing boundaries, or "Crossover" and
+ * "Handover" would match. Advisory only: it drives a hint, never a validation error.
+ */
+export const FORMAT_LIKE_LABEL = /\b(t20|t10|\d+\s*overs?|overs?|red ball|pink ball|white ball)\b/i;
+
+/** The non-blocking "that's a format, not a block" hint under a label that matches. */
+function FormatLikeHint() {
+  return (
+    <div style={{ ...HINT, marginTop: 4, color: GOLD }}>
+      This looks like a match format. Formats are competitions on a league; a block is a stretch of
+      time (Block 1, First half).{' '}
+      <HelpLink topic="blocks-vs-competitions">What&apos;s the difference?</HelpLink>
+    </div>
+  );
+}
 
 // A brand-new block used to default to blank start/end dates — technically correct (the
 // operator has to pick real ones anyway) but it also meant the very first thing a new
@@ -182,9 +212,11 @@ function WorkedExample() {
  * save; the server re-checks all of them (it is the authority), but catching them here
  * turns a round-trip 400 into an inline hint.
  */
-function validate(draft: SeasonCalendar): { errors: string[]; warnings: string[] } {
+type CalendarWarning = { text: string; topic?: HelpTopicId };
+
+function validate(draft: SeasonCalendar): { errors: string[]; warnings: CalendarWarning[] } {
   const errors: string[] = [];
-  const warnings: string[] = [];
+  const warnings: CalendarWarning[] = [];
 
   if (!draft.label.trim()) errors.push('Give the calendar a label, e.g. "2026/27".');
   if (draft.blocks.length === 0) errors.push('Add at least one playing block.');
@@ -209,13 +241,17 @@ function validate(draft: SeasonCalendar): { errors: string[]; warnings: string[]
     (b) => isValidIsoDate(b.start) && isValidIsoDate(b.end) && b.end >= b.start,
   );
 
-  // Overlapping blocks aren't illegal — a union could run two competitions in parallel
-  // windows — but they are far more often a typo, so they warn rather than block.
+  // Overlapping blocks aren't illegal, but they are either a typo or two formats modelled
+  // as blocks — which should be two competitions on the league — so they warn, not block.
   for (let i = 0; i < usable.length; i++) {
     for (let j = i + 1; j < usable.length; j++) {
       const a = usable[i];
       const b = usable[j];
-      if (a.start <= b.end && b.start <= a.end) warnings.push(`${a.label} and ${b.label} overlap.`);
+      if (a.start <= b.end && b.start <= a.end)
+        warnings.push({
+          text: `${a.label} and ${b.label} overlap. Blocks are stretches of time — two formats running side by side are two competitions on the league, not two blocks.`,
+          topic: 'blocks-vs-competitions',
+        });
     }
   }
 
@@ -424,6 +460,7 @@ export function CalendarForm({
           placeholder="e.g. 2026/27"
           autoFocus
         />
+        {FORMAT_LIKE_LABEL.test(draft.label) && <FormatLikeHint />}
         {dupLabel && <div style={ERR}>A calendar with this label already exists.</div>}
       </div>
 
@@ -442,14 +479,17 @@ export function CalendarForm({
         </InfoDot>
       </div>
       {draft.blocks.map((b, i) => (
-        <RangeRow
-          key={b.id}
-          value={b}
-          placeholder="Block 1"
-          showLength
-          onChange={(p) => patchBlock(i, p)}
-          onRemove={() => patch({ blocks: draft.blocks.filter((_, j) => j !== i) })}
-        />
+        // The hint sits outside RangeRow, which the breaks list shares.
+        <div key={b.id}>
+          <RangeRow
+            value={b}
+            placeholder="Block 1"
+            showLength
+            onChange={(p) => patchBlock(i, p)}
+            onRemove={() => patch({ blocks: draft.blocks.filter((_, j) => j !== i) })}
+          />
+          {FORMAT_LIKE_LABEL.test(b.label) && <FormatLikeHint />}
+        </div>
       ))}
       <div style={{ marginTop: 10 }}>
         <Btn
@@ -590,8 +630,14 @@ export function CalendarForm({
         </div>
       ))}
       {warnings.map((w) => (
-        <div key={w} style={{ ...ERR, color: 'var(--gold, #B7791F)' }}>
-          {w}
+        <div key={w.text} style={{ ...ERR, color: GOLD }}>
+          {w.text}
+          {w.topic && (
+            <>
+              {' '}
+              <HelpLink topic={w.topic}>What&apos;s the difference?</HelpLink>
+            </>
+          )}
         </div>
       ))}
       {saveErr && <div style={ERR}>{saveErr}</div>}
@@ -664,6 +710,22 @@ export function CalendarsCard({
         throw new ApiError(409, 'This calendar was deleted in another session.');
       return fresh.map((c) => (c.id === cal.id ? cal : c));
     }, 'Could not save calendar');
+
+  /**
+   * Every league competition scheduled on `cal`, with its structure resolved (null when
+   * the id no longer matches one) — the card's "who uses this calendar" lines.
+   */
+  const bindingsOf = (cal: SeasonCalendar) =>
+    (config.leagues ?? []).flatMap((l) =>
+      (l.competitions ?? [])
+        .filter((comp) => comp.calendarId === cal.id)
+        .map((comp) => ({
+          key: `${l.key}:${comp.id}`,
+          league: l.label,
+          competition: comp.label,
+          structure: (config.structures ?? []).find((st) => st.id === comp.structureId) ?? null,
+        })),
+    );
 
   /** Leagues whose competitions bind `cal` — drives the cascade warning and the cascade. */
   const leaguesBinding = (cal: SeasonCalendar) =>
@@ -751,41 +813,78 @@ export function CalendarsCard({
                     '',
                   );
                   const last = usable.reduce<string>((a, b) => (!a || b.end > a ? b.end : a), '');
+                  const bindings = bindingsOf(cal);
+                  const bound = bindings
+                    .map((x) => x.structure)
+                    .filter((st): st is CompetitionStructure => st !== null);
+                  // Only judged when something resolvable is bound: an unbound calendar is
+                  // simply unused, not a calendar with idle blocks.
+                  const idle = bound.length > 0 ? uncoveredBlocksAcross(bound, cal) : [];
                   return (
-                    <tr key={cal.id}>
-                      <td>
-                        <span style={{ fontWeight: 700 }}>{cal.label}</span>
-                      </td>
-                      <td>
-                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                          {cal.blocks.map((b) => (
-                            <Pill key={b.id} tone="muted">
-                              {b.label}
-                            </Pill>
+                    <Fragment key={cal.id}>
+                      <tr>
+                        <td>
+                          <span style={{ fontWeight: 700 }}>{cal.label}</span>
+                        </td>
+                        <td>
+                          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                            {cal.blocks.map((b) => (
+                              <Pill key={b.id} tone="muted">
+                                {b.label}
+                              </Pill>
+                            ))}
+                          </div>
+                        </td>
+                        <td>
+                          <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>
+                            {first && last
+                              ? `${formatIsoDate(first)} → ${formatIsoDate(last)}`
+                              : '—'}
+                          </span>
+                        </td>
+                        <td>
+                          <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>
+                            {(cal.breaks ?? []).length || '—'}
+                          </span>
+                        </td>
+                        <td>
+                          <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                            <Btn tone="outline" size="sm" onClick={() => setForm(cal)}>
+                              Edit
+                            </Btn>
+                            <Btn tone="ghost" size="sm" onClick={() => askDelete(cal)}>
+                              Delete
+                            </Btn>
+                          </div>
+                        </td>
+                      </tr>
+                      <tr className="cal-bindings">
+                        <td colSpan={5} style={{ paddingTop: 0, fontSize: 12, lineHeight: 1.5 }}>
+                          {bindings.length === 0 ? (
+                            <span style={{ color: 'var(--muted-2)' }}>
+                              No competitions on this calendar yet.
+                            </span>
+                          ) : (
+                            bindings.map((x) => (
+                              <div key={x.key} style={{ color: 'var(--muted)' }}>
+                                {x.league} — {x.competition}{' '}
+                                {x.structure
+                                  ? `(${x.structure.name} v${x.structure.version})`
+                                  : '(structure missing)'}
+                              </div>
+                            ))
+                          )}
+                          {idle.map((b) => (
+                            <div key={b.id} style={{ color: GOLD }}>
+                              {describeUncoveredBlockAggregate(
+                                b,
+                                cal.blocks.findIndex((x) => x.id === b.id),
+                              )}
+                            </div>
                           ))}
-                        </div>
-                      </td>
-                      <td>
-                        <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>
-                          {first && last ? `${formatIsoDate(first)} → ${formatIsoDate(last)}` : '—'}
-                        </span>
-                      </td>
-                      <td>
-                        <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>
-                          {(cal.breaks ?? []).length || '—'}
-                        </span>
-                      </td>
-                      <td>
-                        <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
-                          <Btn tone="outline" size="sm" onClick={() => setForm(cal)}>
-                            Edit
-                          </Btn>
-                          <Btn tone="ghost" size="sm" onClick={() => askDelete(cal)}>
-                            Delete
-                          </Btn>
-                        </div>
-                      </td>
-                    </tr>
+                        </td>
+                      </tr>
+                    </Fragment>
                   );
                 })}
               </tbody>

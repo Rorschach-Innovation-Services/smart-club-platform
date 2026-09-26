@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 import type { ReactNode, CSSProperties, ComponentType, ButtonHTMLAttributes } from 'react';
 import { scoreCQI, cqiBand } from './cqiScore';
 import type { Club } from './types';
-import { HelpLink } from './help/HelpDrawer';
+import { GUIDE_URL, HelpLink } from './help/HelpDrawer';
 import { useFocusTrap } from './useFocusTrap';
 import { FIELD_GUIDES, type FieldGuideId } from './help/field-guides';
 
@@ -1431,7 +1431,10 @@ export function HowSeasonsWork({ compact }: { compact?: boolean }) {
         ))}
       </div>
       <p className="hsw-summary">
-        The operator builds the shape once. The administrator runs the season through it every year.
+        The operator builds the shape once. The administrator runs the season through it every year.{' '}
+        <a className="help-link" href={GUIDE_URL} target="_blank" rel="noopener noreferrer">
+          Open the full guide
+        </a>
       </p>
     </section>
   );

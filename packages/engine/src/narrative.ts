@@ -17,7 +17,14 @@ import { describeEntrants, groupSizes } from './entrants';
 import { describeFormat, knockoutShape } from './formats';
 import { chainFeeder, derivedEntrantTotal, previewFitAll } from './structure';
 import { stageTitle } from './stage-kinds';
-import type { CompetitionStructure, GroupPlan, IsoDate, SeasonCalendar, StageSpec } from './types';
+import type {
+  CompetitionStructure,
+  GroupPlan,
+  IsoDate,
+  SeasonBlock,
+  SeasonCalendar,
+  StageSpec,
+} from './types';
 
 /**
  * A stage as one plain-English sentence — the primary artefact of the operator console's
@@ -182,6 +189,46 @@ function blockName(stage: StageSpec, calendar: SeasonCalendar | undefined): stri
   if (!block) return `${name} (not on this calendar)`;
   const label = block.label?.trim();
   return label && label !== name ? `${name} (${label})` : name;
+}
+
+/**
+ * "Block 2 (Second half, 17 Jan 2027 → 26 Mar 2027) has no stage playing in it". The
+ * label is dropped when it only repeats "Block N". `blockIndex` is 0-based.
+ */
+export function describeUncoveredBlock(block: SeasonBlock, blockIndex: number): string {
+  return `${uncoveredBlockPrefix(block, blockIndex)} has no stage playing in it`;
+}
+
+/**
+ * The per-CALENDAR aggregate wording (server PUT warnings, the calendars card): across
+ * every competition bound to the calendar, nothing plays here. Kept separate from
+ * `describeUncoveredBlock` so the two sentences never get concatenated into "has no
+ * stage playing in it — no competition uses it", which says the same thing twice.
+ */
+export function describeUncoveredBlockAggregate(block: SeasonBlock, blockIndex: number): string {
+  return `${uncoveredBlockPrefix(block, blockIndex)} — no competition on this calendar uses it`;
+}
+
+/**
+ * The red line for a `blockOverrun`: "<name> plays in Block 3 but this calendar has only 2
+ * blocks — extend the calendar or choose differently".
+ */
+export function describeBlockOverrun(
+  structure: CompetitionStructure,
+  o: { block: number; has: number },
+): string {
+  return `${structure.name} plays in Block ${o.block} but this calendar has only ${o.has} block${
+    o.has === 1 ? '' : 's'
+  } — extend the calendar or choose differently`;
+}
+
+/** "Block 2 (Second half, 17 Jan 2027 → 26 Mar 2027)" — the label omitted when it just repeats "Block N". */
+function uncoveredBlockPrefix(block: SeasonBlock, blockIndex: number): string {
+  const name = `Block ${blockIndex + 1}`;
+  const span = `${formatIsoDate(block.start)} → ${formatIsoDate(block.end)}`;
+  const label = block.label?.trim();
+  const detail = label && label !== name ? `${label}, ${span}` : span;
+  return `${name} (${detail})`;
 }
 
 /**

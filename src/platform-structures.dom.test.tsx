@@ -835,7 +835,7 @@ describe('the structures list — the mismatch is visible before opening', () =>
   it('names the calendar the bound competitions run on', async () => {
     setup([structure()], { calendars: [calendar], leagues: [boundLeague('flat', 'cal')] });
     const row = screen.getByRole('row', { name: /flat round robin/i });
-    expect(within(row).getByText('2026/27')).toBeInTheDocument();
+    expect(within(row).getByText('Premier Men · 2026/27')).toBeInTheDocument();
   });
 
   it('flags a structure whose blocks are not on its bound calendar', async () => {
@@ -1251,5 +1251,193 @@ describe('CompetitionsEditor — structures not authored by an operator', () => 
     // The operator's own structure stays at the top level.
     const top = within(picker).getByRole('option', { name: 'Flat round robin' });
     expect(top.parentElement).toBe(picker);
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Uncovered blocks — a calendar block no stage plays in. Always gold, never an error:
+   a shared season calendar is routinely covered by a sibling competition.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/** Three blocks — a structure on positions 1 and 2 fits it but leaves the first empty. */
+const threeBlockCalendar: SeasonCalendar = {
+  id: 'three',
+  label: 'Three blocks',
+  blocks: [
+    { id: 't1', label: 'Block 1', start: '2026-09-05', end: '2026-10-31' },
+    { id: 't2', label: 'Block 2', start: '2026-11-07', end: '2026-12-12' },
+    { id: 't3', label: 'Block 3', start: '2027-01-16', end: '2027-03-27' },
+  ],
+  breaks: [],
+  excludeDates: [],
+};
+
+const roundRobinStage = (id: string, name: string, blockIndex: number) => ({
+  id,
+  name,
+  format: { kind: 'round-robin', legs: 1 },
+  entrants: { kind: 'all-registered' },
+  schedule: { blockIndex, cadence: { kind: 'weekly' } },
+});
+
+describe('preview rail — blocks no stage plays in', () => {
+  it('warns about the previewed calendar’s empty block without failing the fit verdict', async () => {
+    const { user } = setup([structure()]);
+    await openEditor(user);
+
+    const rail = within(preview());
+    expect(rail.getByText(/^Block 2 \(.*\) has no stage playing in it$/)).toBeVisible();
+    expect(rail.getByText(/^✓ Fits/)).toBeVisible();
+  });
+
+  it('prefixes a bound calendar other than the previewed one with its label', async () => {
+    const { user } = setup([structure()], {
+      calendars: [calendar, otherCalendar],
+      leagues: [boundLeague('flat', 'cal')],
+    });
+    await openEditor(user);
+    await user.selectOptions(previewPicker(), 'other');
+
+    const rail = within(preview());
+    expect(rail.getByText(/^Block 2 \(.*\) has no stage playing in it$/)).toBeVisible();
+    expect(
+      rail.getByText(/^On 2026\/27: Block 2 \(.*\) has no stage playing in it$/),
+    ).toBeVisible();
+  });
+
+  it('disappears once a stage moves into the empty block', async () => {
+    const { user } = setup([
+      structure({
+        stages: [roundRobinStage('s1', 'First', 0), roundRobinStage('s2', 'Second', 0)],
+      } as Partial<CompetitionStructure>),
+    ]);
+    await openEditor(user);
+    expect(within(preview()).getByText(/has no stage playing in it/)).toBeVisible();
+
+    await user.selectOptions(blockPicker(), '1');
+
+    expect(within(preview()).queryByText(/has no stage playing in it/)).toBeNull();
+  });
+
+  it('gives way to the overrun error on a calendar where saving would be rejected', async () => {
+    // Positions 1 and 2: fits `threeBlockCalendar` (block 1 empty), overruns the bound
+    // two-block `calendar` (which ALSO has an empty block 1 — but the red error owns it).
+    const { user } = setup(
+      [
+        structure({
+          stages: [roundRobinStage('s1', 'First', 1), roundRobinStage('s2', 'Second', 2)],
+        } as Partial<CompetitionStructure>),
+      ],
+      { calendars: [calendar, threeBlockCalendar], leagues: [boundLeague('flat', 'cal')] },
+    );
+    await openEditor(user);
+    expect(screen.getByText(/Saving would be rejected/)).toBeInTheDocument();
+    // Previewing the overrun calendar itself: no gold line either.
+    expect(within(preview()).queryByText(/has no stage playing in it/)).toBeNull();
+
+    await user.selectOptions(previewPicker(), 'three');
+
+    const rail = within(preview());
+    expect(rail.getByText(/^Block 1 \(.*\) has no stage playing in it$/)).toBeVisible();
+    expect(rail.queryByText(/^On 2026\/27:/)).toBeNull();
+  });
+});
+
+describe('CompetitionsEditor — blocks the competition leaves empty', () => {
+  it('warns under the row and still lets the operator save', async () => {
+    const config = {
+      structures: [structure()],
+      calendars: [calendar],
+      leagues: [],
+    } as unknown as TenantConfig;
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <CompetitionsEditor
+        league={boundLeague('flat', 'cal')}
+        config={config}
+        onSave={onSave}
+        onClose={vi.fn()}
+        toast={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/^Block 2 \(.*\) has no stage playing in it$/)).toBeVisible();
+    const save = screen.getByRole('button', { name: /save competitions/i });
+    expect(save).toBeEnabled();
+    await user.click(save);
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('CompetitionsEditor — a structure that plays past its calendar', () => {
+  it('shows the red overrun line instead of gold lines, and blocks Save', async () => {
+    // Positions 0 and 2 on the two-block calendar: Block 2 is empty AND Block 3 is missing.
+    // The missing block is the actionable problem, so only the red line shows.
+    const config = {
+      structures: [
+        structure({
+          stages: [roundRobinStage('s1', 'First', 0), roundRobinStage('s2', 'Second', 2)],
+        } as Partial<CompetitionStructure>),
+      ],
+      calendars: [calendar],
+      leagues: [],
+    } as unknown as TenantConfig;
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <CompetitionsEditor
+        league={boundLeague('flat', 'cal')}
+        config={config}
+        onSave={onSave}
+        onClose={vi.fn()}
+        toast={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        'Flat round robin plays in Block 3 but this calendar has only 2 blocks — extend the calendar or choose differently',
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/has no stage playing in it/)).toBeNull();
+    // Same gate as the structure editor's own bound-calendar overrun: the server would
+    // reject it, so Save waits until the pair fits.
+    const save = screen.getByRole('button', { name: /save competitions/i });
+    expect(save).toBeDisabled();
+    await user.click(save);
+    expect(onSave).not.toHaveBeenCalled();
+  });
+});
+
+describe('the structures list — Used by pairs each league with its calendar', () => {
+  it('shows one line per distinct league · calendar pair, and a dash when unbound', () => {
+    const premier = {
+      key: 'premier',
+      label: 'Premier Men',
+      competitions: [
+        { id: 'c1', label: '50 Over', structureId: 'flat', calendarId: 'cal' },
+        { id: 'c2', label: 'T20', structureId: 'flat', calendarId: 'cal' },
+        { id: 'c3', label: '50 Over', structureId: 'flat', calendarId: 'other' },
+      ],
+    } as unknown as League;
+    const div1 = {
+      key: 'div1',
+      label: 'Division 1',
+      competitions: [{ id: 'c4', label: 'League', structureId: 'flat', calendarId: 'cal' }],
+    } as unknown as League;
+    setup([structure(), structure({ id: 'spare', name: 'Spare shape' })], {
+      calendars: [calendar, otherCalendar],
+      leagues: [premier, div1],
+    });
+
+    const row = within(screen.getByRole('row', { name: /flat round robin/i }));
+    // Two competitions of Premier Men on 2026/27 are ONE pair.
+    expect(row.getAllByText('Premier Men · 2026/27')).toHaveLength(1);
+    expect(row.getByText('Premier Men · test')).toBeInTheDocument();
+    expect(row.getByText('Division 1 · 2026/27')).toBeInTheDocument();
+
+    const spare = within(screen.getByRole('row', { name: /spare shape/i }));
+    expect(spare.getByText('—')).toBeInTheDocument();
   });
 });

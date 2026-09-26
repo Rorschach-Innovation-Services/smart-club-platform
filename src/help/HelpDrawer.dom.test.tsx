@@ -88,13 +88,18 @@ describe('HelpDrawer', () => {
     warn.mockRestore();
   });
 
-  it('links to the guide only when the topic has an anchor', async () => {
+  it('always links the guide — with the topic anchor when it has one', async () => {
     const user = userEvent.setup();
-    // Every shipped topic has an anchor now; clear one to exercise the no-anchor path.
+    // Every shipped topic has an anchor now; clear one to exercise the no-anchor path,
+    // which falls back to the guide's front page (the drawer is many users' only visible
+    // door to the full walkthrough).
     HELP_TOPICS['home-and-away'].guideAnchor = undefined;
     const { unmount } = renderLink('home-and-away');
     await user.click(screen.getByRole('button', { name: /how does this work/i }));
-    expect(screen.queryByRole('link', { name: /read more in the guide/i })).toBeNull();
+    expect(screen.getByRole('link', { name: /read more in the guide/i })).toHaveAttribute(
+      'href',
+      GUIDE_URL,
+    );
     unmount();
 
     HELP_TOPICS['home-and-away'].guideAnchor = 'home-and-away';

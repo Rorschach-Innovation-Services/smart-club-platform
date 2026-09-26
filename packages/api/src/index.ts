@@ -91,6 +91,8 @@ import { findTemplate, instantiateTemplate, newStructureId } from '../../engine/
 import { isAffiliated, leagueParticipants } from '../../engine/src/leagues.js';
 import { generateStage, stagesAfterGenerate } from '../../engine/src/generate.js';
 import { resolveCompetitionDefaults } from '../../engine/src/defaults.js';
+import { uncoveredBlocksAcross } from '../../engine/src/structure.js';
+import { describeUncoveredBlockAggregate } from '../../engine/src/narrative.js';
 import { demographicsByLeague, summarizeDemographics } from './demographics.js';
 import {
   validateClubPatch,
@@ -4071,7 +4073,7 @@ app.post('/season-runs/quick-start', requireAdmin, async (c) => {
       ? { calendars: [...(config.calendars ?? []), calendar] }
       : {}),
   };
-  const { config: written } = await writeTenantConfigAsOperator(tenant, patch, {
+  const { config: written, warnings } = await writeTenantConfigAsOperator(tenant, patch, {
     by: email ?? 'admin (quick start)',
     current: config,
   });
@@ -4124,6 +4126,8 @@ app.post('/season-runs/quick-start', requireAdmin, async (c) => {
       competitionId: competition.id,
       structureId: structure.id,
       calendarId: calendar.id,
+      // Same additive shape as rebase: the coverage warnings only when non-empty.
+      ...(warnings.length > 0 ? { warnings } : {}),
     },
     201,
   );
@@ -4882,16 +4886,85 @@ export async function writeTenantConfigAsOperator(
     patch.calendars !== undefined
   ) {
     const current = await getCurrent();
-    validateCompetitions(
-      patch.leagues ?? current.leagues ?? [],
-      patch.structures ?? current.structures ?? [],
-      patch.calendars ?? current.calendars ?? [],
-    );
+    const nextLeagues = patch.leagues ?? current.leagues ?? [];
+    const nextStructures = patch.structures ?? current.structures ?? [];
+    const nextCalendars = patch.calendars ?? current.calendars ?? [];
+    validateCompetitions(nextLeagues, nextStructures, nextCalendars);
+    for (const line of calendarCoverageWarnings(
+      current,
+      nextLeagues,
+      nextStructures,
+      nextCalendars,
+    ))
+      if (!warnings.includes(line)) warnings.push(line);
   }
   const config = await applyTenantConfigPatch(tenant, patch);
   if (patch.calendars !== undefined || patch.structures !== undefined)
     console.info(`tenant config ${tenant}: calendars/structures written by ${opts.by}`);
   return { config, warnings };
+}
+
+/**
+ * Aggregate coverage warnings (informational, never blocking): for each calendar, the
+ * blocks NO competition bound to it plays in. Aggregated across every competition on the
+ * calendar, so two competitions sharing one calendar and covering a block each (T20 in
+ * Block 1, 50 Over in Block 2) raise nothing. Scoped to the calendars this save actually
+ * touched — its blocks changed, the set of competitions bound to it changed, or the
+ * content of a structure those competitions use changed — so an unrelated edit (renaming a league) never re-nags. A calendar nobody binds never warns.
+ * Runs after `validateCompetitions`, so every binding resolves.
+ */
+function calendarCoverageWarnings(
+  current: TenantConfig,
+  nextLeagues: League[],
+  nextStructures: CompetitionStructure[],
+  nextCalendars: SeasonCalendar[],
+): string[] {
+  const bindingsOn = (leagues: League[], calendarId: string): string =>
+    stableStringify(
+      leagues
+        .flatMap((lg) =>
+          (lg.competitions ?? [])
+            .filter((comp) => comp.calendarId === calendarId)
+            .map((comp) => [lg.key, comp.id, comp.structureId, comp.calendarId]),
+        )
+        .sort((a, b) => stableStringify(a).localeCompare(stableStringify(b))),
+    );
+  const currentStructures = current.structures ?? [];
+  const structureContent = (st: CompetitionStructure | undefined): string => {
+    if (st === undefined) return '';
+    const { version: _version, ...content } = st;
+    return stableStringify(content);
+  };
+  const lines: string[] = [];
+  for (const cal of nextCalendars) {
+    const before = (current.calendars ?? []).find((c) => c.id === cal.id);
+    const blocksChanged =
+      before === undefined || stableStringify(before.blocks) !== stableStringify(cal.blocks);
+    const bindingsChanged =
+      bindingsOn(current.leagues ?? [], cal.id) !== bindingsOn(nextLeagues, cal.id);
+    const bound = nextLeagues.flatMap((lg) =>
+      (lg.competitions ?? []).filter((comp) => comp.calendarId === cal.id),
+    );
+    // A structures-only save (e.g. moving a bound structure's block-2 stage into block 1)
+    // changes neither the calendar's blocks nor the binding tuples, yet can open a gap —
+    // so a content change to any structure bound here also counts. Version-stripped, same
+    // convention as the version-mint diff: a no-op resave never re-nags.
+    const structureChanged = bound.some(
+      (comp) =>
+        structureContent(currentStructures.find((st) => st.id === comp.structureId)) !==
+        structureContent(nextStructures.find((st) => st.id === comp.structureId)),
+    );
+    if (!blocksChanged && !bindingsChanged && !structureChanged) continue;
+    if (bound.length === 0) continue;
+    const structures = bound
+      .map((comp) => nextStructures.find((st) => st.id === comp.structureId))
+      .filter((st): st is CompetitionStructure => st !== undefined);
+    for (const block of uncoveredBlocksAcross(structures, cal)) {
+      const line = `${cal.label}: ${describeUncoveredBlockAggregate(block, cal.blocks.indexOf(block))}`;
+      if (!lines.includes(line)) lines.push(line);
+    }
+  }
+  return lines;
 }
 
 /**
