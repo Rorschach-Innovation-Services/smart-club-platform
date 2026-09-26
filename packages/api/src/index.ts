@@ -3401,11 +3401,18 @@ function validateSeriesSchedule(
  * season with custom dates synthesises `cal-flat-<league>`), and was already validated at
  * `POST /season-runs` — so it is checked against that snapshot alone. Every other series
  * binds to the tenant's live `config.calendars`.
+ *
+ * `runCalendar` is the generate route's freeze-point override: a run's FIRST generate
+ * materialises against the live calendar and stores it on the run only after the series
+ * are written, so those series are checked against that calendar rather than the stored
+ * (about to be replaced) snapshot. Server-internal; no public route passes it.
  */
 async function seriesScheduleCalendars(
   tenant: string,
   seasonRunId: unknown,
+  runCalendar?: RunCalendarOverride,
 ): Promise<SeasonCalendar[]> {
+  if (runCalendar && seasonRunId === runCalendar.runId) return [runCalendar.calendar];
   if (typeof seasonRunId === 'string') {
     const run = await repo.getSeasonRun(tenant, seasonRunId);
     if (!run) throw new HttpError(400, `series names a season run that doesn't exist`);
@@ -3449,7 +3456,17 @@ app.post('/series', requireAdmin, async (c) => {
  * with `POST /season-runs/:id/stages/:specId/generate`, so a generated group's new series
  * passes exactly the checks (and draft forcing) a client-POSTed one does.
  */
-async function createSeries(tenant: string, series: Series): Promise<Series> {
+/** See `seriesScheduleCalendars`: the calendar a run is being frozen onto mid-generate. */
+interface RunCalendarOverride {
+  runId: string;
+  calendar: SeasonCalendar;
+}
+
+async function createSeries(
+  tenant: string,
+  series: Series,
+  runCalendar?: RunCalendarOverride,
+): Promise<Series> {
   // `startDate` is the gsi1 SORT KEY. An empty string is rejected outright by DynamoDB
   // for a key attribute — but dynalite accepts it, so this can only be caught here, and
   // a client that sent one would 500 mid-way through a multi-group generate having
@@ -3476,7 +3493,7 @@ async function createSeries(tenant: string, series: Series): Promise<Series> {
   if (series.schedule !== undefined)
     validateSeriesSchedule(
       series.schedule,
-      await seriesScheduleCalendars(tenant, series.seasonRunId),
+      await seriesScheduleCalendars(tenant, series.seasonRunId, runCalendar),
     );
   // Fixtures are generated client-side and POSTed whole.
   series.version = 1;
@@ -3519,6 +3536,7 @@ async function applySeriesPatch(
   id: string,
   patch: SeriesPatch,
   _actor: string,
+  runCalendar?: RunCalendarOverride,
 ): Promise<Series> {
   const current = await repo.getSeries(tenant, id);
   if (!current) throw new HttpError(404, 'series not found');
@@ -3542,7 +3560,10 @@ async function applySeriesPatch(
     // Validate against the series as it will be STORED: the patch may carry its own
     // `seasonRunId`, otherwise the stored one decides snapshot-vs-config.
     const seasonRunId = 'seasonRunId' in patch ? patch.seasonRunId : current.seasonRunId;
-    validateSeriesSchedule(patch.schedule, await seriesScheduleCalendars(tenant, seasonRunId));
+    validateSeriesSchedule(
+      patch.schedule,
+      await seriesScheduleCalendars(tenant, seasonRunId, runCalendar),
+    );
   }
   // ── Progressive release (ADR 0011) ──
   // `revealedAt` is server-owned audit; never accept it off the wire.
@@ -3855,8 +3876,56 @@ function assertValidStageRunFields(stage: StageRun): void {
 // through the projected `GET /series`, never here.
 app.get('/season-runs', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
-  return c.json(await repo.listSeasonRuns(tenant));
+  const [runs, config] = await Promise.all([
+    repo.listSeasonRuns(tenant),
+    repo.getTenantConfig(tenant),
+  ]);
+  return c.json(runs.map((run) => withLiveCalendar(run, config)));
 });
+
+/**
+ * True while no stage of the run has produced a series yet — no `groups[].seriesId` on
+ * any stage. Until then the run's calendar follows the live tenant calendar; the first
+ * generate is the freeze point (see `withLiveCalendar`).
+ */
+function isUngenerated(run: SeasonRun): boolean {
+  return !(run.stages ?? []).some((stage) => (stage?.groups ?? []).some((g) => !!g?.seriesId));
+}
+
+/**
+ * The calendar the run's binding resolves to in LIVE config: league (`leagueKey`) →
+ * competition (`competitionId`) → calendar (`competition.calendarId`). Undefined when any
+ * link is gone (the competition was unbound, or its calendar deleted).
+ */
+function liveCalendarFor(
+  run: Pick<SeasonRun, 'leagueKey' | 'competitionId'>,
+  config: TenantConfig | null | undefined,
+): SeasonCalendar | undefined {
+  const league = (config?.leagues ?? []).find((l) => l.key === run.leagueKey);
+  const competition = (league?.competitions ?? []).find((cm) => cm.id === run.competitionId);
+  if (!competition) return undefined;
+  return (config?.calendars ?? []).find((cl) => cl.id === competition.calendarId);
+}
+
+const CALENDAR_REMOVED_WARNING =
+  "This season's competition or calendar was removed; showing the dates it started with.";
+
+/**
+ * The read-side view of a run (GET /season-runs, GET /season-runs/:id). A run's calendar
+ * follows the live tenant calendar until its first fixtures are generated: an
+ * ungenerated run whose binding resolves is returned with `calendarSnapshot` replaced by
+ * a deep copy of the live calendar and `calendarLive: true`. Nothing is stored — the
+ * stored snapshot is only overwritten at the freeze point (the first generate). A
+ * generated run is returned unchanged. An ungenerated run whose competition/calendar no
+ * longer resolves keeps its stored snapshot and says so in `warnings`. `version` is
+ * never touched, so a client generating from this view still sends the version it read.
+ */
+function withLiveCalendar(run: SeasonRun, config: TenantConfig | null | undefined): SeasonRun {
+  if (!isUngenerated(run)) return run;
+  const live = liveCalendarFor(run, config);
+  if (!live) return { ...run, calendarLive: false, warnings: [CALENDAR_REMOVED_WARNING] };
+  return { ...run, calendarSnapshot: structuredClone(live), calendarLive: true };
+}
 
 /**
  * The retired flat-season sentinel. A flat season now starts through quick start (a real
@@ -4178,9 +4247,12 @@ app.post('/season-runs/quick-start', requireAdmin, async (c) => {
 
 app.get('/season-runs/:id', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
-  const run = await repo.getSeasonRun(tenant, c.req.param('id'));
+  const [run, config] = await Promise.all([
+    repo.getSeasonRun(tenant, c.req.param('id')),
+    repo.getTenantConfig(tenant),
+  ]);
   if (!run) throw new HttpError(404, 'season run not found');
-  return c.json(run);
+  return c.json(withLiveCalendar(run, config));
 });
 
 app.patch('/season-runs/:id', requireAdmin, async (c) => {
@@ -4199,6 +4271,12 @@ async function applySeasonRunPatch(
   id: string,
   patch: Partial<SeasonRun>,
   actor: string,
+  /**
+   * Server-internal only — never reachable from the public PATCH body. The generate route
+   * passes the live calendar it materialised against so the first generate freezes it
+   * into the run in the same conditional write that records the stage's series.
+   */
+  internal?: { freezeCalendar?: SeasonCalendar },
 ): Promise<SeasonRun> {
   const current = await repo.getSeasonRun(tenant, id);
   if (!current) throw new HttpError(404, 'season run not found');
@@ -4213,6 +4291,10 @@ async function applySeasonRunPatch(
   delete (patch as { calendarSnapshot?: unknown }).calendarSnapshot;
   delete (patch as { createdAt?: unknown }).createdAt;
   delete (patch as { createdBy?: unknown }).createdBy;
+  // Response-only fields of GET (the live-calendar overlay): never stored.
+  delete (patch as { calendarLive?: unknown }).calendarLive;
+  delete (patch as { warnings?: unknown }).warnings;
+  if (internal?.freezeCalendar) patch.calendarSnapshot = internal.freezeCalendar;
   // The audit trail is APPEND-ONLY, reconstructed here from the stored run rather than
   // taken from the request.
   //
@@ -4300,6 +4382,11 @@ interface GenerateStageBody {
  *
  * A 200 may carry `warnings` — today only when a pool pairing could not be drawn and the
  * stage was paired as a seeded bracket instead.
+ *
+ * The FIRST generate of a run (no stage has a series yet) is the calendar freeze point: the
+ * run is materialised against the live calendar its competition is bound to, and that
+ * calendar is stored as `calendarSnapshot` in the same run write. Later generates use the
+ * stored snapshot.
  */
 app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => {
   const { tenant, email } = c.get('requestAuth')!;
@@ -4333,8 +4420,19 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
       code: 'competition_unbound',
     });
 
+  // The freeze point. Until a run's first fixtures exist its calendar follows the live
+  // tenant calendar (what GET shows), so the FIRST generate materialises against the live
+  // calendar — including the does_not_fit / no_block checks below — and stores it on the
+  // run in the same conditional write that records the stage's series. From then on the
+  // stored snapshot is frozen, exactly as before.
+  const liveCalendar = isUngenerated(run) ? liveCalendarFor(run, config) : undefined;
+  const freezeCalendar = liveCalendar ? structuredClone(liveCalendar) : undefined;
+  if (freezeCalendar) validateCalendars([freezeCalendar]);
+  const genRun: SeasonRun = freezeCalendar ? { ...run, calendarSnapshot: freezeCalendar } : run;
+  const runCalendar = freezeCalendar ? { runId: run.id, calendar: freezeCalendar } : undefined;
+
   const result = generateStage({
-    run,
+    run: genRun,
     specId,
     // Gated on the same `isAffiliated` the console preview passes, so the server generates
     // exactly the field the admin was shown.
@@ -4408,7 +4506,7 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     for (const [i, series] of result.series.entries()) {
       const stored = existing[i];
       if (!stored) {
-        written.push(await createSeries(tenant, series));
+        written.push(await createSeries(tenant, series, runCalendar));
         writtenIds.push(series.id);
         continue;
       }
@@ -4418,6 +4516,7 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
           series.id,
           { ...overwriteOf(series), version: stored.version },
           actor,
+          runCalendar,
         ),
       );
       writtenIds.push(series.id);
@@ -4438,8 +4537,9 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
   const nextRun = await applySeasonRunPatch(
     tenant,
     id,
-    { stages: stagesAfterGenerate(run, specId, result.groups), version: run.version },
+    { stages: stagesAfterGenerate(genRun, specId, result.groups), version: run.version },
     actor,
+    freezeCalendar ? { freezeCalendar } : undefined,
   );
   return c.json({
     run: nextRun,
@@ -4857,7 +4957,21 @@ export async function writeTenantConfigAsOperator(
             409,
             `${n} series ${n === 1 ? 'is' : 'are'} scheduled against "${cal.label}" — reschedule ${n === 1 ? 'it' : 'them'} before deleting the calendar`,
           );
-        const runs = allRuns.filter((r) => r.calendarSnapshot?.id === cal.id).length;
+        // A run that has not generated yet FOLLOWS its competition's live calendar (see
+        // `withLiveCalendar`), so it references that calendar even when its stored
+        // snapshot names another. Resolved against the bindings as they will be AFTER
+        // this write, so a save that re-points the competition elsewhere and deletes the
+        // old calendar together is not blocked by a run that will no longer follow it.
+        const nextLeagues = patch.leagues ?? current.leagues ?? [];
+        const followedCalendarId = (r: SeasonRun): string | undefined =>
+          nextLeagues
+            .find((l) => l.key === r.leagueKey)
+            ?.competitions?.find((cm) => cm.id === r.competitionId)?.calendarId;
+        const runs = allRuns.filter(
+          (r) =>
+            r.calendarSnapshot?.id === cal.id ||
+            (isUngenerated(r) && followedCalendarId(r) === cal.id),
+        ).length;
         if (runs > 0)
           throw new HttpError(
             409,

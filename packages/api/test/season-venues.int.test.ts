@@ -460,10 +460,12 @@ describe('POST /season-runs', () => {
   });
 });
 
-describe('a started season keeps its start-time calendar; a restart takes the new one', () => {
+describe('an ungenerated season follows the live calendar; a restart takes the new one', () => {
   // Regression for the prod report: operator edits a calendar's dates, admin deletes the
-  // season and starts it again — the new run must carry the NEW dates, while a run left
-  // running keeps the copy it started with.
+  // season and starts it again — the new run must carry the NEW dates. A run left running
+  // with no fixtures generated SHOWS the live dates (its calendar is frozen only at the
+  // first generate — see season-live-calendar.int.test.ts), but GET never rewrites the
+  // stored copy.
   const FRESH: SeasonCalendar = {
     id: 'cal-fresh',
     label: 'Fresh 2026/27',
@@ -474,7 +476,7 @@ describe('a started season keeps its start-time calendar; a restart takes the ne
     blocks: [{ id: 'b1', label: 'Block 1', start: '2026-09-13', end: '2027-02-28' }],
   };
 
-  test('start → operator extends the calendar → run unchanged → delete + restart → new dates', async () => {
+  test('start → operator extends the calendar → run shows it live (stored copy untouched) → delete + restart → new dates', async () => {
     await bindCompetition(repo, 'dolphins', {
       leagueKey: 'premier-men',
       competitionId: 'comp-fresh',
@@ -498,7 +500,17 @@ describe('a started season keeps its start-time calendar; a restart takes the ne
     const running = (await (
       await app.request('/season-runs/sr-fresh', { headers: headers(ADMIN) })
     ).json()) as SeasonRun;
-    assert.deepEqual(running.calendarSnapshot, FRESH, 'a running season keeps its start-time copy');
+    assert.deepEqual(
+      running.calendarSnapshot,
+      EXTENDED,
+      'an ungenerated season shows the live calendar',
+    );
+    assert.equal(running.calendarLive, true);
+    assert.deepEqual(
+      (await repo.getSeasonRun('dolphins', 'sr-fresh'))?.calendarSnapshot,
+      FRESH,
+      'GET computes the live view; it never writes the stored snapshot',
+    );
 
     const del = await app.request('/season-runs/sr-fresh', {
       method: 'DELETE',

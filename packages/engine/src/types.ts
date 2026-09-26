@@ -435,6 +435,19 @@ export interface SeasonRun {
    * data may still carry the field briefly. No code reads it — do not start.
    */
   flatFormat?: { seriesType: string; overs: number };
+  /**
+   * RESPONSE-ONLY, never stored (PATCH strips it). Set by GET /season-runs[/:id]: `true`
+   * when the run has no generated series yet, so `calendarSnapshot` above is the LIVE
+   * calendar its competition is bound to (the run follows it until the first generate
+   * freezes it); `false` when that binding no longer resolves and the stored snapshot is
+   * shown instead. Absent on a generated run.
+   */
+  calendarLive?: boolean;
+  /**
+   * RESPONSE-ONLY, never stored (PATCH strips it). Advisory lines about the run — e.g.
+   * its competition or calendar was removed before it generated.
+   */
+  warnings?: string[];
 }
 
 /** A club's home/secondary ground. */

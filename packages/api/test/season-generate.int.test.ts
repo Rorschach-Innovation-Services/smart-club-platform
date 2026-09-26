@@ -302,6 +302,15 @@ describe('POST /season-runs/:id/stages/:specId/generate — writes', () => {
     assert.equal(stored!.stages.find((s) => s.specId === 'pools')!.staleSchedule, undefined);
     // The other stage keeps its StageRun as it was.
     assert.equal(stored!.stages.find((s) => s.specId === 'final')!.status, 'awaiting-entrants');
+    // Frozen after generate: the calendar it generated against is stored, and GET serves
+    // the stored run with no live-calendar overlay.
+    assert.deepEqual(stored!.calendarSnapshot, CALENDAR);
+    assert.equal(first.run.calendarLive, undefined);
+    const got = (await (
+      await app.request(`/season-runs/${RUN}`, { headers: headers(ADMIN) })
+    ).json()) as SeasonRun;
+    assert.equal(got.calendarLive, undefined);
+    assert.deepEqual(got.calendarSnapshot, CALENDAR);
   });
 
   test('regenerate replaces in place and keeps released:false and an admin-chosen name', async () => {

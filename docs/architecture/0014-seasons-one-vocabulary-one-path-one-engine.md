@@ -158,6 +158,17 @@ section.
   remains only for `export-cohort.ts`, which imports CQI code, not engine code.
 - The operator wizard's template reuse considers operator-authored structures only.
 - Calendar delete now also refuses when a season run was started on that calendar.
+- **Calendars follow live until first generation.** A season run's calendar follows the
+  live tenant calendar its competition is bound to until the run's first fixtures are
+  generated; the first generate materialises against that calendar and freezes it into
+  `calendarSnapshot`, and from then on the run is frozen exactly as before. `GET` returns
+  the live calendar with a computed `calendarLive: true` (never stored) and warns when the
+  binding no longer resolves; the calendar delete guard also counts an ungenerated run by
+  the calendar it follows. Freezing at start protected nothing, because no fixtures existed,
+  but it forced a delete-and-restart whenever an operator fixed dates or re-bound a
+  calendar. This supersedes ADR 0008's "calendar rebase deliberately out of scope" for the
+  ungenerated case only. A generated run's calendar is still never rebased, and structures
+  still reach a running season only through Review changes (rebase).
 - A quick start writes two items (config, then run) without a transaction; a failure between
   them is reported with the created competition id so the admin can start it normally.
 - Series without `seasonRunId` cannot be regenerated from the UI. Plan B re-imports remain the

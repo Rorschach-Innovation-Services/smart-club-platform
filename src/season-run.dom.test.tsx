@@ -1125,6 +1125,38 @@ describe('stage cards say where each stage is, where it plays and what it needs'
   });
 });
 
+describe('a season that has not generated follows the live calendar', () => {
+  const FOLLOW_LINE =
+    /^Dates follow the season calendar until you generate — after that they’re frozen for this season\./;
+
+  it('says the dates follow the calendar only while the server flags them live', () => {
+    const { rerenderRuns } = setup(ONE_STAGE_FOR_CARDS, [
+      run(ONE_STAGE_FOR_CARDS, { calendarLive: true }),
+    ]);
+    const card = cardFor(/^League · /);
+    expect(within(card).getByText(/^Plays in Block 1 · /)).toBeVisible();
+    const line = within(card).getByText(FOLLOW_LINE);
+    expect(line).toBeVisible();
+    expect(within(line).getByRole('link', { name: /how does this work/i })).toBeVisible();
+
+    // Generated (the server drops the flag): the dates are frozen, nothing to explain.
+    rerenderRuns([run(ONE_STAGE_FOR_CARDS)]);
+    expect(within(cardFor(/^League · /)).queryByText(FOLLOW_LINE)).toBeNull();
+  });
+
+  it('shows the server’s warnings in gold', () => {
+    const warning =
+      "This season's competition or calendar was removed; showing the dates it started with.";
+    setup(ONE_STAGE_FOR_CARDS, [
+      run(ONE_STAGE_FOR_CARDS, { calendarLive: false, warnings: [warning] }),
+    ]);
+    const line = screen.getByText(warning);
+    expect(line).toBeVisible();
+    expect(line.style.color).toMatch(/--gold/);
+    expect(screen.queryByText(FOLLOW_LINE)).toBeNull();
+  });
+});
+
 const ONE_STAGE_FOR_CARDS: CompetitionStructure = {
   id: 'flat-cards',
   name: 'One round robin',

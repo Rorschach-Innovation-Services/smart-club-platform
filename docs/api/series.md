@@ -36,6 +36,32 @@ never freeze outdated dates into a new season.
 Both are **stripped from PATCH** rather than rejected, so a client round-tripping a whole
 run object doesn't get a confusing 400.
 
+**The calendar follows the live tenant calendar until the first generate.** Freezing at
+start protected nothing (no fixtures existed yet), so a run's calendar is frozen at its
+**first generate** instead:
+
+- While no stage has a series (no `stages[].groups[].seriesId`), `GET /season-runs` and
+  `GET /season-runs/:id` return the run with `calendarSnapshot` replaced by a deep copy of the
+  calendar its binding resolves to **now** (league → competition → `calendarId`), plus the
+  response-only flag `calendarLive: true`. An operator's date fix, or re-pointing the
+  competition at another calendar, shows up at once. Nothing is written by the read, and
+  `version` is unchanged, so a generate sends back the version it read as before.
+- If that binding no longer resolves (the competition was unbound, or its calendar deleted),
+  the stored snapshot is returned with `calendarLive: false` and
+  `warnings: ["This season's competition or calendar was removed; showing the dates it started with."]`.
+- The first `POST /season-runs/:id/stages/:specId/generate` materialises against the live
+  calendar (the `does_not_fit` / `no_block` checks included) and stores it as
+  `calendarSnapshot` in the same run write that records the stage's series. From then on
+  the run is returned exactly as stored, with no `calendarLive`, and calendar edits no longer
+  reach it.
+- `calendarLive` and `warnings` are never stored; PATCH strips them like the snapshots.
+- The structure snapshot is unchanged by this: a structure change still reaches a running
+  season only through rebase (Review changes).
+- The operator calendar delete guard counts a run by its stored `calendarSnapshot.id`
+  **and**, for a run that has not generated, by the calendar its competition is bound to
+  after the save. Deleting a calendar an ungenerated run follows is a `409` even when its
+  stored snapshot names another calendar.
+
 | Route                                           | Auth  | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /season-runs`                              | admin | `200 → SeasonRun[]`. Admin-only: the frozen `structureSnapshot` embeds each stage's `schedule.slots` (kick-off times a series may withhold, ADR 0011), and the only caller is the admin-gated console. Reps read fixtures through the projected `GET /series`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
@@ -134,7 +160,10 @@ Writes go through the existing routes' own code:
 3. **Run.** The run is updated through the `PATCH /season-runs/:id` handler with the version
    you sent. The stage is marked `generated`, each group records its `seriesId`, and
    `staleSchedule` is cleared. A stage generated with no stored groups gets them from what
-   was generated.
+   was generated. On the run's **first** generate this write also stores the live calendar
+   the stage was materialised against as `calendarSnapshot` (the freeze point, see
+   [Season runs](#season-runs)); the new series' schedules are validated against that
+   calendar.
 
 | Status | When                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

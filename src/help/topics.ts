@@ -181,7 +181,8 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
       'Every save that changes a structure gives it a new version. A season takes a copy when it starts, so later edits never reshape a season already running.',
       'Rebase moves a running season onto the latest version. The server fetches the structure itself, and refuses if it changed again after you reviewed it.',
       'Existing series are never touched. A stage whose teams setting changed goes back to awaiting entrants. A stage whose schedule changed is marked “Needs regenerating”.',
-      'The calendar is not rebased. A season keeps the calendar copy it started with.',
+      'Until a season generates its first fixtures, its dates follow the season calendar its competition is bound to, so an operator’s date fix or a re-pointed calendar shows up straight away.',
+      'The first generate freezes the calendar for that season. After that, calendar edits no longer reach it; only structure changes do, through Review changes.',
       'An edit made for one season gives that season its own copy of the structure. The other seasons keep the original, and a season already running keeps the shape it started with.',
     ],
     example:

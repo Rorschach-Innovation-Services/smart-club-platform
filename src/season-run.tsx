@@ -1762,6 +1762,7 @@ function StageCard({
   registered,
   heldBack = [],
   calendar,
+  calendarLive = false,
   narrative,
   onConfirm,
   onGenerate,
@@ -1770,8 +1771,13 @@ function StageCard({
   /** The EFFECTIVE stage — the run's `pairingOverride` already applied. */
   stage: StageSpec;
   index: number;
-  /** The run's frozen calendar — where "Plays in Block N" reads its dates from. */
+  /** The run's calendar — where "Plays in Block N" reads its dates from. */
   calendar: SeasonCalendar;
+  /**
+   * The server's `run.calendarLive`: nothing has been generated yet, so `calendar` is the
+   * LIVE calendar the competition is bound to and follows it until the first generate.
+   */
+  calendarLive?: boolean;
   /** This stage's sentence from `describeStructure` over the run's snapshot. */
   narrative?: string;
   stageRun: StageRun | undefined;
@@ -2010,6 +2016,12 @@ function StageCard({
       </div>
       <div className="sr-stage-meta">
         <p className="sr-stage-block">{playsIn}</p>
+        {calendarLive && (
+          <p style={{ fontSize: 12, color: 'var(--muted)' }}>
+            Dates follow the season calendar until you generate — after that they’re frozen for this
+            season. <HelpLink topic="structure-versions-and-rebase" />
+          </p>
+        )}
         {narrative && <p>{narrative}</p>}
         {/* While awaiting entrants the timeline's hint already says this. */}
         {!awaiting && (
@@ -2910,6 +2922,16 @@ export function SeasonRunsPanel({
               registered
             </div>
 
+            {(active.warnings ?? []).length > 0 && (
+              <div style={{ marginBottom: 12 }}>
+                {(active.warnings ?? []).map((w) => (
+                  <p key={w} style={{ ...WARN, margin: 0 }}>
+                    {w}
+                  </p>
+                ))}
+              </div>
+            )}
+
             {skew && (
               <div
                 style={{
@@ -2954,6 +2976,7 @@ export function SeasonRunsPanel({
                   registered={runContext.participants.map((p) => p.teamId)}
                   heldBack={runContext.unaffiliated.map((p) => p.teamId)}
                   calendar={runContext.calendar}
+                  calendarLive={active.calendarLive === true}
                   narrative={runContext.narratives[i]}
                   busy={busyStage === spec.id}
                   onConfirm={() => setConfirming({ run: active, stage: spec })}
