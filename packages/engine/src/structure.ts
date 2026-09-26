@@ -22,6 +22,7 @@ import type {
   CompetitionStructure,
   GroupPlan,
   IsoDate,
+  SeasonBlock,
   SeasonCalendar,
   SeasonRun,
   StageSpec,
@@ -392,6 +393,47 @@ export function previewFitAll(
       ...(notBefore ? { notBefore } : {}),
     };
   });
+}
+
+/**
+ * Calendar blocks no stage of `structure` plays in. A warning, never an error: a shared
+ * season calendar is routinely covered by several competitions between them (T20 in
+ * Block 1, 50 Over in Block 2). A stage naming a block the calendar lacks simply covers
+ * nothing here — that direction is the hard 400 at write time, not this function's job.
+ */
+export function uncoveredBlocks(
+  structure: CompetitionStructure,
+  calendar: SeasonCalendar,
+): SeasonBlock[] {
+  return uncoveredBlocksAcross([structure], calendar);
+}
+
+/**
+ * The block a structure's latest stage plays in, when that is past `calendar`'s last block
+ * (`block` 1-based, `has` the calendar's block count) — else null. The opposite direction
+ * to `uncoveredBlocks`, and a hard stop rather than a warning: the server rejects binding a
+ * structure to a calendar it overruns (400). Callers that re-derive block positions
+ * against the calendar (a fresh template pick) never hit it.
+ */
+export function blockOverrun(
+  structure: CompetitionStructure,
+  calendar: SeasonCalendar,
+): { block: number; has: number } | null {
+  const maxIndex = Math.max(-1, ...(structure.stages ?? []).map((s) => s.schedule.blockIndex));
+  const has = calendar.blocks.length;
+  return maxIndex + 1 > has ? { block: maxIndex + 1, has } : null;
+}
+
+/** `uncoveredBlocks` over the union of every structure's used block indexes. */
+export function uncoveredBlocksAcross(
+  structures: CompetitionStructure[],
+  calendar: SeasonCalendar,
+): SeasonBlock[] {
+  const used = new Set<number>();
+  for (const structure of structures) {
+    for (const stage of structure.stages ?? []) used.add(stage.schedule.blockIndex);
+  }
+  return calendar.blocks.filter((_, i) => !used.has(i));
 }
 
 /**

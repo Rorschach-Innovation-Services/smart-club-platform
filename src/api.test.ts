@@ -145,6 +145,27 @@ describe('quickStartSeason', () => {
     expect(JSON.parse(init.body)).toEqual(body);
     expect(res).toEqual(payload);
   });
+
+  it('passes the server coverage warnings through when present', async () => {
+    const warning =
+      '2026/27: Block 2 (17 Jan 2027 → 26 Mar 2027) — no competition on this calendar uses it';
+    (fetch as any).mockResolvedValueOnce(
+      okResponse({
+        run: { id: 'run-1' },
+        competitionId: 'cmp_1',
+        structureId: 'st_1',
+        calendarId: 'cal_1',
+        warnings: [warning],
+      }),
+    );
+    const res = await quickStartSeason({
+      leagueKey: 'premier-men',
+      templateId: 'flat-round-robin',
+      seasonLabel: '2026/27',
+      calendar: { id: 'cal_1' },
+    });
+    expect(res.warnings).toEqual([warning]);
+  });
 });
 
 describe('generateStage', () => {

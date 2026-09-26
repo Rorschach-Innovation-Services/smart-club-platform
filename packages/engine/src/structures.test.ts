@@ -18,6 +18,8 @@ import {
   poolQualifiersFor,
   previewFit,
   previewFitAll,
+  uncoveredBlocks,
+  uncoveredBlocksAcross,
 } from './structure';
 import {
   crossPoolRounds,
@@ -31,6 +33,7 @@ import {
   withinPoolRounds,
 } from './formats';
 import { weekdayOf } from './calendar';
+import { describeUncoveredBlock, describeUncoveredBlockAggregate } from './narrative';
 import { groupSizes, labelFor, resolveEntrants } from './entrants';
 import type { CompetitionStructure, EntrantSpec, SeasonCalendar, StageSpec } from './types';
 
@@ -1647,5 +1650,68 @@ describe('a counted qualification prefills only the qualifiers', () => {
     });
     if (r.status !== 'awaiting') throw new Error('expected awaiting');
     expect(r.prefill.flatMap((g) => g.entrants)).toEqual(['a1', 'a2', 'b1', 'b2', 'newcomer']);
+  });
+});
+
+describe('uncovered blocks', () => {
+  /** Only `schedule.blockIndex` matters to coverage; the rest of the stage is irrelevant. */
+  const playingIn = (id: string, ...blocks: number[]): CompetitionStructure => ({
+    id,
+    name: id,
+    version: 1,
+    stages: blocks.map(
+      (blockIndex, i) =>
+        ({
+          id: `${id}-s${i}`,
+          schedule: { blockIndex, cadence: { kind: 'weekly' } },
+        }) as unknown as StageSpec,
+    ),
+  });
+
+  it('is empty when every block has a stage playing in it', () => {
+    expect(uncoveredBlocks(playingIn('s', 0, 1), CAL)).toEqual([]);
+  });
+
+  it('names the block no stage plays in', () => {
+    expect(uncoveredBlocks(playingIn('s', 0, 0), CAL)).toEqual([CAL.blocks[1]]);
+  });
+
+  it('treats a stage naming a block the calendar lacks as covering nothing', () => {
+    expect(uncoveredBlocks(playingIn('s', 0, 5), CAL)).toEqual([CAL.blocks[1]]);
+  });
+
+  it('is empty across structures that cover the calendar between them', () => {
+    expect(uncoveredBlocksAcross([playingIn('t20', 0), playingIn('fifty', 1)], CAL)).toEqual([]);
+  });
+
+  it('names a block no structure across the set plays in', () => {
+    expect(uncoveredBlocksAcross([playingIn('t20', 0), playingIn('fifty', 0)], CAL)).toEqual([
+      CAL.blocks[1],
+    ]);
+  });
+
+  it('describes the block with its own label and dates', () => {
+    const block = { id: 'b2', label: 'Second half', start: '2027-01-17', end: '2027-03-26' };
+    expect(describeUncoveredBlock(block, 1)).toBe(
+      'Block 2 (Second half, 17 Jan 2027 → 26 Mar 2027) has no stage playing in it',
+    );
+  });
+
+  it('does not repeat a label that only says "Block N"', () => {
+    const block = { id: 'b2', label: 'Block 2', start: '2027-01-17', end: '2027-03-26' };
+    expect(describeUncoveredBlock(block, 1)).toBe(
+      'Block 2 (17 Jan 2027 → 26 Mar 2027) has no stage playing in it',
+    );
+  });
+
+  it('the aggregate wording says no competition uses it, once, with the same prefix', () => {
+    const labelled = { id: 'b2', label: 'Second half', start: '2027-01-17', end: '2027-03-26' };
+    expect(describeUncoveredBlockAggregate(labelled, 1)).toBe(
+      'Block 2 (Second half, 17 Jan 2027 → 26 Mar 2027) — no competition on this calendar uses it',
+    );
+    const plain = { id: 'b2', label: 'Block 2', start: '2027-01-17', end: '2027-03-26' };
+    expect(describeUncoveredBlockAggregate(plain, 1)).toBe(
+      'Block 2 (17 Jan 2027 → 26 Mar 2027) — no competition on this calendar uses it',
+    );
   });
 });

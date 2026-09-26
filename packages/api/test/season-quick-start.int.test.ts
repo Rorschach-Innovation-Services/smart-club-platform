@@ -8,6 +8,7 @@
  *   + binding into tenant config, and the run's snapshots are exactly what was written;
  * - placement over a multi-block calendar, with `startAfter` chaining for stages sharing a
  *   block;
+ * - the 201 carries `warnings` only when a block of the chosen calendar is left unused;
  * - `POST /season-runs` refuses the retired `__flat__` sentinel.
  *
  * Same harness as season-run-rebase.int.test.ts: in-process dynalite + the REAL Hono app.
@@ -89,6 +90,7 @@ interface QuickStartResponse {
   competitionId: string;
   structureId: string;
   calendarId: string;
+  warnings?: string[];
 }
 
 before(async () => {
@@ -325,6 +327,7 @@ describe('POST /season-runs/quick-start — custom dates', () => {
     assert.deepEqual(run.calendarSnapshot, calendar);
     assert.deepEqual(run.stages, [{ specId: 'season', status: 'awaiting-entrants', groups: [] }]);
     assert.deepEqual(await repo.getSeasonRun(TENANT, run.id), run, 'the run is stored');
+    assert.equal('warnings' in body, false, 'a one-block custom calendar is fully covered');
   });
 
   test('the same league + season label again is a 409', async () => {
@@ -388,6 +391,10 @@ describe('POST /season-runs/quick-start — existing calendar', () => {
     assert.deepEqual(body.run.calendarSnapshot, TWO_BLOCKS);
     // Default placement over two blocks: the single stage opens in block 1.
     assert.equal(body.run.structureSnapshot.stages[0].schedule.blockIndex, 0);
+    // Both competitions on this calendar play in block 1, so block 2 is unused.
+    assert.deepEqual(body.warnings, [
+      '2026/27: Block 2 (10 Jan 2027 → 28 Mar 2027) — no competition on this calendar uses it',
+    ]);
   });
 
   test('explicit placement over a two-block calendar places stages and chains same-block ones', async () => {
