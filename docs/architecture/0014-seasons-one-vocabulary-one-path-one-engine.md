@@ -161,7 +161,9 @@ section.
 - **Calendars follow live until first generation.** A season run's calendar follows the
   live tenant calendar its competition is bound to until the run's first fixtures are
   generated; the first generate materialises against that calendar and freezes it into
-  `calendarSnapshot`, and from then on the run is frozen exactly as before. `GET` returns
+  `calendarSnapshot`, stamping a stored `calendarFrozenAt`, and from then on the run is
+  frozen exactly as before. The freeze is one-way: a rebase that clears generated groups
+  cannot reopen it (a rebase of a legacy run with series stamps it). `GET` returns
   the live calendar with a computed `calendarLive: true` (never stored) and warns when the
   binding no longer resolves; the calendar delete guard also counts an ungenerated run by
   the calendar it follows. Freezing at start protected nothing, because no fixtures existed,

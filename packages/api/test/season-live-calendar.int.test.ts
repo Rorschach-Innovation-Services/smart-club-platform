@@ -253,6 +253,7 @@ describe('an ungenerated season follows the live calendar; the first generate fr
     const stored = await repo.getSeasonRun(TENANT, RUN);
     assert.deepEqual(stored?.calendarSnapshot, OTHER);
     assert.equal(stored?.calendarLive, undefined, 'the flag is never stored');
+    assert.equal(typeof stored?.calendarFrozenAt, 'string', 'the freeze is stamped');
 
     const got = await getRun(RUN);
     assert.equal(got.calendarLive, undefined);
@@ -267,6 +268,129 @@ describe('an ungenerated season follows the live calendar; the first generate fr
     assert.deepEqual(got.calendarSnapshot, OTHER, 'frozen at the first generate');
     assert.equal(got.calendarLive, undefined);
     assert.deepEqual((await listRun(RUN))?.calendarSnapshot, OTHER);
+  });
+});
+
+describe('the freeze is one-way', () => {
+  const rebase = (id: string, structureVersion: number, version: number) =>
+    app.request(`/season-runs/${id}/rebase`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ structureVersion, version }),
+    });
+
+  test('a rebase that clears the generated groups never puts the season back on live dates', async () => {
+    const RUN = 'sr-rebase';
+    const START = cal('cal-rebase', 'Rebase', '2026-09-13', '2026-12-13');
+    const OWN: CompetitionStructure = { ...STRUCTURE, id: 'st-rebase' };
+    await bindCompetition(repo, TENANT, {
+      leagueKey: LEAGUE_KEY,
+      competitionId: 'comp-rebase',
+      structure: OWN,
+      calendar: START,
+    });
+    await startRun(RUN, 'comp-rebase');
+    const gen = await generate(RUN, 1);
+    assert.equal(gen.status, 200, await gen.clone().text());
+    const frozenAt = (await repo.getSeasonRun(TENANT, RUN))?.calendarFrozenAt;
+    assert.ok(frozenAt);
+
+    // v2 changes the stage's entrant spec — rebase clears its groups and their seriesIds.
+    await bindCompetition(repo, TENANT, {
+      leagueKey: LEAGUE_KEY,
+      competitionId: 'comp-rebase',
+      structure: {
+        ...OWN,
+        version: 2,
+        stages: [{ ...OWN.stages[0], entrants: { kind: 'manual' } }],
+      },
+      calendar: START,
+    });
+    const res = await rebase(RUN, 2, 2);
+    assert.equal(res.status, 200, await res.clone().text());
+    const stored = await repo.getSeasonRun(TENANT, RUN);
+    assert.deepEqual(stored?.stages[0].groups, [], 'the groups were cleared');
+    assert.equal(stored?.calendarFrozenAt, frozenAt, 'the original freeze stands');
+
+    const edited = { ...START, blocks: [{ ...START.blocks[0], end: '2027-02-28' }] };
+    const put = await operatorPutCalendar(START.id, edited);
+    assert.equal(put.status, 200, await put.clone().text());
+    const got = await getRun(RUN);
+    assert.equal(got.calendarLive, undefined);
+    assert.deepEqual(got.calendarSnapshot, START, 'still the calendar it generated against');
+  });
+
+  test('a legacy run with series but no freeze stamp is frozen, and a rebase stamps it', async () => {
+    const RUN = 'sr-legacy';
+    const LEGACY_CAL = cal('cal-legacy', 'Legacy', '2026-09-13', '2026-12-13');
+    const LEGACY_ST: CompetitionStructure = { ...STRUCTURE, id: 'st-legacy' };
+    await bindCompetition(repo, TENANT, {
+      leagueKey: LEAGUE_KEY,
+      competitionId: 'comp-legacy',
+      structure: {
+        ...LEGACY_ST,
+        version: 2,
+        stages: [{ ...LEGACY_ST.stages[0], name: 'Renamed' }],
+      },
+      calendar: { ...LEGACY_CAL, blocks: [{ ...LEGACY_CAL.blocks[0], end: '2027-01-31' }] },
+    });
+    // Generated before this feature: a seriesId, no calendarFrozenAt.
+    await repo.putSeasonRun(TENANT, {
+      id: RUN,
+      leagueKey: LEAGUE_KEY,
+      competitionId: 'comp-legacy',
+      seasonLabel: 'Legacy 2026/27',
+      structureSnapshot: LEGACY_ST,
+      calendarSnapshot: LEGACY_CAL,
+      stages: [
+        {
+          specId: 'league',
+          status: 'generated',
+          groups: [
+            { id: 'g1', label: 'Group A', entrants: CLUB_IDS, seriesId: 's-sr-legacy-league-g1' },
+          ],
+        },
+      ],
+      version: 1,
+    });
+
+    const before = await getRun(RUN);
+    assert.equal(before.calendarLive, undefined, 'series without a stamp still count as frozen');
+    assert.deepEqual(before.calendarSnapshot, LEGACY_CAL);
+
+    const res = await rebase(RUN, 2, 1);
+    assert.equal(res.status, 200, await res.clone().text());
+    const stored = await repo.getSeasonRun(TENANT, RUN);
+    assert.equal(typeof stored?.calendarFrozenAt, 'string', 'rebase stamps the freeze');
+    assert.deepEqual(stored?.calendarSnapshot, LEGACY_CAL, 'and keeps the stored calendar');
+  });
+
+  test('a client can neither set nor clear the freeze', async () => {
+    const PATCH_CAL = cal('cal-patch', 'Patch', '2026-09-13', '2026-12-13');
+    await bind('comp-patch', PATCH_CAL);
+    const posted = await app.request('/season-runs', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify(
+        startRunBody({
+          id: 'sr-patch',
+          leagueKey: LEAGUE_KEY,
+          competitionId: 'comp-patch',
+          calendarFrozenAt: '2020-01-01T00:00:00.000Z',
+        }),
+      ),
+    });
+    assert.equal(posted.status, 201);
+    assert.equal((await repo.getSeasonRun(TENANT, 'sr-patch'))?.calendarFrozenAt, undefined);
+
+    const patched = await app.request('/season-runs/sr-patch', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ version: 1, calendarFrozenAt: '2020-01-01T00:00:00.000Z' }),
+    });
+    assert.equal(patched.status, 200, await patched.clone().text());
+    assert.equal((await repo.getSeasonRun(TENANT, 'sr-patch'))?.calendarFrozenAt, undefined);
+    assert.equal((await getRun('sr-patch')).calendarLive, true);
   });
 });
 
@@ -314,10 +438,28 @@ describe('calendar delete guard', () => {
     const res = await operatorPutCalendar(FOLLOWED.id, null);
     assert.equal(res.status, 409);
     const body = (await res.json()) as { error: string };
-    assert.match(body.error, /1 season run was started on "Followed"/);
+    assert.equal(
+      body.error,
+      '1 season run follows "Followed" until its fixtures are generated — delete it before deleting the calendar',
+    );
     assert.ok(
       (await repo.getTenantConfig(TENANT))?.calendars?.some((c) => c.id === FOLLOWED.id),
       'nothing was deleted',
+    );
+  });
+
+  test('names runs started on the calendar and runs following it separately', async () => {
+    // Another competition bound to the calendar sr-follow already follows; a run started
+    // on it stores that calendar as its snapshot.
+    const FOLLOWED = cal('cal-followed', 'Followed', '2026-09-20', '2026-12-20');
+    await bind('comp-follow-2', FOLLOWED);
+    await startRun('sr-follow-2', 'comp-follow-2');
+
+    const res = await operatorPutCalendar(FOLLOWED.id, null);
+    assert.equal(res.status, 409);
+    assert.equal(
+      ((await res.json()) as { error: string }).error,
+      '1 season run was started on "Followed"; 1 season run follows "Followed" until its fixtures are generated — delete them before deleting the calendar',
     );
   });
 });
@@ -342,6 +484,8 @@ describe('a stage that did not fit at start', () => {
     const body = (await res.json()) as GenerateResponse;
     assert.equal(body.series.length, 1);
     assert.equal(body.series[0].fixtures.length, 6);
-    assert.deepEqual((await repo.getSeasonRun(TENANT, 'sr-fit'))?.calendarSnapshot, widened);
+    const fitted = await repo.getSeasonRun(TENANT, 'sr-fit');
+    assert.deepEqual(fitted?.calendarSnapshot, widened);
+    assert.equal(typeof fitted?.calendarFrozenAt, 'string');
   });
 });

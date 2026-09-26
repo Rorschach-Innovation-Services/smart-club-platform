@@ -3883,13 +3883,21 @@ app.get('/season-runs', requireAdmin, async (c) => {
   return c.json(runs.map((run) => withLiveCalendar(run, config)));
 });
 
+/** True when any stage group of the run carries a series back-pointer. */
+function hasGeneratedSeries(run: SeasonRun): boolean {
+  return (run.stages ?? []).some((stage) => (stage?.groups ?? []).some((g) => !!g?.seriesId));
+}
+
 /**
- * True while no stage of the run has produced a series yet — no `groups[].seriesId` on
- * any stage. Until then the run's calendar follows the live tenant calendar; the first
- * generate is the freeze point (see `withLiveCalendar`).
+ * True while the run's calendar still follows the live tenant calendar: it has never been
+ * frozen (`calendarFrozenAt` unset) AND no stage has produced a series yet. The freeze is
+ * one-way — the first generate (or a rebase of a run that already had series) stamps
+ * `calendarFrozenAt`, so a rebase clearing every group's `seriesId` can never put a season
+ * with existing fixtures back on live dates. A legacy run with series but no stamp counts
+ * as frozen through the second clause. See `withLiveCalendar`.
  */
 function isUngenerated(run: SeasonRun): boolean {
-  return !(run.stages ?? []).some((stage) => (stage?.groups ?? []).some((g) => !!g?.seriesId));
+  return !run.calendarFrozenAt && !hasGeneratedSeries(run);
 }
 
 /**
@@ -3994,6 +4002,10 @@ async function createSeasonRun(
     });
   run.structureSnapshot = structuredClone(structure);
   run.calendarSnapshot = structuredClone(calendar);
+  // Server-owned: a new run always starts following the live calendar.
+  delete (run as { calendarFrozenAt?: unknown }).calendarFrozenAt;
+  delete (run as { calendarLive?: unknown }).calendarLive;
+  delete (run as { warnings?: unknown }).warnings;
   // Config is written through the operator validators, but the snapshot is frozen for the
   // life of the run — re-check what will actually be stored rather than trust it.
   validateStructures([run.structureSnapshot]);
@@ -4289,12 +4301,16 @@ async function applySeasonRunPatch(
   // stage. A client-supplied snapshot is never trusted, here or there.
   delete (patch as { structureSnapshot?: unknown }).structureSnapshot;
   delete (patch as { calendarSnapshot?: unknown }).calendarSnapshot;
+  delete (patch as { calendarFrozenAt?: unknown }).calendarFrozenAt;
   delete (patch as { createdAt?: unknown }).createdAt;
   delete (patch as { createdBy?: unknown }).createdBy;
   // Response-only fields of GET (the live-calendar overlay): never stored.
   delete (patch as { calendarLive?: unknown }).calendarLive;
   delete (patch as { warnings?: unknown }).warnings;
-  if (internal?.freezeCalendar) patch.calendarSnapshot = internal.freezeCalendar;
+  if (internal?.freezeCalendar) {
+    patch.calendarSnapshot = internal.freezeCalendar;
+    patch.calendarFrozenAt = now();
+  }
   // The audit trail is APPEND-ONLY, reconstructed here from the stored run rather than
   // taken from the request.
   //
@@ -4672,11 +4688,19 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
       );
   }
 
+  // A run that already produced series has its calendar frozen for good BEFORE its groups
+  // (and their seriesId back-pointers) may be cleared below — otherwise a rebase could put
+  // a season with existing, possibly released, fixtures back on live dates. Keeps the
+  // stored calendarSnapshot; covers legacy runs generated before `calendarFrozenAt` existed.
+  const freeze =
+    !current.calendarFrozenAt && hasGeneratedSeries(current) ? { calendarFrozenAt: at } : {};
+
   try {
     const next = await repo.updateSeasonRun(tenant, id, {
       version: body.version as number,
       structureSnapshot: live,
       stages: [...kept, ...added],
+      ...freeze,
     });
     // Same additive shape as PUT /platform/tenants: `warnings` only when non-empty.
     return c.json(warnings.length > 0 ? { ...next, warnings } : next);
@@ -4967,16 +4991,29 @@ export async function writeTenantConfigAsOperator(
           nextLeagues
             .find((l) => l.key === r.leagueKey)
             ?.competitions?.find((cm) => cm.id === r.competitionId)?.calendarId;
-        const runs = allRuns.filter(
+        const startedOn = allRuns.filter((r) => r.calendarSnapshot?.id === cal.id).length;
+        const following = allRuns.filter(
           (r) =>
-            r.calendarSnapshot?.id === cal.id ||
-            (isUngenerated(r) && followedCalendarId(r) === cal.id),
+            r.calendarSnapshot?.id !== cal.id &&
+            isUngenerated(r) &&
+            followedCalendarId(r) === cal.id,
         ).length;
-        if (runs > 0)
+        const runs = startedOn + following;
+        if (runs > 0) {
+          const parts: string[] = [];
+          if (startedOn > 0)
+            parts.push(
+              `${startedOn} season run${startedOn === 1 ? ' was' : 's were'} started on "${cal.label}"`,
+            );
+          if (following > 0)
+            parts.push(
+              `${following} season run${following === 1 ? ' follows' : 's follow'} "${cal.label}" until ${following === 1 ? 'its' : 'their'} fixtures are generated`,
+            );
           throw new HttpError(
             409,
-            `${runs} season run${runs === 1 ? ' was' : 's were'} started on "${cal.label}" — delete ${runs === 1 ? 'it' : 'them'} before deleting the calendar`,
+            `${parts.join('; ')} — delete ${runs === 1 ? 'it' : 'them'} before deleting the calendar`,
           );
+        }
       }
       // NOT a blocking guard — a live series' schedule stays a live reference to its
       // calendar on purpose (mid-season date edits flowing into regenerate is the

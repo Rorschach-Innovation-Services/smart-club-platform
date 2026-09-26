@@ -436,6 +436,14 @@ export interface SeasonRun {
    */
   flatFormat?: { seriesType: string; overs: number };
   /**
+   * STORED, server-owned (ISO timestamp): when this run's calendar was frozen — its first
+   * generate, or a rebase of a run that already had series. Once set, the run never goes
+   * back to following the live calendar, even if a rebase clears every group's series
+   * back-pointer. Never accepted from a client (POST ignores it, PATCH strips it). Legacy
+   * runs without it are treated as frozen as soon as any group carries a `seriesId`.
+   */
+  calendarFrozenAt?: string;
+  /**
    * RESPONSE-ONLY, never stored (PATCH strips it). Set by GET /season-runs[/:id]: `true`
    * when the run has no generated series yet, so `calendarSnapshot` above is the LIVE
    * calendar its competition is bound to (the run follows it until the first generate

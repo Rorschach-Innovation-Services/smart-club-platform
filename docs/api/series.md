@@ -40,7 +40,8 @@ run object doesn't get a confusing 400.
 start protected nothing (no fixtures existed yet), so a run's calendar is frozen at its
 **first generate** instead:
 
-- While no stage has a series (no `stages[].groups[].seriesId`), `GET /season-runs` and
+- While the run is unfrozen (no stored `calendarFrozenAt`) and no stage has a series (no
+  `stages[].groups[].seriesId`), `GET /season-runs` and
   `GET /season-runs/:id` return the run with `calendarSnapshot` replaced by a deep copy of the
   calendar its binding resolves to **now** (league → competition → `calendarId`), plus the
   response-only flag `calendarLive: true`. An operator's date fix, or re-pointing the
@@ -51,16 +52,23 @@ start protected nothing (no fixtures existed yet), so a run's calendar is frozen
   `warnings: ["This season's competition or calendar was removed; showing the dates it started with."]`.
 - The first `POST /season-runs/:id/stages/:specId/generate` materialises against the live
   calendar (the `does_not_fit` / `no_block` checks included) and stores it as
-  `calendarSnapshot` in the same run write that records the stage's series. From then on
-  the run is returned exactly as stored, with no `calendarLive`, and calendar edits no longer
-  reach it.
-- `calendarLive` and `warnings` are never stored; PATCH strips them like the snapshots.
+  `calendarSnapshot` in the same run write that records the stage's series, stamping the
+  server-owned `calendarFrozenAt`. From then on the run is returned exactly as stored, with
+  no `calendarLive`, and calendar edits no longer reach it.
+- **The freeze is one-way.** `calendarFrozenAt` is never cleared, so a rebase that clears a
+  stage's groups (and their `seriesId`s) cannot put the season back on live dates. A rebase
+  of a run that has series but no stamp (generated before this rule) stamps it, keeping the
+  stored calendar; such a run already counts as frozen because it has series.
+- `calendarFrozenAt` is ignored on `POST` and stripped from PATCH. `calendarLive` and
+  `warnings` are response-only and never stored; PATCH strips them like the snapshots.
 - The structure snapshot is unchanged by this: a structure change still reaches a running
   season only through rebase (Review changes).
 - The operator calendar delete guard counts a run by its stored `calendarSnapshot.id`
   **and**, for a run that has not generated, by the calendar its competition is bound to
   after the save. Deleting a calendar an ungenerated run follows is a `409` even when its
-  stored snapshot names another calendar.
+  stored snapshot names another calendar. The message counts the two separately:
+  `N season run(s) started on "X"` and `N season run(s) follow "X" until their fixtures are
+generated`, joined with `;` when both apply.
 
 | Route                                           | Auth  | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
