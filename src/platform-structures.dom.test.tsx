@@ -1441,3 +1441,212 @@ describe('the structures list — Used by pairs each league with its calendar', 
     expect(spare.getByText('—')).toBeInTheDocument();
   });
 });
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Editing scope — per-season copies.
+
+   A structure bound by several seasons can be edited for all of them (a new version,
+   today's behaviour) or for ONE: then saving forks a copy for that season and repoints
+   only its competition, leaving the original and every other binding byte-unchanged.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('editing scope — one season or all of them', () => {
+  const twoSeasons = (): League[] =>
+    [
+      {
+        key: 'premier',
+        label: 'Premier Men',
+        competitions: [{ id: 'c1', label: '50 Over', structureId: 'flat', calendarId: 'cal' }],
+      },
+      {
+        key: 'first',
+        label: 'First Division',
+        competitions: [{ id: 'c2', label: 'T20', structureId: 'flat', calendarId: 'other' }],
+      },
+    ] as unknown as League[];
+
+  const scopePicker = () => screen.getByRole('combobox', { name: /edit for/i });
+  const scopeLine = () => screen.getByTestId('edit-scope-line');
+  const saveLabelled = (name: RegExp) => screen.getByRole('button', { name });
+
+  it('keeps the plain preview picker, and says so, when no season uses the structure', async () => {
+    const { user } = setup([structure()]);
+    await openEditor(user);
+
+    expect(previewPicker()).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /edit for/i })).toBeNull();
+    expect(scopeLine()).toHaveTextContent('Not bound to any season yet.');
+    expect(saveLabelled(/^save structure$/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('fork-note')).toBeNull();
+  });
+
+  it('offers every season plus each binding, and scoping previews that season’s calendar', async () => {
+    const { user } = setup([structure()], {
+      calendars: [calendar, otherCalendar],
+      leagues: twoSeasons(),
+    });
+    await openEditor(user);
+
+    const options = [...(scopePicker() as HTMLSelectElement).options].map((o) => o.text);
+    expect(options).toEqual([
+      'All seasons using this structure (2)',
+      'Premier Men · 2026/27',
+      'First Division · test',
+    ]);
+    expect(scopeLine()).toHaveTextContent(
+      'Editing for all 2 seasons using this structure — saving affects every one of them.',
+    );
+    expect(saveLabelled(/^save for all 2 seasons$/i)).toBeInTheDocument();
+    // All seasons keeps the free preview choice.
+    expect(previewPicker()).toBeInTheDocument();
+    expect(screen.getByTestId('rail-scope')).toHaveTextContent('for all 2 seasons');
+    await user.selectOptions(previewPicker(), 'cal');
+    expect(preview()).toHaveTextContent('16 Jan 2027');
+
+    await user.selectOptions(scopePicker(), '1');
+
+    expect(scopeLine()).toHaveTextContent(
+      'Editing for First Division · test — saving affects only this season.',
+    );
+    expect(saveLabelled(/^save for this season only$/i)).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: /show dates from/i })).toBeNull();
+    expect(screen.getByTestId('rail-scope')).toHaveTextContent(
+      'Previewing on test · for First Division · test only',
+    );
+    // `otherCalendar`'s own dates, as the previewed calendar (no "On test:" prefix) — and
+    // none of `calendar`'s, whose Block 2 runs Jan–Mar 2027.
+    expect(
+      within(preview()).getByText(
+        /^Block 2 \(8 Nov 2026 → 6 Dec 2026\) has no stage playing in it$/,
+      ),
+    ).toBeVisible();
+    expect(preview()).not.toHaveTextContent('16 Jan 2027');
+
+    await user.selectOptions(scopePicker(), '-1');
+    expect(scopeLine()).toHaveTextContent(/Editing for all 2 seasons/);
+    expect(saveLabelled(/^save for all 2 seasons$/i)).toBeInTheDocument();
+  });
+
+  it('forks a scoped save: the original untouched, a clone, and only that competition repointed', async () => {
+    const original = structure({
+      source: 'quick-start',
+      templateId: 'tpl-flat',
+    } as Partial<CompetitionStructure>);
+    const leagues = twoSeasons();
+    const { user, save, toast } = setup([original], {
+      calendars: [calendar, otherCalendar],
+      leagues,
+    });
+    await openEditor(user);
+    await user.selectOptions(scopePicker(), '1');
+    await user.click(saveLabelled(/^save for this season only$/i));
+
+    expect(save).toHaveBeenCalledTimes(1);
+    const patch = save.mock.calls[0][0] as Partial<TenantConfig>;
+    expect(patch.structures).toHaveLength(2);
+    expect(patch.structures![0]).toStrictEqual(original);
+    const clone = patch.structures![1];
+    expect(clone.id).not.toBe('flat');
+    expect(clone.name).toBe('Flat round robin · test');
+    expect(clone).not.toHaveProperty('source');
+    expect(clone).not.toHaveProperty('templateId');
+    expect(clone.stages).toEqual(original.stages);
+
+    expect(patch.leagues![0]).toStrictEqual(leagues[0]);
+    expect(patch.leagues![1].competitions).toEqual([
+      { id: 'c2', label: 'T20', structureId: clone.id, calendarId: 'other' },
+    ]);
+    expect(toast).toHaveBeenCalledWith('Created Flat round robin · test for First Division · test');
+  });
+
+  it('does not stack the calendar label onto a name that already ends with it', async () => {
+    const { user, save } = setup([structure({ name: 'Flat round robin · test' })], {
+      calendars: [calendar, otherCalendar],
+      leagues: twoSeasons(),
+    });
+    await openEditor(user, /flat round robin · test/i);
+    await user.selectOptions(scopePicker(), '1');
+    await user.click(saveLabelled(/^save for this season only$/i));
+
+    const patch = save.mock.calls[0][0] as Partial<TenantConfig>;
+    expect(patch.structures![1].name).toBe('Flat round robin · test');
+  });
+
+  it('saves in place when the scoped season is the only one using the structure', async () => {
+    const { user, save } = setup([structure()], { leagues: [boundLeague('flat', 'cal')] });
+    await openEditor(user);
+
+    const options = [...(scopePicker() as HTMLSelectElement).options].map((o) => o.text);
+    expect(options[1]).toBe('Premier Men · 2026/27 — only season using it');
+
+    await user.selectOptions(scopePicker(), '0');
+    expect(screen.queryByTestId('fork-note')).toBeNull();
+    await user.click(saveLabelled(/^save for this season only$/i));
+
+    const patch = save.mock.calls[0][0] as Partial<TenantConfig>;
+    expect(patch.structures).toHaveLength(1);
+    expect(patch.structures![0].id).toBe('flat');
+    expect(patch).not.toHaveProperty('leagues');
+  });
+
+  it('shows the copy consent and the running-season caveat only when a save will fork', async () => {
+    const { user } = setup([structure()], {
+      calendars: [calendar, otherCalendar],
+      leagues: twoSeasons(),
+    });
+    await openEditor(user);
+    expect(screen.queryByTestId('fork-note')).toBeNull();
+    expect(screen.getByText(/saving creates a/i)).toHaveTextContent(/new version/);
+
+    await user.selectOptions(scopePicker(), '0');
+
+    const note = screen.getByTestId('fork-note');
+    expect(note).toHaveTextContent(
+      'Saving creates this season’s own copy of the structure; the other 1 season keeps the current one.',
+    );
+    expect(note).toHaveTextContent(
+      'A season already started on this competition keeps the shape it started with and will NOT be offered these changes — to change a running season, edit for all seasons and use Review changes in the admin console.',
+    );
+  });
+
+  it('refuses the fork, writing nothing, when the season’s binding changed meanwhile', async () => {
+    const { user, save } = setup([structure()], {
+      calendars: [calendar, otherCalendar],
+      leagues: twoSeasons(),
+    });
+    await openEditor(user);
+    await user.selectOptions(scopePicker(), '1');
+
+    // Someone else repointed First Division's competition while the editor was open.
+    const moved = twoSeasons();
+    (moved[1].competitions![0] as { structureId: string }).structureId = 'someone-else';
+    vi.mocked(api.platformGetTenant).mockResolvedValue({
+      structures: [structure()],
+      calendars: [calendar, otherCalendar],
+      leagues: moved,
+    } as unknown as TenantConfig);
+
+    await user.click(saveLabelled(/^save for this season only$/i));
+
+    expect(
+      await screen.findByText(
+        'This season’s binding changed while you were editing — reopen and try again',
+      ),
+    ).toBeInTheDocument();
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('keeps the all-seasons save exactly as before: one structure, no leagues patch', async () => {
+    const { user, save } = setup([structure()], {
+      calendars: [calendar, otherCalendar],
+      leagues: twoSeasons(),
+    });
+    await openEditor(user);
+    await user.click(saveLabelled(/^save for all 2 seasons$/i));
+
+    const patch = save.mock.calls[0][0] as Partial<TenantConfig>;
+    expect(patch.structures).toHaveLength(1);
+    expect(patch.structures![0].id).toBe('flat');
+    expect(patch).not.toHaveProperty('leagues');
+  });
+});
