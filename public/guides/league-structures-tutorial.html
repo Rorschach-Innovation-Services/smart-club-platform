@@ -433,7 +433,7 @@
     </div>
     <div style="text-align:right">
       2026 / 27 Season<br>
-      Version 2.1 · September 2026
+      Version 2.2 · September 2026
     </div>
     </div>
   </div>
@@ -689,6 +689,17 @@
     </p>
   </div>
 
+  <div class="note">
+    <span class="callout-label">Changing dates after a season has started</span>
+    <p>
+      Edit the calendar and save. A season that has not generated fixtures yet picks up the new
+      dates straight away, with nothing to delete or restart; its stage cards say
+      <em>Dates follow the season calendar until you generate</em>. Once a season has generated
+      fixtures its dates are frozen, and a calendar edit no longer moves them. To move a
+      generated fixture, edit that fixture.
+    </p>
+  </div>
+
   <h3>What good looks like</h3>
 
   <table>
@@ -877,9 +888,12 @@
   <div class="note">
     <span class="callout-label">Changing overs during a season</span>
     <p>
-      Fixtures already generated keep the format they were made with, even when a stage is
-      regenerated. A new name or overs reaches a running season only when the administrator
-      adopts the new version through <span class="ui">Review changes</span>.
+      Saving a new name or overs makes a new version of the structure. A running season keeps
+      the version it started with until the administrator opens
+      <span class="ui">Review changes</span>, which shows a <em>Match format</em> line
+      (<em>Was: … · 50 overs</em>, <em>Now: … · 30 overs</em>) and applies it. Fixtures already
+      generated keep their old format until the administrator regenerates them; every stage
+      with fixtures shows <span class="ui">Needs regenerating</span> until they do.
     </p>
   </div>
 
@@ -1085,6 +1099,26 @@
     </p>
   </div>
 
+  <h3>Next season: Run again</h3>
+  <p>
+    Each year the union needs new dates, not new leagues. Start the season wizard and enter the
+    new calendar. Its second step lists every league already set up on another calendar under
+    <span class="ui">Run again</span>, such as
+    <em>Premier Men 50 Over — Run again on 2027/28: Split league with mid-season swap</em>.
+  </p>
+  <p>
+    Tick the leagues that carry on (<span class="ui">Select all</span> ticks every one). Each
+    keeps its structure and moves to the new dates; nothing is re-created. Every row starts
+    unticked, so a league you leave alone stays exactly where it was. A row is greyed out when
+    its structure plays in a block the new calendar doesn't have. Fix the calendar, or set that
+    league up by hand.
+  </p>
+  <p>
+    You can also add a league in step two and pick nothing for it. The review step then lists
+    it as <em>added, but no structure picked — left unchanged</em>, and only the calendar is
+    saved. That is how you create next year's calendar before deciding who plays on it.
+  </p>
+
   <div class="note">
     <span class="callout-label">No setup, no season</span>
     <p>
@@ -1146,7 +1180,9 @@
         A copy of the structure is taken. If the operator edits it next week, your running
         season is untouched until you choose to adopt the new version with
         <span class="ui">Review changes</span>. The calendar keeps following the operator's
-        changes until you first generate fixtures, then it is frozen too.
+        changes until you first generate fixtures, then it is frozen too. Until then each stage
+        card says <em>Dates follow the season calendar until you generate</em>, so a date fix
+        from the operator never means deleting and restarting the season.
       </p>
     </div>
   </div>
@@ -1186,7 +1222,7 @@
     <thead><tr><th>Pill</th><th>What it means</th></tr></thead>
     <tbody>
       <tr><td><span class="pill coral">Doesn’t fit</span></td><td>The rounds need more time than the block allows. The reason is shown on the card.</td></tr>
-      <tr><td><span class="pill coral">Needs regenerating</span></td><td>The entrants, the pairing or the schedule changed after generation, so the live fixtures no longer match.</td></tr>
+      <tr><td><span class="pill coral">Needs regenerating</span></td><td>The entrants, the pairing or the schedule changed after generation, so the live fixtures no longer match. Also shown after <em>Review changes</em> applies a new name or overs: regenerating gives the fixtures the new format.</td></tr>
     </tbody>
   </table>
 
@@ -1239,8 +1275,11 @@
 
   <p>
     Each series shows the structure's name and its overs. Regenerating keeps whatever a
-    series already shows; a new name or overs reaches existing series only through
-    <span class="ui">Review changes</span>.
+    series already shows, with one exception. When the operator changes the structure's
+    name or overs, <span class="ui">Review changes</span> shows it as a <em>Match format</em>
+    line (was and now). Once you apply it, each stage with fixtures reads
+    <span class="ui">Needs regenerating</span>, and its next regenerate uses the new name and
+    overs.
   </p>
 
   <p>
@@ -1564,6 +1603,10 @@
         <td>Operator only, after saving a league setup with a different calendar. Seasons with nothing generated yet move to the new dates; generated ones don't. Expected at renewal; mid-season, tell the administrator.</td>
       </tr>
       <tr>
+        <td>The structure’s name or overs changed when you reviewed its changes — regenerating adopts them for these series.</td>
+        <td>You applied a new structure version with a different name or overs. Existing fixtures keep the old format until you press <em>Regenerate</em> on the stage. If the series are released, read the <em>Regenerate a released schedule?</em> prompt first.</td>
+      </tr>
+      <tr>
         <td>This console is out of date — refresh it and try again.</td>
         <td>The operator page was loaded before an update and tried to save something the platform no longer uses. Nothing was saved. Refresh and make the change again.</td>
       </tr>
@@ -1634,8 +1677,11 @@
     <dt>Preliminary round</dt>
     <dd>An extra opening round that trims a knockout field to a power of two. Nine entrants need one; eight need none.</dd>
 
+    <dt>Run again</dt>
+    <dd>The season wizard's way to renew a league for next year: it moves the league's setup to the new calendar and keeps its structure. Nothing is re-created.</dd>
+
     <dt>Season</dt>
-    <dd>One league being played out this year (a season run). Holds which teams are in which group at each stage, and freezes the structure and calendar it started with. Started from <em>Start a season</em>.</dd>
+    <dd>One league being played out this year (a season run). Holds which teams are in which group at each stage. Freezes the structure it started with, and freezes the calendar when it first generates fixtures; until then it follows the league's calendar. Started from <em>Start a season</em>.</dd>
 
     <dt>Series</dt>
     <dd>The existing unit of fixtures. One stage-group becomes one series, so everything downstream is unchanged. A new series is labelled with the structure's name and overs.</dd>
@@ -1674,7 +1720,7 @@
   </p>
 
   <div class="colophon">
-    Smart Club Platform · Setting up how a league works · Version 2.1 · September 2026<br>
+    Smart Club Platform · Setting up how a league works · Version 2.2 · September 2026<br>
     Technical detail: <span class="path">docs/architecture/0008-configurable-league-structures.md</span>,
     <span class="path">docs/architecture/0014-seasons-one-vocabulary-one-path-one-engine.md</span><br>
     Deploying this feature: <span class="path">docs/runbooks/configurable-league-structures.md</span>
