@@ -504,3 +504,50 @@ describe('migrate-league-setups — CLI flags', () => {
     assert.deepEqual(cfg?.leagues?.[0].setup, { structureId: 'st-r', calendarId: 'cal-r' });
   });
 });
+
+describe('migrate-league-setups — a competition with no overs of its own', () => {
+  test('keeps the old effective default instead of inheriting a sibling stream’s overs', async () => {
+    const T = 'lsmig-noovers';
+    const store = scopedStore(T);
+    await repo.createTenantConfig(
+      baseConfig(T, {
+        calendars: [calendar('cal-n', '2026-09-01', '2027-03-31')],
+        structures: [structure('st-shared', 'Pools')],
+        leagues: [
+          // No overs: in the old model this league's series were 50-over.
+          league('div1', { competitions: [comp('c-div1', 'st-shared', 'cal-n')] }),
+          league('t20', { competitions: [comp('c-t20', 'st-shared', 'cal-n', 20)] }),
+        ],
+      }),
+    );
+
+    await migrateLeagueSetups({ confirm: true, log: () => {}, store, backupDir });
+
+    const cfg = await repo.getTenantConfig(T);
+    const setupOf = (key: string) => (cfg!.leagues ?? []).find((l) => l.key === key)!.setup!;
+    const oversOf = (id: string) => cfg!.structures!.find((s) => s.id === id)!.overs;
+    assert.equal(oversOf(setupOf('div1').structureId), 50, 'div1 stays 50-over');
+    assert.equal(oversOf(setupOf('t20').structureId), 20, 't20 stays 20-over');
+    assert.notEqual(setupOf('div1').structureId, setupOf('t20').structureId);
+  });
+
+  test('uses the tenant’s retired default match format when it had one', async () => {
+    const T = 'lsmig-tenantdefault';
+    const store = scopedStore(T);
+    await repo.createTenantConfig(
+      baseConfig(T, {
+        competitionDefaults: {
+          matchFormats: [{ overs: 40 }],
+        } as TenantConfig['competitionDefaults'],
+        calendars: [calendar('cal-d', '2026-09-01', '2027-03-31')],
+        structures: [structure('st-d', 'D')],
+        leagues: [league('ld', { competitions: [comp('c-d', 'st-d', 'cal-d')] })],
+      }),
+    );
+
+    await migrateLeagueSetups({ confirm: true, log: () => {}, store, backupDir });
+
+    const cfg = await repo.getTenantConfig(T);
+    assert.equal(cfg!.structures!.find((s) => s.id === 'st-d')!.overs, 40);
+  });
+});

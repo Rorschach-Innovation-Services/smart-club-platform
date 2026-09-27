@@ -509,7 +509,9 @@ Per league:
   becomes `setup`.
 - **Extras** (every other competition) are reported, and the script exits 1. The league still
   migrates on the kept one.
-- **Overs**, for every competition including extras: written onto its structure. If two
+- **Overs**, for every competition including extras: written onto its structure. A competition
+  with no overs of its own counts as the default it played under (the tenant's first match
+  format, else 50), never as "no opinion". If two
   competitions sharing a structure disagree, the later one gets a per-league clone
   (`st-<orig>-<league>`, name suffixed " · N overs"); if that was the kept one, `setup` points
   at the clone.
@@ -522,14 +524,14 @@ sst shell --stage dev -- npx tsx packages/api/scripts/migrate-league-setups.ts  
 
 Read every list before confirming:
 
-| Report            | Means                                                                      | Do                                                                                                                                                   |
-| ----------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `extras`          | league had more than one competition; only one survives as its setup       | **Prod: STOP.** See 10b.                                                                                                                             |
-| `calendarChanges` | ungenerated run whose followed calendar changes; it will silently re-date  | Tell the admin, or fix the kept choice first                                                                                                         |
-| `formatDrift`     | generated run whose snapshot name/overs differ from the migrated structure | Nothing, usually: existing series keep their stored format on regenerate. A later stage's first generate, or a rebase, takes the migrated name/overs |
-| `excludedTeams`   | kept competition had `excludeTeamIds`; the new model ignores them          | Re-cut entrants with **Edit entrants** on the stage                                                                                                  |
-| `inheritedOvers`  | kept competition had no overs; its structure now carries another's         | Check the overs on that structure are right for this league                                                                                          |
-| `skipped`         | tenant failed validation or read; nothing written for it                   | Fix the reason, re-run                                                                                                                               |
+| Report            | Means                                                                                                                                                               | Do                                                                                                                                                   |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `extras`          | league had more than one competition; only one survives as its setup                                                                                                | **Prod: STOP.** See 10b.                                                                                                                             |
+| `calendarChanges` | ungenerated run whose followed calendar changes; it will silently re-date                                                                                           | Tell the admin, or fix the kept choice first                                                                                                         |
+| `formatDrift`     | generated run whose snapshot name/overs differ from the migrated structure                                                                                          | Nothing, usually: existing series keep their stored format on regenerate. A later stage's first generate, or a rebase, takes the migrated name/overs |
+| `excludedTeams`   | kept competition had `excludeTeamIds`; the new model ignores them                                                                                                   | Re-cut entrants with **Edit entrants** on the stage                                                                                                  |
+| `inheritedOvers`  | kept competition had no overs of its own; pinned to the old default (the tenant's first match format, else 50), cloning its structure if a sibling stream disagrees | Nothing, usually: this is the format its series already played. Change the structure's Overs if the default was never right for this league          |
+| `skipped`         | tenant failed validation or read; nothing written for it                                                                                                            | Fix the reason, re-run                                                                                                                               |
 
 The last line reads `STOP: N extra competition(s) found — bring this report back for a
 split-league decision` when extras exist.

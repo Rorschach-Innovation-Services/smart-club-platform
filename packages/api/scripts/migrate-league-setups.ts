@@ -258,6 +258,14 @@ function planTenant(
   const plans: LeagueSetupPlan[] = [];
   let alreadySetUp = 0;
 
+  // What a competition with no overs of its own actually played under in the old model
+  // (series-builder: matchFormat.overs ?? competitionDefaults.matchFormats[0].overs ?? 50).
+  // Treating "no overs" as "no opinion" would let it inherit a sibling stream's overs.
+  const retiredDefaults = config.competitionDefaults as
+    | { matchFormats?: Array<{ overs?: number }> }
+    | undefined;
+  const defaultOvers = retiredDefaults?.matchFormats?.[0]?.overs ?? 50;
+
   // The overs each structure holds so far — seeded from what it already stores.
   const assigned = new Map<string, number>();
   for (const s of structures) if (s.overs !== undefined) assigned.set(s.id, s.overs);
@@ -284,9 +292,9 @@ function planTenant(
           structureId: comp.structureId,
           calendarId: comp.calendarId,
         });
-      const overs = comp.matchFormat?.overs;
+      const overs = comp.matchFormat?.overs ?? defaultOvers;
       const original = originals.get(comp.structureId);
-      if (overs === undefined || !original) return;
+      if (!original) return;
       const held = assigned.get(comp.structureId);
       if (held === undefined) {
         assigned.set(comp.structureId, overs);
@@ -459,7 +467,7 @@ function printTenant(label: string, plan: TenantPlan, log: (line: string) => voi
     );
   for (const i of n.inheritedOvers)
     log(
-      `  ! ${i.leagueKey} · ${i.competitionId} had no overs; its structure ${i.structureId} now carries ${i.overs}`,
+      `  ! ${i.leagueKey} · ${i.competitionId} had no overs of its own; pinned to the old default — structure ${i.structureId} carries ${i.overs}`,
     );
   for (const d of n.formatDrift)
     log(
