@@ -712,47 +712,41 @@ export function CalendarsCard({
     }, 'Could not save calendar');
 
   /**
-   * Every league competition scheduled on `cal`, with its structure resolved (null when
-   * the id no longer matches one) — the card's "who uses this calendar" lines.
+   * Every league whose setup plays on `cal`, with its structure resolved (null when the id
+   * no longer matches one) — the card's "who uses this calendar" lines.
    */
   const bindingsOf = (cal: SeasonCalendar) =>
-    (config.leagues ?? []).flatMap((l) =>
-      (l.competitions ?? [])
-        .filter((comp) => comp.calendarId === cal.id)
-        .map((comp) => ({
-          key: `${l.key}:${comp.id}`,
-          league: l.label,
-          competition: comp.label,
-          structure: (config.structures ?? []).find((st) => st.id === comp.structureId) ?? null,
-        })),
-    );
+    (config.leagues ?? [])
+      .filter((l) => l.setup?.calendarId === cal.id)
+      .map((l) => ({
+        key: l.key,
+        league: l.label,
+        structure: (config.structures ?? []).find((st) => st.id === l.setup?.structureId) ?? null,
+      }));
 
-  /** Leagues whose competitions bind `cal` — drives the cascade warning and the cascade. */
+  /** Leagues whose setup plays on `cal` — drives the cascade warning and the cascade. */
   const leaguesBinding = (cal: SeasonCalendar) =>
-    (config.leagues ?? []).filter((l) =>
-      (l.competitions ?? []).some((comp) => comp.calendarId === cal.id),
-    );
+    (config.leagues ?? []).filter((l) => l.setup?.calendarId === cal.id);
 
   async function onDelete(cal: SeasonCalendar) {
     setDeleteErr('');
     try {
-      // Cascade: a competition pointing at a deleted calendar would fail the server's
-      // cross-check, so the bindings go in the SAME PUT. Series scheduled against the
+      // Cascade: a league setup pointing at a deleted calendar would fail the server's
+      // cross-check, so those setups come off in the SAME PUT. Series scheduled against the
       // calendar still hard-block server-side — that guard is the one worth keeping,
       // and its 409 message is surfaced as-is.
       const current = await api.platformGetTenant(slug);
       const patch: Partial<TenantConfig> = {
         calendars: (current.calendars ?? []).filter((c) => c.id !== cal.id),
       };
-      const bound = (current.leagues ?? []).filter((l) =>
-        (l.competitions ?? []).some((comp) => comp.calendarId === cal.id),
-      );
+      const bound = (current.leagues ?? []).filter((l) => l.setup?.calendarId === cal.id);
       if (bound.length > 0)
-        patch.leagues = (current.leagues ?? []).map((l) =>
-          bound.includes(l)
-            ? { ...l, competitions: (l.competitions ?? []).filter((c) => c.calendarId !== cal.id) }
-            : l,
-        );
+        patch.leagues = (current.leagues ?? []).map((l) => {
+          if (!bound.includes(l)) return l;
+          const { setup: _setup, ...rest } = l;
+          void _setup;
+          return rest;
+        });
       await save(patch);
       setConfirm(null);
       toast(`${cal.label} · deleted`);
@@ -867,9 +861,9 @@ export function CalendarsCard({
                           ) : (
                             bindings.map((x) => (
                               <div key={x.key} style={{ color: 'var(--muted)' }}>
-                                {x.league} — {x.competition}{' '}
+                                {x.league} —{' '}
                                 {x.structure
-                                  ? `(${x.structure.name} v${x.structure.version})`
+                                  ? `${x.structure.name} (v${x.structure.version})`
                                   : '(structure missing)'}
                               </div>
                             ))
@@ -950,7 +944,7 @@ export function CalendarsCard({
               <div className="fix-confirm-body">
                 {leaguesBinding(confirm).length > 0 && (
                   <>
-                    Also removes its competition from{' '}
+                    Also removes the setup of{' '}
                     <strong>
                       {leaguesBinding(confirm)
                         .map((l) => l.label)

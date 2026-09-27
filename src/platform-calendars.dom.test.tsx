@@ -263,34 +263,31 @@ describe('CalendarsCard — concurrent edits', () => {
 });
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   Deleting a calendar bound by a league's competition (CalendarsCard's `onDelete`,
-   platform-calendars.tsx ~:619). A competition pointing at a deleted calendar would fail
-   the server's cross-check, so the binding is stripped in the SAME PUT — but only the
-   binding that actually points at the deleted calendar, not every competition the league
-   runs.
+   Deleting a calendar a league's setup plays on (CalendarsCard's `onDelete`). A setup
+   pointing at a deleted calendar would fail the server's cross-check, so that setup comes
+   off in the SAME PUT — only on the leagues whose setup names the deleted calendar.
    ───────────────────────────────────────────────────────────────────────────── */
 
-describe('CalendarsCard — deleting a bound calendar cascades to its competition', () => {
-  const leagueWith = (bound: string, elsewhere: string): League =>
+describe('CalendarsCard — deleting a calendar cascades to the setups on it', () => {
+  const leagueOn = (key: string, label: string, calendarId: string): League =>
     ({
-      key: 'premier',
-      label: 'Premier Men',
+      key,
+      label,
       group: 'Senior',
       district: 'All districts',
-      competitions: [
-        { id: 'c1', label: '50 Over', structureId: 's1', calendarId: bound },
-        { id: 'c2', label: 'T20', structureId: 's2', calendarId: elsewhere },
-      ],
+      setup: { structureId: 's1', calendarId },
     }) as unknown as League;
 
-  it('strips only the competition bound to the deleted calendar, in one save', async () => {
+  it('removes only the setups on the deleted calendar, in one save', async () => {
     const bound = cal({ id: 'cal1', label: 'Cal 1' });
     const other = cal({ id: 'cal2', label: 'Cal 2' });
-    const league = leagueWith('cal1', 'cal2');
     const save = vi.fn().mockResolvedValue({});
     const toast = vi.fn();
     const user = userEvent.setup();
-    const config = { calendars: [bound, other], leagues: [league] } as unknown as TenantConfig;
+    const config = {
+      calendars: [bound, other],
+      leagues: [leagueOn('premier', 'Premier Men', 'cal1'), leagueOn('reserve', 'Reserve', 'cal2')],
+    } as unknown as TenantConfig;
     vi.mocked(api.platformGetTenant).mockResolvedValue(config);
 
     render(<CalendarsCard slug="dolphins" config={config} save={save} toast={toast} />);
@@ -301,15 +298,16 @@ describe('CalendarsCard — deleting a bound calendar cascades to its competitio
     // the box: the card's own bindings lines name the league too.
     const box = document.querySelector<HTMLElement>('.fix-confirm-box')!;
     expect(within(box).getByText(/premier men/i)).toBeVisible();
+    expect(within(box).queryByText(/reserve/i)).toBeNull();
 
     await user.click(screen.getByRole('button', { name: /yes, delete/i }));
 
     expect(save).toHaveBeenCalledTimes(1);
     const patch = save.mock.calls[0][0];
     expect(patch.calendars.map((c: SeasonCalendar) => c.id)).toEqual(['cal2']);
-    // The competition on the SURVIVING calendar is untouched.
-    expect(patch.leagues[0].competitions).toHaveLength(1);
-    expect(patch.leagues[0].competitions[0]).toMatchObject({ id: 'c2', calendarId: 'cal2' });
+    expect(patch.leagues[0]).not.toHaveProperty('setup');
+    // The setup on the SURVIVING calendar is untouched.
+    expect(patch.leagues[1].setup).toEqual({ structureId: 's1', calendarId: 'cal2' });
   });
 
   it('shows a refused delete inside the confirm box, which stays open, and deletes nothing', async () => {
@@ -481,7 +479,7 @@ describe('CalendarForm — blocks are time, not formats', () => {
    competitions sharing one calendar, and covers it.
    ───────────────────────────────────────────────────────────────────────────── */
 
-describe('CalendarsCard — competitions on each calendar', () => {
+describe('CalendarsCard — league setups on each calendar', () => {
   const twoBlocks = cal({
     blocks: [
       { id: 'b1', label: 'Block 1', start: '2026-09-12', end: '2026-12-12' },
@@ -505,15 +503,13 @@ describe('CalendarsCard — competitions on each calendar', () => {
       ],
     }) as unknown as CompetitionStructure;
 
-  const leagueWith = (
-    competitions: Array<{ id: string; label: string; structureId: string; calendarId: string }>,
-  ) =>
+  const leagueOn = (key: string, label: string, structureId: string, calendarId: string) =>
     ({
-      key: 'premier',
-      label: 'Premier Men',
+      key,
+      label,
       group: 'Senior',
       district: 'All districts',
-      competitions,
+      setup: { structureId, calendarId },
     }) as unknown as League;
 
   const renderCard = (config: Partial<TenantConfig>) =>
@@ -526,20 +522,20 @@ describe('CalendarsCard — competitions on each calendar', () => {
       />,
     );
 
-  it('lists each competition with its structure name and version', () => {
+  it('lists each league set up on it with its structure name and version', () => {
     renderCard({
       calendars: [twoBlocks],
       structures: [structureIn('s1', 'Pools and knockout', 3, 0)],
       leagues: [
-        leagueWith([
-          { id: 'c1', label: 'T20', structureId: 's1', calendarId: 'cal2627' },
-          { id: 'c2', label: '50 Over', structureId: 'gone', calendarId: 'cal2627' },
-        ]),
+        leagueOn('premier', 'Premier Men', 's1', 'cal2627'),
+        leagueOn('t20', 'Premier T20', 'gone', 'cal2627'),
+        leagueOn('elsewhere', 'Elsewhere', 's1', 'other-cal'),
       ],
     });
 
-    expect(screen.getByText('Premier Men — T20 (Pools and knockout v3)')).toBeVisible();
-    expect(screen.getByText('Premier Men — 50 Over (structure missing)')).toBeVisible();
+    expect(screen.getByText('Premier Men — Pools and knockout (v3)')).toBeVisible();
+    expect(screen.getByText('Premier T20 — (structure missing)')).toBeVisible();
+    expect(screen.queryByText(/Elsewhere/)).toBeNull();
   });
 
   it('says so when no competition uses the calendar, and raises no coverage warning', () => {
@@ -553,7 +549,7 @@ describe('CalendarsCard — competitions on each calendar', () => {
     renderCard({
       calendars: [twoBlocks],
       structures: [structureIn('s1', 'Flat league', 1, 0)],
-      leagues: [leagueWith([{ id: 'c1', label: 'T20', structureId: 's1', calendarId: 'cal2627' }])],
+      leagues: [leagueOn('premier', 'Premier Men', 's1', 'cal2627')],
     });
 
     const lines = screen.getAllByText(/no competition on this calendar uses it/i);
@@ -566,13 +562,12 @@ describe('CalendarsCard — competitions on each calendar', () => {
       calendars: [twoBlocks],
       structures: [structureIn('s1', 'Flat league', 1, 0), structureIn('s2', 'Knockout', 1, 1)],
       leagues: [
-        leagueWith([
-          { id: 'c1', label: 'T20', structureId: 's1', calendarId: 'cal2627' },
-          { id: 'c2', label: '50 Over', structureId: 's2', calendarId: 'cal2627' },
-        ]),
+        leagueOn('premier', 'Premier Men', 's1', 'cal2627'),
+        leagueOn('t20', 'Premier T20', 's2', 'cal2627'),
       ],
     });
 
+    expect(screen.getByText('Premier T20 — Knockout (v1)')).toBeVisible();
     expect(screen.queryByText(/no competition on this calendar uses it/i)).toBeNull();
   });
 });

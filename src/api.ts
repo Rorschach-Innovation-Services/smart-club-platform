@@ -33,7 +33,6 @@ import type {
   SendResult,
   LogoUploadPost,
   TutorialUploadGrant,
-  DnsSheet,
   TenantOverview,
   DemographicsResponse,
   DocIntakePresignItem,
@@ -488,32 +487,6 @@ export const patchSeasonRun = (id: string, patch: unknown) =>
 export const deleteSeasonRunReq = (id: string) =>
   request(`/season-runs/${id}`, { method: 'DELETE' });
 export const getSeasonRun = (id: string) => request<SeasonRun>(`/season-runs/${id}`);
-/**
- * Admin quick start for a league with no competition bound: the SERVER instantiates the
- * named template from the closed registry (server-minted ids, `source: 'quick-start'`),
- * writes calendar + structure + binding into tenant config and creates the run, all in
- * one handler. Admins never send a structure body (ADR 0006 keeps structures
- * operator-authored). `calendar` is either an existing calendar id or new single-block
- * dates. `placement` is the per-stage block position when the calendar has ≥2 blocks.
- */
-export interface QuickStartSeasonRequest {
-  leagueKey: string;
-  templateId: string;
-  seasonLabel: string;
-  calendar: { id: string } | { label: string; start: string; end: string };
-  matchFormat?: { label?: string; overs?: number; ballType?: string };
-  placement?: number[];
-}
-export interface QuickStartSeasonResponse {
-  run: SeasonRun;
-  competitionId: string;
-  structureId: string;
-  calendarId: string;
-  /** Calendar blocks no competition on the chosen calendar plays in; only when non-empty. */
-  warnings?: string[];
-}
-export const quickStartSeason = (body: QuickStartSeasonRequest) =>
-  request<QuickStartSeasonResponse>('/season-runs/quick-start', { method: 'POST', body });
 // Adopt the live version of the run's structure — the one audited exception to snapshot
 // immutability. The server reads the structure itself; the body only names the version
 // the admin reviewed and the run version they read, so either moving underneath 409s.
@@ -689,8 +662,14 @@ export const platformCreateTenant = (body: {
   submissionDeadline: string;
   features?: Record<string, boolean>;
 }) => request<TenantConfig>('/platform/tenants', { method: 'POST', body });
+/**
+ * `liveUrl` is response-only: the client's canonical club-site URL (the SetupCard's hand-off
+ * links). Computed per read, never stored, and absent from PUT responses; null in the
+ * dormant pre-wildcard state.
+ */
+export type PlatformTenant = TenantConfig & { liveUrl?: string | null };
 export const platformGetTenant = (slug: string) =>
-  request<TenantConfig>(`/platform/tenants/${encodeURIComponent(slug)}`);
+  request<PlatformTenant>(`/platform/tenants/${encodeURIComponent(slug)}`);
 // PUT merge-patches only branding / features / submissionDeadline; each key present
 // REPLACES that key wholesale (same shallow merge as PUT /tenant/config), so callers
 // must send the full branding object, not a fragment.
@@ -753,8 +732,6 @@ export const platformTutorialUploadAbort = (
     method: 'POST',
     body,
   });
-export const platformDnsSheet = (slug: string) =>
-  request<DnsSheet>(`/platform/tenants/${encodeURIComponent(slug)}/dns`);
 // Operator "setup complete" milestone (D6) — informational, reversible. Returns the
 // updated config (setupCompletedAt present ⇒ done; DELETE clears it, reopening setup).
 export const platformCompleteSetup = (slug: string) =>

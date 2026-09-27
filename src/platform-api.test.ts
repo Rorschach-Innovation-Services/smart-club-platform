@@ -16,7 +16,6 @@ import {
   platformUpdateTenant,
   platformAddAdmin,
   platformLogoUploadUrl,
-  platformDnsSheet,
   uploadLogoToS3,
   setTokenProvider,
 } from './api';
@@ -84,9 +83,13 @@ describe('platform client URL construction', () => {
     expect(JSON.parse(init.body!)).toEqual({ contentType: 'image/png' });
   });
 
-  it('GET …/dns', async () => {
-    await platformDnsSheet('sharks');
-    expect(lastCall()[0]).toBe('http://localhost/platform/tenants/sharks/dns');
+  it('GET /platform/tenants/:slug returns the response-only liveUrl (the DNS sheet is gone)', async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      okResponse({ tenant: 'sharks', liveUrl: 'https://sharks.club.example' }),
+    );
+    const res = await platformGetTenant('sharks');
+    expect(lastCall()[0]).toBe('http://localhost/platform/tenants/sharks');
+    expect(res.liveUrl).toBe('https://sharks.club.example');
   });
 
   it('URL-encodes a hostile slug instead of splicing raw path segments', async () => {

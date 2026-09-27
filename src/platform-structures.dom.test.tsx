@@ -15,7 +15,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { CompetitionsEditor, StructuresCard } from './platform-structures';
+import { StructuresCard } from './platform-structures';
 import type { CompetitionStructure, League, SeasonCalendar, TenantConfig } from './types';
 import * as api from './api';
 import { ApiError } from './api';
@@ -128,12 +128,12 @@ const twoStage = (): CompetitionStructure =>
     ],
   } as Partial<CompetitionStructure>);
 
-/** A league binding `structureId` to `calendarId`, as the competition editor writes it. */
+/** A league set up with `structureId` on `calendarId`, as the setup dialog writes it. */
 const boundLeague = (structureId: string, calendarId: string): League =>
   ({
     key: 'premier',
     label: 'Premier Men',
-    competitions: [{ id: 'c1', label: '50 Over', structureId, calendarId }],
+    setup: { structureId, calendarId },
   }) as unknown as League;
 
 /** The "Show dates from" calendar picker. */
@@ -142,12 +142,18 @@ const previewPicker = () => screen.getByRole('combobox', { name: /show dates fro
 const blockPicker = () => screen.getAllByRole('combobox', { name: /playing block/i })[0];
 const saveBtn = () => screen.getByRole('button', { name: /save structure/i });
 
-const openEditor = async (user: ReturnType<typeof userEvent.setup>, name = /flat round robin/i) =>
-  user.click(within(screen.getByRole('row', { name })).getByText(/edit/i));
+/** Opens a library structure (read-only preview) from its row. */
+const openPreview = async (user: ReturnType<typeof userEvent.setup>, name = /flat round robin/i) =>
+  user.click(within(screen.getByRole('row', { name })).getByRole('button', { name: 'View' }));
+/** Opens a library structure and switches it into Edit mode. */
+const openEditor = async (user: ReturnType<typeof userEvent.setup>, name = /flat round robin/i) => {
+  await openPreview(user, name);
+  await user.click(screen.getByRole('button', { name: 'Edit structure' }));
+};
 
-/** The preview rail's "teams entered" box. */
-const teamsBox = () => screen.getAllByRole('spinbutton')[0];
 const preview = () => screen.getByText(/^Preview$/i).parentElement!;
+/** The preview rail's "teams entered" box. */
+const teamsBox = () => within(preview()).getByRole('spinbutton');
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -316,7 +322,7 @@ describe('preview rail — calendar fit', () => {
 describe('structure editor — validation', () => {
   it('refuses a structure with no name', async () => {
     const { user, save } = setup([structure({ name: '' })]);
-    await openEditor(user, /untitled|edit/i);
+    await openEditor(user, /untitled|view/i);
 
     await user.click(screen.getByRole('button', { name: /save structure/i }));
     expect(save).not.toHaveBeenCalled();
@@ -472,8 +478,9 @@ describe('StageRow — Time slots', () => {
     expect('roundsPerDay' in saved.stages[0].schedule).toBe(false);
   });
 
-  it('prefills the tenant’s own default slots and match days (ADR 0014)', async () => {
+  it('prefills the built-in Saturday and 08:00 / 13:30 defaults, whatever the tenant config says', async () => {
     const { user, save } = setup([structure()], {
+      // Retired: tenant-configured slots and match days are no longer read.
       competitionDefaults: {
         timeSlots: [
           { label: 'Early', start: '09:30' },
@@ -487,20 +494,20 @@ describe('StageRow — Time slots', () => {
     await user.click(
       within(timeSlotsChoice()).getByRole('button', { name: 'Morning & afternoon starts' }),
     );
-    expect(screen.getByDisplayValue('09:30')).toBeInTheDocument();
-    expect(screen.getByDisplayValue('14:15')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('08:00')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('13:30')).toBeInTheDocument();
 
     await user.click(screen.getByRole('radio', { name: /^set days only/i }));
-    expect(screen.getByRole('button', { name: 'Sun' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: 'Sat' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: 'Sat' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Sun' })).toHaveAttribute('aria-pressed', 'false');
 
     await user.click(saveBtn());
     const schedule = save.mock.calls[0][0].structures[0].stages[0].schedule;
     expect(schedule.slots).toEqual([
-      { label: 'Early', start: '09:30' },
-      { label: 'Late', start: '14:15' },
+      { label: 'Morning', start: '08:00' },
+      { label: 'Afternoon', start: '13:30' },
     ]);
-    expect(schedule.cadence).toEqual({ kind: 'weekdays', days: [0] });
+    expect(schedule.cadence).toEqual({ kind: 'weekdays', days: [6] });
   });
 
   it('editing a row’s label and time round-trips into the saved structure', async () => {
@@ -716,7 +723,7 @@ describe('the refusal banner — a resolved calendar can’t place every stage',
     ],
   } as Partial<CompetitionStructure>);
 
-  it('names the bound competition and offers a way out, when this structure is bound', async () => {
+  it('names the league set up with it and offers a way out, when this structure is in use', async () => {
     const { user } = setup([strandedStage], {
       calendars: [calendar, otherCalendar],
       leagues: [boundLeague('flat', 'other')],
@@ -726,7 +733,7 @@ describe('the refusal banner — a resolved calendar can’t place every stage',
     expect(previewPicker()).toHaveValue('other');
     expect(screen.getByText(/plays a\s*block position/i)).toBeInTheDocument();
     // Named both in the "Used by" column and the banner's own explanation.
-    expect(screen.getAllByText(/50 Over \(Premier Men\)/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/This structure is in use while Premier Men uses test/i)).toBeVisible();
   });
 
   it('tells the operator to pick each stage’s block by hand, when nothing binds it', async () => {
@@ -875,30 +882,26 @@ describe('the structures list — the mismatch is visible before opening', () =>
    pointing at the deleted structure, not every competition the league runs.
    ───────────────────────────────────────────────────────────────────────────── */
 
-describe('StructuresCard — deleting a bound structure cascades to its competition', () => {
-  const leagueWith = (bound: string, elsewhere: string): League =>
+describe('StructuresCard — deleting a structure cascades to the setups using it', () => {
+  const leagueOn = (key: string, label: string, structureId: string): League =>
     ({
-      key: 'premier',
-      label: 'Premier Men',
+      key,
+      label,
       group: 'Senior',
       district: 'All districts',
-      competitions: [
-        { id: 'c1', label: '50 Over', structureId: bound, calendarId: 'cal' },
-        { id: 'c2', label: 'T20', structureId: elsewhere, calendarId: 'cal' },
-      ],
+      setup: { structureId, calendarId: 'cal' },
     }) as unknown as League;
 
-  it('strips only the competition bound to the deleted structure, in one save', async () => {
+  it('removes only the setups naming the deleted structure, in one save', async () => {
     const bound = structure({ id: 'flat-one', name: 'Flat one' });
     const other = structure({ id: 'flat-two', name: 'Flat two' });
-    const league = leagueWith('flat-one', 'flat-two');
     const save = vi.fn().mockResolvedValue({});
     const toast = vi.fn();
     const user = userEvent.setup();
     const config = {
       structures: [bound, other],
       calendars: [calendar],
-      leagues: [league],
+      leagues: [leagueOn('premier', 'Premier Men', 'flat-one'), leagueOn('t20', 'T20', 'flat-two')],
     } as unknown as TenantConfig;
     vi.mocked(api.platformGetTenant).mockResolvedValue(config);
 
@@ -906,8 +909,7 @@ describe('StructuresCard — deleting a bound structure cascades to its competit
 
     await user.click(within(screen.getByRole('row', { name: /flat one/i })).getByText(/delete/i));
 
-    // The confirm dialog names the affected league before anything is deleted. Scoped to
-    // the dialog itself — the "Used by" column also names Premier Men on both rows.
+    // The confirm dialog names the affected league before anything is deleted.
     const confirmBox = document.querySelector('.fix-confirm-box') as HTMLElement;
     expect(within(confirmBox).getByText(/premier men/i)).toBeVisible();
 
@@ -916,9 +918,9 @@ describe('StructuresCard — deleting a bound structure cascades to its competit
     expect(save).toHaveBeenCalledTimes(1);
     const patch = save.mock.calls[0][0];
     expect(patch.structures.map((s: CompetitionStructure) => s.id)).toEqual(['flat-two']);
-    // The competition on the SURVIVING structure is untouched.
-    expect(patch.leagues[0].competitions).toHaveLength(1);
-    expect(patch.leagues[0].competitions[0]).toMatchObject({ id: 'c2', structureId: 'flat-two' });
+    expect(patch.leagues[0]).not.toHaveProperty('setup');
+    // The setup on the SURVIVING structure is untouched.
+    expect(patch.leagues[1].setup).toEqual({ structureId: 'flat-two', calendarId: 'cal' });
   });
 
   it('shows a refused delete inside the confirm box, which stays open, and deletes nothing', async () => {
@@ -1216,44 +1218,6 @@ describe('preview rail — the structure as a story', () => {
   });
 });
 
-describe('CompetitionsEditor — structures not authored by an operator', () => {
-  it('lists quick-start and migrated structures in their own labelled groups', () => {
-    const config = {
-      structures: [
-        structure(),
-        structure({ id: 'qs', name: 'Quick-started', source: 'quick-start' }),
-        structure({ id: 'mig', name: 'Migrated', source: 'migration' }),
-      ],
-      calendars: [calendar],
-      leagues: [],
-    } as unknown as TenantConfig;
-    const lg = {
-      key: 'premier',
-      label: 'Premier Men',
-      competitions: [{ id: 'c1', label: 'League', structureId: 'flat', calendarId: 'cal' }],
-    } as unknown as League;
-    render(
-      <CompetitionsEditor
-        league={lg}
-        config={config}
-        onSave={vi.fn()}
-        onClose={vi.fn()}
-        toast={vi.fn()}
-      />,
-    );
-    const picker = screen
-      .getAllByRole('combobox')
-      .find((el) => within(el).queryByRole('option', { name: 'Structure…' }))!;
-    const quick = within(picker).getByRole('group', { name: 'Created by admin quick start' });
-    expect(within(quick).getByRole('option', { name: 'Quick-started' })).toBeInTheDocument();
-    const migrated = within(picker).getByRole('group', { name: 'Migrated flat seasons' });
-    expect(within(migrated).getByRole('option', { name: 'Migrated' })).toBeInTheDocument();
-    // The operator's own structure stays at the top level.
-    const top = within(picker).getByRole('option', { name: 'Flat round robin' });
-    expect(top.parentElement).toBe(picker);
-  });
-});
-
 /* ─────────────────────────────────────────────────────────────────────────────
    Uncovered blocks — a calendar block no stage plays in. Always gold, never an error:
    a shared season calendar is routinely covered by a sibling competition.
@@ -1343,99 +1307,25 @@ describe('preview rail — blocks no stage plays in', () => {
   });
 });
 
-describe('CompetitionsEditor — blocks the competition leaves empty', () => {
-  it('warns under the row and still lets the operator save', async () => {
-    const config = {
-      structures: [structure()],
-      calendars: [calendar],
-      leagues: [],
-    } as unknown as TenantConfig;
-    const onSave = vi.fn().mockResolvedValue(undefined);
-    const user = userEvent.setup();
-    render(
-      <CompetitionsEditor
-        league={boundLeague('flat', 'cal')}
-        config={config}
-        onSave={onSave}
-        onClose={vi.fn()}
-        toast={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByText(/^Block 2 \(.*\) has no stage playing in it$/)).toBeVisible();
-    const save = screen.getByRole('button', { name: /save competitions/i });
-    expect(save).toBeEnabled();
-    await user.click(save);
-    expect(onSave).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('CompetitionsEditor — a structure that plays past its calendar', () => {
-  it('shows the red overrun line instead of gold lines, and blocks Save', async () => {
-    // Positions 0 and 2 on the two-block calendar: Block 2 is empty AND Block 3 is missing.
-    // The missing block is the actionable problem, so only the red line shows.
-    const config = {
-      structures: [
-        structure({
-          stages: [roundRobinStage('s1', 'First', 0), roundRobinStage('s2', 'Second', 2)],
-        } as Partial<CompetitionStructure>),
-      ],
-      calendars: [calendar],
-      leagues: [],
-    } as unknown as TenantConfig;
-    const onSave = vi.fn().mockResolvedValue(undefined);
-    const user = userEvent.setup();
-    render(
-      <CompetitionsEditor
-        league={boundLeague('flat', 'cal')}
-        config={config}
-        onSave={onSave}
-        onClose={vi.fn()}
-        toast={vi.fn()}
-      />,
-    );
-
-    expect(
-      screen.getByText(
-        'Flat round robin plays in Block 3 but this calendar has only 2 blocks — extend the calendar or choose differently',
-      ),
-    ).toBeVisible();
-    expect(screen.queryByText(/has no stage playing in it/)).toBeNull();
-    // Same gate as the structure editor's own bound-calendar overrun: the server would
-    // reject it, so Save waits until the pair fits.
-    const save = screen.getByRole('button', { name: /save competitions/i });
-    expect(save).toBeDisabled();
-    await user.click(save);
-    expect(onSave).not.toHaveBeenCalled();
-  });
-});
-
 describe('the structures list — Used by pairs each league with its calendar', () => {
-  it('shows one line per distinct league · calendar pair, and a dash when unbound', () => {
-    const premier = {
-      key: 'premier',
-      label: 'Premier Men',
-      competitions: [
-        { id: 'c1', label: '50 Over', structureId: 'flat', calendarId: 'cal' },
-        { id: 'c2', label: 'T20', structureId: 'flat', calendarId: 'cal' },
-        { id: 'c3', label: '50 Over', structureId: 'flat', calendarId: 'other' },
-      ],
-    } as unknown as League;
-    const div1 = {
-      key: 'div1',
-      label: 'Division 1',
-      competitions: [{ id: 'c4', label: 'League', structureId: 'flat', calendarId: 'cal' }],
+  it('shows one line per league set up with it (from league.setup), and a dash when unused', () => {
+    const on = (key: string, label: string, calendarId: string) =>
+      ({ key, label, setup: { structureId: 'flat', calendarId } }) as unknown as League;
+    // Stored competitions are inert: they no longer count as "Used by".
+    const legacyOnly = {
+      key: 'legacy',
+      label: 'Legacy League',
+      competitions: [{ id: 'c1', label: 'League', structureId: 'flat', calendarId: 'cal' }],
     } as unknown as League;
     setup([structure(), structure({ id: 'spare', name: 'Spare shape' })], {
       calendars: [calendar, otherCalendar],
-      leagues: [premier, div1],
+      leagues: [on('premier', 'Premier Men', 'cal'), on('div1', 'Division 1', 'other'), legacyOnly],
     });
 
     const row = within(screen.getByRole('row', { name: /flat round robin/i }));
-    // Two competitions of Premier Men on 2026/27 are ONE pair.
-    expect(row.getAllByText('Premier Men · 2026/27')).toHaveLength(1);
-    expect(row.getByText('Premier Men · test')).toBeInTheDocument();
-    expect(row.getByText('Division 1 · 2026/27')).toBeInTheDocument();
+    expect(row.getByText('Premier Men · 2026/27')).toBeInTheDocument();
+    expect(row.getByText('Division 1 · test')).toBeInTheDocument();
+    expect(row.queryByText(/Legacy League/)).toBeNull();
 
     const spare = within(screen.getByRole('row', { name: /spare shape/i }));
     expect(spare.getByText('—')).toBeInTheDocument();
@@ -1447,21 +1337,17 @@ describe('the structures list — Used by pairs each league with its calendar', 
 
    A structure bound by several seasons can be edited for all of them (a new version,
    today's behaviour) or for ONE: then saving forks a copy for that season and repoints
-   only its competition, leaving the original and every other binding byte-unchanged.
+   only that league's setup, leaving the original and every other binding byte-unchanged.
    ───────────────────────────────────────────────────────────────────────────── */
 
 describe('editing scope — one season or all of them', () => {
   const twoSeasons = (): League[] =>
     [
-      {
-        key: 'premier',
-        label: 'Premier Men',
-        competitions: [{ id: 'c1', label: '50 Over', structureId: 'flat', calendarId: 'cal' }],
-      },
+      { key: 'premier', label: 'Premier Men', setup: { structureId: 'flat', calendarId: 'cal' } },
       {
         key: 'first',
         label: 'First Division',
-        competitions: [{ id: 'c2', label: 'T20', structureId: 'flat', calendarId: 'other' }],
+        setup: { structureId: 'flat', calendarId: 'other' },
       },
     ] as unknown as League[];
 
@@ -1475,7 +1361,7 @@ describe('editing scope — one season or all of them', () => {
 
     expect(previewPicker()).toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: /edit for/i })).toBeNull();
-    expect(scopeLine()).toHaveTextContent('Not bound to any season yet.');
+    expect(scopeLine()).toHaveTextContent('Editing — not used by any league yet.');
     expect(saveLabelled(/^save structure$/i)).toBeInTheDocument();
     expect(screen.queryByTestId('fork-note')).toBeNull();
   });
@@ -1494,7 +1380,7 @@ describe('editing scope — one season or all of them', () => {
       'First Division · test',
     ]);
     expect(scopeLine()).toHaveTextContent(
-      'Editing for all 2 seasons using this structure — saving affects every one of them.',
+      'Editing — for all 2 seasons using this structure — saving affects every one of them.',
     );
     expect(saveLabelled(/^save for all 2 seasons$/i)).toBeInTheDocument();
     // All seasons keeps the free preview choice.
@@ -1506,7 +1392,7 @@ describe('editing scope — one season or all of them', () => {
     await user.selectOptions(scopePicker(), '1');
 
     expect(scopeLine()).toHaveTextContent(
-      'Editing for First Division · test — saving affects only this season.',
+      'Editing — for First Division · test — saving affects only this season.',
     );
     expect(saveLabelled(/^save for this season only$/i)).toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: /show dates from/i })).toBeNull();
@@ -1523,11 +1409,11 @@ describe('editing scope — one season or all of them', () => {
     expect(preview()).not.toHaveTextContent('16 Jan 2027');
 
     await user.selectOptions(scopePicker(), '-1');
-    expect(scopeLine()).toHaveTextContent(/Editing for all 2 seasons/);
+    expect(scopeLine()).toHaveTextContent(/Editing — for all 2 seasons/);
     expect(saveLabelled(/^save for all 2 seasons$/i)).toBeInTheDocument();
   });
 
-  it('forks a scoped save: the original untouched, a clone, and only that competition repointed', async () => {
+  it('forks a scoped save: the original untouched, a clone, and only that league’s setup repointed', async () => {
     const original = structure({
       source: 'quick-start',
       templateId: 'tpl-flat',
@@ -1553,9 +1439,7 @@ describe('editing scope — one season or all of them', () => {
     expect(clone.stages).toEqual(original.stages);
 
     expect(patch.leagues![0]).toStrictEqual(leagues[0]);
-    expect(patch.leagues![1].competitions).toEqual([
-      { id: 'c2', label: 'T20', structureId: clone.id, calendarId: 'other' },
-    ]);
+    expect(patch.leagues![1].setup).toEqual({ structureId: clone.id, calendarId: 'other' });
     expect(toast).toHaveBeenCalledWith('Created Flat round robin · test for First Division · test');
   });
 
@@ -1605,7 +1489,7 @@ describe('editing scope — one season or all of them', () => {
       'Saving creates this season’s own copy of the structure; the other 1 season keeps the current one.',
     );
     expect(note).toHaveTextContent(
-      'A season already started on this competition keeps the shape it started with and will NOT be offered these changes — to change a running season, edit for all seasons and use Review changes in the admin console.',
+      'A season already started for this league keeps the shape it started with and will NOT be offered these changes — to change a running season, edit for all seasons and use Review changes in the admin console.',
     );
   });
 
@@ -1617,9 +1501,9 @@ describe('editing scope — one season or all of them', () => {
     await openEditor(user);
     await user.selectOptions(scopePicker(), '1');
 
-    // Someone else repointed First Division's competition while the editor was open.
+    // Someone else repointed First Division's setup while the editor was open.
     const moved = twoSeasons();
-    (moved[1].competitions![0] as { structureId: string }).structureId = 'someone-else';
+    moved[1].setup = { structureId: 'someone-else', calendarId: 'other' };
     vi.mocked(api.platformGetTenant).mockResolvedValue({
       structures: [structure()],
       calendars: [calendar, otherCalendar],
@@ -1630,7 +1514,7 @@ describe('editing scope — one season or all of them', () => {
 
     expect(
       await screen.findByText(
-        'This season’s binding changed while you were editing — reopen and try again',
+        'This season’s setup changed while you were editing — reopen and try again',
       ),
     ).toBeInTheDocument();
     expect(save).not.toHaveBeenCalled();
@@ -1648,5 +1532,130 @@ describe('editing scope — one season or all of them', () => {
     expect(patch.structures).toHaveLength(1);
     expect(patch.structures![0].id).toBe('flat');
     expect(patch).not.toHaveProperty('leagues');
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Preview / Edit modes. A library structure opens read-only — nothing on screen can
+   change it — with one way into editing. Esc and Cancel come back out, asking first
+   when there are unsaved edits.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('structure editor — Preview and Edit modes', () => {
+  const dialog = () => screen.getByRole('dialog');
+
+  it('opens read-only: stages as sentences, the rail live, no inputs and no Save', async () => {
+    const { user } = setup([twoStage()]);
+    await openPreview(user, /split league/i);
+
+    expect(screen.getByRole('dialog', { name: 'View structure' })).toBeInTheDocument();
+    expect(within(dialog()).getByRole('heading', { name: 'Split league' })).toBeVisible();
+    expect(screen.getByText("You're previewing — nothing here changes anything.")).toBeVisible();
+    const stages = within(screen.getByRole('list', { name: 'Stages' })).getAllByRole('listitem');
+    expect(stages).toHaveLength(2);
+    expect(stages[0]).toHaveTextContent('First stage · Double round');
+    // No form inputs outside the rail's teams box and the dates-from picker.
+    expect(screen.queryByPlaceholderText(/split league with mid-season swap/i)).toBeNull();
+    expect(screen.queryByLabelText(/overs \(optional\)/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^save/i })).toBeNull();
+    expect(previewPicker()).toBeInTheDocument();
+    // The rail still follows the teams box.
+    await user.clear(teamsBox());
+    await user.type(teamsBox(), '8');
+    expect(within(preview()).getAllByText(/all 8 sides/).length).toBeGreaterThan(0);
+  });
+
+  it('"Edit structure" switches to the editor, titled and stripped as editing', async () => {
+    const { user } = setup([structure()]);
+    await openEditor(user);
+
+    expect(screen.getByRole('dialog', { name: 'Edit structure' })).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Flat round robin')).toBeInTheDocument();
+    expect(screen.getByTestId('edit-scope-line')).toHaveTextContent(/^Editing — /);
+    expect(saveBtn()).toBeInTheDocument();
+  });
+
+  it('Esc with no edits goes straight back to the preview, keeping the dialog open', async () => {
+    const { user } = setup([structure()]);
+    await openEditor(user);
+
+    await user.keyboard('{Escape}');
+
+    expect(screen.getByRole('dialog', { name: 'View structure' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit structure' })).toBeVisible();
+  });
+
+  it('asks before discarding unsaved edits; Discard restores the stored structure', async () => {
+    const { user, save } = setup([structure()]);
+    await openEditor(user);
+    const name = screen.getByDisplayValue('Flat round robin');
+    await user.clear(name);
+    await user.type(name, 'Renamed');
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByRole('alert')).toHaveTextContent(/discard your unsaved changes/i);
+    // Keep editing leaves the edit in place.
+    await user.click(screen.getByRole('button', { name: 'Keep editing' }));
+    expect(screen.getByDisplayValue('Renamed')).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: 'Discard changes' }));
+
+    expect(within(dialog()).getByRole('heading', { name: 'Flat round robin' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Edit structure' }));
+    expect(screen.getByDisplayValue('Flat round robin')).toBeInTheDocument();
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('opens a freshly started structure straight into editing', async () => {
+    const { user } = setup([structure()]);
+    await user.click(screen.getByRole('button', { name: /create structure/i }));
+    await user.click(screen.getByRole('button', { name: /build from scratch/i }));
+
+    expect(screen.getByRole('dialog', { name: 'Edit structure' })).toBeInTheDocument();
+    expect(saveBtn()).toBeInTheDocument();
+  });
+});
+
+describe('structure editor — overs', () => {
+  const oversBox = () => screen.getByLabelText(/overs \(optional\)/i);
+
+  it('explains the field and saves a whole number from 1 to 200', async () => {
+    const { user, save } = setup([structure()]);
+    await openEditor(user);
+    expect(
+      screen.getByText(
+        /Fixtures generated from this structure play this many overs; leave empty for\s*50\./,
+      ),
+    ).toBeVisible();
+
+    await user.type(oversBox(), '20');
+    await user.click(saveBtn());
+
+    expect(save.mock.calls[0][0].structures[0].overs).toBe(20);
+  });
+
+  it.each(['0', '201', '12.5'])('refuses %s and keeps Save disabled', async (value) => {
+    const { user, save } = setup([structure()]);
+    await openEditor(user);
+
+    fireEvent.change(oversBox(), { target: { value } });
+
+    expect(screen.getByText(/overs must be a whole number from 1 to 200/i)).toBeVisible();
+    expect(saveBtn()).toBeDisabled();
+    await user.click(saveBtn());
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('clearing it removes the key (plays the default 50)', async () => {
+    const { user, save } = setup([structure({ overs: 20 } as Partial<CompetitionStructure>)]);
+    await openPreview(user);
+    expect(screen.getByText('20 overs per side')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Edit structure' }));
+
+    await user.clear(oversBox());
+    await user.click(saveBtn());
+
+    expect(save.mock.calls[0][0].structures[0]).not.toHaveProperty('overs');
   });
 });

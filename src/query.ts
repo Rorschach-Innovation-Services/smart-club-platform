@@ -52,6 +52,5 @@ export const qk = {
   platformTenants: () => ['platform-tenants'],
   platformTenant: (slug: string) => ['platform-tenant', slug],
   platformTenantOverview: (slug: string) => ['platform-tenant-overview', slug],
-  platformDns: (slug: string) => ['platform-dns', slug],
   platformTenantReps: (slug: string) => ['platform-tenant-reps', slug],
 };
