@@ -974,3 +974,129 @@ describe('SeasonSetupWizard — run again', () => {
     expect(patch.leagues[1].setup.structureId).toBe(clones[1].id);
   });
 });
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Choices the wizard accepted must either be applied or refused out loud — never
+   dropped silently, and never lost to a stray click or Escape.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+describe('SeasonSetupWizard — nothing accepted is silently dropped', () => {
+  const lastSeason: SeasonCalendar = {
+    id: 'cal-prev',
+    label: '2025/26',
+    blocks: [
+      { id: 'p1', label: 'Block 1', start: '2025-09-13', end: '2025-12-13' },
+      { id: 'p2', label: 'Block 2', start: '2026-01-17', end: '2026-03-28' },
+    ],
+    breaks: [],
+    excludeDates: [],
+  };
+
+  it('a backdrop click never closes it, and Escape asks before discarding typed input', async () => {
+    const { user, onClose } = setup();
+    await fillSeasonLabel(user);
+
+    await user.click(document.querySelector('.task-modal-backdrop') as HTMLElement);
+    expect(onClose).not.toHaveBeenCalled();
+
+    await user.keyboard('{Escape}');
+    expect(screen.getByText('Discard your changes?')).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Keep editing' }));
+    expect(screen.queryByText('Discard your changes?')).toBeNull();
+    expect(screen.getByPlaceholderText('e.g. 2026/27')).toHaveValue('2026/27');
+
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    await user.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes at once on Escape when nothing has been entered', async () => {
+    const { user, onClose } = setup();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByText('Discard your changes?')).toBeNull();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a customised template instance left in a block the calendar no longer has', async () => {
+    const { user } = setup();
+    await fillSeasonLabel(user);
+    await user.click(screen.getByRole('button', { name: /add block/i }));
+    await user.click(continueBtn());
+    await addLeague(user, 'premier');
+    await user.click(screen.getByRole('radio', { name: /split league with mid-season swap/i }));
+    // Any "Adjust stages" edit makes the stages the operator's own: leaving step 0 no
+    // longer re-derives them, so the final round stays in Block 2.
+    await user.click(screen.getByRole('button', { name: /adjust stages/i }));
+    await user.click(screen.getAllByRole('radio', { name: /^Triple round robin/ })[0]);
+
+    // Back to step 0: its form remounts with the default single block.
+    await user.click(screen.getByRole('button', { name: /^back$/i }));
+    await fillSeasonLabel(user);
+    await user.click(continueBtn());
+
+    expect(continueBtn()).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      "Premier Men's structure plays in a block 2026/27 doesn't have — pick another structure or remove it.",
+    );
+  });
+
+  it('a ticked "Run again" row that no longer fits blocks Continue until it is unticked', async () => {
+    const { user } = setup({
+      calendars: [lastSeason],
+      structures: [twoBlockStructure],
+      leagues: [league({ setup: { structureId: 'struct-two-block', calendarId: 'cal-prev' } })],
+    });
+    await fillSeasonLabel(user);
+    await user.click(screen.getByRole('button', { name: /add block/i }));
+    await user.click(continueBtn());
+    await user.click(screen.getByRole('checkbox', { name: /premier men/i }));
+
+    // Shrink the calendar back to one block.
+    await user.click(screen.getByRole('button', { name: /^back$/i }));
+    await fillSeasonLabel(user);
+    await user.click(continueBtn());
+
+    expect(continueBtn()).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      "Premier Men was ticked to run again but its structure plays in a block 2026/27 doesn't have — untick it or change the calendar.",
+    );
+    const box = screen.getByRole('checkbox', { name: /premier men/i });
+    expect(box).toBeChecked();
+    expect(box).toBeEnabled();
+
+    await user.click(box);
+    expect(box).not.toBeChecked();
+    expect(box).toBeDisabled();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(continueBtn()).toBeEnabled();
+  });
+
+  it('writes nothing when a planned league was deleted in another session', async () => {
+    const { user, save, config } = setup({
+      leagues: [league(), league({ key: 'promo', label: 'Promotion Men' })],
+    });
+    await fillSeasonLabel(user);
+    await user.click(continueBtn());
+    await addLeague(user, 'premier');
+    await user.click(screen.getByRole('radio', { name: /flat round robin/i }));
+    await addLeague(user, 'promo');
+    await user.click(screen.getAllByRole('radio', { name: /flat round robin/i })[1]);
+    await user.click(continueBtn());
+
+    // The refetch at commit no longer has Promotion Men.
+    vi.mocked(api.platformGetTenant).mockResolvedValue({
+      ...config,
+      leagues: [league()],
+    } as TenantConfig);
+    await user.click(screen.getByRole('button', { name: /create season/i }));
+
+    expect(
+      await screen.findByText(
+        'Promotion Men was deleted in another session — nothing was saved. Close and start again.',
+      ),
+    ).toBeInTheDocument();
+    expect(save).not.toHaveBeenCalled();
+    expect(screen.queryByText(/is created/i)).toBeNull();
+  });
+});

@@ -226,3 +226,29 @@ describe('SetupLeagueDialog — changing a setup', () => {
     expect(saveBtn()).toBeDisabled();
   });
 });
+
+describe('SetupLeagueDialog — closing', () => {
+  it('a backdrop click never closes it, and Escape asks before discarding a choice', async () => {
+    const { user, onClose } = setup({});
+    await useExisting(user);
+
+    await user.click(document.querySelector('.task-modal-backdrop') as HTMLElement);
+    expect(onClose).not.toHaveBeenCalled();
+
+    await user.keyboard('{Escape}');
+    expect(screen.getByText('Discard your changes?')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Keep editing' }));
+    expect(screen.getByRole('radio', { name: /use an existing structure/i })).toBeChecked();
+    expect(onClose).not.toHaveBeenCalled();
+
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes at once when nothing has been chosen', async () => {
+    const { user, onClose } = setup({});
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});

@@ -31,6 +31,7 @@ import {
   Modal,
   OptionCards,
   Pill,
+  useModalCloseGuard,
   useNestedEscapeClose,
   type OptionCard,
 } from './atoms';
@@ -1752,6 +1753,13 @@ function StructureEditor({
     if (dirty) return setConfirmDiscard(true);
     goPreview();
   };
+  // The dialog's own close (×, and Escape where EscapeTo isn't mounted) asks the same
+  // question instead of dropping unsaved edits.
+  useModalCloseGuard(() => {
+    if (!editing || !dirty) return false;
+    setConfirmDiscard(true);
+    return true;
+  });
   // A structure carries no calendar identity of its own any more, so there is nothing
   // stored to reopen against — only the tenant's own calendar or the binding(s) that use
   // this structure can suggest one. See `resolvePreviewCalendarId`.
@@ -2279,8 +2287,12 @@ function StructureEditor({
             flexWrap: 'wrap',
           }}
         >
-          <span style={{ flex: 1 }}>Discard your unsaved changes and go back to the preview?</span>
-          <Btn tone="ink" size="sm" onClick={goPreview}>
+          <span style={{ flex: 1 }}>
+            {isNew
+              ? 'Discard your unsaved changes?'
+              : 'Discard your unsaved changes and go back to the preview?'}
+          </span>
+          <Btn tone="ink" size="sm" onClick={isNew ? onClose : goPreview}>
             Discard changes
           </Btn>
           <Btn tone="outline" size="sm" onClick={() => setConfirmDiscard(false)}>
@@ -2860,6 +2872,7 @@ export function StructuresCard({
             )
           }
           onClose={() => setEditing(null)}
+          dismissable={false}
         >
           <StructureEditor
             initial={editing.structure}

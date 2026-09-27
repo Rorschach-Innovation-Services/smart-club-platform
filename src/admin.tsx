@@ -3824,6 +3824,7 @@ function ShareSignupLinkModal({ signupLink, onClose, onGenerate, onRevoke, toast
    default. The change is visible immediately across the entire UI. */
 function EditDeadlineModal({ currentISO, defaultISO, onClose, onSave, toast }) {
   const [value, setValue] = useStateA(currentISO || defaultISO);
+  const [busy, setBusy] = useStateA(false);
   const long = formatDeadlineLong(value);
   const days = daysUntil(value);
   const daysLine =
@@ -3841,10 +3842,14 @@ function EditDeadlineModal({ currentISO, defaultISO, onClose, onSave, toast }) {
   })();
 
   function save() {
-    if (!value) return;
-    onSave && onSave(value);
-    toast && toast(`Deadline updated · ${long}`);
-    onClose && onClose();
+    if (!value || busy) return;
+    setBusy(true);
+    Promise.resolve(onSave && onSave(value))
+      .then(() => {
+        toast && toast(`Deadline updated · ${long}`);
+        onClose && onClose();
+      })
+      .catch(() => setBusy(false));
   }
   function resetToDefault() {
     setValue(defaultISO);
@@ -3944,7 +3949,7 @@ function EditDeadlineModal({ currentISO, defaultISO, onClose, onSave, toast }) {
               <Btn tone="outline" onClick={onClose}>
                 Cancel
               </Btn>
-              <Btn tone="teal" icon={Icon.Check} disabled={!value} onClick={save}>
+              <Btn tone="teal" icon={Icon.Check} disabled={!value || busy} onClick={save}>
                 Save deadline
               </Btn>
             </div>

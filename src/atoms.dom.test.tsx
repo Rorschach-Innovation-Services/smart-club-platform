@@ -424,4 +424,46 @@ describe('Modal — the one dialog shell', () => {
     await userEvent.click(document.querySelector('.task-modal-backdrop') as HTMLElement);
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
+
+  describe('confirmClose — a dialog holding unsaved input', () => {
+    function Draft() {
+      const [open, setOpen] = useState(true);
+      const [text, setText] = useState('');
+      return open ? (
+        <Modal title="Draft" onClose={() => setOpen(false)} confirmClose={text !== ''}>
+          <input aria-label="Note" value={text} onChange={(e) => setText(e.target.value)} />
+        </Modal>
+      ) : null;
+    }
+
+    it('closes at once while nothing is entered', async () => {
+      const user = userEvent.setup();
+      render(<Draft />);
+      await user.keyboard('{Escape}');
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
+    it('asks before discarding; Keep editing keeps the input, Discard closes', async () => {
+      const user = userEvent.setup();
+      render(<Draft />);
+      await user.type(screen.getByRole('textbox', { name: 'Note' }), 'half-typed');
+
+      await user.click(screen.getByTitle('Close'));
+      expect(screen.getByRole('alert')).toHaveTextContent('Discard your changes?');
+      await user.click(screen.getByRole('button', { name: 'Keep editing' }));
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.getByRole('textbox', { name: 'Note' })).toHaveValue('half-typed');
+
+      // Escape asks too, and a second Escape answers "keep editing".
+      await user.keyboard('{Escape}');
+      expect(screen.getByRole('alert')).toBeInTheDocument();
+      await user.keyboard('{Escape}');
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+      await user.keyboard('{Escape}');
+      await user.click(screen.getByRole('button', { name: 'Discard' }));
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+  });
 });

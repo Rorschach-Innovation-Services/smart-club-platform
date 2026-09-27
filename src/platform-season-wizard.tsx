@@ -296,13 +296,17 @@ function RenewRow({
         <input
           type="checkbox"
           id={inputId}
-          checked={showDetail}
-          disabled={!!overrun}
+          checked={ticked}
+          // Ticked before the calendar shrank: left enabled so it can still be unticked.
+          disabled={!!overrun && !ticked}
           aria-describedby={overrun ? overrunId : undefined}
           onChange={(e) => onTick(e.target.checked)}
           style={{ marginTop: 3 }}
         />
-        <label htmlFor={inputId} style={{ flex: 1, cursor: overrun ? 'default' : 'pointer' }}>
+        <label
+          htmlFor={inputId}
+          style={{ flex: 1, cursor: overrun && !ticked ? 'default' : 'pointer' }}
+        >
           <div style={{ fontWeight: 600, fontSize: 13 }}>
             {`${row.league.label} — Run again on ${calendar.label}: ${row.structure.name}`}
           </div>
@@ -394,6 +398,16 @@ const AFTER_SETUP_STEPS = [
   { title: 'Approve and release', desc: 'Clubs see nothing until a series is released.' },
 ];
 
+/**
+ * What makes a calendar draft "edited" for the discard prompt: its name and its blocks.
+ * Block ids are left out — a fresh form mints new ones on every mount.
+ */
+const calendarSig = (c: SeasonCalendar) =>
+  JSON.stringify({
+    label: c.label,
+    blocks: c.blocks.map((b) => ({ label: b.label, start: b.start, end: b.end })),
+  });
+
 export function SeasonSetupWizard({
   slug,
   config,
@@ -427,6 +441,9 @@ export function SeasonSetupWizard({
   const [calDraft, setCalDraft] = useState<SeasonCalendar | null>(null);
   const [calValid, setCalValid] = useState(false);
   const selectedExisting = calendars.find((c) => c.id === existingCalId);
+  const calFormKey = calMode === 'existing' ? existingCalId : 'new';
+  /** The draft as the calendar form first reported it, so an edit reads as unsaved input. */
+  const [calBaseline, setCalBaseline] = useState<{ formKey: string; sig: string } | null>(null);
 
   // ── Step 2: league structures ──
   const [leagueChoices, setLeagueChoices] = useState<Record<string, LeagueChoice>>({});
@@ -645,6 +662,19 @@ export function SeasonSetupWizard({
         return [];
       })
     : [];
+  // A row ticked before the calendar shrank would otherwise drop out of the save silently.
+  if (calDraft)
+    for (const r of renewRows)
+      if (renewTicks[r.league.key] && blockOverrun(r.structure, calDraft))
+        step2Blockers.push({
+          key: r.league.key,
+          message: `${r.league.label} was ticked to run again but its structure plays in a block ${calDraft.label || 'this calendar'} doesn't have — untick it or change the calendar.`,
+        });
+
+  const dirty =
+    (!!calDraft && !!calBaseline && calendarSig(calDraft) !== calBaseline.sig) ||
+    addedKeys.length > 0 ||
+    Object.values(renewTicks).some(Boolean);
 
   /**
    * Leaving step 0: re-derive every held NEW template structure's stage block positions
@@ -739,6 +769,12 @@ export function SeasonSetupWizard({
 
       const created: Array<{ league: string; structure: string }> = [];
       const freshLeagues = fresh.leagues ?? [];
+      const gone = planned.find((p) => !freshLeagues.some((fl) => fl.key === p.league.key));
+      if (gone)
+        throw new ApiError(
+          409,
+          `${gone.league.label} was deleted in another session — nothing was saved. Close and start again.`,
+        );
       const nextLeagues = freshLeagues.map((fl) => {
         const p = planned.find((x) => x.league.key === fl.key);
         if (!p) return fl;
@@ -797,7 +833,14 @@ export function SeasonSetupWizard({
   }
 
   return (
-    <Modal eyebrow={WIZARD_EYEBROW} title={WIZARD_TITLE} maxWidth={1040} onClose={onClose}>
+    <Modal
+      eyebrow={WIZARD_EYEBROW}
+      title={WIZARD_TITLE}
+      maxWidth={1040}
+      onClose={onClose}
+      dismissable={false}
+      confirmClose={dirty}
+    >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 18 }}>
         {STEPS.map((label, i) => (
           <span
@@ -894,6 +937,11 @@ export function SeasonSetupWizard({
             onDraftChange={(draft, valid) => {
               setCalDraft(draft);
               setCalValid(valid);
+              setCalBaseline((b) =>
+                b && b.formKey === calFormKey
+                  ? b
+                  : { formKey: calFormKey, sig: calendarSig(draft) },
+              );
             }}
             onSave={async () => {}}
             onClose={() => {}}

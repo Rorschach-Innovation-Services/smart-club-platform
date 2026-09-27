@@ -1,8 +1,14 @@
 /* ─── Shared atom components ─── */
 
-import { useState, useEffect, useRef, useId } from 'react';
+import { useState, useEffect, useRef, useId, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
-import type { ReactNode, CSSProperties, ComponentType, ButtonHTMLAttributes } from 'react';
+import type {
+  ReactNode,
+  CSSProperties,
+  ComponentType,
+  ButtonHTMLAttributes,
+  MutableRefObject,
+} from 'react';
 import { scoreCQI, cqiBand } from './cqiScore';
 import type { Club } from './types';
 import { GUIDE_URL, HelpLink } from './help/HelpDrawer';
@@ -848,7 +854,9 @@ export function useNestedEscapeClose(onClose: () => void) {
  * - focus moves into the dialog on open (unless a child already took it, e.g. `autoFocus`)
  *   and returns to whatever had it when the dialog closes;
  * - a click on the backdrop closes, unless `dismissable={false}` (a form that must not lose
- *   its input to a stray click).
+ *   its input to a stray click);
+ * - with `confirmClose`, a close request (Escape, ×, backdrop) first asks "Discard your
+ *   changes?" inside the dialog; content can also intercept it with `useModalCloseGuard`.
  *
  * Portalled to document.body so the fixed backdrop centres on the viewport, not on the
  * residual transform the fadeUp animation leaves on `.main > *`. The help drawer's
@@ -864,6 +872,7 @@ export function Modal({
   labelledBy,
   dismissable = true,
   closeLabel = 'Close',
+  confirmClose = false,
 }: {
   eyebrow?: ReactNode;
   title: ReactNode;
@@ -879,8 +888,18 @@ export function Modal({
   dismissable?: boolean;
   /** Tooltip on the close button. */
   closeLabel?: string;
+  /** True ⇒ the dialog holds unsaved input: closing asks before discarding it. */
+  confirmClose?: boolean;
 }) {
-  useEscapeClose(onClose);
+  const guardRef = useRef<(() => boolean) | null>(null);
+  const [asking, setAsking] = useState(false);
+  const askingNow = asking && confirmClose;
+  const requestClose = (viaEscape = false) => {
+    if (guardRef.current?.()) return;
+    if (!confirmClose) return onClose();
+    setAsking(!(viaEscape && askingNow));
+  };
+  useEscapeClose(() => requestClose(true));
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   useFocusTrap(dialogRef, true);
@@ -899,11 +918,12 @@ export function Modal({
   }, []);
   const style: CSSProperties = {};
   if (maxWidth) style.maxWidth = maxWidth;
-  if (footer) style.gridTemplateRows = 'auto 1fr auto';
+  if (footer || askingNow)
+    style.gridTemplateRows = `auto ${askingNow ? 'auto ' : ''}1fr${footer ? ' auto' : ''}`;
   return createPortal(
     <div
       className="task-modal-backdrop"
-      onClick={(e) => dismissable && e.target === e.currentTarget && onClose()}
+      onClick={(e) => dismissable && e.target === e.currentTarget && requestClose()}
     >
       <div
         ref={dialogRef}
@@ -921,16 +941,58 @@ export function Modal({
               {title}
             </div>
           </div>
-          <button className="task-modal-close" onClick={onClose} title={closeLabel}>
+          <button className="task-modal-close" onClick={() => requestClose()} title={closeLabel}>
             <Icon.X />
           </button>
         </div>
-        <div className="task-modal-body">{children}</div>
-        {footer && <div className="task-modal-foot">{footer}</div>}
+        {askingNow && (
+          <div
+            role="alert"
+            className="insights-callout"
+            style={{
+              margin: 0,
+              borderRadius: 0,
+              padding: '10px 26px',
+              display: 'flex',
+              gap: 10,
+              alignItems: 'center',
+              flexWrap: 'wrap',
+            }}
+          >
+            <span style={{ flex: 1 }}>Discard your changes?</span>
+            <Btn tone="ink" size="sm" onClick={onClose}>
+              Discard
+            </Btn>
+            <Btn tone="outline" size="sm" autoFocus onClick={() => setAsking(false)}>
+              Keep editing
+            </Btn>
+          </div>
+        )}
+        <CloseGuardContext.Provider value={guardRef}>
+          <div className="task-modal-body">{children}</div>
+          {footer && <div className="task-modal-foot">{footer}</div>}
+        </CloseGuardContext.Provider>
       </div>
     </div>,
     document.body,
   );
+}
+
+const CloseGuardContext = createContext<MutableRefObject<(() => boolean) | null> | null>(null);
+
+/**
+ * Lets a Modal's content intercept the Modal's own close (Escape, ×, backdrop): `guard`
+ * returns true when it handled the request and the dialog must stay open.
+ */
+export function useModalCloseGuard(guard: () => boolean) {
+  const ref = useContext(CloseGuardContext);
+  useEffect(() => {
+    if (!ref) return;
+    ref.current = guard;
+    return () => {
+      if (ref.current === guard) ref.current = null;
+    };
+  });
 }
 
 /**

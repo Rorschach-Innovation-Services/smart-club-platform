@@ -172,16 +172,15 @@ const MODE_CARDS = (hasStructures: boolean): OptionCard<'template' | 'existing'>
 ];
 
 /**
- * A pick's overrun of `calendar`, or null. Only a library pick or an adoption ('existing')
- * can overrun: a template pick derives its block positions against the calendar.
+ * A pick's overrun of `calendar`, or null — for every mode: a template instance is placed
+ * against the calendar at pick time, but "Adjust stages" or a later calendar change can
+ * still leave a stage in a block the calendar doesn't have.
  */
 export function pickOverrun(
   choice: LeagueChoice | undefined,
   calendar: SeasonCalendar | undefined,
 ): { block: number; has: number } | null {
-  return calendar && choice?.mode === 'existing' && choice.structure
-    ? blockOverrun(choice.structure, calendar)
-    : null;
+  return calendar && choice?.structure ? blockOverrun(choice.structure, calendar) : null;
 }
 
 /**
@@ -582,6 +581,8 @@ export function SetupLeagueDialog({
         )
       }
       onClose={onClose}
+      dismissable={false}
+      confirmClose={choice.mode !== 'skip' || calendarId !== ''}
     >
       <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
         A league plays one structure on one season calendar. Pick both — nothing is chosen for you.

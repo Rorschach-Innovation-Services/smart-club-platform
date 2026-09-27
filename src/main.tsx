@@ -878,9 +878,11 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       .catch(() => {});
   }
   function setSubmissionDeadline(iso) {
-    withToast(() => api.putTenantConfig({ submissionDeadline: iso }), 'Could not save deadline')
-      .then(() => invalidate(qk.tenant()))
-      .catch(() => {});
+    // Returned raw (no .catch swallow) so the deadline modal stays open on a failed save.
+    return withToast(
+      () => api.putTenantConfig({ submissionDeadline: iso }),
+      'Could not save deadline',
+    ).then(() => invalidate(qk.tenant()));
   }
   function saveOrgName(name) {
     const trimmed = (name || '').trim();
@@ -926,9 +928,9 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     if (!cur) return Promise.resolve();
     const merged = { ...cur, ...patch, key: cur.key }; // key is immutable
     const next = allLeagues.map((l) => (l.key === key ? merged : l));
-    return withToast(() => api.putTenantConfig({ leagues: next }), 'Could not save league')
-      .then(() => invalidate(qk.tenant()))
-      .catch(() => {});
+    return withToast(() => api.putTenantConfig({ leagues: next }), 'Could not save league').then(
+      () => invalidate(qk.tenant()),
+    );
   }
   function deleteLeague(key) {
     const next = allLeagues.filter((l) => l.key !== key);

@@ -1617,6 +1617,51 @@ describe('structure editor — Preview and Edit modes', () => {
   });
 });
 
+describe('structure editor — closing the dialog', () => {
+  const closeBtn = () => document.querySelector('.task-modal-close') as HTMLElement;
+
+  it('a backdrop click never closes it; × from the preview closes it', async () => {
+    const { user } = setup([structure()]);
+    await openPreview(user);
+
+    await user.click(document.querySelector('.task-modal-backdrop') as HTMLElement);
+    expect(screen.getByRole('dialog', { name: 'View structure' })).toBeInTheDocument();
+
+    await user.click(closeBtn());
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('Escape from the preview closes it', async () => {
+    const { user } = setup([structure()]);
+    await openPreview(user);
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('× with unsaved edits asks first, the same prompt Esc and Cancel use', async () => {
+    const { user } = setup([structure()]);
+    await openEditor(user);
+    const name = screen.getByDisplayValue('Flat round robin');
+    await user.clear(name);
+    await user.type(name, 'Renamed');
+
+    await user.click(closeBtn());
+    expect(screen.getByRole('dialog', { name: 'Edit structure' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Discard your unsaved changes and go back to the preview?',
+    );
+    await user.click(screen.getByRole('button', { name: 'Keep editing' }));
+    expect(screen.getByDisplayValue('Renamed')).toBeInTheDocument();
+  });
+
+  it('× from the editor with no edits closes it', async () => {
+    const { user } = setup([structure()]);
+    await openEditor(user);
+    await user.click(closeBtn());
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});
+
 describe('structure editor — overs', () => {
   const oversBox = () => screen.getByLabelText(/overs \(optional\)/i);
 
