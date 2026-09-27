@@ -31,7 +31,7 @@
  *         (sst diff won't catch it; the deploy fails mid-flight).
  *      d. Add the VANITY entry (enabled:true) and `npx sst deploy --stage prod`.
  *      e. Client creates the CNAMEs (webHost/www → CloudFront domain; apiHost, if any,
- *         → API GW regional domain — targets in the deploy output / DNS sheet).
+ *         → API GW regional domain — targets in the deploy output / this file).
  *    See docs/guides/onboarding-a-tenant.md.
  *
  * ── Deliberate non-goal ──
@@ -78,14 +78,13 @@ export const SHARED_API_CERT_ARN =
 // never replaced (account CloudFront quota is maxed at 20/20), so this is stable —
 // kept as a constant to avoid ordering the StaticSite before the API Lambda in
 // sst.config.ts. Filled during the wildcard rollout from
-// `aws cloudfront list-distributions --profile medicoach`. Baked into the API as
-// WEB_CNAME_TARGET so the operator DNS sheet shows the real web CNAME target instead
-// of a placeholder. Empty → the DNS sheet shows a "look it up" hint.
+// `aws cloudfront list-distributions --profile medicoach`. Still baked into the API env
+// as WEB_CNAME_TARGET by sst.config.ts, but the in-app reader (the operator DNS sheet)
+// was removed with the one-setup round (ADR 0014 amendment): this constant is now the
+// reference value for the manual CNAME step in docs/guides/onboarding-a-tenant.md, and
+// the env wiring is dead until the post-burn-in cleanup drops it.
 // Verified 2026-07-17: distribution E28ENZ488BYMPB (the Smart Club StaticSite). Routing-inert
-// until the wildcard is armed; it only changes the operator DNS-sheet display string — but
-// that display DOES change now (the sheet stops showing the placeholder hint), which the
-// vanity (path 2) onboarding flow also reads. Correct and desired: every vanity alias rides
-// this same distribution.
+// until the wildcard is armed. Every vanity alias rides this same distribution.
 export const WEB_CNAME_TARGET = 'd1iklmvwijprzp.cloudfront.net';
 
 export interface VanityDomain {

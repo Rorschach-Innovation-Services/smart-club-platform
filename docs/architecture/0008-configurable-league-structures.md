@@ -1,6 +1,9 @@
 # ADR 0008 — Configurable league structures: stage pipelines over per-union special cases
 
-**Status:** Accepted
+**Status:** Accepted. Superseded in part by the
+[ADR 0014 amendment (one setup per league)](0014-seasons-one-vocabulary-one-path-one-engine.md#amendment-september-2026-one-setup-per-league):
+a league no longer holds `competitions[]`; it has at most one `setup { structureId, calendarId }`,
+and match format is `CompetitionStructure.overs`.
 
 ## Context
 

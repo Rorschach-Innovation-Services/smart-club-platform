@@ -15,6 +15,42 @@ Nothing changes for `dolphins` until an operator configures something.
 
 ---
 
+## The setup model (since 27 Sep 2026, read this first)
+
+[ADR 0014 amendment](../architecture/0014-seasons-one-vocabulary-one-path-one-engine.md#amendment-september-2026-one-setup-per-league).
+The Competition is gone. Older sections below that mention competitions, quick start or the
+Competition defaults card describe the build before this; where they tell you to do
+something, they point here.
+
+- **League → one setup → structure + calendar.** `League.setup { structureId, calendarId }`,
+  at most one per league. No setup, no season.
+- **Format = structure overs.** `CompetitionStructure.overs` (empty = 50). A new series takes
+  the structure's name as its series type and its overs as `maxOvers`. There is no match
+  format, ball type or format label anywhere else.
+- **Two formats = two leagues.** T20 and 50-over for the same clubs are two league entries,
+  each with its own setup.
+- **Operator only.** The setup is created and changed in one dialog: **Set up** / **Change
+  setup** on the league row of the catalogue, or the league row of **Set up a season**. The
+  admin console cannot create or change one.
+- **Admin side.** **Fixtures → Start a season** lists only set-up leagues. The rest appear under
+  "Not set up yet — ask your operator"; a league whose calendar has ended says to ask the
+  operator to renew the dates. There is no quick start.
+- **Refusals.** `POST /season-runs`: 400 `setup_missing` / `structure_missing` /
+  `calendar_missing`, 409 `season_exists` (same league, same season label). Generate never
+  checks setup; a frozen season regenerates even if its league lost its setup.
+- **Regenerate keeps the stored format.** An existing series keeps its `seriesType` and
+  `maxOvers` on regenerate. Only a rebase that changed the structure's name or overs (it stamps
+  `formatChanged`) lets the next regenerate adopt the new ones.
+- **Re-pointing a calendar mid-season** is allowed; the save warns "N ungenerated season run(s)
+  of "<league>" will follow the new dates". Generated runs are frozen and unaffected.
+- **Stale consoles.** A stale admin tab cannot wipe or forge a setup (the admin PUT restores
+  stored setups by league key). A stale operator console that still edits competitions gets
+  409 `console_stale`: refresh it.
+- **Gone:** quick start, the competition picker, the Competition defaults card, the DNS /
+  go-live card. The live URL still shows on the setup card (`liveUrl` on
+  `GET /platform/tenants/:slug`, response-only). Venue aliases and travel are config-only
+  (§9).
+
 ## 0. Pre-flight
 
 ```bash
@@ -86,47 +122,43 @@ npm run dev:local:demo     # API :3333, vite :3201
 **Restart the local API after any `packages/api` change — there is no backend hot reload,
 and the new routes will 404 until you do.**
 
-There are two ways into a season (ADR 0014) and the walkthrough covers both: the operator's
-wizard (**Set up a season**, from the tenant edit page or the CalendarsCard/SetupCard empty
-states; the modal is titled "Set up the season calendar & competitions") and the admin's
-**Start a season**, which offers **Quick start** for a league with no competition. The cards
-(Season calendars, Structure library, Leagues, Competition defaults) are the editing surfaces
+There is one way to set a league up and one way to start its season. The operator sets it up
+(**Set up a season**, from the tenant edit page or the CalendarsCard/SetupCard empty states,
+or **Set up** on a league row of the catalogue); the admin starts it (**Start a season**). The
+cards (Season calendars, Competition structures, League catalogue) are the editing surfaces
 you drop into afterwards.
 
 Walk the whole path once:
 
 1. Operator console → **Set up a season** → _Season dates_ (a calendar with two blocks and a
-   mid-season break, or extend an existing one) → _League structures_ (add a league, pick a
-   template or an existing structure; check the season narrative and the "Stage N plays in
-   Block N" choices; open **Adjust stages** on a new template and change one stage) →
-   _Review & create_ → commit. Leave at least one league out of the wizard, unbound.
-2. Operator console → **Venues** → _Sync from club records_, then pin one ground by hand
+   mid-season break, or extend an existing one) → _League structures_ (add a league and pick
+   a template or an existing structure for it; nothing is preselected, and the calendar is
+   the one from step one. Check the fit verdict, the season narrative and the "Stage N plays
+   in Block N" choices; no format is asked here) → _Review & create_ (a league that already
+   had a setup shows "Replaces the current setup: …") → commit. Leave at least one league out
+   of the wizard, with no setup.
+2. Operator console → **Competition structures** → open a structure. It opens in **Preview**
+   ("You're previewing — nothing here changes anything"). **Edit structure** → set **Overs**
+   (empty = 50) → Esc returns to preview without saving. Edit again and save.
+3. Operator console → **Venues** → _Sync from club records_, then pin one ground by hand
    (latitude and longitude accept a minus sign and a decimal point — if they don't, stop).
-3. Operator console → **Competition defaults** → add a match format and a match day, save,
-   and confirm a new stage set to "Set days only" starts with that day ticked.
-4. Admin console → **Fixtures** → **Start a season** → pick the **unbound** league. The
-   callout must read "No competition has been set up for this league yet" and the Quick start
-   form must appear in place. Pick a template, choose **Custom dates** with your own start and
-   end, give a season label and a match format (it should list the format from step 3), and
-   check the preview narrative before **Start season**. The done screen shows the four "What
-   happens next" steps. This is the case that could not generate at all before ADR 0014
-   (flat season on custom dates), so do not skip it.
+4. Admin console → **Fixtures** → **Start a season**. The league left out in step 1 must be
+   listed as not set up, with "ask your operator", and must not be startable. Pick a set-up
+   league → season label → start. The done screen shows the four "What happens next" steps.
 5. On the new season's stage card: the status timeline (Awaiting entrants → Ready → Generated
    → Released), "Plays in Block 1 · <dates>", the narrative line and "What the platform needs
    from you". **Confirm entrants** → **Generate N fixtures** (runs on the server) → approve →
-   release from the release bar. Release once with venues withheld.
+   release from the release bar. Release once with venues withheld. The series shows the
+   structure's name and the overs from step 2.
 6. Club portal → the season reads as **one** heading, and withheld venues show "Venue to be
    confirmed".
-7. Back to the admin console → **Start a season** on a wizard-bound league → pick the
-   competition → start → confirm stage-1 entrants → generate → approve → release. Resolve a
-   later stage and confirm it generates. Then regenerate a released stage and confirm the
-   "Regenerate a released schedule?" prompt appears before anything is replaced.
-8. **Start a season** on the step-4 league again: it is now bound, so it must route to the
-   competition picker, not Quick start. The server refuses a second quick start on a calendar
-   the league already has a competition on, with
-   `"<league>" already has a competition on "<calendar>" — start the season from it instead`.
-   In the UI that is reachable only when the league's calendars have ended and Quick start is
-   offered again.
+7. Resolve a later stage and confirm it generates. Then regenerate a released stage and
+   confirm the "Regenerate a released schedule?" prompt appears before anything is replaced.
+8. **Start a season** on the same league with the same season label: the server refuses with
+   409 `season_exists`. Back in the operator console, on the **League catalogue**, **Set up** the
+   league left out in step 1 from its row: structure and calendar both start empty and Save
+   stays disabled until both are picked. After a refresh it is startable in the admin
+   launcher.
 9. Fixtures list → an imported or pre-ADR series shows an **Imported schedule** or
    **Stand-alone series** pill, its fixtures are editable, and nothing offers to regenerate it.
 10. Operator console → edit a calendar block's dates while a series is still scheduled against
@@ -134,8 +166,9 @@ Walk the whole path once:
     **not** blocked.
 
 > **"Create a series" is gone (ADR 0014).** The admin console has no create-series form and
-> no series-level Regenerate. A one-off cup or festival is started through **Start a season**
-> with the **One-off tournament** template (quick start). Imported schedules and stand-alone
+> no series-level Regenerate. A one-off cup or festival is a league the operator sets up with
+> a structure from the **One-off tournament** template, then started through **Start a
+> season** like any other. Imported schedules and stand-alone
 > series stay on the Fixtures list and remain editable (add, edit, delete fixtures, allocate
 > venues), but they cannot be regenerated: there is no season stage to rebuild them from.
 
@@ -187,7 +220,8 @@ per [ADR 0006](../architecture/0006-platform-operator-and-tenant-registry.md)).
 **Point the operator at Set up a season first.** It walks season dates → league structures →
 review & create in one guided flow and ends in a single PUT, which is the order below anyway —
 it just does steps 1, 3 and 4 together instead of as three separate card visits. Venues
-(step 2) and Competition defaults (step 5) sit outside the wizard as standalone cards.
+(step 2) sit outside the wizard as a standalone card; venue aliases and travel (step 5) have
+no card at all.
 
 1. **Season calendars.** The union's real playing blocks. For KZNCU 2026/27 that is
    Block 1 (13 Sep – 13 Dec), the mid-season break, and Block 2 (3rd week Jan – March).
@@ -201,21 +235,18 @@ it just does steps 1, 3 and 4 together instead of as three separate card visits.
 3. **Structures.** Six starter templates cover all thirteen documented structures. JSON
    import is how you seed several without twenty rounds of clicking. The wizard's template
    gallery shows a live fit verdict against the calendar picked in step 1; the standalone
-   Structure library card is where you go back to edit one stage by stage.
-4. **Leagues → Competitions.** Bind each format stream (e.g. "50 Over Red Ball", "T20 Pink
-   Ball") to a structure and a calendar. A league can run several in parallel — that was the
-   structural gap in the old model.
-5. **Competition defaults.** On the client's settings page: the union's match formats (offered
-   when a season starts), match days and time slots (the starting ticks for a stage's
-   schedule), travel cost, and venue aliases (two spellings of one ground, for the clash
-   check). Anything left empty uses the built-in value. Admins see the same card on their
-   league page with venue aliases read-only. For dolphins, run the alias backfill in §9a.
+   **Competition structures** card is where you go back to edit one stage by stage. Set
+   **Overs** on each structure (Edit structure → Overs; empty = 50). That is the match format.
+4. **Leagues → Setup.** One setup per league: **Set up** on the league's row in the League
+   catalogue (or its row in the wizard) → structure + calendar. Two formats for the same clubs
+   (T20 and 50-over) are two league entries, each with its own setup. See
+   [The setup model](#the-setup-model-since-27-sep-2026-read-this-first).
+5. **Venue aliases and travel.** Config-only; no card. Leave both unset unless the union asks.
+   To change them, see §9.
 
-Then hand over: the admin runs the season from **Fixtures → Start a season**. A league you did
-not bind is not stuck: the admin can **quick-start** it (pick a template, dates and a match
-format; the server creates the structure, calendar, competition and binding from the closed
-template registry). Admins cannot author stages, so a league that needs a shape no template
-gives still needs an operator binding.
+Then hand over: the admin runs the season from **Fixtures → Start a season**. The launcher
+lists only set-up leagues; any other league tells the admin to ask the operator. There is no
+admin-side way round that, by design.
 
 ## 5. Verification
 
@@ -226,10 +257,12 @@ curl -s https://<host>/tenant | jq '{calendars: (.calendars|length), structures}
 ```
 
 In the console: the operator settings page shows the three new cards and the setup checklist
-has matching items. The admin console shows **Start a season** beside _Create a series_.
+has matching items. The admin console shows **Start a season** (there is no _Create a series_
+any more).
 
-A league with no competition configured must say so plainly ("no structure configured for this
-league — contact your platform operator") rather than showing an empty dropdown.
+A league with no setup must say so plainly (listed under "Not set up yet — ask your
+operator"; a direct `POST /season-runs` gets 400 `setup_missing`) rather than showing an empty
+dropdown.
 
 ## 6. Rollback
 
@@ -310,7 +343,10 @@ season console shows **This season runs structure v{old}; the template is now v{
    - schedule change ⇒ **Needs regenerating**;
    - format change ⇒ any per-season pairing choice is cleared (it's in the audit);
    - stage removed ⇒ its run entry goes, **its series stay**;
-   - stage added ⇒ appears awaiting entrants.
+   - stage added ⇒ appears awaiting entrants;
+   - structure **name or overs** changed ⇒ every surviving stage is marked `formatChanged`,
+     and its next generate writes the new series type and overs onto its existing series.
+     Without a rebase, a regenerate always keeps a series' stored type and overs.
 4. **Released stages** keep their pill and go through the normal released-schedule
    confirm, then the server clash gate. Nothing released is replaced without a click.
 
@@ -331,10 +367,18 @@ else changed the season. Refetch and review again.
 - **A stage reset to awaiting entrants keeps its series.** They stay under the same ids,
   the stage card still finds them, and regenerating over the same groups replaces them
   in place. If any are released, generate asks first, as it does anywhere else.
-- **Calendars are not rebased.** A calendar edit still doesn't reach a running season's
-  `calendarSnapshot`. Only standalone series follow a calendar edit on regenerate.
+- **Calendars are not rebased once generated.** A calendar edit (or re-pointing a league's
+  `setup.calendarId`) doesn't reach a season that has generated fixtures; its
+  `calendarSnapshot` is frozen. A season with nothing generated yet follows the live calendar,
+  and the operator save warns how many such runs will move. Only standalone series follow a
+  calendar edit on regenerate.
 
 ## 8. Migrate flat runs (added 2026-09-25)
+
+> **Done, historical.** Ran on dev and prod on 25 Sep 2026 (0 flat runs on either), and the
+> script has since been deleted. Any competition it minted is converted to a league setup by
+> §10. Quick start, mentioned below, is deleted too; a league with no setup is set up by the
+> operator. Do not use this section as instructions.
 
 Flat seasons used to be stored under a sentinel competition id, `__flat__`, with no
 competition, structure or (for custom dates) calendar in tenant config. Quick start replaces
@@ -392,22 +436,41 @@ league or delete the run.
 while a season run's `calendarSnapshot.id` still names it (`409 "N season runs were started
 on …"`). It already refused while a series was scheduled against it.
 
-## 9. Competition defaults and the venue-alias backfill (added 2026-09-25)
+## 9. Venue aliases and travel: config-only (revised 2026-09-27)
 
-`TenantConfig.competitionDefaults` ([ADR 0014](../architecture/0014-seasons-one-vocabulary-one-path-one-engine.md),
-[docs/api/tenant.md](../api/tenant.md#put-tenantconfig--update-config-admin)) holds what used
-to be constants: match formats, match days, double-header start times, travel cost and venue
-aliases. Every field is optional; an absent one uses the built-in value, so no tenant needs
-setting up for this deploy to be safe.
+`TenantConfig.competitionDefaults` now holds two fields, both optional:
 
-- **Where it is edited.** The operator's client settings page has a **Competition defaults**
-  card (after Competition structures). The tenant admin sees the same card on the Leagues page,
-  with venue aliases read-only. Both write through the same validation.
-- **What reads it.** Quick start offers the tenant's match formats; the structure editor and
-  the season wizard fill in the tenant's match days and start times; templates with start
-  times take the tenant's slots; the admin and club travel estimates use the tenant's travel
-  cost unless a series carries its own; a generated series with no overs of its own takes
-  the first match format's overs. Existing structures, seasons and series are never changed.
+| Field          | Shape                                      | Read by                                     |
+| -------------- | ------------------------------------------ | ------------------------------------------- |
+| `venueAliases` | `{ "<ground spelling>": "<ground name>" }` | release, in-season and clash-check gates    |
+| `travel`       | `{ costPerKm, carsPerAwayTrip }` (≥ 0)     | admin and club-portal travel cost estimates |
+
+Match formats, match days and time slots are gone (built-ins only); the server drops them if
+sent. **There is no card for either field** — the Competition defaults card was deleted. The
+anonymous `GET /tenant` doesn't serve them.
+
+**Editing them.** Operator config PUT, with an operator's Cognito ID token:
+
+```bash
+API=https://<api host>; T=<operator id token>; SLUG=<tenant>
+# 1. Read what is stored now.
+curl -s -H "Authorization: Bearer $T" $API/platform/tenants/$SLUG | jq '.competitionDefaults // {}' > cd.json
+# 2. Edit cd.json. Keep BOTH fields in it.
+# 3. Write it back.
+jq '{competitionDefaults: .}' cd.json \
+  | curl -s -X PUT -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+      --data @- $API/platform/tenants/$SLUG | jq '.competitionDefaults'
+```
+
+- **Send the whole object.** `competitionDefaults` is replaced, not merged: a PUT carrying only
+  `venueAliases` deletes `travel`, and vice versa. Always read, edit, write back both.
+- Keys and values are stored normalised (`Riverside Bowl` → `riversidebowl`); send them as
+  written on the sheet. A name that normalises to nothing is a 400. Max 500 aliases.
+- Adding or removing an alias can change clash verdicts on the next release or in-season
+  edit. Check with the union before removing one.
+- The tenant admin's `PUT /tenant/config` accepts the same field through the same validator.
+  Prefer the operator route so the change is operator-owned.
+
 - **Venue aliases.** The release, in-season and clash-check gates, and the four venue CLIs
   (`resolve-venue-clashes`, `normalise-venue-names`, `merge-duplicate-venues`,
   `bootstrap-fixture-prereqs`), resolve ground names through the code default
@@ -415,6 +478,8 @@ setting up for this deploy to be safe.
   merged over it. Aliases are stored normalised (`Riverside Bowl` → `riversidebowl`).
 
 ### 9a. Backfill the dolphins aliases into config
+
+> **Done** on dev and prod, 25 Sep 2026 (34 aliases each). Kept for reference.
 
 The code default is every dolphins spelling. Copy it into the dolphins config so an operator
 can see and edit it there. This changes no clash result — the gates already merge the two.
@@ -429,6 +494,108 @@ sst shell --stage dev -- npx tsx packages/api/scripts/backfill-venue-aliases.ts 
 It writes only when dolphins has no `venueAliases` at all; an existing map (even `{}`) is left
 alone, and the rest of `competitionDefaults` is kept. **Do not** empty `DEFAULT_VENUE_ALIASES`
 in code until this has run on dev **and** prod; that is a separate follow-up change.
+
+## 10. Migrate league setups (added 2026-09-27)
+
+`packages/api/scripts/migrate-league-setups.ts` gives every league that still has
+`competitions[]` and no `setup` its one setup, and moves each competition's overs onto its
+structure. **Additive**: it writes `setup` and `structure.overs` beside the old data and strips
+nothing, so the old build keeps working against a migrated config and rolling back the build
+needs no restore. A league that already has `setup` is never touched. Idempotent.
+
+Per league:
+
+- **Kept competition** = the one whose calendar ends latest. Its `{ structureId, calendarId }`
+  becomes `setup`.
+- **Extras** (every other competition) are reported, and the script exits 1. The league still
+  migrates on the kept one.
+- **Overs**, for every competition including extras: written onto its structure. If two
+  competitions sharing a structure disagree, the later one gets a per-league clone
+  (`st-<orig>-<league>`, name suffixed " · N overs"); if that was the kept one, `setup` points
+  at the clone.
+
+### 10a. Dry-run and read the report
+
+```bash
+sst shell --stage dev -- npx tsx packages/api/scripts/migrate-league-setups.ts   # dry-run, writes nothing
+```
+
+Read every list before confirming:
+
+| Report            | Means                                                                      | Do                                                                                                                                                   |
+| ----------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `extras`          | league had more than one competition; only one survives as its setup       | **Prod: STOP.** See 10b.                                                                                                                             |
+| `calendarChanges` | ungenerated run whose followed calendar changes; it will silently re-date  | Tell the admin, or fix the kept choice first                                                                                                         |
+| `formatDrift`     | generated run whose snapshot name/overs differ from the migrated structure | Nothing, usually: existing series keep their stored format on regenerate. A later stage's first generate, or a rebase, takes the migrated name/overs |
+| `excludedTeams`   | kept competition had `excludeTeamIds`; the new model ignores them          | Re-cut entrants with **Edit entrants** on the stage                                                                                                  |
+| `inheritedOvers`  | kept competition had no overs; its structure now carries another's         | Check the overs on that structure are right for this league                                                                                          |
+| `skipped`         | tenant failed validation or read; nothing written for it                   | Fix the reason, re-run                                                                                                                               |
+
+The last line reads `STOP: N extra competition(s) found — bring this report back for a
+split-league decision` when extras exist.
+
+### 10b. Prod gate: extra competitions
+
+Dry-run prod first. **If `extras` is non-empty, stop.** Each extra is a format stream (e.g. the
+T20 beside the 50-over) that would lose its league binding. Decide with the union, per league:
+create a second league for that format and set it up (the clone structure the dry-run names is
+ready for it), or accept that the stream ends. Only then `--confirm`. The script still exits 1
+while extras exist; that exit is the gate, not a failure of the write.
+
+### 10c. Confirm, then deploy immediately
+
+```bash
+sst shell --stage dev -- npx tsx packages/api/scripts/migrate-league-setups.ts --confirm
+sst shell --stage dev -- npx tsx packages/api/scripts/migrate-league-setups.ts   # re-run: "0 of 0 league(s)", "N already set up"
+# dev: re-seed (seed-cohort mints leagues with setups now), deploy, browser check.
+
+sst shell --stage prod -- npx tsx packages/api/scripts/migrate-league-setups.ts             # the gate, 10b
+sst shell --stage prod -- npx tsx packages/api/scripts/migrate-league-setups.ts --confirm
+npm run deploy    # straight after
+```
+
+Deploy right after the prod confirm. Until the deploy the old build is live and still edits
+competitions; an operator change in that window lands after the migration read it, and the new
+build never sees it. Run `--confirm` while no operator is mid-edit: each tenant config is
+re-read and written whole.
+
+### 10d. Backup and restore
+
+`--confirm` writes the full pre-image of each touched tenant config before its put:
+`packages/api/league-setups-backup-<tenant>-<ISO>.json` (gitignored; `--backup-dir=<dir>` to
+put it elsewhere). **Keep the prod backups.** A tenant whose backup fails is skipped, not
+written.
+
+- **Roll back the build:** redeploy the previous build. No restore: `competitions[]` is still
+  there and the old build reads it.
+- **Restore a config** (only if the migrated config itself is wrong):
+
+  ```bash
+  sst shell --stage <stage> -- npx tsx -e "import('./packages/api/src/repo.ts').then(async r => r.putTenantConfig(JSON.parse(require('fs').readFileSync('<backup file>','utf8'))))"
+  ```
+
+  This overwrites the whole config, including anything saved since the backup.
+
+## 11. Strip competitions after burn-in (cleanup-competitions)
+
+After prod has run on setups long enough that nobody will roll back to a pre-setup build,
+`packages/api/scripts/cleanup-competitions.ts` removes the inert data: `competitions[]`,
+`League.note`, and stage `ladder` / `outcome`. Nothing strips them on save; this script is the
+only thing that does. **After it runs, rolling back to a pre-setup build is no longer free.**
+
+- Dry-run by default; `--confirm` writes, after a pre-image backup per tenant:
+  `packages/api/competitions-cleanup-backup-<tenant>-<ISO>.json` (gitignored;
+  `--backup-dir=<dir>` to move it). Restore as in 10d.
+- **Refuses a tenant that still has an unmigrated league** (competitions and no `setup`): the
+  whole tenant is left untouched, the league is reported, and the run exits 1. Run §10 first;
+  a refusal means §10 was skipped or an extra was never resolved.
+- No structure versions are bumped and no season runs are touched. Idempotent.
+
+```bash
+sst shell --stage dev -- npx tsx packages/api/scripts/cleanup-competitions.ts
+sst shell --stage dev -- npx tsx packages/api/scripts/cleanup-competitions.ts --confirm
+# then prod, the same two steps, once burn-in is over
+```
 
 ## Known limitations to communicate
 

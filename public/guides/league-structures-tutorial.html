@@ -392,9 +392,9 @@
   <ol>
     <li><a href="#part-one"><span class="rn">One</span>How a season is put together</a></li>
     <li><a href="#season-calendars"><span class="rn">Two</span>Season calendars</a></li>
-    <li><a href="#venues"><span class="rn">Three</span>Venues and competition defaults</a></li>
+    <li><a href="#venues"><span class="rn">Three</span>Venues</a></li>
     <li><a href="#competition-structures"><span class="rn">Four</span>Competition structures</a></li>
-    <li><a href="#binding"><span class="rn">Five</span>Binding a competition to a league</a></li>
+    <li><a href="#binding"><span class="rn">Five</span>Setting up a league</a></li>
     <li><a href="#running-a-season"><span class="rn">Six</span>Running a season</a></li>
     <li><a href="#allocating-grounds"><span class="rn">Seven</span>Allocating grounds</a></li>
     <li><a href="#worked-examples"><span class="rn">Eight</span>Worked examples</a></li>
@@ -418,7 +418,7 @@
   <div class="cover-bottom">
     <div class="pipeline-cap">How a fixture comes to exist</div>
     <div class="pipeline">
-      <span class="node fill">Competition</span><span class="arm"></span>
+      <span class="node fill">League</span><span class="arm"></span>
       <span class="node">Season</span><span class="arm"></span>
       <span class="node">Stage</span><span class="arm"></span>
       <span class="node">Group</span><span class="arm"></span>
@@ -433,7 +433,7 @@
     </div>
     <div style="text-align:right">
       2026 / 27 Season<br>
-      Version 2.0 · September 2026
+      Version 2.1 · September 2026
     </div>
     </div>
   </div>
@@ -446,14 +446,14 @@
     <h2>What's in this guide</h2>
   </div>
   <ol>
-    <li><a href="#part-one"><span class="n">One</span><span class="t">How a season is put together</span><span class="d">The four ideas everything else rests on, and the two ways in</span></a></li>
+    <li><a href="#part-one"><span class="n">One</span><span class="t">How a season is put together</span><span class="d">The four ideas everything else rests on, and who does what</span></a></li>
     <li><a href="#season-calendars"><span class="n">Two</span><span class="t">Season calendars</span><span class="d">Playing blocks, breaks and excluded dates</span></a></li>
-    <li><a href="#venues"><span class="n">Three</span><span class="t">Venues and competition defaults</span><span class="d">The ground list, why pinning matters, and the union's own defaults</span></a></li>
-    <li><a href="#competition-structures"><span class="n">Four</span><span class="t">Competition structures</span><span class="d">Building the shape of a competition</span></a></li>
-    <li><a href="#binding"><span class="n">Five</span><span class="t">Binding a competition to a league</span><span class="d">Where structures meet real clubs</span></a></li>
+    <li><a href="#venues"><span class="n">Three</span><span class="t">Venues</span><span class="d">The ground list, why pinning matters, and the two settings with no card</span></a></li>
+    <li><a href="#competition-structures"><span class="n">Four</span><span class="t">Competition structures</span><span class="d">Building the shape of a season, and its overs</span></a></li>
+    <li><a href="#binding"><span class="n">Five</span><span class="t">Setting up a league</span><span class="d">One structure and one calendar per league</span></a></li>
     <li><a href="#running-a-season"><span class="n">Six</span><span class="t">Running a season</span><span class="d">The administrator's stage-by-stage walkthrough</span></a></li>
     <li><a href="#allocating-grounds"><span class="n">Seven</span><span class="t">Allocating grounds</span><span class="d">What the allocator does, and how to argue with it</span></a></li>
-    <li><a href="#worked-examples"><span class="n">Eight</span><span class="t">Worked examples</span><span class="d">Four real KZNCU and EMCU competitions</span></a></li>
+    <li><a href="#worked-examples"><span class="n">Eight</span><span class="t">Worked examples</span><span class="d">Four real KZNCU and EMCU leagues</span></a></li>
     <li><a href="#messages"><span class="n">Nine</span><span class="t">What the messages mean</span><span class="d">Every warning, and what to do about it</span></a></li>
     <li><a href="#reference"><span class="n">Ten</span><span class="t">Reference</span><span class="d">Glossary and who can do what</span></a></li>
   </ol>
@@ -470,22 +470,28 @@
     </p>
   </div>
 
-  <h3>A league is not a competition</h3>
+  <h3>One league, one format, one setup</h3>
 
   <p>
     In the old model a league was just a name, and it ran one flat round robin. That works
-    for EMCU Division 2. It does not work for KZNCU Premier Men, which runs
-    <strong>two competitions at once</strong>: a T20 Pink Ball tournament in seeded groups,
-    and a 50 Over Red Ball league split into a Top Six and a Bottom Six.
+    for EMCU Division 2. It does not work for KZNCU Premier Men, which plays a T20 Pink Ball
+    tournament in seeded groups and a 50 Over Red Ball league split into a Top Six and a
+    Bottom Six.
   </p>
 
   <p>
-    So a league now holds one or more <strong>competitions</strong>. Each competition is a
-    format stream with its own shape and its own dates. The same twelve clubs can be in both,
-    grouped completely differently.
+    On the platform those are <strong>two leagues</strong>, "Premier Men T20" and "Premier Men
+    50 Over", the way the union's own catalogue already lists them. The same twelve clubs can
+    be in both, grouped completely differently. Two formats always means two leagues.
   </p>
 
-  <h3>A competition is a pipeline of stages</h3>
+  <p>
+    Each league has one <strong>setup</strong>: the <strong>structure</strong> it plays
+    through and the <strong>season calendar</strong> it plays on. The operator makes it. The
+    structure also carries the match format, as its number of overs.
+  </p>
+
+  <h3>A structure is a pipeline of stages</h3>
 
   <p>
     A stage is one phase of play. Premier Men 50 Over has two: a double round robin, then a
@@ -529,8 +535,8 @@
 
   <p>
     A Top Six therefore produces one series and a Bottom Six another. In the club portal
-    those appear under a single season heading, so a club sees one competition rather than
-    two loose lists.
+    those appear under a single season heading, so a club sees one season rather than two
+    loose lists.
   </p>
 
   <h3 id="standings">Standings are typed by a human, on purpose</h3>
@@ -556,54 +562,51 @@
     </p>
   </div>
 
-  <h3 id="two-doors">Two doors into the same model</h3>
+  <h3 id="two-doors">Who does what</h3>
 
   <p>
-    Every season is a real competition on a real structure, however it was set up. There are
-    two ways to get one, and they end in the same place.
+    There is one way to set a league up and one way to start its season. The operator does
+    the first, the administrator the second.
   </p>
 
   <table class="t-narrow">
-    <thead><tr><th>Door</th><th>Who, and what it does</th></tr></thead>
+    <thead><tr><th>Who</th><th>What they do</th></tr></thead>
     <tbody>
       <tr>
-        <td><strong>The operator's wizard</strong><br><span class="ui">Set up a season</span></td>
+        <td><strong>The operator</strong><br><span class="ui">Set up a season</span> · <span class="ui">Set up</span></td>
         <td>
-          The operator opens <em>Set up the season calendar &amp; competitions</em> from the tenant
-          page. Three steps: <strong>season dates</strong> (the calendar), <strong>league
-          structures</strong> (a template or an existing structure per league, with
-          <span class="ui">Adjust stages</span> to edit a new template's stages inline), then
-          <strong>review &amp; create</strong>, which saves it all at once. This is the full tool,
-          and it embeds Parts Two, Four and Five.
+          The wizard, <em>Set up the season calendar &amp; leagues</em>, has three steps:
+          <strong>season dates</strong> (the calendar), <strong>league structures</strong> (a
+          template or an existing structure per league), then <strong>review &amp;
+          create</strong>, which saves it all at once. For one league at a time,
+          <span class="ui">Set up</span> on its row in the League catalogue does the same job.
+          Parts Two, Four and Five cover what these screens ask.
         </td>
       </tr>
       <tr>
-        <td><strong>The administrator's quick start</strong><br><span class="ui">Start a season</span></td>
+        <td><strong>The administrator</strong><br><span class="ui">Start a season</span></td>
         <td>
-          For a league with no competition yet, or whose competitions are on calendars that have
-          ended, <span class="ui">Start a season</span> offers <strong>Quick start</strong>. The
-          admin picks a template, the dates (an existing calendar or their own start and end) and
-          a match format. The platform then creates the structure, the calendar and the
-          competition, binds it to the league and starts the season in one step.
+          Picks a league the operator has set up, gives the season a label and starts it. Then
+          works each stage: confirm entrants, generate, approve, release (Part Six).
         </td>
       </tr>
     </tbody>
   </table>
 
   <div class="why">
-    <span class="callout-label">Admins choose, operators author</span>
+    <span class="callout-label">Operators set up, administrators run</span>
     <p>
-      Quick start only ever picks from the platform's own list of templates. An administrator
-      cannot write or edit a structure's stages. That stays the operator's job, which is why a
-      quick-started structure is made fresh for its league and never offered back to the
-      wizard as a shape to reuse.
+      An administrator cannot create or change a league's setup, or edit a structure. A league
+      the operator hasn't set up is listed in <span class="ui">Start a season</span> under
+      <em>Not set up yet — ask your operator</em>. That is one message to the operator, instead
+      of a season quietly started on the wrong dates.
     </p>
   </div>
 
   <p>
-    The parts that follow are still worth reading in full. They're what the wizard's steps and
-    the quick-start templates are built from, and they're where the operator goes afterwards to
-    edit a structure stage by stage, extend a calendar mid-season, or fix a single binding.
+    The parts that follow are worth reading in full. They're what the wizard's steps are built
+    from, and they're where the operator goes afterwards to edit a structure stage by stage,
+    extend a calendar mid-season, or change one league's setup.
   </p>
 </section>
 
@@ -680,7 +683,7 @@
   <div class="warn">
     <span class="callout-label">Before you save</span>
     <p>
-      A calendar that a competition, a series or a running season uses cannot be deleted. The
+      A calendar that a league's setup, a series or a running season uses cannot be deleted. The
       platform will refuse and tell you what is using it. That is deliberate: deleting it
       would strand a season nobody could regenerate.
     </p>
@@ -704,7 +707,7 @@
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Three · Operator</div>
-    <h2 id="venues">Venues and competition defaults</h2>
+    <h2 id="venues">Venues</h2>
     <p class="lede">
       The master list of grounds fixtures can be played at. Second, because the allocator
       needs it and because you can seed most of it automatically.
@@ -780,20 +783,19 @@
     </p>
   </div>
 
-  <h3 id="competition-defaults">Competition defaults</h3>
+  <h3 id="competition-defaults">Two settings with no card</h3>
 
   <p>
-    The <span class="ui">Competition defaults</span> card on the client's settings page holds
-    the union's own answers to questions the platform would otherwise answer with built-in
-    values. <strong>Match formats</strong> are offered when an administrator starts a season,
-    and picking one fills in its overs and ball type. <strong>Match days</strong> and
-    <strong>time slots</strong> are the starting ticks for a stage that plays on set days only
-    or has set start times; every stage can still change them. <strong>Travel cost</strong>
-    prices the travel estimates on the fixtures screens and exports. <strong>Venue
-    aliases</strong> tell the clash check that two spellings are one ground, so a fixture at
-    either books the same field. Anything left empty uses the built-in value, and changing a
-    default never changes a season or structure that already exists. Administrators see the
-    same card on their league page, with venue aliases read-only.
+    <strong>Venue aliases</strong> tell the clash check that two spellings are one ground, so a
+    fixture at either books the same field. <strong>Travel cost</strong> (rand per kilometre,
+    cars per away trip) prices the travel estimates on the fixtures screens and the club
+    portal. Neither has a card in the console: ask your platform operator to change them.
+  </p>
+
+  <p>
+    Match formats, match days and start times are no longer union-wide settings. The overs
+    live on each structure (Part Four), and each stage picks its own days and times, starting
+    from the platform's usual choices.
   </p>
 </section>
 
@@ -803,7 +805,7 @@
     <div class="part-num">Part Four · Operator</div>
     <h2 id="competition-structures">Competition structures</h2>
     <p class="lede">
-      The shape of a competition, built once and reused. This is the heart of the feature
+      The shape of a league's season, built once and reused. This is the heart of the feature
       and the part worth taking slowly. The wizard embeds it: its second step, <em>League
       structures</em>, picks a template or an existing structure per league, and
       <span class="ui">Adjust stages</span> opens this same stage editor inline. This part is
@@ -816,8 +818,7 @@
   <p>
     Six templates ship, and between them they cover all thirteen documented KZNCU and EMCU
     structures. A template is a <strong>copy</strong>, not a link. Once you pick one it is
-    yours and fully editable, and changing it later never affects anything else. The same six
-    are what an administrator chooses from in Quick start.
+    yours and fully editable, and changing it later never affects anything else.
   </p>
 
   <table>
@@ -825,7 +826,7 @@
     <tbody>
       <tr><td>Flat round robin</td><td>Every EMCU division. One stage, everyone plays everyone.</td></tr>
       <tr><td>Split league with mid-season swap</td><td>KZNCU Premier Men 50 Over, Premier Women 30 Over.</td></tr>
-      <tr><td>Seeded groups → cross-group semis → final</td><td>Every T20 Pink Ball competition.</td></tr>
+      <tr><td>Seeded groups → cross-group semis → final</td><td>Every T20 Pink Ball league.</td></tr>
       <tr><td>Seeded groups → within-group semis → final</td><td>A league where each group produces its own finalist.</td></tr>
       <tr><td>Stream + knockout cup</td><td>Promotion Men: streams plus the Kingsmead Cup.</td></tr>
       <tr><td>One-off tournament</td><td>A cup or festival outside the league season. Pick the sides, get a seeded knockout spread across the dates you give it.</td></tr>
@@ -845,6 +846,42 @@
     <span class="ui">Import JSON</span> is how you move a structure between clients or seed
     several at once without twenty rounds of clicking.
   </p>
+
+  <h3>Preview first, then Edit</h3>
+
+  <p>
+    Open a structure from the <span class="ui">Competition structures</span> card and it opens
+    in <strong>Preview</strong>: the stages as plain sentences, the preview rail, and a picker
+    to see the dates on any of the union's calendars. The line under the title says so:
+    <em>You're previewing — nothing here changes anything.</em>
+  </p>
+
+  <p>
+    Press <span class="ui">Edit structure</span> to change it. The form opens with a strip
+    that says what saving will change: every season using the structure, or just one of them
+    (<span class="field">Edit for</span>). <span class="ui">Discard changes</span>, or Esc,
+    goes back to Preview without saving.
+  </p>
+
+  <h3>Overs: the match format</h3>
+
+  <p>
+    A structure carries the match format as one number, <strong>Overs</strong>, next to its
+    name in Edit mode. Leave it empty for 50. Every series the structure generates takes its
+    overs from here and its name from the structure's name, so name structures the way clubs
+    talk: <span class="field">T20 seeded groups</span>, <span class="field">50 Over split
+    league</span>. A league that plays two formats is two leagues, each with its own
+    structure.
+  </p>
+
+  <div class="note">
+    <span class="callout-label">Changing overs during a season</span>
+    <p>
+      Fixtures already generated keep the format they were made with, even when a stage is
+      regenerated. A new name or overs reaches a running season only when the administrator
+      adopts the new version through <span class="ui">Review changes</span>.
+    </p>
+  </div>
 
   <h3>Reading a stage</h3>
 
@@ -947,8 +984,7 @@
   <p>
     You can also add <strong>time slots</strong> (a T20 morning and afternoon), and an
     <strong>activation date</strong>: junior fixtures generated in September but not visible
-    to clubs until the third week of January. Match days and time slots start from the
-    union's <a href="#competition-defaults">competition defaults</a>.
+    to clubs until the third week of January.
   </p>
 
   <h3 id="preview-rail">Watch the preview rail</h3>
@@ -976,57 +1012,85 @@
 <section class="part">
   <div class="part-head">
     <div class="part-num">Part Five · Operator</div>
-    <h2 id="binding">Binding a competition to a league</h2>
+    <h2 id="binding">Setting up a league</h2>
     <p class="lede">
-      The step that puts a structure to work on a league's real clubs. The wizard does this as
-      its third step, <em>Review &amp; create</em>, and an administrator's Quick start does it
-      for a single league. This part is for binding one by hand from the Leagues card.
+      The step that puts a structure to work on a league's real clubs. Each league has one
+      setup: a structure and a calendar. The wizard sets up several leagues at once; this part
+      is for setting up, or changing, one league from the League catalogue.
     </p>
   </div>
 
-  <p>
-    Open <span class="ui">Leagues</span> in the operator console and add a competition to the
-    league. Each competition needs four things:
-  </p>
+  <div class="steps">
+    <div class="step">
+      <h4>Open the <span class="ui">League catalogue</span> in the operator console</h4>
+      <p>
+        The <strong>Setup</strong> column shows each league's structure and calendar, or that it
+        isn't set up yet.
+      </p>
+    </div>
+    <div class="step">
+      <h4>Press <span class="ui">Set up</span> on the league's row</h4>
+      <p>
+        It reads <span class="ui">Change setup</span> on a league that already has one.
+      </p>
+    </div>
+    <div class="step">
+      <h4>Pick the structure</h4>
+      <p>
+        A template (made fresh for this league) or one of the union's existing structures.
+        Nothing is picked for you: the choice starts empty on purpose.
+      </p>
+    </div>
+    <div class="step">
+      <h4>Pick the calendar, and read the fit</h4>
+      <p>
+        The dialog checks every stage against the calendar's blocks and says whether each fits,
+        and names any block no stage plays in. <span class="ui">Save</span> stays greyed out
+        until both choices are made.
+      </p>
+    </div>
+  </div>
 
   <table class="t-narrow">
-    <thead><tr><th>Field</th><th>Example</th></tr></thead>
+    <thead><tr><th>League</th><th>Structure</th><th>Calendar</th></tr></thead>
     <tbody>
-      <tr><td>Label</td><td>50 Over (Red Ball)</td></tr>
-      <tr><td>Structure</td><td>Split league with mid-season swap</td></tr>
-      <tr><td>Calendar</td><td>2026/27</td></tr>
-      <tr><td>Match format</td><td>50 overs, red ball</td></tr>
+      <tr><td>Premier Men 50 Over</td><td>Split league with mid-season swap · 50 overs</td><td>2026/27</td></tr>
+      <tr><td>Premier Men T20</td><td>Seeded groups → cross-group semis → final · 20 overs</td><td>2026/27</td></tr>
     </tbody>
   </table>
 
   <p>
-    Add a second competition to the same league for the T20 stream, pointing at a different
-    structure. Those are the two competitions Premier Men runs in parallel.
+    Premier Men's two formats are two leagues, each set up on its own. There is no second
+    setup on one league.
   </p>
 
   <div class="warn">
     <span class="callout-label">Two cross-checks happen on save</span>
     <p>
       The structure and calendar must both still exist, and every stage's playing block must
-      exist on the bound calendar. A structure whose stages reference "Block 2" cannot be bound
-      to a single-block calendar — you get told which stage and which calendar, on save, rather
-      than months later at generation time.
+      exist on the chosen calendar. A structure whose stages reference "Block 2" cannot be set
+      up on a single-block calendar — you get told which stage and which calendar, on save,
+      rather than months later at generation time.
     </p>
   </div>
 
-  <p>
-    The match format lives on the competition. Every series its stages generate copies it from
-    there.
-  </p>
+  <div class="note">
+    <span class="callout-label">Changing a setup once a season is running</span>
+    <p>
+      A season that has generated fixtures keeps the calendar it generated with. A season with
+      nothing generated yet follows its league's calendar, so pointing the league at a
+      different calendar moves those dates too. The save tells you how many seasons will
+      follow the new dates. At renewal time that is exactly what you want; mid-season, tell
+      the administrator first.
+    </p>
+  </div>
 
   <div class="note">
-    <span class="callout-label">Nothing breaks if you stop here</span>
+    <span class="callout-label">No setup, no season</span>
     <p>
-      A league with no competition is not stuck. The administrator's
-      <span class="ui">Start a season</span> offers Quick start for it: they pick a template,
-      dates and a match format, and the platform binds a competition for them. You only need
-      to bind by hand when the league needs a shape the templates don't give, or several
-      competitions side by side.
+      A league without a setup cannot start a season. In the administrator's
+      <span class="ui">Start a season</span> it is listed under <em>Not set up yet — ask your
+      operator</em>, and there is no way round that from the admin side.
     </p>
   </div>
 </section>
@@ -1052,42 +1116,37 @@
       </p>
     </div>
     <div class="step">
-      <h4>A league your operator set up: pick the competition</h4>
+      <h4>Only set-up leagues can start</h4>
       <p>
-        <span class="ui">Continue</span>, then pick the competition (there is usually only one)
-        and confirm the season label. A summary shows the structure, its version, the calendar,
-        and how many groups each stage will make with the sides actually registered.
+        The list shows the leagues your operator has set up. The rest sit under <em>Not set up
+        yet — ask your operator</em>. A league whose calendar has ended says so: ask the
+        operator to renew the season dates.
       </p>
     </div>
     <div class="step">
-      <h4>A league with no competition: Quick start</h4>
+      <h4>Confirm the season label and start</h4>
       <p>
-        The Quick start form appears in place. Pick <strong>how the season is played</strong>
-        from the template cards, then the <strong>dates</strong>: one of the union's calendars,
-        or <em>Custom dates</em> with your own start and end. If the calendar has more than one
-        block, say which block each stage plays in. Give the season a label and pick the
-        <strong>match format</strong>; its overs and ball type fill in and stay editable.
-      </p>
-      <p>
-        Before you press <span class="ui">Start season</span>, the preview reads the season
-        back to you in plain sentences, one per stage, using the sides registered for the
-        league. That is exactly what the platform will build.
+        <span class="ui">Continue</span>, then confirm the season label. A summary shows the
+        structure, its version and overs, the calendar, and how many groups each stage will make
+        with the sides actually registered. A league runs one season per label: starting
+        "2026/27" twice is refused.
       </p>
     </div>
     <div class="step">
       <h4>Read "What happens next"</h4>
       <p>
-        Both paths show the same four-step strip: <strong>Confirm entrants</strong>,
+        The done screen shows a four-step strip: <strong>Confirm entrants</strong>,
         <strong>Generate fixtures</strong>, <strong>Approve</strong>, <strong>Release</strong>.
         That is the order you work each stage in, below.
       </p>
     </div>
     <div class="step">
-      <h4>The structure and calendar are frozen at this moment</h4>
+      <h4>The structure is frozen now, the calendar at first generate</h4>
       <p>
-        A copy is taken. If the operator edits the structure next week, your running season is
-        untouched until you choose to adopt the new version. Neither can be un-frozen: to
-        change them outright, start a new season instead.
+        A copy of the structure is taken. If the operator edits it next week, your running
+        season is untouched until you choose to adopt the new version with
+        <span class="ui">Review changes</span>. The calendar keeps following the operator's
+        changes until you first generate fixtures, then it is frozen too.
       </p>
     </div>
   </div>
@@ -1142,7 +1201,7 @@
   <p>
     <span class="ui">Use the suggestion</span> accepts it in one click. Or reassign by hand.
     <strong>Not playing</strong> is a legitimate answer for a side registered in the league but
-    sitting this competition out.
+    sitting this season out.
   </p>
 
   <p>Live counts against the structure's expected sizes catch a miscount before it becomes a fixture list.</p>
@@ -1174,8 +1233,14 @@
     <span class="ui">Generate 30 fixtures</span> (the button names the count) creates one
     series per group, named after the league and the stage. Generation runs on the server,
     through the same checks as any other fixture change, so a ground clash with another
-    competition is refused and listed rather than written. From there it is the ordinary path:
+    league is refused and listed rather than written. From there it is the ordinary path:
     check the fixtures, approve, release. Clubs and players see nothing until you release.
+  </p>
+
+  <p>
+    Each series shows the structure's name and its overs. Regenerating keeps whatever a
+    series already shows; a new name or overs reaches existing series only through
+    <span class="ui">Review changes</span>.
   </p>
 
   <p>
@@ -1261,14 +1326,15 @@
     home ground → the club's secondary ground → the away side's ground → the nearest available neutral ground
   </p>
 
-  <h3>The ledger covers every competition at once</h3>
+  <h3>The ledger covers every league at once</h3>
 
   <div class="note">
     <span class="callout-label">The single most important thing here</span>
     <p>
       Allocation looks at <strong>every series in the union</strong>, not just the one you are
-      allocating. Premier Men 50 Over and Premier Men T20 compete for the same grounds on the
-      same Saturday, and a side must not be scheduled twice in one day across two competitions.
+      allocating. Premier Men 50 Over and Premier Men T20 are two leagues competing for the
+      same grounds on the same Saturday, and a side must not be scheduled twice in one day
+      across the two.
     </p>
   </div>
 
@@ -1330,7 +1396,8 @@
     <div class="part-num">Part Eight</div>
     <h2 id="worked-examples">Worked examples</h2>
     <p class="lede">
-      Four real competitions, exactly as they are configured.
+      Four real leagues, exactly as they are configured. Each is its own league with its own
+      setup; Premier Men appears twice because its two formats are two leagues.
     </p>
   </div>
 
@@ -1348,7 +1415,7 @@
     and Block 1 is 13.
   </p>
 
-  <h3>KZNCU Premier Men · 50 Over Red Ball</h3>
+  <h3>KZNCU Premier Men 50 Over · Red Ball</h3>
   <div class="flow">
     <div class="flow-stage">
       <div class="st">Stage 1</div>
@@ -1363,12 +1430,12 @@
     </div>
   </div>
   <p>
-    30 fixtures per group in stage 1, ten per team — matching the union's own spreadsheet. The
+    Structure set to 50 overs. 30 fixtures per group in stage 1, ten per team — matching the union's own spreadsheet. The
     swap is the interesting part: it is a rule written in words, a suggestion the platform
     pre-fills, and a human decision recorded against a name.
   </p>
 
-  <h3>KZNCU Premier Men · T20 Pink Ball</h3>
+  <h3>KZNCU Premier Men T20 · Pink Ball</h3>
   <div class="flow">
     <div class="flow-stage">
       <div class="st">Stage 1</div>
@@ -1383,7 +1450,7 @@
     </div>
   </div>
   <p>
-    Snake seeding puts the top two seeds in different groups. The semis pair A1 against B2 and
+    Structure set to 20 overs. Snake seeding puts the top two seeds in different groups. The semis pair A1 against B2 and
     B1 against A2, then the final references the two winners — so the bracket reads
     "Winner of Semi-final 1" until the results are known.
   </p>
@@ -1470,31 +1537,35 @@
       </tr>
       <tr>
         <td>One of these sides already has a match that day.</td>
-        <td>The fixture is unresolved because a side is already committed, possibly in another competition. Move the date, or accept it and place the fixture by hand.</td>
+        <td>The fixture is unresolved because a side is already committed, possibly in another league. Move the date, or accept it and place the fixture by hand.</td>
       </tr>
       <tr>
         <td>Every available ground is already booked that day.</td>
         <td>More fixtures than ground capacity. Add grounds, raise "matches per day" on a two-pitch ground, or spread the round.</td>
       </tr>
       <tr>
-        <td>That competition points at a structure that no longer exists.</td>
-        <td>The structure was deleted after the competition was bound to it. Your operator needs to re-point the competition.</td>
+        <td>This league has no season setup yet — ask your operator to set it up in the operator console.</td>
+        <td>Only the operator can set a league up: <span class="ui">Set up</span> on its row in the League catalogue, or the season wizard. Nothing to do on the admin side until then.</td>
       </tr>
       <tr>
-        <td>No competition has been set up for this league yet.</td>
-        <td>Shown in <span class="ui">Start a season</span>. Use the Quick start form below it: pick a template, dates and a match format. Or ask your operator to set the league up in the season wizard.</td>
+        <td>This league's setup points at a structure (or calendar) that no longer exists — ask your operator.</td>
+        <td>The structure or calendar was removed after the league was set up with it. The operator needs to change the league's setup.</td>
       </tr>
       <tr>
-        <td>This league's competitions are on calendars that have ended.</td>
-        <td>Last season's competition is still bound, but its dates are over. Quick-start this season on new dates, or ask your operator to extend the calendar or bind a new one.</td>
+        <td>This league's season dates have ended — ask your operator to renew them.</td>
+        <td>Last season's calendar is still the league's setup. The operator extends it, or changes the setup to a new calendar.</td>
       </tr>
       <tr>
-        <td>"Premier Men" already has a competition on "2026/27" — start the season from it instead</td>
-        <td>Quick start refused because the league already has a competition on the calendar you picked. Go back and pick the competition, or quick-start on different dates.</td>
+        <td>That season label is already running for this league — pick a different label or continue the existing season.</td>
+        <td>The league already has a season with that label. Open it from the Fixtures list, or give the new one a different label.</td>
       </tr>
       <tr>
-        <td>Competition no longer bound to this league.</td>
-        <td>Generating refused because an operator removed this season's competition from the league after the season started. Ask your operator to re-bind it, or start a new season.</td>
+        <td>2 ungenerated season runs of "Premier Men 50 Over" will follow the new dates.</td>
+        <td>Operator only, after saving a league setup with a different calendar. Seasons with nothing generated yet move to the new dates; generated ones don't. Expected at renewal; mid-season, tell the administrator.</td>
+      </tr>
+      <tr>
+        <td>This console is out of date — refresh it and try again.</td>
+        <td>The operator page was loaded before an update and tried to save something the platform no longer uses. Nothing was saved. Refresh and make the change again.</td>
       </tr>
       <tr>
         <td>Some of this stage's fixtures are released; the console will ask before replacing them.</td>
@@ -1518,10 +1589,10 @@
     <tbody>
       <tr><td>Season calendars</td><td>Create and edit</td><td>Read</td><td>—</td></tr>
       <tr><td>Competition structures</td><td>Create and edit</td><td>Read</td><td>—</td></tr>
-      <tr><td>Bind competitions to leagues</td><td>Yes</td><td>Only through Quick start</td><td>—</td></tr>
+      <tr><td>Set up a league (structure + calendar)</td><td>Yes</td><td>—</td><td>—</td></tr>
       <tr><td>Venues</td><td>—</td><td>Create and edit</td><td>Read</td></tr>
-      <tr><td>Competition defaults</td><td>Create and edit</td><td>Edit (venue aliases read-only)</td><td>—</td></tr>
-      <tr><td>Start and run a season, including Quick start</td><td>—</td><td>Yes</td><td>—</td></tr>
+      <tr><td>Venue aliases, travel cost</td><td>On request (no card)</td><td>—</td><td>—</td></tr>
+      <tr><td>Start and run a season</td><td>—</td><td>Yes</td><td>—</td></tr>
       <tr><td>Confirm entrants</td><td>—</td><td>Yes</td><td>—</td></tr>
       <tr><td>Generate, approve, release</td><td>—</td><td>Yes</td><td>—</td></tr>
       <tr><td>Allocate grounds</td><td>—</td><td>Yes</td><td>—</td></tr>
@@ -1545,38 +1616,41 @@
     <dt>Cadence</dt>
     <dd>How often rounds are played: weekly, every N weeks, on set weekdays, or spread evenly across the block.</dd>
 
-    <dt>Competition</dt>
-    <dd>One format stream inside a league, such as "50 Over Red Ball": a structure, a calendar and a match format, bound to the league. A league can run several at once.</dd>
-
-    <dt>Competition defaults</dt>
-    <dd>The union's own match formats, match days, time slots, travel cost and venue aliases, set on the Competition defaults card. Anything left empty uses the built-in value.</dd>
-
     <dt>Cross-group</dt>
     <dd>A knockout that pairs one group's winner against another group's runner-up, so group rivals cannot meet again immediately.</dd>
+
+    <dt>Edit / Preview</dt>
+    <dd>The two modes of the structure editor. A structure opens in Preview, where nothing can change; <em>Edit structure</em> switches to the form, and Esc or <em>Discard changes</em> goes back.</dd>
 
     <dt>Group</dt>
     <dd>A set of teams within a stage that play each other. A Top Six is a group. Each group becomes one series. The platform says "group" everywhere; older union documents may say "pool".</dd>
 
+    <dt>League</dt>
+    <dd>One entry in the union's catalogue, such as "Premier Men 50 Over". Clubs register for it. It has at most one setup. Two formats for the same clubs are two leagues.</dd>
+
+    <dt>Overs</dt>
+    <dd>The match format, set on the structure. Empty means 50. Every series the structure generates takes its overs from here.</dd>
+
     <dt>Preliminary round</dt>
     <dd>An extra opening round that trims a knockout field to a power of two. Nine entrants need one; eight need none.</dd>
 
-    <dt>Quick start</dt>
-    <dd>The administrator's way to start a season on a league with no competition, or whose competitions' calendars have ended. Pick a template, dates and a match format; the platform creates the structure, calendar and competition and starts the season. Admins choose from the templates only and cannot author stages.</dd>
-
     <dt>Season</dt>
-    <dd>One competition being played out this year (a season run). Holds which teams are in which group at each stage, and freezes the structure and calendar it started with. Started from <em>Start a season</em>.</dd>
+    <dd>One league being played out this year (a season run). Holds which teams are in which group at each stage, and freezes the structure and calendar it started with. Started from <em>Start a season</em>.</dd>
 
     <dt>Series</dt>
-    <dd>The existing unit of fixtures. One stage-group becomes one series, so everything downstream is unchanged.</dd>
+    <dd>The existing unit of fixtures. One stage-group becomes one series, so everything downstream is unchanged. A new series is labelled with the structure's name and overs.</dd>
+
+    <dt>Setup</dt>
+    <dd>What a league plays through: one structure and one season calendar. Made and changed only by the operator, with <em>Set up</em> on the league's row or in the season wizard.</dd>
 
     <dt>Snake seeding</dt>
     <dd>Splitting seeds 1,2,3,4 into two groups as A,B,B,A rather than A,A,B,B — it keeps the top seeds apart.</dd>
 
     <dt>Stage</dt>
-    <dd>One phase of play in a competition. A split league has two: the double round and the final round. A stage is titled by its kind (Round-robin stage, Knockout stage, Final, Hand-entered stage) and plays in one block.</dd>
+    <dd>One phase of play in a structure. A split league has two: the double round and the final round. A stage is titled by its kind (Round-robin stage, Knockout stage, Final, Hand-entered stage) and plays in one block.</dd>
 
     <dt>Structure</dt>
-    <dd>The reusable shape of a competition: its stages, in order. Built once by the operator (or made from a template by Quick start) and used season after season.</dd>
+    <dd>The reusable shape of a league's season: its stages, in order, and its overs. Built once by the operator, usually from a template, and used season after season.</dd>
 
     <dt>Unresolved</dt>
     <dd>A fixture the allocator could not place, shown with the reason. Deliberately visible rather than placed somewhere wrong.</dd>
@@ -1600,7 +1674,7 @@
   </p>
 
   <div class="colophon">
-    Smart Club Platform · Setting up how a league works · Version 2.0 · September 2026<br>
+    Smart Club Platform · Setting up how a league works · Version 2.1 · September 2026<br>
     Technical detail: <span class="path">docs/architecture/0008-configurable-league-structures.md</span>,
     <span class="path">docs/architecture/0014-seasons-one-vocabulary-one-path-one-engine.md</span><br>
     Deploying this feature: <span class="path">docs/runbooks/configurable-league-structures.md</span>
