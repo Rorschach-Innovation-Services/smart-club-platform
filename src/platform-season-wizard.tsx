@@ -621,6 +621,32 @@ export function SeasonSetupWizard({
   const canContinueStep0 = calValid && !!calDraft && (calMode === 'new' || !!selectedExisting);
 
   /**
+   * An added league must end up set up: adding one and picking nothing used to save only
+   * the calendar, which read as "I selected the league but it isn't set up".
+   */
+  const step2Blockers: Array<{ key: string; message: string }> = calDraft
+    ? leagues.flatMap((l) => {
+        if (!addedKeys.includes(l.key)) return [];
+        const c = leagueChoices[l.key];
+        if (!c?.structure)
+          return [
+            {
+              key: l.key,
+              message: `${l.label} has no structure yet — pick a template or an existing structure, or remove it.`,
+            },
+          ];
+        if (pickOverrun(c, calDraft))
+          return [
+            {
+              key: l.key,
+              message: `${l.label}'s structure plays in a block ${calDraft.label || 'this calendar'} doesn't have — pick another structure or remove it.`,
+            },
+          ];
+        return [];
+      })
+    : [];
+
+  /**
    * Leaving step 0: re-derive every held NEW template structure's stage block positions
    * against the CURRENT `calDraft`. A template is instantiated once, at pick time, against
    * whatever `calDraft` looked like then — but the operator can go Back to step 0 and
@@ -1030,11 +1056,23 @@ export function SeasonSetupWizard({
               );
             })()
           )}
+          {step2Blockers.length > 0 && (
+            <div role="alert" style={{ ...HINT, color: 'var(--coral, #b4412e)', marginTop: 12 }}>
+              {step2Blockers.map((b) => (
+                <div key={b.key}>{b.message}</div>
+              ))}
+            </div>
+          )}
           <div style={footRow}>
             <Btn tone="ghost" size="sm" onClick={() => setStep(0)}>
               Back
             </Btn>
-            <Btn tone="teal" size="sm" onClick={() => setStep(2)}>
+            <Btn
+              tone="teal"
+              size="sm"
+              onClick={() => setStep(2)}
+              disabled={step2Blockers.length > 0}
+            >
               Continue
             </Btn>
           </div>

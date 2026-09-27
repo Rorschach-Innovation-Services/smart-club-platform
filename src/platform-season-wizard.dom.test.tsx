@@ -414,13 +414,11 @@ describe('SeasonSetupWizard', () => {
     await addLeague(user, 'promo');
     const radios = screen.getAllByRole('radio', { name: /flat round robin/i });
     await user.click(radios[radios.length - 1]);
-    await user.click(continueBtn());
-
-    // Only the template pick is planned; the overrunning pick is named as left unchanged.
-    expect(screen.getByRole('button', { name: /create season/i })).toHaveTextContent(
-      'Create season · 1 league',
+    // The overrunning pick blocks Continue and says which league and what to do.
+    expect(continueBtn()).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      /Premier Men's structure plays in a block .* doesn't have — pick another structure or remove it\./,
     );
-    expect(screen.getByText(/Premier Men \(its structure plays past/)).toBeInTheDocument();
   });
 
   it('refuses a cloned adoption of a quick-start structure that overruns the draft calendar', async () => {
@@ -430,7 +428,7 @@ describe('SeasonSetupWizard', () => {
       name: 'Split league',
       source: 'quick-start',
     };
-    const { user, save } = setup({ structures: [quickStarted] });
+    const { user } = setup({ structures: [quickStarted] });
 
     await fillSeasonLabel(user);
     await user.click(continueBtn());
@@ -443,14 +441,9 @@ describe('SeasonSetupWizard', () => {
     expect(screen.getByText(OVERRUN_LINE)).toBeInTheDocument();
     expect(screen.queryByText(/gets its own copy/)).toBeNull();
 
-    await user.click(continueBtn());
-    const create = screen.getByRole('button', { name: /create season/i });
-    expect(create).toHaveTextContent(/^Create season$/);
-    await user.click(create);
-    // Only the calendar is written — no clone, no setup.
-    const patch = save.mock.calls[0][0];
-    expect(patch.structures).toEqual([quickStarted]);
-    expect(patch.leagues[0]).not.toHaveProperty('setup');
+    // No clone is offered and the step cannot be left with the pick in place.
+    expect(continueBtn()).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/Premier Men's structure plays in a block/);
   });
 
   it('an overrunning pick becomes committable once the calendar grows the block it needs', async () => {
@@ -697,17 +690,29 @@ describe('SeasonSetupWizard — league rows', () => {
     expect(screen.queryByPlaceholderText(/ball type/i)).toBeNull();
   });
 
-  it('an added league with no structure picked is left unchanged', async () => {
-    const { user, save } = setup();
+  it('an added league must get a structure before Continue', async () => {
+    const { user } = setup();
     await fillSeasonLabel(user);
     await user.click(continueBtn());
     await user.selectOptions(screen.getByRole('combobox', { name: /add a league/i }), 'premier');
-    await user.click(continueBtn());
 
-    expect(screen.getByText(/Premier Men \(added, but no structure picked/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /create season/i })).toHaveTextContent(
-      /^Create season$/,
+    expect(continueBtn()).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Premier Men has no structure yet — pick a template or an existing structure, or remove it.',
     );
+
+    await user.click(screen.getByRole('radio', { name: /start from a template/i }));
+    await user.click(screen.getByRole('radio', { name: /flat round robin/i }));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(continueBtn()).toBeEnabled();
+  });
+
+  it('a calendar with no leagues added still saves on its own', async () => {
+    const { user, save } = setup();
+    await fillSeasonLabel(user);
+    await user.click(continueBtn());
+    expect(continueBtn()).toBeEnabled();
+    await user.click(continueBtn());
     await user.click(screen.getByRole('button', { name: /create season/i }));
     expect(save.mock.calls[0][0].leagues[0]).not.toHaveProperty('setup');
   });
