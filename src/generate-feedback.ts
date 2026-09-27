@@ -41,8 +41,6 @@ function structuredConflictMessage(err: ApiError): string | null {
   if (err.code === 'does_not_fit') return doesNotFitMessage(err.message);
   if (err.code === 'no_block')
     return 'This stage points at a playing block that no longer exists on the calendar. Ask your operator to fix the structure\'s "Plays in" setting.';
-  if (err.code === 'competition_unbound')
-    return "This league's competition was removed from the operator console. Quick-start a new season, or ask your operator to re-bind one.";
   if (err.code === 'released_overwrite')
     return "Some of this stage's fixtures are released; the console will ask before replacing them";
   if (err.code === 'venue_clash') {

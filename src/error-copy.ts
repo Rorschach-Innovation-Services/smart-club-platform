@@ -68,23 +68,23 @@ export function seasonRunErrorMessage(err: unknown, fallback: string): string {
   return seasonRunConflictMessage(err) ?? describeError(err, fallback);
 }
 
-/** The message shown when `POST /season-runs/quick-start` refuses. */
-export function quickStartErrorMessage(err: unknown): string {
-  if (err instanceof ApiError) {
-    switch (err.code) {
-      case 'invalid_dates':
-        return 'Enter the dates as year-month-day (for example 2026-10-03), with the end on or after the start.';
-      case 'bad_placement':
-        return "A stage is set to play in a block this calendar doesn't have. Choose a block for each stage again, then start the season.";
-      case 'competition_exists':
-        return 'This league already has a competition on that calendar. Pick this league again and start the season from its competition.';
-      case 'season_exists':
-        return `${err.message}. Give the new season a different label, or carry on with the existing one under Seasons.`;
-      case 'run_not_started':
-        return "The competition was created but the season didn't start. Pick this league again and start it from its competition.";
-    }
-  }
-  return describeError(err, 'Could not start the season — try again.');
+/** A league without an operator-created setup cannot start a season. */
+export const SETUP_MISSING_MESSAGE =
+  'This league has no season setup yet — ask your operator to set it up in the operator console.';
+
+/** The league already runs a season under that label (one setup per league). */
+export const SEASON_EXISTS_MESSAGE =
+  'That season label is already running for this league — pick a different label or continue the existing season.';
+
+/**
+ * The message for a `POST /season-runs` refusal the admin can act on, or `null` when the
+ * error is not one of them (the caller falls back to `describeError`).
+ */
+export function startSeasonErrorMessage(err: unknown): string | null {
+  if (!(err instanceof ApiError)) return null;
+  if (err.code === 'setup_missing') return SETUP_MISSING_MESSAGE;
+  if (err.code === 'season_exists') return SEASON_EXISTS_MESSAGE;
+  return null;
 }
 
 /** What the release dialog says when `PATCH /series/:id { released: true }` refuses. */

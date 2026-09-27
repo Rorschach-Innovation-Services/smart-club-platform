@@ -5,11 +5,13 @@ import {
   isNetworkError,
   isVersionRace,
   networkErrorMessage,
-  quickStartErrorMessage,
   releaseErrorMessage,
   SEASON_CHANGED_MESSAGE,
+  SEASON_EXISTS_MESSAGE,
   seasonRunConflictMessage,
   seasonRunErrorMessage,
+  SETUP_MISSING_MESSAGE,
+  startSeasonErrorMessage,
   toastCopy,
 } from './error-copy';
 
@@ -89,42 +91,47 @@ describe('season-run writes', () => {
   });
 });
 
-describe('quickStartErrorMessage', () => {
-  it('maps each coded refusal to an instruction', () => {
-    expect(quickStartErrorMessage(new ApiError(400, 'x', 'invalid_dates'))).toBe(
-      'Enter the dates as year-month-day (for example 2026-10-03), with the end on or after the start.',
+describe('startSeasonErrorMessage', () => {
+  it('sends a league with no setup to the operator', () => {
+    const err = new ApiError(
+      400,
+      'this league has no season setup yet — ask your operator',
+      'setup_missing',
     );
-    expect(quickStartErrorMessage(new ApiError(400, 'x', 'bad_placement'))).toBe(
-      "A stage is set to play in a block this calendar doesn't have. Choose a block for each stage again, then start the season.",
+    expect(startSeasonErrorMessage(err)).toBe(
+      'This league has no season setup yet — ask your operator to set it up in the operator console.',
     );
-    expect(quickStartErrorMessage(new ApiError(409, 'x', 'competition_exists'))).toBe(
-      'This league already has a competition on that calendar. Pick this league again and start the season from its competition.',
-    );
-    expect(
-      quickStartErrorMessage(
-        new ApiError(409, '"2026/27" is already running for "Premier Men"', 'season_exists'),
-      ),
-    ).toBe(
-      '"2026/27" is already running for "Premier Men". Give the new season a different label, or carry on with the existing one under Seasons.',
-    );
-    expect(quickStartErrorMessage(new ApiError(500, 'x', 'run_not_started'))).toBe(
-      "The competition was created but the season didn't start. Pick this league again and start it from its competition.",
-    );
+    expect(SETUP_MISSING_MESSAGE).toBe(startSeasonErrorMessage(err));
   });
 
-  it('never shows a code, and falls back to the server or a retry line', () => {
-    for (const code of [
-      'invalid_dates',
-      'bad_placement',
-      'competition_exists',
+  it('asks for a different label when the season already runs', () => {
+    const err = new ApiError(
+      409,
+      '"2026/27" is already running for "Premier Men"',
       'season_exists',
-      'run_not_started',
-    ])
-      expect(quickStartErrorMessage(new ApiError(400, 'x', code))).not.toContain(code);
-    expect(quickStartErrorMessage(new ApiError(400, 'unknown league'))).toBe('unknown league');
-    expect(quickStartErrorMessage(new Error('boom'))).toBe(
-      'Could not start the season — try again.',
     );
+    expect(startSeasonErrorMessage(err)).toBe(
+      'That season label is already running for this league — pick a different label or continue the existing season.',
+    );
+    expect(SEASON_EXISTS_MESSAGE).toBe(startSeasonErrorMessage(err));
+  });
+
+  it('never shows a code, and leaves every other failure to describeError', () => {
+    for (const code of ['setup_missing', 'season_exists'])
+      expect(startSeasonErrorMessage(new ApiError(400, 'x', code))).not.toContain(code);
+    expect(startSeasonErrorMessage(new ApiError(400, 'unknown league'))).toBeNull();
+    expect(startSeasonErrorMessage(new Error('boom'))).toBeNull();
+  });
+
+  it('is what the start-season toast shows for a coded refusal', () => {
+    const err = new ApiError(400, 'x', 'setup_missing');
+    expect(
+      toastCopy(err, 'Could not start the season', { errorMessage: startSeasonErrorMessage }),
+    ).toBe(SETUP_MISSING_MESSAGE);
+    const dup = new ApiError(409, 'x', 'season_exists');
+    expect(
+      toastCopy(dup, 'Could not start the season', { errorMessage: startSeasonErrorMessage }),
+    ).toBe(SEASON_EXISTS_MESSAGE);
   });
 });
 
