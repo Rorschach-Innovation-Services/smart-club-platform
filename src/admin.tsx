@@ -2398,7 +2398,6 @@ export function LeagueForm({
   const [label, setLabel] = useStateA(league?.label || '');
   const [group, setGroup] = useStateA(league?.group || 'Overarching Leagues');
   const [district, setDistrict] = useStateA(league?.district || OVERARCHING_DISTRICT);
-  const [note, setNote] = useStateA(league?.note || '');
   const [busy, setBusy] = useStateA(false);
 
   // Key is the immutable matching token. New leagues slug it from the name; edits keep it.
@@ -2413,7 +2412,6 @@ export function LeagueForm({
       label: label.trim(),
       group: group.trim(),
       district,
-      note: note.trim() || undefined,
     };
     const p = editing ? onUpdate(league.key, patch) : onCreate({ key, ...patch });
     Promise.resolve(p)
@@ -2489,15 +2487,6 @@ export function LeagueForm({
             placeholder="e.g. EMCU Divisions"
           />
         </div>
-      </div>
-      <div className="field">
-        <div className="field-label">Note (optional)</div>
-        <input
-          className="field-input"
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          placeholder="Shown under the league in the picker"
-        />
       </div>
       <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
         <Btn tone="outline" onClick={onClose}>

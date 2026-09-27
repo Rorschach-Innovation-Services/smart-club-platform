@@ -1342,6 +1342,9 @@ function StageCard({
   // stage has fixtures yet, but it only means something once there are series to rebuild;
   // before that, generating simply uses the new schedule.
   const staleSchedule = !!stageRun?.staleSchedule && allLinked.length > 0;
+  // Same for a rebase that adopted a structure whose name or overs changed: the stored
+  // series keep the old ones until a regenerate adopts the new, so it is offered here.
+  const formatChanged = !!stageRun?.formatChanged && allLinked.length > 0;
   // A CHAINED stage must start after its feeder's last round, so a feeder regenerate that
   // pushed the feeder later can run it into this stage — while pairings, and so
   // `diverged`, stay put. Asked of the ACTUAL series on both sides: this stage's earliest
@@ -1362,7 +1365,7 @@ function StageCard({
     ownDates.length > 0 &&
     feederDates.length > 0 &&
     ownDates[0] <= feederDates[feederDates.length - 1];
-  const needsRegen = diverged || staleSchedule || chainMoved;
+  const needsRegen = diverged || staleSchedule || formatChanged || chainMoved;
   const stale = staleEntrants || needsRegen;
 
   // A confirmed grouping is frozen — deliberately, it is a human decision about this
@@ -1588,11 +1591,12 @@ function StageCard({
           {stale && (
             <p style={{ ...HINT, color: 'var(--coral)' }}>
               {staleEntrants || diverged
-                ? 'The entrants or pairing changed after these fixtures were generated'
+                ? 'The entrants or pairing changed after these fixtures were generated — regenerate to bring the series into line.'
                 : staleSchedule
-                  ? 'The structure’s schedule for this stage changed after these fixtures were generated'
-                  : 'The stage this one follows now runs into these fixtures, so they no longer start after it'}{' '}
-              — regenerate to bring the series into line.
+                  ? 'The structure’s schedule for this stage changed after these fixtures were generated — regenerate to bring the series into line.'
+                  : formatChanged
+                    ? 'The structure’s name or overs changed when you reviewed its changes — regenerating adopts them for these series.'
+                    : 'The stage this one follows now runs into these fixtures, so they no longer start after it — regenerate to bring the series into line.'}
             </p>
           )}
           <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' }}>

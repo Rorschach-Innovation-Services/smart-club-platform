@@ -12,7 +12,7 @@
  * series' `seriesType` and its `overs` the series' `maxOvers` (absent ⇒ 50).
  */
 import type { TeamParticipant } from './leagues';
-import type { Competition, IsoDate, League, SeasonRun, Series, StageSpec } from './types';
+import type { IsoDate, League, SeasonRun, Series, StageSpec } from './types';
 
 /**
  * The match format a series is built with — read off the league's setup structure (the
@@ -33,11 +33,6 @@ export interface StageSeriesGroup {
   startDate: IsoDate;
   league?: Pick<League, 'label'>;
   format?: StageSeriesFormat;
-  /**
-   * @deprecated Superseded by `format`; deleted in WS6. Honoured only when `format` is
-   * absent, so callers not yet moved to `format` build exactly what they did before.
-   */
-  competition?: Pick<Competition, 'label' | 'matchFormat'>;
 }
 
 export interface BuildStageSeriesArgs {
@@ -55,11 +50,6 @@ export interface BuildStageSeriesArgs {
    * entrants and snapshotted onto the series, so a later roster edit can't orphan it.
    */
   leagueTeams: readonly TeamParticipant[];
-  /**
-   * @deprecated The competitionDefaults-derived overs fallback; deleted in WS6. Ignored
-   * whenever `group.format` is given (the new path's fallback is an inline 50).
-   */
-  defaultOvers?: number;
 }
 
 export function buildStageSeries({
@@ -69,7 +59,6 @@ export function buildStageSeries({
   group: p,
   multi,
   leagueTeams,
-  defaultOvers,
 }: BuildStageSeriesArgs): Series {
   const participants = leagueTeams
     .filter((t) => p.entrants.includes(t.teamId))
@@ -103,24 +92,11 @@ export function buildStageSeries({
     seasonRunId: run.id,
     stageSpecId: stage.id,
     groupId: p.groupId,
-    ...formatFields(p, stage, defaultOvers),
+    maxOvers: p.format?.overs ?? 50,
+    seriesType: p.format?.structureName ?? stage.name,
     kind: 'series',
     released: false,
     releasedAt: null,
     version: 1,
-  };
-}
-
-/** `maxOvers` + `seriesType`: from `format` when given, else the deprecated competition path. */
-function formatFields(
-  p: StageSeriesGroup,
-  stage: StageSpec,
-  defaultOvers: number | undefined,
-): { maxOvers: number; seriesType: string } {
-  if (p.format)
-    return { maxOvers: p.format.overs ?? 50, seriesType: p.format.structureName ?? stage.name };
-  return {
-    maxOvers: p.competition?.matchFormat?.overs ?? defaultOvers ?? 50,
-    seriesType: p.competition?.label ?? stage.name,
   };
 }

@@ -2104,19 +2104,6 @@ export function AffiliationForm({
                                     </div>
                                     <span>{L.label}</span>
                                   </div>
-                                  {L.note && (
-                                    <div
-                                      style={{
-                                        fontSize: 10.5,
-                                        color: 'var(--muted)',
-                                        marginLeft: 30,
-                                        fontWeight: 500,
-                                        fontStyle: 'italic',
-                                      }}
-                                    >
-                                      {L.note}
-                                    </div>
-                                  )}
                                 </button>
                                 {data.leagues[L.key] && (
                                   <div

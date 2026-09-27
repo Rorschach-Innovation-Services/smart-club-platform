@@ -232,36 +232,6 @@ describe('instantiateTemplate', () => {
     const st = instantiateTemplate(findTemplate('pools-to-knockout')!, CAL);
     expect(st.stages[0].schedule.slots).toEqual(builtIn);
     expect(st.stages[1].schedule.slots).toEqual(builtIn);
-    // An empty override keeps the built-ins.
-    const empty = instantiateTemplate(
-      findTemplate('pools-to-knockout')!,
-      CAL,
-      undefined,
-      undefined,
-      {
-        timeSlots: [],
-      },
-    );
-    expect(empty.stages[0].schedule.slots).toEqual(builtIn);
-  });
-
-  it('swaps in passed time slots where the template sets start times', () => {
-    const slots = [
-      { label: 'Early', start: '09:30' },
-      { label: 'Late', start: '14:00' },
-    ];
-    const st = instantiateTemplate(findTemplate('pools-to-knockout')!, CAL, undefined, undefined, {
-      timeSlots: slots,
-    });
-    expect(st.stages[0].schedule.slots).toEqual(slots);
-    expect(st.stages[1].schedule.slots).toEqual(slots);
-    // Fresh copies: editing the structure never edits the tenant's config.
-    expect(st.stages[0].schedule.slots).not.toBe(slots);
-    // A template with no set times stays without them.
-    const flat = instantiateTemplate(findTemplate('flat-round-robin')!, CAL, undefined, undefined, {
-      timeSlots: slots,
-    });
-    expect('slots' in flat.stages[0].schedule).toBe(false);
   });
 
   // Templates and stage-kind examples are read by every tenant, so they describe a shape,
@@ -316,7 +286,7 @@ describe('JSON import / export', () => {
   });
 
   // A structure carries no calendar identity of its own (ADR 0008 Phase 1) — stages name
-  // a block POSITION, and the Competition binding supplies the calendar at generation
+  // a block POSITION, and the league's setup supplies the calendar at generation
   // time. Export/import round-trips the stages as-is; there is no calendarId to lose.
   it('rejects a legacy export that still carries concrete blockId references', () => {
     const legacy = {

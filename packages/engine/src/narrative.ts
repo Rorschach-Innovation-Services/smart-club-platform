@@ -201,12 +201,12 @@ export function describeUncoveredBlock(block: SeasonBlock, blockIndex: number): 
 
 /**
  * The per-CALENDAR aggregate wording (server PUT warnings, the calendars card): across
- * every competition bound to the calendar, nothing plays here. Kept separate from
+ * every league whose setup follows the calendar, nothing plays here. Kept separate from
  * `describeUncoveredBlock` so the two sentences never get concatenated into "has no
- * stage playing in it — no competition uses it", which says the same thing twice.
+ * stage playing in it — no league uses it", which says the same thing twice.
  */
 export function describeUncoveredBlockAggregate(block: SeasonBlock, blockIndex: number): string {
-  return `${uncoveredBlockPrefix(block, blockIndex)} — no competition on this calendar uses it`;
+  return `${uncoveredBlockPrefix(block, blockIndex)} — no league set up on this calendar uses it`;
 }
 
 /**

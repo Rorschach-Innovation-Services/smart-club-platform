@@ -12,7 +12,7 @@ import { findBlock } from './calendar';
 import type { TeamParticipant } from './leagues';
 import { materialiseRun } from './run';
 import { buildStageSeries, type StageSeriesFormat } from './series-builder';
-import type { Competition, League, SeasonRun, Series, StageRun, StageSpec } from './types';
+import type { League, SeasonRun, Series, StageRun, StageSpec } from './types';
 
 export interface StageGenerationArgs {
   run: SeasonRun;
@@ -30,10 +30,6 @@ export interface StageGenerationArgs {
   league?: Pick<League, 'label'>;
   /** The setup structure's name and overs — see `buildStageSeries`. */
   format?: StageSeriesFormat;
-  /** @deprecated Superseded by `format`; deleted in WS6. Ignored when `format` is given. */
-  competition?: Pick<Competition, 'label' | 'matchFormat'>;
-  /** @deprecated Superseded by `format`; deleted in WS6. Ignored when `format` is given. */
-  defaultOvers?: number;
 }
 
 /** One group as generated: what the run's StageRun records against it. */
@@ -77,8 +73,6 @@ export function generateStage({
   leagueTeams,
   league,
   format,
-  competition,
-  defaultOvers,
 }: StageGenerationArgs): StageGeneration {
   const index = run.structureSnapshot.stages.findIndex((s) => s.id === specId);
   if (index < 0) return { status: 'unknown-stage' };
@@ -111,11 +105,10 @@ export function generateStage({
         // to the block it plays in rather than a blank `startDate` (a gsi1 sort key).
         startDate: g.plan.dates[0] ?? block.start,
         league,
-        ...(format ? { format } : { competition }),
+        format,
       },
       multi,
       leagueTeams,
-      defaultOvers,
     }),
   );
   // Named for the pairing THIS season plays (the run's override laid over the spec).

@@ -311,7 +311,7 @@ describe('HowSeasonsWork', () => {
     const nodes = within(screen.getByRole('list', { name: /how a season is put together/i }))
       .getAllByRole('listitem')
       .map((li) => li.textContent);
-    expect(nodes).toEqual(['Competition', 'Season', 'Stage', 'Group', 'Fixtures']);
+    expect(nodes).toEqual(['League', 'Season', 'Stage', 'Group', 'Fixtures']);
     expect(screen.getAllByRole('heading', { level: 4 })).toHaveLength(4);
     expect(screen.getByText(/The operator builds the shape once/)).toBeInTheDocument();
   });

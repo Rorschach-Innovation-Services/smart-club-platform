@@ -384,7 +384,7 @@ function assertStagesFitCalendar(
  *
  * The deprecated `competitions[]` a league may still carry (and `note`, and a stage's
  * `ladder`/`outcome`) are NOT validated and NOT stripped here: they are inert stored data
- * during the dual window, removed only by a deliberate cleanup script after burn-in.
+ * during the dual window, removed only by scripts/cleanup-competitions.ts after burn-in.
  */
 export function validateSetups(
   leagues: League[],
@@ -403,47 +403,6 @@ export function validateSetups(
     if (!calendar)
       throw new HttpError(400, `"${lg.label}" is set up on a calendar that doesn't exist`);
     assertStagesFitCalendar(`"${lg.label}"`, structure, calendar);
-  }
-}
-
-/**
- * A league's competition bindings.
- * @deprecated Routes validate {@link validateSetups} instead; kept only for
- * scripts/migrate-flat-runs.ts, which still writes competitions and is retired in WS6.
- */
-export function validateCompetitions(
-  leagues: League[],
-  structures: CompetitionStructure[],
-  calendars: SeasonCalendar[],
-): void {
-  for (const lg of leagues) {
-    if (lg.competitions === undefined) continue;
-    if (!Array.isArray(lg.competitions))
-      throw new HttpError(400, `competitions on "${lg.label}" must be an array`);
-    if (lg.competitions.length > 10)
-      throw new HttpError(400, `"${lg.label}" is limited to 10 competitions`);
-    const ids = lg.competitions.map((comp): unknown => comp?.id);
-    if (ids.some((id) => typeof id !== 'string' || !(id as string).trim()))
-      throw new HttpError(400, `every competition on "${lg.label}" needs an id`);
-    if (new Set(ids).size !== ids.length)
-      throw new HttpError(409, `duplicate competition id on "${lg.label}"`);
-    for (const comp of lg.competitions) {
-      if (!comp.label?.trim())
-        throw new HttpError(400, `every competition on "${lg.label}" needs a label`);
-      const structure = structures.find((st) => st.id === comp.structureId);
-      if (!structure)
-        throw new HttpError(
-          400,
-          `competition "${comp.label}" points at a structure that doesn't exist`,
-        );
-      const calendar = calendars.find((cal) => cal.id === comp.calendarId);
-      if (!calendar)
-        throw new HttpError(
-          400,
-          `competition "${comp.label}" points at a calendar that doesn't exist`,
-        );
-      assertStagesFitCalendar(`competition "${comp.label}"`, structure, calendar);
-    }
   }
 }
 

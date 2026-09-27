@@ -3265,7 +3265,7 @@ describe('competition structures (ADR 0008)', () => {
       assert.equal(res.status, 200, await res.clone().text());
       const stored = (await repo.getTenantConfig(T))!.leagues!.find((l) => l.key === 'premier');
       assert.deepEqual(stored?.competitions, legacy);
-      assert.equal(stored?.note, 'legacy note');
+      assert.equal((stored as { note?: string } | undefined)?.note, 'legacy note');
     } finally {
       await repo.putTenantConfig(before!);
     }
@@ -3397,7 +3397,7 @@ describe('calendar coverage warnings', () => {
   const T = 'coverage';
   const OP = platformHeaders(OPERATOR);
   const COVERAGE_LINE =
-    '2026/27: Block 2 (Second half, 17 Jan 2027 → 26 Mar 2027) — no competition on this calendar uses it';
+    '2026/27: Block 2 (Second half, 17 Jan 2027 → 26 Mar 2027) — no league set up on this calendar uses it';
 
   const stageIn = (id: string, blockIndex: number) => ({
     id,

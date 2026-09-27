@@ -531,8 +531,8 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   const allCalendars = tenantConfig?.calendars ?? [];
   // Structures live only on the authenticated read; absent for reps, who never need them.
   const allStructures = tenantConfigQuery.data?.structures ?? [];
-  // Competition defaults (ADR 0014): the authenticated read carries all of it; the public
-  // payload only the pickers' fields (formats, days, slots) — enough until the read lands.
+  // Competition defaults (ADR 0014): only travel cost and venue aliases survive, and only
+  // the authenticated read carries them; absent ⇒ the built-in travel fallback.
   const competitionDefaults =
     tenantConfigQuery.data?.competitionDefaults ?? tenantConfig?.competitionDefaults;
   const allSeasonRuns = seasonRunsQuery.data ?? [];

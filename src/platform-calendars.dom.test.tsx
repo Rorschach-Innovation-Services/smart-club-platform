@@ -384,7 +384,7 @@ describe('CalendarForm — field guides and the worked example', () => {
 /* ─────────────────────────────────────────────────────────────────────────────
    Blocks are time, not formats. Operators have modelled "T20" and "30 Over" as two
    overlapping blocks of one calendar; the form now says what that should be instead
-   (two competitions on the league) without ever refusing the save.
+   (two leagues, each with its own setup) without ever refusing the save.
    ───────────────────────────────────────────────────────────────────────────── */
 
 const renderWithHelp = (config: TenantConfig) => {
@@ -405,7 +405,7 @@ const editRow = async (user: ReturnType<typeof userEvent.setup>, name: RegExp) =
 const HINT_TEXT = /this looks like a match format/i;
 
 describe('CalendarForm — blocks are time, not formats', () => {
-  it('explains an overlap as two competitions and links to the difference', async () => {
+  it('explains an overlap as two leagues and links to the difference', async () => {
     const overlapping = cal({
       blocks: [
         { id: 'b1', label: 'Block 1', start: '2026-09-12', end: '2026-12-12' },
@@ -417,12 +417,12 @@ describe('CalendarForm — blocks are time, not formats', () => {
 
     expect(
       screen.getByText(
-        /Block 1 and Block 2 overlap\. Blocks are stretches of time — two formats running side by side are two competitions on the league, not two blocks\./,
+        /Block 1 and Block 2 overlap\. Blocks are stretches of time — two formats running side by side are two leagues, each with its own setup, not two blocks\./,
       ),
     ).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: /what's the difference\?/i }));
-    expect(screen.getByRole('dialog', { name: 'Blocks and competitions' })).toBeVisible();
+    expect(screen.getByRole('dialog', { name: 'Blocks and formats' })).toBeVisible();
   });
 
   it('hints under blocks named after a format, and not under blocks named after time', async () => {
@@ -475,8 +475,8 @@ describe('CalendarForm — blocks are time, not formats', () => {
 
 /* ─────────────────────────────────────────────────────────────────────────────
    Who uses each calendar, and which of its blocks nobody plays in. Aggregated across
-   every competition on the calendar: T20 in Block 1 and 50 Over in Block 2 is two
-   competitions sharing one calendar, and covers it.
+   every league set up on the calendar: T20 in Block 1 and 50 Over in Block 2 is two
+   leagues sharing one calendar, and covers it.
    ───────────────────────────────────────────────────────────────────────────── */
 
 describe('CalendarsCard — league setups on each calendar', () => {
@@ -538,26 +538,26 @@ describe('CalendarsCard — league setups on each calendar', () => {
     expect(screen.queryByText(/Elsewhere/)).toBeNull();
   });
 
-  it('says so when no competition uses the calendar, and raises no coverage warning', () => {
+  it('says so when no league is set up on the calendar, and raises no coverage warning', () => {
     renderCard({ calendars: [twoBlocks], structures: [], leagues: [] });
 
-    expect(screen.getByText('No competitions on this calendar yet.')).toBeVisible();
-    expect(screen.queryByText(/no competition on this calendar uses it/i)).toBeNull();
+    expect(screen.getByText('No league is set up on this calendar yet.')).toBeVisible();
+    expect(screen.queryByText(/no league set up on this calendar uses it/i)).toBeNull();
   });
 
-  it('warns about a block no competition on the calendar plays in', () => {
+  it('warns about a block no league on the calendar plays in', () => {
     renderCard({
       calendars: [twoBlocks],
       structures: [structureIn('s1', 'Flat league', 1, 0)],
       leagues: [leagueOn('premier', 'Premier Men', 's1', 'cal2627')],
     });
 
-    const lines = screen.getAllByText(/no competition on this calendar uses it/i);
+    const lines = screen.getAllByText(/no league set up on this calendar uses it/i);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toHaveTextContent(/Block 2/);
   });
 
-  it('raises nothing when the competitions cover every block between them', () => {
+  it('raises nothing when the leagues cover every block between them', () => {
     renderCard({
       calendars: [twoBlocks],
       structures: [structureIn('s1', 'Flat league', 1, 0), structureIn('s2', 'Knockout', 1, 1)],
@@ -568,6 +568,6 @@ describe('CalendarsCard — league setups on each calendar', () => {
     });
 
     expect(screen.getByText('Premier T20 — Knockout (v1)')).toBeVisible();
-    expect(screen.queryByText(/no competition on this calendar uses it/i)).toBeNull();
+    expect(screen.queryByText(/no league set up on this calendar uses it/i)).toBeNull();
   });
 });

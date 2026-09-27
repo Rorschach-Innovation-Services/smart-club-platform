@@ -480,14 +480,14 @@ describe('StageRow — Time slots', () => {
 
   it('prefills the built-in Saturday and 08:00 / 13:30 defaults, whatever the tenant config says', async () => {
     const { user, save } = setup([structure()], {
-      // Retired: tenant-configured slots and match days are no longer read.
+      // Retired: a stored config may still carry tenant slots and match days; neither is read.
       competitionDefaults: {
         timeSlots: [
           { label: 'Early', start: '09:30' },
           { label: 'Late', start: '14:15' },
         ],
         matchDays: [0],
-      },
+      } as TenantConfig['competitionDefaults'],
     });
     await openEditor(user);
 

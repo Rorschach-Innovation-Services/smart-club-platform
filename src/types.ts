@@ -20,7 +20,6 @@ import type {
   Cadence,
   ClubGround,
   ClubTeam,
-  Competition,
   CompetitionDefaults,
   CompetitionStructure,
   DerivationNote,
@@ -29,10 +28,7 @@ import type {
   GroupPlan,
   IsoDate,
   IsoTime,
-  LadderSpec,
   League,
-  MatchFormatDefault,
-  OutcomeSpec,
   SeasonBlock,
   SeasonBreak,
   SeasonCalendar,
@@ -52,7 +48,6 @@ export type {
   Cadence,
   ClubGround,
   ClubTeam,
-  Competition,
   CompetitionDefaults,
   CompetitionStructure,
   DerivationNote,
@@ -61,10 +56,7 @@ export type {
   GroupPlan,
   IsoDate,
   IsoTime,
-  LadderSpec,
   League,
-  MatchFormatDefault,
-  OutcomeSpec,
   SeasonBlock,
   SeasonBreak,
   SeasonCalendar,
@@ -264,8 +256,8 @@ export interface TenantConfig {
   structures?: CompetitionStructure[];
   /**
    * Tenant-configured defaults (ADR 0014) — read through `resolveCompetitionDefaults`
-   * (engine defaults.ts), never directly, so an absent field gets its fallback. GET /tenant
-   * carries matchFormats/matchDays/timeSlots only; GET /tenant/config carries all of it.
+   * (engine defaults.ts), never directly, so an absent field gets its fallback. Only
+   * `travel` and `venueAliases` survive; the anonymous GET /tenant carries neither.
    */
   competitionDefaults?: CompetitionDefaults;
   /** Operator "setup complete" milestone (D6). Present ⇒ setup marked done. */
@@ -445,29 +437,6 @@ export interface DocIntakeCommitItem {
 export type DocIntakeCommitClubResult =
   | { clubId: string; ok: true; docs: Record<string, boolean> }
   | { clubId: string; ok: false; error: string };
-
-/** GET /platform/tenants/:slug/dns — the vanity-domain go-live instruction sheet. */
-export interface DnsRecord {
-  type: 'CNAME';
-  host: string;
-  target: string;
-}
-export interface DnsStep {
-  key: string;
-  title: string;
-  detail: string;
-  records?: DnsRecord[];
-}
-export interface DnsSheet {
-  tenant: string;
-  /** Where the client is already reachable (wildcard host, or vanity origin). */
-  liveUrl: string | null;
-  note: string;
-  steps: DnsStep[];
-  /** The one shared API host every tenant uses (informational). */
-  sharedApiHost?: string;
-  sharedApiTarget?: string;
-}
 
 /** A note appended to a club's admin communication log. */
 export interface ClubNote {

@@ -1376,15 +1376,15 @@ export function OptionCards<T extends string>({
   );
 }
 
-const HSW_PIPELINE = ['Competition', 'Season', 'Stage', 'Group', 'Fixtures'];
+const HSW_PIPELINE = ['League', 'Season', 'Stage', 'Group', 'Fixtures'];
 
 const HSW_IDEAS: Array<{ title: string; text: string }> = [
   {
-    title: 'A league is not a competition',
-    text: 'A league holds one or more competitions, each a format stream with its own shape and dates, so the same clubs can play a T20 in groups and a 50-over league in two halves.',
+    title: 'A league has one setup',
+    text: 'A league your operator has set up has one structure and one season calendar. The same clubs can still play a T20 in groups and a 50-over league in two halves: those are two leagues, each with its own setup.',
   },
   {
-    title: 'A competition is a pipeline of stages',
+    title: 'A structure is a pipeline of stages',
     text: 'Each stage is one phase of play and answers three questions: who plays, who plays whom, and when.',
   },
   {
@@ -1413,8 +1413,8 @@ export function HowSeasonsWork({ compact }: { compact?: boolean }) {
       <section className="hsw compact">
         {strip}
         <p className="hsw-summary">
-          A competition is a pipeline of stages; each stage plays in one block, and each of its
-          groups becomes one series of fixtures. <HelpLink topic="blocks-vs-stages" />
+          A structure is a pipeline of stages; each stage plays in one block, and each of its groups
+          becomes one series of fixtures. <HelpLink topic="blocks-vs-stages" />
         </p>
       </section>
     );

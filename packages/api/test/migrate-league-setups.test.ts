@@ -3,7 +3,7 @@
  * league still on competitions[] its one `setup`, moving each competition's overs onto
  * its structure (cloning a shared structure only on conflicting overs).
  *
- * Same harness as migrate-flat-runs.test.ts (in-process dynalite, real repo functions).
+ * Same harness as backfill-venue-aliases.test.ts (in-process dynalite, real repo functions).
  * Each describe scopes the migration to its own tenant through a store whose
  * listTenants filters the registry, so one tenant's extras never leak into another
  * describe's exit status.

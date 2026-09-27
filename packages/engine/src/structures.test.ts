@@ -1704,14 +1704,14 @@ describe('uncovered blocks', () => {
     );
   });
 
-  it('the aggregate wording says no competition uses it, once, with the same prefix', () => {
+  it('the aggregate wording says no league set up on it uses it, once, with the same prefix', () => {
     const labelled = { id: 'b2', label: 'Second half', start: '2027-01-17', end: '2027-03-26' };
     expect(describeUncoveredBlockAggregate(labelled, 1)).toBe(
-      'Block 2 (Second half, 17 Jan 2027 → 26 Mar 2027) — no competition on this calendar uses it',
+      'Block 2 (Second half, 17 Jan 2027 → 26 Mar 2027) — no league set up on this calendar uses it',
     );
     const plain = { id: 'b2', label: 'Block 2', start: '2027-01-17', end: '2027-03-26' };
     expect(describeUncoveredBlockAggregate(plain, 1)).toBe(
-      'Block 2 (17 Jan 2027 → 26 Mar 2027) — no competition on this calendar uses it',
+      'Block 2 (17 Jan 2027 → 26 Mar 2027) — no league set up on this calendar uses it',
     );
   });
 });

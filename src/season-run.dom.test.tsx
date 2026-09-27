@@ -1241,6 +1241,46 @@ describe('a rebase-changed schedule — "Needs regenerating" only once there are
     expect(screen.getByText(/schedule for this stage changed/i)).toBeVisible();
     expect(screen.getByRole('button', { name: /regenerate \d+ fixtures/i })).toBeVisible();
   });
+
+  it('offers Regenerate over generated series once a rebase changed the name or overs', async () => {
+    const readyStage = { specId: 'league', status: 'ready' as const, groups: [], audit: [] };
+    const { user, onGenerate, rerenderRuns } = setup(ONE_STAGE, [
+      run(ONE_STAGE, { stages: [{ ...readyStage, formatChanged: true }] }),
+    ]);
+    // Nothing generated: the first generate adopts the new name/overs anyway.
+    expect(screen.queryByText(/needs regenerating/i)).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: /generate \d+ fixtures/i }));
+    const { series, groups } = seriesFromGenerate(onGenerate.mock.calls[0]);
+    const generated = {
+      specId: 'league',
+      status: 'generated' as const,
+      groups: groups.map((g) => ({
+        id: g.id,
+        label: 'Group A',
+        entrants: [],
+        seriesId: g.seriesId,
+      })),
+      audit: [],
+    };
+    rerenderRuns([run(ONE_STAGE, { stages: [generated] })], series);
+    expect(screen.queryByText(/needs regenerating/i)).toBeNull();
+
+    rerenderRuns([run(ONE_STAGE, { stages: [{ ...generated, formatChanged: true }] })]);
+    expect(screen.getByText(/needs regenerating/i)).toBeVisible();
+    expect(
+      screen.getByText(
+        'The structure’s name or overs changed when you reviewed its changes — regenerating adopts them for these series.',
+      ),
+    ).toBeVisible();
+    // The gold line stays alongside the Regenerate offer.
+    expect(
+      screen.getByText(
+        'The structure’s name or overs changed — the next regenerate applies it to this stage’s series.',
+      ),
+    ).toBeVisible();
+    expect(screen.getByRole('button', { name: /regenerate \d+ fixtures/i })).toBeVisible();
+  });
 });
 
 /* ─────────────────────────────────────────────────────────────────────────────

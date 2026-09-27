@@ -312,7 +312,7 @@ export function teamCounts(
  *
  * There is no exclusion list: a league has one setup, and a side sitting a stage out is
  * handled by the stage-level Edit-entrants flow, which supersedes the retired
- * `Competition.excludeTeamIds`.
+ * per-competition exclusion list.
  *
  * ── The affiliation gate ──
  * A club that has not submitted its affiliation form is not yet in the season. The CALLER
@@ -333,36 +333,14 @@ export function teamCounts(
 export function leagueParticipants<C extends ClubSidesSource & { leagues?: string[] }>(
   clubs: C[],
   leagueKey: string,
-  options?: ParticipantGateOptions<C>,
-): (TeamParticipant & { club: C })[];
-/**
- * @deprecated The `exclude` (Competition.excludeTeamIds) position is retired — the
- * stage-level Edit-entrants flow supersedes it. Still honoured until every caller moves to
- * the three-argument form; deleted in WS6.
- */
-export function leagueParticipants<C extends ClubSidesSource & { leagues?: string[] }>(
-  clubs: C[],
-  leagueKey: string,
-  exclude: readonly string[] | undefined,
-  options?: ParticipantGateOptions<C>,
-): (TeamParticipant & { club: C })[];
-export function leagueParticipants<C extends ClubSidesSource & { leagues?: string[] }>(
-  clubs: C[],
-  leagueKey: string,
-  third?: readonly string[] | ParticipantGateOptions<C>,
-  fourth?: ParticipantGateOptions<C>,
+  options: ParticipantGateOptions<C> = {},
 ): (TeamParticipant & { club: C })[] {
-  const legacy = Array.isArray(third) || third === undefined;
-  const dropped = new Set<string>(legacy ? ((third as readonly string[] | undefined) ?? []) : []);
-  const options: ParticipantGateOptions<C> =
-    (legacy ? fourth : (third as ParticipantGateOptions<C>)) ?? {};
   const gate =
     options.isAffiliated && !options.includeUnaffiliated ? options.isAffiliated : undefined;
   return (clubs || [])
     .filter((c) => Array.isArray(c.leagues) && c.leagues.includes(leagueKey))
     .filter((c) => !gate || gate(c))
-    .flatMap((c) => clubTeamsForLeague(c, leagueKey).map((p) => ({ ...p, club: c })))
-    .filter((p) => !dropped.has(p.teamId));
+    .flatMap((c) => clubTeamsForLeague(c, leagueKey).map((p) => ({ ...p, club: c })));
 }
 
 /**
@@ -393,7 +371,7 @@ export interface ParticipantGateOptions<C> {
 /**
  * The gated pool plus the sides the gate held back, so a console can list them greyed
  * with an "Include anyway". No exclusion list: the stage-level Edit-entrants flow
- * supersedes the retired `Competition.excludeTeamIds`.
+ * supersedes the retired per-competition exclusion list.
  *
  * `isAffiliated` is required here — without it nothing is ever held back, and the caller
  * wants {@link leagueParticipants}.
@@ -402,27 +380,8 @@ export function leagueParticipantsWithStatus<C extends ClubSidesSource & { leagu
   clubs: C[],
   leagueKey: string,
   isAffiliated: (club: C) => boolean,
-): ParticipantsWithStatus<C>;
-/**
- * @deprecated The `exclude` (Competition.excludeTeamIds) position is retired — the
- * stage-level Edit-entrants flow supersedes it. Still honoured until every caller moves to
- * the three-argument form; deleted in WS6.
- */
-export function leagueParticipantsWithStatus<C extends ClubSidesSource & { leagues?: string[] }>(
-  clubs: C[],
-  leagueKey: string,
-  exclude: readonly string[] | undefined,
-  isAffiliated: (club: C) => boolean,
-): ParticipantsWithStatus<C>;
-export function leagueParticipantsWithStatus<C extends ClubSidesSource & { leagues?: string[] }>(
-  clubs: C[],
-  leagueKey: string,
-  third: readonly string[] | undefined | ((club: C) => boolean),
-  fourth?: (club: C) => boolean,
 ): ParticipantsWithStatus<C> {
-  const isAffiliated = (typeof third === 'function' ? third : fourth) as (club: C) => boolean;
-  const exclude = typeof third === 'function' ? undefined : third;
-  const all = leagueParticipants(clubs, leagueKey, exclude);
+  const all = leagueParticipants(clubs, leagueKey);
   return {
     participants: all.filter((p) => isAffiliated(p.club)),
     unaffiliated: all.filter((p) => !isAffiliated(p.club)),

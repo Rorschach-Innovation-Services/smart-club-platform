@@ -43,8 +43,8 @@ const GOLD = 'var(--gold, #B7791F)';
 
 /**
  * A label that reads like a match format rather than a stretch of time. Operators have
- * named blocks "T20" and "30 Over" to model two formats — but formats are competitions on
- * a league, and a block is only time. Leading AND trailing boundaries, or "Crossover" and
+ * named blocks "T20" and "30 Over" to model two formats — but a format lives on the
+ * structure (its overs), a league has one setup, and a block is only time. Leading AND trailing boundaries, or "Crossover" and
  * "Handover" would match. Advisory only: it drives a hint, never a validation error.
  */
 export const FORMAT_LIKE_LABEL = /\b(t20|t10|\d+\s*overs?|overs?|red ball|pink ball|white ball)\b/i;
@@ -53,8 +53,8 @@ export const FORMAT_LIKE_LABEL = /\b(t20|t10|\d+\s*overs?|overs?|red ball|pink b
 function FormatLikeHint() {
   return (
     <div style={{ ...HINT, marginTop: 4, color: GOLD }}>
-      This looks like a match format. Formats are competitions on a league; a block is a stretch of
-      time (Block 1, First half).{' '}
+      This looks like a match format. A format lives on the structure (its overs), and each league
+      has one setup; a block is a stretch of time (Block 1, First half).{' '}
       <HelpLink topic="blocks-vs-competitions">What&apos;s the difference?</HelpLink>
     </div>
   );
@@ -242,14 +242,14 @@ function validate(draft: SeasonCalendar): { errors: string[]; warnings: Calendar
   );
 
   // Overlapping blocks aren't illegal, but they are either a typo or two formats modelled
-  // as blocks — which should be two competitions on the league — so they warn, not block.
+  // as blocks — which should be two leagues, each with its own setup — so they warn, not block.
   for (let i = 0; i < usable.length; i++) {
     for (let j = i + 1; j < usable.length; j++) {
       const a = usable[i];
       const b = usable[j];
       if (a.start <= b.end && b.start <= a.end)
         warnings.push({
-          text: `${a.label} and ${b.label} overlap. Blocks are stretches of time — two formats running side by side are two competitions on the league, not two blocks.`,
+          text: `${a.label} and ${b.label} overlap. Blocks are stretches of time — two formats running side by side are two leagues, each with its own setup, not two blocks.`,
           topic: 'blocks-vs-competitions',
         });
     }
@@ -473,7 +473,7 @@ export function CalendarForm({
             seasons list.
           </p>
           <p>
-            A competition’s stages bind to blocks <strong>by order</strong> — stage 1 to the first
+            A structure’s stages bind to blocks <strong>by order</strong> — stage 1 to the first
             block, stage 2 to the second — so the sequence here matters.
           </p>
         </InfoDot>
@@ -856,7 +856,7 @@ export function CalendarsCard({
                         <td colSpan={5} style={{ paddingTop: 0, fontSize: 12, lineHeight: 1.5 }}>
                           {bindings.length === 0 ? (
                             <span style={{ color: 'var(--muted-2)' }}>
-                              No competitions on this calendar yet.
+                              No league is set up on this calendar yet.
                             </span>
                           ) : (
                             bindings.map((x) => (

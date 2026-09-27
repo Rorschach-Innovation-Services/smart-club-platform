@@ -379,17 +379,6 @@ describe('leagueParticipants', () => {
     expect(first.club.id).toBe('glenwood');
   });
 
-  it('still honours the deprecated exclude position until WS6, filtering on teamId', () => {
-    // A club may hold its B side back, so the legacy filter is on teamId, not clubId.
-    expect(leagueParticipants(clubs as any, 'premier', ['tm_b']).map((p) => p.teamId)).toEqual([
-      'tm_a',
-      'berea',
-    ]);
-    expect(leagueParticipants(clubs as any, 'premier', undefined, {}).map((p) => p.teamId)).toEqual(
-      ['tm_a', 'tm_b', 'berea'],
-    );
-  });
-
   it('tolerates a missing club list', () => {
     expect(leagueParticipants(clubs as any, 't20').map((p) => p.teamId)).toEqual([
       'glenwood',
@@ -444,17 +433,6 @@ describe('the affiliation gate', () => {
       isAffiliated,
     );
     expect(ids(participants)).toEqual(['glenwood', 'delta']);
-    expect(ids(unaffiliated)).toEqual(['berea']);
-  });
-
-  it('still honours the deprecated exclude position on both lists until WS6', () => {
-    const { participants, unaffiliated } = leagueParticipantsWithStatus(
-      clubs,
-      'premier',
-      ['delta'],
-      isAffiliated,
-    );
-    expect(ids(participants)).toEqual(['glenwood']);
     expect(ids(unaffiliated)).toEqual(['berea']);
   });
 });

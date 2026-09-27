@@ -732,7 +732,7 @@ async function seedSeason(
     stages.push({ specId: stage.id, status: 'generated', groups });
   }
 
-  const run = {
+  const run: SeasonRun = {
     id: runId,
     leagueKey: league.key,
     // HARD INVARIANT: seasonLabel is the gsi1 sort key — same blank-string trap as above.
@@ -744,8 +744,7 @@ async function seedSeason(
     createdBy: 'seed-cohort',
     version: 1,
     // No `competitionId`: deprecated and inert — a run resolves its setup via `leagueKey`.
-    // (The engine type still declares it required until WS6 deletes it.)
-  } as SeasonRun;
+  };
   await repo.putSeasonRun(tenant, run);
   return { run, series: seriesOut };
 }

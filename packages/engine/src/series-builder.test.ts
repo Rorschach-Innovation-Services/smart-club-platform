@@ -112,18 +112,5 @@ describe('buildStageSeries', () => {
     expect(buildStageSeries(args()).maxOvers).toBe(20);
     const noOvers = { ...args().group, format: { structureName: 'One-off cup' } };
     expect(buildStageSeries(args({ group: noOvers })).maxOvers).toBe(50);
-    // The retired tenant default no longer reaches a `format`-built series.
-    expect(buildStageSeries(args({ group: noOvers, defaultOvers: 40 })).maxOvers).toBe(50);
-  });
-
-  it('still honours the deprecated competition pick when no format is given (until WS6)', () => {
-    const legacy = {
-      ...args().group,
-      format: undefined,
-      competition: { label: '40 Over' },
-    };
-    const s = buildStageSeries(args({ group: legacy, defaultOvers: 40 }));
-    expect(s.seriesType).toBe('40 Over');
-    expect(s.maxOvers).toBe(40);
   });
 });

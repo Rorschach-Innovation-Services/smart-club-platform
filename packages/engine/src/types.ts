@@ -18,15 +18,12 @@ export interface League {
   /** A DISTRICTS value, or the 'All districts' sentinel for overarching leagues. */
   district: string;
   /**
-   * @deprecated Display-only and ships empty in real use; deleted in WS6. Still stored and
-   * read until then.
-   */
-  note?: string;
-  /**
    * Format streams this league runs (ADR 0008) — e.g. T20 Pink Ball and 50 Over Red Ball
    * side by side over the same registered clubs. Absent ⇒ the league behaves exactly as
    * before: one flat create-series flow, no structure.
-   * @deprecated Replaced by {@link League.setup}; deleted in WS6. Fully functional until then.
+   * @deprecated Replaced by {@link League.setup}. Nothing reads it for scheduling; kept only
+   * so stored configs type-check for the operator-binding overlay, the stale-console 409 and
+   * the setup migration. Retired by `scripts/cleanup-competitions.ts` after prod burn-in.
    */
   competitions?: Competition[];
   /**
@@ -195,25 +192,10 @@ export type EntrantSpec =
   | { kind: 'seeded-split'; groups: GroupPlan; method: 'blocks' | 'snake' };
 
 /**
- * Points and tie-break configuration, lifted off the create-series form onto the stage.
- * @deprecated Stored but not read; kept so existing structures stay valid. The platform
- * has no results or ladder model, and no UI edits this. Deleted in WS6.
- */
-export interface LadderSpec {
-  winPoints: number;
-  bonusPoints: number;
-  lossPoints: number;
-  tiePoints: number;
-  abandonedPoints: number;
-  /** Tie-break sequence, most significant first. */
-  order: string[];
-}
-
-/**
- * When a stage plays. Names a POSITION into whichever calendar the competition binds,
+ * When a stage plays. Names a POSITION into whichever calendar the league's setup names,
  * not a calendar or block directly — a structure carries no calendar identity of its own,
- * so the same structure can be reused against different calendars. The Competition's
- * binding supplies the actual blocks at generation time.
+ * so the same structure can be reused against different calendars. The setup's calendar
+ * supplies the actual blocks at generation time.
  */
 export interface StageSchedule {
   /** 0-based index into the bound calendar's `blocks` array. */
@@ -232,20 +214,6 @@ export interface StageSchedule {
   startAfter?: 'previous-stage';
 }
 
-/**
- * What finishing where in this stage means — display and next-season carry.
- * @deprecated Stored but not read; kept so existing structures stay valid. Nothing
- * displays or carries it, and new templates no longer set it. Deleted in WS6.
- */
-export interface OutcomeSpec {
-  /** Positions crowned champion, e.g. [1]. */
-  champion?: number[];
-  /** Positions promoted out of this group. */
-  promoted?: number[];
-  /** Positions relegated out of this group. */
-  relegated?: number[];
-}
-
 export interface StageSpec {
   /** Stable within the structure — later stages reference it via DerivationNote. */
   id: string;
@@ -255,10 +223,6 @@ export interface StageSpec {
   schedule: StageSchedule;
   /** Group display names, e.g. ["Top Six", "Bottom Six"]. Falls back to "Group A/B/…". */
   groupLabels?: string[];
-  /** @deprecated Stored but not read; kept so existing structures stay valid. Deleted in WS6. */
-  ladder?: LadderSpec;
-  /** @deprecated Stored but not read; kept so existing structures stay valid. Deleted in WS6. */
-  outcome?: OutcomeSpec;
 }
 
 /**
@@ -334,7 +298,10 @@ export type VenueStatus = 'home' | 'alternative' | 'neutral' | 'unresolved';
  * groupings, over the same twelve registered clubs.
  *
  * @deprecated Collapsed into {@link League.setup} (one league, one structure, one calendar;
- * overs move onto {@link CompetitionStructure.overs}). Deleted in WS6; fully functional until then.
+ * overs move onto {@link CompetitionStructure.overs}). Nothing schedules from it. Kept only
+ * because stored configs still carry it (read by the operator-binding overlay, the
+ * stale-console 409 and the setup migration); retired by `scripts/cleanup-competitions.ts`
+ * after prod burn-in.
  */
 export interface Competition {
   id: string;
@@ -348,37 +315,12 @@ export interface Competition {
 }
 
 /**
- * One match format a tenant offers, e.g. `{ label: 'T20 (Pink Ball)', overs: 20, ballType: 'Pink' }`.
- * @deprecated Formats revert to built-ins and overs live on the structure; deleted in WS6.
- */
-export interface MatchFormatDefault {
-  label: string;
-  overs?: number;
-  ballType?: string;
-}
-
-/**
  * Tenant-configured defaults that replace sport- and union-specific constants (ADR 0014,
  * "Tenant-configured defaults instead of constants"). Every field is optional: an absent
  * field resolves to the built-in fallback (`resolveCompetitionDefaults`, defaults.ts), so a
  * tenant that never configured any of this behaves exactly as before.
  */
 export interface CompetitionDefaults {
-  /**
-   * The formats offered where an admin picks one. Absent ⇒ the built-in list.
-   * @deprecated Reverts to built-ins; deleted in WS6.
-   */
-  matchFormats?: MatchFormatDefault[];
-  /**
-   * Default weekdays for "set days only". Absent ⇒ Saturday.
-   * @deprecated Reverts to built-ins; deleted in WS6.
-   */
-  matchDays?: Weekday[];
-  /**
-   * Default start times for double-headers. Absent ⇒ 08:00 / 13:30.
-   * @deprecated Reverts to built-ins; deleted in WS6.
-   */
-  timeSlots?: TimeSlot[];
   /** Travel cost estimate. Per-series values win. Absent ⇒ R4.50/km × 3 cars. */
   travel?: { costPerKm: number; carsPerAwayTrip: number };
   /**
@@ -461,7 +403,8 @@ export interface SeasonRun {
   /**
    * @deprecated Inert since the competition layer collapsed into `League.setup` — runs
    * resolve via `leagueKey` alone. Kept optional for stored data; new runs omit it.
-   * Deleted from writes, never read. Removed in WS6-era cleanup.
+   * Never written, never read. Retired by `scripts/cleanup-competitions.ts` after prod
+   * burn-in.
    */
   competitionId?: string;
   /** e.g. "2026/27". */
@@ -473,9 +416,9 @@ export interface SeasonRun {
   createdBy?: string;
   version: number;
   /**
-   * @deprecated Flat seasons are retired (ADR 0014); `scripts/migrate-flat-runs.ts` moves
-   * each flat run onto a real competition whose `matchFormat` holds this choice. Migrated
-   * data may still carry the field briefly. No code reads it — do not start.
+   * @deprecated Flat seasons are retired (ADR 0014); the one-off flat-run migration moved
+   * every flat run onto a real structure. Old stored runs may still carry the field. No code
+   * reads it — do not start.
    */
   flatFormat?: { seriesType: string; overs: number };
   /**

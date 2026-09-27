@@ -299,25 +299,16 @@ export function instantiateTemplate(
   calendar: SeasonCalendar | undefined,
   name?: string,
   placement?: number[],
-  /**
-   * Start times for a stage the template gives set start times. Absent or empty ⇒ the
-   * template's own built-in 08:00 / 13:30 slots. (Tenant-configured time slots are
-   * deprecated; callers still passing `resolveCompetitionDefaults(config)` keep working.)
-   */
-  defaults?: { timeSlots?: readonly TimeSlot[] },
 ): CompetitionStructure {
   const placed = defaultPlacement(template, calendar?.blocks?.length ?? 0);
   const blocks = template.stages.map((_, i) => placement?.[i] ?? placed[i]);
-  const tenantSlots = defaults?.timeSlots?.length ? defaults.timeSlots : undefined;
   const copies = template.stages.map((stage) => ({
     ...stage,
     schedule: {
       ...stage.schedule,
       // Fresh copies, and only when the template has slots at all — never an explicit
       // `slots: undefined` key (the whole branch omits the key to mean "no set times").
-      ...(stage.schedule.slots
-        ? { slots: (tenantSlots ?? stage.schedule.slots).map((s) => ({ ...s })) }
-        : {}),
+      ...(stage.schedule.slots ? { slots: stage.schedule.slots.map((s) => ({ ...s })) } : {}),
     },
   }));
   return {
