@@ -7,9 +7,22 @@
  * (packages/api/src/seed-cohort.ts) both build through here, so the id a re-seed writes is
  * byte-identical to the one the console's generate writes, and both carry the same schedule
  * binding (`roundsPerDay`, `activateFrom`) rather than two hand-kept copies drifting.
+ *
+ * Match format comes from the league's setup structure (`format`): its name becomes the
+ * series' `seriesType` and its `overs` the series' `maxOvers` (absent ⇒ 50).
  */
 import type { TeamParticipant } from './leagues';
 import type { Competition, IsoDate, League, SeasonRun, Series, StageSpec } from './types';
+
+/**
+ * The match format a series is built with — read off the league's setup structure (the
+ * run's structure snapshot first). `structureName` → `seriesType` (absent ⇒ the stage
+ * name); `overs` → `maxOvers` (absent ⇒ 50).
+ */
+export interface StageSeriesFormat {
+  structureName?: string;
+  overs?: number;
+}
 
 /** The per-group inputs — the fields of the console's `GenerateGroupPayload` read here. */
 export interface StageSeriesGroup {
@@ -19,6 +32,11 @@ export interface StageSeriesGroup {
   fixtures: unknown[];
   startDate: IsoDate;
   league?: Pick<League, 'label'>;
+  format?: StageSeriesFormat;
+  /**
+   * @deprecated Superseded by `format`; deleted in WS6. Honoured only when `format` is
+   * absent, so callers not yet moved to `format` build exactly what they did before.
+   */
   competition?: Pick<Competition, 'label' | 'matchFormat'>;
 }
 
@@ -38,8 +56,8 @@ export interface BuildStageSeriesArgs {
    */
   leagueTeams: readonly TeamParticipant[];
   /**
-   * Overs when the competition's match format names none: the tenant's first configured
-   * match format (`competitionDefaults.matchFormats[0].overs`). Absent ⇒ 50.
+   * @deprecated The competitionDefaults-derived overs fallback; deleted in WS6. Ignored
+   * whenever `group.format` is given (the new path's fallback is an inline 50).
    */
   defaultOvers?: number;
 }
@@ -85,11 +103,24 @@ export function buildStageSeries({
     seasonRunId: run.id,
     stageSpecId: stage.id,
     groupId: p.groupId,
-    maxOvers: p.competition?.matchFormat?.overs ?? defaultOvers ?? 50,
-    seriesType: p.competition?.label ?? stage.name,
+    ...formatFields(p, stage, defaultOvers),
     kind: 'series',
     released: false,
     releasedAt: null,
     version: 1,
+  };
+}
+
+/** `maxOvers` + `seriesType`: from `format` when given, else the deprecated competition path. */
+function formatFields(
+  p: StageSeriesGroup,
+  stage: StageSpec,
+  defaultOvers: number | undefined,
+): { maxOvers: number; seriesType: string } {
+  if (p.format)
+    return { maxOvers: p.format.overs ?? 50, seriesType: p.format.structureName ?? stage.name };
+  return {
+    maxOvers: p.competition?.matchFormat?.overs ?? defaultOvers ?? 50,
+    seriesType: p.competition?.label ?? stage.name,
   };
 }

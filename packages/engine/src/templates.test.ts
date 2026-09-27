@@ -12,7 +12,6 @@ import {
 } from './templates';
 import { materialiseStage } from './structure';
 import { describeStage } from './narrative';
-import { FALLBACK_TIME_SLOTS } from './defaults';
 import { STAGE_KINDS } from './stage-kinds';
 import type { SeasonCalendar } from './types';
 
@@ -224,14 +223,29 @@ describe('instantiateTemplate', () => {
   });
 
   // A short-format day plays a morning and an afternoon match, so the starter template
-  // carries the fallback slots on both its stages out of the box.
-  it('carries the fallback morning/afternoon slots on both stages of pools-to-knockout', () => {
+  // carries the built-in 08:00 / 13:30 slots on both its stages out of the box.
+  it('carries the built-in morning/afternoon slots on both stages of pools-to-knockout', () => {
+    const builtIn = [
+      { label: 'Morning', start: '08:00' },
+      { label: 'Afternoon', start: '13:30' },
+    ];
     const st = instantiateTemplate(findTemplate('pools-to-knockout')!, CAL);
-    expect(st.stages[0].schedule.slots).toEqual(FALLBACK_TIME_SLOTS);
-    expect(st.stages[1].schedule.slots).toEqual(FALLBACK_TIME_SLOTS);
+    expect(st.stages[0].schedule.slots).toEqual(builtIn);
+    expect(st.stages[1].schedule.slots).toEqual(builtIn);
+    // An empty override keeps the built-ins.
+    const empty = instantiateTemplate(
+      findTemplate('pools-to-knockout')!,
+      CAL,
+      undefined,
+      undefined,
+      {
+        timeSlots: [],
+      },
+    );
+    expect(empty.stages[0].schedule.slots).toEqual(builtIn);
   });
 
-  it('swaps in the tenant’s own time slots where the template sets start times', () => {
+  it('swaps in passed time slots where the template sets start times', () => {
     const slots = [
       { label: 'Early', start: '09:30' },
       { label: 'Late', start: '14:00' },

@@ -310,12 +310,9 @@ export function teamCounts(
 /**
  * Every side registered for a league, in a stable order — the pool a season draws on.
  *
- * `excludeTeamIds` (from the bound Competition) drops sides entered in the LEAGUE but not
- * in this competition: a club that plays the 50 Over and sits out the T20. Honouring it
- * here is what makes the field true — declared but unread, it promised an exclusion the
- * runtime ignored, which is worse than not having the field at all.
- *
- * It filters on teamId, not clubId, so a club can enter one side and hold another back.
+ * There is no exclusion list: a league has one setup, and a side sitting a stage out is
+ * handled by the stage-level Edit-entrants flow, which supersedes the retired
+ * `Competition.excludeTeamIds`.
  *
  * ── The affiliation gate ──
  * A club that has not submitted its affiliation form is not yet in the season. The CALLER
@@ -336,10 +333,29 @@ export function teamCounts(
 export function leagueParticipants<C extends ClubSidesSource & { leagues?: string[] }>(
   clubs: C[],
   leagueKey: string,
-  exclude: string[] = [],
-  options: ParticipantGateOptions<C> = {},
+  options?: ParticipantGateOptions<C>,
+): (TeamParticipant & { club: C })[];
+/**
+ * @deprecated The `exclude` (Competition.excludeTeamIds) position is retired — the
+ * stage-level Edit-entrants flow supersedes it. Still honoured until every caller moves to
+ * the three-argument form; deleted in WS6.
+ */
+export function leagueParticipants<C extends ClubSidesSource & { leagues?: string[] }>(
+  clubs: C[],
+  leagueKey: string,
+  exclude: readonly string[] | undefined,
+  options?: ParticipantGateOptions<C>,
+): (TeamParticipant & { club: C })[];
+export function leagueParticipants<C extends ClubSidesSource & { leagues?: string[] }>(
+  clubs: C[],
+  leagueKey: string,
+  third?: readonly string[] | ParticipantGateOptions<C>,
+  fourth?: ParticipantGateOptions<C>,
 ): (TeamParticipant & { club: C })[] {
-  const dropped = new Set(exclude);
+  const legacy = Array.isArray(third) || third === undefined;
+  const dropped = new Set<string>(legacy ? ((third as readonly string[] | undefined) ?? []) : []);
+  const options: ParticipantGateOptions<C> =
+    (legacy ? fourth : (third as ParticipantGateOptions<C>)) ?? {};
   const gate =
     options.isAffiliated && !options.includeUnaffiliated ? options.isAffiliated : undefined;
   return (clubs || [])
@@ -357,6 +373,12 @@ export function isAffiliated(club: { affiliation?: string }): boolean {
   return club.affiliation === 'complete';
 }
 
+/** {@link leagueParticipantsWithStatus}' result: the gated pool and the sides held back. */
+export interface ParticipantsWithStatus<C> {
+  participants: (TeamParticipant & { club: C })[];
+  unaffiliated: (TeamParticipant & { club: C })[];
+}
+
 /** Options for {@link leagueParticipants}' affiliation gate. */
 export interface ParticipantGateOptions<C> {
   /**
@@ -370,8 +392,8 @@ export interface ParticipantGateOptions<C> {
 
 /**
  * The gated pool plus the sides the gate held back, so a console can list them greyed
- * with an "Include anyway". `excludeTeamIds` is honoured on both lists: a side the
- * competition excludes is not "held back by affiliation", it is not entered at all.
+ * with an "Include anyway". No exclusion list: the stage-level Edit-entrants flow
+ * supersedes the retired `Competition.excludeTeamIds`.
  *
  * `isAffiliated` is required here — without it nothing is ever held back, and the caller
  * wants {@link leagueParticipants}.
@@ -379,12 +401,27 @@ export interface ParticipantGateOptions<C> {
 export function leagueParticipantsWithStatus<C extends ClubSidesSource & { leagues?: string[] }>(
   clubs: C[],
   leagueKey: string,
-  exclude: string[] = [],
   isAffiliated: (club: C) => boolean,
-): {
-  participants: (TeamParticipant & { club: C })[];
-  unaffiliated: (TeamParticipant & { club: C })[];
-} {
+): ParticipantsWithStatus<C>;
+/**
+ * @deprecated The `exclude` (Competition.excludeTeamIds) position is retired — the
+ * stage-level Edit-entrants flow supersedes it. Still honoured until every caller moves to
+ * the three-argument form; deleted in WS6.
+ */
+export function leagueParticipantsWithStatus<C extends ClubSidesSource & { leagues?: string[] }>(
+  clubs: C[],
+  leagueKey: string,
+  exclude: readonly string[] | undefined,
+  isAffiliated: (club: C) => boolean,
+): ParticipantsWithStatus<C>;
+export function leagueParticipantsWithStatus<C extends ClubSidesSource & { leagues?: string[] }>(
+  clubs: C[],
+  leagueKey: string,
+  third: readonly string[] | undefined | ((club: C) => boolean),
+  fourth?: (club: C) => boolean,
+): ParticipantsWithStatus<C> {
+  const isAffiliated = (typeof third === 'function' ? third : fourth) as (club: C) => boolean;
+  const exclude = typeof third === 'function' ? undefined : third;
   const all = leagueParticipants(clubs, leagueKey, exclude);
   return {
     participants: all.filter((p) => isAffiliated(p.club)),

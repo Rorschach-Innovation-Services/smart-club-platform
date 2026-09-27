@@ -11,15 +11,15 @@
 import { findBlock } from './calendar';
 import type { TeamParticipant } from './leagues';
 import { materialiseRun } from './run';
-import { buildStageSeries } from './series-builder';
+import { buildStageSeries, type StageSeriesFormat } from './series-builder';
 import type { Competition, League, SeasonRun, Series, StageRun, StageSpec } from './types';
 
 export interface StageGenerationArgs {
   run: SeasonRun;
   specId: string;
   /**
-   * The sides the stage draws from: `leagueParticipants` for the run's league with the
-   * competition's `excludeTeamIds` applied — the same list the console materialises over.
+   * The sides the stage draws from: `leagueParticipants` for the run's league — the same
+   * list the console materialises over.
    */
   participants: ReadonlyArray<{ teamId: string }>;
   /**
@@ -28,8 +28,11 @@ export interface StageGenerationArgs {
    */
   leagueTeams: readonly TeamParticipant[];
   league?: Pick<League, 'label'>;
+  /** The setup structure's name and overs — see `buildStageSeries`. */
+  format?: StageSeriesFormat;
+  /** @deprecated Superseded by `format`; deleted in WS6. Ignored when `format` is given. */
   competition?: Pick<Competition, 'label' | 'matchFormat'>;
-  /** Overs when the competition's match format names none — see `buildStageSeries`. */
+  /** @deprecated Superseded by `format`; deleted in WS6. Ignored when `format` is given. */
   defaultOvers?: number;
 }
 
@@ -73,6 +76,7 @@ export function generateStage({
   participants,
   leagueTeams,
   league,
+  format,
   competition,
   defaultOvers,
 }: StageGenerationArgs): StageGeneration {
@@ -107,7 +111,7 @@ export function generateStage({
         // to the block it plays in rather than a blank `startDate` (a gsi1 sort key).
         startDate: g.plan.dates[0] ?? block.start,
         league,
-        competition,
+        ...(format ? { format } : { competition }),
       },
       multi,
       leagueTeams,

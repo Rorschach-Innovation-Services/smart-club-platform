@@ -17,13 +17,23 @@ export interface League {
   group: string;
   /** A DISTRICTS value, or the 'All districts' sentinel for overarching leagues. */
   district: string;
+  /**
+   * @deprecated Display-only and ships empty in real use; deleted in WS6. Still stored and
+   * read until then.
+   */
   note?: string;
   /**
    * Format streams this league runs (ADR 0008) — e.g. T20 Pink Ball and 50 Over Red Ball
    * side by side over the same registered clubs. Absent ⇒ the league behaves exactly as
    * before: one flat create-series flow, no structure.
+   * @deprecated Replaced by {@link League.setup}; deleted in WS6. Fully functional until then.
    */
   competitions?: Competition[];
+  /**
+   * The league's one operator-authored setup — replaces competitions[]; created/edited only
+   * via the operator wizard/SetupLeagueDialog.
+   */
+  setup?: { structureId: string; calendarId: string };
 }
 
 /* ─── SEASON CALENDAR (ADR 0008) ───
@@ -187,7 +197,7 @@ export type EntrantSpec =
 /**
  * Points and tie-break configuration, lifted off the create-series form onto the stage.
  * @deprecated Stored but not read; kept so existing structures stay valid. The platform
- * has no results or ladder model, and no UI edits this.
+ * has no results or ladder model, and no UI edits this. Deleted in WS6.
  */
 export interface LadderSpec {
   winPoints: number;
@@ -225,7 +235,7 @@ export interface StageSchedule {
 /**
  * What finishing where in this stage means — display and next-season carry.
  * @deprecated Stored but not read; kept so existing structures stay valid. Nothing
- * displays or carries it, and new templates no longer set it.
+ * displays or carries it, and new templates no longer set it. Deleted in WS6.
  */
 export interface OutcomeSpec {
   /** Positions crowned champion, e.g. [1]. */
@@ -245,9 +255,9 @@ export interface StageSpec {
   schedule: StageSchedule;
   /** Group display names, e.g. ["Top Six", "Bottom Six"]. Falls back to "Group A/B/…". */
   groupLabels?: string[];
-  /** @deprecated Stored but not read; kept so existing structures stay valid. */
+  /** @deprecated Stored but not read; kept so existing structures stay valid. Deleted in WS6. */
   ladder?: LadderSpec;
-  /** @deprecated Stored but not read; kept so existing structures stay valid. */
+  /** @deprecated Stored but not read; kept so existing structures stay valid. Deleted in WS6. */
   outcome?: OutcomeSpec;
 }
 
@@ -268,6 +278,11 @@ export interface CompetitionStructure {
    * `operator`, the pre-existing meaning. Provenance only, like `templateId`.
    */
   source?: 'operator' | 'quick-start' | 'migration';
+  /**
+   * Overs per innings — the one surviving match-format field; feeds `Series.maxOvers`.
+   * Validated 1-200. Absent ⇒ 50.
+   */
+  overs?: number;
   stages: StageSpec[];
 }
 
@@ -317,6 +332,9 @@ export type VenueStatus = 'home' | 'alternative' | 'neutral' | 'unresolved';
  * league could only be ONE thing, but KZNCU Premier Men runs a T20 Pink Ball competition
  * and a 50 Over Red Ball competition in parallel — different structures, different
  * groupings, over the same twelve registered clubs.
+ *
+ * @deprecated Collapsed into {@link League.setup} (one league, one structure, one calendar;
+ * overs move onto {@link CompetitionStructure.overs}). Deleted in WS6; fully functional until then.
  */
 export interface Competition {
   id: string;
@@ -329,7 +347,10 @@ export interface Competition {
   excludeTeamIds?: string[];
 }
 
-/** One match format a tenant offers, e.g. `{ label: 'T20 (Pink Ball)', overs: 20, ballType: 'Pink' }`. */
+/**
+ * One match format a tenant offers, e.g. `{ label: 'T20 (Pink Ball)', overs: 20, ballType: 'Pink' }`.
+ * @deprecated Formats revert to built-ins and overs live on the structure; deleted in WS6.
+ */
 export interface MatchFormatDefault {
   label: string;
   overs?: number;
@@ -343,11 +364,20 @@ export interface MatchFormatDefault {
  * tenant that never configured any of this behaves exactly as before.
  */
 export interface CompetitionDefaults {
-  /** The formats offered where an admin picks one. Absent ⇒ the built-in list. */
+  /**
+   * The formats offered where an admin picks one. Absent ⇒ the built-in list.
+   * @deprecated Reverts to built-ins; deleted in WS6.
+   */
   matchFormats?: MatchFormatDefault[];
-  /** Default weekdays for "set days only". Absent ⇒ Saturday. */
+  /**
+   * Default weekdays for "set days only". Absent ⇒ Saturday.
+   * @deprecated Reverts to built-ins; deleted in WS6.
+   */
   matchDays?: Weekday[];
-  /** Default start times for double-headers. Absent ⇒ 08:00 / 13:30. */
+  /**
+   * Default start times for double-headers. Absent ⇒ 08:00 / 13:30.
+   * @deprecated Reverts to built-ins; deleted in WS6.
+   */
   timeSlots?: TimeSlot[];
   /** Travel cost estimate. Per-series values win. Absent ⇒ R4.50/km × 3 cars. */
   travel?: { costPerKm: number; carsPerAwayTrip: number };

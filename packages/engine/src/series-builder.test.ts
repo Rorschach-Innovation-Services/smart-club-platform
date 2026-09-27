@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { buildStageSeries, type BuildStageSeriesArgs } from './series-builder';
-import { FALLBACK_TIME_SLOTS } from './defaults';
 import type { TeamParticipant } from './leagues';
 import type { StageSpec } from './types';
 
@@ -12,7 +11,10 @@ const STAGE: StageSpec = {
   schedule: {
     blockIndex: 0,
     cadence: { kind: 'weekly' },
-    slots: [...FALLBACK_TIME_SLOTS],
+    slots: [
+      { label: 'Morning', start: '08:00' },
+      { label: 'Afternoon', start: '13:30' },
+    ],
     roundsPerDay: 2,
     activateFrom: '2027-01-18',
   },
@@ -59,7 +61,7 @@ const args = (overrides: Partial<BuildStageSeriesArgs> = {}): BuildStageSeriesAr
     fixtures: [{ id: 'f1', round: 1, home: 'tm_glen_a', away: 'pinetown', date: '2026-09-13' }],
     startDate: '2026-09-13',
     league: { label: 'Premier Men' },
-    competition: { label: 'T20 (Pink Ball)', matchFormat: { overs: 20 } },
+    format: { structureName: 'T20 (Pink Ball)', overs: 20 },
   },
   multi: true,
   leagueTeams: LEAGUE_TEAMS,
@@ -81,11 +83,11 @@ describe('buildStageSeries', () => {
     expect(again.version).toBe(1);
   });
 
-  it('omits the optional keys, the group label and the competition fallbacks when absent', () => {
+  it('omits the optional keys, the group label and the format fallbacks when absent', () => {
     const s = buildStageSeries(
       args({
         stage: { ...STAGE, schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, slots: [] } },
-        group: { ...args().group, league: undefined, competition: undefined },
+        group: { ...args().group, league: undefined, format: undefined },
         multi: false,
       }),
     );
@@ -100,10 +102,28 @@ describe('buildStageSeries', () => {
     expect(s.seriesType).toBe('Pool stage');
   });
 
-  it('falls back to the tenant’s default overs when the competition names none', () => {
-    const noOvers = { ...args().group, competition: { label: '40 Over' } };
-    expect(buildStageSeries(args({ group: noOvers, defaultOvers: 40 })).maxOvers).toBe(40);
-    // The competition's own overs still win.
-    expect(buildStageSeries(args({ defaultOvers: 40 })).maxOvers).toBe(20);
+  it('names the series type after the setup structure, else the stage', () => {
+    expect(buildStageSeries(args()).seriesType).toBe('T20 (Pink Ball)');
+    const unnamed = { ...args().group, format: { overs: 20 } };
+    expect(buildStageSeries(args({ group: unnamed })).seriesType).toBe('Pool stage');
+  });
+
+  it('takes the structure’s overs, else 50', () => {
+    expect(buildStageSeries(args()).maxOvers).toBe(20);
+    const noOvers = { ...args().group, format: { structureName: 'One-off cup' } };
+    expect(buildStageSeries(args({ group: noOvers })).maxOvers).toBe(50);
+    // The retired tenant default no longer reaches a `format`-built series.
+    expect(buildStageSeries(args({ group: noOvers, defaultOvers: 40 })).maxOvers).toBe(50);
+  });
+
+  it('still honours the deprecated competition pick when no format is given (until WS6)', () => {
+    const legacy = {
+      ...args().group,
+      format: undefined,
+      competition: { label: '40 Over' },
+    };
+    const s = buildStageSeries(args({ group: legacy, defaultOvers: 40 }));
+    expect(s.seriesType).toBe('40 Over');
+    expect(s.maxOvers).toBe(40);
   });
 });
