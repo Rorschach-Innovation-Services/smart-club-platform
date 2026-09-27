@@ -5039,6 +5039,7 @@ describe('/admin/club-signup-link (lifecycle)', () => {
       body: JSON.stringify({
         submissionDeadline: '2027-01-31',
         clubSignupLink: { token: 'forged-token', createdAt: '2026-01-01T00:00:00.000Z' },
+        liveUrl: 'https://forged.example',
       }),
     });
     assert.equal(res.status, 200);
@@ -5048,6 +5049,11 @@ describe('/admin/club-signup-link (lifecycle)', () => {
     assert.equal((await publicGet('forged-token')).status, 404);
     const cfg = await repo.getTenantConfig(T);
     assert.equal(cfg?.submissionDeadline, '2027-01-31', 'the rest of the patch applied');
+    assert.equal(
+      (cfg as { liveUrl?: unknown } | null)?.liveUrl,
+      undefined,
+      'response-only liveUrl is never persisted',
+    );
   });
 
   test('DELETE revokes the link (public 404, pointer cleared) and is idempotent', async () => {

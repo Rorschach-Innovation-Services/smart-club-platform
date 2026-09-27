@@ -393,6 +393,45 @@ describe('migrate-league-setups', () => {
   });
 });
 
+describe('migrate-league-setups — conflict clone id already taken', () => {
+  const T = 'lsmig-taken';
+  const store = scopedStore(T);
+
+  test('reuses a clone id only when its overs match; otherwise keeps suffixing', async () => {
+    await repo.createTenantConfig(
+      baseConfig(T, {
+        calendars: [calendar('cal-2026', '2026-09-01', '2027-03-31')],
+        structures: [
+          structure('st-shared', 'Shared'),
+          // Both the deterministic id AND its first suffix are taken, with other overs.
+          structure('st-st-shared-women', 'Taken', { overs: 50 }),
+          structure('st-st-shared-women-30', 'Also taken', { overs: 40 }),
+          // The deterministic id for div-two is taken WITH matching overs → reused.
+          structure('st-st-shared-div-two', 'Reusable', { overs: 20 }),
+        ],
+        leagues: [
+          league('premier', { competitions: [comp('c-50', 'st-shared', 'cal-2026', 50)] }),
+          league('women', { competitions: [comp('c-w', 'st-shared', 'cal-2026', 30)] }),
+          league('div-two', { competitions: [comp('c-d', 'st-shared', 'cal-2026', 20)] }),
+        ],
+      }),
+    );
+
+    await migrateLeagueSetups({ confirm: true, log: () => {}, store, backupDir });
+
+    const cfg = await repo.getTenantConfig(T);
+    const lg = (key: string) => cfg?.leagues?.find((l) => l.key === key);
+    const st = (id: string) => cfg?.structures?.find((s) => s.id === id);
+    assert.equal(lg('women')?.setup?.structureId, 'st-st-shared-women-30-2');
+    assert.equal(st('st-st-shared-women-30-2')?.overs, 30);
+    assert.equal(st('st-st-shared-women-30')?.overs, 40, 'mismatched structure untouched');
+    assert.equal(st('st-st-shared-women')?.overs, 50, 'mismatched structure untouched');
+    assert.equal(lg('div-two')?.setup?.structureId, 'st-st-shared-div-two');
+    assert.equal(st('st-st-shared-div-two')?.name, 'Reusable', 'matching overs → reused as-is');
+    assert.equal(cfg?.structures?.length, 5, 'exactly one new clone minted');
+  });
+});
+
 describe('migrate-league-setups — a tenant that would not validate', () => {
   const T = 'lsmig-bad';
   const store = scopedStore(T);

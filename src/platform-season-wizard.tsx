@@ -684,18 +684,26 @@ export function SeasonSetupWizard({
       if (calMode === 'existing' && !freshCalendars.some((c) => c.id === calDraft.id)) {
         throw new ApiError(409, 'This calendar was deleted in another session.');
       }
+      // A retry after a PUT that landed but was never acknowledged: the "new" calendar is
+      // already stored under this id, so upsert it rather than append a duplicate (409).
+      const calendarLanded = freshCalendars.some((c) => c.id === calDraft.id);
       const nextCalendars =
-        calMode === 'existing'
+        calMode === 'existing' || calendarLanded
           ? freshCalendars.map((c) => (c.id === calDraft.id ? calDraft : c))
           : [...freshCalendars, calDraft];
 
       const planned = plannedSetups();
+      const freshStructures = fresh.structures ?? [];
       // Deduped by id: two leagues picking the same template SHARE one new instance, so it
-      // is written exactly once — and only when a planned setup still uses it.
+      // is written exactly once — and only when a planned setup still uses it. Same retry
+      // guard as SetupLeagueDialog: an instance whose id is ALREADY stored (a PUT that
+      // landed but was never acknowledged) is not appended again, or the save 409s on a
+      // duplicate structure id.
       const newStructures = [
         ...new Map(
           planned
             .filter((p) => p.kind === 'new')
+            .filter((p) => !freshStructures.some((s) => s.id === p.structure.id))
             .map((p) => [p.structure.id, p.structure] as const),
         ).values(),
       ];
@@ -720,7 +728,7 @@ export function SeasonSetupWizard({
         created.push({ league: fl.label, structure: structureName });
         return { ...fl, setup: { structureId, calendarId: calDraft.id } };
       });
-      const nextStructures = [...(fresh.structures ?? []), ...newStructures, ...clones];
+      const nextStructures = [...freshStructures, ...newStructures, ...clones];
 
       await save({ calendars: nextCalendars, structures: nextStructures, leagues: nextLeagues });
       toast(`${calDraft.label} · season set up`);

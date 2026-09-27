@@ -4648,6 +4648,9 @@ async function applyTenantConfigPatch(
   // their own Live chip or the setupCompletedBy audit field. See types.ts.
   delete (patch as { setupCompletedAt?: unknown }).setupCompletedAt;
   delete (patch as { setupCompletedBy?: unknown }).setupCompletedBy;
+  // `liveUrl` is response-only (GET /tenant/config derives it from the slug) — never
+  // persist it, so a console echoing the row back can't write it onto the stored config.
+  delete (patch as { liveUrl?: unknown }).liveUrl;
   // Table/index keys are derived at the repo write choke point — strip them here
   // too so a malicious patch can't even attempt to retarget another tenant's row
   // or corrupt the platform registry index.
@@ -5507,7 +5510,8 @@ async function grantAdminToOperators(
  * RESPONSE-ONLY `liveUrl`: where the client is already reachable (its vanity origin, else
  * its wildcard host; null in the dormant pre-wildcard state). Computed per read, never
  * stored — the PUT builds its patch from an explicit field whitelist that has no
- * `liveUrl`, so a console echoing the row back cannot persist it.
+ * `liveUrl`, and applyTenantConfigPatch strips it from every patch (PUT /tenant/config
+ * too), so a console echoing the row back cannot persist it.
  */
 app.get('/platform/tenants/:slug', async (c) => {
   const slug = c.req.param('slug');
@@ -7119,8 +7123,19 @@ app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
   // DIFFERENT-definition entry is a genuine conflict, not a retry: it's left in place so
   // validateLeagues' uniqueness check on the combined array still 409s it, same as a
   // duplicate WITHIN newLeagues itself (also untouched by this filter).
-  const requestedLeagues = Array.isArray(body.newLeagues) ? body.newLeagues : [];
   const existingLeaguesByKey = new Map((cfg.leagues ?? []).map((l) => [l.key, l]));
+  // Intake never mints operator bindings (ADR 0008): overwrite each incoming league's
+  // `setup` and deprecated `competitions[]` with whatever is STORED for that key (undefined
+  // for a brand-new key), exactly as preserveOperatorBindings does. Otherwise a crafted body
+  // could land an unvalidated setup that 400s every later operator save in validateSetups.
+  // Done before the idempotency filter so a re-send of an existing league still matches.
+  const requestedLeagues = (Array.isArray(body.newLeagues) ? body.newLeagues : []).map(
+    (l): League => ({
+      ...l,
+      competitions: existingLeaguesByKey.get(l?.key)?.competitions,
+      setup: existingLeaguesByKey.get(l?.key)?.setup,
+    }),
+  );
   const sameLeagueDefinition = (a: League, b: League): boolean =>
     a.key === b.key &&
     a.label === b.label &&

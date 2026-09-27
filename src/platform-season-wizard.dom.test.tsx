@@ -153,6 +153,41 @@ describe('SeasonSetupWizard', () => {
     expect(screen.getByText(/Premier Men/)).toBeInTheDocument();
   });
 
+  it('a retry after a PUT that landed unacknowledged re-sends no duplicate structure or calendar', async () => {
+    const { user, save, config } = setup();
+    // First PUT lands server-side but the response is lost.
+    save.mockRejectedValueOnce(new Error('network'));
+
+    await fillSeasonLabel(user);
+    await user.click(continueBtn());
+    await addLeague(user, 'premier');
+    await user.click(screen.getByRole('radio', { name: /flat round robin/i }));
+    await user.click(continueBtn());
+    await user.click(screen.getByRole('button', { name: /create season/i }));
+
+    expect(save).toHaveBeenCalledTimes(1);
+    const landed = save.mock.calls[0][0];
+    // The refetch on retry now sees what the first PUT wrote.
+    vi.mocked(api.platformGetTenant).mockResolvedValue({
+      ...config,
+      calendars: landed.calendars,
+      structures: landed.structures,
+      leagues: landed.leagues,
+    } as TenantConfig);
+
+    await user.click(screen.getByRole('button', { name: /create season/i }));
+
+    expect(save).toHaveBeenCalledTimes(2);
+    const retry = save.mock.calls[1][0];
+    expect(retry.structures.map((s: CompetitionStructure) => s.id)).toEqual(
+      landed.structures.map((s: CompetitionStructure) => s.id),
+    );
+    expect(retry.calendars.map((c: SeasonCalendar) => c.id)).toEqual(
+      landed.calendars.map((c: SeasonCalendar) => c.id),
+    );
+    expect(await screen.findByText(/is created/i)).toBeInTheDocument();
+  });
+
   it('adding no league writes only the calendar', async () => {
     const { user, save } = setup();
 

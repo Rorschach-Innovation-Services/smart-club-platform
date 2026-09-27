@@ -303,9 +303,15 @@ function planTenant(
       if (held === overs) return;
 
       // Conflict: a per-league clone of the ORIGINAL structure carries this competition's overs.
-      let cloneId = `st-${comp.structureId}-${lg.key}`;
-      const existing = structures.find((s) => s.id === cloneId);
-      if (existing && existing.overs !== overs) cloneId = `${cloneId}-${overs}`;
+      // Reuse an id only when the structure already under it carries these same overs;
+      // otherwise keep suffixing until the id is free or matches.
+      const base = `st-${comp.structureId}-${lg.key}`;
+      let cloneId = base;
+      for (let n = 1; ; n++) {
+        const existing = structures.find((s) => s.id === cloneId);
+        if (!existing || existing.overs === overs) break;
+        cloneId = n === 1 ? `${base}-${overs}` : `${base}-${overs}-${n}`;
+      }
       if (!structures.some((s) => s.id === cloneId)) {
         const { source: _source, ...rest } = original;
         void _source;

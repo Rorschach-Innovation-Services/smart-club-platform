@@ -402,9 +402,8 @@ export interface SeasonRun {
   leagueKey: string;
   /**
    * @deprecated Inert since the competition layer collapsed into `League.setup` — runs
-   * resolve via `leagueKey` alone. Kept optional for stored data; new runs omit it.
-   * Never written, never read. Retired by `scripts/cleanup-competitions.ts` after prod
-   * burn-in.
+   * resolve via `leagueKey` alone. It stays on already-stored runs forever (no cleanup
+   * script touches season runs); new runs omit it, and nothing reads it.
    */
   competitionId?: string;
   /** e.g. "2026/27". */
