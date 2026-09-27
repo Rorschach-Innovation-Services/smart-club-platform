@@ -10,6 +10,10 @@
  *   (its divergence check compares pairings only, and confirmed groups shadow the spec):
  *   entrant change clears groups, schedule change marks `staleSchedule`, format change
  *   drops `pairingOverride`, a dangling `fromStage` warns;
+ * - the ROOT format marker: a rebase onto a structure whose `name`/`overs` changed stamps
+ *   `formatChanged` on every surviving stage; the next generate adopts the new name/overs
+ *   and clears it, while a regenerate WITHOUT it keeps a released series' stored
+ *   `seriesType`/`maxOvers`; a client can neither set nor clear it;
  * - audit entries are stamped server-side;
  * - PATCH still strips a client-supplied snapshot after a rebase.
  *
@@ -21,13 +25,15 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import type {
+  Club,
   CompetitionStructure,
   SeasonCalendar,
   SeasonRun,
+  Series,
   StageRun,
   StageSpec,
 } from '../src/types.js';
-import { bindCompetition, startRunBody } from './season-run-harness.js';
+import { bindSetup, startRunBody } from './season-run-harness.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
 const DDB_PORT = 4639; // next free odd port after veterans-requests (4637)
@@ -205,6 +211,7 @@ const confirmedStages = (): StageRun[] => [
 const run = (over: Partial<SeasonRun> = {}): SeasonRun => ({
   id: 'sr-rb',
   leagueKey: 'premier-men',
+  // A stored deprecated competitionId is inert.
   competitionId: 'comp-1',
   seasonLabel: '2026/27',
   structureSnapshot: V1,
@@ -271,10 +278,9 @@ before(async () => {
 
   const cfg = await repo.getTenantConfig('dolphins');
   await repo.putTenantConfig({ ...cfg!, structures: [V2, LEGACY_V2, REVEAL_V2] });
-  // POST /season-runs freezes what config binds: comp-1 on premier-men runs the live V2.
-  await bindCompetition(repo, 'dolphins', {
+  // POST /season-runs freezes what config sets up: premier-men runs the live V2.
+  await bindSetup(repo, 'dolphins', {
     leagueKey: 'premier-men',
-    competitionId: 'comp-1',
     structure: V2,
     calendar: CALENDAR,
   });
@@ -382,6 +388,8 @@ describe('POST /season-runs/:id/rebase — reconciliation', () => {
     );
     assert.equal(body.version, 2);
     assert.equal(body.warnings, undefined, 'no warnings key on a clean rebase');
+    // v1 → v2 kept the root name and overs, so no stage is marked to adopt a new format.
+    assert.ok(body.stages.every((st) => st.formatChanged === undefined));
   });
 
   test('an entrant-spec change clears groups to awaiting-entrants, keeping the old grouping in the audit', () => {
@@ -533,6 +541,8 @@ describe('pairingOverride guard on the season-run write paths', () => {
       body: JSON.stringify(
         startRunBody({
           id: 'sr-po-post',
+          // One season per league per label: the directly-seeded runs hold '2026/27'.
+          seasonLabel: 'po-post',
           stages: [{ specId: 'ko', status: 'ready', groups: [], pairingOverride: 'x' as never }],
         }),
       ),
@@ -548,6 +558,7 @@ describe('pairingOverride guard on the season-run write paths', () => {
       body: JSON.stringify(
         startRunBody({
           id: 'sr-po-post',
+          seasonLabel: 'po-post',
           stages: [{ specId: 'ko', status: 'ready', groups: [], pairingOverride: 'within-pool' }],
         }),
       ),
@@ -556,5 +567,139 @@ describe('pairingOverride guard on the season-run write paths', () => {
     const stored = await repo.getSeasonRun('dolphins', 'sr-po-post');
     assert.equal(stored?.structureSnapshot.version, V2.version, 'froze the live structure');
     assert.equal(stored?.stages[0]?.pairingOverride, 'within-pool');
+  });
+});
+
+describe('the rebase root-format marker (formatChanged)', () => {
+  const LEAGUE = 'fmt-league';
+  const RUN = 'sr-fmt';
+  const SERIES = `s-${RUN}-league-g1`;
+  const LEAGUE_STAGE: StageSpec = {
+    id: 'league',
+    name: 'League',
+    format: { kind: 'round-robin', legs: 1 },
+    entrants: { kind: 'all-registered' },
+    schedule: weekly(0),
+  };
+  const FMT_V1: CompetitionStructure = {
+    id: 'st-fmt',
+    name: 'One-Day League',
+    version: 1,
+    overs: 50,
+    stages: [LEAGUE_STAGE],
+  };
+  // Same stages; only the ROOT name and overs change.
+  const FMT_V2: CompetitionStructure = { ...FMT_V1, version: 2, name: 'T20 League', overs: 20 };
+
+  const generate = (version: number) =>
+    app.request(`/season-runs/${RUN}/stages/league/generate`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ version, confirmReleasedOverwrite: true }),
+    });
+  const stored = async (): Promise<SeasonRun> => (await repo.getSeasonRun('dolphins', RUN))!;
+  const series = async (): Promise<Series> => (await repo.getSeries('dolphins', SERIES))!;
+
+  before(async () => {
+    for (const id of ['fmt-a', 'fmt-b', 'fmt-c', 'fmt-d'])
+      await repo.putClub('dolphins', {
+        id,
+        name: `Club ${id}`,
+        leagues: [LEAGUE],
+        ground: { venue: `${id} Oval` },
+        affiliation: 'complete',
+      } as unknown as Club);
+    await bindSetup(repo, 'dolphins', { leagueKey: LEAGUE, structure: FMT_V1, calendar: CALENDAR });
+    const res = await app.request('/season-runs', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify(startRunBody({ id: RUN, leagueKey: LEAGUE, seasonLabel: 'fmt' })),
+    });
+    assert.equal(res.status, 201, await res.clone().text());
+    const gen = await generate(1);
+    assert.equal(gen.status, 200, await gen.clone().text());
+    const s = await series();
+    assert.equal(s.seriesType, 'One-Day League');
+    assert.equal(s.maxOvers, 50);
+    // Released — and, like a competitions-era series, carrying its own format label.
+    await repo.putSeries('dolphins', {
+      ...s,
+      seriesType: '50 Over (Red Ball)',
+      maxOvers: 45,
+      approved: true,
+      released: true,
+      releasedAt: '2026-09-01T00:00:00.000Z',
+    });
+  });
+
+  test('a regenerate WITHOUT the marker keeps a released series’ stored seriesType/maxOvers', async () => {
+    const res = await generate((await stored()).version);
+    assert.equal(res.status, 200, await res.clone().text());
+    const s = await series();
+    assert.equal(s.released, true);
+    assert.equal(s.seriesType, '50 Over (Red Ball)');
+    assert.equal(s.maxOvers, 45);
+  });
+
+  test('a rebase onto a new root name/overs stamps formatChanged on every surviving stage', async () => {
+    const cfg = await repo.getTenantConfig('dolphins');
+    await repo.putTenantConfig({
+      ...cfg!,
+      structures: (cfg!.structures ?? []).map((st) => (st.id === FMT_V2.id ? FMT_V2 : st)),
+    });
+    const res = await rebase(RUN, { structureVersion: 2, version: (await stored()).version });
+    assert.equal(res.status, 200, await res.clone().text());
+    const body = (await res.json()) as SeasonRun;
+    assert.equal(body.stages.length, 1);
+    assert.equal(body.stages[0]!.formatChanged, true);
+    // The stage spec itself is unchanged: no audit entry, groups kept.
+    assert.equal(body.stages[0]!.groups[0]!.seriesId, SERIES);
+    assert.equal((await stored()).stages[0]!.formatChanged, true, 'stored, not response-only');
+  });
+
+  test('a client can neither clear the marker nor set it through PATCH or POST', async () => {
+    const current = await stored();
+    const res = await app.request(`/season-runs/${RUN}`, {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        version: current.version,
+        stages: current.stages.map(({ formatChanged: _fc, ...st }) => st),
+      }),
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.equal((await stored()).stages[0]!.formatChanged, true, 'the stored marker is replayed');
+
+    const other = await repo.getSeasonRun('dolphins', 'sr-po');
+    const set = await app.request('/season-runs/sr-po', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        version: other!.version,
+        stages: [{ specId: 'ko', status: 'ready', groups: [], formatChanged: true }],
+      }),
+    });
+    assert.equal(set.status, 200, await set.clone().text());
+    assert.equal(
+      (await repo.getSeasonRun('dolphins', 'sr-po'))!.stages[0]!.formatChanged,
+      undefined,
+    );
+  });
+
+  test('the next generate adopts the new name/overs and clears the marker', async () => {
+    const res = await generate((await stored()).version);
+    assert.equal(res.status, 200, await res.clone().text());
+    const s = await series();
+    assert.equal(s.released, true, 'still published');
+    assert.equal(s.seriesType, 'T20 League');
+    assert.equal(s.maxOvers, 20);
+    assert.equal((await stored()).stages[0]!.formatChanged, undefined);
+  });
+
+  test('after that, a regenerate keeps the adopted format', async () => {
+    await repo.putSeries('dolphins', { ...(await series()), seriesType: 'Kept label' });
+    const res = await generate((await stored()).version);
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.equal((await series()).seriesType, 'Kept label');
   });
 });

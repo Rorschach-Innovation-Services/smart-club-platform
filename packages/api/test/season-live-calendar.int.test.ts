@@ -4,13 +4,15 @@
  * "calendar rebase out of scope" for the ungenerated case).
  *
  * What is pinned:
- * - GET /season-runs[/:id] on an ungenerated run returns the calendar its competition is
- *   bound to NOW (an operator date edit, a rebind to another calendar), with
+ * - GET /season-runs[/:id] on an ungenerated run returns the calendar its league's setup
+ *   names NOW (an operator date edit, a re-point of `setup.calendarId`), with
  *   `calendarLive: true` — and never writes the stored snapshot;
+ * - an operator save that re-points a league's setup says so in `warnings[]` ("N
+ *   ungenerated season run(s) … will follow the new dates"); a rename-only save does not;
  * - the first generate is the freeze point: it materialises against the live calendar,
  *   stores it on the run, and from then on GET serves the stored copy with no overlay,
  *   whatever the operator does to the calendar next;
- * - an ungenerated run whose competition was unbound keeps its stored snapshot and says so
+ * - an ungenerated run whose league lost its setup keeps its stored snapshot and says so
  *   (`calendarLive: false` + `warnings`);
  * - the calendar delete guard counts an ungenerated run by the calendar it FOLLOWS, not
  *   only by the one its stored snapshot names;
@@ -32,7 +34,7 @@ import type {
   SeasonRun,
   Series,
 } from '../src/types.js';
-import { bindCompetition, startRunBody } from './season-run-harness.js';
+import { bindSetup, startRunBody } from './season-run-harness.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
 const DDB_PORT = 4651; // next free odd port after backfill-venue-aliases (4649)
@@ -106,11 +108,12 @@ const listRun = async (id: string): Promise<SeasonRun | undefined> => {
   return ((await res.json()) as SeasonRun[]).find((r) => r.id === id);
 };
 
-const startRun = async (id: string, competitionId: string): Promise<SeasonRun> => {
+/** One season per league per label, so each run takes its id as its label. */
+const startRun = async (id: string, leagueKey = LEAGUE_KEY): Promise<SeasonRun> => {
   const res = await app.request('/season-runs', {
     method: 'POST',
     headers: headers(ADMIN),
-    body: JSON.stringify(startRunBody({ id, leagueKey: LEAGUE_KEY, competitionId })),
+    body: JSON.stringify(startRunBody({ id, leagueKey, seasonLabel: id })),
   });
   assert.equal(res.status, 201, await res.clone().text());
   return (await res.json()) as SeasonRun;
@@ -136,13 +139,21 @@ async function operatorPutCalendar(id: string, next: SeasonCalendar | null): Pro
   });
 }
 
-const bind = (competitionId: string, calendar: SeasonCalendar) =>
-  bindCompetition(repo, TENANT, {
-    leagueKey: LEAGUE_KEY,
-    competitionId,
-    structure: STRUCTURE,
-    calendar,
+const bind = (calendar: SeasonCalendar, leagueKey = LEAGUE_KEY) =>
+  bindSetup(repo, TENANT, { leagueKey, structure: STRUCTURE, calendar });
+
+/** The operator's real leagues write: re-point one league's setup at another calendar. */
+async function operatorRepoint(leagueKey: string, calendarId: string): Promise<Response> {
+  const cfg = await repo.getTenantConfig(TENANT);
+  const leagues = (cfg!.leagues ?? []).map((l) =>
+    l.key === leagueKey && l.setup ? { ...l, setup: { ...l.setup, calendarId } } : l,
+  );
+  return app.request(`/platform/tenants/${TENANT}`, {
+    method: 'PUT',
+    headers: { 'x-dev-auth': OPERATOR, 'content-type': 'application/json' },
+    body: JSON.stringify({ leagues }),
   });
+}
 
 before(async () => {
   const dynalite = (await import('dynalite')).default as (opts?: unknown) => Server;
@@ -209,8 +220,11 @@ describe('an ungenerated season follows the live calendar; the first generate fr
   const RUN = 'sr-live';
 
   test('an operator edit to the bound calendar shows on GET at once, flagged live', async () => {
-    await bind('comp-live', START);
-    const started = await startRun(RUN, 'comp-live');
+    await bind(START);
+    // OTHER exists in config too, so the re-point below is an operator save, not a seed.
+    const cfg = await repo.getTenantConfig(TENANT);
+    await repo.putTenantConfig({ ...cfg!, calendars: [...(cfg!.calendars ?? []), OTHER] });
+    const started = await startRun(RUN);
     assert.deepEqual(started.calendarSnapshot, START);
 
     const put = await operatorPutCalendar(START.id, EXTENDED);
@@ -227,11 +241,33 @@ describe('an ungenerated season follows the live calendar; the first generate fr
     assert.deepEqual((await repo.getSeasonRun(TENANT, RUN))?.calendarSnapshot, START);
   });
 
-  test('re-pointing the competition at another calendar shows THAT calendar', async () => {
-    await bind('comp-live', OTHER);
+  test('re-pointing the setup at another calendar warns, and GET shows THAT calendar', async () => {
+    const res = await operatorRepoint(LEAGUE_KEY, OTHER.id);
+    assert.equal(res.status, 200, await res.clone().text());
+    const body = (await res.json()) as { warnings?: string[] };
+    assert.ok(
+      body.warnings?.includes(
+        `1 ungenerated season run of "${LEAGUE_KEY}" will follow the new dates`,
+      ),
+      JSON.stringify(body.warnings),
+    );
     const got = await getRun(RUN);
     assert.deepEqual(got.calendarSnapshot, OTHER);
     assert.equal(got.calendarLive, true);
+  });
+
+  test('a rename-only leagues save fires neither the re-point nor a coverage warning', async () => {
+    const cfg = await repo.getTenantConfig(TENANT);
+    const leagues = (cfg!.leagues ?? []).map((l) =>
+      l.key === LEAGUE_KEY ? { ...l, label: 'Live League (renamed)' } : l,
+    );
+    const res = await app.request(`/platform/tenants/${TENANT}`, {
+      method: 'PUT',
+      headers: { 'x-dev-auth': OPERATOR, 'content-type': 'application/json' },
+      body: JSON.stringify({ leagues }),
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.equal(((await res.json()) as { warnings?: string[] }).warnings, undefined);
   });
 
   test('generate freezes the calendar as of that moment', async () => {
@@ -283,22 +319,16 @@ describe('the freeze is one-way', () => {
     const RUN = 'sr-rebase';
     const START = cal('cal-rebase', 'Rebase', '2026-09-13', '2026-12-13');
     const OWN: CompetitionStructure = { ...STRUCTURE, id: 'st-rebase' };
-    await bindCompetition(repo, TENANT, {
-      leagueKey: LEAGUE_KEY,
-      competitionId: 'comp-rebase',
-      structure: OWN,
-      calendar: START,
-    });
-    await startRun(RUN, 'comp-rebase');
+    await bindSetup(repo, TENANT, { leagueKey: LEAGUE_KEY, structure: OWN, calendar: START });
+    await startRun(RUN);
     const gen = await generate(RUN, 1);
     assert.equal(gen.status, 200, await gen.clone().text());
     const frozenAt = (await repo.getSeasonRun(TENANT, RUN))?.calendarFrozenAt;
     assert.ok(frozenAt);
 
     // v2 changes the stage's entrant spec — rebase clears its groups and their seriesIds.
-    await bindCompetition(repo, TENANT, {
+    await bindSetup(repo, TENANT, {
       leagueKey: LEAGUE_KEY,
-      competitionId: 'comp-rebase',
       structure: {
         ...OWN,
         version: 2,
@@ -324,9 +354,8 @@ describe('the freeze is one-way', () => {
     const RUN = 'sr-legacy';
     const LEGACY_CAL = cal('cal-legacy', 'Legacy', '2026-09-13', '2026-12-13');
     const LEGACY_ST: CompetitionStructure = { ...STRUCTURE, id: 'st-legacy' };
-    await bindCompetition(repo, TENANT, {
+    await bindSetup(repo, TENANT, {
       leagueKey: LEAGUE_KEY,
-      competitionId: 'comp-legacy',
       structure: {
         ...LEGACY_ST,
         version: 2,
@@ -338,6 +367,7 @@ describe('the freeze is one-way', () => {
     await repo.putSeasonRun(TENANT, {
       id: RUN,
       leagueKey: LEAGUE_KEY,
+      // A stored deprecated competitionId is inert.
       competitionId: 'comp-legacy',
       seasonLabel: 'Legacy 2026/27',
       structureSnapshot: LEGACY_ST,
@@ -367,7 +397,7 @@ describe('the freeze is one-way', () => {
 
   test('a client can neither set nor clear the freeze', async () => {
     const PATCH_CAL = cal('cal-patch', 'Patch', '2026-09-13', '2026-12-13');
-    await bind('comp-patch', PATCH_CAL);
+    await bind(PATCH_CAL);
     const posted = await app.request('/season-runs', {
       method: 'POST',
       headers: headers(ADMIN),
@@ -375,7 +405,7 @@ describe('the freeze is one-way', () => {
         startRunBody({
           id: 'sr-patch',
           leagueKey: LEAGUE_KEY,
-          competitionId: 'comp-patch',
+          seasonLabel: 'sr-patch',
           calendarFrozenAt: '2020-01-01T00:00:00.000Z',
         }),
       ),
@@ -394,27 +424,29 @@ describe('the freeze is one-way', () => {
   });
 });
 
-describe('an ungenerated season whose binding is gone', () => {
+describe('an ungenerated season whose league lost its setup', () => {
   test('keeps its stored snapshot and says why', async () => {
+    // Its own league: every ungenerated run of a league follows that league's one setup.
+    const KEY = 'live-unbind';
     const START = cal('cal-unbind', 'Unbind', '2026-09-13', '2026-12-13');
-    await bind('comp-unbind', START);
-    await startRun('sr-unbind', 'comp-unbind');
+    await bind(START, KEY);
+    await startRun('sr-unbind', KEY);
 
     const cfg = await repo.getTenantConfig(TENANT);
     await repo.putTenantConfig({
       ...cfg!,
-      leagues: (cfg!.leagues ?? []).map((l) =>
-        l.key === LEAGUE_KEY
-          ? { ...l, competitions: (l.competitions ?? []).filter((c) => c.id !== 'comp-unbind') }
-          : l,
-      ),
+      leagues: (cfg!.leagues ?? []).map((l) => {
+        if (l.key !== KEY) return l;
+        const { setup: _setup, ...rest } = l;
+        return rest;
+      }),
     });
 
     const got = await getRun('sr-unbind');
     assert.deepEqual(got.calendarSnapshot, START);
     assert.equal(got.calendarLive, false);
     assert.deepEqual(got.warnings, [
-      "This season's competition or calendar was removed; showing the dates it started with.",
+      "This season's league setup or calendar was removed; showing the dates it started with.",
     ]);
     const listed = await listRun('sr-unbind');
     assert.equal(listed?.calendarLive, false);
@@ -426,9 +458,9 @@ describe('calendar delete guard', () => {
   test('refuses to delete the calendar an ungenerated run follows, whatever its snapshot names', async () => {
     const STARTED_ON = cal('cal-started', 'Started on', '2026-09-13', '2026-12-13');
     const FOLLOWED = cal('cal-followed', 'Followed', '2026-09-20', '2026-12-20');
-    await bind('comp-follow', STARTED_ON);
-    await startRun('sr-follow', 'comp-follow');
-    await bind('comp-follow', FOLLOWED);
+    await bind(STARTED_ON, 'live-follow');
+    await startRun('sr-follow', 'live-follow');
+    await bind(FOLLOWED, 'live-follow');
     assert.equal(
       (await repo.getSeasonRun(TENANT, 'sr-follow'))?.calendarSnapshot.id,
       STARTED_ON.id,
@@ -449,11 +481,11 @@ describe('calendar delete guard', () => {
   });
 
   test('names runs started on the calendar and runs following it separately', async () => {
-    // Another competition bound to the calendar sr-follow already follows; a run started
-    // on it stores that calendar as its snapshot.
+    // Another league set up on the calendar sr-follow already follows; a run started on it
+    // stores that calendar as its snapshot.
     const FOLLOWED = cal('cal-followed', 'Followed', '2026-09-20', '2026-12-20');
-    await bind('comp-follow-2', FOLLOWED);
-    await startRun('sr-follow-2', 'comp-follow-2');
+    await bind(FOLLOWED, 'live-follow-2');
+    await startRun('sr-follow-2', 'live-follow-2');
 
     const res = await operatorPutCalendar(FOLLOWED.id, null);
     assert.equal(res.status, 409);
@@ -468,8 +500,8 @@ describe('a stage that did not fit at start', () => {
   test('generates once the block is extended — no delete and restart', async () => {
     // Two Sundays; a 4-side single round robin needs three.
     const SHORT = cal('cal-short', 'Short', '2026-09-13', '2026-09-20');
-    await bind('comp-fit', SHORT);
-    await startRun('sr-fit', 'comp-fit');
+    await bind(SHORT);
+    await startRun('sr-fit');
 
     const refused = await generate('sr-fit', 1);
     assert.equal(refused.status, 409);

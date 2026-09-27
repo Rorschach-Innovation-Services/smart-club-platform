@@ -5,15 +5,14 @@
 Resolves the tenant from the host (prod) or `x-tenant` / `?tenant=` (dev) and returns the
 **public** subset of config: branding (name, title, logo, favicon, color tokens, copy
 slots), the submission deadline, the league catalogue, the district list, the tutorial
-videos, the per-tenant feature flags, the season calendars, the compliance-doc
-catalogue, and the pickers' part of the competition defaults. `knownClubs` is not exposed here. `districts` and `requiredDocs` are the
+videos, the per-tenant feature flags, the season calendars and the compliance-doc
+catalogue. `knownClubs` is not exposed here. `districts` and `requiredDocs` are the
 resolved lists — a legacy row without the field falls back to the shared defaults; an
 explicit `[]` (freshly created client) comes through empty.
 
 ```
 200 → { tenant, branding, submissionDeadline, leagues, districts, requiredDocs,
-        tutorials, features, calendars,
-        competitionDefaults: { matchFormats?, matchDays?, timeSlots? } }
+        tutorials, features, calendars }
 400 → unknown tenant
 404 → tenant not found
 ```
@@ -29,10 +28,11 @@ Used at first paint for theming: the SPA ships a neutral default theme and appli
 boolean map read via `useFeature`/`hasFeature`, so each flag carries its own default and an
 empty map means "all defaults".
 
-`competitionDefaults` here is an allowlist of three fields — the ones a form prefills from.
-`travel` and `venueAliases` never ride the anonymous payload; they are on
-`GET /tenant/config`. A field the tenant has not set is absent, and the client resolves it to
-the built-in value (`resolveCompetitionDefaults`, `packages/engine/src/defaults.ts`).
+There is no `competitionDefaults` on this payload. Its allowlist used to carry the three
+fields a form prefilled from (`matchFormats`, `matchDays`, `timeSlots`); those reverted to
+built-ins, and the two fields that survive — `travel` and `venueAliases` — never ride the
+anonymous payload. They are on `GET /tenant/config`; a client resolves an absent value to the
+built-in (`resolveCompetitionDefaults`, `packages/engine/src/defaults.ts`).
 
 ## `GET /tenant/config` — tenant setup config (authenticated)
 
@@ -82,11 +82,14 @@ operator's `PUT /platform/tenants/:slug`
 > `PUT /platform/tenants/:slug` — the operator route additionally rejects (409)
 > removing a league clubs are still registered for.
 >
-> `League.competitions` (the structure/calendar bindings) are **operator-only**, even
-> though `leagues` itself is tenant-editable here: a tenant-admin PUT that touches `leagues`
-> has each incoming league's `competitions` overwritten with whatever is currently stored
-> for that key, so this route can rename or reorder leagues but can never mint or drop a
-> binding. Bind competitions via `PUT /platform/tenants/:slug` only.
+> A league's operator bindings — `League.setup` (`{ structureId, calendarId }`) and the
+> deprecated `League.competitions` it may still carry — are **operator-only**, even though
+> `leagues` itself is tenant-editable here (`preserveOperatorBindings`): a tenant-admin PUT
+> that touches `leagues` has each incoming league's `setup` and `competitions` overwritten
+> with whatever is currently stored for that key (absent for a brand-new key). This route
+> can rename or reorder leagues but can never mint, drop or forge a binding — and an admin
+> console that builds its leagues list from a stale cache (no `setup` on it) cannot wipe
+> one. Set leagues up via `PUT /platform/tenants/:slug` only.
 
 > `competitionDefaults` ([ADR 0014](../architecture/0014-seasons-one-vocabulary-one-path-one-engine.md))
 > is **admin-level setup data**, like `leagues`: writable here AND via
@@ -95,18 +98,17 @@ operator's `PUT /platform/tenants/:slug`
 >
 > ```
 > competitionDefaults: {
->   matchFormats?: { label, overs?, ballType? }[]  // label 1–60 chars, overs whole 1–200, ballType ≤30; ≤20 formats
->   matchDays?: Weekday[]                          // 0 (Sunday) – 6 (Saturday), no repeats
->   timeSlots?: { label, start: 'HH:MM' }[]        // the stage slot rule; ≤8 slots
 >   travel?: { costPerKm, carsPerAwayTrip }        // both numbers ≥ 0
 >   venueAliases?: Record<string, string>          // ground name → the ground it means; ≤500
 > }
 > ```
 >
-> The whole object replaces the stored one (send every field you want to keep; the consoles
-> refetch and rebuild before they PUT). An absent field means "use the built-in value":
-> formats Twenty20 / One-Day / Multi-Day / The Hundred, Saturday, 08:00 / 13:30, R4.50/km
-> × 3 cars. Venue alias keys and values are stored in `normaliseName` form (lowercase,
+> Only these two survive, config-only (no console UI). The retired `matchFormats`,
+> `matchDays` and `timeSlots` are neither validated nor stored: sent by an old console, they
+> are dropped from the saved value and the built-ins apply (formats Twenty20 / One-Day /
+> Multi-Day / The Hundred, Saturday, 08:00 / 13:30; overs now live on the structure). The
+> whole object replaces the stored one (send every field you want to keep). An absent field
+> means "use the built-in value": R4.50/km × 3 cars. Venue alias keys and values are stored in `normaliseName` form (lowercase,
 > punctuation and generic words such as "Cricket Club" dropped), so "Riverside Bowl" is
 > stored as `riversidebowl`; a name that normalises to nothing is a 400. The release,
 > in-season and clash-check gates merge these aliases over the code default
@@ -129,15 +131,19 @@ operator's `PUT /platform/tenants/:slug`
 > ≥1 stage, unique structure and stage ids, known format / entrant / cadence kinds, and —
 > the load-bearing one — a stage's `derivedFrom.fromStage` must name an **earlier** stage.
 > A forward or self reference is a cycle, and a season built from one would be
-> permanently unresolvable with no obvious cause. Deleting a structure a league's
-> `competitions[]` still binds to is rejected (409); a running season is unaffected either
-> way because it holds its own snapshot. A league's `competitions[]` are cross-checked
-> against the post-patch view of structures and calendars, so one PUT may legitimately add
-> a structure and the competition that uses it together. Read via the authenticated
-> `GET /tenant/config`, not the public `GET /tenant`.
+> permanently unresolvable with no obvious cause. `overs` (optional) is a whole number
+> 1-200 — the one surviving match-format field, feeding `Series.maxOvers`. Deleting a
+> structure a league's `setup` still names is rejected (409 "… is still used by N league(s)
+> (…) — change their setup first"); a running season is unaffected either way because it
+> holds its own snapshot. A league's `setup` is cross-checked (`validateSetups`) against the
+> post-patch view of structures and calendars — both must exist, and no stage may play past
+> the calendar's last block — so one PUT may legitimately add a structure and the league
+> setup that uses it together. Stored `competitions[]`, a league `note` and a stage's
+> `ladder`/`outcome` are inert: never validated, never rejected, never stripped. Read via
+> the authenticated `GET /tenant/config`, not the public `GET /tenant`.
 >
 > Each `StageSpec.schedule` names a `blockIndex` (0-based position into whichever calendar
-> the competition binds), not a calendar or block id — a structure carries no calendar
+> the league's setup binds), not a calendar or block id — a structure carries no calendar
 > identity of its own, so the same structure is reusable across different calendars. See
 > the [ordinal block refs addendum](../architecture/0008-configurable-league-structures.md#addendum-2026-08-02-ordinal-block-references-and-the-season-wizard).
 >
@@ -161,6 +167,31 @@ operator's `PUT /platform/tenants/:slug`
 > when non-empty so an unaffected save's response shape is unchanged. Only removing the
 > calendar outright (or a block a stage still needs) 409s; editing its dates is a live
 > reference by design — see the addendum linked above.
+>
+> The same `warnings[]` carries two setup lines, both scoped to what the save changed (a
+> rename-only save fires neither): **coverage** — a calendar block no league set up on it
+> plays in (aggregated across every setup on the calendar) — and **re-point** — a save that
+> changes a league's `setup.calendarId` appends "N ungenerated season run(s) of "<league>"
+> will follow the new dates", because a run follows its league's live setup until its first
+> generate.
+
+## `GET` / `PUT /platform/tenants/:slug` — the operator's view of one tenant
+
+`GET` returns the full config row plus a **response-only** `liveUrl`: where the client is
+already reachable (its vanity origin, else its wildcard host; `null` in the dormant
+pre-wildcard state), computed per read by `canonicalWebOrigin`. It replaces the deleted
+`GET /platform/tenants/:slug/dns` sheet. It is never stored: the `PUT` builds its patch from
+an explicit field whitelist that has no `liveUrl`, so a console echoing the row back cannot
+persist it.
+
+`PUT` may write `League.setup` (the tenant-admin `PUT /tenant/config` cannot). The deprecated
+`League.competitions` is inert during the dual window and handled per incoming league:
+
+| Incoming `competitions`                | Result                                                                                                    |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| absent                                 | the stored value is kept — nothing is ever stripped on save                                               |
+| deep-equal to stored (empty ≡ absent)  | accepted unchanged                                                                                        |
+| anything else (an edit, a new binding) | `409 "this console is out of date — refresh it and try again"` (`code: "console_stale"`), nothing written |
 
 ## Operator bulk document intake (operator only)
 

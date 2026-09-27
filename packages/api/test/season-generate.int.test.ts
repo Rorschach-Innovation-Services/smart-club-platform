@@ -13,11 +13,14 @@
  * - a released series is never overwritten without `confirmReleasedOverwrite` (409
  *   `released_overwrite` naming it, nothing written), and with it the overwrite runs
  *   through the SAME in-season clash gate as PATCH /series (structured `venue_clash` 409);
- * - a run whose competition was unbound from the league is a 409 `competition_unbound`;
+ * - there is NO setup check: a run whose league lost its setup still generates off its own
+ *   snapshots (the old `competition_unbound` 409 is gone);
+ * - the format is snapshot-first: `seriesType` = the structure snapshot's name, `maxOvers`
+ *   = its overs, else the live setup structure's overs (a pre-overs snapshot), else 50;
  * - the participant field is gated on the engine's `isAffiliated` (the console preview's
  *   predicate), while a side confirmed into the groups via "Include anyway" is generated.
  *
- * Same harness as season-quick-start.int.test.ts: in-process dynalite + the REAL Hono app.
+ * In-process dynalite + the REAL Hono app.
  *
  * Run with the API package's test runner (tsx --test).
  */
@@ -107,11 +110,12 @@ const generate = (runId: string, specId: string, body: unknown, auth = ADMIN) =>
 
 /** A fresh run (version 1) on the two-stage structure. */
 async function seedRun(id: string): Promise<SeasonRun> {
-  const run: SeasonRun = {
+  const run = {
     id,
     leagueKey: LEAGUE_KEY,
-    competitionId: 'cmp-gen',
     seasonLabel: `Season ${id}`,
+    // No `overs` on the snapshot: a pre-overs run, so maxOvers falls back to the live
+    // setup structure's.
     structureSnapshot: {
       id: 'st-gen',
       name: 'Pools then final',
@@ -125,7 +129,7 @@ async function seedRun(id: string): Promise<SeasonRun> {
       { specId: 'final', status: 'awaiting-entrants', groups: [] },
     ],
     version: 1,
-  };
+  } as unknown as SeasonRun;
   await repo.putSeasonRun(TENANT, run);
   return run;
 }
@@ -183,21 +187,13 @@ before(async () => {
         label: 'Gen League',
         group: 'Men',
         district: 'All districts',
-        competitions: [
-          {
-            id: 'cmp-gen',
-            label: '50 Over',
-            matchFormat: { overs: 50 },
-            structureId: 'st-gen',
-            calendarId: 'cal-gen',
-          },
-        ],
+        setup: { structureId: 'st-gen', calendarId: 'cal-gen' },
       },
     ],
     calendars: [...(cfg!.calendars ?? []), CALENDAR],
     structures: [
       ...(cfg!.structures ?? []),
-      { id: 'st-gen', name: 'Pools then final', version: 1, stages: [POOLS, FINAL] },
+      { id: 'st-gen', name: 'Pools then final', version: 2, overs: 40, stages: [POOLS, FINAL] },
     ],
   });
   // Six single-side clubs, each with its own home ground — the generated fixtures carry no
@@ -239,15 +235,30 @@ describe('POST /season-runs/:id/stages/:specId/generate — guards', () => {
     assert.equal(await repo.getSeries(TENANT, 's-run-guard-version-pools-g1'), null);
   });
 
-  test('a run whose competition is no longer bound to the league is a 409', async () => {
+  test('a run whose league has no setup still generates off its own snapshots', async () => {
     const run = await seedRun('run-guard-unbound');
+    // A stored deprecated competitionId is inert.
     await repo.putSeasonRun(TENANT, { ...run, competitionId: 'cmp-gone' });
-    const res = await generate('run-guard-unbound', 'pools', { version: 1 });
-    assert.equal(res.status, 409);
-    const body = (await res.json()) as ErrorBody;
-    assert.equal(body.code, 'competition_unbound');
-    assert.equal(body.error, 'competition no longer bound to this league');
-    assert.equal(await repo.getSeries(TENANT, 's-run-guard-unbound-pools-g1'), null);
+    const cfg = (await repo.getTenantConfig(TENANT))!;
+    await repo.putTenantConfig({
+      ...cfg,
+      leagues: (cfg.leagues ?? []).map((l) => {
+        if (l.key !== LEAGUE_KEY) return l;
+        const { setup: _setup, ...rest } = l;
+        return rest;
+      }),
+    });
+    try {
+      const res = await generate('run-guard-unbound', 'pools', { version: 1 });
+      assert.equal(res.status, 200);
+      const out = (await res.json()) as GenerateResponse;
+      // No live setup to read overs from and none on the snapshot ⇒ the builder's 50.
+      assert.equal(out.series[0].seriesType, 'Pools then final');
+      assert.equal(out.series[0].maxOvers, 50);
+      for (const s of out.series) await repo.deleteSeries(TENANT, s.id);
+    } finally {
+      await repo.putTenantConfig(cfg);
+    }
   });
 
   test('a stage with no confirmed or derivable entrants is a 409', async () => {
@@ -285,7 +296,10 @@ describe('POST /season-runs/:id/stages/:specId/generate — writes', () => {
       assert.equal(s.fixtures.length, 3, 'a 3-team single round robin is 3 fixtures');
     }
     assert.equal(first.series[0].name, 'Gen League · Pool stage · Group A');
-    assert.equal(first.series[0].seriesType, '50 Over');
+    // Snapshot-first format: the structure snapshot's name; its overs are absent (a
+    // pre-overs snapshot), so the live setup structure's overs.
+    assert.equal(first.series[0].seriesType, 'Pools then final');
+    assert.equal(first.series[0].maxOvers, 40);
     assert.equal(first.series[0].schedule?.blockId, 'b1');
     assert.deepEqual((await repo.getSeries(TENANT, g1))?.fixtures, first.series[0].fixtures);
 
@@ -511,7 +525,6 @@ describe('POST /season-runs/:id/stages/:specId/generate — warnings', () => {
     await repo.putSeasonRun(TENANT, {
       id: 'run-warn',
       leagueKey: LEAGUE_KEY,
-      competitionId: 'cmp-gen',
       seasonLabel: 'Season run-warn',
       structureSnapshot: { id: 'st-gen', name: 'Knockout only', version: 1, stages: [KO] },
       calendarSnapshot: CALENDAR,
@@ -523,11 +536,13 @@ describe('POST /season-runs/:id/stages/:specId/generate — warnings', () => {
         },
       ],
       version: 1,
-    });
+    } as SeasonRun);
     const res = await generate('run-warn', 'ko', { version: 1 });
     assert.equal(res.status, 200);
     const out = (await res.json()) as GenerateResponse;
     assert.ok(out.series[0].fixtures.length > 0);
+    // The snapshot's own name wins over the live structure's.
+    assert.equal(out.series[0].seriesType, 'Knockout only');
     assert.deepEqual(out.warnings, [
       'Paired as a seeded bracket, not cross-group; fix the confirmed positions and regenerate',
     ]);
@@ -556,16 +571,16 @@ describe('POST /season-runs/:id/stages/:specId/generate — affiliation gate', (
 
   // Last describe in the file, so the extra club it seeds affects no other test.
   async function seedAllRun(id: string, groups: SeasonRun['stages'][number]['groups']) {
-    const run: SeasonRun = {
+    const run = {
       id,
       leagueKey: LEAGUE_KEY,
-      competitionId: 'cmp-gen',
       seasonLabel: `Season ${id}`,
-      structureSnapshot: { id: 'st-gen', name: 'One stage', version: 1, stages: [ALL] },
+      // Snapshot overs win over the live setup structure's 40.
+      structureSnapshot: { id: 'st-gen', name: 'One stage', version: 1, overs: 20, stages: [ALL] },
       calendarSnapshot: CALENDAR,
       stages: [{ specId: 'all', status: 'ready', groups }],
       version: 1,
-    };
+    } as SeasonRun;
     await repo.putSeasonRun(TENANT, run);
   }
 
@@ -588,6 +603,7 @@ describe('POST /season-runs/:id/stages/:specId/generate — affiliation gate', (
     assert.equal(out.series.length, 1);
     assert.deepEqual([...out.series[0].teams].sort(), [...CLUB_IDS].sort());
     assert.ok(!out.series[0].teams.includes(PENDING));
+    assert.equal(out.series[0].maxOvers, 20, "the snapshot's overs, not the live structure's");
   });
 
   test('the same club confirmed into the groups (Include anyway) is generated', async () => {

@@ -80,17 +80,15 @@ import {
 import {
   validateCalendars,
   validateStructures,
-  validateCompetitions,
+  validateSetups,
   validateRequiredDocs,
   assertValidCadence,
   assertValidTimeSlots,
   validateCompetitionDefaults,
   KNOCKOUT_PAIRINGS,
 } from './config-validation.js';
-import { findTemplate, instantiateTemplate, newStructureId } from '../../engine/src/templates.js';
 import { isAffiliated, leagueParticipants } from '../../engine/src/leagues.js';
 import { generateStage, stagesAfterGenerate } from '../../engine/src/generate.js';
-import { resolveCompetitionDefaults } from '../../engine/src/defaults.js';
 import { uncoveredBlocksAcross } from '../../engine/src/structure.js';
 import { describeUncoveredBlockAggregate } from '../../engine/src/narrative.js';
 import { demographicsByLeague, summarizeDemographics } from './demographics.js';
@@ -137,10 +135,8 @@ import {
 } from './veterans.js';
 import type {
   Club,
-  CompetitionDefaults,
   ClubCommEvent,
   ClubSpec,
-  Competition,
   CompetitionStructure,
   DirectoryClub,
   League,
@@ -241,13 +237,6 @@ const MAX_DOC_BYTES = 10 * 1024 * 1024; // 10 MB
  */
 const isLocalUploadsMode = (): boolean =>
   process.env.STAGE === 'local' && !!process.env.LOCAL_UPLOADS_DIR;
-
-// Wildcard platform (scheme 1) — real CNAME targets for the operator DNS sheet, and
-// the shared API host. Empty until the wildcard is armed (see infra/tenants.ts).
-const WILDCARD_ENABLED = process.env.WILDCARD_ENABLED === '1';
-const SHARED_API_HOST = process.env.SHARED_API_HOST ?? '';
-const WEB_CNAME_TARGET = process.env.WEB_CNAME_TARGET ?? '';
-const SHARED_API_CNAME_TARGET = process.env.SHARED_API_CNAME_TARGET ?? '';
 
 /**
  * Provision a passwordless invite/signup user, translating Cognito's email-format
@@ -403,22 +392,6 @@ function publicRequiredDocs(cfg: TenantConfig | null): Omit<RequiredDoc, 'matchH
   return resolveRequiredDocs(cfg).map(({ matchHints: _hints, ...rest }) => rest);
 }
 
-/**
- * The part of `competitionDefaults` the anonymous GET /tenant serves: the three fields a
- * form prefills from. An ALLOWLIST, so `travel`, `venueAliases` and anything added later
- * stay on the authenticated GET /tenant/config until someone decides otherwise.
- */
-function publicCompetitionDefaults(
-  cfg: TenantConfig,
-): Pick<CompetitionDefaults, 'matchFormats' | 'matchDays' | 'timeSlots'> {
-  const d = cfg.competitionDefaults ?? {};
-  return {
-    ...(d.matchFormats ? { matchFormats: d.matchFormats } : {}),
-    ...(d.matchDays ? { matchDays: d.matchDays } : {}),
-    ...(d.timeSlots ? { timeSlots: d.timeSlots } : {}),
-  };
-}
-
 // ─────────────── Local-only upload sink (dev:local; 404 elsewhere) ───────────────
 
 /**
@@ -533,10 +506,10 @@ app.get('/tenant', async (c) => {
     // create-series form reads them off this already-fetched payload. Operator-only to
     // WRITE (stripped from PUT /tenant/config); public to read.
     calendars: config.calendars ?? [],
-    // The pickers' defaults (ADR 0014) — as public as the calendars. Only the three a form
-    // prefills from: travel cost and venue aliases are operational detail nobody on a public
-    // page reads, so they stay on the authenticated GET /tenant/config.
-    competitionDefaults: publicCompetitionDefaults(config),
+    // No `competitionDefaults`: the three fields the anonymous payload used to allowlist
+    // (matchFormats/matchDays/timeSlots) reverted to built-ins, and the two that survive —
+    // travel cost and venue aliases — are operational detail nobody on a public page reads,
+    // so they stay on the authenticated GET /tenant/config.
     // Structures are deliberately NOT here. They are only needed by the authenticated
     // "Start a season" flow, and GET /tenant is unauthenticated and hit on every public
     // page load — serving up to 50 structures × 20 stages of competition configuration
@@ -3361,8 +3334,8 @@ app.post('/clubs/:id/send-fixtures', async (c) => {
 
 /**
  * `Series.schedule` shape guard (ADR 0008): the calendar binding a create/regenerate
- * confirmed, so a later regenerate reproduces the same dates. Unlike a competition's
- * binding (`validateCompetitions`), a series names a concrete BLOCK, not a position — it
+ * confirmed, so a later regenerate reproduces the same dates. Unlike a league's setup
+ * (`validateSetups`), a series names a concrete BLOCK, not a position — it
  * is generated once against whatever calendar was current at the time, not resolved
  * through a structure. Checked against the calendars the series is ALLOWED to name, so a
  * dangling calendarId/blockId can never be written from either POST or PATCH — see
@@ -3849,7 +3822,7 @@ app.delete('/series/:id', requireAdmin, async (c) => {
 });
 
 /* ─── Season runs (ADR 0008) ───
-   A run orchestrates one competition's stages for one season; the fixtures still live on
+   A run orchestrates one league setup's stages for one season; the fixtures still live on
    the Series each stage-group materialises into. Admin-only to write, reps read (their
    club's fixtures resolve through it). Same optimistic concurrency as series. */
 
@@ -3901,22 +3874,33 @@ function isUngenerated(run: SeasonRun): boolean {
 }
 
 /**
- * The calendar the run's binding resolves to in LIVE config: league (`leagueKey`) →
- * competition (`competitionId`) → calendar (`competition.calendarId`). Undefined when any
- * link is gone (the competition was unbound, or its calendar deleted).
+ * The calendar the run's league resolves to in LIVE config: league (`leagueKey`) → its
+ * setup (`league.setup.calendarId`) → calendar. Undefined when any link is gone (the
+ * league lost its setup, or the calendar was deleted).
  */
 function liveCalendarFor(
-  run: Pick<SeasonRun, 'leagueKey' | 'competitionId'>,
+  run: Pick<SeasonRun, 'leagueKey'>,
   config: TenantConfig | null | undefined,
 ): SeasonCalendar | undefined {
   const league = (config?.leagues ?? []).find((l) => l.key === run.leagueKey);
-  const competition = (league?.competitions ?? []).find((cm) => cm.id === run.competitionId);
-  if (!competition) return undefined;
-  return (config?.calendars ?? []).find((cl) => cl.id === competition.calendarId);
+  const calendarId = league?.setup?.calendarId;
+  if (!calendarId) return undefined;
+  return (config?.calendars ?? []).find((cl) => cl.id === calendarId);
+}
+
+/** The structure the run's league is set up on in LIVE config, when it still resolves. */
+function liveStructureFor(
+  run: Pick<SeasonRun, 'leagueKey'>,
+  config: TenantConfig | null | undefined,
+): CompetitionStructure | undefined {
+  const league = (config?.leagues ?? []).find((l) => l.key === run.leagueKey);
+  const structureId = league?.setup?.structureId;
+  if (!structureId) return undefined;
+  return (config?.structures ?? []).find((st) => st.id === structureId);
 }
 
 const CALENDAR_REMOVED_WARNING =
-  "This season's competition or calendar was removed; showing the dates it started with.";
+  "This season's league setup or calendar was removed; showing the dates it started with.";
 
 /**
  * The read-side view of a run (GET /season-runs, GET /season-runs/:id). A run's calendar
@@ -3924,7 +3908,7 @@ const CALENDAR_REMOVED_WARNING =
  * ungenerated run whose binding resolves is returned with `calendarSnapshot` replaced by
  * a deep copy of the live calendar and `calendarLive: true`. Nothing is stored — the
  * stored snapshot is only overwritten at the freeze point (the first generate). A
- * generated run is returned unchanged. An ungenerated run whose competition/calendar no
+ * generated run is returned unchanged. An ungenerated run whose league setup/calendar no
  * longer resolves keeps its stored snapshot and says so in `warnings`. `version` is
  * never touched, so a client generating from this view still sends the version it read.
  */
@@ -3936,24 +3920,21 @@ function withLiveCalendar(run: SeasonRun, config: TenantConfig | null | undefine
 }
 
 /**
- * The retired flat-season sentinel. A flat season now starts through quick start (a real
- * competition + structure written to config); runs already stored under it are rewritten
- * by scripts/migrate-flat-runs.ts.
- */
-const FLAT_COMPETITION_ID = '__flat__';
-
-/**
- * Validate and store a new season run — the whole of `POST /season-runs`, shared with the
- * quick start so a quick-started run passes exactly the checks a client-built one does.
- * Stamps the server-owned fields (`version: 1`, `createdAt/By`) and returns the stored run.
+ * Validate and store a new season run — the whole of `POST /season-runs`. Stamps the
+ * server-owned fields (`version: 1`, `createdAt/By`) and returns the stored run.
  *
- * The snapshots are SERVER-FETCHED at start — the same rule as rebase and quick start. The
- * run's `leagueKey` → `competitionId` binding is resolved against the live tenant config
- * and the competition's structure + calendar are deep-copied into `structureSnapshot` /
+ * The snapshots are SERVER-FETCHED at start — the same rule as rebase. The run's
+ * `leagueKey` is resolved against the live tenant config and the league's setup
+ * (`league.setup` → structure + calendar) is deep-copied into `structureSnapshot` /
  * `calendarSnapshot`; anything the client sent for them is ignored. A stale admin tab
  * (tenant config cached before an operator edited the calendar) can therefore no longer
  * freeze outdated dates into a new season. Client-sent `stages` must all name stages on
  * the RESOLVED structure; absent, every stage starts `awaiting-entrants`.
+ *
+ * A league with no setup is a 400 `setup_missing` — seasons can only start on a league the
+ * operator set up. This is the ONLY place setup is required: generate works off the run's
+ * own snapshots. The deprecated `competitionId` is ignored if sent (and never stored on a
+ * new run); an existing run's stored value is left alone.
  */
 async function createSeasonRun(
   tenant: string,
@@ -3966,16 +3947,20 @@ async function createSeasonRun(
   // caller deserves the 400 that says what is wrong.
   if (typeof run.seasonLabel !== 'string' || !run.seasonLabel.trim())
     throw new HttpError(400, 'season run needs a season label');
-  if (!run.competitionId?.trim()) throw new HttpError(400, 'season run needs a competition');
-  if (run.competitionId === FLAT_COMPETITION_ID)
-    throw new HttpError(400, 'flat seasons are no longer supported; use quick start');
   if (run.stages !== undefined && !Array.isArray(run.stages))
     throw new HttpError(400, 'season run stages must be an array');
   if ((run.stages?.length ?? 0) > 20)
     throw new HttpError(400, 'a season run is limited to 20 stages');
-  for (const stage of run.stages ?? []) if (stage) assertValidStageRunFields(stage);
+  for (const stage of run.stages ?? []) {
+    if (!stage) continue;
+    assertValidStageRunFields(stage);
+    // Server-owned: only a rebase sets it.
+    delete stage.formatChanged;
+  }
+  // Deprecated and inert: a run resolves its setup through `leagueKey`.
+  delete (run as { competitionId?: unknown }).competitionId;
 
-  // Resolve the binding against LIVE config: the snapshots are the whole point (a run keeps
+  // Resolve the setup against LIVE config: the snapshots are the whole point (a run keeps
   // the structure and calendar it STARTED with, so a later operator edit can never reshape
   // a season in flight), so what gets frozen must be what config says now, not what a
   // client happened to have cached.
@@ -3983,21 +3968,18 @@ async function createSeasonRun(
   if (!config) throw new HttpError(404, 'tenant not found');
   const league = (config.leagues ?? []).find((l) => l.key === run.leagueKey);
   if (!league) throw new HttpError(400, 'unknown league');
-  const competition = (league.competitions ?? []).find((cm) => cm.id === run.competitionId);
-  // Same wording + code as the generate route's 409: the competition was unbound (or
-  // never bound) while the admin's view still showed it.
-  if (!competition)
-    throw new HttpError(400, 'competition no longer bound to this league', {
-      code: 'competition_unbound',
+  if (!league.setup)
+    throw new HttpError(400, 'this league has no season setup yet — ask your operator', {
+      code: 'setup_missing',
     });
-  const structure = (config.structures ?? []).find((st) => st.id === competition.structureId);
+  const structure = liveStructureFor(run, config);
   if (!structure)
-    throw new HttpError(400, "the competition's structure no longer exists", {
+    throw new HttpError(400, "the league's structure no longer exists", {
       code: 'structure_missing',
     });
-  const calendar = (config.calendars ?? []).find((cl) => cl.id === competition.calendarId);
+  const calendar = liveCalendarFor(run, config);
   if (!calendar)
-    throw new HttpError(400, "the competition's calendar no longer exists", {
+    throw new HttpError(400, "the league's calendar no longer exists", {
       code: 'calendar_missing',
     });
   run.structureSnapshot = structuredClone(structure);
@@ -4027,6 +4009,13 @@ async function createSeasonRun(
 
   if (await repo.getSeasonRun(tenant, run.id))
     throw new HttpError(409, 'a season run with that id already exists');
+  // One setup per league ⇒ one season per league per label.
+  const seasonLabel = run.seasonLabel.trim();
+  const runs = await repo.listSeasonRuns(tenant);
+  if (runs.some((r) => r.leagueKey === league.key && r.seasonLabel?.trim() === seasonLabel))
+    throw new HttpError(409, `"${seasonLabel}" is already running for "${league.label}"`, {
+      code: 'season_exists',
+    });
   run.version = 1;
   run.createdAt = now();
   run.createdBy = by;
@@ -4038,223 +4027,6 @@ app.post('/season-runs', requireAdmin, async (c) => {
   const { tenant, email } = c.get('requestAuth')!;
   const run = await c.req.json<SeasonRun>();
   return c.json(await createSeasonRun(tenant, run, email ?? undefined), 201);
-});
-
-/** Body of `POST /season-runs/quick-start` — mirrors `QuickStartSeasonRequest` in src/api.ts. */
-interface QuickStartBody {
-  leagueKey?: unknown;
-  templateId?: unknown;
-  seasonLabel?: unknown;
-  calendar?: unknown;
-  matchFormat?: unknown;
-  placement?: unknown;
-}
-
-/**
- * POST /season-runs/quick-start — start a season for a league with no competition bound.
- *
- * The admin names a template from the closed registry and either an existing calendar or
- * one pair of dates; the SERVER instantiates the structure (server-minted ids, `source:
- * 'quick-start'`), writes calendar + structure + binding through the operator write path
- * (so every validator and referrer guard runs), then creates the run exactly as `POST
- * /season-runs` would. Admins never send a structure body — structures stay
- * operator-authored (ADR 0006); this is the operator's templates applied on their behalf.
- *
- * NOT atomic across the two items: the config write lands first. If the run write then
- * fails, the competition exists without a season, the response is a 500 naming the
- * competition id, and the admin starts it through the normal Start a season path.
- */
-app.post('/season-runs/quick-start', requireAdmin, async (c) => {
-  const { tenant, email } = c.get('requestAuth')!;
-  const body = await c.req.json<QuickStartBody>();
-  if (!body || typeof body !== 'object') throw new HttpError(400, 'quick start needs a body');
-
-  const template = typeof body.templateId === 'string' ? findTemplate(body.templateId) : undefined;
-  if (!template) throw new HttpError(400, 'quick start needs a known template');
-  if (typeof body.seasonLabel !== 'string' || !body.seasonLabel.trim())
-    throw new HttpError(400, 'quick start needs a season label');
-  const seasonLabel = body.seasonLabel.trim();
-  if (typeof body.leagueKey !== 'string' || !body.leagueKey.trim())
-    throw new HttpError(400, 'quick start needs a league');
-
-  // Calendar: an existing id, or one pair of dates that becomes a single-block calendar.
-  const isDate = (v: unknown): v is string =>
-    typeof v === 'string' && dayjs.utc(v, 'YYYY-MM-DD', true).isValid();
-  const cal = body.calendar as { id?: unknown; label?: unknown; start?: unknown; end?: unknown };
-  if (!cal || typeof cal !== 'object' || Array.isArray(cal))
-    throw new HttpError(400, 'quick start needs a calendar');
-  let existingCalendarId: string | undefined;
-  let newDates: { label: string; start: string; end: string } | undefined;
-  if (cal.id !== undefined) {
-    if (typeof cal.id !== 'string' || !cal.id.trim())
-      throw new HttpError(400, 'calendar id must be a non-blank string');
-    existingCalendarId = cal.id;
-  } else {
-    if (typeof cal.label !== 'string' || !cal.label.trim())
-      throw new HttpError(400, 'a new calendar needs a label');
-    if (!isDate(cal.start) || !isDate(cal.end))
-      throw new HttpError(400, 'a new calendar needs valid start and end dates (YYYY-MM-DD)', {
-        code: 'invalid_dates',
-      });
-    if (cal.end < cal.start)
-      throw new HttpError(400, 'the season ends before it starts', { code: 'invalid_dates' });
-    newDates = { label: cal.label.trim(), start: cal.start, end: cal.end };
-  }
-
-  // Match format: optional, and only the three known fields are kept.
-  let matchFormat: { label?: string; overs?: number; ballType?: string } | undefined;
-  if (body.matchFormat !== undefined) {
-    const mf = body.matchFormat as { label?: unknown; overs?: unknown; ballType?: unknown };
-    if (!mf || typeof mf !== 'object' || Array.isArray(mf))
-      throw new HttpError(400, 'matchFormat must be an object');
-    if (mf.label !== undefined && (typeof mf.label !== 'string' || !mf.label.trim()))
-      throw new HttpError(400, 'matchFormat label must be a non-blank string');
-    if (mf.overs !== undefined && (!Number.isInteger(mf.overs) || (mf.overs as number) < 1))
-      throw new HttpError(400, 'matchFormat overs must be a whole number of 1 or more');
-    if (mf.ballType !== undefined && (typeof mf.ballType !== 'string' || !mf.ballType.trim()))
-      throw new HttpError(400, 'matchFormat ballType must be a non-blank string');
-    matchFormat = {
-      ...(mf.label !== undefined ? { label: (mf.label as string).trim() } : {}),
-      ...(mf.overs !== undefined ? { overs: mf.overs as number } : {}),
-      ...(mf.ballType !== undefined ? { ballType: (mf.ballType as string).trim() } : {}),
-    };
-  }
-
-  const config = await repo.getTenantConfig(tenant);
-  if (!config) throw new HttpError(404, 'tenant not found');
-  const league = (config.leagues ?? []).find((l) => l.key === body.leagueKey);
-  if (!league) throw new HttpError(400, 'unknown league');
-
-  let calendar: SeasonCalendar;
-  if (existingCalendarId !== undefined) {
-    const found = (config.calendars ?? []).find((cl) => cl.id === existingCalendarId);
-    if (!found) throw new HttpError(400, 'unknown calendar');
-    calendar = found;
-  } else {
-    calendar = {
-      id: newStructureId('cal'),
-      label: newDates!.label,
-      blocks: [{ id: 'b1', label: 'Season', start: newDates!.start, end: newDates!.end }],
-    };
-  }
-
-  let placement: number[] | undefined;
-  if (body.placement !== undefined) {
-    const p = body.placement;
-    if (
-      !Array.isArray(p) ||
-      p.length !== template.stages.length ||
-      p.some((n) => !Number.isInteger(n) || n < 0 || n >= calendar.blocks.length)
-    )
-      throw new HttpError(
-        400,
-        `placement must name a block for each of the ${template.stages.length} stage${template.stages.length === 1 ? '' : 's'}: each stage's block must be between 0 and ${calendar.blocks.length - 1} (0 = first block)`,
-        { code: 'bad_placement' },
-      );
-    placement = p as number[];
-  }
-
-  if ((league.competitions ?? []).some((comp) => comp.calendarId === calendar.id))
-    throw new HttpError(
-      409,
-      `"${league.label}" already has a competition on "${calendar.label}" — start the season from it instead`,
-      { code: 'competition_exists' },
-    );
-  const runs = await repo.listSeasonRuns(tenant);
-  if (runs.some((r) => r.leagueKey === league.key && r.seasonLabel === seasonLabel))
-    throw new HttpError(409, `"${seasonLabel}" is already running for "${league.label}"`, {
-      code: 'season_exists',
-    });
-
-  // Structure names are capped at 80 by `validateStructures`; a long league label must
-  // not turn a valid quick start into a 400 the admin cannot do anything about.
-  const structureName = `${league.label} · ${template.name}`.slice(0, 80).trim();
-  const structure: CompetitionStructure = {
-    // The tenant's own double-header slots where the template sets start times.
-    ...instantiateTemplate(
-      template,
-      calendar,
-      structureName,
-      placement,
-      resolveCompetitionDefaults(config),
-    ),
-    source: 'quick-start',
-    version: 1,
-  };
-  const competition: Competition = {
-    id: newStructureId('cmp'),
-    label: matchFormat?.label ?? template.name,
-    ...(matchFormat ? { matchFormat } : {}),
-    structureId: structure.id,
-    calendarId: calendar.id,
-  };
-  const patch: Partial<TenantConfig> = {
-    structures: [...(config.structures ?? []), structure],
-    leagues: (config.leagues ?? []).map((l) =>
-      l.key === league.key ? { ...l, competitions: [...(l.competitions ?? []), competition] } : l,
-    ),
-    ...(existingCalendarId === undefined
-      ? { calendars: [...(config.calendars ?? []), calendar] }
-      : {}),
-  };
-  const { config: written, warnings } = await writeTenantConfigAsOperator(tenant, patch, {
-    by: email ?? 'admin (quick start)',
-    current: config,
-  });
-  // The 500 for "the competition is in config but its season is not" — the admin recovers
-  // by starting it from "Start a season", so the body names the competition.
-  const notStarted = () =>
-    new HttpError(
-      500,
-      `The competition was set up (${competition.id}) but its season could not be started — start it from "Start a season"`,
-      { code: 'run_not_started', competitionId: competition.id },
-    );
-  // Snapshot what was actually WRITTEN (the operator path owns the version number).
-  const structureSnapshot = (written.structures ?? []).find((st) => st.id === structure.id);
-  const calendarSnapshot = (written.calendars ?? []).find((cl) => cl.id === calendar.id);
-  if (!structureSnapshot || !calendarSnapshot) {
-    console.error(
-      `quick start for ${tenant}/${league.key}: competition ${competition.id} was written but the config read back lacks its ${structureSnapshot ? 'calendar' : 'structure'}`,
-    );
-    throw notStarted();
-  }
-
-  const run: SeasonRun = {
-    id: `run-${randomUUID().slice(0, 8)}`,
-    leagueKey: league.key,
-    competitionId: competition.id,
-    seasonLabel,
-    structureSnapshot,
-    calendarSnapshot,
-    stages: structureSnapshot.stages.map((s) => ({
-      specId: s.id,
-      status: 'awaiting-entrants',
-      groups: [],
-    })),
-    version: 1,
-  };
-  let created: SeasonRun;
-  try {
-    created = await createSeasonRun(tenant, run, email ?? undefined);
-  } catch (err) {
-    console.error(
-      `quick start for ${tenant}/${league.key}: competition ${competition.id} was written but its season run was not`,
-      err,
-    );
-    Sentry.captureException(err);
-    throw notStarted();
-  }
-  return c.json(
-    {
-      run: created,
-      competitionId: competition.id,
-      structureId: structure.id,
-      calendarId: calendar.id,
-      // Same additive shape as rebase: the coverage warnings only when non-empty.
-      ...(warnings.length > 0 ? { warnings } : {}),
-    },
-    201,
-  );
 });
 
 app.get('/season-runs/:id', requireAdmin, async (c) => {
@@ -4286,9 +4058,10 @@ async function applySeasonRunPatch(
   /**
    * Server-internal only — never reachable from the public PATCH body. The generate route
    * passes the live calendar it materialised against so the first generate freezes it
-   * into the run in the same conditional write that records the stage's series.
+   * into the run in the same conditional write that records the stage's series, and the
+   * stage whose rebase `formatChanged` marker it just consumed.
    */
-  internal?: { freezeCalendar?: SeasonCalendar },
+  internal?: { freezeCalendar?: SeasonCalendar; clearFormatChangedFor?: string },
 ): Promise<SeasonRun> {
   const current = await repo.getSeasonRun(tenant, id);
   if (!current) throw new HttpError(404, 'season run not found');
@@ -4343,6 +4116,12 @@ async function applySeasonRunPatch(
       const incoming = Array.isArray(stage.audit) ? stage.audit : [];
       const appended = incoming.slice(prior.length).map((entry) => ({ ...entry, by: actor, at }));
       stage.audit = [...prior, ...appended];
+      // `formatChanged` is server-owned (set by rebase, consumed by generate): the stored
+      // marker is replayed whatever the client sent, and only the generate that adopted the
+      // new format may clear it.
+      if (found?.formatChanged === true && internal?.clearFormatChangedFor !== stage.specId)
+        stage.formatChanged = true;
+      else delete stage.formatChanged;
     }
   }
   // `seasonLabel` is the gsi1 sort key. Blanking it writes an empty `gsi1sk`, which real
@@ -4373,17 +4152,21 @@ interface GenerateStageBody {
  * on the server and write one series per group (ADR 0014, amending ADR 0004).
  *
  * The engine decides WHAT: the run is materialised exactly as the Seasons panel does it
- * (`leagueParticipants` over the tenant's affiliated clubs minus the competition's
- * `excludeTeamIds`, then `materialiseRun` — pairing overrides, confirmed groups, pool
- * qualifiers, chaining floors) and each group is built by `buildStageSeries`. This route decides HOW, through
- * the existing write paths only:
+ * (`leagueParticipants` over the tenant's affiliated clubs, then `materialiseRun` — pairing
+ * overrides, confirmed groups, pool qualifiers, chaining floors) and each group is built by
+ * `buildStageSeries`. This route decides HOW, through the existing write paths only:
  * - a group whose series doesn't exist yet goes through `createSeries` (POST /series: a
  *   draft, whatever the builder said);
  * - one that exists is overwritten through `applySeriesPatch` (PATCH /series/:id) with its
  *   stored version, so the approval recall on drafts and the in-season clash gate on
  *   released series run unchanged — their 409s propagate with their structured bodies.
  *   `released`/`releasedAt`/`name` are stripped first: regenerating changes the fixtures,
- *   never whether they are published, and never a name the admin chose;
+ *   never whether they are published, and never a name the admin chose. `seriesType` and
+ *   `maxOvers` are stripped too — a regenerate keeps the stored format, so a released
+ *   "T20" series can never be republished as a 50-over under a structure-shaped name —
+ *   UNLESS the stage carries the rebase marker `formatChanged` (a rebase adopted a
+ *   structure whose name/overs changed): then the new format is written and the marker
+ *   cleared in the same run write;
  * - the run is then updated through `applySeasonRunPatch` (PATCH /season-runs/:id) with
  *   the version the caller read.
  *
@@ -4400,9 +4183,14 @@ interface GenerateStageBody {
  * stage was paired as a seeded bracket instead.
  *
  * The FIRST generate of a run (no stage has a series yet) is the calendar freeze point: the
- * run is materialised against the live calendar its competition is bound to, and that
- * calendar is stored as `calendarSnapshot` in the same run write. Later generates use the
- * stored snapshot.
+ * run is materialised against the live calendar its league's setup names (falling back to
+ * the stored snapshot when that no longer resolves), and that calendar is stored as
+ * `calendarSnapshot` in the same run write. Later generates use the stored snapshot.
+ *
+ * There is NO setup check here: every run carries its own snapshots from creation, so a
+ * league that lost its setup can still (re)generate its season. The format is
+ * snapshot-first — `seriesType` = the structure snapshot's name, `maxOvers` = its overs
+ * (the live setup structure's overs only for a pre-overs snapshot; absent ⇒ 50).
  */
 app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => {
   const { tenant, email } = c.get('requestAuth')!;
@@ -4427,14 +4215,14 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
   const [config, clubs] = await Promise.all([repo.getTenantConfig(tenant), repo.listClubs(tenant)]);
   if (!config) throw new HttpError(404, 'tenant not found');
   const league = (config.leagues ?? []).find((l) => l.key === run.leagueKey);
-  // Flat runs are migrated onto real competitions (scripts/migrate-flat-runs.ts) and the
-  // sentinel is refused at POST /season-runs, so a missing competition means an operator
-  // unbound it from the league after the season started — not a format to synthesise.
-  const competition = league?.competitions?.find((cm) => cm.id === run.competitionId);
-  if (!competition)
-    throw new HttpError(409, 'competition no longer bound to this league', {
-      code: 'competition_unbound',
-    });
+  // Snapshot-first. The live setup structure is consulted ONLY for overs a pre-overs
+  // snapshot lacks, and only best-effort: absent, the builder falls back to 50.
+  const format = {
+    structureName: run.structureSnapshot.name,
+    overs: run.structureSnapshot.overs ?? liveStructureFor(run, config)?.overs,
+  };
+  const stageRun = (run.stages ?? []).find((st) => st?.specId === specId);
+  const adoptFormat = stageRun?.formatChanged === true;
 
   // The freeze point. Until a run's first fixtures exist its calendar follows the live
   // tenant calendar (what GET shows), so the FIRST generate materialises against the live
@@ -4452,16 +4240,12 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     specId,
     // Gated on the same `isAffiliated` the console preview passes, so the server generates
     // exactly the field the admin was shown.
-    participants: leagueParticipants(clubs, run.leagueKey, competition.excludeTeamIds, {
-      isAffiliated,
-    }),
+    participants: leagueParticipants(clubs, run.leagueKey, { isAffiliated }),
     // Ungated: resolves names for any side in a confirmed group, including one the admin
     // chose to "Include anyway".
-    leagueTeams: leagueParticipants(clubs, run.leagueKey),
+    leagueTeams: leagueParticipants(clubs, run.leagueKey, {}),
     league,
-    competition,
-    // A competition with no overs of its own takes the tenant's first match format's.
-    defaultOvers: config.competitionDefaults?.matchFormats?.[0]?.overs,
+    format,
   });
   if (result.status === 'unknown-stage') throw new HttpError(404, 'stage not found');
   if (result.status === 'awaiting-entrants')
@@ -4483,10 +4267,19 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     );
 
   // What an existing series is PATCHed with: regenerating changes the fixtures, never
-  // whether they are published, and never a name the admin chose.
+  // whether they are published, never a name the admin chose, and never the stored format
+  // (seriesType/maxOvers) — except when a rebase marked the stage `formatChanged`, which is
+  // the rebase's version-review consent to adopt the new structure's name/overs.
   const overwriteOf = (series: Series): Partial<Series> => {
-    const { released: _r, releasedAt: _ra, name: _n, ...fixturesAndConfig } = series;
-    return fixturesAndConfig;
+    const {
+      released: _r,
+      releasedAt: _ra,
+      name: _n,
+      seriesType,
+      maxOvers,
+      ...fixturesAndConfig
+    } = series;
+    return adoptFormat ? { ...fixturesAndConfig, seriesType, maxOvers } : fixturesAndConfig;
   };
 
   // Dry pass of the in-season clash gate over every RELEASED group about to be overwritten,
@@ -4555,7 +4348,11 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     id,
     { stages: stagesAfterGenerate(genRun, specId, result.groups), version: run.version },
     actor,
-    freezeCalendar ? { freezeCalendar } : undefined,
+    {
+      ...(freezeCalendar ? { freezeCalendar } : {}),
+      // The rebase format marker is consumed by this generate: the new format was written.
+      clearFormatChangedFor: specId,
+    },
   );
   return c.json({
     run: nextRun,
@@ -4605,6 +4402,10 @@ function scheduleShape(stage: StageSpec): unknown {
  * - schedule changed ⇒ `staleSchedule: true`, surfaced as "Needs regenerating".
  * - format changed ⇒ `pairingOverride` cleared (recorded in the audit entry): an
  *   override chosen against the old format must not silently win over the new one.
+ * Separately, the snapshot ROOT is diffed: when the structure's `name` or `overs` changed,
+ * every surviving StageRun is stamped `formatChanged: true`, so the next generate of each
+ * adopts the new name/overs instead of keeping the stored series format (the version
+ * review this route requires is the consent for that).
  * A `derivedFrom.fromStage` naming no live stage is reported in `warnings` — the client
  * engine silently falls back to the adjacent earlier stage, which is plausible but wrong.
  */
@@ -4674,6 +4475,14 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
       return out;
     });
 
+  // Root format diff (name/overs): a regenerate keeps each series' stored format unless
+  // the stage carries this marker.
+  const rootFormatChanged =
+    current.structureSnapshot.name !== live.name || current.structureSnapshot.overs !== live.overs;
+  const survivors: StageRun[] = rootFormatChanged
+    ? kept.map((run) => ({ ...run, formatChanged: true }))
+    : kept;
+
   const hasRun = new Set(kept.map((run) => run.specId));
   const added: StageRun[] = live.stages
     .filter((s) => !oldSpecs.has(s.id) && !hasRun.has(s.id))
@@ -4699,7 +4508,7 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
     const next = await repo.updateSeasonRun(tenant, id, {
       version: body.version as number,
       structureSnapshot: live,
-      stages: [...kept, ...added],
+      stages: [...survivors, ...added],
       ...freeze,
     });
     // Same additive shape as PUT /platform/tenants: `warnings` only when non-empty.
@@ -4824,7 +4633,7 @@ const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 async function applyTenantConfigPatch(
   tenant: string,
   patch: Partial<TenantConfig>,
-  opts: { preserveCompetitions?: boolean } = {},
+  opts: { preserveOperatorBindings?: boolean } = {},
 ): Promise<TenantConfig> {
   const current = await repo.getTenantConfig(tenant);
   if (!current) throw new HttpError(404, 'tenant not found');
@@ -4853,11 +4662,11 @@ async function applyTenantConfigPatch(
     patch.districts = patch.districts.map((d) => d.trim());
   }
   if (patch.leagues !== undefined) {
-    // validateLeagues runs against the RAW incoming body, before preserveCompetitions
-    // below discards whatever competitions data the client sent — so a tenant PUT can
-    // still 400 (e.g. duplicate key) on a league whose competitions edit was never
-    // going to be kept. Accepted: pre-stripping every incoming league's competitions
-    // field before validating just to avoid that wasted 400 costs more than it saves.
+    // validateLeagues runs against the RAW incoming body, before preserveOperatorBindings
+    // below discards whatever setup/competitions data the client sent — so a tenant PUT
+    // can still 400 (e.g. duplicate key) on a league whose binding edit was never going
+    // to be kept. Accepted: pre-stripping every incoming league's bindings before
+    // validating just to avoid that wasted 400 costs more than it saves.
     validateLeagues(
       patch.leagues,
       // A league's district must be real for the tenant — or the overarching
@@ -4869,17 +4678,23 @@ async function applyTenantConfigPatch(
         ...(current.leagues ?? []).map((l) => l.district),
       ]),
     );
-    // Competition bindings (League.competitions) are operator-only (ADR 0008) — the
-    // tenant-admin path can rename/reorder leagues but must never mint or drop a
-    // binding. Overwrite each incoming league's competitions with whatever is
-    // CURRENTLY STORED for that key, ignoring the patch's value entirely.
-    if (opts.preserveCompetitions) {
-      // A key with no stored counterpart (a brand-new league) sets `competitions:
-      // undefined` explicitly rather than omitting the property — safe only because
-      // the repo write marshals with removeUndefinedValues, so it never lands on the
-      // row as a literal `null`/`undefined` attribute.
-      const storedByKey = new Map((current.leagues ?? []).map((l) => [l.key, l.competitions]));
-      patch.leagues = patch.leagues.map((l) => ({ ...l, competitions: storedByKey.get(l.key) }));
+    // A league's operator bindings — its `setup` and the deprecated `competitions[]` it may
+    // still carry during the dual window — are operator-only (ADR 0008). The tenant-admin
+    // path can rename/reorder leagues but must never mint, drop or forge a binding: the
+    // admin console builds its leagues PUT from a CACHED league list, so a stale tab would
+    // otherwise wipe a setup it never saw. Overwrite both on each incoming league with
+    // whatever is CURRENTLY STORED for that key, ignoring the patch's values entirely.
+    if (opts.preserveOperatorBindings) {
+      // A key with no stored counterpart (a brand-new league) sets both to `undefined`
+      // explicitly rather than omitting the property — safe only because the repo write
+      // marshals with removeUndefinedValues, so it never lands on the row as a literal
+      // `null`/`undefined` attribute.
+      const storedByKey = new Map((current.leagues ?? []).map((l) => [l.key, l]));
+      patch.leagues = patch.leagues.map((l) => ({
+        ...l,
+        competitions: storedByKey.get(l.key)?.competitions,
+        setup: storedByKey.get(l.key)?.setup,
+      }));
     }
   }
   // Admin-level setup data (ADR 0014): both the tenant admin's and the operator's PUT land
@@ -4916,14 +4731,12 @@ async function applyTenantConfigPatch(
 
 /**
  * The operator-authority write for the ADR 0008 setup data: calendars, structures and the
- * league competitions that bind them. Shared by `PUT /platform/tenants/:slug` and the
- * admin quick start (`POST /season-runs/quick-start`), so a quick-started season goes
- * through exactly the validators, version minting and referrer guards an operator's edit
- * does. Whatever else `patch` carries (branding, districts, …) is passed through to
- * `applyTenantConfigPatch` untouched — the caller owns validating those.
+ * league setups that bind them. Used by `PUT /platform/tenants/:slug`. Whatever else
+ * `patch` carries (branding, districts, …) is passed through to `applyTenantConfigPatch`
+ * untouched — the caller owns validating those.
  *
- * Calls `applyTenantConfigPatch` WITHOUT `preserveCompetitions`: this is the path that is
- * allowed to mint and drop bindings.
+ * Calls `applyTenantConfigPatch` WITHOUT `preserveOperatorBindings`: this is the path that
+ * is allowed to write `league.setup`.
  *
  * `current` lets a caller that already read the row skip a second read; `by` names who
  * made the change for the log line (there is no stored audit field for config edits).
@@ -4956,7 +4769,7 @@ export async function writeTenantConfigAsOperator(
     // A series stores `schedule.calendarId`; dropping the calendar out from under it would
     // leave regenerate unable to reproduce that series' dates. A season run snapshots its
     // calendar, so deleting one can't reshape it — but its `calendarSnapshot.id` is how
-    // its series (and the competition that started it) name that calendar, and a run with
+    // its series (and the league setup that started it) name that calendar, and a run with
     // no live calendar can't be told apart from a dangling one. Only REMOVED calendars are
     // checked, so a pre-existing orphan never blocks an unrelated save.
     const current = await getCurrent();
@@ -4981,16 +4794,14 @@ export async function writeTenantConfigAsOperator(
             409,
             `${n} series ${n === 1 ? 'is' : 'are'} scheduled against "${cal.label}" — reschedule ${n === 1 ? 'it' : 'them'} before deleting the calendar`,
           );
-        // A run that has not generated yet FOLLOWS its competition's live calendar (see
+        // A run that has not generated yet FOLLOWS its league setup's live calendar (see
         // `withLiveCalendar`), so it references that calendar even when its stored
-        // snapshot names another. Resolved against the bindings as they will be AFTER
-        // this write, so a save that re-points the competition elsewhere and deletes the
-        // old calendar together is not blocked by a run that will no longer follow it.
+        // snapshot names another. Resolved against the setups as they will be AFTER this
+        // write, so a save that re-points the setup elsewhere and deletes the old
+        // calendar together is not blocked by a run that will no longer follow it.
         const nextLeagues = patch.leagues ?? current.leagues ?? [];
         const followedCalendarId = (r: SeasonRun): string | undefined =>
-          nextLeagues
-            .find((l) => l.key === r.leagueKey)
-            ?.competitions?.find((cm) => cm.id === r.competitionId)?.calendarId;
+          nextLeagues.find((l) => l.key === r.leagueKey)?.setup?.calendarId;
         const startedOn = allRuns.filter((r) => r.calendarSnapshot?.id === cal.id).length;
         const following = allRuns.filter(
           (r) =>
@@ -5053,27 +4864,25 @@ export async function writeTenantConfigAsOperator(
     });
     // Referrer delete guard, same basis as leagues/districts/calendars. A running season
     // snapshots its structure, so deleting one can't corrupt a season in flight — but a
-    // LEAGUE still binding to it would be left pointing at nothing, and no new season
+    // LEAGUE still set up on it would be left pointing at nothing, and no new season
     // could be started from it.
     const nextIds = new Set(incoming.map((st) => st.id));
     const removed = (current.structures ?? []).filter((st) => !nextIds.has(st.id));
     if (removed.length > 0) {
       const nextLeagues = patch.leagues ?? current.leagues ?? [];
       for (const st of removed) {
-        const refs = nextLeagues.flatMap((l) =>
-          (l.competitions ?? []).filter((comp) => comp.structureId === st.id).map(() => l.label),
-        );
+        const refs = nextLeagues.filter((l) => l.setup?.structureId === st.id).map((l) => l.label);
         if (refs.length > 0)
           throw new HttpError(
             409,
-            `"${st.name}" is still used by ${refs.length} competition${refs.length === 1 ? '' : 's'} (${[...new Set(refs)].join(', ')}) — unbind ${refs.length === 1 ? 'it' : 'them'} first`,
+            `"${st.name}" is still used by ${refs.length} league${refs.length === 1 ? '' : 's'} (${refs.join(', ')}) — change ${refs.length === 1 ? 'its' : 'their'} setup first`,
           );
       }
     }
   }
-  // Competitions bind leagues to structures and calendars, so they can only be checked
-  // once all three are known — against the POST-patch view, so one write may legitimately
-  // add a structure and the competition that uses it together.
+  // Setups bind leagues to structures and calendars, so they can only be checked once all
+  // three are known — against the POST-patch view, so one write may legitimately add a
+  // structure and the league setup that uses it together.
   if (
     patch.leagues !== undefined ||
     patch.structures !== undefined ||
@@ -5083,7 +4892,7 @@ export async function writeTenantConfigAsOperator(
     const nextLeagues = patch.leagues ?? current.leagues ?? [];
     const nextStructures = patch.structures ?? current.structures ?? [];
     const nextCalendars = patch.calendars ?? current.calendars ?? [];
-    validateCompetitions(nextLeagues, nextStructures, nextCalendars);
+    validateSetups(nextLeagues, nextStructures, nextCalendars);
     for (const line of calendarCoverageWarnings(
       current,
       nextLeagues,
@@ -5091,6 +4900,9 @@ export async function writeTenantConfigAsOperator(
       nextCalendars,
     ))
       if (!warnings.includes(line)) warnings.push(line);
+    if (patch.leagues !== undefined)
+      for (const line of await setupRepointWarnings(tenant, current, nextLeagues))
+        if (!warnings.includes(line)) warnings.push(line);
   }
   const config = await applyTenantConfigPatch(tenant, patch);
   if (patch.calendars !== undefined || patch.structures !== undefined)
@@ -5100,12 +4912,12 @@ export async function writeTenantConfigAsOperator(
 
 /**
  * Aggregate coverage warnings (informational, never blocking): for each calendar, the
- * blocks NO competition bound to it plays in. Aggregated across every competition on the
- * calendar, so two competitions sharing one calendar and covering a block each (T20 in
- * Block 1, 50 Over in Block 2) raise nothing. Scoped to the calendars this save actually
- * touched — its blocks changed, the set of competitions bound to it changed, or the
- * content of a structure those competitions use changed — so an unrelated edit (renaming a league) never re-nags. A calendar nobody binds never warns.
- * Runs after `validateCompetitions`, so every binding resolves.
+ * blocks NO league set up on it plays in. Aggregated across every league setup on the
+ * calendar, so two leagues sharing one calendar and covering a block each (T20 in Block 1,
+ * 50 Over in Block 2) raise nothing. Scoped to the calendars this save actually touched —
+ * its blocks changed, the set of setups on it changed, or the content of a structure those
+ * setups use changed — so an unrelated edit (renaming a league) never re-nags. A calendar
+ * nobody is set up on never warns. Runs after `validateSetups`, so every setup resolves.
  */
 function calendarCoverageWarnings(
   current: TenantConfig,
@@ -5113,14 +4925,16 @@ function calendarCoverageWarnings(
   nextStructures: CompetitionStructure[],
   nextCalendars: SeasonCalendar[],
 ): string[] {
+  const setupsOn = (leagues: League[], calendarId: string) =>
+    leagues.flatMap((lg) =>
+      lg.setup?.calendarId === calendarId
+        ? [{ key: lg.key, structureId: lg.setup.structureId }]
+        : [],
+    );
   const bindingsOn = (leagues: League[], calendarId: string): string =>
     stableStringify(
-      leagues
-        .flatMap((lg) =>
-          (lg.competitions ?? [])
-            .filter((comp) => comp.calendarId === calendarId)
-            .map((comp) => [lg.key, comp.id, comp.structureId, comp.calendarId]),
-        )
+      setupsOn(leagues, calendarId)
+        .map((b) => [b.key, b.structureId])
         .sort((a, b) => stableStringify(a).localeCompare(stableStringify(b))),
     );
   const currentStructures = current.structures ?? [];
@@ -5136,27 +4950,59 @@ function calendarCoverageWarnings(
       before === undefined || stableStringify(before.blocks) !== stableStringify(cal.blocks);
     const bindingsChanged =
       bindingsOn(current.leagues ?? [], cal.id) !== bindingsOn(nextLeagues, cal.id);
-    const bound = nextLeagues.flatMap((lg) =>
-      (lg.competitions ?? []).filter((comp) => comp.calendarId === cal.id),
-    );
+    const bound = setupsOn(nextLeagues, cal.id);
     // A structures-only save (e.g. moving a bound structure's block-2 stage into block 1)
-    // changes neither the calendar's blocks nor the binding tuples, yet can open a gap —
-    // so a content change to any structure bound here also counts. Version-stripped, same
+    // changes neither the calendar's blocks nor the setup tuples, yet can open a gap — so
+    // a content change to any structure set up here also counts. Version-stripped, same
     // convention as the version-mint diff: a no-op resave never re-nags.
     const structureChanged = bound.some(
-      (comp) =>
-        structureContent(currentStructures.find((st) => st.id === comp.structureId)) !==
-        structureContent(nextStructures.find((st) => st.id === comp.structureId)),
+      (b) =>
+        structureContent(currentStructures.find((st) => st.id === b.structureId)) !==
+        structureContent(nextStructures.find((st) => st.id === b.structureId)),
     );
     if (!blocksChanged && !bindingsChanged && !structureChanged) continue;
     if (bound.length === 0) continue;
     const structures = bound
-      .map((comp) => nextStructures.find((st) => st.id === comp.structureId))
+      .map((b) => nextStructures.find((st) => st.id === b.structureId))
       .filter((st): st is CompetitionStructure => st !== undefined);
     for (const block of uncoveredBlocksAcross(structures, cal)) {
       const line = `${cal.label}: ${describeUncoveredBlockAggregate(block, cal.blocks.indexOf(block))}`;
       if (!lines.includes(line)) lines.push(line);
     }
+  }
+  return lines;
+}
+
+/**
+ * The mid-season re-point warning (informational, never blocking): a save that CHANGES a
+ * league's `setup.calendarId` (incoming vs stored, by key; a first-time setup counts) moves
+ * every ungenerated season
+ * run of that league onto the new calendar's dates — they follow the live setup until
+ * their first generate. Renewing a finished season onto next year's calendar is the
+ * feature; mid-season it must at least announce itself. A save that leaves every
+ * `setup.calendarId` alone (a rename, a reorder) never reads the runs and never warns.
+ */
+async function setupRepointWarnings(
+  tenant: string,
+  current: TenantConfig,
+  nextLeagues: League[],
+): Promise<string[]> {
+  const storedByKey = new Map((current.leagues ?? []).map((l) => [l.key, l]));
+  const repointed = nextLeagues.filter((l) => {
+    // A setup that is removed is not a re-point (its runs fall back to their stored
+    // snapshots); one set up for the first time over existing runs is.
+    const after = l.setup?.calendarId;
+    return after !== undefined && after !== storedByKey.get(l.key)?.setup?.calendarId;
+  });
+  if (repointed.length === 0) return [];
+  const runs = await repo.listSeasonRuns(tenant);
+  const lines: string[] = [];
+  for (const lg of repointed) {
+    const n = runs.filter((r) => r.leagueKey === lg.key && isUngenerated(r)).length;
+    if (n > 0)
+      lines.push(
+        `${n} ungenerated season run${n === 1 ? '' : 's'} of "${lg.label}" will follow the new dates`,
+      );
   }
   return lines;
 }
@@ -5366,7 +5212,7 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { calendars?: unknown }).calendars;
   delete (patch as { structures?: unknown }).structures;
   delete (patch as { requiredDocs?: unknown }).requiredDocs;
-  const next = await applyTenantConfigPatch(tenant, patch, { preserveCompetitions: true });
+  const next = await applyTenantConfigPatch(tenant, patch, { preserveOperatorBindings: true });
   return c.json(next);
 });
 
@@ -5656,11 +5502,18 @@ async function grantAdminToOperators(
   return { granted, failed };
 }
 
-/** GET /platform/tenants/:slug — the full config row (operator edit form). */
+/**
+ * GET /platform/tenants/:slug — the full config row (operator edit form), plus the
+ * RESPONSE-ONLY `liveUrl`: where the client is already reachable (its vanity origin, else
+ * its wildcard host; null in the dormant pre-wildcard state). Computed per read, never
+ * stored — the PUT builds its patch from an explicit field whitelist that has no
+ * `liveUrl`, so a console echoing the row back cannot persist it.
+ */
 app.get('/platform/tenants/:slug', async (c) => {
-  const config = await repo.getTenantConfig(c.req.param('slug'));
+  const slug = c.req.param('slug');
+  const config = await repo.getTenantConfig(slug);
   if (!config) throw new HttpError(404, 'tenant not found');
-  return c.json(config);
+  return c.json({ ...config, liveUrl: canonicalWebOrigin(slug) });
 });
 
 /**
@@ -5730,6 +5583,31 @@ function stableStringify(value: unknown): string {
 }
 
 /**
+ * The deprecated `competitions[]` on an operator's leagues PUT (dual window, until the
+ * WS6 cleanup script). `setup` is the binding now, so competitions are inert stored data —
+ * but an operator console old enough to still EDIT them must be told, not silently ignored:
+ *
+ * - absent on an incoming league ⇒ the stored value is kept (nothing is ever stripped);
+ * - deep-equal to the stored value (empty ≡ absent) ⇒ accepted unchanged;
+ * - anything else ⇒ 409 `console_stale`: the console is out of date. A 200 that dropped
+ *   the edit would be worse than the refusal.
+ */
+function keepStoredCompetitions(incoming: League[], stored: League[]): League[] {
+  const storedByKey = new Map(stored.map((l) => [l.key, l.competitions]));
+  const norm = (v: unknown): string =>
+    stableStringify(Array.isArray(v) && v.length === 0 ? undefined : (v ?? undefined));
+  return incoming.map((l) => {
+    const before = storedByKey.get(l.key);
+    if (l.competitions === undefined) return { ...l, competitions: before };
+    if (norm(l.competitions) !== norm(before))
+      throw new HttpError(409, 'this console is out of date — refresh it and try again', {
+        code: 'console_stale',
+      });
+    return { ...l, competitions: before };
+  });
+}
+
+/**
  * PUT /platform/tenants/:slug — merge-patch branding / features / leagues /
  * districts / submissionDeadline (whitelisted: the operator portal edits nothing
  * else). Shares applyTenantConfigPatch with PUT /tenant/config, so the same
@@ -5757,7 +5635,7 @@ app.put('/platform/tenants/:slug', async (c) => {
   if (body.features !== undefined) patch.features = body.features;
   if (body.leagues !== undefined) {
     validateLeagues(body.leagues); // shape 400s must win over the guard's 409
-    patch.leagues = body.leagues;
+    patch.leagues = keepStoredCompetitions(body.leagues, (await getCurrent()).leagues ?? []);
     // Operator-side delete guard: unlike the tenant admin console, the operator has
     // no view of club registrations, so a write that drops a league key clubs still
     // reference is rejected outright — an orphaned key breaks player registration.
@@ -5865,9 +5743,8 @@ app.put('/platform/tenants/:slug', async (c) => {
   if (body.tutorialsNoFallback !== undefined) {
     patch.tutorialsNoFallback = !!body.tutorialsNoFallback;
   }
-  // Calendars, structures and the competitions binding them go through the shared
-  // operator write (validation, version minting, referrer guards, calendar-edit warnings)
-  // — the same path an admin's quick start takes.
+  // Calendars, structures and the league setups binding them go through the shared
+  // operator write (validation, version minting, referrer guards, calendar-edit warnings).
   if (body.calendars !== undefined) patch.calendars = body.calendars;
   if (body.structures !== undefined) patch.structures = body.structures;
   // Validated (and normalised) in the shared applyTenantConfigPatch, same as the admin path.
@@ -7237,7 +7114,7 @@ app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
 
   // Step 1 — leagues first, fail-fast whole-request. Nothing else has run if this throws.
   // Idempotent: drop any incoming league that's an EXACT re-send of one already on the
-  // stored catalogue (same key/label/group/district/note/competitions) BEFORE validating
+  // stored catalogue (same key/label/group/district/note/competitions/setup) BEFORE validating
   // — a retry of an already-appended league must succeed, not 409. A same-KEY-but-
   // DIFFERENT-definition entry is a genuine conflict, not a retry: it's left in place so
   // validateLeagues' uniqueness check on the combined array still 409s it, same as a
@@ -7250,7 +7127,8 @@ app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
     a.group === b.group &&
     a.district === b.district &&
     (a.note ?? '') === (b.note ?? '') &&
-    JSON.stringify(a.competitions ?? null) === JSON.stringify(b.competitions ?? null);
+    JSON.stringify(a.competitions ?? null) === JSON.stringify(b.competitions ?? null) &&
+    stableStringify(a.setup ?? null) === stableStringify(b.setup ?? null);
   const newLeagues = requestedLeagues.filter((l) => {
     const existing = existingLeaguesByKey.get(l.key);
     return !existing || !sameLeagueDefinition(l, existing);
@@ -7676,82 +7554,6 @@ app.post('/platform/tenants/:slug/clubs', async (c) => {
     .catch(() => ({}) as { name?: string; district?: string });
   const club = await createOperatorClub(slug, cfg, body);
   return c.json(club, 201);
-});
-
-/**
- * GET /platform/tenants/:slug/dns — the domain sheet as DATA (the portal renders it).
- * `liveUrl` is where the client is ALREADY reachable (wildcard host, or vanity origin
- * once configured). `steps` are the OPTIONAL vanity-domain upsell: with the shared API
- * host, that's now a single web-cert reissue + one VANITY entry + client CNAMEs — no
- * per-tenant API cert. Real CNAME targets come from the deploy envs; the web target is
- * only populated once WEB_CNAME_TARGET is filled in infra/tenants.ts.
- */
-app.get('/platform/tenants/:slug/dns', async (c) => {
-  const slug = c.req.param('slug');
-  const config = await repo.getTenantConfig(slug);
-  if (!config) throw new HttpError(404, 'tenant not found');
-  const liveUrl = canonicalWebOrigin(slug);
-  const webTarget =
-    WEB_CNAME_TARGET || '<CloudFront distribution domain — aws cloudfront list-distributions>';
-  const apiTarget =
-    SHARED_API_CNAME_TARGET || '<shared API Gateway regional domain — sst deploy output>';
-  return c.json({
-    tenant: slug,
-    liveUrl,
-    note: WILDCARD_ENABLED
-      ? `This client is already live at ${liveUrl} — nothing to do. The steps below are ` +
-        'only needed if the client wants their OWN vanity domain instead of the shared ' +
-        'club subdomain.'
-      : 'Vanity go-live checklist. Placeholders in angle brackets are operator-filled: ' +
-        'pick the client web host (e.g. clubs.<client-domain>) and read the CNAME targets ' +
-        'from the `sst deploy --stage prod` outputs.',
-    steps: [
-      {
-        key: 'web-certificate',
-        title: 'Reissue the WEB ACM certificate with the new SANs',
-        detail:
-          'ACM cannot add SANs to an existing certificate. Request a NEW us-east-1 ' +
-          '(CloudFront) certificate covering ALL existing web hosts PLUS <webHost> and ' +
-          'www.<webHost> — `npm --prefix packages/api run request-cert -- --region ' +
-          'us-east-1 --replace <WEB_CERT_ARN> --add <webHost> --add www.<webHost>` builds ' +
-          'the superset so a live SAN is never dropped. Validate via DNS, then update ' +
-          'WEB_CERT_ARN in infra/tenants.ts. (The client shares the platform API host, so ' +
-          'NO af-south-1 API cert is needed unless they insist on their own apiHost.)',
-      },
-      {
-        key: 'client-dns',
-        title: "Client DNS CNAME records (at the client's DNS provider / cPanel)",
-        detail:
-          'Add the ACM validation CNAMEs from the certificate step, plus the records below. ' +
-          `Never advertise www.<slug>${process.env.WILDCARD_WEB_SUFFIX ?? '.club.medicoach.co.za'} ` +
-          'forms — the wildcard certificate covers a single label only.',
-        records: [
-          { type: 'CNAME', host: '<webHost>', target: webTarget },
-          { type: 'CNAME', host: 'www.<webHost>', target: webTarget },
-        ],
-      },
-      {
-        key: 'registry',
-        title: 'Add the VANITY entry to infra/tenants.ts',
-        detail:
-          `Append { slug: '${slug}', webHost: '<webHost>', www: true, enabled: true } to ` +
-          'VANITY (leave apiHost unset so the client shares the platform API host). ' +
-          'TENANT_HOST_MAP, ALLOWED_ORIGINS, WEB_ORIGIN_MAP, the web alias and the SPA ' +
-          'web→API map are all derived from it.',
-      },
-      {
-        key: 'deploy',
-        title: 'Deploy',
-        detail:
-          'First check `aws cloudfront list-distributions` for alias conflicts in the shared ' +
-          'account (`sst diff` does not catch CNAMEAlreadyExists), then run ' +
-          '`npx sst deploy --stage prod`. The user runs deploys — see the runbook.',
-      },
-    ],
-    // The one shared API host every tenant already uses (informational).
-    sharedApiHost: SHARED_API_HOST,
-    sharedApiTarget: apiTarget,
-  });
 });
 
 /**

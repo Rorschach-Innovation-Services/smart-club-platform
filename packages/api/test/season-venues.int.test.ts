@@ -17,7 +17,7 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import type { CompetitionStructure, SeasonCalendar, SeasonRun, Venue } from '../src/types.js';
-import { bindCompetition, startRunBody } from './season-run-harness.js';
+import { bindSetup, startRunBody } from './season-run-harness.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
 const DDB_PORT = 4607; // distinct from api.int (4599), platform.int (4601), logo-offline (4603), backfill-team (4605)
@@ -80,7 +80,6 @@ const run = (over: Partial<SeasonRun> = {}): SeasonRun =>
   ({
     id: 'sr-1',
     leagueKey: 'premier-men',
-    competitionId: 'comp-1',
     seasonLabel: '2026/27',
     structureSnapshot: STRUCTURE,
     calendarSnapshot: CALENDAR,
@@ -136,10 +135,9 @@ before(async () => {
   await seed.seedTenantConfig('dolphins');
   ({ app } = await import('../src/index.js'));
   repo = await import('../src/repo.js');
-  // POST /season-runs freezes what CONFIG binds, so the run's structure + calendar live there.
-  await bindCompetition(repo, 'dolphins', {
+  // POST /season-runs freezes what CONFIG sets up, so the run's structure + calendar live there.
+  await bindSetup(repo, 'dolphins', {
     leagueKey: 'premier-men',
-    competitionId: 'comp-1',
     structure: STRUCTURE,
     calendar: CALENDAR,
   });
@@ -288,18 +286,17 @@ const postRun = (body: unknown, auth = ADMIN) =>
   });
 
 /**
- * Seed a throwaway binding for one test, then put config back exactly as it was — a
+ * Seed a throwaway setup for one test, then put config back exactly as it was — a
  * deliberately malformed structure or calendar left in config would 400 every later
  * operator calendar write in this file.
  */
 async function withBinding(
-  opts: { competitionId: string; structure?: CompetitionStructure; calendar?: SeasonCalendar },
+  opts: { structure?: CompetitionStructure; calendar?: SeasonCalendar },
   body: () => Promise<void>,
 ) {
   const before = await repo.getTenantConfig('dolphins');
-  await bindCompetition(repo, 'dolphins', {
+  await bindSetup(repo, 'dolphins', {
     leagueKey: 'premier-men',
-    competitionId: opts.competitionId,
     structure: opts.structure ?? STRUCTURE,
     calendar: opts.calendar ?? CALENDAR,
   });
@@ -321,9 +318,18 @@ describe('POST /season-runs', () => {
     assert.ok(body.createdAt, 'createdAt should be stamped');
     // No stages sent: every stage of the bound structure starts awaiting entrants.
     assert.deepEqual(body.stages, [{ specId: 'stage-1', status: 'awaiting-entrants', groups: [] }]);
-    // The snapshots are the bound competition's LIVE structure + calendar.
+    // The snapshots are the league setup's LIVE structure + calendar.
     assert.deepEqual(body.structureSnapshot, STRUCTURE);
     assert.deepEqual(body.calendarSnapshot, CALENDAR);
+    // No deprecated competitionId is minted on a new run.
+    assert.equal((body as { competitionId?: string }).competitionId, undefined);
+  });
+
+  test('the same league + season label again is a 409 — one setup, one season per label', async () => {
+    const res = await postRun(startRunBody({ id: 'sr-dup-label' }));
+    assert.equal(res.status, 409);
+    assert.equal(((await res.json()) as { code?: string }).code, 'season_exists');
+    assert.equal(await repo.getSeasonRun('dolphins', 'sr-dup-label'), null);
   });
 
   test('a duplicate id is a 409, not a silent overwrite of a live season', async () => {
@@ -374,48 +380,74 @@ describe('POST /season-runs', () => {
     assert.equal(await repo.getSeasonRun('dolphins', 'sr-wrong-stages'), null);
   });
 
-  test('the binding must resolve: unknown league, unbound competition', async () => {
+  test('the league must resolve and be set up: unknown league 400, no setup 400 setup_missing', async () => {
     const league = await postRun(startRunBody({ id: 'sr-x', leagueKey: 'no-such-league' }));
     assert.equal(league.status, 400);
     assert.match(((await league.json()) as { error: string }).error, /unknown league/);
 
-    const comp = await postRun(startRunBody({ id: 'sr-x', competitionId: 'comp-gone' }));
-    assert.equal(comp.status, 400);
-    const body = (await comp.json()) as { error: string; code?: string };
-    assert.equal(body.code, 'competition_unbound');
-    assert.equal(await repo.getSeasonRun('dolphins', 'sr-x'), null);
-  });
-
-  test('a competition whose structure or calendar is missing from config is rejected', async () => {
     const before = await repo.getTenantConfig('dolphins');
     try {
-      const league = before!.leagues!.find((l) => l.key === 'premier-men')!;
+      // A league the operator never set up — even one still carrying a deprecated
+      // competitions[] binding, which no longer starts anything.
       await repo.putTenantConfig({
         ...before!,
-        leagues: before!.leagues!.map((l) =>
-          l === league
-            ? {
-                ...l,
-                competitions: [
-                  ...(l.competitions ?? []),
-                  { id: 'comp-nost', label: 'x', structureId: 'st-gone', calendarId: CALENDAR.id },
-                  {
-                    id: 'comp-nocal',
-                    label: 'x',
-                    structureId: STRUCTURE.id,
-                    calendarId: 'cal-gone',
-                  },
-                ],
-              }
-            : l,
-        ),
+        leagues: [
+          ...(before!.leagues ?? []),
+          {
+            key: 'not-set-up',
+            label: 'Not set up',
+            group: 'Test',
+            district: 'All districts',
+            competitions: [
+              { id: 'comp-old', label: 'Old', structureId: STRUCTURE.id, calendarId: CALENDAR.id },
+            ],
+          },
+        ],
       });
-      const st = await postRun(startRunBody({ id: 'sr-x', competitionId: 'comp-nost' }));
+      const res = await postRun(
+        startRunBody({ id: 'sr-x', leagueKey: 'not-set-up', competitionId: 'comp-old' }),
+      );
+      assert.equal(res.status, 400);
+      const body = (await res.json()) as { error: string; code?: string };
+      assert.equal(body.code, 'setup_missing');
+      assert.equal(body.error, 'this league has no season setup yet — ask your operator');
+      assert.equal(await repo.getSeasonRun('dolphins', 'sr-x'), null);
+    } finally {
+      await repo.putTenantConfig(before!);
+    }
+  });
+
+  test('a sent competitionId is ignored — the league setup decides', async () => {
+    const res = await postRun(
+      startRunBody({ id: 'sr-comp-ignored', seasonLabel: 'comp ignored', competitionId: 'x' }),
+    );
+    assert.equal(res.status, 201);
+    const stored = await repo.getSeasonRun('dolphins', 'sr-comp-ignored');
+    assert.equal((stored as { competitionId?: string }).competitionId, undefined);
+    assert.equal(stored?.structureSnapshot.id, STRUCTURE.id);
+    await repo.deleteSeasonRun('dolphins', 'sr-comp-ignored');
+  });
+
+  test('a setup whose structure or calendar is missing from config is rejected', async () => {
+    const before = await repo.getTenantConfig('dolphins');
+    const setUp = (setup: { structureId: string; calendarId: string }) =>
+      repo.putTenantConfig({
+        ...before!,
+        leagues: before!.leagues!.map((l) => (l.key === 'premier-men' ? { ...l, setup } : l)),
+      });
+    try {
+      await setUp({ structureId: 'st-gone', calendarId: CALENDAR.id });
+      const st = await postRun(startRunBody({ id: 'sr-x', seasonLabel: 'x' }));
       assert.equal(st.status, 400);
-      assert.match(((await st.json()) as { error: string }).error, /structure/);
-      const cal = await postRun(startRunBody({ id: 'sr-x', competitionId: 'comp-nocal' }));
+      const stBody = (await st.json()) as { error: string; code?: string };
+      assert.match(stBody.error, /structure/);
+      assert.equal(stBody.code, 'structure_missing');
+      await setUp({ structureId: STRUCTURE.id, calendarId: 'cal-gone' });
+      const cal = await postRun(startRunBody({ id: 'sr-x', seasonLabel: 'x' }));
       assert.equal(cal.status, 400);
-      assert.match(((await cal.json()) as { error: string }).error, /calendar/);
+      const calBody = (await cal.json()) as { error: string; code?: string };
+      assert.match(calBody.error, /calendar/);
+      assert.equal(calBody.code, 'calendar_missing');
     } finally {
       await repo.putTenantConfig(before!);
     }
@@ -439,8 +471,8 @@ describe('POST /season-runs', () => {
         },
       ],
     };
-    await withBinding({ competitionId: 'comp-bad', structure: forwardRef }, async () => {
-      const res = await postRun(startRunBody({ id: 'sr-bad', competitionId: 'comp-bad' }));
+    await withBinding({ structure: forwardRef }, async () => {
+      const res = await postRun(startRunBody({ id: 'sr-bad', seasonLabel: 'bad' }));
       assert.equal(res.status, 400);
       assert.equal(await repo.getSeasonRun('dolphins', 'sr-bad'), null);
     });
@@ -452,8 +484,8 @@ describe('POST /season-runs', () => {
       id: 'cal-bad',
       blocks: [{ id: 'b1', label: 'Block 1', start: '2026-12-13', end: '2026-09-13' }],
     };
-    await withBinding({ competitionId: 'comp-cal', calendar: inverted }, async () => {
-      const res = await postRun(startRunBody({ id: 'sr-cal', competitionId: 'comp-cal' }));
+    await withBinding({ calendar: inverted }, async () => {
+      const res = await postRun(startRunBody({ id: 'sr-cal', seasonLabel: 'cal' }));
       assert.equal(res.status, 400);
       assert.equal(await repo.getSeasonRun('dolphins', 'sr-cal'), null);
     });
@@ -477,13 +509,12 @@ describe('an ungenerated season follows the live calendar; a restart takes the n
   };
 
   test('start → operator extends the calendar → run shows it live (stored copy untouched) → delete + restart → new dates', async () => {
-    await bindCompetition(repo, 'dolphins', {
+    await bindSetup(repo, 'dolphins', {
       leagueKey: 'premier-men',
-      competitionId: 'comp-fresh',
       structure: STRUCTURE,
       calendar: FRESH,
     });
-    const body = startRunBody({ id: 'sr-fresh', competitionId: 'comp-fresh' });
+    const body = startRunBody({ id: 'sr-fresh', seasonLabel: 'fresh' });
     assert.equal((await postRun(body)).status, 201);
 
     // The operator's real write path, not a repo poke.

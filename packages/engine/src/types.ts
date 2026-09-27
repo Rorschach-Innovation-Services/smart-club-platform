@@ -421,6 +421,14 @@ export interface StageRun {
    */
   staleSchedule?: boolean;
   /**
+   * STORED, server-owned. Set by `POST /season-runs/:id/rebase` on every surviving stage
+   * when the adopted structure's ROOT `name` or `overs` changed. A regenerate normally keeps
+   * each existing series' stored `seriesType`/`maxOvers`; while this is set, the next
+   * generate of the stage adopts the new structure name/overs instead and clears it. Never
+   * accepted from a client (POST drops it, PATCH replays the stored value).
+   */
+  formatChanged?: boolean;
+  /**
    * Who confirmed this stage's entrants, when, what was proposed and whether they took
    * it. Relegation and points carry ride on these decisions, so the trail is a
    * governance requirement rather than a nicety.
@@ -450,7 +458,12 @@ export interface StageRun {
 export interface SeasonRun {
   id: string;
   leagueKey: string;
-  competitionId: string;
+  /**
+   * @deprecated Inert since the competition layer collapsed into `League.setup` — runs
+   * resolve via `leagueKey` alone. Kept optional for stored data; new runs omit it.
+   * Deleted from writes, never read. Removed in WS6-era cleanup.
+   */
+  competitionId?: string;
   /** e.g. "2026/27". */
   seasonLabel: string;
   structureSnapshot: CompetitionStructure;

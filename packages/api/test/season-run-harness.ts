@@ -1,20 +1,14 @@
 /**
  * Shared harness for the integration tests that start a season through `POST /season-runs`.
  *
- * The route no longer accepts client snapshots: it resolves `leagueKey` → `competitionId`
- * against LIVE tenant config and freezes that competition's structure + calendar. So a test
- * that wants a run on a given structure/calendar binds them in config first
- * (`bindCompetition`), then POSTs a body naming only the binding (`startRunBody`).
+ * The route no longer accepts client snapshots: it resolves `leagueKey` → `league.setup`
+ * against LIVE tenant config and freezes that setup's structure + calendar. So a test that
+ * wants a run on a given structure/calendar sets the league up in config first
+ * (`bindSetup`), then POSTs a body naming only the league (`startRunBody`).
  *
  * Not a `*.test.ts` file, so the runner's `test/*.test.ts` glob never executes it alone.
  */
-import type {
-  Competition,
-  CompetitionStructure,
-  League,
-  SeasonCalendar,
-  TenantConfig,
-} from '../src/types.js';
+import type { CompetitionStructure, League, SeasonCalendar, TenantConfig } from '../src/types.js';
 
 type Repo = typeof import('../src/repo.js');
 
@@ -24,29 +18,22 @@ const upsert = <T extends { id: string }>(list: T[] | undefined, item: T): T[] =
 ];
 
 /**
- * Write `structure` and `calendar` into the tenant's config and bind them to
- * `competitionId` on `leagueKey` (creating the league if the seed lacks it). Written
- * straight through the repo — no operator validators — so a test can seed a deliberately
- * malformed structure and prove the POST still rejects it.
+ * Write `structure` and `calendar` into the tenant's config and set `leagueKey` up on them
+ * (`league.setup`, creating the league if the seed lacks it). Written straight through the
+ * repo — no operator validators — so a test can seed a deliberately malformed structure
+ * and prove the POST still rejects it.
  */
-export async function bindCompetition(
+export async function bindSetup(
   repo: Repo,
   tenant: string,
   opts: {
     leagueKey: string;
-    competitionId: string;
     structure: CompetitionStructure;
     calendar: SeasonCalendar;
   },
 ): Promise<TenantConfig> {
   const cfg = await repo.getTenantConfig(tenant);
   if (!cfg) throw new Error(`tenant ${tenant} is not seeded`);
-  const competition: Competition = {
-    id: opts.competitionId,
-    label: opts.competitionId,
-    structureId: opts.structure.id,
-    calendarId: opts.calendar.id,
-  };
   const leagues: League[] = [...(cfg.leagues ?? [])];
   const at = leagues.findIndex((l) => l.key === opts.leagueKey);
   const league: League =
@@ -55,10 +42,7 @@ export async function bindCompetition(
       : { key: opts.leagueKey, label: opts.leagueKey, group: 'Test', district: 'All districts' };
   const bound: League = {
     ...league,
-    competitions: [
-      ...(league.competitions ?? []).filter((c) => c.id !== competition.id),
-      competition,
-    ],
+    setup: { structureId: opts.structure.id, calendarId: opts.calendar.id },
   };
   if (at >= 0) leagues[at] = bound;
   else leagues.push(bound);
@@ -72,11 +56,10 @@ export async function bindCompetition(
   return next;
 }
 
-/** The body the console now sends: the binding and the label — no snapshots, no stages. */
+/** The body the console now sends: the league and the label — no snapshots, no stages. */
 export const startRunBody = (over: Record<string, unknown> = {}) => ({
   id: 'sr-1',
   leagueKey: 'premier-men',
-  competitionId: 'comp-1',
   seasonLabel: '2026/27',
   version: 1,
   ...over,

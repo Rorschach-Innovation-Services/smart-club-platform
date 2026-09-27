@@ -1,7 +1,7 @@
 /**
  * Seed a full ADR 0008 league cohort into a tenant — clubs, a calendar, structures,
- * leagues with bound competitions, venues, a season run per league, and generated
- * fixtures — plus the two logins needed to walk it.
+ * per-format leagues each with its one setup, venues, a season run per base league, and
+ * generated fixtures — plus the two logins needed to walk it.
  *
  *   sst shell --stage dev -- npm --prefix packages/api run seed-cohort -- \
  *     dolphins --clubs 16 --leagues seed-premier-men,seed-reserve-men \
@@ -34,18 +34,13 @@ import { pathToFileURL } from 'node:url';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import * as repo from './repo.js';
 import { clubIdFromName } from './club-id.js';
-import {
-  validateCalendars,
-  validateStructures,
-  validateCompetitions,
-} from './config-validation.js';
+import { validateCalendars, validateStructures, validateSetups } from './config-validation.js';
 import { grantTenantAdmin, grantClubRep } from './tenant-admin.js';
 import { OVERARCHING_DISTRICT } from './catalogue.js';
 import { userPoolId } from './env.js';
 import type {
   Club,
   ClubTeam,
-  Competition,
   CompetitionStructure,
   League,
   SeasonCalendar,
@@ -261,7 +256,6 @@ const CLUB_COLORS = ['#0E3529', '#215F47', '#4B8A6C', '#B89B4A', '#E7DDC6', '#8C
  */
 const calendarId = (season: string) => `cal-${slug(season)}`;
 const structureId = (season: string, template: string) => `st-${slug(season)}-${template}`;
-const competitionId = (leagueKey: string, template: string) => `comp-${leagueKey}-${template}`;
 const seasonRunId = (leagueKey: string, season: string) => `run-${leagueKey}-${slug(season)}`;
 const venueId = (clubId: string) => `v-${clubId}`;
 
@@ -319,23 +313,38 @@ function buildCalendar(season: string, startYear: number): SeasonCalendar {
 }
 
 /**
- * Three structures from the shipped templates, with deterministic ids.
+ * The three match formats a seeded base league is minted in — one LEAGUE per format, since
+ * a league has exactly one setup (structure + calendar). The base key keeps the flat round
+ * robin, so a re-seed over a cohort seeded before per-format leagues reuses its league key,
+ * season run and series ids; the other two formats get stable derived keys.
  *
- * Only the flat round robin is run as a season below — it resolves from
- * `all-registered` alone, so it generates end to end with no human input. The other two
- * are installed so the operator portal and the season-run UI have realistic material to
- * drive by hand; their later stages are `manual`/`derivedFrom` and are *supposed* to sit
- * at `awaiting-entrants` until an admin confirms standings. That is the feature working,
- * not the seed failing.
+ * Only the flat round robin is run as a season below — it resolves from `all-registered`
+ * alone, so it generates end to end with no human input. The other two are set up so the
+ * operator portal and the season-run UI have realistic material to drive by hand; their
+ * later stages are `manual`/`derivedFrom` and are *supposed* to sit at `awaiting-entrants`
+ * until an admin confirms standings. That is the feature working, not the seed failing.
  */
+const FORMATS = [
+  { templateId: 'flat-round-robin', suffix: '', label: '50 Over', overs: 50 },
+  { templateId: 'pools-to-knockout', suffix: '-t20', label: 'T20', overs: 20 },
+  { templateId: 'split-league-swap', suffix: '-split', label: 'Premier League', overs: 50 },
+] as const;
+
+/** The per-format league keys a base `--leagues` key expands to (base key first). */
+const formatKeys = (baseKey: string): string[] => FORMATS.map((f) => `${baseKey}${f.suffix}`);
+
+/** Three structures from the shipped templates, with deterministic ids and their overs. */
 function buildStructures(season: string, calendar: SeasonCalendar): CompetitionStructure[] {
-  const wanted = ['flat-round-robin', 'split-league-swap', 'pools-to-knockout'];
-  return wanted.map((templateId) => {
+  return FORMATS.map(({ templateId, overs }) => {
     const template = STRUCTURE_TEMPLATES.find((t) => t.id === templateId);
     if (!template) throw new Error(`unknown structure template "${templateId}"`);
     // The engine's default block placement (and stage chaining), with a deterministic id
     // so a re-seed converges on the same structure row.
-    return { ...instantiateTemplate(template, calendar), id: structureId(season, templateId) };
+    return {
+      ...instantiateTemplate(template, calendar),
+      id: structureId(season, templateId),
+      overs,
+    };
   });
 }
 
@@ -352,41 +361,34 @@ const LEAGUE_META: Record<string, { label: string; group: string }> = {
   'seed-under-19': { label: 'Under 19', group: 'Junior' },
 };
 
-function buildLeague(
-  leagueKey: string,
+/**
+ * A base `--leagues` key's per-format leagues (base key first), each set up on its
+ * format's structure over the season calendar. Written whole, so a seeded league re-seeded
+ * from the competitions era loses its old `competitions[]` — this seeder owns these rows.
+ */
+function buildLeagues(
+  baseKey: string,
   season: string,
   structures: CompetitionStructure[],
-): League {
-  const meta = LEAGUE_META[leagueKey] ?? {
-    label: leagueKey
+): League[] {
+  const meta = LEAGUE_META[baseKey] ?? {
+    label: baseKey
       .replace(/^seed-/, '')
       .replace(/-/g, ' ')
       .replace(/\b\w/g, (c) => c.toUpperCase()),
     group: 'Senior Men',
   };
-  const competitions: Competition[] = structures.map((st) => ({
-    id: competitionId(leagueKey, st.templateId ?? slug(st.name)),
-    label:
-      st.templateId === 'flat-round-robin'
-        ? '50 Over (Red Ball)'
-        : st.templateId === 'pools-to-knockout'
-          ? 'T20 (Pink Ball)'
-          : 'Premier League',
-    matchFormat:
-      st.templateId === 'pools-to-knockout'
-        ? { overs: 20, ballType: 'pink', label: 'T20' }
-        : { overs: 50, ballType: 'red', label: '50 Over' },
-    structureId: st.id,
-    calendarId: calendarId(season),
-  }));
-  return {
-    key: leagueKey,
-    label: meta.label,
-    group: meta.group,
-    district: OVERARCHING_DISTRICT,
-    note: 'Seeded test cohort',
-    competitions,
-  };
+  return FORMATS.map((f) => {
+    const structure = structures.find((st) => st.templateId === f.templateId);
+    if (!structure) throw new Error(`no seeded structure for "${f.templateId}"`);
+    return {
+      key: `${baseKey}${f.suffix}`,
+      label: `${meta.label} ${f.label}`,
+      group: meta.group,
+      district: OVERARCHING_DISTRICT,
+      setup: { structureId: structure.id, calendarId: calendarId(season) },
+    };
+  });
 }
 
 /**
@@ -459,7 +461,7 @@ async function mergeConfig(
   // and only fail much later at generation time with no obvious cause.
   validateCalendars(calendars);
   validateStructures(structures);
-  validateCompetitions(leagues, structures, calendars);
+  validateSetups(leagues, structures, calendars);
 
   const next: TenantConfig = { ...config, calendars, structures, leagues, districts };
   await repo.putTenantConfig(next);
@@ -511,7 +513,9 @@ function buildClubs(count: number, leagueKeys: string[], perLeague?: number): Cl
   return COHORT.slice(0, count).map((spec, i) => {
     const id = clubIdFromName(spec.name);
     const sides = MULTI_SIDE_INDICES.has(i) ? 2 : 1;
-    const mine = windowed ? windowed[i] : leaguesForClub(i, leagueKeys);
+    // Every per-format league of a base league the club entered: the formats share one
+    // registered field, exactly as the competitions of one league used to.
+    const mine = (windowed ? windowed[i] : leaguesForClub(i, leagueKeys)).flatMap(formatKeys);
 
     const leagueTeams: Record<string, number> = {};
     const teamRosters: Record<string, ClubTeam[]> = {};
@@ -638,15 +642,14 @@ async function seedSeason(
     clubs: Club[];
     league: League;
     structure: CompetitionStructure;
-    competition: Competition;
     calendar: SeasonCalendar;
     season: string;
   },
 ): Promise<{ run: SeasonRun; series: Series[] }> {
-  const { clubs, league, structure, competition, calendar, season } = opts;
+  const { clubs, league, structure, calendar, season } = opts;
   const runId = seasonRunId(league.key, season);
 
-  const participants = leagueParticipants(clubs, league.key, competition.excludeTeamIds ?? []);
+  const participants = leagueParticipants(clubs, league.key, {});
   const registered = participants.map((p) => p.teamId);
   if (registered.length < 2)
     throw new Error(`league "${league.key}" has ${registered.length} registered side(s) — need 2+`);
@@ -705,7 +708,7 @@ async function seedSeason(
             fixtures: group.fixtures,
             startDate,
             league,
-            competition,
+            format: { structureName: structure.name, overs: structure.overs },
           },
           multi: result.groups.length > 1,
           leagueTeams: participants,
@@ -729,10 +732,9 @@ async function seedSeason(
     stages.push({ specId: stage.id, status: 'generated', groups });
   }
 
-  const run: SeasonRun = {
+  const run = {
     id: runId,
     leagueKey: league.key,
-    competitionId: competition.id,
     // HARD INVARIANT: seasonLabel is the gsi1 sort key — same blank-string trap as above.
     seasonLabel: season,
     structureSnapshot: structure,
@@ -741,7 +743,9 @@ async function seedSeason(
     createdAt: new Date().toISOString(),
     createdBy: 'seed-cohort',
     version: 1,
-  };
+    // No `competitionId`: deprecated and inert — a run resolves its setup via `leagueKey`.
+    // (The engine type still declares it required until WS6 deletes it.)
+  } as SeasonRun;
   await repo.putSeasonRun(tenant, run);
   return { run, series: seriesOut };
 }
@@ -794,6 +798,15 @@ function parseArgs(argv: string[]): Args {
     : DEFAULT_LEAGUES;
   if (leagueKeys.length === 0) throw new Error('--leagues needs at least one key');
   if (leagueKeys.length > 6) throw new Error('--leagues is capped at 6');
+  // A base key is expanded to its per-format keys; one that already ends in a format
+  // suffix would collide with another base key's derived league.
+  const suffixed = leagueKeys.find((k) => FORMATS.some((f) => f.suffix && k.endsWith(f.suffix)));
+  if (suffixed)
+    throw new Error(
+      `--leagues "${suffixed}" ends in a reserved format suffix (${FORMATS.filter((f) => f.suffix)
+        .map((f) => f.suffix)
+        .join(', ')}); pass the base key — its per-format leagues are derived`,
+    );
   const perLeagueRaw = flags.get('per-league');
   const perLeague = perLeagueRaw === undefined ? undefined : Number(perLeagueRaw);
   if (perLeague !== undefined) {
@@ -848,7 +861,7 @@ async function main(): Promise<void> {
 
   const calendar = buildCalendar(args.season, startYear);
   const structures = buildStructures(args.season, calendar);
-  const leagues = args.leagueKeys.map((key) => buildLeague(key, args.season, structures));
+  const leagues = args.leagueKeys.flatMap((key) => buildLeagues(key, args.season, structures));
   const clubs = buildClubs(args.clubs, args.leagueKeys, args.perLeague);
   const districts = Array.from(new Set(clubs.map((c) => c.district)));
 
@@ -868,7 +881,7 @@ async function main(): Promise<void> {
   // PREVIOUS run registered them in, silently emptying that league behind its fixtures.
   // Scoped to the leagues THIS run manages, so re-seeding with a different membership
   // actually shrinks them rather than accumulating.
-  const managed = new Set(args.leagueKeys);
+  const managed = new Set(args.leagueKeys.flatMap(formatKeys));
   for (const club of clubs) await putClubMerging(args.tenant, club, managed);
   console.log(`· ${clubs.length} clubs`);
 
@@ -881,14 +894,13 @@ async function main(): Promise<void> {
   const flat = writtenStructures.find((s) => s.templateId === 'flat-round-robin')!;
   let totalSeries = 0;
   let totalFixtures = 0;
-  for (const league of leagues) {
-    const competition = league.competitions!.find((c) => c.structureId === flat.id)!;
+  // One run per BASE league — the flat round-robin format keeps the base key.
+  for (const league of leagues.filter((l) => l.setup?.structureId === flat.id)) {
     const entered = clubs.filter((c) => c.leagues.includes(league.key));
     const { run, series } = await seedSeason(args.tenant, {
       clubs,
       league,
       structure: flat,
-      competition,
       calendar: writtenCalendar,
       season: args.season,
     });
@@ -901,7 +913,7 @@ async function main(): Promise<void> {
     );
   }
   console.log(
-    `· ${totalSeries} series, ${totalFixtures} fixtures across ${leagues.length} leagues`,
+    `· ${totalSeries} series, ${totalFixtures} fixtures across ${args.leagueKeys.length} base leagues`,
   );
 
   if (args.admin || args.rep) {
