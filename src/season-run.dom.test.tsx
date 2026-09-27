@@ -1507,6 +1507,34 @@ describe('rebase — review and apply a newer structure version', () => {
     expect(within(dialog()).getByRole('status')).toHaveTextContent(/regenerated: league, cup/i);
   });
 
+  it('names a match-format change even when no stage changed', async () => {
+    const v2 = { ...TWO_STAGES_V1, version: 2, overs: 30 };
+    const { user } = setup(TWO_STAGES_V1, [v1Run()], {
+      series: [draft('league'), draft('cup')],
+      structures: [v2],
+    });
+
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+
+    const note = within(dialog()).getByRole('note');
+    expect(note).toHaveTextContent('Match format');
+    expect(note).toHaveTextContent(`Was: ${TWO_STAGES_V1.name} · 50 overs`);
+    expect(note).toHaveTextContent(`Now: ${TWO_STAGES_V1.name} · 30 overs`);
+    expect(note).toHaveTextContent(/needs regenerating/i);
+    expect(within(dialog()).getAllByText('No change.')).toHaveLength(2);
+  });
+
+  it('shows no match-format line when name and overs are unchanged', async () => {
+    const { user } = setup(TWO_STAGES_V1, [v1Run()], {
+      series: [draft('league'), draft('cup')],
+      structures: [TWO_STAGES_V2],
+    });
+
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+
+    expect(within(dialog()).queryByRole('note')).toBeNull();
+  });
+
   it('a rebase refused because the structure moved again says to reopen Review changes', async () => {
     const onRebaseRun = vi
       .fn()

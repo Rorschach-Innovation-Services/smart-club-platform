@@ -1828,6 +1828,16 @@ function StructureReviewModal({
   // a live diff would collapse to "No change" under the outcome the admin is reading.
   const [changes] = useState(() => stageChanges(run, live, (id) => seriesOf(id)));
   const [fromVersion] = useState(run.structureSnapshot.version);
+  // The server's rebase diffs the same root fields to stamp `formatChanged`.
+  const [formatChange] = useState(() => {
+    const prev = run.structureSnapshot;
+    return prev.name !== live.name || prev.overs !== live.overs
+      ? {
+          before: `${prev.name} · ${prev.overs ?? 50} overs`,
+          after: `${live.name} · ${live.overs ?? 50} overs`,
+        }
+      : null;
+  });
   const [optIn, setOptIn] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -1865,6 +1875,32 @@ function StructureReviewModal({
         how this season&apos;s stages are set up — the fixtures only change where you regenerate
         them. <HelpLink topic="structure-versions-and-rebase" />
       </p>
+      {formatChange && (
+        <div
+          role="note"
+          style={{
+            border: '1px solid var(--line)',
+            borderRadius: 8,
+            padding: '10px 12px',
+            fontSize: 12.5,
+            lineHeight: 1.55,
+            marginBottom: 8,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <strong style={{ color: 'var(--ink)' }}>Match format</strong>
+            <Pill tone="teal">Changed</Pill>
+          </div>
+          <div style={{ color: 'var(--muted)', marginTop: 4 }}>
+            <div>Was: {formatChange.before}</div>
+            <div>Now: {formatChange.after}</div>
+          </div>
+          <div style={{ marginTop: 4 }}>
+            Fixtures already generated keep the old format until you regenerate them — each stage
+            with fixtures will show &ldquo;Needs regenerating&rdquo;.
+          </div>
+        </div>
+      )}
       <div style={{ display: 'grid', gap: 8 }}>
         {changes.map((c) => (
           <div
