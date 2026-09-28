@@ -178,11 +178,11 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
       'A season keeps a copy of the structure it started with. Rebase moves a running season onto the latest version without touching its series.',
     body: [
       'Every save that changes a structure gives it a new version. A season takes a copy when it starts, so later edits never reshape a season already running.',
-      'Rebase moves a running season onto the latest version. The server fetches the structure itself, and refuses if it changed again after you reviewed it.',
+      'Rebase moves a running season onto the latest version of the structure its league is set up on now — if the operator moved the league onto another structure, that one. The server fetches the structure itself, and refuses if it changed again after you reviewed it.',
       'Existing series are never touched. A stage whose teams setting changed goes back to awaiting entrants. A stage whose schedule changed is marked “Needs regenerating”.',
       'Until a season generates its first fixtures, its dates follow the calendar in its league’s setup, so an operator’s date fix or a re-pointed calendar shows up straight away.',
       'The first generate freezes the calendar for that season. After that, calendar edits no longer reach it; only structure changes do, through Review changes.',
-      'An edit made for one season gives that season its own copy of the structure. The other seasons keep the original, and a season already running keeps the shape it started with.',
+      'An edit made for one season gives that season its own copy of the structure. The other seasons keep the original. A season already running keeps the shape it started with until Review changes moves it onto the copy.',
     ],
     example:
       'Premier Men’s season started on version 3. The operator moves the final round to Block 2, which makes version 4. Rebase moves the season to version 4 and marks the final round “Needs regenerating”. The Top Six fixtures already released stay as they are.',

@@ -465,5 +465,23 @@ describe('Modal — the one dialog shell', () => {
       await user.click(screen.getByRole('button', { name: 'Discard' }));
       expect(screen.queryByRole('dialog')).toBeNull();
     });
+
+    it('returns focus to where it was when the ask closes without discarding', async () => {
+      const user = userEvent.setup();
+      render(<Draft />);
+      const note = screen.getByRole('textbox', { name: 'Note' });
+      await user.type(note, 'half-typed');
+
+      await user.keyboard('{Escape}');
+      expect(screen.getByRole('button', { name: 'Keep editing' })).toHaveFocus();
+      await user.click(screen.getByRole('button', { name: 'Keep editing' }));
+      expect(note).toHaveFocus();
+
+      // A second Escape answers "keep editing" the same way.
+      await user.keyboard('{Escape}');
+      expect(note).not.toHaveFocus();
+      await user.keyboard('{Escape}');
+      expect(note).toHaveFocus();
+    });
   });
 });

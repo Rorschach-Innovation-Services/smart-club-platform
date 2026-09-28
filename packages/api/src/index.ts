@@ -89,6 +89,7 @@ import {
 } from './config-validation.js';
 import { isAffiliated, leagueParticipants } from '../../engine/src/leagues.js';
 import { generateStage, stagesAfterGenerate } from '../../engine/src/generate.js';
+import { rebaseTargetFor } from '../../engine/src/run.js';
 import { uncoveredBlocksAcross } from '../../engine/src/structure.js';
 import { describeUncoveredBlockAggregate } from '../../engine/src/narrative.js';
 import { demographicsByLeague, summarizeDemographics } from './demographics.js';
@@ -4010,6 +4011,12 @@ async function createSeasonRun(
   if (await repo.getSeasonRun(tenant, run.id))
     throw new HttpError(409, 'a season run with that id already exists');
   // One setup per league ⇒ one season per league per label.
+  // Check-then-put, not atomic: two POSTs for the same league+label racing between the
+  // list below and the put can both land. Accepted — it takes two admins starting the
+  // same season within one round trip, and the duplicate shows in the Seasons list where
+  // either can be deleted. Making it atomic needs a per-label guard item in the tenant
+  // partition, which eraseTenantData/clearCohort would then have to sweep and a label
+  // rename in PATCH would have to move. PATCH runs the same check on a rename.
   const seasonLabel = run.seasonLabel.trim();
   const runs = await repo.listSeasonRuns(tenant);
   if (runs.some((r) => r.leagueKey === league.key && r.seasonLabel?.trim() === seasonLabel))
@@ -4132,6 +4139,19 @@ async function applySeasonRunPatch(
     (typeof patch.seasonLabel !== 'string' || !patch.seasonLabel.trim())
   )
     throw new HttpError(400, 'season run needs a season label');
+  // Renaming onto a label the league already runs is the same duplicate POST refuses.
+  if (patch.seasonLabel !== undefined && patch.seasonLabel.trim() !== current.seasonLabel?.trim()) {
+    const label = patch.seasonLabel.trim();
+    const others = await repo.listSeasonRuns(tenant);
+    if (
+      others.some(
+        (r) => r.id !== id && r.leagueKey === current.leagueKey && r.seasonLabel?.trim() === label,
+      )
+    )
+      throw new HttpError(409, `"${label}" is already running for this league`, {
+        code: 'season_exists',
+      });
+  }
   try {
     return await repo.updateSeasonRun(tenant, id, patch);
   } catch (err) {
@@ -4379,14 +4399,18 @@ function scheduleShape(stage: StageSpec): unknown {
 }
 
 /**
- * POST /season-runs/:id/rebase — adopt the live version of the run's structure.
+ * POST /season-runs/:id/rebase — adopt the structure the run's league is set up on now.
  *
  * The one audited exception to snapshot immutability (see the PATCH strip above). The
- * new snapshot is the structure the SERVER reads from tenant config — the body only names
- * which version the admin reviewed (`structureVersion`) and which run version they read
- * (`version`), so a structure edited again after the review 409s rather than silently
- * adopting something nobody looked at, and a run changed under them 409s the same way
- * PATCH does.
+ * target is `rebaseTargetFor` (engine/run.ts): the league's current setup structure, or
+ * the snapshot's own structure id when the league has no setup that resolves — so a
+ * league moved onto a clone or a per-season fork brings its season along, and edits to
+ * the structure it left are never adopted. The new snapshot is that structure as the
+ * SERVER reads it from tenant config — the body only names which structure and version
+ * the admin reviewed (`structureId`, `structureVersion`) and which run version they read
+ * (`version`), so a structure edited again (or a league moved again) after the review
+ * 409s rather than silently adopting something nobody looked at, and a run changed under
+ * them 409s the same way PATCH does.
  *
  * Series are never touched here. StageRuns are reconciled against the new stage list:
  * - a spec that survives keeps its StageRun (series back-pointers and audit intact);
@@ -4412,7 +4436,13 @@ function scheduleShape(stage: StageSpec): unknown {
 app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   const id = c.req.param('id');
-  const body = await c.req.json<{ structureVersion?: unknown; version?: unknown }>();
+  const body = await c.req.json<{
+    structureId?: unknown;
+    structureVersion?: unknown;
+    version?: unknown;
+  }>();
+  if (typeof body?.structureId !== 'string' || !body.structureId)
+    throw new HttpError(400, 'rebase needs the id of the structure you reviewed');
   if (!Number.isInteger(body?.structureVersion))
     throw new HttpError(400, 'rebase needs the structure version you reviewed');
   if (!Number.isInteger(body?.version))
@@ -4423,14 +4453,18 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
   // down would otherwise answer 200 to a caller whose view of the run is stale.
   if (current.version !== body.version) throw new HttpError(409, 'season run changed; refetch');
   const config = await repo.getTenantConfig(tenant);
-  const live = (config?.structures ?? []).find((st) => st.id === current.structureSnapshot.id);
+  const live = rebaseTargetFor(current, config);
   if (!live) throw new HttpError(404, 'the structure this season runs no longer exists');
-  if (live.version !== body.structureVersion)
+  if (live.id !== body.structureId || live.version !== body.structureVersion)
     throw new HttpError(409, 'the structure changed since you reviewed it; refetch', {
       code: 'structure_changed',
     });
   // Already on it — nothing to adopt, and no audit noise for a double-click.
-  if (live.version === current.structureSnapshot.version) return c.json(current);
+  if (
+    live.id === current.structureSnapshot.id &&
+    live.version === current.structureSnapshot.version
+  )
+    return c.json(current);
 
   const actor = c.get('requestAuth')!.email ?? 'unknown';
   const at = now();

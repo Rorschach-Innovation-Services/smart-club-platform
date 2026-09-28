@@ -1489,7 +1489,7 @@ describe('editing scope — one season or all of them', () => {
       'Saving creates this season’s own copy of the structure; the other 1 season keeps the current one.',
     );
     expect(note).toHaveTextContent(
-      'A season already started for this league keeps the shape it started with and will NOT be offered these changes — to change a running season, edit for all seasons and use Review changes in the admin console.',
+      'A season already started for this league keeps the shape it started with until an admin applies Review changes in the admin console, which will offer them this copy.',
     );
   });
 
@@ -1614,6 +1614,41 @@ describe('structure editor — Preview and Edit modes', () => {
 
     expect(screen.getByRole('dialog', { name: 'Edit structure' })).toBeInTheDocument();
     expect(saveBtn()).toBeInTheDocument();
+  });
+
+  it('Cancel on a new structure with edits asks first; clean, it just closes', async () => {
+    const { user, save } = setup([structure()]);
+    await user.click(screen.getByRole('button', { name: /create structure/i }));
+    await user.click(screen.getByRole('button', { name: /build from scratch/i }));
+    await user.type(screen.getByPlaceholderText(/split league with mid-season swap/i), 'Draft');
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByRole('dialog', { name: 'Edit structure' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Discard your unsaved changes?');
+    await user.click(screen.getByRole('button', { name: 'Discard changes' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(save).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: /create structure/i }));
+    await user.click(screen.getByRole('button', { name: /build from scratch/i }));
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('a second Escape on a new, edited structure means keep editing', async () => {
+    const { user } = setup([structure()]);
+    await user.click(screen.getByRole('button', { name: /create structure/i }));
+    await user.click(screen.getByRole('button', { name: /build from scratch/i }));
+    await user.type(screen.getByPlaceholderText(/split league with mid-season swap/i), 'Draft');
+
+    await user.keyboard('{Escape}');
+    expect(screen.getByRole('alert')).toHaveTextContent('Discard your unsaved changes?');
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('dialog', { name: 'Edit structure' })).toBeInTheDocument();
+    expect(
+      (screen.getByPlaceholderText(/split league with mid-season swap/i) as HTMLInputElement).value,
+    ).toContain('Draft');
   });
 });
 

@@ -121,7 +121,7 @@ export interface ExcludedTeamsNote {
   excludeTeamIds: string[];
 }
 
-export interface InheritedOversNote {
+export interface PinnedDefaultOversNote {
   tenant: string;
   leagueKey: string;
   competitionId: string;
@@ -165,7 +165,7 @@ export interface MigrateLeagueSetupsResult {
   oversWritten: OversWrite[];
   clones: StructureClone[];
   excludedTeams: ExcludedTeamsNote[];
-  inheritedOvers: InheritedOversNote[];
+  pinnedDefaultOvers: PinnedDefaultOversNote[];
   formatDrift: FormatDrift[];
   calendarChanges: CalendarChange[];
   skipped: LeagueSetupSkip[];
@@ -220,7 +220,7 @@ type Notes = Pick<
   | 'oversWritten'
   | 'clones'
   | 'excludedTeams'
-  | 'inheritedOvers'
+  | 'pinnedDefaultOvers'
   | 'formatDrift'
   | 'calendarChanges'
 >;
@@ -237,7 +237,7 @@ const emptyNotes = (): Notes => ({
   oversWritten: [],
   clones: [],
   excludedTeams: [],
-  inheritedOvers: [],
+  pinnedDefaultOvers: [],
   formatDrift: [],
   calendarChanges: [],
 });
@@ -377,7 +377,7 @@ function planTenant(
       .find((l) => l.key === p.leagueKey)
       ?.competitions?.find((c) => c.id === p.competitionId);
     if (migrated && keptComp && keptComp.matchFormat?.overs === undefined && migrated.overs)
-      notes.inheritedOvers.push({
+      notes.pinnedDefaultOvers.push({
         tenant,
         leagueKey: p.leagueKey,
         competitionId: p.competitionId,
@@ -465,7 +465,7 @@ function printTenant(label: string, plan: TenantPlan, log: (line: string) => voi
     log(
       `  ! excluded teams on ${x.leagueKey} · ${x.competitionId}: ${x.excludeTeamIds.join(', ')} — re-cut entrants via Edit entrants`,
     );
-  for (const i of n.inheritedOvers)
+  for (const i of n.pinnedDefaultOvers)
     log(
       `  ! ${i.leagueKey} · ${i.competitionId} had no overs of its own; pinned to the old default — structure ${i.structureId} carries ${i.overs}`,
     );

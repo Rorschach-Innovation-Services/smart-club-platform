@@ -332,6 +332,28 @@ describe('POST /season-runs', () => {
     assert.equal(await repo.getSeasonRun('dolphins', 'sr-dup-label'), null);
   });
 
+  test('renaming a season onto a label its league already runs is the same 409', async () => {
+    const created = await postRun(startRunBody({ id: 'sr-rename', seasonLabel: 'Rename me' }));
+    assert.equal(created.status, 201);
+    const { version } = (await created.json()) as SeasonRun;
+    const patch = (seasonLabel: string, v: number) =>
+      app.request('/season-runs/sr-rename', {
+        method: 'PATCH',
+        headers: headers(ADMIN),
+        body: JSON.stringify({ seasonLabel, version: v }),
+      });
+
+    const clash = await patch('2026/27', version);
+    assert.equal(clash.status, 409);
+    assert.equal(((await clash.json()) as { code?: string }).code, 'season_exists');
+    assert.equal((await repo.getSeasonRun('dolphins', 'sr-rename'))?.seasonLabel, 'Rename me');
+
+    // Its own label, re-sent, and a free label both go through.
+    assert.equal((await patch('Rename me', version)).status, 200);
+    assert.equal((await patch('Renamed', version + 1)).status, 200);
+    await repo.deleteSeasonRun('dolphins', 'sr-rename');
+  });
+
   test('a duplicate id is a 409, not a silent overwrite of a live season', async () => {
     const res = await postRun(startRunBody({ seasonLabel: 'clobber attempt' }));
     assert.equal(res.status, 409);

@@ -1018,6 +1018,23 @@ describe('SeasonSetupWizard — nothing accepted is silently dropped', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('Cancel asks before discarding typed input', async () => {
+    const { user, onClose } = setup();
+    await fillSeasonLabel(user);
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByText('Discard your changes?')).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('Cancel closes at once when nothing has been entered', async () => {
+    const { user, onClose } = setup();
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByText('Discard your changes?')).toBeNull();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('refuses a customised template instance left in a block the calendar no longer has', async () => {
     const { user } = setup();
     await fillSeasonLabel(user);

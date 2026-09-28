@@ -487,12 +487,15 @@ export const patchSeasonRun = (id: string, patch: unknown) =>
 export const deleteSeasonRunReq = (id: string) =>
   request(`/season-runs/${id}`, { method: 'DELETE' });
 export const getSeasonRun = (id: string) => request<SeasonRun>(`/season-runs/${id}`);
-// Adopt the live version of the run's structure — the one audited exception to snapshot
-// immutability. The server reads the structure itself; the body only names the version
-// the admin reviewed and the run version they read, so either moving underneath 409s.
-// `warnings` appears only when non-empty (a `derivedFrom.fromStage` that no longer
-// resolves).
-export const rebaseSeasonRun = (id: string, body: { structureVersion: number; version: number }) =>
+// Adopt the structure the run's league is set up on now (`rebaseTargetFor`) — the one
+// audited exception to snapshot immutability. The server reads the structure itself; the
+// body only names the structure and version the admin reviewed and the run version they
+// read, so any of them moving underneath 409s. `warnings` appears only when non-empty (a
+// `derivedFrom.fromStage` that no longer resolves).
+export const rebaseSeasonRun = (
+  id: string,
+  body: { structureId: string; structureVersion: number; version: number },
+) =>
   request<SeasonRun & { warnings?: string[] }>(`/season-runs/${id}/rebase`, {
     method: 'POST',
     body,

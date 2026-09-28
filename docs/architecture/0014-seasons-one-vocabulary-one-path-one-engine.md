@@ -291,6 +291,10 @@ next generate of that stage adopts the new name and overs and clears the marker 
 write. The rebase's version-review consent is the authorisation. `formatChanged` is
 server-owned: `POST /season-runs` strips it from incoming stages.
 
+Rebase follows the league's current setup structure (`league.setup.structureId`, falling back
+to the snapshot's own structure when the league has no setup), so a league moved onto a
+migration clone or a per-season fork brings its running season along on Review changes.
+
 ### Two safety rules for the dual window
 
 - **The tenant-admin PUT preserves operator bindings.** `PUT /tenant/config` restores each

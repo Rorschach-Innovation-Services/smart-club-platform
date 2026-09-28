@@ -9,7 +9,7 @@
  * choices start empty here and Save stays disabled until each is made.
  */
 import { useState, type CSSProperties } from 'react';
-import { Btn, InfoDot, Modal, OptionCards, type OptionCard } from './atoms';
+import { Btn, InfoDot, Modal, ModalCancelBtn, OptionCards, type OptionCard } from './atoms';
 import * as api from './api';
 import { ApiError } from './api';
 import { describeError } from './error-copy';
@@ -588,9 +588,16 @@ export function SetupLeagueDialog({
         A league plays one structure on one season calendar. Pick both — nothing is chosen for you.
       </p>
       {current && (
-        <p style={{ margin: '0 0 14px', fontSize: 12.5 }}>
-          Current setup: <strong>{describeSetup(current, structures, calendars)}</strong>
-        </p>
+        <>
+          <p style={{ margin: '0 0 6px', fontSize: 12.5 }}>
+            Current setup: <strong>{describeSetup(current, structures, calendars)}</strong>
+          </p>
+          <p style={{ margin: '0 0 14px', fontSize: 12, color: 'var(--muted)', lineHeight: 1.5 }}>
+            A season already running for this league keeps its structure until the administrator
+            applies <em>Review changes</em>, which will offer to move it onto the new one. A season
+            with no fixtures yet follows the new calendar straight away.
+          </p>
+        </>
       )}
 
       <div className="field-label">Structure</div>
@@ -663,9 +670,9 @@ export function SetupLeagueDialog({
         <Btn tone="teal" onClick={submit} disabled={!canSave}>
           {busy ? 'Saving…' : 'Save setup'}
         </Btn>
-        <Btn tone="outline" onClick={onClose}>
+        <ModalCancelBtn tone="outline" onClickOutsideModal={onClose}>
           Cancel
-        </Btn>
+        </ModalCancelBtn>
       </div>
     </Modal>
   );

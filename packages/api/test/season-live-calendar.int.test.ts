@@ -308,11 +308,11 @@ describe('an ungenerated season follows the live calendar; the first generate fr
 });
 
 describe('the freeze is one-way', () => {
-  const rebase = (id: string, structureVersion: number, version: number) =>
+  const rebase = (id: string, structureId: string, structureVersion: number, version: number) =>
     app.request(`/season-runs/${id}/rebase`, {
       method: 'POST',
       headers: headers(ADMIN),
-      body: JSON.stringify({ structureVersion, version }),
+      body: JSON.stringify({ structureId, structureVersion, version }),
     });
 
   test('a rebase that clears the generated groups never puts the season back on live dates', async () => {
@@ -336,7 +336,7 @@ describe('the freeze is one-way', () => {
       },
       calendar: START,
     });
-    const res = await rebase(RUN, 2, 2);
+    const res = await rebase(RUN, OWN.id, 2, 2);
     assert.equal(res.status, 200, await res.clone().text());
     const stored = await repo.getSeasonRun(TENANT, RUN);
     assert.deepEqual(stored?.stages[0].groups, [], 'the groups were cleared');
@@ -388,7 +388,7 @@ describe('the freeze is one-way', () => {
     assert.equal(before.calendarLive, undefined, 'series without a stamp still count as frozen');
     assert.deepEqual(before.calendarSnapshot, LEGACY_CAL);
 
-    const res = await rebase(RUN, 2, 1);
+    const res = await rebase(RUN, LEGACY_ST.id, 2, 1);
     assert.equal(res.status, 200, await res.clone().text());
     const stored = await repo.getSeasonRun(TENANT, RUN);
     assert.equal(typeof stored?.calendarFrozenAt, 'string', 'rebase stamps the freeze');

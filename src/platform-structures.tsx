@@ -1748,7 +1748,7 @@ function StructureEditor({
   };
   /** Esc / Cancel from Edit: back to the preview, asking first when there are unsaved edits. */
   const leaveEdit = () => {
-    if (isNew) return onClose();
+    if (isNew) return dirty ? setConfirmDiscard(true) : onClose();
     if (confirmDiscard) return setConfirmDiscard(false);
     if (dirty) return setConfirmDiscard(true);
     goPreview();
@@ -1757,7 +1757,8 @@ function StructureEditor({
   // question instead of dropping unsaved edits.
   useModalCloseGuard(() => {
     if (!editing || !dirty) return false;
-    setConfirmDiscard(true);
+    // A second request while already asking means "keep editing", as it does elsewhere.
+    setConfirmDiscard((asking) => !asking);
     return true;
   });
   // A structure carries no calendar identity of its own any more, so there is nothing
@@ -1979,13 +1980,10 @@ function StructureEditor({
       };
       if (forking && scoped) {
         // Copy-on-write: this season gets its own structure and the others keep the
-        // original, byte-unchanged. A season ALREADY RUNNING on this league is not
-        // offered these edits: its snapshot references the ORIGINAL structure id, and
-        // both the console's skew check (season-run.tsx, `structures.find(s => s.id ===
-        // active.structureSnapshot.id)`) and the server's rebase route
-        // (`POST /season-runs/:id/rebase`, same lookup) follow that id — never the
-        // league setup's current `structureId`. The original's version doesn't move, so no
-        // "Review changes" appears; the fork only shapes seasons started from now on.
+        // original, byte-unchanged. A season ALREADY RUNNING on this league follows the
+        // league's setup (`rebaseTargetFor`, shared by the console's skew check and
+        // `POST /season-runs/:id/rebase`), so it is offered "Review changes" onto the fork;
+        // the fork keeps the original's stage ids, so the rebase diffs stage by stage.
         const calLabel = calendarLabelOf(scoped.calendarId);
         const clone = forkForSeason(next, calLabel);
         await onSave(clone, {
@@ -2354,9 +2352,8 @@ function StructureEditor({
             current one.
           </div>
           <div style={{ marginTop: 6 }}>
-            A season already started for this league keeps the shape it started with and will NOT be
-            offered these changes — to change a running season, edit for all seasons and use Review
-            changes in the admin console.
+            A season already started for this league keeps the shape it started with until an admin
+            applies Review changes in the admin console, which will offer them this copy.
           </div>
         </div>
       ) : (

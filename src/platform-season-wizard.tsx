@@ -20,6 +20,7 @@ import {
   Icon,
   InfoDot,
   Modal,
+  ModalCancelBtn,
   NextSteps,
   OptionCards,
   type OptionCard,
@@ -948,9 +949,9 @@ export function SeasonSetupWizard({
             toast={toast}
           />
           <div style={footRow}>
-            <Btn tone="ghost" size="sm" onClick={onClose}>
+            <ModalCancelBtn tone="ghost" size="sm" onClickOutsideModal={onClose}>
               Cancel
-            </Btn>
+            </ModalCancelBtn>
             <Btn
               tone="teal"
               size="sm"

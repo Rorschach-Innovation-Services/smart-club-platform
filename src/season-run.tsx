@@ -52,7 +52,7 @@ import {
   type StageMaterialisation,
 } from '../packages/engine/src/structure';
 import { describeStage, describeStructure } from '../packages/engine/src/narrative';
-import { materialiseRun } from '../packages/engine/src/run';
+import { materialiseRun, rebaseTargetFor } from '../packages/engine/src/run';
 import { STAGE_KINDS, stageKindFor, stageTitle } from '../packages/engine/src/stage-kinds';
 import { isPoolKnockout, poolPairings, roundsForFormat } from '../packages/engine/src/formats';
 import {
@@ -1809,6 +1809,23 @@ function stageChanges(
   return changes;
 }
 
+/**
+ * The overs this season's generated series actually carry — what a format change moves
+ * them FROM. `undefined` when nothing has been generated (the snapshot's overs stand).
+ */
+function storedOvers(run: SeasonRun, seriesOf: (specId: string) => Series[]): string | undefined {
+  const overs = [
+    ...new Set(
+      run.structureSnapshot.stages
+        .flatMap((st) => seriesOf(st.id))
+        .map((s) => s.maxOvers)
+        .filter((o): o is number => typeof o === 'number'),
+    ),
+  ].sort((a, b) => a - b);
+  if (overs.length === 0) return undefined;
+  return overs.length === 1 ? `${overs[0]} overs` : `mixed (${overs.join('/')}) overs`;
+}
+
 function StructureReviewModal({
   run,
   live,
@@ -1827,13 +1844,19 @@ function StructureReviewModal({
   // Frozen when the modal opens: once applied, `run` re-renders onto the new snapshot and
   // a live diff would collapse to "No change" under the outcome the admin is reading.
   const [changes] = useState(() => stageChanges(run, live, (id) => seriesOf(id)));
-  const [fromVersion] = useState(run.structureSnapshot.version);
+  const [from] = useState(() => ({
+    id: run.structureSnapshot.id,
+    name: run.structureSnapshot.name,
+    version: run.structureSnapshot.version,
+  }));
+  // The league was moved onto another structure (a clone or a per-season fork).
+  const moved = from.id !== live.id;
   // The server's rebase diffs the same root fields to stamp `formatChanged`.
   const [formatChange] = useState(() => {
     const prev = run.structureSnapshot;
     return prev.name !== live.name || prev.overs !== live.overs
       ? {
-          before: `${prev.name} · ${prev.overs ?? 50} overs`,
+          before: `${prev.name} · ${storedOvers(run, seriesOf) ?? `${prev.overs ?? 50} overs`}`,
           after: `${live.name} · ${live.overs ?? 50} overs`,
         }
       : null;
@@ -1842,6 +1865,12 @@ function StructureReviewModal({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [outcome, setOutcome] = useState<RebaseOutcome | null>(null);
+  // Removed stages whose fixtures clubs can already see: applying orphans released series,
+  // so the admin says so explicitly rather than reading it off a pill among several.
+  const [releasedDrops] = useState(() =>
+    changes.filter((c) => c.kind === 'removed' && seriesOf(c.id).some((s) => s.released)),
+  );
+  const [dropsAcknowledged, setDropsAcknowledged] = useState(false);
   const regenIds = changes.filter((c) => c.regenEligible && optIn[c.id] !== false).map((c) => c.id);
 
   async function apply() {
@@ -1864,16 +1893,32 @@ function StructureReviewModal({
       eyebrow="Fixtures · Season"
       maxWidth={900}
       title={
-        <>
-          Review changes · <em>{live.name}</em>
-        </>
+        moved ? (
+          <>
+            Review changes · <em>{from.name}</em> → <em>{live.name}</em>
+          </>
+        ) : (
+          <>
+            Review changes · <em>{live.name}</em>
+          </>
+        )
       }
       onClose={onClose}
     >
       <p style={{ fontSize: 13, lineHeight: 1.6, margin: '0 0 12px' }}>
-        This season runs v{fromVersion}; the structure is now v{live.version}. Applying it changes
-        how this season&apos;s stages are set up — the fixtures only change where you regenerate
-        them. <HelpLink topic="structure-versions-and-rebase" />
+        {moved ? (
+          <>
+            This league is now set up on {live.name} (v{live.version}); this season still runs{' '}
+            {from.name} (v{from.version}). Applying moves the season onto it
+          </>
+        ) : (
+          <>
+            This season runs v{from.version}; the structure is now v{live.version}. Applying it
+            changes how this season&apos;s stages are set up
+          </>
+        )}{' '}
+        — the fixtures only change where you regenerate them.{' '}
+        <HelpLink topic="structure-versions-and-rebase" />
       </p>
       {formatChange && (
         <div
@@ -1978,7 +2023,9 @@ function StructureReviewModal({
             lineHeight: 1.6,
           }}
         >
-          <strong>Structure v{live.version} applied.</strong>
+          <strong>
+            {moved ? `${live.name} v${live.version}` : `Structure v${live.version}`} applied.
+          </strong>
           {outcome.regenerated.length > 0 && (
             <div>Regenerated: {outcome.regenerated.join(', ')}.</div>
           )}
@@ -2017,6 +2064,20 @@ function StructureReviewModal({
       {!canApply && !outcome && (
         <p style={ERR}>Applying a structure isn&apos;t available from here.</p>
       )}
+      {!outcome && releasedDrops.length > 0 && (
+        <label style={{ display: 'flex', gap: 8, fontSize: 12.5, marginTop: 10 }}>
+          <input
+            type="checkbox"
+            checked={dropsAcknowledged}
+            onChange={(e) => setDropsAcknowledged(e.target.checked)}
+          />
+          <span>
+            I understand {releasedDrops.map((c) => c.name).join(', ')}{' '}
+            {releasedDrops.length === 1 ? 'has' : 'have'} released fixtures that stop being tracked
+            by this season. Clubs keep seeing them until you delete those series.
+          </span>
+        </label>
+      )}
 
       <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
         {outcome ? (
@@ -2028,8 +2089,17 @@ function StructureReviewModal({
             <Btn tone="outline" size="sm" onClick={onClose} disabled={busy}>
               Cancel
             </Btn>
-            <Btn tone="teal" size="sm" onClick={apply} disabled={busy || !canApply}>
-              {busy ? 'Applying…' : `Apply structure v${live.version}`}
+            <Btn
+              tone="teal"
+              size="sm"
+              onClick={apply}
+              disabled={busy || !canApply || (releasedDrops.length > 0 && !dropsAcknowledged)}
+            >
+              {busy
+                ? 'Applying…'
+                : moved
+                  ? `Apply ${live.name} v${live.version}`
+                  : `Apply structure v${live.version}`}
             </Btn>
           </>
         )}
@@ -2067,7 +2137,7 @@ export function SeasonRunsPanel({
   /** POST /season-runs/:id/rebase. Absent ⇒ the banner explains but can't apply. */
   onRebaseRun?: (
     id: string,
-    body: { structureVersion: number; version: number },
+    body: { structureId: string; structureVersion: number; version: number },
   ) => Promise<SeasonRun & { warnings?: string[] }>;
   /** A fresh read of one run — the rebase flow refetches between stage regenerations. */
   onFetchRun?: (id: string) => Promise<SeasonRun | undefined>;
@@ -2103,14 +2173,18 @@ export function SeasonRunsPanel({
   /** Every series a run generated for one stage, by the series' own back-reference. */
   const seriesOfStage = (runId: string, specId: string) =>
     allSeries.filter((s) => s.seasonRunId === runId && s.stageSpecId === specId);
-  // The operator has published a newer version of the structure this season froze.
-  // Newer only: an older live version (a restore?) is not something to "adopt".
-  const liveStructure = active
-    ? structures.find((s) => s.id === active.structureSnapshot.id)
-    : undefined;
+  // The structure the league is set up on now (the server's rebase resolves the same
+  // one) differs from what this season froze: a newer version, or another structure
+  // entirely when the league was moved onto a clone or a per-season fork. On the same
+  // structure only a NEWER version is offered: versions only go down through a config
+  // restore, which is not something to adopt. A moved-to clone starts at v1, so any id
+  // change counts.
+  const target = active ? rebaseTargetFor(active, { leagues: allLeagues, structures }) : undefined;
   const skew =
-    active && liveStructure && liveStructure.version > active.structureSnapshot.version
-      ? liveStructure
+    active &&
+    target &&
+    (target.id !== active.structureSnapshot.id || target.version > active.structureSnapshot.version)
+      ? target
       : undefined;
 
   const runContext = useMemo(() => {
@@ -2164,6 +2238,7 @@ export function SeasonRunsPanel({
   ): Promise<RebaseOutcome> {
     if (!onRebaseRun) throw new Error('Applying a structure is not available here');
     const { warnings = [], ...rebased } = await onRebaseRun(run.id, {
+      structureId: live.id,
       structureVersion: live.version,
       version: run.version,
     });
@@ -2475,8 +2550,19 @@ export function SeasonRunsPanel({
                 }}
               >
                 <span style={{ flex: 1, minWidth: 220 }}>
-                  This season runs structure v{active.structureSnapshot.version}; the template is
-                  now v{skew.version}. <HelpLink topic="structure-versions-and-rebase" />
+                  {skew.id !== active.structureSnapshot.id ? (
+                    <>
+                      This league is now set up on {skew.name} (v{skew.version}); this season still
+                      runs {active.structureSnapshot.name} (v
+                      {active.structureSnapshot.version}). Applying moves the season onto it.
+                    </>
+                  ) : (
+                    <>
+                      This season runs structure v{active.structureSnapshot.version}; the template
+                      is now v{skew.version}.
+                    </>
+                  )}{' '}
+                  <HelpLink topic="structure-versions-and-rebase" />
                 </span>
                 <Btn tone="outline" size="sm" onClick={() => setReviewing(skew)}>
                   Review changes

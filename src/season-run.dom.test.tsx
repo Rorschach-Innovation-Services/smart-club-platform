@@ -156,6 +156,8 @@ const setup = (
     structures?: CompetitionStructure[];
     onRebaseRun?: ReturnType<typeof vi.fn>;
     onFetchRun?: ReturnType<typeof vi.fn>;
+    /** The structure the league is set up on now; defaults to the run's own. */
+    leagueStructureId?: string;
   } = {},
 ) => {
   const onPatchRun = vi.fn().mockResolvedValue(undefined);
@@ -166,7 +168,7 @@ const setup = (
   const panel = (r: SeasonRun[], series: Series[]) => (
     <SeasonRunsPanel
       clubs={clubs}
-      allLeagues={[league(structure.id)]}
+      allLeagues={[league(opts.leagueStructureId ?? structure.id)]}
       allSeries={series}
       runs={r}
       onOpenLauncher={onOpenLauncher}
@@ -1491,7 +1493,11 @@ describe('rebase — review and apply a newer structure version', () => {
 
     await user.click(within(dialog()).getByRole('button', { name: /apply structure v2/i }));
 
-    expect(onRebaseRun).toHaveBeenCalledWith('run-1', { structureVersion: 2, version: 1 });
+    expect(onRebaseRun).toHaveBeenCalledWith('run-1', {
+      structureId: TWO_STAGES_V2.id,
+      structureVersion: 2,
+      version: 1,
+    });
     expect(onGenerate).toHaveBeenCalledTimes(2);
     // Stage one generates against the run the rebase returned…
     const [firstRun, firstStage] = onGenerate.mock.calls[0];
@@ -1522,6 +1528,98 @@ describe('rebase — review and apply a newer structure version', () => {
     expect(note).toHaveTextContent(`Now: ${TWO_STAGES_V1.name} · 30 overs`);
     expect(note).toHaveTextContent(/needs regenerating/i);
     expect(within(dialog()).getAllByText('No change.')).toHaveLength(2);
+  });
+
+  it('takes the Was overs from the generated series, not a guess', async () => {
+    const v2 = { ...TWO_STAGES_V1, version: 2, overs: 30 };
+    const { user } = setup(TWO_STAGES_V1, [v1Run()], {
+      series: [draft('league', { maxOvers: 45 }), draft('cup', { maxOvers: 45 })],
+      structures: [v2],
+    });
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+    expect(within(dialog()).getByRole('note')).toHaveTextContent(
+      `Was: ${TWO_STAGES_V1.name} · 45 overs`,
+    );
+  });
+
+  it('says the overs are mixed when the generated series disagree', async () => {
+    const v2 = { ...TWO_STAGES_V1, version: 2, overs: 30 };
+    const { user } = setup(TWO_STAGES_V1, [v1Run()], {
+      series: [draft('league', { maxOvers: 50 }), draft('cup', { maxOvers: 20 })],
+      structures: [v2],
+    });
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+    expect(within(dialog()).getByRole('note')).toHaveTextContent(
+      `Was: ${TWO_STAGES_V1.name} · mixed (20/50) overs`,
+    );
+  });
+
+  it('asks the admin to acknowledge dropping a stage whose fixtures are released', async () => {
+    const onRebaseRun = vi.fn().mockResolvedValue(rebased(2));
+    const leagueOnly = {
+      ...TWO_STAGES_V1,
+      version: 2,
+      stages: TWO_STAGES_V1.stages.slice(0, 1),
+    } as CompetitionStructure;
+    const { user } = setup(TWO_STAGES_V1, [v1Run()], {
+      series: [draft('league'), draft('cup', { released: true })],
+      structures: [leagueOnly],
+      onRebaseRun,
+    });
+
+    await user.click(screen.getByRole('button', { name: /review changes/i }));
+    const apply = within(dialog()).getByRole('button', { name: /apply structure v2/i });
+    expect(apply).toBeDisabled();
+    const ack = within(dialog()).getByRole('checkbox', { name: /released fixtures that stop/i });
+    await user.click(ack);
+    expect(apply).toBeEnabled();
+    await user.click(apply);
+    expect(onRebaseRun).toHaveBeenCalled();
+  });
+
+  describe('the league moved onto another structure (a clone or a per-season fork)', () => {
+    const CLONE = {
+      ...TWO_STAGES_V2,
+      id: 'st-clone',
+      name: 'Club Cup (Premier)',
+      version: 1,
+    } as CompetitionStructure;
+
+    it('offers the league’s structure — not edits made to the original', async () => {
+      const onRebaseRun = vi.fn().mockResolvedValue({ ...rebased(2), structureSnapshot: CLONE });
+      const { user } = setup(TWO_STAGES_V1, [v1Run()], {
+        series: [draft('league'), draft('cup')],
+        // The original has since moved on too; the run must not be offered it.
+        structures: [{ ...TWO_STAGES_V1, version: 5, overs: 20 }, CLONE],
+        leagueStructureId: CLONE.id,
+        onRebaseRun,
+        onFetchRun: vi.fn().mockResolvedValue(rebased(3)),
+      });
+
+      const moved = `This league is now set up on ${CLONE.name} (v1); this season still runs ${TWO_STAGES_V1.name} (v1). Applying moves the season onto it`;
+      expect(screen.getByText(`${moved}.`, { exact: false })).toBeVisible();
+      expect(screen.queryByText(/the template is now/i)).toBeNull();
+
+      await user.click(screen.getByRole('button', { name: /review changes/i }));
+      expect(dialog()).toHaveAccessibleName(
+        `Review changes · ${TWO_STAGES_V1.name} → ${CLONE.name}`,
+      );
+      expect(dialog()).toHaveTextContent(moved);
+
+      await user.click(within(dialog()).getByRole('button', { name: `Apply ${CLONE.name} v1` }));
+      expect(onRebaseRun).toHaveBeenCalledWith('run-1', {
+        structureId: CLONE.id,
+        structureVersion: 1,
+        version: 1,
+      });
+    });
+
+    it('shows no banner once the season already runs the league’s structure', () => {
+      setup(CLONE, [run(CLONE)], {
+        structures: [{ ...TWO_STAGES_V1, version: 5 }, CLONE],
+      });
+      expect(screen.queryByRole('button', { name: /review changes/i })).toBeNull();
+    });
   });
 
   it('shows no match-format line when name and overs are unchanged', async () => {

@@ -251,4 +251,21 @@ describe('SetupLeagueDialog — closing', () => {
     await user.click(screen.getByRole('button', { name: 'Close' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('Cancel asks the same question when a choice has been made', async () => {
+    const { user, onClose } = setup({});
+    await useExisting(user);
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByText('Discard your changes?')).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('Cancel closes at once when nothing has been chosen', async () => {
+    const { user, onClose } = setup({});
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByText('Discard your changes?')).toBeNull();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
 });
