@@ -145,7 +145,9 @@ test('club portal: a withheld venue reads "to be confirmed"; reveal shows the ed
   await expect(rep.getByText(gWNew)).toHaveCount(0);
 
   // Admin reveals venues through the confirm modal.
-  await page.locator('.ph-actions').getByRole('button', { name: 'Reveal venues' }).click();
+  // "Reveal venues" moved from the page-head .ph-actions into the release bar's
+  // .fix-release-actions (post-release secondary actions live there, next to Recall).
+  await page.locator('.fix-release-actions').getByRole('button', { name: 'Reveal venues' }).click();
   await page.locator('.fix-confirm-box').getByRole('button', { name: 'Reveal venues' }).click();
 
   // Rep now sees the EDITED ground and the "venues confirmed" eyebrow.
