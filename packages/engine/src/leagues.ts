@@ -124,6 +124,7 @@ export interface LeagueRef {
   label?: string;
   group?: string;
   district?: string;
+  fixturesOnly?: boolean;
 }
 
 type LeagueList<L> = readonly L[] | null | undefined;
@@ -138,16 +139,27 @@ export function slugifyLeagueKey(label: string) {
 }
 
 /**
+ * A fixtures-only catalogue entry (League.fixturesOnly) — e.g. a KO Cup that runs on its
+ * own calendar. Never an affiliation choice or a player's team; fixtures treat it normally.
+ */
+export function isFixturesOnlyLeague(league: LeagueRef | null | undefined) {
+  return league?.fixturesOnly === true;
+}
+
+/**
  * Leagues offered to a club in `district`: the overarching leagues plus that district's
  * own, deduped by key (overarching wins). Unlike the old static helper there is NO
  * fallback to a default district — an unknown/blank district yields just the overarching
- * set, which is the correct behaviour for a fresh tenant.
+ * set, which is the correct behaviour for a fresh tenant. Fixtures-only entries are never
+ * offered: they are not something a club affiliates to.
  */
 export function leagueOptionsForDistrict<L extends LeagueRef>(
   allLeagues: LeagueList<L>,
   district: string,
 ): L[] {
-  const list = Array.isArray(allLeagues) ? allLeagues : [];
+  const list = (Array.isArray(allLeagues) ? allLeagues : []).filter(
+    (l) => !isFixturesOnlyLeague(l),
+  );
   const overarching = list.filter((l) => l.district === OVERARCHING_DISTRICT);
   const districtSpecific = list.filter(
     (l) => l.district === district && l.district !== OVERARCHING_DISTRICT,
@@ -179,7 +191,7 @@ export function leagueOptionsOutsideDistrict<L extends LeagueRef>(
   const seen = new Set<string>();
   const out: Record<string, Record<string, L[]>> = {};
   for (const l of list) {
-    if (inDistrict.has(l.key) || seen.has(l.key)) continue;
+    if (inDistrict.has(l.key) || seen.has(l.key) || isFixturesOnlyLeague(l)) continue;
     seen.add(l.key);
     const d = l.district || '';
     const byGroup = (out[d] = out[d] || {});
@@ -300,6 +312,9 @@ export function teamCounts(
   for (const k of keys) {
     const n = Math.max(1, Number(leagueTeams?.[k]) || 1);
     const lg = findByKey(allLeagues, k);
+    // A fixtures-only entry (KO Cup) is the same sides playing another competition, not
+    // extra teams — counting it would double the club's side count.
+    if (isFixturesOnlyLeague(lg)) continue;
     if (lg?.group === JUNIOR_GROUP) junior += n;
     else if (isWomensLeague(lg)) women += n;
     else senior += n;

@@ -14,6 +14,7 @@ import { useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { BoundedNumber, Btn, Card, EmptyState, Field, Icon, InfoDot, Modal, Pill } from './atoms';
 import { ApiError } from './api';
+import { useVertical } from './branding';
 import { WEEKDAY_LABELS, isValidIsoDate } from '../packages/engine/src/calendar';
 import { MIN_GEO_COVERAGE, geoCoverage } from '../packages/engine/src/venues';
 import type { Club, Venue, VenueUnavailable, Weekday } from './types';
@@ -57,6 +58,7 @@ function VenueForm({
   onClose: () => void;
   toast: Toast;
 }) {
+  const vt = useVertical().terms;
   const [draft, setDraft] = useState<Venue>(
     () => venue ?? { id: '', name: '', surfaces: 1, homeClubIds: [], unavailable: [] },
   );
@@ -201,9 +203,9 @@ function VenueForm({
         falls back to home-ground preference alone.
       </p>
 
-      <div style={SECTION}>Home clubs</div>
+      <div style={SECTION}>Home {vt.clubs}</div>
       <p style={{ ...HINT, marginTop: 0 }}>
-        Clubs that call this ground home. More than one is normal — ground-sharing is why
+        {vt.Clubs} that call this ground home. More than one is normal — ground-sharing is why
         &ldquo;home preference&rdquo; sometimes has to give way.
       </p>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
@@ -476,6 +478,7 @@ export function VenuesCard({
   onDelete: (id: string) => void;
   toast: Toast;
 }) {
+  const vt = useVertical().terms;
   const [form, setForm] = useState<Venue | 'new' | null>(null);
   const [confirm, setConfirm] = useState<Venue | null>(null);
   const [importing, setImporting] = useState(false);
@@ -489,7 +492,9 @@ export function VenuesCard({
       for (const v of derived) await onSave(v);
       // "synced", not "added" — the list also carries existing grounds that gained a
       // ground-sharing club, which is a real change that has to be saved.
-      toast(`${derived.length} ground${derived.length === 1 ? '' : 's'} synced from club records`);
+      toast(
+        `${derived.length} ground${derived.length === 1 ? '' : 's'} synced from ${vt.club} records`,
+      );
     } catch {
       /* onSave toasts its own failure */
     } finally {
@@ -540,12 +545,12 @@ export function VenuesCard({
         <EmptyState
           icon={Icon.Shield}
           title="No grounds yet"
-          sub="Fixtures need somewhere to be played. Start from the grounds clubs already recorded on their affiliation forms, then add any neutral venues."
+          sub={`Fixtures need somewhere to be played. Start from the grounds ${vt.clubs} already recorded on their affiliation forms, then add any neutral venues.`}
           action={
             <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
               {derived.length > 0 && (
                 <Btn tone="teal" onClick={runBackfill} disabled={importing}>
-                  {importing ? 'Syncing…' : `Sync ${derived.length} from club records`}
+                  {importing ? 'Syncing…' : `Sync ${derived.length} from ${vt.club} records`}
                 </Btn>
               )}
               <Btn tone="outline" icon={Icon.Plus} onClick={() => setForm('new')}>
@@ -561,7 +566,9 @@ export function VenuesCard({
               <thead>
                 <tr>
                   <th>Ground</th>
-                  <th title="The club(s) this is a home ground for. 'Neutral' means no home club.">
+                  <th
+                    title={`The ${vt.club}(s) this is a home ground for. 'Neutral' means no home ${vt.club}.`}
+                  >
                     Home to
                   </th>
                   <th title="Matches this ground can host in a single day.">
@@ -660,7 +667,7 @@ export function VenuesCard({
               <Btn tone="outline" size="sm" onClick={runBackfill} disabled={importing}>
                 {/* "Sync", not "Add" — the list also carries existing grounds that
                     gained a ground-sharing club. */}
-                {importing ? 'Syncing…' : `Sync ${derived.length} from club records`}
+                {importing ? 'Syncing…' : `Sync ${derived.length} from ${vt.club} records`}
               </Btn>
             </div>
           )}

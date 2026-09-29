@@ -10,7 +10,8 @@
  */
 import { readFileSync } from 'node:fs';
 import * as repo from './repo.js';
-import type { Club, Series, TenantConfig, League } from './types.js';
+import type { Club, Series, TenantConfig, League, RequiredDoc } from './types.js';
+import type { Sport } from './vertical.js';
 
 interface Snapshot {
   submissionDeadline: string;
@@ -116,8 +117,17 @@ export function buildTenantConfig(
   // DEFAULT_DISTRICTS read-time fallback; the operator portal passes [] so a
   // fresh client explicitly starts empty (signup blocked until configured).
   districts?: string[],
+  // Omit for cricket (field absent ⇒ cricket profile). A football tenant seeds its
+  // non-cricket defaults explicitly: requiredDocs [] (absent would fall back to the
+  // cricket catalogue at read time), WhatsApp invites off (the shared templates are
+  // cricket-flavoured) and no DEFAULT_TUTORIALS fallback (cricket videos).
+  sport?: Sport,
+  requiredDocs?: RequiredDoc[],
 ): TenantConfig {
   const name = branding.name.trim();
+  const football = sport === 'football';
+  const docs = requiredDocs ?? (football ? [] : undefined);
+  const flags = football ? { whatsappInvites: false, ...(features ?? {}) } : features;
   return {
     tenant: slug,
     branding: {
@@ -133,7 +143,10 @@ export function buildTenantConfig(
     knownClubs: [],
     leagues,
     ...(districts !== undefined ? { districts } : {}),
-    ...(features ? { features } : {}),
+    ...(flags ? { features: flags } : {}),
+    ...(sport ? { sport } : {}),
+    ...(docs !== undefined ? { requiredDocs: docs } : {}),
+    ...(football ? { tutorialsNoFallback: true } : {}),
   };
 }
 

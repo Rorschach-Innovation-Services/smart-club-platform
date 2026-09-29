@@ -10,7 +10,7 @@
  */
 
 import { Fragment, useState as useStateA } from 'react';
-import { useCopy } from './branding';
+import { useCopy, useModule, useVertical } from './branding';
 import { KPI, CountUp, EmptyState, Icon, Btn } from './atoms';
 import { DEFAULT_REQUIRED_DOCS, completionDocs } from './data';
 import { exportSheetsToXlsx } from './exportXlsx';
@@ -249,7 +249,11 @@ export function insightsExportSheets({
   clearances,
   demographics,
   requiredDocs = DEFAULT_REQUIRED_DOCS,
+  modules = {},
 }: InsightsBreakdownProps) {
+  const cqiOn = modules.cqi !== false;
+  const complianceOn = modules.compliance !== false;
+  const clearancesOn = modules.clearances !== false;
   const split = clubs.reduce(
     (acc, c) => {
       const t = teamCounts(c.leagues || [], leagues, c.leagueTeams);
@@ -335,8 +339,18 @@ export function insightsExportSheets({
           Value: leagues.length,
           Detail: `${leagueRows.filter((row) => row.clubCount > 0).length} with entries`,
         },
-        { Metric: 'Pending clearances', Value: counts.pending, Detail: 'awaiting action' },
-        { Metric: 'Average CQI', Value: avgCqi, Detail: `${submitted.length} clubs submitted CQI` },
+        ...(clearancesOn
+          ? [{ Metric: 'Pending clearances', Value: counts.pending, Detail: 'awaiting action' }]
+          : []),
+        ...(cqiOn
+          ? [
+              {
+                Metric: 'Average CQI',
+                Value: avgCqi,
+                Detail: `${submitted.length} clubs submitted CQI`,
+              },
+            ]
+          : []),
       ],
     },
     {
@@ -385,47 +399,60 @@ export function insightsExportSheets({
         Percentage: pct(row.count, clubs.length),
       })),
     },
+    ...(cqiOn
+      ? [
+          {
+            name: 'CQI',
+            rows: bands.map((band) => ({
+              Band: band.label,
+              Clubs: band.count,
+              Percentage: pct(band.count, clubs.length),
+            })),
+          },
+        ]
+      : []),
+    ...(complianceOn
+      ? [
+          {
+            name: 'Document compliance',
+            rows: docStats.map((doc) => ({
+              Document: doc.name,
+              'Clubs uploaded': doc.count,
+              'Total clubs': doc.total,
+              Percentage: pct(doc.count, doc.total),
+            })),
+          },
+        ]
+      : []),
     {
-      name: 'CQI',
-      rows: bands.map((band) => ({
-        Band: band.label,
-        Clubs: band.count,
-        Percentage: pct(band.count, clubs.length),
-      })),
-    },
-    {
-      name: 'Document compliance',
-      rows: docStats.map((doc) => ({
-        Document: doc.name,
-        'Clubs uploaded': doc.count,
-        'Total clubs': doc.total,
-        Percentage: pct(doc.count, doc.total),
-      })),
-    },
-    {
-      name: 'Clearances',
+      // Clearances off (no transfer tracking): the sheet keeps just the player count.
+      name: clearancesOn ? 'Clearances' : 'Players',
       rows: [
         { Metric: 'Players registered', Count: playersTotal, Percentage: '' },
-        {
-          Metric: 'Pending',
-          Count: counts.pending,
-          Percentage: pct(counts.pending, clearanceTotal),
-        },
-        {
-          Metric: 'Approved (including admin overrides)',
-          Count: approvedTotal,
-          Percentage: pct(approvedTotal, clearanceTotal),
-        },
-        {
-          Metric: 'Admin overrides',
-          Count: counts.adminOverride,
-          Percentage: pct(counts.adminOverride, clearanceTotal),
-        },
-        {
-          Metric: 'Rejected',
-          Count: counts.rejected,
-          Percentage: pct(counts.rejected, clearanceTotal),
-        },
+        ...(clearancesOn
+          ? [
+              {
+                Metric: 'Pending',
+                Count: counts.pending,
+                Percentage: pct(counts.pending, clearanceTotal),
+              },
+              {
+                Metric: 'Approved (including admin overrides)',
+                Count: approvedTotal,
+                Percentage: pct(approvedTotal, clearanceTotal),
+              },
+              {
+                Metric: 'Admin overrides',
+                Count: counts.adminOverride,
+                Percentage: pct(counts.adminOverride, clearanceTotal),
+              },
+              {
+                Metric: 'Rejected',
+                Count: counts.rejected,
+                Percentage: pct(counts.rejected, clearanceTotal),
+              },
+            ]
+          : []),
       ],
     },
   ];
@@ -561,6 +588,7 @@ function DuoRow({
   max: number;
   onOpen?: () => void;
 }) {
+  const vt = useVertical().terms;
   // The ghost is absolutely positioned so it always paints over the solid bar:
   // green at low opacity is invisible where they overlap (the solid reads clean) and
   // tints only the extension beyond it. In the inset case it switches to a white
@@ -590,13 +618,19 @@ function DuoRow({
       onClick={onOpen}
       // aria-label overrides the content-derived name, so it must carry BOTH the
       // counts sighted users see and the action the bare numbers don't announce.
-      aria-label={`${label}: ${clubCount} clubs, ${teamCount} teams — view league team directory`}
+      aria-label={`${label}: ${clubCount} ${vt.clubs}, ${teamCount} teams — view league team directory`}
     >
       {cells}
     </button>
   ) : (
     <div className="insights-bar-row duo">{cells}</div>
   );
+}
+
+export interface InsightsModules {
+  cqi?: boolean;
+  compliance?: boolean;
+  clearances?: boolean;
 }
 
 interface InsightsBreakdownProps {
@@ -621,6 +655,12 @@ interface InsightsBreakdownProps {
    */
   requiredDocs?: RequiredDoc[];
   /**
+   * The tenant's sport-vertical modules (branding.useModule). A module explicitly `false`
+   * drops its cards, KPIs and export sheets (e.g. football has no CQI, compliance docs or
+   * clearances). Absent ⇒ all on — the operator overview and legacy callers are unchanged.
+   */
+  modules?: InsightsModules;
+  /**
    * The tenant's series, for the per-league honesty hint: a league with a released
    * series but no club entered gets a "fixtures exist but no club has entered it" note.
    * Absent (e.g. the operator overview) ⇒ no hints, counts unchanged.
@@ -638,14 +678,19 @@ export function InsightsBreakdown({
   demographics,
   requiredDocs: requiredDocsProp,
   series = [],
+  modules = {},
 }: InsightsBreakdownProps) {
+  const vt = useVertical().terms;
   const requiredDocs = requiredDocsProp ?? DEFAULT_REQUIRED_DOCS;
+  const cqiOn = modules.cqi !== false;
+  const complianceOn = modules.compliance !== false;
+  const clearancesOn = modules.clearances !== false;
   if (!clubs.length)
     return (
       <EmptyState
         icon={Icon.Clubs}
-        title="No clubs yet"
-        sub="Breakdowns appear here once the first club is onboarded."
+        title={`No ${vt.clubs} yet`}
+        sub={`Breakdowns appear here once the first ${vt.club} is onboarded.`}
       />
     );
 
@@ -697,7 +742,7 @@ export function InsightsBreakdown({
   return (
     <div>
       <div className="kpi-strip">
-        <KPI label="Clubs" num={<CountUp to={clubs.length} />} sub="in the cohort" />
+        <KPI label={vt.Clubs} num={<CountUp to={clubs.length} />} sub="in the cohort" />
         <KPI
           label="Teams entered"
           num={<CountUp to={teamsTotal} />}
@@ -709,19 +754,21 @@ export function InsightsBreakdown({
           num={<CountUp to={leagues.length} />}
           sub={`${enteredLeagues} with entries`}
         />
-        <KPI
-          label="Pending clearances"
-          num={<CountUp to={cc.pending} />}
-          sub="awaiting action"
-          tone={cc.pending > 0 ? 'warn' : 'good'}
-        />
+        {clearancesOn && (
+          <KPI
+            label="Pending clearances"
+            num={<CountUp to={cc.pending} />}
+            sub="awaiting action"
+            tone={cc.pending > 0 ? 'warn' : 'good'}
+          />
+        )}
       </div>
 
       <div className="insights-panel">
         {/* ─── Clubs & teams per league ─── */}
         <div className="insights-card">
           <div className="insights-card-head">
-            <div className="insights-card-title">Clubs &amp; Teams per League</div>
+            <div className="insights-card-title">{vt.Clubs} &amp; Teams per League</div>
             <DuoLegend />
           </div>
           <div className={lgRows.length > 8 ? 'insights-scroll' : undefined}>
@@ -734,7 +781,7 @@ export function InsightsBreakdown({
                     <Fragment key={r.key}>
                       <DuoRow
                         label={r.label}
-                        title={`${r.label} — ${r.clubCount} clubs (${pct(r.clubCount, clubs.length)} of cohort), ${r.teamCount} teams (${pct(r.teamCount, teamsTotal)} of all teams)`}
+                        title={`${r.label} — ${r.clubCount} ${vt.clubs} (${pct(r.clubCount, clubs.length)} of cohort), ${r.teamCount} teams (${pct(r.teamCount, teamsTotal)} of all teams)`}
                         clubCount={r.clubCount}
                         teamCount={r.teamCount}
                         max={lgMax}
@@ -742,8 +789,8 @@ export function InsightsBreakdown({
                       />
                       {fixturedButEmpty.has(r.key) && (
                         <div className="insights-row-hint">
-                          Fixtures exist for this league but no club has entered it — ask the
-                          platform team to run the club league sync.
+                          Fixtures exist for this league but no {vt.club} has entered it — ask the
+                          platform team to run the {vt.club} league sync.
                         </div>
                       )}
                     </Fragment>
@@ -767,11 +814,11 @@ export function InsightsBreakdown({
           )}
           {orphans.keys.length > 0 && (
             <div className="insights-callout warn">
-              <strong>{orphans.clubCount}</strong> club{orphans.clubCount === 1 ? '' : 's'} still
-              reference{orphans.clubCount === 1 ? 's' : ''} <strong>{orphans.keys.length}</strong>{' '}
-              removed league{orphans.keys.length === 1 ? '' : 's'} — those{' '}
-              <strong>{orphans.teamCount}</strong> team{orphans.teamCount === 1 ? '' : 's'} count as
-              senior in the totals above.
+              <strong>{orphans.clubCount}</strong> {orphans.clubCount === 1 ? vt.club : vt.clubs}{' '}
+              still reference{orphans.clubCount === 1 ? 's' : ''}{' '}
+              <strong>{orphans.keys.length}</strong> removed league
+              {orphans.keys.length === 1 ? '' : 's'} — those <strong>{orphans.teamCount}</strong>{' '}
+              team{orphans.teamCount === 1 ? '' : 's'} count as senior in the totals above.
             </div>
           )}
         </div>
@@ -779,7 +826,7 @@ export function InsightsBreakdown({
         {/* ─── Clubs per district ─── */}
         <div className="insights-card">
           <div className="insights-card-head">
-            <div className="insights-card-title">Clubs per District</div>
+            <div className="insights-card-title">{vt.Clubs} per District</div>
             <DuoLegend />
           </div>
           <div className={dRows.length > 8 ? 'insights-scroll' : undefined}>
@@ -789,8 +836,8 @@ export function InsightsBreakdown({
                 label={r.name}
                 title={
                   r.other
-                    ? `${r.name} — ${r.clubCount} clubs (${pct(r.clubCount, clubs.length)} of cohort), ${r.teamCount} teams (${pct(r.teamCount, teamsTotal)} of all teams)`
-                    : `${r.name} — ${r.clubCount} clubs (${pct(r.clubCount, clubs.length)} of cohort), ${r.teamCount} teams (${pct(r.teamCount, teamsTotal)} of all teams), ${r.leagueCount} leagues available`
+                    ? `${r.name} — ${r.clubCount} ${vt.clubs} (${pct(r.clubCount, clubs.length)} of cohort), ${r.teamCount} teams (${pct(r.teamCount, teamsTotal)} of all teams)`
+                    : `${r.name} — ${r.clubCount} ${vt.clubs} (${pct(r.clubCount, clubs.length)} of cohort), ${r.teamCount} teams (${pct(r.teamCount, teamsTotal)} of all teams), ${r.leagueCount} leagues available`
                 }
                 clubCount={r.clubCount}
                 teamCount={r.teamCount}
@@ -801,8 +848,8 @@ export function InsightsBreakdown({
           {busiest && busiest.clubCount > 0 && (
             <div className="insights-callout good">
               Strongest district: <strong>{busiest.name}</strong> with{' '}
-              <strong>{busiest.clubCount}</strong> club{busiest.clubCount === 1 ? '' : 's'} fielding{' '}
-              <strong>{busiest.teamCount}</strong> team{busiest.teamCount === 1 ? '' : 's'}
+              <strong>{busiest.clubCount}</strong> {busiest.clubCount === 1 ? vt.club : vt.clubs}{' '}
+              fielding <strong>{busiest.teamCount}</strong> team{busiest.teamCount === 1 ? '' : 's'}
             </div>
           )}
           {noLeagueDistricts.length > 0 && (
@@ -818,7 +865,9 @@ export function InsightsBreakdown({
         <div className="insights-card">
           <div className="insights-card-head">
             <div className="insights-card-title">Affiliation Status</div>
-            <div className="insights-card-meta">of {clubs.length} clubs</div>
+            <div className="insights-card-meta">
+              of {clubs.length} {vt.clubs}
+            </div>
           </div>
           {affRows.map((r) => (
             <div key={r.key} className="insights-bar-row">
@@ -829,7 +878,7 @@ export function InsightsBreakdown({
                   style={{ width: (r.count / Math.max(1, clubs.length)) * 100 + '%' }}
                 />
               </div>
-              <div className="insights-bar-num" title={`${r.count} of ${clubs.length} clubs`}>
+              <div className="insights-bar-num" title={`${r.count} of ${clubs.length} ${vt.clubs}`}>
                 {pct(r.count, clubs.length)}
               </div>
             </div>
@@ -837,74 +886,83 @@ export function InsightsBreakdown({
           <div
             className={`insights-callout ${affRows[0].count === clubs.length ? 'good' : 'warn'}`}
           >
-            <strong>{affRows[0].count}</strong> of {clubs.length} clubs affiliated —{' '}
+            <strong>{affRows[0].count}</strong> of {clubs.length} {vt.clubs} affiliated —{' '}
             <strong>{clubs.length - affRows[0].count}</strong> still to submit
           </div>
         </div>
 
         {/* ─── CQI score distribution ─── */}
-        <div className="insights-card">
-          <div className="insights-card-head">
-            <div className="insights-card-title">CQI Score Distribution</div>
-            <div className="insights-card-meta">
-              Avg <CountUp to={avgCqi} decimals={1} />
+        {cqiOn && (
+          <div className="insights-card">
+            <div className="insights-card-head">
+              <div className="insights-card-title">CQI Score Distribution</div>
+              <div className="insights-card-meta">
+                Avg <CountUp to={avgCqi} decimals={1} />
+              </div>
             </div>
-          </div>
-          {bands.map((b) => (
-            <div key={b.key} className="insights-bar-row">
-              <div className="insights-bar-label">{b.label}</div>
-              <div className="insights-bar-track">
+            {bands.map((b) => (
+              <div key={b.key} className="insights-bar-row">
+                <div className="insights-bar-label">{b.label}</div>
+                <div className="insights-bar-track">
+                  <div
+                    className={`insights-bar-fill ${cqiBandTone(b.key)}`}
+                    style={{ width: (b.count / maxBand) * 100 + '%' }}
+                  />
+                </div>
                 <div
-                  className={`insights-bar-fill ${cqiBandTone(b.key)}`}
-                  style={{ width: (b.count / maxBand) * 100 + '%' }}
-                />
+                  className="insights-bar-num"
+                  title={`${b.count} of ${clubs.length} ${vt.clubs}`}
+                >
+                  {pct(b.count, clubs.length)}
+                </div>
               </div>
-              <div className="insights-bar-num" title={`${b.count} of ${clubs.length} clubs`}>
-                {pct(b.count, clubs.length)}
-              </div>
+            ))}
+            <div className="insights-callout good">
+              <strong>{submitted.length}</strong> of {clubs.length} {vt.clubs} submitted CQI
             </div>
-          ))}
-          <div className="insights-callout good">
-            <strong>{submitted.length}</strong> of {clubs.length} clubs submitted CQI
           </div>
-        </div>
+        )}
 
         {/* ─── Document compliance ─── */}
-        <div className="insights-card">
-          <div className="insights-card-head">
-            <div className="insights-card-title">Document Compliance</div>
-            <div className="insights-card-meta">
-              of {clubs.length} clubs
-              {context === 'operator' && !requiredDocsProp ? ' · standard doc set' : ''}
-            </div>
-          </div>
-          {docStats.map((d) => (
-            <div key={d.key} className="insights-bar-row wide-label">
-              <div className="insights-bar-label" title={d.name}>
-                {d.name}
-              </div>
-              <div className="insights-bar-track">
-                <div
-                  className={`insights-bar-fill ${docTone(d.pct)}`}
-                  style={{ width: d.pct + '%' }}
-                />
-              </div>
-              <div className="insights-bar-num" title={`${d.count} of ${d.total} clubs`}>
-                {pct(d.count, d.total)}
+        {complianceOn && (
+          <div className="insights-card">
+            <div className="insights-card-head">
+              <div className="insights-card-title">Document Compliance</div>
+              <div className="insights-card-meta">
+                of {clubs.length} {vt.clubs}
+                {context === 'operator' && !requiredDocsProp ? ' · standard doc set' : ''}
               </div>
             </div>
-          ))}
-          <div className={`insights-callout ${mostMissing.pct < 40 ? 'alert' : 'warn'}`}>
-            Most missing: <strong>{mostMissing.name}</strong> — only{' '}
-            <strong>{mostMissing.count}</strong> of {mostMissing.total} clubs uploaded
+            {docStats.map((d) => (
+              <div key={d.key} className="insights-bar-row wide-label">
+                <div className="insights-bar-label" title={d.name}>
+                  {d.name}
+                </div>
+                <div className="insights-bar-track">
+                  <div
+                    className={`insights-bar-fill ${docTone(d.pct)}`}
+                    style={{ width: d.pct + '%' }}
+                  />
+                </div>
+                <div className="insights-bar-num" title={`${d.count} of ${d.total} ${vt.clubs}`}>
+                  {pct(d.count, d.total)}
+                </div>
+              </div>
+            ))}
+            <div className={`insights-callout ${mostMissing.pct < 40 ? 'alert' : 'warn'}`}>
+              Most missing: <strong>{mostMissing.name}</strong> — only{' '}
+              <strong>{mostMissing.count}</strong> of {mostMissing.total} clubs uploaded
+            </div>
           </div>
-        </div>
+        )}
 
         {/* ─── Players & clearances ─── */}
         <div className="insights-card">
           <div className="insights-card-head">
-            <div className="insights-card-title">Players &amp; Clearances</div>
-            <div className="insights-card-meta">transfer pipeline</div>
+            <div className="insights-card-title">
+              {clearancesOn ? <>Players &amp; Clearances</> : 'Players'}
+            </div>
+            {clearancesOn && <div className="insights-card-meta">transfer pipeline</div>}
           </div>
           <div className="resource-list">
             <div className="resource-row">
@@ -915,50 +973,57 @@ export function InsightsBreakdown({
                 <strong>players</strong> registered across the cohort
               </span>
             </div>
-            <div className="resource-row">
-              <span
-                className={`resource-num ${cc.pending > 0 ? 'warn' : 'good'}`}
-                title={`${cc.pending} of ${ccTotal} clearances`}
-              >
-                <CountUp
-                  to={pendingPct}
-                  decimals={Number.isInteger(pendingPct) ? 0 : 1}
-                  suffix="%"
-                />
-              </span>
-              <span className="resource-text">
-                <strong>{cc.pending === 1 ? 'clearance' : 'clearances'}</strong> pending — awaiting
-                a club or admin decision
-              </span>
-            </div>
-            <div className="resource-row">
-              <span className="resource-num good" title={`${ccApproved} of ${ccTotal} clearances`}>
-                <CountUp
-                  to={approvedPct}
-                  decimals={Number.isInteger(approvedPct) ? 0 : 1}
-                  suffix="%"
-                />
-              </span>
-              <span className="resource-text">
-                <strong>approved</strong>
-                {cc.adminOverride > 0 ? ` (incl. ${cc.adminOverride} by admin override)` : ''}
-              </span>
-            </div>
-            <div className="resource-row">
-              <span
-                className={`resource-num ${cc.rejected > 0 ? 'danger' : 'good'}`}
-                title={`${cc.rejected} of ${ccTotal} clearances`}
-              >
-                <CountUp
-                  to={rejectedPct}
-                  decimals={Number.isInteger(rejectedPct) ? 0 : 1}
-                  suffix="%"
-                />
-              </span>
-              <span className="resource-text">
-                <strong>rejected</strong> transfer {cc.rejected === 1 ? 'request' : 'requests'}
-              </span>
-            </div>
+            {clearancesOn && (
+              <>
+                <div className="resource-row">
+                  <span
+                    className={`resource-num ${cc.pending > 0 ? 'warn' : 'good'}`}
+                    title={`${cc.pending} of ${ccTotal} clearances`}
+                  >
+                    <CountUp
+                      to={pendingPct}
+                      decimals={Number.isInteger(pendingPct) ? 0 : 1}
+                      suffix="%"
+                    />
+                  </span>
+                  <span className="resource-text">
+                    <strong>{cc.pending === 1 ? 'clearance' : 'clearances'}</strong> pending —
+                    awaiting a club or admin decision
+                  </span>
+                </div>
+                <div className="resource-row">
+                  <span
+                    className="resource-num good"
+                    title={`${ccApproved} of ${ccTotal} clearances`}
+                  >
+                    <CountUp
+                      to={approvedPct}
+                      decimals={Number.isInteger(approvedPct) ? 0 : 1}
+                      suffix="%"
+                    />
+                  </span>
+                  <span className="resource-text">
+                    <strong>approved</strong>
+                    {cc.adminOverride > 0 ? ` (incl. ${cc.adminOverride} by admin override)` : ''}
+                  </span>
+                </div>
+                <div className="resource-row">
+                  <span
+                    className={`resource-num ${cc.rejected > 0 ? 'danger' : 'good'}`}
+                    title={`${cc.rejected} of ${ccTotal} clearances`}
+                  >
+                    <CountUp
+                      to={rejectedPct}
+                      decimals={Number.isInteger(rejectedPct) ? 0 : 1}
+                      suffix="%"
+                    />
+                  </span>
+                  <span className="resource-text">
+                    <strong>rejected</strong> transfer {cc.rejected === 1 ? 'request' : 'requests'}
+                  </span>
+                </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -1085,13 +1150,15 @@ export function LeagueTeamDirectoryCard({
   leagueKey: string;
   onOpenClub?: (clubId: string) => void;
 }) {
+  const vertical = useVertical();
+  const vt = vertical.terms;
   const rows = leagueTeamDirectory(clubs, leagueKey);
   if (!rows.length)
     return (
       <EmptyState
         icon={Icon.Clubs}
         title="No teams entered"
-        sub="No club has entered this league yet — teams appear here once affiliations name it."
+        sub={`No ${vt.club} has entered this league yet — teams appear here once affiliations name it.`}
       />
     );
   const clubCount = new Set(rows.map((r) => r.clubId)).size;
@@ -1099,11 +1166,13 @@ export function LeagueTeamDirectoryCard({
     <div className="insights-card">
       <div className="insights-card-head">
         <div className="insights-card-title">Team Directory</div>
-        <div className="insights-card-meta">chair contact per club</div>
+        <div className="insights-card-meta">
+          {vertical.sport === 'cricket' ? 'chair' : vt.chair} contact per {vt.club}
+        </div>
       </div>
       <div className="kpi-strip mini">
         <KPI label="Teams" num={<CountUp to={rows.length} />} sub="in this league" />
-        <KPI label="Clubs" num={<CountUp to={clubCount} />} sub="fielding sides" />
+        <KPI label={vt.Clubs} num={<CountUp to={clubCount} />} sub="fielding sides" />
       </div>
       {rows.map((r) => (
         <div key={r.teamId} className="league-directory-row">
@@ -1212,6 +1281,11 @@ export function AdminInsightsPage({
   series = [],
 }: AdminInsightsPageProps) {
   const copy = useCopy();
+  const modules: InsightsModules = {
+    cqi: useModule('cqi'),
+    compliance: useModule('compliance'),
+    clearances: useModule('clearances'),
+  };
   const [exporting, setExporting] = useStateA(false);
 
   const exportInsights = async () => {
@@ -1220,7 +1294,15 @@ export function AdminInsightsPage({
     try {
       await exportSheetsToXlsx(
         'season-insights.xlsx',
-        insightsExportSheets({ clubs, leagues, districts, clearances, demographics, requiredDocs }),
+        insightsExportSheets({
+          clubs,
+          leagues,
+          districts,
+          clearances,
+          demographics,
+          requiredDocs,
+          modules,
+        }),
       );
     } catch {
       toast?.('Export failed — please retry', 'warn');
@@ -1263,6 +1345,7 @@ export function AdminInsightsPage({
         demographics={demographics}
         requiredDocs={requiredDocs}
         series={series}
+        modules={modules}
       />
     </div>
   );

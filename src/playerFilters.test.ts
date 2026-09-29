@@ -157,3 +157,24 @@ describe('filterPlayers — combined facets', () => {
     expect(filterPlayers(ALL, f({ club: 'berea', q: 'zulu' }))).toEqual([]);
   });
 });
+
+describe('filterPlayers — position (positions-profile verticals)', () => {
+  const keeper = { firstName: 'Lebo', lastName: 'M', position: 'Goalkeeper' };
+  const striker = { firstName: 'Musa', lastName: 'K', position: 'Striker' };
+  const unset = { firstName: 'Zak', lastName: 'P' };
+  const squad = [keeper, striker, unset];
+
+  it('matches the exact position', () => {
+    expect(filterPlayers(squad, f({ position: 'Striker' }))).toEqual([striker]);
+  });
+
+  it('excludes players with no recorded position once a position is picked', () => {
+    expect(filterPlayers(squad, f({ position: 'Goalkeeper' }))).toEqual([keeper]);
+  });
+
+  it("'all' leaves the list unfiltered and is not an active filter", () => {
+    expect(filterPlayers(squad, f())).toEqual(squad);
+    expect(hasActiveFilters(f({ position: 'all' }))).toBe(false);
+    expect(hasActiveFilters(f({ position: 'Striker' }))).toBe(true);
+  });
+});

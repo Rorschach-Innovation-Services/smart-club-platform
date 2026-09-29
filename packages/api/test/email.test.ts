@@ -85,6 +85,19 @@ describe('regLinkEmailContent · tenant-parametrized copy', () => {
     assert.match(html, /<p>The A &amp; B office<\/p>/);
   });
 
+  test('club noun defaults to "club" (cricket wording unchanged)', () => {
+    const { text, html } = regLinkEmailContent(baseInput(orgCopy(null)));
+    assert.match(text, /register straight into the club:/);
+    assert.match(html, /register straight into the club:<\/p>/);
+  });
+
+  test('a school vertical says "school" instead of "club"', () => {
+    const { text, html } = regLinkEmailContent(baseInput({ ...orgCopy(null), club: 'school' }));
+    assert.match(text, /register straight into the school:/);
+    assert.match(html, /register straight into the school:<\/p>/);
+    assert.ok(!/into the club/.test(text));
+  });
+
   test('tutorials section still renders below the org copy when present', () => {
     const input = {
       ...baseInput({ name: 'Sharks', office: 'Sharks office', cohort: 'Sharks cohort' }),

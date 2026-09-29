@@ -108,6 +108,8 @@ export interface RegLinkOrgCopy {
   office: string;
   /** Cohort label, e.g. "Dolphins Pipeline cohort". */
   cohort: string;
+  /** The vertical's lowercase club noun ("club" / "school"); absent ⇒ "club". */
+  club?: string;
 }
 
 export interface RegLinkEmailInput {
@@ -140,6 +142,7 @@ export function regLinkEmailContent(input: RegLinkEmailInput): {
   const { chairName, clubName, season, link, org, tutorials } = input;
   const subject = `${clubName} · player registration link (${season})`;
   const greetName = chairName || 'there';
+  const clubNoun = org.club || 'club';
 
   const hasTutorials = !!tutorials && tutorials.videos.length > 0;
   const tutorialsText = hasTutorials
@@ -150,7 +153,7 @@ export function regLinkEmailContent(input: RegLinkEmailInput): {
 
   const text =
     `Hi ${greetName},\n\n` +
-    `Your ${clubName} affiliation is in. Here's your unique player-registration link for the ${season} season — share it with your members so they can register straight into the club:\n\n` +
+    `Your ${clubName} affiliation is in. Here's your unique player-registration link for the ${season} season — share it with your members so they can register straight into the ${clubNoun}:\n\n` +
     `${link}\n\n` +
     `Every registration flows directly into your roster and the ${org.cohort}.` +
     `${tutorialsText}\n\n` +
@@ -177,7 +180,7 @@ export function regLinkEmailContent(input: RegLinkEmailInput): {
   const html =
     `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
     `<p>Hi ${safeName},</p>` +
-    `<p>Your <strong>${safeClub}</strong> affiliation is in. Here's your unique player-registration link for the ${safeSeason} season — share it with your members so they can register straight into the club:</p>` +
+    `<p>Your <strong>${safeClub}</strong> affiliation is in. Here's your unique player-registration link for the ${safeSeason} season — share it with your members so they can register straight into the ${escapeHtml(clubNoun)}:</p>` +
     `<p><a href="${safeLink}" style="color:#1D9E75;font-weight:600">${safeLink}</a></p>` +
     `<p>Every registration flows directly into your roster and the ${safeCohort}.</p>` +
     `${tutorialsHtml}` +

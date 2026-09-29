@@ -12,9 +12,11 @@
  *    latitude ("-", "-29.") without rewriting itself.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { VenuesCard } from './venues-card';
+import { renderWithProviders } from './test-utils';
+import { qk } from './query';
 import type { Club, Venue } from './types';
 
 const clubs = [
@@ -39,12 +41,17 @@ const pinned = (over: Partial<Venue> = {}): Venue =>
     ...over,
   }) as Venue;
 
-const setup = (props: Partial<Parameters<typeof VenuesCard>[0]> = {}) => {
+// The card reads the tenant's vertical nouns (club/school) from the react-query tenant
+// payload; seed it so no request fires. `{}` = a legacy (cricket) tenant.
+const setup = (
+  props: Partial<Parameters<typeof VenuesCard>[0]> = {},
+  tenant: Record<string, unknown> = {},
+) => {
   const onSave = vi.fn().mockResolvedValue(undefined);
   const onDelete = vi.fn();
   const toast = vi.fn();
   const user = userEvent.setup();
-  render(
+  renderWithProviders(
     <VenuesCard
       clubs={clubs}
       venues={[]}
@@ -53,6 +60,7 @@ const setup = (props: Partial<Parameters<typeof VenuesCard>[0]> = {}) => {
       toast={toast}
       {...props}
     />,
+    { seed: [[qk.tenant(), tenant]] },
   );
   return { user, onSave, onDelete, toast };
 };
@@ -61,6 +69,11 @@ describe('VenuesCard — a failed fetch is not an empty registry', () => {
   it('offers the sync CTA when the registry is genuinely empty', () => {
     setup({ venues: [] });
     expect(screen.getByRole('button', { name: /sync 2 from club records/i })).toBeVisible();
+  });
+
+  it('names the school records for a football (school) tenant', () => {
+    setup({ venues: [] }, { sport: 'football' });
+    expect(screen.getByRole('button', { name: /sync 2 from school records/i })).toBeVisible();
   });
 
   it('offers NOTHING that would add grounds when the fetch failed', () => {

@@ -6,6 +6,7 @@
  * them into TenantConfig.requiredDocs).
  */
 import type { DocFormat, RequiredDoc } from './types.js';
+import { VERTICALS, type Sport } from './vertical.js';
 
 /**
  * Fallback district list for tenants with no `districts` field on their config row
@@ -460,6 +461,7 @@ export function validateClubPatch(
     cqiAnswers?: Record<string, unknown> | null;
     exco?: Record<string, unknown>;
     coaches?: unknown[];
+    ground?: { pitchCount?: unknown };
   },
   validLeagueKeys: Set<string>,
   validDocKeys: Set<string>,
@@ -472,6 +474,12 @@ export function validateClubPatch(
   docDefs?: RequiredDoc[],
   /** The club's stored docMeta, so an already-present sentinel is never newly rejected. */
   currentDocMeta?: Record<string, unknown>,
+  /**
+   * The tenant's sport vertical. Coach body/level are checked against the vertical's
+   * vocabulary for NON-cricket sports only: cricket records were never validated, so
+   * retro-validating would 400 existing clubs holding off-catalogue values on next save.
+   */
+  sport?: Sport,
 ): string | null {
   if (patch.name !== undefined) {
     const n = patch.name.trim();
@@ -480,6 +488,13 @@ export function validateClubPatch(
   }
   if (patch.district && !validDistricts.has(patch.district)) {
     return `unknown district: ${patch.district}`;
+  }
+  const pitchCount = patch.ground?.pitchCount;
+  if (
+    pitchCount != null &&
+    (!Number.isInteger(pitchCount) || (pitchCount as number) < 0 || (pitchCount as number) > 99)
+  ) {
+    return 'number of fields must be a whole number between 0 and 99';
   }
   if (patch.leagues) {
     const bad = patch.leagues.filter((k) => !validLeagueKeys.has(k));
@@ -652,6 +667,15 @@ export function validateClubPatch(
       }
       if (c.yearStarted && !/^\d{4}$/.test(String(c.yearStarted))) {
         return 'coach yearStarted must be a 4-digit year';
+      }
+      if (sport && sport !== 'cricket') {
+        const { coachingBodies, coachingLevels } = VERTICALS[sport];
+        if (c.body != null && !coachingBodies.includes(String(c.body))) {
+          return `invalid coaching body: ${String(c.body)}`;
+        }
+        if (c.level != null && !coachingLevels.includes(String(c.level))) {
+          return `invalid coaching level: ${String(c.level)}`;
+        }
       }
       // Per-team assignment: every referenced id must be a real roster team. Checked
       // only when the patch carries teamRosters (so a draft that omits rosters but

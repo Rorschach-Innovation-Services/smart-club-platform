@@ -11,6 +11,14 @@ import { useQuery } from '@tanstack/react-query';
 import { qk } from './query';
 import * as api from './api';
 import type { TenantBranding } from './types';
+import { currentSeasonLabel } from './data';
+import {
+  resolveVertical,
+  type ModuleKey,
+  type TermKey,
+  type VerticalProfile,
+  type VerticalTerms,
+} from './vertical';
 
 /** The resolved, never-undefined copy slots the UI renders. */
 export interface ResolvedCopy {
@@ -32,9 +40,14 @@ export interface ResolvedCopy {
 /**
  * Resolve branding copy with neutral defaults, so every call site renders sensible
  * text before the tenant payload lands (first paint) and for tenants that haven't
- * customised a slot. Mirrors `orgCopy` on the API — keep the chains in sync.
+ * customised a slot. Mirrors `orgCopy` on the API — keep the chains in sync. The defaults
+ * that name the member organisation ("club") come from the vertical's terms, so a football
+ * tenant reads "school" without overriding each slot; explicit `branding.copy` still wins.
  */
-export function resolveCopy(branding?: Partial<TenantBranding> | null): ResolvedCopy {
+export function resolveCopy(
+  branding?: Partial<TenantBranding> | null,
+  terms: VerticalTerms = resolveVertical().terms,
+): ResolvedCopy {
   const copy = branding?.copy ?? {};
   const orgName = branding?.name || branding?.title || 'Smart Club';
   const orgShort = copy.orgShort || orgName;
@@ -44,10 +57,10 @@ export function resolveCopy(branding?: Partial<TenantBranding> | null): Resolved
     office: copy.office || `${orgShort} office`,
     admin: copy.admin || `${orgShort} administrators`,
     cohortName: copy.cohortName || `${orgShort} cohort`,
-    heroTitle: copy.heroTitle || `From your club to the ${orgShort}.`,
+    heroTitle: copy.heroTitle || `From your ${terms.club} to the ${orgShort}.`,
     heroBlurb:
       copy.heroBlurb ||
-      `Affiliated clubs join the ${orgName} ecosystem — fixtures, talent ID and league readiness, all in one place.`,
+      `Affiliated ${terms.clubs} join the ${orgName} ecosystem — fixtures, talent ID and league readiness, all in one place.`,
     crumbRoot: copy.crumbRoot || orgShort,
     welcome: copy.welcome || 'Sign in',
     eyebrow: copy.eyebrow || orgName,
@@ -77,7 +90,8 @@ function useTenantPayload() {
 
 /** Resolved org copy for the active tenant (neutral defaults until branding loads). */
 export function useCopy(): ResolvedCopy {
-  return resolveCopy(useTenantPayload()?.branding);
+  const tenant = useTenantPayload();
+  return resolveCopy(tenant?.branding, resolveVertical(tenant).terms);
 }
 
 /**
@@ -88,4 +102,29 @@ export function useCopy(): ResolvedCopy {
 export function useFeature(key: string, def = false): boolean {
   const v = useTenantPayload()?.features?.[key];
   return typeof v === 'boolean' ? v : def;
+}
+
+/** The active tenant's sport vertical profile (cricket until the payload loads / when unset). */
+export function useVertical(): VerticalProfile {
+  return resolveVertical(useTenantPayload());
+}
+
+/**
+ * Whether a module (veterans / cqi / compliance / clearances) is on — mirrors the API's
+ * hasModule: the `module.<key>` flag when stored, else the vertical's default.
+ */
+export function useModule(module: ModuleKey): boolean {
+  const tenant = useTenantPayload();
+  const v = tenant?.features?.[`module.${module}`];
+  return typeof v === 'boolean' ? v : resolveVertical(tenant).moduleDefaults[module];
+}
+
+/** One vertical term, e.g. useTerm('Club') ⇒ 'Club' (cricket) / 'School' (football). */
+export function useTerm(key: TermKey): string {
+  return useVertical().terms[key];
+}
+
+/** The tenant's display season label; absent ⇒ the built-in current season label. */
+export function useSeasonLabel(): string {
+  return useTenantPayload()?.seasonLabel?.trim() || currentSeasonLabel();
 }

@@ -16,6 +16,7 @@ import {
   clubTeamsForLeague,
   leagueParticipants,
   leagueParticipantsWithStatus,
+  isFixturesOnlyLeague,
 } from './leagues';
 
 const LEAGUES = [
@@ -109,6 +110,52 @@ describe('leagueOptionsOutsideDistrict', () => {
   it('tolerates empty/garbage input', () => {
     expect(leagueOptionsOutsideDistrict([], 'anything')).toEqual({});
     expect(leagueOptionsOutsideDistrict(undefined as never, 'anything')).toEqual({});
+  });
+});
+
+describe('fixtures-only leagues (e.g. a KO Cup on its own calendar)', () => {
+  const WITH_CUP = [
+    ...LEAGUES,
+    {
+      key: 'koCup',
+      label: 'KO Cup',
+      group: 'Overarching',
+      district: OVERARCHING_DISTRICT,
+      fixturesOnly: true,
+    },
+    {
+      key: 'emcuCup',
+      label: 'EMCU Cup',
+      group: 'EMCU Divisions',
+      district: 'Ethekwini Metro Cricket Union',
+      fixturesOnly: true,
+    },
+  ];
+  it('are never offered in the affiliation picker', () => {
+    const out = leagueOptionsForDistrict(WITH_CUP, 'Ethekwini Metro Cricket Union');
+    expect(out.map((l) => l.key)).toEqual(['premier', 'veterans', 'emcuD1', 'emcuD2']);
+  });
+  it('are not surfaced as cross-district options either', () => {
+    const out = leagueOptionsOutsideDistrict(WITH_CUP, 'Umkhanyakude Cricket District');
+    const keys = Object.values(out).flatMap((g) =>
+      Object.values(g)
+        .flat()
+        .map((l) => l.key),
+    );
+    expect(keys.sort()).toEqual(['emcuD1', 'emcuD2']);
+  });
+  it('do not add to a club side count', () => {
+    expect(teamCounts(['premier', 'koCup'], WITH_CUP)).toEqual({ senior: 1, women: 0, junior: 0 });
+  });
+  it('still resolve by key for the fixtures machinery', () => {
+    expect(findByKey(WITH_CUP, 'koCup')?.label).toBe('KO Cup');
+    expect(isFixturesOnlyLeague(findByKey(WITH_CUP, 'koCup'))).toBe(true);
+    expect(isFixturesOnlyLeague(findByKey(WITH_CUP, 'premier'))).toBe(false);
+    const clubs = [
+      { id: 'saints', name: 'Saints', leagues: ['premier', 'koCup'] },
+      { id: 'kloof', name: 'Kloof', leagues: ['premier'] },
+    ];
+    expect(leagueParticipants(clubs, 'koCup').map((p) => p.clubId)).toEqual(['saints']);
   });
 });
 

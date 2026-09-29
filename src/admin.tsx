@@ -12,7 +12,8 @@ import { createPortal } from 'react-dom';
 import { useQueries } from '@tanstack/react-query';
 import * as api from './api';
 import { qk, queryClient } from './query';
-import { useCopy } from './branding';
+import { useCopy, useModule, useSeasonLabel, useVertical } from './branding';
+import { pitchCountLabel, roleLabel } from './vertical';
 import {
   PlayerFilterBar,
   FilterResultCount,
@@ -63,6 +64,7 @@ import {
 import {
   leagueOptionsForDistrict,
   leagueOptionsOutsideDistrict,
+  isFixturesOnlyLeague,
   slugifyLeagueKey,
   labelByKey,
   teamCounts,
@@ -381,6 +383,7 @@ export function seasonSummaryRows(allSeries: Series[]) {
  * still see nothing, and gets reported as a bug.
  */
 function SeriesStatusPills({ series: s }: { series: Series }) {
+  const vt = useVertical().terms;
   const activatesLater = !!s.activateFrom && !isActivated(s.activateFrom, todayIso());
   return (
     <>
@@ -394,7 +397,7 @@ function SeriesStatusPills({ series: s }: { series: Series }) {
       {s.released && s.withheld?.venue && <Pill tone="gold">Withheld venues</Pill>}
       {s.released && s.withheld?.time && <Pill tone="gold">Withheld times</Pill>}
       {activatesLater && (
-        <span title={`Hidden from clubs until ${formatIsoDate(s.activateFrom)}`}>
+        <span title={`Hidden from ${vt.clubs} until ${formatIsoDate(s.activateFrom)}`}>
           <Pill tone="muted">Activates {formatIsoDate(s.activateFrom)}</Pill>
         </span>
       )}
@@ -433,7 +436,10 @@ export function AdminFixtures({
   onFetchSeasonRun,
   onGenerateStageSeries,
 }: AdminFixturesProps) {
+  const vt = useVertical().terms;
   const copy = useCopy();
+  // Overs are cricket label metadata — other sports never show them.
+  const showOvers = useVertical().sport === 'cricket';
   // The single "Start a season" entry point — the league picked here decides whether the
   // admin lands in StartSeasonForm (a competition the operator set up) or Quick start.
   // Owned here, not in SeasonRunsPanel, so its own button and the header button share it.
@@ -522,7 +528,7 @@ export function AdminFixtures({
   function askRecall(s) {
     setConfirm({
       title: 'Recall this release?',
-      body: 'Clubs will no longer see this schedule in their portals. No notification is sent. Any withheld venues or times are cleared — you choose again next time you release.',
+      body: `${vt.Clubs} will no longer see this schedule in their portals. No notification is sent. Any withheld venues or times are cleared — you choose again next time you release.`,
       danger: true,
       yesLabel: 'Yes, recall',
       onYes: () => {
@@ -541,11 +547,11 @@ export function AdminFixtures({
   function reveal(s, field: 'venue' | 'time') {
     const noun = field === 'venue' ? 'venues' : 'times';
     setConfirm({
-      title: `Reveal ${noun} to all clubs?`,
+      title: `Reveal ${noun} to all ${vt.clubs}?`,
       body:
         field === 'venue'
-          ? `Every club in ${s.name} will see the allocated grounds, distance and travel cost immediately. This can't be withdrawn without recalling the whole release.`
-          : `Every club in ${s.name} will see the start times immediately. This can't be withdrawn without recalling the whole release.`,
+          ? `Every ${vt.club} in ${s.name} will see the allocated grounds, distance and travel cost immediately. This can't be withdrawn without recalling the whole release.`
+          : `Every ${vt.club} in ${s.name} will see the start times immediately. This can't be withdrawn without recalling the whole release.`,
       yesLabel: field === 'venue' ? 'Reveal venues' : 'Reveal times',
       onYes: () => {
         Promise.resolve(onReveal?.(s.id, [field]))
@@ -595,9 +601,9 @@ export function AdminFixtures({
               yet; this just unlocks Release.
             </p>
             <p>
-              <strong>Release to clubs</strong> — publish it to every club’s portal. No email or
-              WhatsApp is sent; each club chooses when to share fixtures with its players. You can
-              withhold venues and/or start times at release and reveal them later.
+              <strong>Release to {vt.clubs}</strong> — publish it to every {vt.club}’s portal. No
+              email or WhatsApp is sent; each {vt.club} chooses when to share fixtures with its
+              players. You can withhold venues and/or start times at release and reveal them later.
             </p>
             <p>
               <strong>Recall / Withdraw</strong> — pull a released or approved series back. No
@@ -715,7 +721,8 @@ export function AdminFixtures({
                       fontFamily: "'Montserrat',sans-serif",
                     }}
                   >
-                    {s.teams.length} teams · {s.fixtures.length} fixtures · {s.maxOvers} ov ·{' '}
+                    {s.teams.length} teams · {s.fixtures.length} fixtures ·{' '}
+                    {showOvers ? `${s.maxOvers} ov · ` : ''}
                     {s.endDate ? '' : 'start '}
                     {formatDay(s.startDate)}
                     {s.endDate ? ` – ${formatDay(s.endDate)}` : ''}
@@ -819,7 +826,7 @@ export function AdminFixtures({
                   icon={confirm.danger ? undefined : Icon.Arrow}
                   onClick={confirm.onYes}
                 >
-                  {confirm.yesLabel ?? (confirm.danger ? 'Yes, recall' : 'Release to clubs')}
+                  {confirm.yesLabel ?? (confirm.danger ? 'Yes, recall' : `Release to ${vt.clubs}`)}
                 </Btn>
               </div>
             </div>
@@ -838,7 +845,8 @@ export function AdminFixtures({
               releaseFor.name +
               ' · released to ' +
               distinctClubCount(releaseFor) +
-              ' clubs' +
+              ' ' +
+              vt.clubs +
               (held.length ? ' · ' + held.join(' & ') + ' withheld' : '');
             // Return the release promise so the dialog stays open while the PATCH is in
             // flight and closes itself on success. The single success toast fires only
@@ -1094,7 +1102,9 @@ export function FixtureTable({
   onAllocateVenues,
   onCheckClashes,
 }) {
+  const vt = useVertical().terms;
   const copy = useCopy();
+  const showOvers = useVertical().sport === 'cricket';
   const clubBy = (id) => clubs.find((c) => c.id === id);
   // Resolve a fixture id → team for this series (participant snapshot, else clubId).
   const teamBy = (id) => resolveTeam(series, id, clubBy);
@@ -1243,7 +1253,7 @@ export function FixtureTable({
               series.seriesType,
               `${series.teams.length} teams`,
               `${series.fixtures.length} fixtures`,
-              `${series.maxOvers} overs`,
+              showOvers && `${series.maxOvers} overs`,
               // A season-generated series has no category — the competition already says
               // what it is. Joining on the present parts avoids a dangling separator.
               series.category,
@@ -1327,7 +1337,7 @@ export function FixtureTable({
                 setConfirm({
                   title: 'Allocate venues for every fixture?',
                   body: series.released
-                    ? `This series is RELEASED. Reallocating rewrites the ground for all ${series.fixtures.length} fixtures — clubs and players have already been sent the current ones, and there is no undo.`
+                    ? `This series is RELEASED. Reallocating rewrites the ground for all ${series.fixtures.length} fixtures — ${vt.clubs} and players have already been sent the current ones, and there is no undo.`
                     : `Assigns a ground to all ${series.fixtures.length} fixtures, replacing any already set. Hand-picked venues are kept only where the fixture is locked.`,
                   onYes: () => onAllocateVenues(series),
                   danger: series.released,
@@ -1585,7 +1595,7 @@ export function FixtureTable({
         <div className="fix-release-text">
           {series.released ? (
             <>
-              <div className="fix-release-eyebrow">✓ Live to clubs</div>
+              <div className="fix-release-eyebrow">✓ Live to {vt.clubs}</div>
               <div className="fix-release-text-title">
                 Fixtures released to all {distinctClubCount(series)} clubs
               </div>
@@ -1717,6 +1727,7 @@ function EditFixtureRow({
   released,
   onCheckClashes,
 }) {
+  const vt = useVertical().terms;
   // Each label is bound to its control. These sit BESIDE their inputs, so without an id
   // pairing a screen reader announces a row of unnamed boxes — and several fixtures can
   // be open at once, so the ids have to be per-row rather than global.
@@ -2051,11 +2062,11 @@ function EditFixtureRow({
                         },
                         {
                           label: 'Primary',
-                          desc: 'The home club’s main ground.',
+                          desc: `The home ${vt.club}’s main ground.`,
                         },
                         {
                           label: 'Secondary',
-                          desc: 'The home club’s backup ground, if they recorded one.',
+                          desc: `The home ${vt.club}’s backup ground, if they recorded one.`,
                           eg: 'a second pitch used when the main ground is booked',
                         },
                         {
@@ -2192,26 +2203,28 @@ function EditFixtureRow({
 
 /* ─── Empty-cohort state — shown before any clubs have registered ─── */
 function EmptyCohort({ onShareLink, onInviteAdmin }) {
+  const vt = useVertical().terms;
   return (
     <div style={{ padding: '8px 0' }}>
       <div className="page-head">
         <div className="ph-left">
           <div className="ph-crumb">Admin Console</div>
-          <h1 className="ph-title">Welcome — let&apos;s get your union set up</h1>
+          <h1 className="ph-title">Welcome — let&apos;s get your {vt.union} set up</h1>
           <p className="ph-desc">
-            No clubs yet. Share your union&apos;s signup link with your affiliated clubs — they
-            register themselves, and your cohort dashboard fills in here as they do.
+            No {vt.clubs} yet. Share your {vt.union}&apos;s signup link with your affiliated{' '}
+            {vt.clubs} — they register themselves, and your cohort dashboard fills in here as they
+            do.
           </p>
         </div>
       </div>
       <EmptyState
         icon={Icon.Clubs}
-        title="No clubs registered yet"
-        sub="Share your union's signup link — clubs register themselves and appear here as soon as they do."
+        title={`No ${vt.clubs} registered yet`}
+        sub={`Share your ${vt.union}'s signup link — ${vt.clubs} register themselves and appear here as soon as they do.`}
         action={
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
             <Btn tone="teal" icon={Icon.Mail} onClick={onShareLink}>
-              Invite clubs
+              Invite {vt.clubs}
             </Btn>
             {onInviteAdmin && (
               <Btn tone="outline" icon={Icon.Mail} onClick={onInviteAdmin}>
@@ -2244,6 +2257,7 @@ export function AdminLeagues({
   /** The tenant's competition defaults card (ADR 0014), rendered under the catalogue. */
   defaultsCard?: ReactNode;
 }) {
+  const vt = useVertical().terms;
   const copy = useCopy();
   const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null);
   const countFor = (key) =>
@@ -2255,7 +2269,7 @@ export function AdminLeagues({
       title: `Delete “${L.label}”?`,
       body:
         n > 0
-          ? `${n} club${n === 1 ? ' is' : 's are'} registered for this league. Deleting it won't change their records, but it disappears from the affiliation picker and fixture filters.`
+          ? `${n} ${n === 1 ? `${vt.club} is` : `${vt.clubs} are`} registered for this league. Deleting it won't change their records, but it disappears from the affiliation picker and fixture filters.`
           : 'This league will be removed from the affiliation picker and fixture filters.',
       onYes: () => {
         onDeleteLeague(L.key);
@@ -2289,7 +2303,7 @@ export function AdminLeagues({
         <EmptyState
           icon={Icon.Shield}
           title="No leagues yet"
-          sub="Create your first league so clubs can register for it during affiliation and admins can build fixtures."
+          sub={`Create your first league so ${vt.clubs} can register for it during affiliation and admins can build fixtures.`}
           action={
             <Btn tone="teal" icon={Icon.Plus} onClick={onCreate}>
               Create your first league
@@ -2304,7 +2318,7 @@ export function AdminLeagues({
                 <th>League</th>
                 <th>District</th>
                 <th>Group</th>
-                <th>Clubs registered</th>
+                <th>{vt.Clubs} registered</th>
                 <th style={{ width: 130 }}></th>
               </tr>
             </thead>
@@ -2529,6 +2543,12 @@ export function AdminDashboard({
   requiredDocs = DEFAULT_REQUIRED_DOCS,
 }) {
   const copy = useCopy();
+  const vertical = useVertical();
+  const vt = vertical.terms;
+  const seasonLabel = useSeasonLabel();
+  const cqiOn = useModule('cqi');
+  const complianceOn = useModule('compliance');
+  const progressModules = { cqi: cqiOn, compliance: complianceOn };
   const stats = cohortStats(clubs, requiredDocs);
   // Clubs a rep has renamed but no admin has acknowledged yet — surfaced as a worklist
   // tile so the flag is visible without opening each club.
@@ -2542,12 +2562,14 @@ export function AdminDashboard({
   // (affiliation not submitted, no CQI, or any compliance doc outstanding).
   function remindBulk() {
     const behind = (c) =>
-      !affiliationSubmitted(c) || c.cqi === 0 || !docsAllComplete(c, requiredDocs);
+      !affiliationSubmitted(c) ||
+      (cqiOn && c.cqi === 0) ||
+      (complianceOn && !docsAllComplete(c, requiredDocs));
     openBccReminder({
       emails: clubs.filter(behind).map((c) => c.exco?.chair?.email),
       subject: 'Smart Club Integration — outstanding submissions',
       toast,
-      emptyMessage: 'All clubs are up to date',
+      emptyMessage: `All ${vt.clubs} are up to date`,
     });
   }
 
@@ -2568,7 +2590,7 @@ export function AdminDashboard({
 
   // Sort by progress descending for "at risk" / "leaders"
   const ranked = [...clubs]
-    .map((c) => ({ ...c, prog: overallProgress(c, requiredDocs) }))
+    .map((c) => ({ ...c, prog: overallProgress(c, requiredDocs, progressModules) }))
     .sort((a, b) => b.prog - a.prog);
   const leaders = ranked.slice(0, 5);
   const atRisk = [...ranked].sort((a, b) => a.prog - b.prog).slice(0, 5);
@@ -2593,23 +2615,31 @@ export function AdminDashboard({
       done: clubs.filter((c) => affiliationSubmitted(c)).length,
       view: 'fixtures',
     },
-    {
-      num: '03',
-      label: 'Player Registration',
-      tone: 'navy',
-      done: clubs.filter((c) => c.players >= 30).length,
-      view: 'clubs_list',
-      future:
-        'Direct player-registration links flow straight into the cohort next phase — clubs and roster metrics auto-update, no manual admin entry.',
-    },
-    { num: '04', label: 'Live Scoring / Talent ID', tone: 'teal', done: 0, view: null },
-    {
-      num: '05',
-      label: 'Compliance Docs',
-      tone: 'gold',
-      done: clubs.filter((c) => docsAllComplete(c, requiredDocs)).length,
-      view: 'documents',
-    },
+    // CQI + compliance both off (e.g. football): the journey is just Affiliation + Fixtures.
+    ...(cqiOn || complianceOn
+      ? [
+          {
+            num: '03',
+            label: 'Player Registration',
+            tone: 'navy',
+            done: clubs.filter((c) => c.players >= 30).length,
+            view: 'clubs_list',
+            future: `Direct player-registration links flow straight into the cohort next phase — ${vt.clubs} and roster metrics auto-update, no manual admin entry.`,
+          },
+          { num: '04', label: 'Live Scoring / Talent ID', tone: 'teal', done: 0, view: null },
+          ...(complianceOn
+            ? [
+                {
+                  num: '05',
+                  label: 'Compliance Docs',
+                  tone: 'gold',
+                  done: clubs.filter((c) => docsAllComplete(c, requiredDocs)).length,
+                  view: 'documents',
+                },
+              ]
+            : []),
+        ]
+      : []),
   ];
   const onPhaseClick = (p) =>
     p.view
@@ -2638,11 +2668,14 @@ export function AdminDashboard({
         <div className="ph-left">
           <div className="ph-crumb">{copy.crumbRoot} · Admin Console</div>
           <h1 className="ph-title">
-            Club Integration <em>Cohort</em>
+            {vt.Club} Integration <em>Cohort</em>
           </h1>
           <p className="ph-desc">
-            {stats.total} affiliated clubs across the {copy.orgShort} districts. Track affiliation,
-            document compliance, CQI scoring and franchise readiness for the 2026/27 season.
+            {stats.total} affiliated {vt.clubs} across the {copy.orgShort} districts.{' '}
+            {cqiOn && complianceOn
+              ? 'Track affiliation, document compliance, CQI scoring and franchise readiness'
+              : 'Track affiliation, fixtures and league readiness'}{' '}
+            for the {seasonLabel} season.
           </p>
         </div>
         <div className="ph-actions">
@@ -2654,11 +2687,13 @@ export function AdminDashboard({
               const rows = clubs.map((c) =>
                 clubExportRow(c, {
                   docCompletion: (club) => docCompletion(club, requiredDocs),
-                  overallProgress: (club) => overallProgress(club, requiredDocs),
+                  overallProgress: (club) => overallProgress(club, requiredDocs, progressModules),
                   cqiBand,
+                  chairLabel: roleLabel(vertical, 'chair'),
+                  modules: progressModules,
                 }),
               );
-              if (!rows.length) return notify('No clubs to export');
+              if (!rows.length) return notify(`No ${vt.clubs} to export`);
               exportRowsToXlsx('cohort-report.xlsx', 'Cohort', rows).catch(() =>
                 notify('Export failed — please retry'),
               );
@@ -2678,8 +2713,10 @@ export function AdminDashboard({
           <Icon.Clock />
         </div>
         <div className="deadline-text">
-          <strong>Submission deadline · {deadlineLong}.</strong> Clubs must complete affiliation,
-          upload required compliance documents, and submit the CQI form.{' '}
+          <strong>Submission deadline · {deadlineLong}.</strong>{' '}
+          {cqiOn && complianceOn
+            ? `${vt.Clubs} must complete affiliation, upload required compliance documents, and submit the CQI form.`
+            : `${vt.Clubs} must complete their affiliation form by this date.`}{' '}
           <span className="days">{daysLabel}</span>.
         </div>
         <div className="deadline-cta" style={{ display: 'flex', gap: 8 }}>
@@ -2693,31 +2730,41 @@ export function AdminDashboard({
       </div>
 
       <div className="kpi-strip">
-        <KPI label="Total clubs" num={<CountUp to={stats.total} />} sub="2026/27 season" />
+        <KPI
+          label={`Total ${vertical.terms.clubs}`}
+          num={<CountUp to={stats.total} />}
+          sub={`${seasonLabel} season`}
+        />
         <KPI
           tone={statusFor(pct(stats.affComplete, stats.total))}
           label="Affiliated"
           num={<CountUp to={stats.affComplete} />}
           sub={`${pct(stats.affComplete, stats.total)}% of cohort`}
         />
-        <KPI
-          tone={statusFor(pct(stats.docsComplete, stats.total))}
-          label="Docs compliant"
-          num={<CountUp to={stats.docsComplete} />}
-          sub={`${pct(stats.docsComplete, stats.total)}% complete`}
-        />
-        <KPI
-          tone={statusFor(pct(stats.cqiSubmitted, stats.total))}
-          label="CQI submitted"
-          num={<CountUp to={stats.cqiSubmitted} />}
-          sub={`${pct(stats.cqiSubmitted, stats.total)}% submitted`}
-        />
-        <KPI
-          tone={statusFor(stats.avgCqi, 75, 60)}
-          label="Avg CQI score"
-          num={<CountUp to={stats.avgCqi} decimals={1} />}
-          sub="raw score · cohort avg"
-        />
+        {complianceOn && (
+          <KPI
+            tone={statusFor(pct(stats.docsComplete, stats.total))}
+            label="Docs compliant"
+            num={<CountUp to={stats.docsComplete} />}
+            sub={`${pct(stats.docsComplete, stats.total)}% complete`}
+          />
+        )}
+        {cqiOn && (
+          <KPI
+            tone={statusFor(pct(stats.cqiSubmitted, stats.total))}
+            label="CQI submitted"
+            num={<CountUp to={stats.cqiSubmitted} />}
+            sub={`${pct(stats.cqiSubmitted, stats.total)}% submitted`}
+          />
+        )}
+        {cqiOn && (
+          <KPI
+            tone={statusFor(stats.avgCqi, 75, 60)}
+            label="Avg CQI score"
+            num={<CountUp to={stats.avgCqi} decimals={1} />}
+            sub="raw score · cohort avg"
+          />
+        )}
         {renamedCount > 0 && (
           <KPI tone="gold" label="Renamed" num={<CountUp to={renamedCount} />} sub="needs review" />
         )}
@@ -2726,7 +2773,7 @@ export function AdminDashboard({
       {/* Phase roll-up */}
       <Card
         title="Integration phase roll-up"
-        sub="Cohort progress through the 5-phase smart integration journey"
+        sub={`Cohort progress through the ${phases.length}-phase smart integration journey`}
       >
         <div className="phase-track" style={{ borderRadius: 0, border: 'none' }}>
           {phases.map((p, i) => (
@@ -2942,6 +2989,7 @@ export function AdminSettingsView({
   onRevokeSignupLink,
   toast,
 }) {
+  const vt = useVertical().terms;
   const [name, setName] = useStateA(orgName || '');
   const [savingOrg, setSavingOrg] = useStateA(false);
   const [showEditDeadline, setShowEditDeadline] = useStateA(false);
@@ -2993,7 +3041,7 @@ export function AdminSettingsView({
         document.execCommand('copy');
         toast?.('Signup link copied');
       } catch {
-        toast?.('Could not copy — copy it from the Invite clubs dialog', 'warn');
+        toast?.(`Could not copy — copy it from the Invite ${vt.clubs} dialog`, 'warn');
       }
       ta.remove();
     }
@@ -3042,14 +3090,17 @@ export function AdminSettingsView({
           alignItems: 'start',
         }}
       >
-        <Card title="Organisation" sub="Shown across club portals, emails and the sign-in screen.">
+        <Card
+          title="Organisation"
+          sub={`Shown across ${vt.club} portals, emails and the sign-in screen.`}
+        >
           <div className="field">
             <div className="field-label">Organisation name</div>
             <input
               className="field-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Coastal Cricket Union"
+              placeholder={`e.g. Coastal ${vt.Sport} ${vt.Union}`}
             />
           </div>
           <Btn tone="teal" size="sm" onClick={saveOrg} disabled={!dirty || savingOrg}>
@@ -3059,7 +3110,7 @@ export function AdminSettingsView({
 
         <Card
           title="Affiliation deadline"
-          sub="The date clubs must submit affiliation, documents and CQI by."
+          sub={`The date ${vt.clubs} must submit affiliation, documents and CQI by.`}
         >
           <div style={rowStyle}>
             <div style={valStyle}>{deadlineMid}</div>
@@ -3075,8 +3126,8 @@ export function AdminSettingsView({
         </Card>
 
         <Card
-          title="Union support contact"
-          sub="Surfaced to clubs as the office to reach for help."
+          title={`${vt.Union} support contact`}
+          sub={`Surfaced to ${vt.clubs} as the office to reach for help.`}
         >
           <div style={rowStyle}>
             <div>
@@ -3091,7 +3142,7 @@ export function AdminSettingsView({
 
         <Card
           title="Access controls"
-          sub="Invite admins and club reps, change roles and edit a rep's club scope."
+          sub={`Invite admins and ${vt.club} reps, change roles and edit a rep's ${vt.club} scope.`}
         >
           <div style={rowStyle}>
             <div>
@@ -3107,8 +3158,8 @@ export function AdminSettingsView({
         </Card>
 
         <Card
-          title="Club self-registration"
-          sub="One link for the whole union — clubs open it to register themselves."
+          title={`${vt.Club} self-registration`}
+          sub={`One link for the whole ${vt.union} — ${vt.clubs} open it to register themselves.`}
         >
           <div style={{ ...rowStyle, marginBottom: 12 }}>
             <span style={chip(!!signupLink)}>{signupLink ? 'Link active' : 'No link'}</span>
@@ -3170,7 +3221,7 @@ export function AdminSettingsView({
 
         <Card
           title="Notifications"
-          sub="How clubs and players are reached. Managed by the platform."
+          sub={`How ${vt.clubs} and players are reached. Managed by the platform.`}
         >
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
             <span style={chip(true)}>Email</span>
@@ -3205,7 +3256,15 @@ export function AdminSettingsView({
 }
 
 /* ─── Cohort insights — visualises CQI bands, doc compliance, outstanding resources ─── */
-function ClubInsights({ clubs, submissionDeadline, requiredDocs = DEFAULT_REQUIRED_DOCS }) {
+function ClubInsights({
+  clubs,
+  submissionDeadline,
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
+  cqiOn = true,
+  complianceOn = true,
+}) {
+  const vt = useVertical().terms;
+  const seasonLabel = useSeasonLabel();
   const deadlineShort = formatDeadlineShort(submissionDeadline);
   const deadlineMid = formatDeadlineMid(submissionDeadline);
   // CQI bands + doc compliance — shared derivations (src/insights.tsx) so the
@@ -3217,65 +3276,71 @@ function ClubInsights({ clubs, submissionDeadline, requiredDocs = DEFAULT_REQUIR
   // Resources required — "behind" is keyed on the form fact.
   const notAffiliated = clubs.filter((c) => !affiliationSubmitted(c)).length;
   const incompleteDocs = clubs.filter((c) => !docsAllComplete(c, requiredDocs)).length;
-  const noCqi = clubs.filter((c) => c.cqi === 0).length;
+  const noCqi = cqiOn ? clubs.filter((c) => c.cqi === 0).length : 0;
   const totalReminders = notAffiliated + noCqi;
 
   return (
     <div className="insights-panel">
       {/* ─── CQI Score Distribution ─── */}
-      <div className="insights-card">
-        <div className="insights-card-head">
-          <div className="insights-card-title">CQI Score Distribution</div>
-          <div className="insights-card-meta">
-            Avg <CountUp to={avgCqi} decimals={1} />
-          </div>
-        </div>
-        {bands.map((b) => (
-          <div key={b.key} className="insights-bar-row">
-            <div className="insights-bar-label">{b.label}</div>
-            <div className="insights-bar-track">
-              <div
-                className={`insights-bar-fill ${bandTone(b.key)}`}
-                style={{ width: (b.count / maxBand) * 100 + '%' }}
-              />
+      {cqiOn && (
+        <div className="insights-card">
+          <div className="insights-card-head">
+            <div className="insights-card-title">CQI Score Distribution</div>
+            <div className="insights-card-meta">
+              Avg <CountUp to={avgCqi} decimals={1} />
             </div>
-            <div className="insights-bar-num">{b.count}</div>
           </div>
-        ))}
-        <div className="insights-callout good">
-          <strong>{submitted.length}</strong> of {clubs.length} clubs submitted CQI · spread across{' '}
-          {bands.filter((b) => b.count > 0 && b.key !== 'P').length} performance band
-          {bands.filter((b) => b.count > 0 && b.key !== 'P').length === 1 ? '' : 's'}
+          {bands.map((b) => (
+            <div key={b.key} className="insights-bar-row">
+              <div className="insights-bar-label">{b.label}</div>
+              <div className="insights-bar-track">
+                <div
+                  className={`insights-bar-fill ${bandTone(b.key)}`}
+                  style={{ width: (b.count / maxBand) * 100 + '%' }}
+                />
+              </div>
+              <div className="insights-bar-num">{b.count}</div>
+            </div>
+          ))}
+          <div className="insights-callout good">
+            <strong>{submitted.length}</strong> of {clubs.length} {vt.clubs} submitted CQI · spread
+            across {bands.filter((b) => b.count > 0 && b.key !== 'P').length} performance band
+            {bands.filter((b) => b.count > 0 && b.key !== 'P').length === 1 ? '' : 's'}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* ─── Document Compliance ─── */}
-      <div className="insights-card">
-        <div className="insights-card-head">
-          <div className="insights-card-title">Document Compliance</div>
-          <div className="insights-card-meta">of {clubs.length} clubs</div>
-        </div>
-        {docStats.map((d) => (
-          <div key={d.key} className="insights-bar-row wide-label">
-            <div className="insights-bar-label" title={d.name}>
-              {d.name}
-            </div>
-            <div className="insights-bar-track">
-              <div
-                className={`insights-bar-fill ${docTone(d.pct)}`}
-                style={{ width: d.pct + '%' }}
-              />
-            </div>
-            <div className="insights-bar-num">
-              {d.count}/{d.total}
+      {complianceOn && (
+        <div className="insights-card">
+          <div className="insights-card-head">
+            <div className="insights-card-title">Document Compliance</div>
+            <div className="insights-card-meta">
+              of {clubs.length} {vt.clubs}
             </div>
           </div>
-        ))}
-        <div className={`insights-callout ${mostMissing.pct < 40 ? 'alert' : 'warn'}`}>
-          Most missing: <strong>{mostMissing.name}</strong> — only{' '}
-          <strong>{mostMissing.count}</strong> of {mostMissing.total} clubs uploaded
+          {docStats.map((d) => (
+            <div key={d.key} className="insights-bar-row wide-label">
+              <div className="insights-bar-label" title={d.name}>
+                {d.name}
+              </div>
+              <div className="insights-bar-track">
+                <div
+                  className={`insights-bar-fill ${docTone(d.pct)}`}
+                  style={{ width: d.pct + '%' }}
+                />
+              </div>
+              <div className="insights-bar-num">
+                {d.count}/{d.total}
+              </div>
+            </div>
+          ))}
+          <div className={`insights-callout ${mostMissing.pct < 40 ? 'alert' : 'warn'}`}>
+            Most missing: <strong>{mostMissing.name}</strong> — only{' '}
+            <strong>{mostMissing.count}</strong> of {mostMissing.total} clubs uploaded
+          </div>
         </div>
-      </div>
+      )}
 
       {/* ─── Resources Required ─── */}
       <div className="insights-card">
@@ -3291,31 +3356,35 @@ function ClubInsights({ clubs, submissionDeadline, requiredDocs = DEFAULT_REQUIR
               <CountUp to={notAffiliated} />
             </span>
             <span className="resource-text">
-              <strong>{notAffiliated === 1 ? 'club' : 'clubs'}</strong> haven't submitted the
-              2026/27 affiliation form
+              <strong>{notAffiliated === 1 ? vt.club : vt.clubs}</strong> haven't submitted the{' '}
+              {seasonLabel} affiliation form
             </span>
           </div>
-          <div className="resource-row">
-            <span
-              className={`resource-num ${incompleteDocs > clubs.length * 0.3 ? 'danger' : incompleteDocs > 0 ? 'warn' : 'good'}`}
-            >
-              <CountUp to={incompleteDocs} />
-            </span>
-            <span className="resource-text">
-              <strong>{incompleteDocs === 1 ? 'club' : 'clubs'}</strong> missing one or more
-              compliance docs
-            </span>
-          </div>
-          <div className="resource-row">
-            <span
-              className={`resource-num ${noCqi > clubs.length * 0.3 ? 'danger' : noCqi > 0 ? 'warn' : 'good'}`}
-            >
-              <CountUp to={noCqi} />
-            </span>
-            <span className="resource-text">
-              <strong>{noCqi === 1 ? 'club' : 'clubs'}</strong> haven't submitted their CQI form
-            </span>
-          </div>
+          {complianceOn && (
+            <div className="resource-row">
+              <span
+                className={`resource-num ${incompleteDocs > clubs.length * 0.3 ? 'danger' : incompleteDocs > 0 ? 'warn' : 'good'}`}
+              >
+                <CountUp to={incompleteDocs} />
+              </span>
+              <span className="resource-text">
+                <strong>{incompleteDocs === 1 ? 'club' : 'clubs'}</strong> missing one or more
+                compliance docs
+              </span>
+            </div>
+          )}
+          {cqiOn && (
+            <div className="resource-row">
+              <span
+                className={`resource-num ${noCqi > clubs.length * 0.3 ? 'danger' : noCqi > 0 ? 'warn' : 'good'}`}
+              >
+                <CountUp to={noCqi} />
+              </span>
+              <span className="resource-text">
+                <strong>{noCqi === 1 ? 'club' : 'clubs'}</strong> haven't submitted their CQI form
+              </span>
+            </div>
+          )}
         </div>
         <div className="insights-callout alert">
           Send <strong>{totalReminders}</strong> reminder{totalReminders === 1 ? '' : 's'} before{' '}
@@ -3342,9 +3411,19 @@ export function AdminClubsList({
   requiredDocs = DEFAULT_REQUIRED_DOCS,
 }) {
   const copy = useCopy();
+  const vertical = useVertical();
+  const cqiOn = useModule('cqi');
+  const complianceOn = useModule('compliance');
+  const progressModules = { cqi: cqiOn, compliance: complianceOn };
+  const chairLabel = roleLabel(vertical, 'chair');
   const [q, setQ] = useStateA('');
   const [filter, setFilter] = useStateA('all');
   const [showInviteAdmin, setShowInviteAdmin] = useStateA(false);
+  // "Fully integrated" = every step of the tenant's journey; a disabled module is no step.
+  const integrated = (c) =>
+    c.affiliation === 'complete' &&
+    (!complianceOn || docsAllComplete(c, requiredDocs)) &&
+    (!cqiOn || c.cqi > 0);
 
   const filtered = useMemoA(() => {
     let cs = clubs;
@@ -3354,39 +3433,33 @@ export function AdminClubsList({
           c.name.toLowerCase().includes(q.toLowerCase()) ||
           c.chair.toLowerCase().includes(q.toLowerCase()),
       );
-    if (filter === 'complete')
-      cs = cs.filter(
-        (c) => c.affiliation === 'complete' && docsAllComplete(c, requiredDocs) && c.cqi > 0,
-      );
-    if (filter === 'incomplete')
-      cs = cs.filter(
-        (c) => !(c.affiliation === 'complete' && docsAllComplete(c, requiredDocs) && c.cqi > 0),
-      );
+    if (filter === 'complete') cs = cs.filter((c) => integrated(c));
+    if (filter === 'incomplete') cs = cs.filter((c) => !integrated(c));
     if (filter === 'affiliation_outstanding') cs = cs.filter((c) => !affiliationSubmitted(c));
     if (filter === 'no_cqi') cs = cs.filter((c) => c.cqi === 0);
     return cs;
-  }, [clubs, q, filter, requiredDocs]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- integrated reads only the deps below
+  }, [clubs, q, filter, requiredDocs, cqiOn, complianceOn]);
 
   const counts = useMemoA(
     () => ({
       all: clubs.length,
-      complete: clubs.filter(
-        (c) => c.affiliation === 'complete' && docsAllComplete(c, requiredDocs) && c.cqi > 0,
-      ).length,
-      incomplete: clubs.filter(
-        (c) => !(c.affiliation === 'complete' && docsAllComplete(c, requiredDocs) && c.cqi > 0),
-      ).length,
+      complete: clubs.filter((c) => integrated(c)).length,
+      incomplete: clubs.filter((c) => !integrated(c)).length,
       affiliation_outstanding: clubs.filter((c) => !affiliationSubmitted(c)).length,
       no_cqi: clubs.filter((c) => c.cqi === 0).length,
     }),
-    [clubs, requiredDocs],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- integrated reads only the deps below
+    [clubs, requiredDocs, cqiOn, complianceOn],
   );
 
   return (
     <div>
       <div className="page-head">
         <div className="ph-left">
-          <div className="ph-crumb">{copy.crumbRoot} · Admin Console / Clubs</div>
+          <div className="ph-crumb">
+            {copy.crumbRoot} · Admin Console / {vertical.terms.Clubs}
+          </div>
           <h1 className="ph-title">
             Club <em>directory</em>
           </h1>
@@ -3404,12 +3477,15 @@ export function AdminClubsList({
               const rows = filtered.map((c) =>
                 clubExportRow(c, {
                   docCompletion: (club) => docCompletion(club, requiredDocs),
-                  overallProgress: (club) => overallProgress(club, requiredDocs),
+                  overallProgress: (club) => overallProgress(club, requiredDocs, progressModules),
                   cqiBand,
+                  chairLabel,
+                  modules: progressModules,
                 }),
               );
-              if (!rows.length) return toast?.('No clubs match — nothing to export', 'warn');
-              exportRowsToXlsx('club-directory.xlsx', 'Clubs', rows).catch(() =>
+              if (!rows.length)
+                return toast?.(`No ${vertical.terms.clubs} match — nothing to export`, 'warn');
+              exportRowsToXlsx('club-directory.xlsx', vertical.terms.Clubs, rows).catch(() =>
                 toast?.('Export failed — please retry', 'warn'),
               );
             }}
@@ -3417,7 +3493,7 @@ export function AdminClubsList({
             Export Excel
           </Btn>
           <Btn tone="ink" icon={Icon.Mail} size="sm" onClick={() => setShowShareLink(true)}>
-            Invite clubs
+            Invite {vertical.terms.clubs}
           </Btn>
         </div>
       </div>
@@ -3434,21 +3510,23 @@ export function AdminClubsList({
             clubs={clubs}
             submissionDeadline={submissionDeadline}
             requiredDocs={requiredDocs}
+            cqiOn={cqiOn}
+            complianceOn={complianceOn}
           />
 
           <div className="filter-row">
             <input
               className="search-box"
-              placeholder="Search by club name or chairperson…"
+              placeholder={`Search by ${vertical.terms.club} name or ${chairLabel.toLowerCase()}…`}
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
             {[
-              { k: 'all', label: 'All clubs' },
+              { k: 'all', label: `All ${vertical.terms.clubs}` },
               { k: 'complete', label: 'Fully integrated' },
               { k: 'incomplete', label: 'Incomplete' },
               { k: 'affiliation_outstanding', label: 'Affiliation outstanding' },
-              { k: 'no_cqi', label: 'CQI not submitted' },
+              ...(cqiOn ? [{ k: 'no_cqi', label: 'CQI not submitted' }] : []),
             ].map((f) => (
               <button
                 key={f.k}
@@ -3465,11 +3543,11 @@ export function AdminClubsList({
             <table className="tbl">
               <thead>
                 <tr>
-                  <th style={{ width: '24%' }}>Club</th>
-                  <th>Chairperson</th>
+                  <th style={{ width: '24%' }}>{vertical.terms.Club}</th>
+                  <th>{chairLabel}</th>
                   <th>Affiliation</th>
-                  <th>Docs</th>
-                  <th>CQI</th>
+                  {complianceOn && <th>Docs</th>}
+                  {cqiOn && <th>CQI</th>}
                   <th>Overall</th>
                   <th style={{ width: 60 }}></th>
                 </tr>
@@ -3477,7 +3555,7 @@ export function AdminClubsList({
               <tbody>
                 {filtered.map((c) => {
                   const dc = docCompletion(c, requiredDocs);
-                  const op = overallProgress(c, requiredDocs);
+                  const op = overallProgress(c, requiredDocs, progressModules);
                   const band = cqiBand(c.cqi);
                   return (
                     <tr key={c.id} className="clickable" onClick={() => gotoClub(c.id)}>
@@ -3509,15 +3587,19 @@ export function AdminClubsList({
                         </div>
                       </td>
                       <td>{affPill(c.affiliation)}</td>
-                      <td>
-                        <ProgChip
-                          value={dc}
-                          tone={dc === 100 ? 'teal' : dc >= 50 ? 'gold' : 'coral'}
-                        />
-                      </td>
-                      <td>
-                        <Pill tone={band.tone}>{band.label}</Pill>
-                      </td>
+                      {complianceOn && (
+                        <td>
+                          <ProgChip
+                            value={dc}
+                            tone={dc === 100 ? 'teal' : dc >= 50 ? 'gold' : 'coral'}
+                          />
+                        </td>
+                      )}
+                      {cqiOn && (
+                        <td>
+                          <Pill tone={band.tone}>{band.label}</Pill>
+                        </td>
+                      )}
                       <td>
                         <ProgChip
                           value={op}
@@ -3563,6 +3645,8 @@ export function AdminClubsList({
    themselves and appear in the cohort immediately. Generating a new link (or
    revoking) kills the previous token server-side at once. */
 function ShareSignupLinkModal({ signupLink, onClose, onGenerate, onRevoke, toast }) {
+  const vt = useVertical().terms;
+  const seasonLabel = useSeasonLabel();
   useEscapeClose(onClose);
   const baseUrl = (typeof window !== 'undefined' && window.location.origin) || '';
   const url = signupLink ? `${baseUrl}/signup?t=${signupLink.token}` : '';
@@ -3596,8 +3680,8 @@ function ShareSignupLinkModal({ signupLink, onClose, onGenerate, onRevoke, toast
 
   // No recipient on either share — the link is union-wide, so the admin picks
   // who to send it to in their own client.
-  const shareText = `Register your club for the season here: ${url}`;
-  const mailtoUrl = `mailto:?subject=${encodeURIComponent('Register your club · 2026/27 season')}&body=${encodeURIComponent(shareText)}`;
+  const shareText = `Register your ${vt.club} for the season here: ${url}`;
+  const mailtoUrl = `mailto:?subject=${encodeURIComponent(`Register your ${vt.club} · ${seasonLabel} season`)}&body=${encodeURIComponent(shareText)}`;
   const waUrl = `https://wa.me/?text=${encodeURIComponent(shareText)}`;
 
   async function run(kind, fn, doneMsg) {
@@ -3627,9 +3711,9 @@ function ShareSignupLinkModal({ signupLink, onClose, onGenerate, onRevoke, toast
       <div className="task-modal narrow" style={{ maxWidth: 620 }}>
         <div className="task-modal-head">
           <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Cohort · club self-registration</div>
+            <div className="task-modal-head-eyebrow">Cohort · {vt.club} self-registration</div>
             <div className="task-modal-head-title">
-              Invite clubs · <em>share the signup link</em>
+              Invite {vt.clubs} · <em>share the signup link</em>
             </div>
           </div>
           <button className="task-modal-close" onClick={onClose} title="Close">
@@ -3672,9 +3756,9 @@ function ShareSignupLinkModal({ signupLink, onClose, onGenerate, onRevoke, toast
                   margin: '0 auto 18px',
                 }}
               >
-                Generate one link for the whole union. Clubs open it, register themselves with their
-                chairperson&apos;s details, and appear in your cohort immediately — no manual
-                onboarding.
+                Generate one link for the whole {vt.union}. {vt.Clubs} open it, register themselves
+                with their {vt.chair}&apos;s details, and appear in your cohort immediately — no
+                manual onboarding.
               </p>
               <Btn tone="teal" icon={Icon.Plus} onClick={generate} disabled={!!busy}>
                 {busy === 'generate' ? 'Generating…' : 'Generate link'}
@@ -3837,6 +3921,8 @@ function ShareSignupLinkModal({ signupLink, onClose, onGenerate, onRevoke, toast
    value to AppRoutes state and toasts a confirmation. Reset restores the
    default. The change is visible immediately across the entire UI. */
 function EditDeadlineModal({ currentISO, defaultISO, onClose, onSave, toast }) {
+  const vt = useVertical().terms;
+  const seasonLabel = useSeasonLabel();
   const [value, setValue] = useStateA(currentISO || defaultISO);
   const long = formatDeadlineLong(value);
   const days = daysUntil(value);
@@ -3880,8 +3966,9 @@ function EditDeadlineModal({ currentISO, defaultISO, onClose, onSave, toast }) {
         </div>
         <div className="task-modal-body">
           <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
-            Change the 2026/27 affiliation, compliance and CQI submission cut-off. The new date will
-            update across the homepage, club portal, onboarding flow and every reminder.
+            Change the {seasonLabel} affiliation, compliance and CQI submission cut-off. The new
+            date will update across the homepage, {vt.club} portal, onboarding flow and every
+            reminder.
           </p>
 
           <div className="field">
@@ -3938,7 +4025,9 @@ function EditDeadlineModal({ currentISO, defaultISO, onClose, onSave, toast }) {
                 marginTop: 2,
               }}
             >
-              {isPast ? '⚠ This date is in the past — clubs will see “Deadline today”.' : daysLine}
+              {isPast
+                ? `⚠ This date is in the past — ${vt.clubs} will see “Deadline today”.`
+                : daysLine}
             </div>
           </div>
 
@@ -3976,6 +4065,7 @@ function EditDeadlineModal({ currentISO, defaultISO, onClose, onSave, toast }) {
    "email the union" button) for both admin and club logins once /tenant
    refetches. Admin-only, like every other tenant-wide setting. */
 function EditSupportContactModal({ current, onClose, onSave, toast }) {
+  const vt = useVertical().terms;
   const init = parseSupport(current);
   const [name, setName] = useStateA(init.name === 'Union office' ? '' : init.name);
   const [email, setEmail] = useStateA(init.email);
@@ -4012,8 +4102,8 @@ function EditSupportContactModal({ current, onClose, onSave, toast }) {
         </div>
         <div className="task-modal-body">
           <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
-            The union office name and email shown in the Need Help panel and behind every “Contact
-            union” button. Updates apply across the whole portal for every club.
+            The {vt.union} office name and email shown in the Need Help panel and behind every
+            “Contact {vt.union}” button. Updates apply across the whole portal for every {vt.club}.
           </p>
 
           <div className="field">
@@ -4024,7 +4114,7 @@ function EditSupportContactModal({ current, onClose, onSave, toast }) {
               className="field-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Cricket Services"
+              placeholder={`${vt.Sport} Services`}
               autoFocus
             />
           </div>
@@ -4132,6 +4222,7 @@ export function nextChairContact(
    chair changes later. Mirrors EditSupportContactModal's EMAIL_RE validation so
    an invalid address can't be saved into a broken mailto:. */
 export function ChairContactModal({ club, onClose, onSave, toast }) {
+  const vt = useVertical().terms;
   const seed = club.exco?.chair || {};
   const [name, setName] = useStateA(seed.name || club.chair || '');
   const [email, setEmail] = useStateA(seed.email || '');
@@ -4161,7 +4252,7 @@ export function ChairContactModal({ club, onClose, onSave, toast }) {
     // the parent's withToast) keeps the modal open for retry rather than closing.
     Promise.resolve(onSave && onSave({ name: cleanName, email: cleanEmail, cell: cleanCell }))
       .then(() => {
-        toast && toast(`Chairperson updated · ${cleanEmail}`);
+        toast && toast(`${vt.Chair} updated · ${cleanEmail}`);
         onClose && onClose();
       })
       .catch(() => setBusy(false));
@@ -4172,9 +4263,9 @@ export function ChairContactModal({ club, onClose, onSave, toast }) {
       <div className="task-modal narrow" style={{ maxWidth: 520 }}>
         <div className="task-modal-head">
           <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Club details</div>
+            <div className="task-modal-head-eyebrow">{vt.Club} details</div>
             <div className="task-modal-head-title">
-              Edit <em>chairperson</em> · {club.name}
+              Edit <em>{vt.chair}</em> · {club.name}
             </div>
           </div>
           <button className="task-modal-close" onClick={onClose} title="Close">
@@ -4183,8 +4274,9 @@ export function ChairContactModal({ club, onClose, onSave, toast }) {
         </div>
         <div className="task-modal-body">
           <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
-            The chairperson is this club's primary contact for deadline reminders, the affiliation
-            link and "Email chairperson". Used across the portal once the club refetches.
+            The {vt.chair} is this {vt.club}&apos;s primary contact for deadline reminders, the
+            affiliation link and &quot;Email {vt.chair}&quot;. Used across the portal once the{' '}
+            {vt.club} refetches.
           </p>
 
           <div className="field">
@@ -4195,12 +4287,12 @@ export function ChairContactModal({ club, onClose, onSave, toast }) {
               className="field-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Chairperson name"
+              placeholder={`${vt.Chair} name`}
               autoFocus
             />
             {nameChanged && (
               <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6, lineHeight: 1.5 }}>
-                Term dates and ID details of the previous chairperson will be cleared; the club
+                Term dates and ID details of the previous {vt.chair} will be cleared; the {vt.club}
                 completes them on its affiliation form.
               </div>
             )}
@@ -4248,7 +4340,7 @@ export function ChairContactModal({ club, onClose, onSave, toast }) {
               Cancel
             </Btn>
             <Btn tone="teal" icon={Icon.Check} disabled={!canSave} onClick={save}>
-              {busy ? 'Saving…' : 'Save chairperson'}
+              {busy ? 'Saving…' : `Save ${vt.chair}`}
             </Btn>
           </div>
         </div>
@@ -4268,6 +4360,9 @@ export function ClubLeaguesEditor({ club, allLeagues, onSave }) {
   const outsideFlat = Object.values(outside).flatMap((g) => Object.values(g).flat());
   const outsideByKey: Record<string, any> = {};
   for (const l of outsideFlat) outsideByKey[l.key] = l;
+  // Fixtures-only entries (a KO Cup) are hidden from both catalogues above — they are not
+  // an affiliation pick — but entering a club here is what makes it a KO Cup entrant.
+  const fixturesOnly = (allLeagues || []).filter(isFixturesOnlyLeague);
   const initial = Array.isArray(club.leagues) ? club.leagues : [];
   const [sel, setSel] = useStateA(initial);
   const [busy, setBusy] = useStateA(false);
@@ -4286,7 +4381,10 @@ export function ClubLeaguesEditor({ club, allLeagues, onSave }) {
   // A selected key is an orphan only when it is in NEITHER the district defaults NOR the
   // cross-district catalogue — a genuinely deleted key. Selected cross-district keys stay
   // visible as their own chips (below), so they must not be flagged for removal here.
-  const orphans = sel.filter((k) => !opts.some((o) => o.key === k) && !outsideByKey[k]);
+  const orphans = sel.filter(
+    (k) =>
+      !opts.some((o) => o.key === k) && !outsideByKey[k] && !fixturesOnly.some((f) => f.key === k),
+  );
   const selectedOutside = sel.filter((k) => !!outsideByKey[k]).map((k) => outsideByKey[k]);
   const dirty = sel.length !== initial.length || sel.some((k) => !initial.includes(k));
   const toggle = (key) =>
@@ -4308,7 +4406,12 @@ export function ClubLeaguesEditor({ club, allLeagues, onSave }) {
     color: orphan ? 'var(--muted)' : on ? 'var(--green)' : 'var(--ink)',
   });
 
-  if (opts.length === 0 && orphans.length === 0 && outsideFlat.length === 0)
+  if (
+    opts.length === 0 &&
+    orphans.length === 0 &&
+    outsideFlat.length === 0 &&
+    fixturesOnly.length === 0
+  )
     return (
       <div style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5 }}>
         No leagues for {club.district} yet — create them on the Leagues page first.
@@ -4428,6 +4531,33 @@ export function ClubLeaguesEditor({ club, allLeagues, onSave }) {
           )}
         </div>
       )}
+      {fixturesOnly.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div
+            style={{
+              fontSize: 11,
+              color: 'var(--muted-2)',
+              fontFamily: "'Montserrat',sans-serif",
+              fontWeight: 700,
+              marginBottom: 6,
+            }}
+          >
+            Fixtures-only competitions · not shown to clubs
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {fixturesOnly.map((L) => (
+              <button
+                key={L.key}
+                type="button"
+                onClick={() => toggle(L.key)}
+                style={chip(sel.includes(L.key), false)}
+              >
+                {L.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {dirty && (
         <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
           <Btn tone="ghost" size="sm" onClick={() => setSel(initial)} disabled={busy}>
@@ -4462,6 +4592,8 @@ export function AdminClubDetail({
   onReconfirmAffiliation,
   allSeries = [],
 }) {
+  const vt = useVertical().terms;
+  const seasonLabel = useSeasonLabel();
   // Hooks must run unconditionally — keep state before any early return.
   const [showLinkModal, setShowLinkModal] = useStateA(false);
   const [showInvite, setShowInvite] = useStateA(false);
@@ -4475,9 +4607,11 @@ export function AdminClubDetail({
   const [showRemove, setShowRemove] = useStateA(false);
   const [noteText, setNoteText] = useStateA('');
   const [noteBusy, setNoteBusy] = useStateA(false);
+  const cqiOn = useModule('cqi');
+  const complianceOn = useModule('compliance');
   if (!club) return null;
   const dc = docCompletion(club, requiredDocs);
-  const op = overallProgress(club, requiredDocs);
+  const op = overallProgress(club, requiredDocs, { cqi: cqiOn, compliance: complianceOn });
   const band = cqiBand(club.cqi);
   // Team counts derive from the leagues entered on the affiliation form, summing the
   // per-league team counts (a club may field >1 side); club.teams/juniors are stale.
@@ -4504,7 +4638,7 @@ export function AdminClubDetail({
     // No email on file → open the editor so the admin can add it right away,
     // rather than dead-ending on a toast.
     if (!e) {
-      toast?.('No chairperson email on file — add one to send mail');
+      toast?.(`No ${vt.chair} email on file — add one to send mail`);
       return setShowChairEdit(true);
     }
     window.location.href = `mailto:${e}?subject=${encodeURIComponent(
@@ -4548,29 +4682,38 @@ export function AdminClubDetail({
         ? `Allocated to ${club.sub === 'EMCU' ? 'EMCU Division 1' : 'District Division'}`
         : 'Pending affiliation',
     },
-    {
-      n: '03',
-      t: 'Player Registration',
-      done: club.players >= 30,
-      val: Math.min(100, ((club.players || 0) / 60) * 100),
-      detail: `${club.players || 0} players registered`,
-      future:
-        'Auto-populates next phase: direct player-registration links will flow straight into the cohort — no manual admin entry.',
-    },
-    {
-      n: '04',
-      t: 'Live Scoring',
-      done: false,
-      val: club.cqi > 0 ? 25 : 0,
-      detail: 'Begins round 1 · 02 Aug 2026',
-    },
-    {
-      n: '05',
-      t: 'Compliance',
-      done: dc === 100,
-      val: dc,
-      detail: `${docsUploadedCount(club, requiredDocs)} of ${completionDocs(requiredDocs).length} docs uploaded`,
-    },
+    // CQI + compliance both off (e.g. football): the journey is just Affiliation + Fixtures.
+    ...(cqiOn || complianceOn
+      ? [
+          {
+            n: '03',
+            t: 'Player Registration',
+            done: club.players >= 30,
+            val: Math.min(100, ((club.players || 0) / 60) * 100),
+            detail: `${club.players || 0} players registered`,
+            future:
+              'Auto-populates next phase: direct player-registration links will flow straight into the cohort — no manual admin entry.',
+          },
+          {
+            n: '04',
+            t: 'Live Scoring',
+            done: false,
+            val: club.cqi > 0 ? 25 : 0,
+            detail: 'Begins round 1 · 02 Aug 2026',
+          },
+          ...(complianceOn
+            ? [
+                {
+                  n: '05',
+                  t: 'Compliance',
+                  done: dc === 100,
+                  val: dc,
+                  detail: `${docsUploadedCount(club, requiredDocs)} of ${completionDocs(requiredDocs).length} docs uploaded`,
+                },
+              ]
+            : []),
+        ]
+      : []),
   ];
 
   return (
@@ -4578,7 +4721,7 @@ export function AdminClubDetail({
       <div className="page-head">
         <div className="ph-left">
           <div className="ph-crumb">
-            <a onClick={gotoList}>Clubs</a> &nbsp;/&nbsp; {club.name}
+            <a onClick={gotoList}>{vt.Clubs}</a> &nbsp;/&nbsp; {club.name}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginTop: 4 }}>
             <ClubAvatar club={club} size={44} />
@@ -4637,10 +4780,10 @@ export function AdminClubDetail({
             Edit name
           </Btn>
           <Btn tone="outline" icon={Icon.Form} size="sm" onClick={() => setShowChairEdit(true)}>
-            Edit chairperson
+            Edit {vt.chair}
           </Btn>
           <Btn tone="outline" icon={Icon.Mail} size="sm" onClick={emailChair}>
-            Email chairperson
+            Email {vt.chair}
           </Btn>
         </div>
       </div>
@@ -4669,24 +4812,31 @@ export function AdminClubDetail({
                   : 'Awaiting submission'
           }
         />
-        <KPI
-          tone="gold"
-          label="Documents"
-          num={`${docsUploadedCount(club, requiredDocs)}/${completionDocs(requiredDocs).length}`}
-          sub="compliance docs"
-        />
-        <KPI
-          tone={band.tone === 'coral' ? 'coral' : ''}
-          label="CQI score"
-          num={club.cqi.toFixed(1)}
-          sub={band.label}
-        />
+        {complianceOn && (
+          <KPI
+            tone="gold"
+            label="Documents"
+            num={`${docsUploadedCount(club, requiredDocs)}/${completionDocs(requiredDocs).length}`}
+            sub="compliance docs"
+          />
+        )}
+        {cqiOn && (
+          <KPI
+            tone={band.tone === 'coral' ? 'coral' : ''}
+            label="CQI score"
+            num={club.cqi.toFixed(1)}
+            sub={band.label}
+          />
+        )}
         <KPI label="Players" num={club.players} sub={`${tc.senior} teams · ${tc.junior} junior`} />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
         <div className="stack">
-          <Card title="Phase status" sub="Smart Club Integration · 5-phase journey">
+          <Card
+            title="Phase status"
+            sub={`Smart Club Integration · ${phases.length}-phase journey`}
+          >
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {phases.map((p) => (
                 <div
@@ -4816,239 +4966,296 @@ export function AdminClubDetail({
             </div>
           </Card>
 
-          <Card
-            title="Compliance documents"
-            sub="Cricket Services 2026/27 club requirements upload"
-          >
-            {activeDocs(requiredDocs).map((d) => {
-              const up = club.docs[d.key];
-              // Real uploads carry docMeta with an objectKey; an admin "Mark as
-              // compliant" override sets the flag true with a markedCompliant
-              // sentinel (no file). docFileMeta never fabricates a filename for the
-              // latter. A multi-file doc (the safeguarding pattern) — render its
-              // stored files as sub-rows.
-              const meta = club.docMeta?.[d.key];
-              const multi = !!d.multiFile;
-              const sg = multi ? safeguardingMeta(meta) : null;
-              const { real, metaText } = docFileMeta(meta);
-              const sgSatisfied = sg ? sg.files.length >= docMinFiles(d) : false;
-              // A booked meeting (the AGM pattern, single-file only) is a club
-              // self-declaration (future meeting date), not an admin override — it must
-              // render as its own state, never "Override", and is not revertable by the
-              // admin (the club self-clears via Undo on its portal).
-              const agm = !multi && d.allowMeetingBooked ? agmMeta(meta) : null;
-              const agmBooked = !!agm?.meetingBooked;
-              const agmDateLabel = agm?.meetingDate && formatDayYear(agm.meetingDate);
-              // The club's own "we don't have this" declaration (allowUnavailable) is its
-              // own state, like a booked meeting — never an admin "Override". Revert leaves
-              // it alone (computeRevertCompliance), except to peel off an admin
-              // markedCompliant stamped beside it. A STALE sentinel (the catalogue has
-              // since withdrawn allowUnavailable) no longer justifies the doc, so it shows
-              // as such and Revert is how it gets cleaned up.
-              const unavailable = unavailableDeclared(meta, d);
-              const unavailableOld = unavailableStale(meta, d);
-              const unavailableAny = unavailable || unavailableOld;
-              // Multi-file "override" = any compliant flag the uploads don't
-              // justify: explicit sentinel, legacy flag-only (no docMeta — the
-              // seeded demo clubs), or a grandfathered single file. All revert.
-              const override = unavailableAny
-                ? false
-                : sg
-                  ? up && !sgSatisfied
-                  : up && !real && !agmBooked;
-              // A lingering sentinel on a club that later met the minimum on its
-              // own shows Approved but must stay revertable.
-              const canRevert = unavailableAny
-                ? unavailableOld || !!meta?.markedCompliant
-                : override || (sg ? up && sg.markedCompliant : false);
-              return (
-                <div key={d.key} className={`doc-row ${up ? 'uploaded' : ''}`}>
-                  <div className="doc-icon">
-                    <Icon.Doc />
-                  </div>
-                  <div className="doc-info">
-                    <div className="doc-name">
-                      {d.name}
-                      {/* An optional record is never "Required", held or not. */}
-                      {!up && !d.optional && <span className="doc-required-tag">Required</span>}
+          {complianceOn && (
+            <Card
+              title="Compliance documents"
+              sub={`${vt.Sport} Services ${seasonLabel} ${vt.club} requirements upload`}
+            >
+              {activeDocs(requiredDocs).map((d) => {
+                const up = club.docs[d.key];
+                // Real uploads carry docMeta with an objectKey; an admin "Mark as
+                // compliant" override sets the flag true with a markedCompliant
+                // sentinel (no file). docFileMeta never fabricates a filename for the
+                // latter. A multi-file doc (the safeguarding pattern) — render its
+                // stored files as sub-rows.
+                const meta = club.docMeta?.[d.key];
+                const multi = !!d.multiFile;
+                const sg = multi ? safeguardingMeta(meta) : null;
+                const { real, metaText } = docFileMeta(meta);
+                const sgSatisfied = sg ? sg.files.length >= docMinFiles(d) : false;
+                // A booked meeting (the AGM pattern, single-file only) is a club
+                // self-declaration (future meeting date), not an admin override — it must
+                // render as its own state, never "Override", and is not revertable by the
+                // admin (the club self-clears via Undo on its portal).
+                const agm = !multi && d.allowMeetingBooked ? agmMeta(meta) : null;
+                const agmBooked = !!agm?.meetingBooked;
+                const agmDateLabel = agm?.meetingDate && formatDayYear(agm.meetingDate);
+                // The club's own "we don't have this" declaration (allowUnavailable) is its
+                // own state, like a booked meeting — never an admin "Override". Revert leaves
+                // it alone (computeRevertCompliance), except to peel off an admin
+                // markedCompliant stamped beside it. A STALE sentinel (the catalogue has
+                // since withdrawn allowUnavailable) no longer justifies the doc, so it shows
+                // as such and Revert is how it gets cleaned up.
+                const unavailable = unavailableDeclared(meta, d);
+                const unavailableOld = unavailableStale(meta, d);
+                const unavailableAny = unavailable || unavailableOld;
+                // Multi-file "override" = any compliant flag the uploads don't
+                // justify: explicit sentinel, legacy flag-only (no docMeta — the
+                // seeded demo clubs), or a grandfathered single file. All revert.
+                const override = unavailableAny
+                  ? false
+                  : sg
+                    ? up && !sgSatisfied
+                    : up && !real && !agmBooked;
+                // A lingering sentinel on a club that later met the minimum on its
+                // own shows Approved but must stay revertable.
+                const canRevert = unavailableAny
+                  ? unavailableOld || !!meta?.markedCompliant
+                  : override || (sg ? up && sg.markedCompliant : false);
+                return (
+                  <div key={d.key} className={`doc-row ${up ? 'uploaded' : ''}`}>
+                    <div className="doc-icon">
+                      <Icon.Doc />
                     </div>
-                    <div className="doc-meta">
-                      {unavailableAny && !sg?.files.length ? (
-                        unavailableOld ? (
-                          'Marked unavailable by club — no longer permitted for this document'
-                        ) : (
-                          'Marked unavailable by club — no document to upload'
-                        )
-                      ) : sg ? (
-                        sg.files.length ? (
-                          <span style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                            {/* Files can land on a declared doc (bulk intake keeps the
+                    <div className="doc-info">
+                      <div className="doc-name">
+                        {d.name}
+                        {/* An optional record is never "Required", held or not. */}
+                        {!up && !d.optional && <span className="doc-required-tag">Required</span>}
+                      </div>
+                      <div className="doc-meta">
+                        {unavailableAny && !sg?.files.length ? (
+                          unavailableOld ? (
+                            'Marked unavailable by club — no longer permitted for this document'
+                          ) : (
+                            'Marked unavailable by club — no document to upload'
+                          )
+                        ) : sg ? (
+                          sg.files.length ? (
+                            <span style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                              {/* Files can land on a declared doc (bulk intake keeps the
                                 declaration) — list them, then the declaration. */}
-                            {unavailableAny && (
-                              <span>
-                                {unavailableOld
-                                  ? 'Marked unavailable by club — no longer permitted for this document'
-                                  : 'Marked unavailable by club'}
-                              </span>
-                            )}
-                            {sg.files.map((f) => (
-                              <span key={f.objectKey}>
-                                {docFileMeta(f).metaText || 'Document'} ·{' '}
-                                {/* Button, not <a onClick>: per-file actions must be
+                              {unavailableAny && (
+                                <span>
+                                  {unavailableOld
+                                    ? 'Marked unavailable by club — no longer permitted for this document'
+                                    : 'Marked unavailable by club'}
+                                </span>
+                              )}
+                              {sg.files.map((f) => (
+                                <span key={f.objectKey}>
+                                  {docFileMeta(f).metaText || 'Document'} ·{' '}
+                                  {/* Button, not <a onClick>: per-file actions must be
                                     keyboard-focusable. */}
-                                <button
-                                  type="button"
-                                  onClick={() => setShowDocPreview({ key: d.key, entry: f })}
-                                  style={{
-                                    background: 'none',
-                                    border: 'none',
-                                    padding: 0,
-                                    font: 'inherit',
-                                    color: 'var(--teal-deep)',
-                                    cursor: 'pointer',
-                                  }}
-                                >
-                                  View
-                                </button>
-                              </span>
-                            ))}
-                          </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setShowDocPreview({ key: d.key, entry: f })}
+                                    style={{
+                                      background: 'none',
+                                      border: 'none',
+                                      padding: 0,
+                                      font: 'inherit',
+                                      color: 'var(--teal-deep)',
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    View
+                                  </button>
+                                </span>
+                              ))}
+                            </span>
+                          ) : override ? (
+                            'Marked compliant — no files on record'
+                          ) : (
+                            'Not yet uploaded · awaiting club'
+                          )
+                        ) : agmBooked ? (
+                          `No minutes yet — AGM to be held on ${agmDateLabel}`
+                        ) : real ? (
+                          metaText
                         ) : override ? (
-                          'Marked compliant — no files on record'
+                          'Marked compliant — no file on record'
                         ) : (
                           'Not yet uploaded · awaiting club'
-                        )
-                      ) : agmBooked ? (
-                        `No minutes yet — AGM to be held on ${agmDateLabel}`
-                      ) : real ? (
-                        metaText
-                      ) : override ? (
-                        'Marked compliant — no file on record'
-                      ) : (
-                        'Not yet uploaded · awaiting club'
-                      )}
+                        )}
+                      </div>
                     </div>
-                  </div>
-                  {up || (sg && sg.files.length > 0) ? (
-                    <div className="doc-row-actions">
-                      <Pill
-                        tone={
-                          override || agmBooked || unavailableAny || (sg && !up) ? 'gold' : 'teal'
-                        }
-                        dot
-                      >
-                        {unavailableAny
-                          ? 'Unavailable'
-                          : sg && !up
-                            ? `${sg.files.length} of ${docMinFiles(d)} minimum`
-                            : agmBooked
-                              ? `Meeting booked · ${agmDateLabel}`
-                              : override
-                                ? 'Override'
-                                : 'Approved'}
-                      </Pill>
-                      {/* Only real uploads (with a stored file) can be previewed;
+                    {up || (sg && sg.files.length > 0) ? (
+                      <div className="doc-row-actions">
+                        <Pill
+                          tone={
+                            override || agmBooked || unavailableAny || (sg && !up) ? 'gold' : 'teal'
+                          }
+                          dot
+                        >
+                          {unavailableAny
+                            ? 'Unavailable'
+                            : sg && !up
+                              ? `${sg.files.length} of ${docMinFiles(d)} minimum`
+                              : agmBooked
+                                ? `Meeting booked · ${agmDateLabel}`
+                                : override
+                                  ? 'Override'
+                                  : 'Approved'}
+                        </Pill>
+                        {/* Only real uploads (with a stored file) can be previewed;
                           overrides have no file on record. Safeguarding previews
                           per-file via the links above. */}
-                      {!sg && real && (
-                        <Btn
-                          tone="ghost"
-                          size="sm"
-                          icon={Icon.Eye}
-                          title={`View ${d.name}`}
-                          onClick={() => setShowDocPreview({ key: d.key })}
-                        />
-                      )}
-                      {/* Override = compliant via admin flag; offer a lossless revert.
+                        {!sg && real && (
+                          <Btn
+                            tone="ghost"
+                            size="sm"
+                            icon={Icon.Eye}
+                            title={`View ${d.name}`}
+                            onClick={() => setShowDocPreview({ key: d.key })}
+                          />
+                        )}
+                        {/* Override = compliant via admin flag; offer a lossless revert.
                           Real uploads (Approved) never show this — their files can't
                           be reverted away (safeguarding keeps its files on revert). */}
-                      {canRevert && onRevertDoc && (
-                        <Btn
-                          tone="ghost"
-                          size="sm"
-                          onClick={() => onRevertDoc(d.key)}
-                          title={
-                            unavailable
-                              ? 'Remove the admin override — the club’s unavailable declaration stays'
-                              : 'Remove this override — compliance re-derives from uploads'
-                          }
-                        >
-                          Revert
-                        </Btn>
-                      )}
-                    </div>
-                  ) : d.optional ? (
-                    <Pill dot>Optional</Pill>
-                  ) : (
-                    <Pill tone="coral" dot>
-                      Missing
-                    </Pill>
-                  )}
-                </div>
-              );
-            })}
-          </Card>
-
-          <Card title="CQI breakdown" sub="Per-category contribution to overall score">
-            {club.cqi === 0 ? (
-              <div
-                style={{
-                  textAlign: 'center',
-                  padding: '28px 0',
-                  color: 'var(--muted)',
-                  fontSize: 13,
-                }}
-              >
-                CQI form not yet submitted by this club.
-              </div>
-            ) : (
-              <div className="score-grid" style={{ marginBottom: 0 }}>
-                {CQI_STRUCTURE.map((cat) => {
-                  // Real per-category score from the club's effective answers (governance is
-                  // auto-filled from docs + stored overlays, so score the merged view, not raw
-                  // cqiAnswers). Falls back to a proportional estimate only for legacy clubs
-                  // that have a score but no persisted answers.
-                  const byCat = club.cqiAnswers
-                    ? scoreCQI(
-                        effectiveAnswers(club, requiredDocs),
-                        governanceSkipKeys(requiredDocs),
-                      ).byCat
-                    : null;
-                  const score = byCat
-                    ? byCat[cat.key].earned
-                    : Math.min(cat.weight, cat.weight * Math.min(1, club.cqi / 100));
-                  return (
-                    <div
-                      key={cat.key}
-                      className="score-card"
-                      style={
-                        {
-                          '--fill': (score / cat.weight) * 100 + '%',
-                          '--accent': cat.accent,
-                        } as CSSProperties
-                      }
-                    >
-                      <div>
-                        <span className="sc-cat">{cat.title}</span>
-                        <span className="sc-w">{cat.weight} pts</span>
+                        {canRevert && onRevertDoc && (
+                          <Btn
+                            tone="ghost"
+                            size="sm"
+                            onClick={() => onRevertDoc(d.key)}
+                            title={
+                              unavailable
+                                ? 'Remove the admin override — the club’s unavailable declaration stays'
+                                : 'Remove this override — compliance re-derives from uploads'
+                            }
+                          >
+                            Revert
+                          </Btn>
+                        )}
                       </div>
-                      <div className="sc-num">{score.toFixed(1)}</div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {/* Governance & Compliance answers — auto-filled from this club's compliance
+                    ) : d.optional ? (
+                      <Pill dot>Optional</Pill>
+                    ) : (
+                      <Pill tone="coral" dot>
+                        Missing
+                      </Pill>
+                    )}
+                  </div>
+                );
+              })}
+            </Card>
+          )}
+
+          {cqiOn && (
+            <Card title="CQI breakdown" sub="Per-category contribution to overall score">
+              {club.cqi === 0 ? (
+                <div
+                  style={{
+                    textAlign: 'center',
+                    padding: '28px 0',
+                    color: 'var(--muted)',
+                    fontSize: 13,
+                  }}
+                >
+                  CQI form not yet submitted by this club.
+                </div>
+              ) : (
+                <div className="score-grid" style={{ marginBottom: 0 }}>
+                  {CQI_STRUCTURE.map((cat) => {
+                    // Real per-category score from the club's effective answers (governance is
+                    // auto-filled from docs + stored overlays, so score the merged view, not raw
+                    // cqiAnswers). Falls back to a proportional estimate only for legacy clubs
+                    // that have a score but no persisted answers.
+                    const byCat = club.cqiAnswers
+                      ? scoreCQI(
+                          effectiveAnswers(club, requiredDocs),
+                          governanceSkipKeys(requiredDocs),
+                        ).byCat
+                      : null;
+                    const score = byCat
+                      ? byCat[cat.key].earned
+                      : Math.min(cat.weight, cat.weight * Math.min(1, club.cqi / 100));
+                    return (
+                      <div
+                        key={cat.key}
+                        className="score-card"
+                        style={
+                          {
+                            '--fill': (score / cat.weight) * 100 + '%',
+                            '--accent': cat.accent,
+                          } as CSSProperties
+                        }
+                      >
+                        <div>
+                          <span className="sc-cat">{cat.title}</span>
+                          <span className="sc-w">{cat.weight} pts</span>
+                        </div>
+                        <div className="sc-num">{score.toFixed(1)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {/* Governance & Compliance answers — auto-filled from this club's compliance
                 documents and records, with any club override flagged. Lets admins see exactly
                 what was declared without opening the club portal. */}
-            {club.cqi > 0 &&
-              (() => {
-                const gov = CQI_STRUCTURE.find((c) => c.key === 'governance');
-                if (!gov) return null;
-                const eff = effectiveAnswers(club, requiredDocs);
-                const govSkip = governanceSkipKeys(requiredDocs);
-                // A genuine club override (not a legacy approximation) — drives the provenance tag.
-                const genuine = genuineCqiAnswers(club);
+              {club.cqi > 0 &&
+                (() => {
+                  const gov = CQI_STRUCTURE.find((c) => c.key === 'governance');
+                  if (!gov) return null;
+                  const eff = effectiveAnswers(club, requiredDocs);
+                  const govSkip = governanceSkipKeys(requiredDocs);
+                  // A genuine club override (not a legacy approximation) — drives the provenance tag.
+                  const genuine = genuineCqiAnswers(club);
+                  return (
+                    <div style={{ marginTop: 16 }}>
+                      <div
+                        style={{
+                          fontSize: 11,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.1em',
+                          color: 'var(--muted-2)',
+                          marginBottom: 8,
+                        }}
+                      >
+                        Governance &amp; Compliance · auto-filled
+                      </div>
+                      <div className="stack" style={{ gap: 6 }}>
+                        {gov.questions
+                          .filter((q) => !govSkip.has(q.key))
+                          .map((q) => {
+                            const yes = eff[q.key] === true;
+                            const edited = q.key in genuine;
+                            return (
+                              <div
+                                key={q.key}
+                                className="row"
+                                style={{ justifyContent: 'space-between', gap: 12 }}
+                              >
+                                <span style={{ fontSize: 13, color: 'var(--ink)' }}>{q.label}</span>
+                                <span className="row" style={{ gap: 8 }}>
+                                  <span
+                                    style={{
+                                      fontSize: 10,
+                                      textTransform: 'uppercase',
+                                      letterSpacing: '0.08em',
+                                      color: 'var(--muted-2)',
+                                    }}
+                                  >
+                                    {edited ? 'Edited' : 'Auto'}
+                                  </span>
+                                  <Pill tone={yes ? 'teal' : 'gold'} dot>
+                                    {yes ? 'Yes' : 'No'}
+                                  </Pill>
+                                </span>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    </div>
+                  );
+                })()}
+              {/* Chairperson motivation — informational multi-select captured on the CQI form
+                (cqiAnswers.involvementReasons). Shown whenever present, independent of whether
+                a CQI score has been submitted, so drafts surface too. */}
+              {(() => {
+                const reasons = genuineCqiAnswers(club).involvementReasons;
+                if (!Array.isArray(reasons) || !reasons.length) return null;
                 return (
                   <div style={{ marginTop: 16 }}>
                     <div
@@ -5060,83 +5267,30 @@ export function AdminClubDetail({
                         marginBottom: 8,
                       }}
                     >
-                      Governance &amp; Compliance · auto-filled
+                      Chairperson · why involved in club cricket
                     </div>
-                    <div className="stack" style={{ gap: 6 }}>
-                      {gov.questions
-                        .filter((q) => !govSkip.has(q.key))
-                        .map((q) => {
-                          const yes = eff[q.key] === true;
-                          const edited = q.key in genuine;
-                          return (
-                            <div
-                              key={q.key}
-                              className="row"
-                              style={{ justifyContent: 'space-between', gap: 12 }}
-                            >
-                              <span style={{ fontSize: 13, color: 'var(--ink)' }}>{q.label}</span>
-                              <span className="row" style={{ gap: 8 }}>
-                                <span
-                                  style={{
-                                    fontSize: 10,
-                                    textTransform: 'uppercase',
-                                    letterSpacing: '0.08em',
-                                    color: 'var(--muted-2)',
-                                  }}
-                                >
-                                  {edited ? 'Edited' : 'Auto'}
-                                </span>
-                                <Pill tone={yes ? 'teal' : 'gold'} dot>
-                                  {yes ? 'Yes' : 'No'}
-                                </Pill>
-                              </span>
-                            </div>
-                          );
-                        })}
+                    <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
+                      {reasons.map((r) => (
+                        <Pill key={String(r)} tone="teal">
+                          {String(r)}
+                        </Pill>
+                      ))}
                     </div>
                   </div>
                 );
               })()}
-            {/* Chairperson motivation — informational multi-select captured on the CQI form
-                (cqiAnswers.involvementReasons). Shown whenever present, independent of whether
-                a CQI score has been submitted, so drafts surface too. */}
-            {(() => {
-              const reasons = genuineCqiAnswers(club).involvementReasons;
-              if (!Array.isArray(reasons) || !reasons.length) return null;
-              return (
-                <div style={{ marginTop: 16 }}>
-                  <div
-                    style={{
-                      fontSize: 11,
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.1em',
-                      color: 'var(--muted-2)',
-                      marginBottom: 8,
-                    }}
-                  >
-                    Chairperson · why involved in club cricket
-                  </div>
-                  <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
-                    {reasons.map((r) => (
-                      <Pill key={String(r)} tone="teal">
-                        {String(r)}
-                      </Pill>
-                    ))}
-                  </div>
-                </div>
-              );
-            })()}
-          </Card>
+            </Card>
+          )}
         </div>
 
         <div className="stack">
-          <Card title="Club details">
+          <Card title={`${vt.Club} details`}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 18px' }}>
               {[
                 // The affiliation form captures one "Municipal District / Sub-Union"
                 // field, so a separate Sub-union row would just repeat District.
                 ['District', club.district || club.sub],
-                ['Chairperson', club.chair],
+                [vt.Chair, club.chair],
                 [
                   'Status',
                   affiliationSubmitted(club)
@@ -5171,7 +5325,7 @@ export function AdminClubDetail({
             </div>
           </Card>
 
-          <Card title="Leagues" sub="Competitions this club is registered for">
+          <Card title="Leagues" sub={`Competitions this ${vt.club} is registered for`}>
             <ClubLeaguesEditor club={club} allLeagues={allLeagues} onSave={onSetLeagues} />
           </Card>
 
@@ -5301,14 +5455,16 @@ export function AdminClubDetail({
               <Btn tone="ink" icon={Icon.Mail} onClick={() => setShowInvite(true)}>
                 Invite club rep
               </Btn>
-              <Btn
-                tone="outline"
-                icon={club.cqi === 0 ? Icon.Form : Icon.Eye}
-                onClick={() => setShowCqi(true)}
-              >
-                {club.cqi === 0 ? 'Record CQI form' : 'View submitted CQI form'}
-              </Btn>
-              {club.cqi > 0 && (
+              {cqiOn && (
+                <Btn
+                  tone="outline"
+                  icon={club.cqi === 0 ? Icon.Form : Icon.Eye}
+                  onClick={() => setShowCqi(true)}
+                >
+                  {club.cqi === 0 ? 'Record CQI form' : 'View submitted CQI form'}
+                </Btn>
+              )}
+              {cqiOn && club.cqi > 0 && (
                 <Btn tone="outline" icon={Icon.Form} onClick={() => setShowCqiEdit(true)}>
                   Edit CQI form
                 </Btn>
@@ -5316,9 +5472,11 @@ export function AdminClubDetail({
               <Btn tone="outline" icon={Icon.Eye} onClick={() => setShowAffiliation(true)}>
                 View affiliation form
               </Btn>
-              <Btn tone="outline" icon={Icon.Shield} onClick={() => setShowCompliant(true)}>
-                Mark as compliant
-              </Btn>
+              {complianceOn && (
+                <Btn tone="outline" icon={Icon.Shield} onClick={() => setShowCompliant(true)}>
+                  Mark as compliant
+                </Btn>
+              )}
               <Btn
                 tone="outline"
                 icon={Icon.X}
@@ -5476,6 +5634,7 @@ function RemoveClubModal({
   onClose,
   onConfirm,
 }) {
+  const vt = useVertical().terms;
   useEscapeClose(onClose);
   const [typed, setTyped] = useStateA('');
   const [busy, setBusy] = useStateA(false);
@@ -5513,7 +5672,7 @@ function RemoveClubModal({
         </div>
         <div className="task-modal-body">
           <p style={{ fontSize: 13.5, color: 'var(--ink)', lineHeight: 1.55, margin: 0 }}>
-            This permanently deletes the club and everything stored under it:{' '}
+            This permanently deletes the {vt.club} and everything stored under it:{' '}
             <strong>
               {playerCount} registered {playerCount === 1 ? 'player' : 'players'}
             </strong>{' '}
@@ -5525,15 +5684,16 @@ function RemoveClubModal({
           </p>
           {inReleased && (
             <p style={{ fontSize: 12.5, color: 'var(--coral)', lineHeight: 1.5, marginTop: 10 }}>
-              This club is named in released fixtures — published schedules will show &ldquo;Removed
-              club&rdquo; in its place.
+              This {vt.club} is named in released fixtures — published schedules will show
+              &ldquo;Removed club&rdquo; in its place.
             </p>
           )}
           <p style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.5, marginTop: 10 }}>
-            Reps whose only club this is lose sign-in access entirely. This can&apos;t be undone.
+            Reps whose only {vt.club} this is lose sign-in access entirely. This can&apos;t be
+            undone.
           </p>
           <label style={{ display: 'block', marginTop: 14 }}>
-            <span className="reg-label">Type the club name to confirm</span>
+            <span className="reg-label">Type the {vt.club} name to confirm</span>
             <input
               className="field-input"
               value={typed}
@@ -5555,7 +5715,7 @@ function RemoveClubModal({
               disabled={!match || busy}
               style={{ background: 'var(--coral)', opacity: !match || busy ? 0.5 : 1 }}
             >
-              {busy ? 'Removing…' : 'Remove club'}
+              {busy ? 'Removing…' : `Remove ${vt.club}`}
             </Btn>
           </div>
         </div>
@@ -5815,16 +5975,19 @@ function CqiViewModal({
 
 /* ─── AffiliationViewModal — read-only view of a club's affiliation form ─── */
 function AffiliationViewModal({ club, allLeagues, onClose }) {
+  const vt = useVertical().terms;
+  const vertical = useVertical();
   const ex = club.exco || {};
   // Pull the four named office-bearers plus any additional members into one list,
-  // dropping unset roles so an awaiting club doesn't show empty officer blocks.
+  // dropping unset roles so an awaiting club doesn't show empty officer blocks. Each entry
+  // is [storage key, display label, member]: labels come from the tenant's vertical, the
+  // storage keys (chair/sec/tre/vc) never change.
   const members = [
-    ['Chairperson', ex.chair],
-    ['Secretary', ex.sec],
-    ['Treasurer', ex.tre],
-    ['Vice-chair', ex.vc],
-    ...(Array.isArray(ex.additionalMembers) ? ex.additionalMembers.map((m) => ['Member', m]) : []),
-  ].filter(([, m]) => m);
+    ...vertical.leadershipRoles.map((r) => [r.key, r.label, ex[r.key]]),
+    ...(Array.isArray(ex.additionalMembers)
+      ? ex.additionalMembers.map((m) => ['member', 'Member', m])
+      : []),
+  ].filter(([, , m]) => m);
   const leagues = club.leagues || [];
   const coaches = club.coaches || [];
   // teamId → name across all rosters, for showing a coach's specific side assignments.
@@ -5907,17 +6070,19 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
           <div className="stack" style={{ gap: 16 }}>
             {/* Club */}
             <div>
-              <SectionTitle>Club</SectionTitle>
+              <SectionTitle>{vt.Club}</SectionTitle>
               <div className="stack" style={{ gap: 4 }}>
                 <Row label="Name" value={club.name} />
                 <Row label="District" value={club.district} />
-                <Row label="Sub-union" value={club.district || club.sub} />
-                <Row label="Chairperson" value={club.chair} />
+                {vertical.sport === 'cricket' && (
+                  <Row label="Sub-union" value={club.district || club.sub} />
+                )}
+                <Row label={vt.Chair} value={club.chair} />
                 <Row label="Status" value={affPill(club.affiliation)} />
               </div>
               {club.affiliation === 'in_progress' && (
                 <div style={{ marginTop: 8, fontSize: 12, color: 'var(--muted)' }}>
-                  Draft — saved by the club but <strong>not yet submitted</strong>. The details
+                  Draft — saved by the {vt.club} but <strong>not yet submitted</strong>. The details
                   below are work in progress and may still change.
                 </div>
               )}
@@ -5925,13 +6090,13 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
 
             {/* Exco */}
             <div>
-              <SectionTitle>Exco</SectionTitle>
+              <SectionTitle>{vertical.sport === 'cricket' ? 'Exco' : vt.Exco}</SectionTitle>
               {members.length === 0 ? (
                 <Empty />
               ) : (
                 <div className="stack" style={{ gap: 12 }}>
-                  {members.map(([role, m], i) => (
-                    <div key={`${role}-${i}`}>
+                  {members.map(([key, role, m], i) => (
+                    <div key={`${key}-${i}`}>
                       <div
                         style={{
                           fontSize: 12,
@@ -5947,7 +6112,7 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
                       <Row label="Cell" value={m.cell} />
                       <Row label="Gender" value={m.gender} />
                       <Row label="Race" value={m.race} />
-                      {role === 'Chairperson' && (
+                      {key === 'chair' && (
                         <>
                           <Row label="ID number" value={m.idNumber} />
                           <Row
@@ -6044,6 +6209,10 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
                 <Row label="Suburb" value={club.ground?.suburb} />
                 <Row label="Secondary venue" value={club.ground?.secondaryVenue} />
                 <Row label="Secondary address" value={club.ground?.secondaryAddress} />
+                {/* Optional — shown only when the club recorded a field count. */}
+                {Number.isInteger(club.ground?.pitchCount) && (
+                  <Row label={pitchCountLabel(vertical.sport)} value={club.ground.pitchCount} />
+                )}
               </div>
             </div>
           </div>
@@ -6182,6 +6351,7 @@ function InviteUserModal({
   onInvite,
   toast,
 }: InviteUserModalProps) {
+  const vt = useVertical().terms;
   const canRep = clubs.length > 0;
   const [email, setEmail] = useStateA('');
   const [role, setRole] = useStateA(canRep ? presetRole || 'rep' : 'admin');
@@ -6348,9 +6518,9 @@ function InviteUserModal({
                   style={{ width: '100%', marginTop: 4 }}
                 >
                   <option value="rep" disabled={!canRep}>
-                    Club rep — scoped to selected clubs
+                    {vt.Club} rep — scoped to selected {vt.clubs}
                   </option>
-                  <option value="admin">Administrator — whole union</option>
+                  <option value="admin">Administrator — whole {vt.union}</option>
                 </select>
               </label>
               {!canRep && (
@@ -6397,6 +6567,7 @@ function InviteUserModal({
 /* ─── RoleScopeModal — change a user's role, and (for reps) their club scope ───
    `mode` is 'role' or 'clubs'. Admins always carry clubIds:[]. */
 function RoleScopeModal({ user, clubs = [], mode, lockRep, onClose, onSave, toast }) {
+  const vt = useVertical().terms;
   const [role, setRole] = useStateA(user.role);
   const [clubIds, setClubIds] = useStateA(() => new Set(user.clubIds || []));
   const [busy, setBusy] = useStateA(false);
@@ -6417,7 +6588,7 @@ function RoleScopeModal({ user, clubs = [], mode, lockRep, onClose, onSave, toas
           ? { role, clubIds: role === 'rep' ? [...clubIds] : [] }
           : { clubIds: [...clubIds] };
       await onSave(user.sub, body);
-      toast && toast(mode === 'role' ? 'Role updated' : 'Club access updated');
+      toast && toast(mode === 'role' ? 'Role updated' : `${vt.Club} access updated`);
       onClose();
     } catch {
       /* withToast already surfaced the error */
@@ -6439,7 +6610,7 @@ function RoleScopeModal({ user, clubs = [], mode, lockRep, onClose, onSave, toas
                 </>
               ) : (
                 <>
-                  Edit <em>club access</em>
+                  Edit <em>{vt.club} access</em>
                 </>
               )}
             </div>
@@ -6467,9 +6638,9 @@ function RoleScopeModal({ user, clubs = [], mode, lockRep, onClose, onSave, toas
                       API rejects it atomically either way; this is about saying so before
                       the request rather than through a 409. */}
                   <option value="rep" disabled={clubs.length === 0 || lockRep}>
-                    Club rep — scoped to selected clubs
+                    {vt.Club} rep — scoped to selected {vt.clubs}
                   </option>
-                  <option value="admin">Administrator — whole union</option>
+                  <option value="admin">Administrator — whole {vt.union}</option>
                 </select>
               </label>
             )}
@@ -6597,6 +6768,7 @@ export function AdminTeamAccessView({
   currentUserEmail,
   toast,
 }) {
+  const vt = useVertical().terms;
   const [showInvite, setShowInvite] = useStateA(false);
   const [editing, setEditing] = useStateA<EditingUserState | null>(null); // { user, mode }
   const [editingEmail, setEditingEmail] = useStateA<Record<string, unknown> | null>(null); // user being email-corrected
@@ -6640,7 +6812,7 @@ export function AdminTeamAccessView({
   function askRemove(u) {
     setConfirm({
       title: 'Remove access?',
-      body: `${u.email} will lose access to this union. This signs them out and can't be undone.`,
+      body: `${u.email} will lose access to this ${vt.union}. This signs them out and can't be undone.`,
       danger: true,
       onYes: () => {
         onRemoveUser?.(u.sub)
@@ -6675,7 +6847,7 @@ export function AdminTeamAccessView({
         <EmptyState
           icon={Icon.Users}
           title="No team members yet"
-          sub="Invite an administrator or a club rep to give them access to this union."
+          sub={`Invite an administrator or a ${vt.club} rep to give them access to this ${vt.union}.`}
           action={
             <Btn tone="teal" icon={Icon.Mail} onClick={() => setShowInvite(true)}>
               Invite admin / rep
@@ -6689,7 +6861,7 @@ export function AdminTeamAccessView({
               <tr>
                 <th>Email</th>
                 <th>Role</th>
-                <th>Clubs</th>
+                <th>{vt.Clubs}</th>
                 <th>Status</th>
                 <th>Invited</th>
                 <th style={{ width: 1 }}></th>
@@ -6723,12 +6895,14 @@ export function AdminTeamAccessView({
                     </td>
                     <td>
                       <Pill tone={u.role === 'admin' ? 'gold' : 'teal'}>
-                        {u.role === 'admin' ? 'Admin' : 'Club rep'}
+                        {u.role === 'admin' ? 'Admin' : `${vt.Club} rep`}
                       </Pill>
                     </td>
                     <td>
                       {u.role === 'admin' ? (
-                        <span style={{ fontSize: 11.5, color: 'var(--muted)' }}>Whole union</span>
+                        <span style={{ fontSize: 11.5, color: 'var(--muted)' }}>
+                          Whole {vt.union}
+                        </span>
                       ) : (
                         <span style={{ fontSize: 12 }}>
                           {(u.clubIds || []).map(clubName).join(', ') || '—'}
@@ -7908,8 +8082,10 @@ export function AdminVeteransRequests({
 
 /* ─── AdminPlayersView — cross-club player register, fanned out over every club ─── */
 
-// Derive a single human-readable role label, mirroring the club-side roster.
-function playerRoleLabel(p) {
+// Derive a single human-readable role label, mirroring the club-side roster. 'positions'
+// profiles (non-cricket verticals) label a player by their playing position.
+function playerRoleLabel(p, playerProfile: 'cricket' | 'positions' = 'cricket') {
+  if (playerProfile === 'positions') return p.position || '—';
   const bits = [];
   if (p.isWk) bits.push('WK');
   if (p.isAllRounder) bits.push('All-rounder');
@@ -7926,8 +8102,14 @@ function playerRoleLabel(p) {
 const PLAYERS_PER_PAGE = 25;
 
 export function AdminPlayersView({ clubs, leagues, toast }) {
+  const vt = useVertical().terms;
   const list = clubs ?? [];
   const teamLabel = labelByKey(leagues ?? []);
+  const vertical = useVertical();
+  const playerProfile = vertical.playerProfile;
+  const positionsMode = playerProfile === 'positions';
+  const veteransOn = useModule('veterans');
+  const roleOf = (p) => playerRoleLabel(p, playerProfile);
 
   // Fan out one players query per club. Partial failures stay isolated —
   // a single errored club contributes no rows but never blanks the table.
@@ -7945,7 +8127,7 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
   useEffectA(() => {
     if (!anyLoading && erroredCount > 0) {
       toast?.(
-        `${erroredCount} club${erroredCount === 1 ? "'s" : "s'"} roster failed to load`,
+        `${erroredCount} ${erroredCount === 1 ? `${vt.club}'s` : `${vt.clubs}'`} roster failed to load`,
         'warn',
       );
     }
@@ -8001,7 +8183,9 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
     const incomplete = scope === 'all' && erroredCount > 0;
     setExportingScope(scope);
     try {
-      const data = rows.map((p) => playerExportRow(p, (t) => teamLabel[t] || '', playerRoleLabel));
+      const data = rows.map((p) =>
+        playerExportRow(p, (t) => teamLabel[t] || '', roleOf, { playerProfile }),
+      );
       await exportRowsToXlsx(filename, 'Players', data);
       if (incomplete)
         toast?.(
@@ -8090,6 +8274,7 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
         players={clubScoped}
         teamLabel={teamLabel}
         clubs={list}
+        positions={positionsMode ? vertical.positions : null}
       />
 
       {anyLoading && allPlayers.length === 0 ? (
@@ -8113,7 +8298,7 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
           title={allPlayers.length === 0 ? 'No players registered yet' : 'No players match'}
           sub={
             allPlayers.length === 0
-              ? 'Players will appear here as clubs register their squads.'
+              ? `Players will appear here as ${vt.clubs} register their squads.`
               : 'Try adjusting your search or filters.'
           }
         />
@@ -8128,9 +8313,9 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
                 <tr>
                   <th>Player</th>
                   <th>ID number</th>
-                  <th>Club</th>
+                  <th>{vt.Club}</th>
                   <th>Team</th>
-                  <th>Role</th>
+                  <th>{positionsMode ? 'Position' : 'Role'}</th>
                   <th>Status</th>
                 </tr>
               </thead>
@@ -8163,7 +8348,7 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
                       )}
                     </td>
                     <td>
-                      <span className="rost-sub">{playerRoleLabel(p)}</span>
+                      <span className="rost-sub">{roleOf(p)}</span>
                     </td>
                     <td>{playerStatusPill(p.status)}</td>
                   </tr>
@@ -8222,16 +8407,29 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
           }
           // The veterans-club picker is drawn from the admin's own club list (real on-system
           // clubs), NOT the per-row clubName strings — the editor excludes the player's own club.
-          veteransEdit={{
-            clubs: list.map((c) => ({ id: c.id, name: c.name || c.slug || '—' })),
-            onSave: (id) =>
-              (id
-                ? api.setPlayerVeteransClub(selectedPlayer.clubId, selectedPlayer.naturalKey, id)
-                : api.removePlayerVeteransClub(selectedPlayer.clubId, selectedPlayer.naturalKey)
-              ).then(() =>
-                queryClient.invalidateQueries({ queryKey: qk.players(selectedPlayer.clubId) }),
-              ),
-          }}
+          veteransEdit={
+            veteransOn
+              ? {
+                  clubs: list.map((c) => ({ id: c.id, name: c.name || c.slug || '—' })),
+                  onSave: (id) =>
+                    (id
+                      ? api.setPlayerVeteransClub(
+                          selectedPlayer.clubId,
+                          selectedPlayer.naturalKey,
+                          id,
+                        )
+                      : api.removePlayerVeteransClub(
+                          selectedPlayer.clubId,
+                          selectedPlayer.naturalKey,
+                        )
+                    ).then(() =>
+                      queryClient.invalidateQueries({
+                        queryKey: qk.players(selectedPlayer.clubId),
+                      }),
+                    ),
+                }
+              : undefined
+          }
           onClose={() => setSelectedPlayer(null)}
         />
       )}

@@ -7,6 +7,7 @@ import { getPlayerIdDocViewUrl } from './api';
 import { docPreviewKind } from './data';
 import type { PlayerRegistration, VeteransRequestPublic } from './types';
 import { formatDayYear, formatStampDay } from './dates';
+import { useModule, useVertical } from './branding';
 
 /** Single human-readable role label, mirroring the admin/club rosters. */
 function roleLabel(p: PlayerRegistration): string {
@@ -389,6 +390,11 @@ export function PlayerDetailModal({
 }) {
   useEscapeClose(onClose);
   const [showIdDoc, setShowIdDoc] = useState(false);
+  // Sport vertical: 'positions' profiles show a Position row instead of the cricket profile;
+  // the veterans module gates the whole veterans-club section.
+  const vertical = useVertical();
+  const positionsMode = vertical.playerProfile === 'positions';
+  const veteransOn = useModule('veterans');
 
   const fullName = `${player.firstName ?? ''} ${player.lastName ?? ''}`.trim() || '—';
 
@@ -425,17 +431,23 @@ export function PlayerDetailModal({
           <Row label="Postal address" value={player.postalAddress} />
           <Row label="Postal code" value={player.postalCode} />
 
-          <SectionTitle>Cricket profile</SectionTitle>
+          <SectionTitle>{positionsMode ? 'Playing profile' : 'Cricket profile'}</SectionTitle>
           <Row label="Team" value={teamLabel || player.team} />
-          <Row label="Role" value={roleLabel(player)} />
-          <Row
-            label="Batting"
-            value={[player.battingHand, player.battingType].filter(Boolean).join(' · ')}
-          />
-          <Row
-            label="Bowling"
-            value={[player.bowlingHand, player.bowlerType].filter(Boolean).join(' · ')}
-          />
+          {positionsMode ? (
+            <Row label="Position" value={player.position} />
+          ) : (
+            <>
+              <Row label="Role" value={roleLabel(player)} />
+              <Row
+                label="Batting"
+                value={[player.battingHand, player.battingType].filter(Boolean).join(' · ')}
+              />
+              <Row
+                label="Bowling"
+                value={[player.bowlingHand, player.bowlerType].filter(Boolean).join(' · ')}
+              />
+            </>
+          )}
 
           <SectionTitle>Registration</SectionTitle>
           <Row label="Current club" value={clubName} />
@@ -469,24 +481,28 @@ export function PlayerDetailModal({
             </div>
           )}
 
-          <SectionTitle>Veterans club</SectionTitle>
-          {veteransRequest && (
-            <VeteransRequestBanner
-              request={veteransRequest.request}
-              onAccept={veteransRequest.onAccept}
-              onDecline={veteransRequest.onDecline}
-              busy={veteransRequest.busy}
-            />
-          )}
-          {veteransEdit ? (
-            <VeteransClubEditor
-              player={player}
-              ownClubId={clubId}
-              clubs={veteransEdit.clubs}
-              onSave={veteransEdit.onSave}
-            />
-          ) : (
-            <Row label="Veterans club" value={player.veteransClub} />
+          {veteransOn && (
+            <>
+              <SectionTitle>Veterans club</SectionTitle>
+              {veteransRequest && (
+                <VeteransRequestBanner
+                  request={veteransRequest.request}
+                  onAccept={veteransRequest.onAccept}
+                  onDecline={veteransRequest.onDecline}
+                  busy={veteransRequest.busy}
+                />
+              )}
+              {veteransEdit ? (
+                <VeteransClubEditor
+                  player={player}
+                  ownClubId={clubId}
+                  clubs={veteransEdit.clubs}
+                  onSave={veteransEdit.onSave}
+                />
+              ) : (
+                <Row label="Veterans club" value={player.veteransClub} />
+              )}
+            </>
           )}
 
           {player.idDocMeta?.objectKey && (

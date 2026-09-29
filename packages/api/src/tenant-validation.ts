@@ -5,6 +5,7 @@
  * valid DNS label (LDH: no trailing hyphen — `demo-.club.…` is not resolvable) and
  * must never shadow a platform-reserved name (or the PLATFORM_TENANT sentinel '*').
  */
+import { isSport, SPORTS } from './vertical.js';
 
 /**
  * Lowercase DNS-label shape: leading letter, a-z 0-9 hyphen in the middle, and a
@@ -26,5 +27,20 @@ export function validateTenantSlug(slug: string): string | null {
   if ((RESERVED_TENANT_SLUGS as readonly string[]).includes(slug)) {
     return `slug "${slug}" is reserved`;
   }
+  return null;
+}
+
+export const SEASON_LABEL_MAX = 20;
+
+/** Validate an operator-supplied sport vertical. Null when valid, else a 400 reason. */
+export function validateSport(sport: unknown): string | null {
+  return isSport(sport) ? null : `sport must be one of: ${SPORTS.join(', ')}`;
+}
+
+/** Validate an operator-supplied season label (short free text, e.g. '2027'). */
+export function validateSeasonLabel(label: unknown): string | null {
+  if (typeof label !== 'string' || !label.trim()) return 'seasonLabel must be a non-empty string';
+  if (label.trim().length > SEASON_LABEL_MAX)
+    return `seasonLabel must be ${SEASON_LABEL_MAX} characters or fewer`;
   return null;
 }
