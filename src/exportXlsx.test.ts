@@ -324,6 +324,26 @@ describe('playerExportRow · player profile', () => {
     });
     expect(row.Position).toBe('');
   });
+
+  it('drops the Veterans club column when the veterans module is off (football tenant)', () => {
+    const row = playerExportRow(base, team, role, {
+      playerProfile: 'positions',
+      modules: { veterans: false },
+    });
+    expect(row).not.toHaveProperty('Veterans club');
+    expect(Object.keys(row)).toContain('Position');
+  });
+
+  it('keeps the cricket key order byte-identical with the veterans module explicitly on', () => {
+    expect(
+      Object.keys(
+        playerExportRow(base, team, role, {
+          playerProfile: 'cricket',
+          modules: { veterans: true },
+        }),
+      ),
+    ).toEqual(EXPECTED_KEYS);
+  });
 });
 
 describe('clubExportRow · sport-vertical modules', () => {

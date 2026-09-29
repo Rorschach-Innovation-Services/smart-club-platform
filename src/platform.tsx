@@ -1391,10 +1391,6 @@ function VerticalCard({
 
   async function saveIt() {
     setErr('');
-    if (labelChanged && !trimmed) {
-      setErr('A season label can’t be cleared once set — enter a label');
-      return;
-    }
     if (trimmed.length > SEASON_LABEL_MAX) {
       setErr(`Season label must be ${SEASON_LABEL_MAX} characters or fewer`);
       return;
@@ -1403,6 +1399,8 @@ function VerticalCard({
     try {
       await save({
         ...(sportChanged ? { sport } : {}),
+        // An emptied input sends '' — the API reads that as "remove the label" (the tenant
+        // falls back to the built-in season label).
         ...(labelChanged ? { seasonLabel: trimmed } : {}),
       });
       toast('Vertical saved');

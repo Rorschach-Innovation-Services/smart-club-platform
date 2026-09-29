@@ -113,12 +113,18 @@ const STATUS_LABEL: Record<PlayerStatus, string> = {
  * `playerProfile: 'positions'` (non-cricket verticals) swaps the cricket Role/Batting/
  * Bowling/Batting type/Bowler type/Wicketkeeper/All-rounder columns for one Position
  * column in Role's slot; the default ('cricket') key order is unchanged.
+ *
+ * `modules.veterans: false` drops the 'Veterans club' column (same optional gate as
+ * clubExportRow). Default: on, so existing callers' key order is untouched.
  */
 export function playerExportRow(
   p: ExportablePlayer,
   resolveTeam: (team: string | undefined) => string,
   resolveRole: (p: ExportablePlayer) => string,
-  { playerProfile = 'cricket' }: { playerProfile?: 'cricket' | 'positions' } = {},
+  {
+    playerProfile = 'cricket',
+    modules = { veterans: true },
+  }: { playerProfile?: 'cricket' | 'positions'; modules?: { veterans: boolean } } = {},
 ): Record<string, string> {
   const head = {
     'First name': p.firstName || '',
@@ -136,14 +142,16 @@ export function playerExportRow(
     Team: resolveTeam(p.team) || '',
     District: p.district || '',
   };
-  const veteransClub = p.veteransClub || '';
+  const veterans: Record<string, string> = modules.veterans
+    ? { 'Veterans club': p.veteransClub || '' }
+    : {};
   const status = p.status ? STATUS_LABEL[p.status] || p.status : 'Active';
   const minor = p.isMinor ? 'Yes' : 'No';
   if (playerProfile === 'positions') {
     return {
       ...head,
       Position: p.position || '',
-      'Veterans club': veteransClub,
+      ...veterans,
       Status: status,
       Minor: minor,
       ...playerExportRest(p),
@@ -154,7 +162,7 @@ export function playerExportRow(
     Role: resolveRole(p) || '',
     Batting: p.battingHand || '',
     Bowling: p.bowlingHand || '',
-    'Veterans club': veteransClub,
+    ...veterans,
     Status: status,
     'Batting type': p.battingType || '',
     'Bowler type': p.bowlerType || '',

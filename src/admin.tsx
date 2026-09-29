@@ -8184,7 +8184,10 @@ export function AdminPlayersView({ clubs, leagues, toast }) {
     setExportingScope(scope);
     try {
       const data = rows.map((p) =>
-        playerExportRow(p, (t) => teamLabel[t] || '', roleOf, { playerProfile }),
+        playerExportRow(p, (t) => teamLabel[t] || '', roleOf, {
+          playerProfile,
+          modules: { veterans: veteransOn },
+        }),
       );
       await exportRowsToXlsx(filename, 'Players', data);
       if (incomplete)

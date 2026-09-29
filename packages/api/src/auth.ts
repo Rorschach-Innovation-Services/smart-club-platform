@@ -15,7 +15,7 @@ import type { Context, MiddlewareHandler } from 'hono';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { Sentry } from './instrument.js';
 import { PLATFORM_TENANT } from './types.js';
-import type { Membership, Role } from './types.js';
+import type { Membership, Role, TenantConfig } from './types.js';
 
 export interface AuthContext {
   sub: string;
@@ -34,6 +34,8 @@ export type HonoEnv = {
   Variables: {
     auth?: AuthContext;
     requestAuth?: RequestAuth;
+    /** Per-request tenant-config memo — see getTenantConfigCached in index.ts. */
+    tenantCfg?: { tenant: string; cfg: TenantConfig | null };
   };
 };
 

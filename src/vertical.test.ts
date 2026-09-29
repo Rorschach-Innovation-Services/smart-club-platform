@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { VERTICALS, resolveVertical, pitchCountLabel } from './vertical';
 import { VERTICALS as API_VERTICALS } from '../packages/api/src/vertical';
-import { COACHING_BODIES, COACHING_LEVELS } from './data';
 import { resolveCopy } from './branding';
 
 describe('vertical profiles', () => {
@@ -14,11 +13,6 @@ describe('vertical profiles', () => {
     expect(resolveVertical({}).sport).toBe('cricket');
     expect(resolveVertical({ sport: 'netball' as never }).sport).toBe('cricket');
     expect(resolveVertical({ sport: 'football' }).sport).toBe('football');
-  });
-
-  it('keep the cricket coaching vocabulary identical to data.ts', () => {
-    expect(VERTICALS.cricket.coachingBodies).toEqual(COACHING_BODIES);
-    expect(VERTICALS.cricket.coachingLevels).toEqual(COACHING_LEVELS);
   });
 });
 

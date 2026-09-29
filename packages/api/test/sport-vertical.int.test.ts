@@ -1,7 +1,8 @@
 /**
  * Integration tests for the sport vertical (plan 1A/1B): the operator-only sport/seasonLabel
  * fields, the module 403 guards, player positions, and the registration write path with the
- * clearances module off (no clearances, no reviews; an active-elsewhere player transfers).
+ * clearances module off (no clearances, no reviews; a player registered elsewhere is noted on
+ * the new row and the other club's roster is never touched).
  *
  * Boots an in-process dynalite, seeds the cricket 'dolphins' tenant plus a football 'fc'
  * tenant, and drives the REAL Hono app via `app.request()` (LOCAL_AUTH dev bypass).
@@ -222,11 +223,38 @@ describe('operator-only sport + seasonLabel', () => {
         body: JSON.stringify(body),
       });
     assert.equal((await put({ sport: 'hockey' })).status, 400);
-    assert.equal((await put({ seasonLabel: '' })).status, 400);
+    assert.equal((await put({ seasonLabel: '   ' })).status, 400, 'whitespace-only is junk');
     assert.equal((await put({ sport: 'cricket', seasonLabel: ' 2026/27 ' })).status, 200);
     const cfg = await repo.getTenantConfig('dolphins');
     assert.equal(cfg?.sport, 'cricket');
     assert.equal(cfg?.seasonLabel, '2026/27');
+  });
+
+  test('PUT /platform/tenants/:slug clears the season label with null or an empty string', async () => {
+    const put = (body: Record<string, unknown>) =>
+      app.request('/platform/tenants/dolphins', {
+        method: 'PUT',
+        headers: headers(OPERATOR, 'dolphins'),
+        body: JSON.stringify(body),
+      });
+    for (const clear of [null, '']) {
+      assert.equal((await put({ seasonLabel: '2031' })).status, 200);
+      assert.equal((await repo.getTenantConfig('dolphins'))?.seasonLabel, '2031');
+      const res = await put({ seasonLabel: clear });
+      assert.equal(res.status, 200, `clear with ${JSON.stringify(clear)}`);
+      assert.equal(((await res.json()) as Record<string, unknown>).seasonLabel, undefined);
+      const cfg = await repo.getTenantConfig('dolphins');
+      assert.equal(cfg?.seasonLabel, undefined);
+      assert.ok(cfg && !('seasonLabel' in cfg), 'the attribute is removed, not stored blank');
+      const pub = (await (await app.request('/tenant?tenant=dolphins')).json()) as Record<
+        string,
+        unknown
+      >;
+      assert.equal(pub.seasonLabel, undefined, 'GET /tenant falls back (no configured label)');
+    }
+    // An unrelated operator save leaves the (absent) label absent.
+    assert.equal((await put({ sport: 'cricket' })).status, 200);
+    assert.equal((await repo.getTenantConfig('dolphins'))?.seasonLabel, undefined);
   });
 });
 
@@ -324,22 +352,90 @@ describe('registration with the clearances module off (football)', () => {
     assert.deepEqual(await repo.listAllReviews('fc'), []);
   });
 
-  test('active at another school → registered here, old roster row deactivated, both noted', async () => {
+  test('active at another school → registered here with a note; the other roster is NOT touched', async () => {
     assert.equal((await register('fc-b', { idNumber: 'FC003' })).status, 201);
-    assert.equal((await findPlayer('fc', 'fc-b', 'FC003'))?.status, 'active');
+    const before = await findPlayer('fc', 'fc-b', 'FC003');
+    assert.equal(before?.status, 'active');
 
     const res = await register('fc-a', { idNumber: 'FC003', lastClubId: 'fc-b' });
     assert.equal(res.status, 201);
     assert.deepEqual(await res.json(), { ok: true });
-    const moved = await findPlayer('fc', 'fc-a', 'FC003');
-    const old = await findPlayer('fc', 'fc-b', 'FC003');
-    assert.equal(moved?.status, 'active');
-    assert.equal(moved?.lastClub, 'Beta High');
-    assert.match(moved?.transferNote ?? '', /Transferred from Beta High/);
-    assert.equal(old?.status, 'inactive');
-    assert.match(old?.transferNote ?? '', /Moved to Alpha High/);
+    const here = await findPlayer('fc', 'fc-a', 'FC003');
+    assert.equal(here?.status, 'active');
+    assert.equal(here?.lastClub, 'Beta High');
+    assert.equal(here?.transferNote, 'Previously registered at Beta High.');
+    // An unauthenticated link must never write another school's roster: the old row is
+    // byte-for-byte what it was (admins resolve the duplicate by hand).
+    assert.deepEqual(await findPlayer('fc', 'fc-b', 'FC003'), before);
     assert.deepEqual(await repo.listAllClearances('fc'), []);
     assert.deepEqual(await repo.listAllReviews('fc'), []);
+  });
+
+  test('a row left clearance-pending when the module was switched off does not strand the player', async () => {
+    const putFeatures = (features: Record<string, boolean>) =>
+      app.request('/platform/tenants/fc', {
+        method: 'PUT',
+        headers: headers(OPERATOR, 'fc'),
+        body: JSON.stringify({ features }),
+      });
+    // Module ON: declaring Alpha High as the previous school opens a clearance and leaves the
+    // Beta High row clearance-pending.
+    assert.equal(
+      (await putFeatures({ whatsappInvites: false, 'module.clearances': true })).status,
+      200,
+    );
+    try {
+      const opened = await register('fc-b', { idNumber: 'FC006', lastClubId: 'fc-a' });
+      assert.equal(opened.status, 201);
+      assert.equal((await findPlayer('fc', 'fc-b', 'FC006'))?.status, 'clearance-pending');
+    } finally {
+      assert.equal((await putFeatures({ whatsappInvites: false })).status, 200);
+    }
+    const pending = await findPlayer('fc', 'fc-b', 'FC006');
+    const clearancesBefore = await repo.listAllClearances('fc');
+
+    // Module OFF: the same identity registers at Alpha High — no 409, noted, pending row untouched.
+    const res = await register('fc-a', { idNumber: 'FC006' });
+    assert.equal(res.status, 201);
+    assert.deepEqual(await res.json(), { ok: true });
+    const here = await findPlayer('fc', 'fc-a', 'FC006');
+    assert.equal(here?.status, 'active');
+    assert.equal(here?.transferNote, 'Previously registered at Beta High.');
+    assert.equal(here?.lastClub, 'Beta High');
+    assert.deepEqual(await findPlayer('fc', 'fc-b', 'FC006'), pending);
+    assert.deepEqual(await repo.listAllClearances('fc'), clearancesBefore);
+  });
+
+  test('veterans module off: a posted veteransClubId is dropped on both registration paths', async () => {
+    const res = await register('fc-a', { idNumber: 'FC007', veteransClubId: 'fc-b' });
+    assert.equal(res.status, 201);
+    const p = await findPlayer('fc', 'fc-a', 'FC007');
+    assert.equal(p?.veteransClubId, undefined);
+    assert.equal(p?.veteransClub, undefined);
+
+    const portal = await app.request('/clubs/fc-a/players', {
+      method: 'POST',
+      headers: headers(FC_ADMIN, 'fc'),
+      body: JSON.stringify({
+        firstName: 'Vet',
+        lastName: 'Portal',
+        idType: 'passport',
+        idNumber: 'FC008',
+        dob: '1980-01-01',
+        nationality: 'South African',
+        race: 'African',
+        gender: 'Male',
+        cell: '0820000002',
+        team: 'u16',
+        district: 'North',
+        veteransClubId: 'fc-b',
+      }),
+    });
+    assert.equal(portal.status, 201);
+    const body = (await portal.json()) as Record<string, unknown>;
+    assert.equal(body.veteransClubId, undefined);
+    assert.equal((await findPlayer('fc', 'fc-a', 'FC008'))?.veteransClubId, undefined);
+    assert.deepEqual(await repo.listVeteransAffiliations('fc', 'fc-b'), []);
   });
 
   test('positions: a known position is stored, an unknown one is 400', async () => {
@@ -396,6 +492,17 @@ describe('registration with the clearances module on (cricket) is unchanged', ()
       (cl) => cl.idNumber === 'DV001',
     );
     assert.equal(clearances.length, 1);
+  });
+
+  test('veterans module on: a declared veterans club is stored and affiliated', async () => {
+    const res = await register('dv-a', { idNumber: 'DV003', veteransClubId: 'dv-b' });
+    assert.equal(res.status, 201);
+    const p = await findPlayer('dolphins', 'dv-a', 'DV003');
+    assert.equal(p?.status, 'active');
+    assert.equal(p?.veteransClubId, 'dv-b');
+    assert.equal(p?.veteransClub, 'Vertical B CC');
+    const affs = await repo.listVeteransAffiliations('dolphins', 'dv-b');
+    assert.ok(affs.some((a) => a.naturalKey === p?.naturalKey && a.primaryClubId === 'dv-a'));
   });
 
   test('active at another club still opens a clearance and leaves the source row active', async () => {

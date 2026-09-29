@@ -37,6 +37,14 @@ export function validateSport(sport: unknown): string | null {
   return isSport(sport) ? null : `sport must be one of: ${SPORTS.join(', ')}`;
 }
 
+/**
+ * An explicit "remove the season label" on the operator PUT: `null` or the empty string
+ * (what a cleared input sends). Whitespace-only is NOT a clear — it still 400s as junk.
+ */
+export function isSeasonLabelClear(label: unknown): boolean {
+  return label === null || label === '';
+}
+
 /** Validate an operator-supplied season label (short free text, e.g. '2027'). */
 export function validateSeasonLabel(label: unknown): string | null {
   if (typeof label !== 'string' || !label.trim()) return 'seasonLabel must be a non-empty string';

@@ -5,6 +5,7 @@ import type { Club, RequiredDoc } from './types';
 import { slotRefLabel } from '../packages/engine/src/formats';
 import { haversineKm } from '../packages/engine/src/geo';
 import { isAffiliated } from '../packages/engine/src/leagues';
+import { VERTICALS } from './vertical';
 import {
   daysSince,
   daysUntilDate,
@@ -145,11 +146,10 @@ export const DISTRICTS = [
    client bundle; its content lives in packages/api/seed-data/<tenant>.json as the demo
    seed (see git history for the original arrays). DISTRICTS above stays live. */
 
-// 'None' leads both lists so a coach without accreditation is an explicit,
-// selectable state (and the default for a freshly added coach) rather than a
-// silently presumed CSA Level 2.
-export const COACHING_BODIES = ['None', 'CSA', 'Gary Kirsten'];
-export const COACHING_LEVELS = ['None', 'Level 1', 'Level 2', 'Level 3', 'Level 4'];
+// The cricket coaching vocabulary, aliased from the vertical profile (src/vertical.ts) so
+// there is one source of truth. Sport-aware code should read resolveVertical(cfg) instead.
+export const COACHING_BODIES = VERTICALS.cricket.coachingBodies;
+export const COACHING_LEVELS = VERTICALS.cricket.coachingLevels;
 // Total years of coaching experience, captured on the affiliation form. Kept in
 // sync with COACH_EXPERIENCE in packages/api/src/catalogue.ts (server validation).
 export const COACH_EXPERIENCE = ['0-3', '4-10', '10+'];
