@@ -14,6 +14,7 @@
     "configure-tenant-docs": "tsx src/configure-tenant-docs.ts",
     "import-titans-compliance": "tsx src/import-titans-compliance.ts",
     "import-titans-contacts": "tsx src/import-titans-contacts.ts",
+    "send-affiliation-fix-notice": "tsx src/send-affiliation-fix-notice.ts",
     "import-titans-roster": "tsx src/import-titans-roster.ts",
     "import-tuskers-compliance": "tsx src/import-tuskers-compliance.ts",
     "import-tuskers-roster": "tsx src/import-tuskers-roster.ts",
