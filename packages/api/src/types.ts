@@ -225,6 +225,14 @@ export interface DirectoryClub {
 
 export interface TenantConfig {
   tenant: string;
+  /**
+   * Sport vertical (vertical.ts) — selects terminology, leadership labels, player profile
+   * and module defaults. Absent ⇒ cricket, so legacy rows need no migration. Operator-only:
+   * PUT /tenant/config strips it, only POST/PUT /platform/tenants writes it.
+   */
+  sport?: 'cricket' | 'football';
+  /** Display season label, e.g. '2027'. Absent ⇒ the built-in label. Operator-only, like `sport`. */
+  seasonLabel?: string;
   branding: {
     name: string;
     /** Human title for <title> and headers, e.g. "Dolphins Pipeline". */
@@ -379,6 +387,8 @@ export interface Club {
     /** Optional second home venue (input only — no map/coords). Used for fixture venue selection. */
     secondaryVenue?: string;
     secondaryAddress?: string;
+    /** Number of playing fields/pitches at the ground (whole number 0–99). */
+    pitchCount?: number;
   };
   leagues: string[];
   /** Teams entered per league key (a club may field >1 side in a league); absent ⇒ 1. */
@@ -604,6 +614,14 @@ export interface PlayerRegistration {
   bowlerType?: string;
   isAllRounder?: boolean;
   isWk?: boolean;
+  /** Playing position — only for 'positions'-profile verticals, validated against the profile list. */
+  position?: string;
+  /**
+   * Set when a registration moved this person between clubs without a clearance (the tenant's
+   * clearances module is off): on the new row it names the club they left, on the deactivated
+   * old row the club they joined.
+   */
+  transferNote?: string;
   idDocMeta?: PlayerIdDocMeta;
   /**
    * The vetted ID document from the player's PREVIOUS club, carried onto the

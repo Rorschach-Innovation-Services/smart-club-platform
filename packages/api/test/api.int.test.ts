@@ -8058,3 +8058,144 @@ describe('POST /admin/clearances/:cid/reopen', () => {
     );
   });
 });
+
+describe('fixtures-only leagues (League.fixturesOnly — a KO Cup on its own calendar)', () => {
+  // A fixtures-only entry sits in TenantConfig.leagues (so season runs/series can target it)
+  // but is not an affiliation choice or a player's team. Entrants are admin-assigned via
+  // club.leagues — that is how leagueParticipants finds them.
+  const REP_KO = devAuth([{ tenantId: 'dolphins', role: 'rep', clubIds: ['kocup'] }]);
+  const mkClub = (id: string, leagues: string[]) => ({
+    id,
+    name: `KO ${id}`,
+    district: 'Test District',
+    sub: `sub-${id}`,
+    chair: 'Chair',
+    affiliation: 'not_started' as const,
+    cqi: 0,
+    docs: {},
+    players: 0,
+    teams: 0,
+    women: 0,
+    juniors: 0,
+    color: '#123123',
+    ground: {},
+    leagues,
+    version: 1,
+  });
+  let normalKey: string;
+  let savedLeagues: import('../src/types.js').League[];
+
+  before(async () => {
+    const cfg = (await repo.getTenantConfig('dolphins'))!;
+    savedLeagues = cfg.leagues ?? [];
+    normalKey = savedLeagues[0]?.key ?? '';
+    assert.ok(normalKey, 'precondition: tenant has a league catalogue');
+    await repo.putTenantConfig({
+      ...cfg,
+      leagues: [
+        ...savedLeagues,
+        {
+          key: 'koCup',
+          label: 'KO Cup',
+          group: 'Overarching Leagues',
+          district: 'All districts',
+          fixturesOnly: true,
+        },
+      ],
+    });
+    await repo.createClub('dolphins', mkClub('kocup', []));
+    await repo.putToken('ko-reg-token', 'dolphins', 'kocup', '2026-06-01T00:00:00.000Z');
+  });
+
+  after(async () => {
+    const cfg = (await repo.getTenantConfig('dolphins'))!;
+    await repo.putTenantConfig({ ...cfg, leagues: savedLeagues });
+  });
+
+  const patchLeagues = async (auth: string, leagues: string[]) => {
+    const version = (await repo.getClub('dolphins', 'kocup'))!.version;
+    return app.request('/clubs/kocup', {
+      method: 'PATCH',
+      headers: headers(auth),
+      body: JSON.stringify({ leagues, version }),
+    });
+  };
+
+  test('a rep cannot pick a fixtures-only league on the affiliation form (400)', async () => {
+    const res = await patchLeagues(REP_KO, [normalKey, 'koCup']);
+    assert.equal(res.status, 400);
+  });
+
+  test('a rep can still pick a normal league (200)', async () => {
+    const res = await patchLeagues(REP_KO, [normalKey]);
+    assert.equal(res.status, 200);
+  });
+
+  test('an admin can enter a club into a fixtures-only league (entrant path, 200)', async () => {
+    const res = await patchLeagues(ADMIN, [normalKey, 'koCup']);
+    assert.equal(res.status, 200);
+    assert.deepEqual((await repo.getClub('dolphins', 'kocup'))!.leagues, [normalKey, 'koCup']);
+  });
+
+  test("a rep's later save carrying an admin-entered fixtures-only key still passes (200)", async () => {
+    const res = await patchLeagues(REP_KO, [normalKey, 'koCup']);
+    assert.equal(res.status, 200);
+  });
+
+  test('a player cannot register with a fixtures-only league as their team (400)', async () => {
+    const up = await app.request('/register/kocup/id-doc/upload-url?t=ko-reg-token', {
+      method: 'POST',
+      body: JSON.stringify({ contentType: 'image/png' }),
+    });
+    const { objectKey } = (await up.json()) as { objectKey: string };
+    const body = (team: string, idNumber: string) =>
+      JSON.stringify({
+        firstName: 'Sipho',
+        lastName: 'Dlamini',
+        idType: 'passport',
+        idNumber,
+        dob: '1998-04-10',
+        nationality: 'South African',
+        race: 'African',
+        gender: 'Male',
+        cell: '0833337777',
+        team,
+        district: 'Ethekwini',
+        idDocMeta: { objectKey, size: 100, contentType: 'image/png' },
+      });
+    const bad = await app.request('/register/kocup?t=ko-reg-token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: body('koCup', 'PPKO01'),
+    });
+    assert.equal(bad.status, 400);
+    assert.match(((await bad.json()) as { error: string }).error, /fixtures-only/);
+    const ok = await app.request('/register/kocup?t=ko-reg-token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: body(normalKey, 'PPKO02'),
+    });
+    assert.equal(ok.status, 201);
+  });
+
+  test('a league catalogue write rejects a non-boolean fixturesOnly (400)', async () => {
+    const res = await app.request('/tenant/config', {
+      method: 'PUT',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        leagues: [
+          ...savedLeagues,
+          {
+            key: 'koCup',
+            label: 'KO Cup',
+            group: 'x',
+            district: 'All districts',
+            fixturesOnly: 'yes',
+          },
+        ],
+      }),
+    });
+    assert.equal(res.status, 400);
+    assert.match(((await res.json()) as { error: string }).error, /fixturesOnly/);
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { playerExportRow } from './exportXlsx';
+import { playerExportRow, clubExportRow } from './exportXlsx';
 
 // Stub label resolvers — the mapper only calls them; their real forms live in admin.tsx.
 const team = (t: string | undefined) => (t ? `Team ${t}` : '');
@@ -274,5 +274,117 @@ describe('playerExportRow', () => {
     expect(unset.Minor).toBe('No');
     expect(unset.Wicketkeeper).toBe('');
     expect(unset['All-rounder']).toBe('');
+  });
+});
+
+describe('playerExportRow · player profile', () => {
+  const base = {
+    naturalKey: 'nk',
+    clubId: 'c',
+    firstName: 'A',
+    lastName: 'B',
+    dob: '2000-01-01',
+    isMinor: false,
+    consentAt: '',
+    createdAt: '',
+    position: 'Striker',
+    battingHand: 'Right',
+    isWk: true,
+  } as never;
+
+  it('keeps the historical cricket key order when the profile is cricket (explicit or default)', () => {
+    expect(Object.keys(playerExportRow(base, team, role, { playerProfile: 'cricket' }))).toEqual(
+      EXPECTED_KEYS,
+    );
+    expect(Object.keys(playerExportRow(base, team, role))).toEqual(EXPECTED_KEYS);
+  });
+
+  it('positions profile swaps the cricket columns for a single Position column', () => {
+    const row = playerExportRow(base, team, role, { playerProfile: 'positions' });
+    const cricketOnly = [
+      'Role',
+      'Batting',
+      'Bowling',
+      'Batting type',
+      'Bowler type',
+      'Wicketkeeper',
+      'All-rounder',
+    ];
+    expect(Object.keys(row)).toEqual([
+      ...EXPECTED_KEYS.slice(0, EXPECTED_KEYS.indexOf('Role')),
+      'Position',
+      ...EXPECTED_KEYS.slice(EXPECTED_KEYS.indexOf('Role')).filter((k) => !cricketOnly.includes(k)),
+    ]);
+    expect(row.Position).toBe('Striker');
+  });
+
+  it('positions profile blanks an unset position rather than dropping the column', () => {
+    const row = playerExportRow({ ...(base as object), position: undefined } as never, team, role, {
+      playerProfile: 'positions',
+    });
+    expect(row.Position).toBe('');
+  });
+
+  it('drops the Veterans club column when the veterans module is off (football tenant)', () => {
+    const row = playerExportRow(base, team, role, {
+      playerProfile: 'positions',
+      modules: { veterans: false },
+    });
+    expect(row).not.toHaveProperty('Veterans club');
+    expect(Object.keys(row)).toContain('Position');
+  });
+
+  it('keeps the cricket key order byte-identical with the veterans module explicitly on', () => {
+    expect(
+      Object.keys(
+        playerExportRow(base, team, role, {
+          playerProfile: 'cricket',
+          modules: { veterans: true },
+        }),
+      ),
+    ).toEqual(EXPECTED_KEYS);
+  });
+});
+
+describe('clubExportRow · sport-vertical modules', () => {
+  const c = {
+    name: 'Northern',
+    district: 'North',
+    chair: 'Jo Soap',
+    affiliation: 'complete',
+    cqi: 70,
+  } as unknown as Parameters<typeof clubExportRow>[0];
+  const helpers = {
+    docCompletion: () => 50,
+    overallProgress: () => 80,
+    cqiBand: () => ({ label: 'B' }),
+  };
+
+  it('defaults to every column, in the historical order (cricket unchanged)', () => {
+    expect(Object.keys(clubExportRow(c, helpers))).toEqual([
+      'Club',
+      'District',
+      'Chairperson',
+      'Affiliation',
+      'Docs %',
+      'CQI Score',
+      'CQI Band',
+      'Overall %',
+    ]);
+  });
+
+  it('relabels the chair column and drops disabled-module columns', () => {
+    const row = clubExportRow(c, {
+      ...helpers,
+      chairLabel: 'Principal',
+      modules: { cqi: false, compliance: false },
+    });
+    expect(row).toEqual({
+      Club: 'Northern',
+      District: 'North',
+      Principal: 'Jo Soap',
+      Affiliation: 'complete',
+      'Overall %': 80,
+    });
   });
 });

@@ -220,6 +220,10 @@ export interface RequiredDoc {
 export interface TenantConfig {
   tenant: string;
   branding: TenantBranding;
+  /** Sport vertical (src/vertical.ts). Absent ⇒ cricket. Operator-only. */
+  sport?: 'cricket' | 'football';
+  /** Display season label, e.g. '2027'. Absent ⇒ the built-in label. Operator-only. */
+  seasonLabel?: string;
   /** Per-tenant feature flags (e.g. whatsappInvites). Absent key ⇒ caller default. */
   features?: Record<string, boolean>;
   submissionDeadline: string;
@@ -678,6 +682,10 @@ export interface PlayerRegistration {
   bowlerType?: string;
   isAllRounder?: boolean;
   isWk?: boolean;
+  /** Playing position ('positions'-profile verticals only). */
+  position?: string;
+  /** Set when a registration moved this person between clubs without a clearance. */
+  transferNote?: string;
   idDocMeta?: PlayerIdDocMeta;
   /** Previous club's vetted ID doc, carried over when a registration-origin clearance is approved. */
   previousIdDocMeta?: PlayerIdDocMeta;

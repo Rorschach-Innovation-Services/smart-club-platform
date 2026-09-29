@@ -744,6 +744,8 @@ export const platformCreateTenant = (body: {
   branding: Partial<TenantBranding> & { name: string };
   submissionDeadline: string;
   features?: Record<string, boolean>;
+  sport?: TenantConfig['sport'];
+  seasonLabel?: string;
 }) => request<TenantConfig>('/platform/tenants', { method: 'POST', body });
 export const platformGetTenant = (slug: string) =>
   request<TenantConfig>(`/platform/tenants/${encodeURIComponent(slug)}`);

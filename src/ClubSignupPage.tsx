@@ -19,6 +19,7 @@ import {
   ApiError,
 } from './api';
 import { useAuth, membershipFor } from './auth';
+import { useSeasonLabel, useVertical } from './branding';
 
 /**
  * Which CTA the done view shows for an already-signed-in visitor:
@@ -46,6 +47,9 @@ export function ClubSignupPage() {
   // Signed-in visitors (e.g. a rep registering a second club) get their session
   // refreshed after submit so the new membership lands without a sign-out.
   const auth = useAuth();
+  // Vertical nouns (club/school, union/league) + the tenant's display season label.
+  const t = useVertical().terms;
+  const seasonLabel = useSeasonLabel();
 
   const [state, setState] = useState('loading'); // loading | ready | invalid | done
   const [orgName, setOrgName] = useState('');
@@ -154,7 +158,7 @@ export function ClubSignupPage() {
       const status = err instanceof ApiError ? err.status : 0;
       if (status === 409 && err.code === 'name_taken') {
         // A different club owns this name; never route to sign-in here.
-        setNameError('A club with that name is already registered — choose a different name.');
+        setNameError(`A ${t.club} with that name is already registered — choose a different name.`);
       } else if (status === 429) {
         setError('Too many signups right now — try again in a little while.');
       } else if (status === 404) {
@@ -179,7 +183,8 @@ export function ClubSignupPage() {
           Link not valid
         </h1>
         <p className="ps-desc">
-          This link isn&apos;t valid any more — ask the union office for the current signup link.
+          This link isn&apos;t valid any more — ask the {t.union} office for the current signup
+          link.
         </p>
         <SignInLink onClick={() => gotoSignIn(form.repEmail.trim())} />
       </Frame>
@@ -198,12 +203,12 @@ export function ClubSignupPage() {
     return (
       <Frame branding={branding}>
         <h1 className="ps-title" style={{ fontSize: 22 }}>
-          {done.replayed ? 'Already registered' : 'Club registered'}
+          {done.replayed ? 'Already registered' : `${t.Club} registered`}
         </h1>
         <p className="ps-desc">
           {done.replayed
             ? `${done.clubName} was already registered with this email — you're all set to sign in.`
-            : `${done.clubName} is registered with ${orgName || 'the union'}.`}{' '}
+            : `${done.clubName} is registered with ${orgName || `the ${t.union}`}.`}{' '}
           {cta === null &&
             "Sign-in is passwordless: enter your email and we'll email you a one-time code."}
         </p>
@@ -235,7 +240,7 @@ export function ClubSignupPage() {
                 lineHeight: 1.5,
               }}
             >
-              You&apos;re signed in and your session was refreshed — the new club is ready.
+              You&apos;re signed in and your session was refreshed — the new {t.club} is ready.
             </p>
           </>
         )}
@@ -257,7 +262,7 @@ export function ClubSignupPage() {
                 lineHeight: 1.5,
               }}
             >
-              Already signed in on this device? Sign out and back in to see your new club.
+              Already signed in on this device? Sign out and back in to see your new {t.club}.
             </p>
           </>
         )}
@@ -267,13 +272,13 @@ export function ClubSignupPage() {
 
   return (
     <Frame branding={branding} wide>
-      <div className="ps-eyebrow">Club registration</div>
+      <div className="ps-eyebrow">{t.Club} registration</div>
       <h1 className="ps-title" style={{ fontSize: 24 }}>
-        {orgName || 'Register your club'}
+        {orgName || `Register your ${t.club}`}
       </h1>
       <p className="ps-desc" style={{ marginBottom: 18 }}>
-        Register your club for the 2026/27 season. You&apos;ll sign in with your email — no password
-        needed.
+        Register your {t.club} for the {seasonLabel} season. You&apos;ll sign in with your email —
+        no password needed.
       </p>
       <form onSubmit={submit} style={{ display: 'grid', gap: 12 }}>
         <Field label="Your name" required value={form.repName} onChange={set('repName')} />
@@ -294,7 +299,7 @@ export function ClubSignupPage() {
             )}
           </div>
         </Row>
-        <Field label="Club name" required value={form.clubName} onChange={set('clubName')} />
+        <Field label={`${t.Club} name`} required value={form.clubName} onChange={set('clubName')} />
         {nameError && (
           <div style={{ color: 'var(--danger-on-dark)', fontSize: 12.5, marginTop: -8 }}>
             {nameError}
@@ -322,15 +327,15 @@ export function ClubSignupPage() {
           </select>
         </label>
         <p style={{ fontSize: 12.5, color: 'var(--muted-on-dark)', lineHeight: 1.5, margin: 0 }}>
-          By registering, you agree the union may store these details to administer your club&apos;s
-          affiliation.
+          By registering, you agree the {t.union} may store these details to administer your{' '}
+          {t.club}&apos;s affiliation.
         </p>
         {districts.length === 0 && (
           // A freshly created client has districts: [] until the operator configures
           // them — the POST would 400 every district, so say so instead of a dead form.
           <div style={{ color: 'var(--danger-on-dark)', fontSize: 12.5 }}>
-            Club signup isn&apos;t open yet — the union hasn&apos;t configured its districts.
-            Contact the union office.
+            {t.Club} signup isn&apos;t open yet — the {t.union} hasn&apos;t configured its
+            districts. Contact the {t.union} office.
           </div>
         )}
         {error && <div style={{ color: 'var(--danger-on-dark)', fontSize: 12.5 }}>{error}</div>}
@@ -340,7 +345,7 @@ export function ClubSignupPage() {
           disabled={busy || districts.length === 0}
           style={{ width: '100%', marginTop: 4 }}
         >
-          {busy ? 'Registering…' : 'Register club'}
+          {busy ? 'Registering…' : `Register ${t.club}`}
         </button>
       </form>
       <SignInLink onClick={() => gotoSignIn(form.repEmail.trim())} />

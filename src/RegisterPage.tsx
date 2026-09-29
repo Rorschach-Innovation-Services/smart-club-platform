@@ -29,6 +29,7 @@ import {
   type DobError,
 } from './data';
 import { leagueOptionsForDistrict } from '../packages/engine/src/leagues';
+import { useModule, useSeasonLabel, useVertical } from './branding';
 
 const EMPTY = {
   surname: '',
@@ -64,6 +65,8 @@ const EMPTY = {
   bowlerType: '',
   isAllRounder: false,
   isWk: false,
+  // Playing position ('positions'-profile verticals only; optional). '' ⇒ not sent.
+  position: '',
   guardianName: '',
   consentChecked: false,
 };
@@ -99,6 +102,14 @@ export function RegisterPage() {
   const [idFile, setIdFile] = useState<File | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  // Sport vertical: 'positions' profiles swap the cricket playing-profile fields for one
+  // Position select; modules gate the previous-club (clearances) and veterans questions.
+  const vertical = useVertical();
+  const positionsMode = vertical.playerProfile === 'positions';
+  const t = vertical.terms;
+  const seasonLabel = useSeasonLabel();
+  const clearancesOn = useModule('clearances');
+  const veteransOn = useModule('veterans');
 
   useEffect(() => {
     let live = true;
@@ -270,28 +281,38 @@ export function RegisterPage() {
         // Dropdown pick sends the club id (backend opens a clearance when the player
         // is found there); 'Other' sends the typed name; first registration sends the
         // documented '—' convention. No club list ⇒ legacy free-text behavior.
-        ...(clubs.length === 0
-          ? { lastClub: d.lastClub.trim() || undefined }
-          : d.lastClubChoice === '__other__'
+        // Clearances module off ⇒ the previous-club section is hidden, so send nothing.
+        ...(!clearancesOn
+          ? {}
+          : clubs.length === 0
             ? { lastClub: d.lastClub.trim() || undefined }
-            : d.lastClubChoice === '__first__'
-              ? { lastClub: '—' }
-              : d.lastClubChoice
-                ? { lastClubId: d.lastClubChoice }
-                : {}),
+            : d.lastClubChoice === '__other__'
+              ? { lastClub: d.lastClub.trim() || undefined }
+              : d.lastClubChoice === '__first__'
+                ? { lastClub: '—' }
+                : d.lastClubChoice
+                  ? { lastClubId: d.lastClubChoice }
+                  : {}),
         // Only sent when the current-club dropdown is shown AND the player picked a club
         // other than the link club — that registers them into (and holds them for) that
         // club instead. Omitted ⇒ backend defaults the destination to the link club.
         ...(currentClubId !== clubId ? { currentClubId } : {}),
         // Veterans second-club affiliation — sent only when the player answered "yes" and picked
         // a club. The server derives the club name and validates it (≠ current club, on-system).
-        ...(d.vetsChoice === 'yes' && d.vetsClubId ? { veteransClubId: d.vetsClubId } : {}),
-        battingHand: d.battingHand,
-        bowlingHand: d.bowlingHand,
-        battingType: d.battingType,
-        bowlerType: d.bowlerType || undefined,
-        isAllRounder: d.isAllRounder,
-        isWk: d.isWk,
+        ...(veteransOn && d.vetsChoice === 'yes' && d.vetsClubId
+          ? { veteransClubId: d.vetsClubId }
+          : {}),
+        // Positions profile sends only the (optional) position; cricket sends its profile.
+        ...(positionsMode
+          ? { position: d.position || undefined }
+          : {
+              battingHand: d.battingHand,
+              bowlingHand: d.bowlingHand,
+              battingType: d.battingType,
+              bowlerType: d.bowlerType || undefined,
+              isAllRounder: d.isAllRounder,
+              isWk: d.isWk,
+            }),
         guardianName: minor ? d.guardianName : undefined,
         idDocMeta: { objectKey, size: idFile.size, contentType },
       });
@@ -320,7 +341,7 @@ export function RegisterPage() {
           Link not valid
         </h1>
         <p className="ps-desc">
-          This registration link is invalid or has expired. Ask your club for a fresh link.
+          This registration link is invalid or has expired. Ask your {t.club} for a fresh link.
         </p>
       </CenterCard>
     );
@@ -383,10 +404,10 @@ export function RegisterPage() {
         {clubName}
       </h1>
       <p className="ps-desc" style={{ marginBottom: 18 }}>
-        Register as a player for the 2026/27 season.
+        Register as a player for the {seasonLabel} season.
       </p>
       <form onSubmit={submit} className="reg-form">
-        <Section title="Club & team">
+        <Section title={`${t.Club} & team`}>
           <Select
             label="District"
             required
@@ -398,7 +419,7 @@ export function RegisterPage() {
               // Near-unreachable (empty-districts tenants can't sign clubs up), but
               // honest: registration needs a district, so block rather than mislead.
               <option value="" disabled>
-                Registration isn't open yet — contact the union office
+                Registration isn't open yet — contact the {t.union} office
               </option>
             ) : (
               districts.map((ds) => (
@@ -522,192 +543,219 @@ export function RegisterPage() {
         </Section>
 
         <Section title="Playing profile">
-          <Seg
-            label="Batting hand"
-            options={HANDS}
-            value={d.battingHand}
-            onPick={(v) => setVal('battingHand', v)}
-          />
-          <Seg
-            label="Bowling hand"
-            options={HANDS}
-            value={d.bowlingHand}
-            onPick={(v) => setVal('bowlingHand', v)}
-          />
-          <Select label="Batting type" value={d.battingType} onChange={set('battingType')}>
-            {BATTING_TYPES.map((b) => (
-              <option key={b}>{b}</option>
-            ))}
-          </Select>
-          <Select
-            label="Bowler type"
-            value={d.bowlerType}
-            onChange={set('bowlerType')}
-            placeholder="— Not a bowler —"
-          >
-            {BOWLER_TYPES.map((b) => (
-              <option key={b}>{b}</option>
-            ))}
-          </Select>
-          <div className="reg-span reg-checks">
-            <Check
-              label="All-rounder"
-              checked={d.isAllRounder}
-              onChange={(v) => setVal('isAllRounder', v)}
-            />
-            <Check label="Wicket-keeper" checked={d.isWk} onChange={(v) => setVal('isWk', v)} />
-          </div>
-        </Section>
-
-        <Section title="Registration history">
-          {clubs.length === 0 ? (
-            // Older backend (no club list in the link context) — legacy free text.
-            <Field
-              span
-              label="Club for which last registered"
-              value={d.lastClub}
-              onChange={set('lastClub')}
-              placeholder="Previous club, or — if first registration"
-            />
+          {positionsMode ? (
+            <Select
+              label="Position"
+              value={d.position}
+              onChange={set('position')}
+              placeholder="— Select position —"
+            >
+              {vertical.positions.map((p) => (
+                <option key={p}>{p}</option>
+              ))}
+            </Select>
           ) : (
             <>
+              <Seg
+                label="Batting hand"
+                options={HANDS}
+                value={d.battingHand}
+                onPick={(v) => setVal('battingHand', v)}
+              />
+              <Seg
+                label="Bowling hand"
+                options={HANDS}
+                value={d.bowlingHand}
+                onPick={(v) => setVal('bowlingHand', v)}
+              />
+              <Select label="Batting type" value={d.battingType} onChange={set('battingType')}>
+                {BATTING_TYPES.map((b) => (
+                  <option key={b}>{b}</option>
+                ))}
+              </Select>
               <Select
+                label="Bowler type"
+                value={d.bowlerType}
+                onChange={set('bowlerType')}
+                placeholder="— Not a bowler —"
+              >
+                {BOWLER_TYPES.map((b) => (
+                  <option key={b}>{b}</option>
+                ))}
+              </Select>
+              <div className="reg-span reg-checks">
+                <Check
+                  label="All-rounder"
+                  checked={d.isAllRounder}
+                  onChange={(v) => setVal('isAllRounder', v)}
+                />
+                <Check label="Wicket-keeper" checked={d.isWk} onChange={(v) => setVal('isWk', v)} />
+              </div>
+            </>
+          )}
+        </Section>
+
+        {(clearancesOn || (veteransOn && clubs.length > 0)) && (
+          <Section title={clearancesOn ? 'Registration history' : 'Veterans'}>
+            {!clearancesOn ? null : clubs.length === 0 ? (
+              // Older backend (no club list in the link context) — legacy free text.
+              <Field
                 span
                 label="Club for which last registered"
-                value={d.lastClubChoice}
-                onChange={(e) =>
-                  // Leaving 'Other' clears the typed name so it can't ride along with
-                  // a club pick (same pattern as the admin venue picker). Reset the
-                  // current-club pick too: the options exclude the chosen previous club,
-                  // so a stale currentClubChoice could otherwise equal the new previous
-                  // club and submit an invalid previous==current pair (backend 400).
-                  setD((f) => ({
-                    ...f,
-                    lastClubChoice: e.target.value,
-                    lastClub: '',
-                    currentClubChoice: '',
-                  }))
-                }
-                placeholder="Select…"
-              >
-                <option value="__first__">None (first registration)</option>
-                {/* The link club itself — for a player re-registering at the same club.
-                    Picking it keeps the current club as the link club (no transfer). */}
-                <option value={clubId}>{clubName} (this club)</option>
-                {clubs.map((cl) => (
-                  <option key={cl.id} value={cl.id}>
-                    {cl.name}
-                  </option>
-                ))}
-                <option value="__other__">Other club (type below)</option>
-              </Select>
-              {d.lastClubChoice === '__other__' && (
-                <Field
-                  span
-                  label="Previous club name"
-                  value={d.lastClub}
-                  onChange={set('lastClub')}
-                  placeholder="Name of the club you last registered for"
-                />
-              )}
-              {typedOtherOnSystem && (
-                <div className="reg-span" style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>
-                  {typedOtherOnSystem.name} is in the club list — select it from the dropdown above
-                  instead of typing it, so your registration links to that club.
-                </div>
-              )}
-              {!!d.lastClubChoice &&
-                d.lastClubChoice !== '__first__' &&
-                d.lastClubChoice !== '__other__' &&
-                d.lastClubChoice !== clubId && (
-                  <div
-                    className="reg-span"
-                    style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
-                  >
-                    {clubs.find((cl) => cl.id === d.lastClubChoice)?.directory
-                      ? 'A clearance request will be raised for the Union office to review before you join your current club.'
-                      : 'If you’re still registered there under this ID number, a clearance request will be sent to that club — they (or the Union office) must approve it before you join your current club.'}
-                  </div>
-                )}
-              {d.lastClubChoice === clubId && (
-                <div className="reg-span" style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}>
-                  You&apos;re re-registering with {clubName} — no clearance is needed.
-                </div>
-              )}
-              {showCurrentClub && (
-                <>
-                  <Select
-                    span
-                    label="Current club"
-                    value={d.currentClubChoice || clubId}
-                    onChange={(e) => setD((f) => ({ ...f, currentClubChoice: e.target.value }))}
-                  >
-                    {currentClubOptions.map((cl) => (
-                      <option key={cl.id} value={cl.id}>
-                        {cl.name}
-                        {cl.id === clubId ? ' (this link)' : ''}
-                      </option>
-                    ))}
-                  </Select>
-                  {currentClubId !== clubId && (
-                    <div
-                      className="reg-span"
-                      style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
-                    >
-                      You&apos;re registering with a club other than the one whose link you used, so
-                      your registration will be sent to that club to approve before you appear on
-                      their roster.
-                    </div>
-                  )}
-                </>
-              )}
-              {/* Veterans second-club affiliation — capture-only, optional. A plain Yes/No
-                  segmented control (the shared <Seg> hard-codes a " hander" suffix, so it can't
-                  be reused for this). "Yes" reveals a club picker, excluding the chosen current
-                  club. No answer sends nothing. */}
-              <div className="reg-span">
-                <Label label="Are you playing veterans cricket for another club?" />
-                <div className="seg">
-                  {[
-                    { v: 'yes', l: 'Yes' },
-                    { v: 'no', l: 'No' },
-                  ].map((o) => (
-                    <button
-                      key={o.v}
-                      type="button"
-                      className={`seg-btn ${d.vetsChoice === o.v ? 'on' : ''}`}
-                      onClick={() =>
-                        setD((f) => ({
-                          ...f,
-                          vetsChoice: o.v,
-                          // Leaving 'yes' clears any pick so it can't ride along as a hidden value.
-                          vetsClubId: o.v === 'yes' ? f.vetsClubId : '',
-                        }))
-                      }
-                    >
-                      {o.l}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              {d.vetsChoice === 'yes' && (
+                value={d.lastClub}
+                onChange={set('lastClub')}
+                placeholder="Previous club, or — if first registration"
+              />
+            ) : (
+              <>
                 <Select
                   span
-                  label="Veterans club"
-                  value={d.vetsClubId}
-                  onChange={(e) => setVal('vetsClubId', e.target.value)}
-                  placeholder="Select the club you play veterans cricket for"
+                  label="Club for which last registered"
+                  value={d.lastClubChoice}
+                  onChange={(e) =>
+                    // Leaving 'Other' clears the typed name so it can't ride along with
+                    // a club pick (same pattern as the admin venue picker). Reset the
+                    // current-club pick too: the options exclude the chosen previous club,
+                    // so a stale currentClubChoice could otherwise equal the new previous
+                    // club and submit an invalid previous==current pair (backend 400).
+                    setD((f) => ({
+                      ...f,
+                      lastClubChoice: e.target.value,
+                      lastClub: '',
+                      currentClubChoice: '',
+                    }))
+                  }
+                  placeholder="Select…"
                 >
-                  {vetsClubOptions.map((cl) => (
+                  <option value="__first__">None (first registration)</option>
+                  {/* The link club itself — for a player re-registering at the same club.
+                    Picking it keeps the current club as the link club (no transfer). */}
+                  <option value={clubId}>{clubName} (this club)</option>
+                  {clubs.map((cl) => (
                     <option key={cl.id} value={cl.id}>
                       {cl.name}
                     </option>
                   ))}
+                  <option value="__other__">Other club (type below)</option>
                 </Select>
-              )}
-            </>
-          )}
-        </Section>
+                {d.lastClubChoice === '__other__' && (
+                  <Field
+                    span
+                    label="Previous club name"
+                    value={d.lastClub}
+                    onChange={set('lastClub')}
+                    placeholder="Name of the club you last registered for"
+                  />
+                )}
+                {typedOtherOnSystem && (
+                  <div
+                    className="reg-span"
+                    style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
+                  >
+                    {typedOtherOnSystem.name} is in the club list — select it from the dropdown
+                    above instead of typing it, so your registration links to that club.
+                  </div>
+                )}
+                {!!d.lastClubChoice &&
+                  d.lastClubChoice !== '__first__' &&
+                  d.lastClubChoice !== '__other__' &&
+                  d.lastClubChoice !== clubId && (
+                    <div
+                      className="reg-span"
+                      style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
+                    >
+                      {clubs.find((cl) => cl.id === d.lastClubChoice)?.directory
+                        ? 'A clearance request will be raised for the Union office to review before you join your current club.'
+                        : 'If you’re still registered there under this ID number, a clearance request will be sent to that club — they (or the Union office) must approve it before you join your current club.'}
+                    </div>
+                  )}
+                {d.lastClubChoice === clubId && (
+                  <div
+                    className="reg-span"
+                    style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
+                  >
+                    You&apos;re re-registering with {clubName} — no clearance is needed.
+                  </div>
+                )}
+                {showCurrentClub && (
+                  <>
+                    <Select
+                      span
+                      label="Current club"
+                      value={d.currentClubChoice || clubId}
+                      onChange={(e) => setD((f) => ({ ...f, currentClubChoice: e.target.value }))}
+                    >
+                      {currentClubOptions.map((cl) => (
+                        <option key={cl.id} value={cl.id}>
+                          {cl.name}
+                          {cl.id === clubId ? ' (this link)' : ''}
+                        </option>
+                      ))}
+                    </Select>
+                    {currentClubId !== clubId && (
+                      <div
+                        className="reg-span"
+                        style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)' }}
+                      >
+                        You&apos;re registering with a club other than the one whose link you used,
+                        so your registration will be sent to that club to approve before you appear
+                        on their roster.
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+            {veteransOn && clubs.length > 0 && (
+              <>
+                {/* Veterans second-club affiliation — capture-only, optional. A plain Yes/No
+                  segmented control (the shared <Seg> hard-codes a " hander" suffix, so it can't
+                  be reused for this). "Yes" reveals a club picker, excluding the chosen current
+                  club. No answer sends nothing. */}
+                <div className="reg-span">
+                  <Label label="Are you playing veterans cricket for another club?" />
+                  <div className="seg">
+                    {[
+                      { v: 'yes', l: 'Yes' },
+                      { v: 'no', l: 'No' },
+                    ].map((o) => (
+                      <button
+                        key={o.v}
+                        type="button"
+                        className={`seg-btn ${d.vetsChoice === o.v ? 'on' : ''}`}
+                        onClick={() =>
+                          setD((f) => ({
+                            ...f,
+                            vetsChoice: o.v,
+                            // Leaving 'yes' clears any pick so it can't ride along as a hidden value.
+                            vetsClubId: o.v === 'yes' ? f.vetsClubId : '',
+                          }))
+                        }
+                      >
+                        {o.l}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {d.vetsChoice === 'yes' && (
+                  <Select
+                    span
+                    label="Veterans club"
+                    value={d.vetsClubId}
+                    onChange={(e) => setVal('vetsClubId', e.target.value)}
+                    placeholder="Select the club you play veterans cricket for"
+                  >
+                    {vetsClubOptions.map((cl) => (
+                      <option key={cl.id} value={cl.id}>
+                        {cl.name}
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </>
+            )}
+          </Section>
+        )}
 
         <Section title="ID document (required)">
           <input
@@ -756,9 +804,9 @@ export function RegisterPage() {
           />
           <span style={{ fontSize: 12.5, lineHeight: 1.55 }}>
             I request to register as a player for <strong>{clubName}</strong> under the{' '}
-            <strong>Union Rules and Byelaws</strong>, and I consent to my personal information being
-            processed for this registration (POPIA). I declare that I am not being paid by the club
-            for my services as a cricketer.
+            <strong>{t.Union} Rules and Byelaws</strong>, and I consent to my personal information
+            being processed for this registration (POPIA). I declare that I am not being paid by the{' '}
+            {t.club} for my services as a {vertical.sport === 'cricket' ? 'cricketer' : 'player'}.
           </span>
         </label>
 

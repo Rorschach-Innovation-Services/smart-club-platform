@@ -18,6 +18,7 @@ import { queryClient, qk } from './query';
 import * as api from './api';
 import { ApiError, EMAIL_RE } from './api';
 import { resolveCopy } from './branding';
+import { resolveVertical, VERTICALS, type ModuleKey, type Sport } from './vertical';
 import { Icon, Pill, Btn, Card, EmptyState, Modal, useToast } from './atoms';
 import { LeagueForm } from './admin';
 import { DISTRICTS } from './data';
@@ -168,7 +169,45 @@ const KNOWN_FLAGS = [
     hint: 'Tenant admins may edit their own branding.',
     def: false,
   },
-];
+  // Module flags: absent ⇒ the tenant's sport default (cricket on, football off) — the
+  // `module` key routes the effective default through resolveVertical (API: hasModule).
+  {
+    key: 'module.veterans',
+    label: 'Veterans module',
+    hint: 'Veterans second-club affiliation. Default: on for cricket, off for football.',
+    def: true,
+    module: 'veterans',
+  },
+  {
+    key: 'module.cqi',
+    label: 'CQI module',
+    hint: 'Club Quality Index scoring and submissions. Default: on for cricket, off for football.',
+    def: true,
+    module: 'cqi',
+  },
+  {
+    key: 'module.compliance',
+    label: 'Compliance module',
+    hint: 'Required-document compliance tracking. Default: on for cricket, off for football.',
+    def: true,
+    module: 'compliance',
+  },
+  {
+    key: 'module.clearances',
+    label: 'Clearances module',
+    hint: 'Player transfer clearances between clubs. Default: on for cricket, off for football.',
+    def: true,
+    module: 'clearances',
+  },
+] satisfies { key: string; label: string; hint: string; def: boolean; module?: ModuleKey }[];
+
+/** Effective default for a known flag — module flags follow the tenant's sport vertical. */
+function flagDefault(
+  f: { def: boolean; module?: ModuleKey },
+  config: Pick<TenantConfig, 'sport'>,
+): boolean {
+  return f.module ? resolveVertical(config).moduleDefaults[f.module] : f.def;
+}
 
 const fmtDate = (iso?: string) => (iso ? formatDayYear(iso) : '—');
 
@@ -731,7 +770,15 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           />
           <DeadlineCard key={`dl-${config.tenant}`} config={config} save={save} toast={toast} />
         </div>
-        <div className="settings-row-2">
+        <div className="settings-row-3">
+          {/* Keyed on the saved sport/label so the card re-derives its baseline after a
+              save. FeaturesCard reads config.sport live for module-flag defaults. */}
+          <VerticalCard
+            key={`vt-${config.tenant}-${config.sport ?? ''}-${config.seasonLabel ?? ''}`}
+            config={config}
+            save={save}
+            toast={toast}
+          />
           <FeaturesCard key={`ft-${config.tenant}`} config={config} save={save} toast={toast} />
           <AdminsCard key={`ad-${config.tenant}`} config={config} toast={toast} />
         </div>
@@ -1426,6 +1473,126 @@ function ClearanceCertificateCard({
   );
 }
 
+const SPORT_LABEL: Record<Sport, string> = { cricket: 'Cricket', football: 'Football' };
+const SEASON_LABEL_MAX = 20;
+
+/** Plain-language consequences of creating a football tenant (the API seeds these). */
+function FootballConsequences() {
+  return (
+    <ul style={{ margin: '6px 0 0', paddingLeft: 18, fontSize: 12, lineHeight: 1.7 }}>
+      <li>Veterans, CQI, compliance and clearances modules are off by default.</li>
+      <li>No required documents are seeded — add any from the settings page.</li>
+      <li>WhatsApp invites are off (email only).</li>
+      <li>Tutorials have no built-in fallback — only videos you upload for this client show.</li>
+    </ul>
+  );
+}
+
+/**
+ * Sport vertical + display season label. Sport is set at creation; the API allows a
+ * change later, but the card only offers it behind a caution — existing flags, docs and
+ * data were seeded for the original sport and are not re-seeded.
+ */
+function VerticalCard({
+  config,
+  save,
+  toast,
+}: {
+  config: TenantConfig;
+  save: (p: Partial<TenantConfig>) => Promise<TenantConfig>;
+  toast: Toast;
+}) {
+  const currentSport: Sport = resolveVertical(config).sport;
+  const initialLabel = config.seasonLabel ?? '';
+  const [sport, setSport] = useState<Sport>(currentSport);
+  const [label, setLabel] = useState(initialLabel);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const trimmed = label.trim();
+  const sportChanged = sport !== currentSport;
+  const labelChanged = trimmed !== initialLabel;
+  const dirty = sportChanged || labelChanged;
+
+  async function saveIt() {
+    setErr('');
+    if (trimmed.length > SEASON_LABEL_MAX) {
+      setErr(`Season label must be ${SEASON_LABEL_MAX} characters or fewer`);
+      return;
+    }
+    setBusy(true);
+    try {
+      await save({
+        ...(sportChanged ? { sport } : {}),
+        // An emptied input sends '' — the API reads that as "remove the label" (the tenant
+        // falls back to the built-in season label).
+        ...(labelChanged ? { seasonLabel: trimmed } : {}),
+      });
+      toast('Vertical saved');
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Could not save — try again');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel title="Vertical" sub="The sport this client runs, and the season label it displays.">
+      <Field
+        label="Sport"
+        hint={
+          <>
+            Currently <strong>{SPORT_LABEL[currentSport]}</strong>
+            {config.sport ? '' : ' (default)'}. Set at creation — change only with care.
+          </>
+        }
+      >
+        <select
+          className="field-input"
+          value={sport}
+          onChange={(e) => setSport(e.target.value as Sport)}
+        >
+          {(Object.keys(VERTICALS) as Sport[]).map((s) => (
+            <option key={s} value={s}>
+              {SPORT_LABEL[s]}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {sportChanged && (
+        <div
+          role="alert"
+          style={{
+            fontSize: 12,
+            color: 'var(--coral, #C0392B)',
+            margin: '-4px 0 12px',
+            lineHeight: 1.6,
+          }}
+        >
+          Caution: changing sport switches this client’s terminology and module defaults, but does
+          not re-seed its feature flags, required documents or existing data — review the Features
+          and Required documents cards after saving.
+        </div>
+      )}
+      <Field
+        label="Season label"
+        hint={`Optional display label, e.g. “2027” — ${SEASON_LABEL_MAX} characters max. Absent ⇒ the built-in label.`}
+      >
+        <input
+          className="field-input"
+          maxLength={SEASON_LABEL_MAX}
+          placeholder="e.g. 2027"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+        />
+      </Field>
+      {err && <div style={{ ...ERR, marginTop: -4, marginBottom: 10 }}>{err}</div>}
+      <Btn tone="teal" size="sm" onClick={saveIt} disabled={!dirty || busy}>
+        {busy ? 'Saving…' : 'Save vertical'}
+      </Btn>
+    </Panel>
+  );
+}
+
 function FeaturesCard({
   config,
   save,
@@ -1505,7 +1672,7 @@ function FeaturesCard({
               </span>
             )}
             <FlagToggle
-              on={flags[f.key] ?? f.def}
+              on={flags[f.key] ?? flagDefault(f, config)}
               onChange={(v) => setFlags({ ...flags, [f.key]: v })}
             />
           </div>
@@ -1951,6 +2118,31 @@ function LeaguesCard({
                   <tr key={L.key}>
                     <td>
                       <span style={{ fontWeight: 700 }}>{L.label}</span>
+                      {/* Fixtures-only (e.g. a KO Cup on its own calendar): hidden from the
+                          affiliation league picker and player registration; the tenant admin
+                          enters clubs from the club's Leagues editor. */}
+                      <label
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          marginTop: 4,
+                          fontSize: 11.5,
+                          color: 'var(--muted)',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={!!L.fixturesOnly}
+                          onChange={(e) =>
+                            onUpdate(L.key, { fixturesOnly: e.target.checked || undefined }).catch(
+                              () => {},
+                            )
+                          }
+                        />
+                        Fixtures only (hidden from affiliation)
+                      </label>
                     </td>
                     <td>
                       <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{L.district}</span>
@@ -3272,6 +3464,9 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
   const [name, setName] = useState('');
   const [title, setTitle] = useState('');
   const [nameErr, setNameErr] = useState('');
+  const [sport, setSport] = useState<Sport>('cricket');
+  const [seasonLabel, setSeasonLabel] = useState('');
+  const [seasonErr, setSeasonErr] = useState('');
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [logoPreview, setLogoPreview] = useState('');
   const [logoErr, setLogoErr] = useState('');
@@ -3311,6 +3506,11 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
       return;
     }
     setNameErr('');
+    if (seasonLabel.trim().length > SEASON_LABEL_MAX) {
+      setSeasonErr(`Season label must be ${SEASON_LABEL_MAX} characters or fewer`);
+      return;
+    }
+    setSeasonErr('');
     setStep(STEP.Logo);
   }
   function pickLogo(file: File | undefined) {
@@ -3349,7 +3549,10 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
     setCreating(true);
     try {
       const brandFont = draftFontOut(brand.font);
-      const cfg = await api.platformCreateTenant({
+      // sport/seasonLabel ride on the create body (the API validates both); built as a
+      // typed local so the extra keys pass the client helper's narrower body type.
+      const body: Parameters<typeof api.platformCreateTenant>[0] &
+        Pick<TenantConfig, 'sport' | 'seasonLabel'> = {
         slug,
         branding: {
           name: name.trim(),
@@ -3358,7 +3561,10 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
           ...(brandFont ? { font: brandFont } : {}),
         },
         submissionDeadline: deadline,
-      });
+        sport,
+        ...(seasonLabel.trim() ? { seasonLabel: seasonLabel.trim() } : {}),
+      };
+      const cfg = await api.platformCreateTenant(body);
       queryClient.invalidateQueries({ queryKey: qk.platformTenants() });
       let finalCfg = cfg;
       if (logoFile) {
@@ -3390,6 +3596,9 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
       } else if (err instanceof ApiError && err.status === 400 && /slug/i.test(msg)) {
         setSlugErr(msg);
         setStep(STEP.Slug);
+      } else if (err instanceof ApiError && err.status === 400 && /seasonLabel|sport/.test(msg)) {
+        setSeasonErr(msg);
+        setStep(STEP.Identity);
       } else if (err instanceof ApiError && err.status === 400 && /name/i.test(msg)) {
         setNameErr(msg);
         setStep(STEP.Identity);
@@ -3520,6 +3729,41 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
                   onChange={(e) => setTitle(e.target.value)}
                 />
               </Field>
+              <Field
+                label="Sport"
+                hint="Sets the client's terminology and which modules are on by default. Cricket keeps today's behaviour."
+              >
+                <select
+                  className="field-input"
+                  value={sport}
+                  onChange={(e) => setSport(e.target.value as Sport)}
+                >
+                  {(Object.keys(VERTICALS) as Sport[]).map((s) => (
+                    <option key={s} value={s}>
+                      {SPORT_LABEL[s]}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {sport === 'football' && (
+                <div style={{ fontSize: 12, color: 'var(--muted)', margin: '-4px 0 12px' }}>
+                  A football client starts differently:
+                  <FootballConsequences />
+                </div>
+              )}
+              <Field
+                label="Season label"
+                error={seasonErr}
+                hint={`Optional — e.g. “2027”, ${SEASON_LABEL_MAX} characters max. Leave blank for the built-in label.`}
+              >
+                <input
+                  className="field-input"
+                  maxLength={SEASON_LABEL_MAX}
+                  placeholder="e.g. 2027"
+                  value={seasonLabel}
+                  onChange={(e) => setSeasonLabel(e.target.value)}
+                />
+              </Field>
               <div style={footRow}>
                 <Btn tone="ghost" size="sm" onClick={() => setStep(STEP.Slug)}>
                   Back
@@ -3617,6 +3861,26 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
                   onChange={(e) => setDeadline(e.target.value)}
                 />
               </Field>
+              <div
+                style={{
+                  fontSize: 12,
+                  color: 'var(--muted)',
+                  lineHeight: 1.6,
+                  padding: '10px 12px',
+                  border: '1px solid var(--line2)',
+                  borderRadius: 8,
+                }}
+              >
+                Creating <strong>{name.trim() || slug}</strong> as a{' '}
+                <strong>{SPORT_LABEL[sport].toLowerCase()}</strong> client
+                {seasonLabel.trim() ? (
+                  <>
+                    {' '}
+                    with season label <strong>{seasonLabel.trim()}</strong>
+                  </>
+                ) : null}
+                .{sport === 'football' && <FootballConsequences />}
+              </div>
               <div style={footRow}>
                 <Btn tone="ghost" size="sm" onClick={() => setStep(STEP.Brand)} disabled={creating}>
                   Back
@@ -3708,6 +3972,13 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
                 </li>
                 <li>
                   First admin: {adminDone || 'not granted yet — add one from the settings page'}
+                </li>
+                <li>
+                  Sport: {SPORT_LABEL[resolveVertical(created).sport]}
+                  {created.seasonLabel ? ` · season label ${created.seasonLabel}` : ''}
+                  {resolveVertical(created).sport === 'football'
+                    ? ' — modules off, no required documents, WhatsApp invites off, no tutorial fallback'
+                    : ''}
                 </li>
               </ul>
               <p

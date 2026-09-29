@@ -11,6 +11,10 @@ import {
   buildRecentActivity,
   fixtureCost,
   composeDob,
+  overallProgress,
+  ALL_PROGRESS_MODULES,
+  DEFAULT_REQUIRED_DOCS,
+  docCompletion,
 } from './data';
 
 describe('greeting', () => {
@@ -390,5 +394,56 @@ describe('composeDob', () => {
     expect(composeDob('', '', '')).toEqual({ dob: '', error: 'incomplete' });
     expect(composeDob('15', '', '1958')).toEqual({ dob: '', error: 'incomplete' });
     expect(composeDob('15', '3', '')).toEqual({ dob: '', error: 'incomplete' });
+  });
+});
+
+describe('overallProgress — module awareness', () => {
+  // The pre-vertical formula, verbatim: 5 weighted phases at 20% each.
+  const legacy = (club) => {
+    const p1 = club.affiliation === 'complete' ? 100 : club.affiliation === 'in_progress' ? 40 : 0;
+    const p2 = club.affiliation === 'complete' ? 100 : 0;
+    const p3 = Math.min(100, ((club.players || 0) / 60) * 100);
+    const p4 = club.cqi > 60 ? 100 : club.cqi > 0 ? 50 : 0;
+    const p5 = docCompletion(club, DEFAULT_REQUIRED_DOCS);
+    return Math.round((p1 + p2 + p3 + p4 + p5) / 5);
+  };
+  const docKeys = DEFAULT_REQUIRED_DOCS.map((d) => d.key);
+  const clubs = [];
+  for (const affiliation of ['not_started', 'in_progress', 'complete'])
+    for (const players of [0, 1, 7, 29, 59, 60, 61, 200])
+      for (const cqi of [0, 1, 45, 60, 61, 100])
+        for (let held = 0; held <= docKeys.length; held += 2)
+          clubs.push({
+            affiliation,
+            players,
+            cqi,
+            docs: Object.fromEntries(docKeys.map((k, i) => [k, i < held])),
+          });
+
+  it('cricket (default + explicit all-on) is byte-identical to the legacy 5×20% math', () => {
+    expect(clubs.length).toBeGreaterThan(100);
+    for (const c of clubs) {
+      const want = legacy(c);
+      expect(overallProgress(c)).toBe(want);
+      expect(overallProgress(c, DEFAULT_REQUIRED_DOCS)).toBe(want);
+      expect(overallProgress(c, DEFAULT_REQUIRED_DOCS, ALL_PROGRESS_MODULES)).toBe(want);
+      expect(overallProgress(c, DEFAULT_REQUIRED_DOCS, { cqi: true, compliance: true })).toBe(want);
+    }
+  });
+
+  it('football (cqi + compliance off) is Affiliation 50% + Fixtures 50%', () => {
+    const off = { cqi: false, compliance: false };
+    const base = { players: 200, cqi: 100, docs: {} };
+    expect(overallProgress({ ...base, affiliation: 'not_started' }, [], off)).toBe(0);
+    expect(overallProgress({ ...base, affiliation: 'in_progress' }, [], off)).toBe(20);
+    expect(overallProgress({ ...base, affiliation: 'complete' }, [], off)).toBe(100);
+  });
+
+  it('one module off drops only its term', () => {
+    const c = { affiliation: 'complete', players: 60, cqi: 0, docs: {} };
+    // cqi off: (100 + 100 + 100 + docs 0) / 4
+    expect(overallProgress(c, DEFAULT_REQUIRED_DOCS, { cqi: false, compliance: true })).toBe(75);
+    // compliance off: (100 + 100 + 100 + cqi 0) / 4
+    expect(overallProgress(c, DEFAULT_REQUIRED_DOCS, { cqi: true, compliance: false })).toBe(75);
   });
 });

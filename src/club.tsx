@@ -19,8 +19,6 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
   DISTRICTS,
-  COACHING_BODIES,
-  COACHING_LEVELS,
   COACH_EXPERIENCE,
   greeting,
   DEFAULT_REQUIRED_DOCS,
@@ -79,7 +77,8 @@ import {
   formatWeekdayLong,
   formatWeekdayName,
 } from './dates';
-import { useCopy } from './branding';
+import { useCopy, useFeature, useModule, useSeasonLabel, useVertical } from './branding';
+import { pitchCountLabel } from './vertical';
 import {
   Icon,
   Pill,
@@ -528,9 +527,16 @@ export function ClubHome({
   allLeagues = [],
   requiredDocs = DEFAULT_REQUIRED_DOCS,
   onRenameClub,
+  onSaveExco = undefined,
 }) {
   const [showNameEdit, setShowNameEdit] = useStateC(false);
+  const [showExcoForm, setShowExcoForm] = useStateC(false);
   const copy = useCopy();
+  const vertical = useVertical();
+  const t = vertical.terms;
+  const seasonLabel = useSeasonLabel();
+  const cqiOn = useModule('cqi');
+  const complianceOn = useModule('compliance');
   const deadlineLong = formatDeadlineLong(submissionDeadline);
   const deadlineShort = formatDeadlineShort(submissionDeadline);
   const daysLeft = daysUntil(submissionDeadline);
@@ -541,13 +547,16 @@ export function ClubHome({
         ? '1 day remaining'
         : `${daysLeft} days remaining`;
   const dc = docCompletion(club, requiredDocs);
-  const op = overallProgress(club, requiredDocs);
+  const op = overallProgress(club, requiredDocs, { cqi: cqiOn, compliance: complianceOn });
   const band = cqiBand(club.cqi);
   // Team counts derive from the leagues entered on the affiliation form, summing the
   // per-league team counts (a club may field >1 side); club.teams/juniors are stale.
   const tc = teamCounts(club.leagues, allLeagues, club.leagueTeams);
   // "Submitted" is the form fact (affiliation === 'complete').
   const affDone = affiliationSubmitted(club);
+  // Leadership stays editable post-submission: with the compliance module off the
+  // documents screen (the exco roster's usual home) is gone, so the home card opens it.
+  const canEditLeadership = !complianceOn && !!onSaveExco;
 
   const phases = [
     {
@@ -568,14 +577,19 @@ export function ClubHome({
       lock: !affDone,
       lockReason: 'Locked — finish phase 1 first',
     },
-    {
-      n: '03',
-      t: 'Compliance & CQI',
-      key: 'compliance',
-      done: dc === 100 && club.cqi > 0,
-      action: 'Continue',
-      target: 'documents',
-    },
+    // CQI + compliance both off (e.g. football): the journey is just Affiliation + Fixtures.
+    ...(cqiOn || complianceOn
+      ? [
+          {
+            n: '03',
+            t: 'Compliance & CQI',
+            key: 'compliance',
+            done: (!complianceOn || dc === 100) && (!cqiOn || club.cqi > 0),
+            action: 'Continue',
+            target: complianceOn ? 'documents' : 'cqi',
+          },
+        ]
+      : []),
   ];
 
   // Find next action
@@ -586,7 +600,9 @@ export function ClubHome({
       {/* Aspirational hero banner */}
       <div className="hero-banner" style={{ backgroundImage: 'var(--hero-image)' }}>
         <div className="hero-content">
-          <div className="hero-eyebrow">{copy.eyebrow} · 2026/27 Season</div>
+          <div className="hero-eyebrow">
+            {copy.eyebrow} · {seasonLabel} Season
+          </div>
           <h2 className="hero-title">{copy.heroTitle}</h2>
           <p className="hero-sub">
             Affiliate, register and integrate — be part of the same ecosystem that powers our
@@ -598,13 +614,15 @@ export function ClubHome({
       <div className="page-head">
         <div className="ph-left">
           <div className="ph-crumb" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span>Club Portal · {club.name}</span>
+            <span>
+              {t.Club} Portal · {club.name}
+            </span>
             {onRenameClub && (
               <button
                 type="button"
                 onClick={() => setShowNameEdit(true)}
-                title="Rename club"
-                aria-label="Rename club"
+                title={`Rename ${t.club}`}
+                aria-label={`Rename ${t.club}`}
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
@@ -634,7 +652,7 @@ export function ClubHome({
               club={club}
               toast={toast}
               successToast={(name) =>
-                `Club name updated to “${name}” · your league office has been notified`
+                `${t.Club} name updated to “${name}” · your league office has been notified`
               }
               onClose={() => setShowNameEdit(false)}
               onSave={(name) =>
@@ -646,11 +664,11 @@ export function ClubHome({
             {greeting()}, <em>{club.chair.split(' ')[0]}</em>
           </h1>
           <p className="ph-desc">
-            Your 2026/27 Cricket Services club integration sits at{' '}
+            Your {seasonLabel} {t.Sport} Services {t.club} integration sits at{' '}
             <strong style={{ color: 'var(--ink)' }}>{next ? op : 100}% complete</strong>.{' '}
             {next
               ? `Next up — ${next.t.toLowerCase()}.`
-              : 'All required steps are done — well batted.'}
+              : `All required steps are done — ${vertical.sport === 'cricket' ? 'well batted' : 'well played'}.`}
           </p>
         </div>
         <div className="ph-actions">
@@ -670,15 +688,16 @@ export function ClubHome({
           <Icon.Clock />
         </div>
         <div className="deadline-text">
-          <strong>Submission deadline · {deadlineLong}.</strong> All three forms must reach the
-          Union office before this date. <span className="days">{daysLabel}</span>.
+          <strong>Submission deadline · {deadlineLong}.</strong>{' '}
+          {cqiOn || complianceOn ? 'All three forms' : 'Your affiliation form'} must reach the{' '}
+          {vertical.terms.office} before this date. <span className="days">{daysLabel}</span>.
         </div>
       </div>
 
       {/* Phase tracker — clickable */}
       <Card
         title="Your integration journey"
-        sub="Three phases on the Medicoach Smart Club platform"
+        sub={`${phases.length === 3 ? 'Three' : 'Two'} phases on the Medicoach Smart Club platform`}
       >
         <div className="phase-track" style={{ borderRadius: 0, border: 'none' }}>
           {phases.map((p) => (
@@ -754,7 +773,7 @@ export function ClubHome({
                 >
                   {affDone
                     ? 'Submitted · tap to view'
-                    : 'Complete the 2026/27 Cricket Services affiliation form — club details, exco, leagues & coaches.'}
+                    : `Complete the ${seasonLabel} ${t.Sport} Services affiliation form — ${t.club} details, ${vertical.sport === 'cricket' ? 'exco' : t.exco}, leagues & coaches.`}
                 </div>
               </div>
               {affDone ? (
@@ -767,7 +786,7 @@ export function ClubHome({
                 </Pill>
               )}
             </button>
-            {dc < 100 && (
+            {complianceOn && dc < 100 && (
               <button
                 className="row"
                 style={{
@@ -811,7 +830,7 @@ export function ClubHome({
                 </Pill>
               </button>
             )}
-            {club.cqi === 0 && (
+            {cqiOn && club.cqi === 0 && (
               <button
                 className="row"
                 style={{
@@ -853,24 +872,28 @@ export function ClubHome({
                 </Pill>
               </button>
             )}
-            {affDone && dc === 100 && club.cqi > 0 && (
+            {affDone && (!complianceOn || dc === 100) && (!cqiOn || club.cqi > 0) && (
               <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--muted)' }}>
-                Everything submitted. Your club has been forwarded to the {copy.admin} for review.
+                Everything submitted. Your {t.club} has been forwarded to the {copy.admin} for
+                review.
               </div>
             )}
           </div>
         </Card>
 
-        <Card title="Your club at a glance">
+        <Card title={`Your ${t.club} at a glance`}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px 18px' }}>
             {[
-              ['CQI score', club.cqi > 0 ? club.cqi.toFixed(1) : '—'],
+              ...(cqiOn ? [['CQI score', club.cqi > 0 ? club.cqi.toFixed(1) : '—']] : []),
               ['Members', club.players || 0],
               ['Senior teams', tc.senior],
               ["Women's teams", tc.women],
               ['Junior teams', tc.junior],
-              ['Sub-union', club.district || club.sub || '—'],
-              ['Chair', club.chair.split(' ')[0]],
+              [
+                vertical.sport === 'cricket' ? 'Sub-union' : 'District',
+                club.district || club.sub || '—',
+              ],
+              [vertical.sport === 'cricket' ? 'Chair' : t.Chair, club.chair.split(' ')[0]],
             ].map(([k, v], i) => (
               <div key={i}>
                 <div
@@ -899,14 +922,34 @@ export function ClubHome({
           </div>
         </Card>
 
-        <GovernanceCard club={club} />
+        <GovernanceCard
+          club={club}
+          onEditLeadership={canEditLeadership ? () => setShowExcoForm(true) : undefined}
+        />
       </div>
+
+      {showExcoForm && (
+        <ExcoFormModal
+          club={club}
+          eyebrow={`Affiliation · ${club.name}`}
+          onClose={() => setShowExcoForm(false)}
+          onSave={(members: Record<string, any>) => {
+            onSaveExco(members);
+            setShowExcoForm(false);
+            const count = Object.values(members).filter((m: any) => m.name).length;
+            toast(
+              `${vertical.terms.Exco} updated · ${count} member${count === 1 ? '' : 's'} on record`,
+            );
+          }}
+        />
+      )}
     </div>
   );
 }
 
 /* ─── Club Home: chairman governance + venues + coaches summary ─── */
-function GovernanceCard({ club }) {
+function GovernanceCard({ club, onEditLeadership = undefined }) {
+  const vertical = useVertical();
   const chair = club.exco?.chair || {};
   const age = ageFromSaId(chair.idNumber);
   const term = termRemaining(chair.termEnd);
@@ -914,10 +957,17 @@ function GovernanceCard({ club }) {
   const coaches = Array.isArray(club.coaches) ? club.coaches.filter((c) => c && c.name) : [];
   const expCount = (bucket) => coaches.filter((c) => c.yearsExperience === bucket).length;
   const rows = [
-    ['Chairman age', age != null ? `${age} yrs` : '—'],
+    [
+      vertical.sport === 'cricket' ? 'Chairman age' : `${vertical.terms.Chair} age`,
+      age != null ? `${age} yrs` : '—',
+    ],
     ['Term remaining', term.label || '—'],
     ['Primary venue', ground.venue || '—'],
     ['Secondary venue', ground.secondaryVenue || '—'],
+    // Optional; shown only when the club recorded it (cricket clubs typically leave it unset).
+    ...(Number.isInteger(ground.pitchCount)
+      ? [[pitchCountLabel(vertical.sport), ground.pitchCount]]
+      : []),
     ['Coaches', coaches.length || 0],
     [
       'Coach experience',
@@ -933,7 +983,17 @@ function GovernanceCard({ club }) {
     ],
   ];
   return (
-    <Card title="Governance & venues" sub="From your affiliation form">
+    <Card
+      title="Governance & venues"
+      sub="From your affiliation form"
+      action={
+        onEditLeadership && (
+          <Btn tone="outline" size="sm" icon={Icon.Form} onClick={onEditLeadership}>
+            Edit {vertical.terms.exco}
+          </Btn>
+        )
+      }
+    >
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px 18px' }}>
         {rows.map(([k, v], i) => (
           <div key={i}>
@@ -1016,6 +1076,9 @@ export function AffiliationForm({
   districts = DISTRICTS,
 }) {
   const copy = useCopy();
+  const vertical = useVertical();
+  const terms = vertical.terms;
+  const seasonLabel = useSeasonLabel();
   const [data, setData] = useStateC(() => {
     // Pre-fill exco from club.exco (single source of truth shared with the exco roster doc)
     const ex: Record<string, any> = club.exco || {};
@@ -1128,6 +1191,8 @@ export function AffiliationForm({
       groundAddress: ground.address || '',
       secondaryVenue: ground.secondaryVenue || '',
       secondaryAddress: ground.secondaryAddress || '',
+      // Number of playing fields at the ground — optional; kept as a string for the input.
+      groundPitchCount: Number.isInteger(ground.pitchCount) ? String(ground.pitchCount) : '',
       groundMapQuery: ground.mapQuery || 'Durban, KwaZulu-Natal, South Africa',
       // Restore the persisted pin so the map opens on it (and survives step round-trips)
       // instead of re-geocoding `mapQuery`. Only seed when real coords were saved.
@@ -1344,6 +1409,8 @@ export function AffiliationForm({
       address: data.groundAddress,
       secondaryVenue: data.secondaryVenue.trim(),
       secondaryAddress: data.secondaryAddress.trim(),
+      // Optional whole number 0–99 (server-validated); blank ⇒ omitted.
+      pitchCount: data.groundPitchCount === '' ? undefined : Number(data.groundPitchCount),
       mapQuery: data.groundMapQuery,
       suburb: coords.suburb,
       lat: coords.lat,
@@ -1445,7 +1512,13 @@ export function AffiliationForm({
   ].filter(Boolean).length;
   const leaguesCount = Object.values(data.leagues).filter(Boolean).length;
   const coachesCount = data.coaches.filter((c) => c.name).length;
-  const STEPS = ['Club Details', 'Executive Committee', 'Leagues & Coaches'];
+  const STEPS = vertical.affiliationSteps;
+  // Step-2 office-bearer rows: labels per vertical; prefixes are the frozen exco storage keys.
+  const excoRoleRows = vertical.leadershipRoles.map((r) => ({
+    prefix: r.key,
+    title: r.label,
+    req: r.required,
+  }));
   const TOTAL_STEPS = STEPS.length;
   const stepLabel = STEPS[step - 1];
 
@@ -1457,10 +1530,10 @@ export function AffiliationForm({
             <a onClick={() => goto('home')}>Home</a> &nbsp;/&nbsp; Affiliation
           </div>
           <h1 className="ph-title">
-            2026/27 <em>Affiliation Form</em>
+            {seasonLabel} <em>Affiliation Form</em>
           </h1>
           <p className="ph-desc">
-            Cricket Services · Club Registration. All fields marked{' '}
+            {terms.Sport} Services · {terms.Club} Registration. All fields marked{' '}
             <span style={{ color: 'var(--coral)' }}>*</span> are required. The digital form mirrors
             the official Excel template — your inputs are saved as you go.
           </p>
@@ -1570,10 +1643,13 @@ export function AffiliationForm({
             </div>
 
             {step === 1 && (
-              <Card title="Club Details" sub="Identifies the club and its district affiliation">
+              <Card
+                title={STEPS[0]}
+                sub={`Identifies the ${terms.club} and its district affiliation`}
+              >
                 <div className="field">
                   <div className="field-label">
-                    Club Name <span className="req">*</span>
+                    {terms.Club} Name <span className="req">*</span>
                   </div>
                   <input
                     className="field-input"
@@ -1584,7 +1660,8 @@ export function AffiliationForm({
                 <div className="field-grid-2">
                   <div className="field">
                     <div className="field-label">
-                      Municipal District / Sub-Union <span className="req">*</span>
+                      {vertical.sport === 'cricket' ? 'Municipal District / Sub-Union' : 'District'}{' '}
+                      <span className="req">*</span>
                     </div>
                     <select
                       className="field-select"
@@ -1593,7 +1670,7 @@ export function AffiliationForm({
                     >
                       {districts.length === 0 ? (
                         <option value="" disabled>
-                          No districts configured — contact the union office
+                          No districts configured — contact the {terms.union} office
                         </option>
                       ) : (
                         districts.map((d) => <option key={d}>{d}</option>)
@@ -1681,6 +1758,28 @@ export function AffiliationForm({
                     )}
                   </div>
 
+                  <div className="field-grid-2" style={{ marginTop: 14 }}>
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <div className="field-label">
+                        {pitchCountLabel(vertical.sport)} <span className="muted">(optional)</span>
+                      </div>
+                      <input
+                        className="field-input"
+                        type="number"
+                        inputMode="numeric"
+                        min={0}
+                        max={99}
+                        step={1}
+                        placeholder="e.g. 2"
+                        value={data.groundPitchCount}
+                        onChange={(e) =>
+                          // Whole numbers only, capped at two digits (server allows 0–99).
+                          update('groundPitchCount', e.target.value.replace(/\D/g, '').slice(0, 2))
+                        }
+                      />
+                    </div>
+                  </div>
+
                   <div className="ground-map-card">
                     <div className="ground-map-head">
                       <div className={`ground-status ${data.groundAddress ? 'confirmed' : ''}`}>
@@ -1732,7 +1831,7 @@ export function AffiliationForm({
                       <Icon.Field /> Secondary venue <span className="muted">(optional)</span>
                     </div>
                     <div className="ground-section-sub">
-                      A second home venue, if your club hosts across two grounds. Used when
+                      A second home venue, if your {terms.club} hosts across two grounds. Used when
                       allocating fixture venues — no map needed.
                     </div>
                   </div>
@@ -1764,15 +1863,10 @@ export function AffiliationForm({
 
             {step === 2 && (
               <Card
-                title="Executive Committee Office Bearers"
+                title={`${STEPS[1]} Office Bearers`}
                 sub="Provide contact, gender &amp; race for each office bearer"
               >
-                {[
-                  { prefix: 'chair', title: 'Chairperson', req: true },
-                  { prefix: 'sec', title: 'Secretary', req: true },
-                  { prefix: 'tre', title: 'Treasurer', req: true },
-                  { prefix: 'vc', title: 'Vice-Chair', req: false },
-                ].map((role) => (
+                {excoRoleRows.map((role) => (
                   <div
                     key={role.prefix}
                     style={{
@@ -1930,7 +2024,8 @@ export function AffiliationForm({
                       Additional Members
                     </div>
                     <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 2 }}>
-                      Add any further exco members — office bearers, committee reps, etc.
+                      Add any further {vertical.sport === 'cricket' ? 'exco' : terms.exco} members —
+                      office bearers, committee reps, etc.
                     </div>
                   </div>
                   <Btn tone="outline" size="sm" icon={Icon.Plus} onClick={addMember}>
@@ -2063,11 +2158,11 @@ export function AffiliationForm({
                 return (
                   <Card
                     title="Leagues entered &amp; Coaches by Designation"
-                    sub={`Leagues are filtered to your selected district — ${data.district}. Pick the ones your club is entering, then capture coaches under each team designation.`}
+                    sub={`Leagues are filtered to your selected district — ${data.district}. Pick the ones your ${terms.club} is entering, then capture coaches under each team designation.`}
                   >
                     <div className="field">
                       <div className="field-label">
-                        Leagues your club is entering <span className="req">*</span>
+                        Leagues your {terms.club} is entering <span className="req">*</span>
                       </div>
                       <div style={{ fontSize: 11.5, color: 'var(--muted)', marginBottom: 10 }}>
                         Showing leagues for{' '}
@@ -2144,7 +2239,7 @@ export function AffiliationForm({
                                       gap: 2,
                                       minWidth: 56,
                                     }}
-                                    title="Number of teams your club enters in this league"
+                                    title={`Number of teams your ${terms.club} enters in this league`}
                                   >
                                     <input
                                       className="field-input"
@@ -2186,11 +2281,11 @@ export function AffiliationForm({
                         but they are kept on every save so they can't be lost. */}
                     {Array.isArray(data.unionLeagues) && data.unionLeagues.length > 0 && (
                       <div className="field" style={{ marginTop: 4 }}>
-                        <div className="field-label">Entered by the union</div>
+                        <div className="field-label">Entered by the {terms.union}</div>
                         <div style={{ fontSize: 11.5, color: 'var(--muted)', marginBottom: 8 }}>
-                          These leagues are outside your district and were entered by the union
-                          office. They stay on your affiliation and can only be changed by the
-                          union.
+                          These leagues are outside your district and were entered by the{' '}
+                          {terms.union} office. They stay on your affiliation and can only be
+                          changed by the {terms.union}.
                         </div>
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                           {data.unionLeagues.map((k) => {
@@ -2240,8 +2335,8 @@ export function AffiliationForm({
                               }}
                             >
                               You're entering more than one side in these leagues. Name each team so
-                              it shows up separately in the fixtures — sides from the same club can
-                              be drawn against each other.
+                              it shows up separately in the fixtures — sides from the same{' '}
+                              {terms.club} can be drawn against each other.
                             </div>
                             {multi.map((key) => {
                               const roster = data.teamRosters[key] || [];
@@ -2303,7 +2398,7 @@ export function AffiliationForm({
                                         <input
                                           className="field-input"
                                           value={t.venue || ''}
-                                          placeholder={data.groundVenue || 'Club ground'}
+                                          placeholder={data.groundVenue || `${terms.Club} ground`}
                                           onChange={(e) =>
                                             updateTeamField(key, i, 'venue', e.target.value)
                                           }
@@ -2579,7 +2674,7 @@ export function AffiliationForm({
                                               updateCoach(idx, 'body', e.target.value)
                                             }
                                           >
-                                            {COACHING_BODIES.map((b) => (
+                                            {vertical.coachingBodies.map((b) => (
                                               <option key={b}>{b}</option>
                                             ))}
                                           </select>
@@ -2593,7 +2688,7 @@ export function AffiliationForm({
                                               updateCoach(idx, 'level', e.target.value)
                                             }
                                           >
-                                            {COACHING_LEVELS.map((l) => (
+                                            {vertical.coachingLevels.map((l) => (
                                               <option key={l}>{l}</option>
                                             ))}
                                           </select>
@@ -2815,7 +2910,7 @@ export function AffiliationForm({
                       // Reject malformed SA-IDs before they reach the API (which also guards).
                       const chairId = data.chairIdNumber.trim();
                       if (chairId && !dobFromSaId(chairId)) {
-                        toast("Chairperson ID number isn't a valid 13-digit RSA ID", 'warn');
+                        toast(`${terms.Chair} ID number isn't a valid 13-digit RSA ID`, 'warn');
                         setStep(2);
                         return;
                       }
@@ -2824,7 +2919,7 @@ export function AffiliationForm({
                       // fixes Step 2 in one pass. New affiliations only — legacy corrections aren't
                       // re-blocked (mirrors the reason guard below).
                       if (!submitted && (!data.chairName || !data.chairCell || !data.chairEmail)) {
-                        toast('Add the chairperson’s name, cell and email', 'warn');
+                        toast(`Add the ${terms.chair}’s name, cell and email`, 'warn');
                         setStep(2);
                         return;
                       }
@@ -2849,7 +2944,9 @@ export function AffiliationForm({
                         setEditing(false);
                         toast(`Changes submitted — pending ${copy.office} re-confirmation`);
                       } else {
-                        toast('Affiliation submitted · Exco roster & leagues captured');
+                        toast(
+                          `Affiliation submitted · ${vertical.sport === 'cricket' ? 'Exco' : terms.Exco} roster & leagues captured`,
+                        );
                       }
                     }}
                   >
@@ -2879,7 +2976,7 @@ export function AffiliationForm({
               </div>
               <div>
                 <div className="aff-hero-title">
-                  Your club, <em>on the same platform</em> as our heroes.
+                  Your {vertical.terms.club}, <em>on the same platform</em> as our heroes.
                 </div>
                 <div className="aff-hero-sub">{copy.heroBlurb}</div>
                 <div className="aff-hero-credit">{copy.orgName}</div>
@@ -2906,7 +3003,7 @@ export function AffiliationForm({
               <div className="aff-summary-step">Live</div>
             </div>
             <div className="aff-summary-row">
-              <div className="aff-summary-label">Club</div>
+              <div className="aff-summary-label">{terms.Club}</div>
               <div className={`aff-summary-value ${!data.clubName ? 'muted' : ''}`}>
                 {data.clubName || '—'}
               </div>
@@ -2924,7 +3021,9 @@ export function AffiliationForm({
               </div>
             </div>
             <div className="aff-summary-row">
-              <div className="aff-summary-label">Exco bearers</div>
+              <div className="aff-summary-label">
+                {vertical.sport === 'cricket' ? 'Exco bearers' : `${terms.Exco} bearers`}
+              </div>
               <div className={`aff-summary-value ${filledBearers === 0 ? 'muted' : ''}`}>
                 {filledBearers ? `${filledBearers} captured` : '—'}
               </div>
@@ -2952,14 +3051,16 @@ export function AffiliationForm({
 }
 
 /* ─── Document upload + Exco form ─── */
-const FIXED_EXCO_ROLES = [
-  { key: 'chair', label: 'Chairperson', required: true },
-  { key: 'sec', label: 'Secretary', required: true },
-  { key: 'tre', label: 'Treasurer', required: true },
-  { key: 'vc', label: 'Vice-Chair', required: false },
-];
-
-function ExcoFormModal({ club, onClose, onSave }) {
+// The fixed office-bearer rows come from the tenant's vertical (leadershipRoles): labels are
+// per-sport, storage keys chair/sec/tre/vc never change. Opened from the compliance-documents
+// screen and, when that module is off, from the home GovernanceCard.
+function ExcoFormModal({ club, onClose, onSave, eyebrow = 'Compliance Template' }) {
+  const vertical = useVertical();
+  const FIXED_EXCO_ROLES = vertical.leadershipRoles;
+  const requiredLabels = FIXED_EXCO_ROLES.filter((r) => r.required).map((r) =>
+    r.key === 'chair' && vertical.sport === 'cricket' ? 'Chair' : r.label,
+  );
+  const requiredHint = `${requiredLabels.slice(0, -1).join(', ')} & ${requiredLabels.at(-1)} are required to submit`;
   const [members, setMembers] = useStateC(() => {
     // Fixed roles from club.exco
     const init = {};
@@ -3030,7 +3131,7 @@ function ExcoFormModal({ club, onClose, onSave }) {
                 color: 'var(--muted-2)',
               }}
             >
-              Compliance Template
+              {eyebrow}
             </div>
             <div
               style={{
@@ -3040,7 +3141,7 @@ function ExcoFormModal({ club, onClose, onSave }) {
                 marginTop: 3,
               }}
             >
-              Executive Committee Roster
+              {vertical.terms.Exco} Roster
             </div>
           </div>
           <span className="ob-step-label" style={{ marginLeft: 'auto' }}>
@@ -3053,8 +3154,9 @@ function ExcoFormModal({ club, onClose, onSave }) {
 
         <div style={{ padding: '20px 26px', overflowY: 'auto' }}>
           <p style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.6, marginBottom: 18 }}>
-            Capture every executive committee bearer with their contact details. This roster is what
-            the Union office uses for official correspondence — no PDF upload needed.
+            Capture every {vertical.terms.exco} bearer with their contact details. This roster is
+            what the {vertical.terms.office} uses for official correspondence — no PDF upload
+            needed.
           </p>
 
           {FIXED_EXCO_ROLES.map((role, idx) => (
@@ -3320,7 +3422,7 @@ function ExcoFormModal({ club, onClose, onSave }) {
           <div className="ob-foot-hint">
             {requiredFilled
               ? `${completedCount} bearer${completedCount === 1 ? '' : 's'} ready to submit`
-              : 'Chair, Secretary & Treasurer are required to submit'}
+              : requiredHint}
           </div>
           <div className="ob-foot-buttons">
             <Btn tone="ghost" onClick={onClose}>
@@ -3400,9 +3502,10 @@ export function DocumentsView({
   const [meetingBooking, setMeetingBooking] = useStateC({ key: null, date: '' });
   // Today as YYYY-MM-DD — used both as the date input's `min` and to reject past/today.
   const today = new Date().toISOString().slice(0, 10);
+  const leadershipRoles = useVertical().leadershipRoles;
   const excoBearerCount = (() => {
     if (!club.exco) return 0;
-    const fixed = FIXED_EXCO_ROLES.filter((r) => club.exco[r.key]?.name).length;
+    const fixed = leadershipRoles.filter((r) => club.exco[r.key]?.name).length;
     const extra = (club.exco.additionalMembers || []).filter((m) => m.name).length;
     return fixed + extra;
   })();
@@ -4195,6 +4298,7 @@ export function CQIView({
   requiredDocs = DEFAULT_REQUIRED_DOCS,
 }) {
   const copy = useCopy();
+  const cqiSeasonLabel = useSeasonLabel();
   const deadlineLong = formatDeadlineLong(submissionDeadline);
   // Governance checks this tenant's catalogue can't back (no constitution doc, no AGM doc,
   // …) drop out of the score AND the form, so a club is never marked down for a document
@@ -4270,7 +4374,7 @@ export function CQIView({
             <a onClick={() => goto('home')}>Home</a> &nbsp;/&nbsp; CQI Self-Assessment
           </div>
           <h1 className="ph-title">
-            Club Quality <em>Index</em> · 2026/27
+            Club Quality <em>Index</em> · {cqiSeasonLabel}
           </h1>
           <p className="ph-desc">
             Score your club across seven dimensions. Your responses are scored in real time using
@@ -4629,6 +4733,14 @@ export function ClubFixturesView({
   // Share-with-players modal state. Hooks must run before the early return below.
   const [shareOpen, setShareOpen] = useStateC(false);
   const [shareCh, setShareCh] = useStateC({ email: true, whatsapp: true });
+  // WhatsApp rides the tenant's whatsappInvites flag (default on, as on the API); with it
+  // off the channel is not offered and never sent (the route drops it too).
+  const whatsappOn = useFeature('whatsappInvites', true);
+  // Overs are cricket label metadata — other sports never show them.
+  const fixVertical = useVertical();
+  const showOvers = fixVertical.sport === 'cricket';
+  const fixTerms = fixVertical.terms;
+  const seasonLabel = useSeasonLabel();
   const [sharing, setSharing] = useStateC(false);
   const playerCount = club.players || 0;
 
@@ -4637,7 +4749,7 @@ export function ClubFixturesView({
   // legitimate re-share (e.g. after a new series is released) through, while the disabled
   // state guards against an in-flight double-submit.
   async function doShareFixtures() {
-    const channels = ['email', 'whatsapp'].filter((c) => shareCh[c]);
+    const channels = (whatsappOn ? ['email', 'whatsapp'] : ['email']).filter((c) => shareCh[c]);
     if (!channels.length) return toast?.('Pick at least one channel', 'warn');
     setSharing(true);
     try {
@@ -4664,7 +4776,9 @@ export function ClubFixturesView({
       <div>
         <div className="page-head">
           <div className="ph-left">
-            <div className="ph-crumb">Club Portal · {club.name} / Fixtures</div>
+            <div className="ph-crumb">
+              {fixTerms.Club} Portal · {club.name} / Fixtures
+            </div>
             <h1 className="ph-title">
               Your <em>Fixtures</em>
             </h1>
@@ -4695,9 +4809,9 @@ export function ClubFixturesView({
           </div>
           <div className="club-fix-empty-title">Awaiting release from the {copy.office}</div>
           <div className="club-fix-empty-sub">
-            Once the union office signs off on the 2026/27 fixture list, every match you're playing
-            — round, date, opponent, venue and travel costs — will populate here automatically. It
-            appears here the moment it goes live.
+            Once the {fixTerms.union} office signs off on the {seasonLabel} fixture list, every
+            match you're playing — round, date, opponent, venue and travel costs — will populate
+            here automatically. It appears here the moment it goes live.
           </div>
           <div className="club-fix-empty-meta">
             <span className="sdot" /> Status: <strong>Draft · awaiting release</strong>
@@ -4812,14 +4926,16 @@ export function ClubFixturesView({
     <div>
       <div className="page-head">
         <div className="ph-left">
-          <div className="ph-crumb">Club Portal · {club.name} / Fixtures</div>
+          <div className="ph-crumb">
+            {fixTerms.Club} Portal · {club.name} / Fixtures
+          </div>
           <h1 className="ph-title">
             Your <em>Fixtures</em>
           </h1>
           <p className="ph-desc">
             {myReleased.length} {myReleased.length === 1 ? 'series' : 'series'} released by the{' '}
-            {copy.office}. {totalMatches} matches across the 2026/27 season — {homeMatches} at home,{' '}
-            {awayMatches} on the road.
+            {copy.office}. {totalMatches} matches across the {seasonLabel} season — {homeMatches} at
+            home, {awayMatches} on the road.
           </p>
         </div>
         <div className="ph-actions">
@@ -4830,7 +4946,9 @@ export function ClubFixturesView({
             disabled={!playerCount}
             title={
               playerCount
-                ? 'Email & WhatsApp the schedule to your registered players'
+                ? whatsappOn
+                  ? 'Email & WhatsApp the schedule to your registered players'
+                  : 'Email the schedule to your registered players'
                 : 'No registered players yet'
             }
             onClick={() => setShareOpen(true)}
@@ -4999,8 +5117,8 @@ export function ClubFixturesView({
                     </div>
                     <div className="club-fix-series-name">{s.name}</div>
                     <div className="club-fix-series-meta">
-                      {s.teams.length} teams · {s.maxOvers} overs · {s.seriesType} · {mine.length}{' '}
-                      of your matches
+                      {s.teams.length} teams · {showOvers ? `${s.maxOvers} overs · ` : ''}
+                      {s.seriesType} · {mine.length} of your matches
                       {mySideNames.length === 1
                         ? ` · playing as ${mySideNames[0]}`
                         : mySideNames.length > 1
@@ -5275,7 +5393,7 @@ export function ClubFixturesView({
               </div>
               <div className="fix-confirm-title">Share fixtures with players</div>
               <div className="fix-confirm-body">
-                Email the full schedule and send a WhatsApp heads-up to your{' '}
+                Email the full schedule{whatsappOn ? ' and send a WhatsApp heads-up' : ''} to your{' '}
                 <strong>{playerCount}</strong> registered player{playerCount === 1 ? '' : 's'}.
                 Players registered as minors are skipped. Choose how to reach them:
               </div>
@@ -5303,7 +5421,7 @@ export function ClubFixturesView({
               <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginBottom: 4 }}>
                 {[
                   { k: 'email', label: 'Email' },
-                  { k: 'whatsapp', label: 'WhatsApp' },
+                  ...(whatsappOn ? [{ k: 'whatsapp', label: 'WhatsApp' }] : []),
                 ].map(({ k, label }) => (
                   <button
                     key={k}
@@ -5361,11 +5479,18 @@ export function ClubPlayersView({
   const [selectedPlayer, setSelectedPlayer] = useStateC(null); // row-click detail modal
   const [busyNk, setBusyNk] = useStateC(null); // naturalKey of the row being deleted
   const [filters, setFilters] = useStateC(emptyPlayerFilters);
+  // Sport vertical: 'positions' profiles show position counts/labels instead of the cricket
+  // role stats; the veterans module gates the affiliates card + per-player veterans editor.
+  const vertical = useVertical();
+  const seasonLabel = useSeasonLabel();
+  const positionsMode = vertical.playerProfile === 'positions';
+  const veteransOn = useModule('veterans');
   // Real on-system clubs for the veterans-club picker (rep-accessible), minus this club —
   // a player can't play veterans cricket "for" their own club.
   const directoryQuery = useQuery({
     queryKey: qk.clubDirectory(),
     queryFn: getClubDirectory,
+    enabled: veteransOn,
   });
   const vetClubs = (directoryQuery.data ?? []).filter((c) => c.id !== club.id);
   // Players from OTHER clubs who declared this club as their veterans second club. View-only
@@ -5374,7 +5499,7 @@ export function ClubPlayersView({
   const affiliatesQuery = useQuery({
     queryKey: qk.veteransAffiliates(club.id),
     queryFn: () => getVeteransAffiliates(club.id),
-    enabled: !!club.id,
+    enabled: !!club.id && veteransOn,
   });
   const affiliates = affiliatesQuery.data ?? [];
   async function openLink() {
@@ -5414,6 +5539,15 @@ export function ClubPlayersView({
 
   const allRounders = mine.filter((p) => p.isAllRounder).length;
   const wks = mine.filter((p) => p.isWk).length;
+  // Positions profile: players with a recorded position, and the two most common positions.
+  const withPosition = mine.filter((p) => p.position).length;
+  const positionCounts: Record<string, number> = {};
+  if (positionsMode)
+    for (const p of mine)
+      if (p.position) positionCounts[p.position] = (positionCounts[p.position] ?? 0) + 1;
+  const topPositions: [string, number][] = Object.entries(positionCounts)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 2);
   const pendingClearance = mine.filter((p) => p.status === 'clearance-pending').length;
   // 'clearance-rejected' is legacy — reject no longer writes it; rows from before still render.
   const rejectedClearance = mine.filter((p) => p.status === 'clearance-rejected').length;
@@ -5422,13 +5556,15 @@ export function ClubPlayersView({
     <div>
       <div className="page-head">
         <div className="ph-left">
-          <div className="ph-crumb">Club Portal · {club.name} / Players</div>
+          <div className="ph-crumb">
+            {vertical.terms.Club} Portal · {club.name} / Players
+          </div>
           <h1 className="ph-title">
             Player <em>Roster</em>
           </h1>
           <p className="ph-desc">
-            Register and maintain {club.name}'s playing members for the 2026/27 season. All
-            registrations sync with the Union office and your fixtures.
+            Register and maintain {club.name}'s playing members for the {seasonLabel} season. All
+            registrations sync with the {vertical.terms.office} and your fixtures.
           </p>
         </div>
         <div className="ph-actions">
@@ -5493,14 +5629,31 @@ export function ClubPlayersView({
           <div className="players-stat-l">Registered</div>
           <div className="players-stat-n">{mine.length}</div>
         </div>
-        <div className="players-stat">
-          <div className="players-stat-l">All-rounders</div>
-          <div className="players-stat-n">{allRounders}</div>
-        </div>
-        <div className="players-stat">
-          <div className="players-stat-l">WK keepers</div>
-          <div className="players-stat-n">{wks}</div>
-        </div>
+        {positionsMode ? (
+          <>
+            <div className="players-stat">
+              <div className="players-stat-l">Position set</div>
+              <div className="players-stat-n">{withPosition}</div>
+            </div>
+            {topPositions.map(([pos, n]) => (
+              <div className="players-stat" key={pos}>
+                <div className="players-stat-l">{pos}s</div>
+                <div className="players-stat-n">{n}</div>
+              </div>
+            ))}
+          </>
+        ) : (
+          <>
+            <div className="players-stat">
+              <div className="players-stat-l">All-rounders</div>
+              <div className="players-stat-n">{allRounders}</div>
+            </div>
+            <div className="players-stat">
+              <div className="players-stat-l">WK keepers</div>
+              <div className="players-stat-n">{wks}</div>
+            </div>
+          </>
+        )}
         <div className="players-stat">
           <div className="players-stat-l">Awaiting clearance</div>
           <div
@@ -5527,6 +5680,7 @@ export function ClubPlayersView({
           onChange={setFilters}
           players={mine}
           teamLabel={teamLabel}
+          positions={positionsMode ? vertical.positions : null}
         />
       </div>
       {hasActiveFilters(filters) && (
@@ -5549,8 +5703,8 @@ export function ClubPlayersView({
               <th>Player</th>
               <th>ID number</th>
               <th>Team</th>
-              <th>Role</th>
-              <th>Bowler type</th>
+              <th>{positionsMode ? 'Position' : 'Role'}</th>
+              {!positionsMode && <th>Bowler type</th>}
               <th>ID doc</th>
               <th>Status</th>
               <th style={{ width: 140 }}></th>
@@ -5561,14 +5715,16 @@ export function ClubPlayersView({
               const outbound = leavingFor(p.naturalKey);
               const inbound =
                 p.status === 'clearance-pending' ? joiningFrom(p.naturalKey) : undefined;
-              const roleBits = [
-                p.battingHand ? p.battingHand + ' hand' : null,
-                p.battingType,
-                p.isAllRounder ? 'All-rounder' : null,
-                p.isWk ? 'WK' : null,
-              ]
-                .filter(Boolean)
-                .join(' · ');
+              const roleBits = positionsMode
+                ? p.position || ''
+                : [
+                    p.battingHand ? p.battingHand + ' hand' : null,
+                    p.battingType,
+                    p.isAllRounder ? 'All-rounder' : null,
+                    p.isWk ? 'WK' : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ');
               return (
                 <tr
                   key={p.naturalKey}
@@ -5603,9 +5759,11 @@ export function ClubPlayersView({
                   <td>
                     <span className="rost-sub">{roleBits || '—'}</span>
                   </td>
-                  <td>
-                    <span className="rost-sub">{p.bowlerType || '—'}</span>
-                  </td>
+                  {!positionsMode && (
+                    <td>
+                      <span className="rost-sub">{p.bowlerType || '—'}</span>
+                    </td>
+                  )}
                   <td>
                     {p.idDocMeta ? (
                       <Pill tone="teal" dot>
@@ -5652,7 +5810,7 @@ export function ClubPlayersView({
             {mine.length === 0 && (
               <tr>
                 <td
-                  colSpan={8}
+                  colSpan={positionsMode ? 7 : 8}
                   style={{ padding: 28, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}
                 >
                   No players registered yet — share the <strong>Registration link</strong> so
@@ -5663,7 +5821,7 @@ export function ClubPlayersView({
             {mine.length > 0 && visible.length === 0 && (
               <tr>
                 <td
-                  colSpan={8}
+                  colSpan={positionsMode ? 7 : 8}
                   style={{ padding: 28, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}
                 >
                   No players match — try adjusting your search or filters.
@@ -5673,7 +5831,9 @@ export function ClubPlayersView({
           </tbody>
         </table>
       </div>
-      <VeteransAffiliatesCard affiliates={affiliates} loading={affiliatesQuery.isLoading} />
+      {veteransOn && (
+        <VeteransAffiliatesCard affiliates={affiliates} loading={affiliatesQuery.isLoading} />
+      )}
 
       {selectedPlayer && (
         <PlayerDetailModal
@@ -5694,15 +5854,20 @@ export function ClubPlayersView({
                 }
               : undefined
           }
-          // Chairs declare/remove a player's veterans second club from their own roster.
-          veteransEdit={{
-            clubs: vetClubs,
-            onSave: (id) =>
-              (id
-                ? setPlayerVeteransClub(club.id, selectedPlayer.naturalKey, id)
-                : removePlayerVeteransClub(club.id, selectedPlayer.naturalKey)
-              ).then(() => queryClient.invalidateQueries({ queryKey: qk.players(club.id) })),
-          }}
+          // Chairs declare/remove a player's veterans second club from their own roster
+          // (veterans module only — the modal hides the section entirely when it's off).
+          veteransEdit={
+            veteransOn
+              ? {
+                  clubs: vetClubs,
+                  onSave: (id) =>
+                    (id
+                      ? setPlayerVeteransClub(club.id, selectedPlayer.naturalKey, id)
+                      : removePlayerVeteransClub(club.id, selectedPlayer.naturalKey)
+                    ).then(() => queryClient.invalidateQueries({ queryKey: qk.players(club.id) })),
+                }
+              : undefined
+          }
           onClose={() => setSelectedPlayer(null)}
         />
       )}
@@ -5763,6 +5928,7 @@ function VeteransAffiliatesCard({
 
 /** Destination-initiated clearance request: pick the source club + the player's ID. */
 export function RequestPlayerForm({ club, directory, onSubmit, onCancel, busy }) {
+  const seasonLabel = useSeasonLabel();
   const [fromClubId, setFromClubId] = useStateC('');
   const [idNumber, setIdNumber] = useStateC('');
   const [note, setNote] = useStateC('');
@@ -5819,7 +5985,7 @@ export function RequestPlayerForm({ club, directory, onSubmit, onCancel, busy })
             className="field-input"
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="e.g. Player relocating — joining us for 2026/27."
+            placeholder={`e.g. Player relocating — joining us for ${seasonLabel}.`}
           />
         </div>
       </div>

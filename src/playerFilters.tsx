@@ -2,6 +2,7 @@
 
 import { useMemo } from 'react';
 import { Btn } from './atoms';
+import { useVertical } from './branding';
 import { BOWLER_TYPES, GENDERS } from './data';
 
 // Sentinel for the "No team" facet option — league keys are slugs derived from
@@ -17,6 +18,8 @@ export const emptyPlayerFilters = Object.freeze({
   team: 'all',
   role: 'all',
   bowler: 'all',
+  // Playing position ('positions'-profile verticals only).
+  position: 'all',
   gender: 'all',
   district: 'all',
 });
@@ -43,6 +46,7 @@ export function filterPlayers(players, f) {
     if (f.team !== 'all' && (f.team === NO_TEAM ? !!p.team : p.team !== f.team)) return false;
     if (f.role !== 'all' && !matchesRole(p, f.role)) return false;
     if (f.bowler !== 'all' && p.bowlerType !== f.bowler) return false;
+    if (f.position !== 'all' && p.position !== f.position) return false;
     if (f.gender !== 'all' && p.gender !== f.gender) return false;
     if (f.district !== 'all' && p.district !== f.district) return false;
     if (!needle) return true;
@@ -72,9 +76,19 @@ export function FilterResultCount({ shown, total }) {
  * Search box + facet selects for a player list. Data-derived facets (team,
  * district) come from `players`, which should be the club-scoped but
  * otherwise-unfiltered list so options never vanish as other facets narrow.
- * Pass `clubs` to render the club select (admin register only).
+ * Pass `clubs` to render the club select (admin register only). Pass `positions` (the
+ * vertical's position list, 'positions' profiles only) to swap the cricket role +
+ * bowler-type selects for a single Position select.
  */
-export function PlayerFilterBar({ filters, onChange, players, teamLabel, clubs = null }) {
+export function PlayerFilterBar({
+  filters,
+  onChange,
+  players,
+  teamLabel,
+  clubs = null,
+  positions = null,
+}) {
+  const vt = useVertical().terms;
   const set = (key) => (e) => onChange({ ...filters, [key]: e.target.value });
 
   const teamOptions = useMemo(() => {
@@ -107,12 +121,12 @@ export function PlayerFilterBar({ filters, onChange, players, teamLabel, clubs =
       {clubs && (
         <select
           className="field-select"
-          aria-label="Filter by club"
+          aria-label={`Filter by ${vt.club}`}
           value={filters.club}
           onChange={set('club')}
           style={{ maxWidth: 200 }}
         >
-          <option value="all">All clubs</option>
+          <option value="all">All {vt.clubs}</option>
           {clubs.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name || c.slug}
@@ -149,33 +163,52 @@ export function PlayerFilterBar({ filters, onChange, players, teamLabel, clubs =
           </option>
         ))}
       </select>
-      <select
-        className="field-select"
-        aria-label="Filter by role"
-        value={filters.role}
-        onChange={set('role')}
-        style={sel}
-      >
-        <option value="all">All roles</option>
-        <option value="wk">Wicket-keeper</option>
-        <option value="all-rounder">All-rounder</option>
-        <option value="batter">Batter</option>
-        <option value="bowler">Bowler</option>
-      </select>
-      <select
-        className="field-select"
-        aria-label="Filter by bowler type"
-        value={filters.bowler}
-        onChange={set('bowler')}
-        style={sel}
-      >
-        <option value="all">All bowler types</option>
-        {BOWLER_TYPES.map((b) => (
-          <option key={b} value={b}>
-            {b}
-          </option>
-        ))}
-      </select>
+      {positions ? (
+        <select
+          className="field-select"
+          aria-label="Filter by position"
+          value={filters.position}
+          onChange={set('position')}
+          style={sel}
+        >
+          <option value="all">All positions</option>
+          {positions.map((pos) => (
+            <option key={pos} value={pos}>
+              {pos}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <>
+          <select
+            className="field-select"
+            aria-label="Filter by role"
+            value={filters.role}
+            onChange={set('role')}
+            style={sel}
+          >
+            <option value="all">All roles</option>
+            <option value="wk">Wicket-keeper</option>
+            <option value="all-rounder">All-rounder</option>
+            <option value="batter">Batter</option>
+            <option value="bowler">Bowler</option>
+          </select>
+          <select
+            className="field-select"
+            aria-label="Filter by bowler type"
+            value={filters.bowler}
+            onChange={set('bowler')}
+            style={sel}
+          >
+            <option value="all">All bowler types</option>
+            {BOWLER_TYPES.map((b) => (
+              <option key={b} value={b}>
+                {b}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
       <select
         className="field-select"
         aria-label="Filter by gender"

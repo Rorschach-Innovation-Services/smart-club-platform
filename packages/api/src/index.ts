@@ -13,7 +13,7 @@
 import './instrument.js'; // MUST be first — inits Sentry before any client is built
 import { Sentry } from './instrument.js';
 import { Hono } from 'hono';
-import type { Context } from 'hono';
+import type { Context, MiddlewareHandler } from 'hono';
 import { cors } from 'hono/cors';
 import { handle } from 'hono/aws-lambda';
 import dayjs from 'dayjs';
@@ -88,7 +88,12 @@ import {
   KNOCKOUT_PAIRINGS,
 } from './config-validation.js';
 import { findTemplate, instantiateTemplate, newStructureId } from '../../engine/src/templates.js';
-import { isAffiliated, leagueParticipants } from '../../engine/src/leagues.js';
+import {
+  findByKey,
+  isAffiliated,
+  isFixturesOnlyLeague,
+  leagueParticipants,
+} from '../../engine/src/leagues.js';
 import { generateStage, stagesAfterGenerate } from '../../engine/src/generate.js';
 import { resolveCompetitionDefaults } from '../../engine/src/defaults.js';
 import { uncoveredBlocksAcross } from '../../engine/src/structure.js';
@@ -168,9 +173,20 @@ import type {
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
 import { orgCopy } from './branding.js';
-import { hasFeature } from './features.js';
+import { hasFeature, hasModule } from './features.js';
+import {
+  resolveVertical,
+  seasonLabel as tenantSeasonLabel,
+  type ModuleKey,
+  type Sport,
+} from './vertical.js';
 import { buildTenantConfig, type TenantBrandingInput } from './seed-core.js';
-import { validateTenantSlug } from './tenant-validation.js';
+import {
+  validateTenantSlug,
+  validateSport,
+  validateSeasonLabel,
+  isSeasonLabelClear,
+} from './tenant-validation.js';
 import { grantTenantAdmin, addAdminMembership } from './tenant-admin.js';
 import { originAllowed, originAllowedForTenant, canonicalWebOrigin } from './origins.js';
 import {
@@ -513,6 +529,10 @@ app.get('/tenant', async (c) => {
   return c.json({
     tenant: config.tenant,
     branding: config.branding,
+    // The sport vertical + season label drive terminology and module gating on every
+    // surface, public pages included. Absent sport ⇒ the client resolves cricket.
+    sport: config.sport,
+    seasonLabel: config.seasonLabel,
     submissionDeadline: config.submissionDeadline,
     leagues: config.leagues ?? [],
     // The compliance-doc catalogue (ADR 0009, reversing ADR 0005's omission): doc
@@ -710,6 +730,21 @@ app.get('/register/:clubId', async (c) => {
 });
 
 /** Submit a player registration. No auth; dedup + POPIA consent enforced. */
+/**
+ * The stored playing position for a registration: validated against the vertical's list for a
+ * 'positions'-profile tenant (absent/blank is allowed), never stored for a cricket-profile one.
+ */
+function resolvePosition(cfg: TenantConfig | null, position: unknown): string | undefined {
+  const profile = resolveVertical(cfg);
+  if (profile.playerProfile !== 'positions') return undefined;
+  if (position == null || (typeof position === 'string' && position.trim() === ''))
+    return undefined;
+  if (typeof position !== 'string' || !profile.positions.includes(position.trim())) {
+    throw new HttpError(400, 'unknown position');
+  }
+  return position.trim();
+}
+
 app.post('/register/:clubId', async (c) => {
   const token = c.req.query('t');
   if (!token) throw new HttpError(400, 'missing token');
@@ -767,11 +802,8 @@ app.post('/register/:clubId', async (c) => {
       'provide a valid 13-digit RSA ID, or a passport/visa number with date of birth',
     );
   }
-  // Team must be a real league key in the tenant catalogue.
-  const leagueKeys = new Set((cfg?.leagues ?? []).map((l) => l.key));
-  if (leagueKeys.size && !leagueKeys.has(body.team!)) {
-    throw new HttpError(400, 'unknown team/league');
-  }
+  assertPlayerTeam(cfg, body.team!);
+  const position = resolvePosition(cfg, body.position);
   const isMinor = computeIsMinor(dob);
   if (isMinor && !body.guardianName) {
     throw new HttpError(400, 'guardianName required for minors (POPIA)');
@@ -814,8 +846,12 @@ app.post('/register/:clubId', async (c) => {
   }
   // Optional veterans second-club declaration (capture-only): the player may play veterans
   // cricket for another ON-SYSTEM club. No extra rate limit: this rides the existing registration
-  // caps (an idempotent Put, no action queue, no third-party write primitive).
-  const veteransClub = await resolveVeteransClub(resolved.tenant, body.veteransClubId, destClubId);
+  // caps (an idempotent Put, no action queue, no third-party write primitive). With the veterans
+  // module off the field is silently dropped (like `position` on a cricket tenant): no lookup,
+  // no stored name/id, and therefore no VETAFFIL write below.
+  const veteransClub = hasModule(cfg, 'veterans')
+    ? await resolveVeteransClub(resolved.tenant, body.veteransClubId, destClubId)
+    : undefined;
   // Names are unauthenticated free text that later rides into outbound messages (the
   // clearance chairman notice) — collapse whitespace runs and bound the length so a
   // hostile value can't carry payloads or break a WhatsApp template parameter.
@@ -851,6 +887,7 @@ app.post('/register/:clubId', async (c) => {
     bowlerType: body.bowlerType,
     isAllRounder: body.isAllRounder ?? false,
     isWk: body.isWk ?? false,
+    ...(position ? { position } : {}),
     idDocMeta: {
       objectKey: idDocMeta.objectKey,
       size: idDocMeta.size,
@@ -923,7 +960,9 @@ app.post('/register/:clubId', async (c) => {
   // would hand out a cheaper attack than the one being prevented: replaying one fabricated
   // identity 409s after the first, and if every replay spent a slot then ~CLUB_SOURCE_PER_HOUR
   // requests would exhaust the quota and start refusing GENUINE players naming that club.
+  const clearancesOn = hasModule(cfg, 'clearances');
   const namedSourceOnSystem =
+    clearancesOn &&
     !!lastClubId &&
     lastClubId !== destClubId &&
     !!(await repo.getClub(resolved.tenant, lastClubId));
@@ -1006,8 +1045,14 @@ app.post('/register/:clubId', async (c) => {
   // before registration (and took the clearance path above), so surviving free text is by
   // construction NOT an exact match — a genuinely off-system club, or a near-name variant of
   // an on-system one, and both deserve the alert.
+  // Registration reviews ride the clearances module: with it off there is no transfer
+  // oversight, so no alert either.
   const typedOther =
-    !lastClubId && body.lastClub && body.lastClub.trim() && body.lastClub.trim() !== '—'
+    clearancesOn &&
+    !lastClubId &&
+    body.lastClub &&
+    body.lastClub.trim() &&
+    body.lastClub.trim() !== '—'
       ? body.lastClub.trim()
       : undefined;
   if (typedOther) {
@@ -1599,6 +1644,17 @@ async function createSelfRegistration(
   // then resolve — the first deletes the source row, the second finds it already gone and,
   // being registration-origin, activates its destination anyway. That lands one person active
   // at two clubs. Refusing the registration outright is what this function already documents.
+  //
+  // With the clearances module OFF there is no transfer to compete with, so the no-touch flow
+  // runs BEFORE that guard: a row left clearance-pending when the module was switched off must
+  // not 409 the player forever — it is just another prior registration (noted, never modified).
+  if (!hasModule(tenantConfig, 'clearances')) {
+    const priorSources = elsewhere.filter(
+      (e) => e.status === 'active' || e.status === 'clearance-pending',
+    );
+    return registerWithoutClearance(tenant, player, lastClubId, directory, priorSources);
+  }
+
   if (elsewhere.some((e) => e.status === 'clearance-pending')) {
     // Already mid-transfer under this identity — don't open a competing clearance or a second row.
     throw new repo.DuplicatePendingClearanceError();
@@ -1714,6 +1770,38 @@ async function createSelfRegistration(
   return {};
 }
 
+/**
+ * createSelfRegistration for a tenant with the clearances module OFF (no transfer tracking):
+ * the registration always lands active at the joining club and no clearance, review or
+ * clearance notice is ever created.
+ *  - Registered at another club (active, or a clearance-pending row left over from when the
+ *    module was on) → the new row carries a transferNote "Previously registered at <club>" and
+ *    records that club as `lastClub`. The other club's roster is NEVER touched: this route is
+ *    unauthenticated, so letting it deactivate a row at a club the caller doesn't control would
+ *    turn a leaked link + an ID number into a roster takeover. Admins resolve the duplicate.
+ *  - A declared previous club with no roster record → recorded as history (`lastClub`) only.
+ */
+async function registerWithoutClearance(
+  tenant: string,
+  player: PlayerRegistration,
+  lastClubId: string,
+  directory: DirectoryClub[],
+  priorSources: Array<{ clubId: string; clubName: string }>,
+): Promise<{ clearanceFromName?: string }> {
+  player.status = 'active';
+  if (priorSources.length > 0) {
+    player.lastClub = priorSources[0].clubName;
+    player.transferNote = `Previously registered at ${priorSources.map((s) => s.clubName).join(', ')}.`;
+  } else if (lastClubId && lastClubId !== player.clubId) {
+    const named =
+      (await repo.getClub(tenant, lastClubId))?.name ??
+      directory.find((e) => e.id === lastClubId)?.name;
+    if (named) player.lastClub = named;
+  }
+  await repo.createPlayer(tenant, player);
+  return {};
+}
+
 // ───────────────────── Authenticated routes ─────────────────────
 
 app.use('/me', authenticate);
@@ -1758,6 +1846,67 @@ app.use('/admin/*', authenticate, requireTenantMembership, requireAdmin);
 // Platform operator portal — tenant-INDEPENDENT (no requireTenantMembership /
 // host resolution): the '*'/operator membership itself is the authorization.
 app.use('/platform/*', authenticate, requirePlatformOperator);
+
+/**
+ * 403 a route family whose module (veterans / cqi / compliance / clearances) is off for the
+ * tenant — `hasModule`: the `module.*` flag, else the sport vertical's default (cricket ⇒ on).
+ * Registered after the membership middleware above, so `requestAuth` is set.
+ */
+function requireModule(module: ModuleKey): MiddlewareHandler<HonoEnv> {
+  return async (c, next) => {
+    const { tenant } = c.get('requestAuth')!;
+    assertModule(await getTenantConfigCached(c, tenant), module);
+    await next();
+  };
+}
+
+/**
+ * The tenant config, read at most once per request: memoised on the Hono context so a
+ * module-gated handler doesn't repeat the read requireModule already made. Keyed on the
+ * tenant so a memo can never serve another tenant's config. Only for read-only use — a
+ * handler that writes the config must re-read it itself.
+ */
+async function getTenantConfigCached(
+  c: Context<HonoEnv>,
+  tenant: string,
+): Promise<TenantConfig | null> {
+  const memo = c.get('tenantCfg');
+  if (memo && memo.tenant === tenant) return memo.cfg;
+  const cfg = await repo.getTenantConfig(tenant);
+  c.set('tenantCfg', { tenant, cfg });
+  return cfg;
+}
+
+function assertModule(cfg: TenantConfig | null, module: ModuleKey): void {
+  if (!hasModule(cfg, module)) {
+    throw new HttpError(403, `the ${module} module is not enabled for this organisation`);
+  }
+}
+
+// Both bare + wildcard forms, for the same reason as the membership block above.
+for (const path of [
+  '/clubs/:id/veterans-requests',
+  '/clubs/:id/veterans-requests/*',
+  '/admin/veterans-requests',
+  '/admin/veterans-requests/*',
+  '/clubs/:id/players/:nk/veterans-club',
+  '/clubs/:id/veterans-affiliates',
+  '/clubs/:id/veterans-candidates',
+]) {
+  app.use(path, requireModule('veterans'));
+}
+for (const path of [
+  '/clubs/:id/clearances',
+  '/clubs/:id/clearances/*',
+  '/admin/clearances',
+  '/admin/clearances/*',
+  '/admin/registration-reviews',
+  '/admin/registration-reviews/*',
+]) {
+  app.use(path, requireModule('clearances'));
+}
+app.use('/clubs/:id/docs/:key', requireModule('compliance'));
+app.use('/clubs/:id/docs/:key/*', requireModule('compliance'));
 
 // ───────────────────────── Clubs ─────────────────────────
 
@@ -1859,9 +2008,15 @@ app.patch('/clubs/:id', async (c) => {
   }
   // Valid league keys = the tenant's catalogue plus keys already on the club (so an
   // admin can still remove a league that was later deleted from the catalogue).
+  // Fixtures-only entries (League.fixturesOnly — a KO Cup) are not an affiliation pick:
+  // a rep can never ADD one. An admin can — club.leagues is how a club becomes an entrant
+  // (leagueParticipants), so that is the KO Cup's entrant list. A key already on the club
+  // stays valid either way, so a rep's save that carries it through still passes.
   const cfg = await repo.getTenantConfig(ra.tenant);
+  if (patch.cqi !== undefined || patch.cqiAnswers !== undefined) assertModule(cfg, 'cqi');
+  const isAdmin = ra.membership.role === 'admin';
   const validLeagueKeys = new Set([
-    ...(cfg?.leagues ?? []).map((l) => l.key),
+    ...(cfg?.leagues ?? []).filter((l) => isAdmin || !isFixturesOnlyLeague(l)).map((l) => l.key),
     ...(current.leagues ?? []),
   ]);
   // Same union for doc keys: the tenant's resolved catalogue plus keys already on the
@@ -1888,6 +2043,7 @@ app.patch('/clubs/:id', async (c) => {
     validDistricts,
     requiredDocs,
     current.docMeta,
+    resolveVertical(cfg).sport,
   );
   if (invalid) throw new HttpError(400, invalid);
   if (patch.docMeta) assertDocMetaObjectKeys(ra.tenant, id, patch.docMeta);
@@ -2067,7 +2223,7 @@ async function mintAndDeliverOnboarding(
     pageUrl: `${base}/tutorials`,
     videos: tutorialsConfig.map((v) => ({ title: v.title, url: absUrl(v.url) })),
   };
-  const season = seasonLabel(new Date().getFullYear());
+  const season = tenantSeasonLabel(tenantConfig);
 
   const { results } = await sendChairOnboarding({
     chair: chairContactOf(current),
@@ -2077,7 +2233,8 @@ async function mintAndDeliverOnboarding(
     channels: hasFeature(tenantConfig, 'whatsappInvites', true)
       ? (['email', 'whatsapp'] as Channel[])
       : (['email'] as Channel[]),
-    org: orgCopy(tenantConfig ?? { tenant }),
+    // The vertical's club noun ("club" / "school") rides the org copy into the body.
+    org: { ...orgCopy(tenantConfig ?? { tenant }), club: resolveVertical(tenantConfig).terms.club },
     regLink,
     tutorials,
     season,
@@ -2212,17 +2369,17 @@ app.post('/clubs/:id/players', async (c) => {
       'provide a valid 13-digit RSA ID, or a passport/visa number with date of birth',
     );
   }
-  // Team must be a real league key in the tenant catalogue.
-  const leagueKeys = new Set((cfg?.leagues ?? []).map((l) => l.key));
-  if (leagueKeys.size && !leagueKeys.has(body.team!)) {
-    throw new HttpError(400, 'unknown team/league');
-  }
+  assertPlayerTeam(cfg, body.team!);
+  const position = resolvePosition(cfg, body.position);
   const isMinor = computeIsMinor(dob);
   if (isMinor && !body.guardianName) {
     throw new HttpError(400, 'guardianName required for minors (POPIA)');
   }
-  // Optional veterans second-club declaration (capture-only) — same guards as the public path.
-  const veteransClub = await resolveVeteransClub(ra.tenant, body.veteransClubId, id);
+  // Optional veterans second-club declaration (capture-only) — same guards as the public path,
+  // including the silent drop when the veterans module is off.
+  const veteransClub = hasModule(cfg, 'veterans')
+    ? await resolveVeteransClub(ra.tenant, body.veteransClubId, id)
+    : undefined;
   const naturalKey = playerNaturalKey({ ...body, dob });
   const player: PlayerRegistration = {
     naturalKey,
@@ -2253,6 +2410,7 @@ app.post('/clubs/:id/players', async (c) => {
     bowlerType: body.bowlerType,
     isAllRounder: body.isAllRounder ?? false,
     isWk: body.isWk ?? false,
+    ...(position ? { position } : {}),
     status: 'active',
     registeredBy: ra.email,
     registeredVia: 'portal',
@@ -2643,7 +2801,7 @@ app.get('/clubs/:id/veterans-candidates', async (c) => {
     throw new HttpError(403, 'club is not entered in a released veterans series');
 
   const [config, clubs] = await Promise.all([
-    repo.getTenantConfig(ra.tenant),
+    getTenantConfigCached(c, ra.tenant),
     repo.listClubs(ra.tenant),
   ]);
   const leagues = config?.leagues ?? [];
@@ -2707,7 +2865,7 @@ app.post('/clubs/:id/veterans-requests', async (c) => {
   const [primaryClub, vetsClub, config] = await Promise.all([
     repo.getClub(ra.tenant, body.primaryClubId),
     repo.getClub(ra.tenant, vetsClubId),
-    repo.getTenantConfig(ra.tenant),
+    getTenantConfigCached(c, ra.tenant),
   ]);
   if (!primaryClub || !vetsClub) throw new HttpError(404, 'club not found');
   const leagues = config?.leagues ?? [];
@@ -2934,7 +3092,7 @@ app.post('/clubs/:id/clearances', async (c) => {
   // Best-effort chairman heads-up (never throws). This route doesn't otherwise need the
   // tenant config — it's read only for the whatsappInvites gate, and a read fault just
   // degrades to the flag's default inside notifyClearanceOpened.
-  const tenantConfig = await repo.getTenantConfig(ra.tenant).catch(() => null);
+  const tenantConfig = await getTenantConfigCached(c, ra.tenant).catch(() => null);
   await notifyClearanceOpened(ra.tenant, tenantConfig, fromClub, clearance, ra.email);
   return c.json(clearance, 201);
 });
@@ -3130,7 +3288,7 @@ app.post('/clubs/:id/docs/:key/upload-url', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   const key = c.req.param('key');
-  const cfg = await repo.getTenantConfig(ra.tenant);
+  const cfg = await getTenantConfigCached(c, ra.tenant);
   const docDef = requireUploadableDoc(cfg, key);
   assertClubAccess(ra, id);
   // Accepted types come from the doc's own definition (legacy default: PDF/Word —
@@ -3174,7 +3332,7 @@ app.patch('/clubs/:id/docs/:key', async (c) => {
   if (typeof meta.size !== 'number' || meta.size <= 0 || meta.size > MAX_DOC_BYTES) {
     throw new HttpError(400, 'file must be non-empty and under 10 MB');
   }
-  const cfg = await repo.getTenantConfig(ra.tenant);
+  const cfg = await getTenantConfigCached(c, ra.tenant);
   const current = await repo.getClub(ra.tenant, id);
   if (!current) throw new HttpError(404, 'club not found');
   // Catalogue ∪ stored keys: recording against a since-removed key is allowed (the
@@ -3295,7 +3453,7 @@ app.delete('/clubs/:id/docs/:key/file', async (c) => {
   const { objectKey } = await c.req.json<{ objectKey?: string }>().catch(() => ({}) as never);
   if (!objectKey) throw new HttpError(400, 'objectKey required');
   assertOwnObjectKey(ra.tenant, id, objectKey);
-  const cfg = await repo.getTenantConfig(ra.tenant);
+  const cfg = await getTenantConfigCached(c, ra.tenant);
   const current = await repo.getClub(ra.tenant, id);
   if (!current) throw new HttpError(404, 'club not found');
   const docMeta = current.docMeta ?? {};
@@ -3399,7 +3557,7 @@ app.post('/clubs/:id/docs/:key/view-url', async (c) => {
   const { objectKey: requested } = await c.req
     .json<{ objectKey?: string }>()
     .catch(() => ({}) as { objectKey?: string });
-  const cfg = await repo.getTenantConfig(ra.tenant);
+  const cfg = await getTenantConfigCached(c, ra.tenant);
   const club = await repo.getClub(ra.tenant, id);
   if (!club) throw new HttpError(404, 'club not found');
   const docMeta = club.docMeta ?? {};
@@ -3500,6 +3658,13 @@ app.post('/clubs/:id/send-fixtures', async (c) => {
   const unknown = channels.find((ch) => ch !== 'email' && ch !== 'whatsapp');
   if (unknown) throw new HttpError(400, `unknown channel: ${unknown}`);
   if (!idempotencyKey) throw new HttpError(400, 'idempotencyKey required');
+  // Read once: feeds the whatsapp gate here and the schedule's season label below.
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  // WhatsApp rides the shared, cricket-flavored club_fixtures_released template — gated on
+  // the tenant's whatsappInvites flag (default ON) exactly like the invite/notice paths, so
+  // an email-only tenant can't fire it by posting the channel directly.
+  if (channels.includes('whatsapp') && !hasFeature(cfg, 'whatsappInvites', true))
+    throw new HttpError(400, 'whatsapp is not enabled for this tenant');
 
   const club = await repo.getClub(ra.tenant, id);
   if (!club) throw new HttpError(404, 'club not found');
@@ -3534,7 +3699,12 @@ app.post('/clubs/:id/send-fixtures', async (c) => {
     throw new HttpError(409, 'no released fixtures to share');
   }
   const clubsById = new Map((await repo.listClubs(ra.tenant)).map((cl) => [cl.id, cl]));
-  const { text: scheduleText, season } = buildClubSchedule(club, releasedSeries, clubsById);
+  const { text: scheduleText, season } = buildClubSchedule(
+    club,
+    releasedSeries,
+    clubsById,
+    cfg?.seasonLabel,
+  );
 
   const players = await repo.listPlayers(ra.tenant, id);
 
@@ -5307,6 +5477,11 @@ function validateLeagues(
   if (leagues.some((l) => !(l as League).label?.trim()))
     throw new HttpError(400, 'every league needs a label');
   if (new Set(keys).size !== keys.length) throw new HttpError(409, 'duplicate league key');
+  const badFlag = (leagues as League[]).find(
+    (l) => l.fixturesOnly !== undefined && typeof l.fixturesOnly !== 'boolean',
+  );
+  if (badFlag)
+    throw new HttpError(400, `fixturesOnly on league "${badFlag.label}" must be a boolean`);
   if (validDistricts) {
     const bad = (leagues as League[]).find((l) => !validDistricts.has(l.district));
     if (bad)
@@ -5340,6 +5515,8 @@ app.get('/tenant/config', async (c) => {
   return c.json({
     tenant: config.tenant,
     branding: config.branding,
+    sport: config.sport,
+    seasonLabel: config.seasonLabel,
     submissionDeadline: config.submissionDeadline,
     leagues: config.leagues ?? [],
     districts: resolveDistricts(config),
@@ -5373,6 +5550,8 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { requiredDocs?: unknown }).requiredDocs;
   delete (patch as { clearanceCertTemplate?: unknown }).clearanceCertTemplate;
   delete (patch as { orgContact?: unknown }).orgContact;
+  delete (patch as { sport?: unknown }).sport;
+  delete (patch as { seasonLabel?: unknown }).seasonLabel;
   const next = await applyTenantConfigPatch(tenant, patch, { preserveCompetitions: true });
   return c.json(next);
 });
@@ -5583,6 +5762,8 @@ app.post('/platform/tenants', async (c) => {
     branding?: TenantBrandingInput;
     submissionDeadline?: string;
     features?: Record<string, boolean>;
+    sport?: Sport;
+    seasonLabel?: string;
   }>();
   const slug = (body.slug ?? '').trim().toLowerCase();
   const slugError = validateTenantSlug(slug);
@@ -5592,6 +5773,14 @@ app.post('/platform/tenants', async (c) => {
   const deadline = (body.submissionDeadline ?? '').trim();
   if (!deadline || Number.isNaN(Date.parse(deadline)))
     throw new HttpError(400, 'valid submissionDeadline required (ISO date)');
+  if (body.sport !== undefined) {
+    const sportError = validateSport(body.sport);
+    if (sportError) throw new HttpError(400, sportError);
+  }
+  if (body.seasonLabel !== undefined) {
+    const labelError = validateSeasonLabel(body.seasonLabel);
+    if (labelError) throw new HttpError(400, labelError);
+  }
   // Explicit empty leagues AND districts: a portal-created client starts with a
   // blank catalogue the operator fills in; districts:[] (vs field-absent) opts the
   // new client OUT of the legacy DEFAULT_DISTRICTS fallback.
@@ -5602,7 +5791,9 @@ app.post('/platform/tenants', async (c) => {
     body.features,
     [],
     [],
+    body.sport,
   );
+  if (body.seasonLabel !== undefined) config.seasonLabel = body.seasonLabel.trim();
   try {
     await repo.createTenantConfig(config);
   } catch (err: unknown) {
@@ -5762,6 +5953,20 @@ app.put('/platform/tenants/:slug', async (c) => {
   const getClubs = async (): Promise<Club[]> => (tenantClubs ??= await repo.listClubs(slug));
   if (body.branding !== undefined) patch.branding = body.branding;
   if (body.features !== undefined) patch.features = body.features;
+  if (body.sport !== undefined) {
+    const sportError = validateSport(body.sport);
+    if (sportError) throw new HttpError(400, sportError);
+    patch.sport = body.sport;
+  }
+  if (isSeasonLabelClear(body.seasonLabel)) {
+    // Explicit clear: an own `undefined` key overrides the stored label in the merge and is
+    // dropped on write (removeUndefinedValues), so display falls back to the built-in label.
+    patch.seasonLabel = undefined;
+  } else if (body.seasonLabel !== undefined) {
+    const labelError = validateSeasonLabel(body.seasonLabel);
+    if (labelError) throw new HttpError(400, labelError);
+    patch.seasonLabel = body.seasonLabel.trim();
+  }
   if (body.leagues !== undefined) {
     validateLeagues(body.leagues); // shape 400s must win over the guard's 409
     patch.leagues = body.leagues;
@@ -6777,6 +6982,22 @@ function isValidIsoDate(value: unknown): value is string {
 }
 
 /**
+ * A player's team must be a real league key in the tenant catalogue, and never a
+ * fixtures-only entry (League.fixturesOnly — e.g. a KO Cup): those are competitions the
+ * club's existing sides play, not a team a player registers for. An empty catalogue
+ * accepts anything (a fresh tenant), as before.
+ */
+function assertPlayerTeam(cfg: TenantConfig | null | undefined, team: string): void {
+  const leagueKeys = new Set((cfg?.leagues ?? []).map((l) => l.key));
+  if (leagueKeys.size && !leagueKeys.has(team)) {
+    throw new HttpError(400, 'unknown team/league');
+  }
+  if (isFixturesOnlyLeague(findByKey(cfg?.leagues, team))) {
+    throw new HttpError(400, 'team cannot be a fixtures-only competition');
+  }
+}
+
+/**
  * Validate one roster-intake commit row against already-resolved tenant state. Returns
  * an error string, or null when the row is clean. A non-null result aborts the WHOLE
  * commit before any write (ALL-before-ANY-write) — a malformed row is categorically
@@ -6846,7 +7067,10 @@ app.post('/platform/tenants/:slug/roster-intake/commit', async (c) => {
   const clubs = await repo.listClubs(slug);
   const clubIds = new Set(clubs.map((cl) => cl.id));
   const clubsById = new Map(clubs.map((cl) => [cl.id, cl]));
-  const leagueKeys = new Set((cfg.leagues ?? []).map((l) => l.key));
+  // A player's team is never a fixtures-only entry (KO Cup) — see assertPlayerTeam.
+  const leagueKeys = new Set(
+    (cfg.leagues ?? []).filter((l) => !isFixturesOnlyLeague(l)).map((l) => l.key),
+  );
 
   for (let i = 0; i < items.length; i++) {
     const err = validateRosterIntakeItem(items[i], clubIds, leagueKeys, i);
@@ -7317,6 +7541,7 @@ app.post('/platform/tenants/:slug/structure-intake/commit', async (c) => {
             validDistricts,
             docDefs,
             current.docMeta,
+            resolveVertical(cfg).sport,
           );
           if (err) throw new HttpError(400, err);
           counts = { teams: patch.teams!, women: patch.women!, juniors: patch.juniors! };
@@ -8421,7 +8646,7 @@ app.post('/admin/clearances/:cid/reassign', async (c) => {
     // The clearance just landed in a NEW club's queue — often a directory clearance
     // finally reaching a real club — so its chairman gets the same heads-up a freshly
     // created clearance would have produced. Best-effort; never fails the reassign.
-    const tenantConfig = await repo.getTenantConfig(ra.tenant).catch(() => null);
+    const tenantConfig = await getTenantConfigCached(c, ra.tenant).catch(() => null);
     await notifyClearanceOpened(ra.tenant, tenantConfig, newFromClub, reassigned, ra.email, {
       bypassCap: true,
     });
@@ -8518,7 +8743,7 @@ app.post('/admin/clearances/:cid/reopen', async (c) => {
     });
     // Best-effort: tell BOTH clubs' chairmen the union reopened the clearance (never fails the
     // request). Source and destination get different copy — see notifyClearanceReopened.
-    const tenantConfig = await repo.getTenantConfig(ra.tenant).catch(() => null);
+    const tenantConfig = await getTenantConfigCached(c, ra.tenant).catch(() => null);
     await notifyClearanceReopened(ra.tenant, tenantConfig, reopened, ra.email);
     return c.json(repo.publicClearance(reopened));
   } catch (err) {
@@ -8786,16 +9011,19 @@ const seasonLabel = (year: number) => `${year}/${String((year + 1) % 100).padSta
 
 /**
  * Resolve the season label dynamically so it scales every year with no code change:
- * prefer a "YYYY/YY" token embedded in a series name (what the UI shows), else derive
- * it from the earliest start date, else the current year. Never returns '' — an empty
- * label would break the email copy and (worse) be rejected as an empty WhatsApp
+ * prefer a "YYYY/YY" token embedded in a series name (what the UI shows), else use
+ * the tenant's configured display `seasonLabel` (e.g. a school league's "2027"), else
+ * derive it from the earliest start date, else the current year. Never returns '' — an
+ * empty label would break the email copy and (worse) be rejected as an empty WhatsApp
  * template parameter.
  */
-function seasonFromSeries(series: Series[]): string {
+function seasonFromSeries(series: Series[], configuredLabel?: string): string {
   for (const s of series) {
     const m = /\b(\d{4}\/\d{2})\b/.exec(typeof s.name === 'string' ? s.name : '');
     if (m) return m[1];
   }
+  const configured = configuredLabel?.trim();
+  if (configured) return configured;
   const starts = series
     .map((s) => s.startDate)
     .filter((d): d is string => typeof d === 'string' && d.length > 0)
@@ -8828,8 +9056,9 @@ export function buildClubSchedule(
   club: Club,
   releasedSeries: Series[],
   clubsById: Map<string, Club>,
+  configuredSeasonLabel?: string,
 ): { text: string; season: string } {
-  const season = seasonFromSeries(releasedSeries);
+  const season = seasonFromSeries(releasedSeries, configuredSeasonLabel);
   const blocks: string[] = [];
   for (const s of releasedSeries) {
     // A series released with fields withheld (ADR 0011) reaches players the same way it

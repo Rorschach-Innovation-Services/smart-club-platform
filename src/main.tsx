@@ -102,6 +102,7 @@ import {
   ClubVeteransSquadView,
 } from './club';
 import { Onboarding } from './onboarding';
+import { useModule, useSeasonLabel, useVertical } from './branding';
 
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
 const TENANT_SLUG = resolveTenantSlug();
@@ -114,11 +115,12 @@ Sentry.setTag('tenant', TENANT_SLUG);
 /* ─── HelpModal — support guidance + union office contacts ─── */
 function HelpModal({ onClose, support }) {
   useEscapeClose(onClose);
+  const t = useVertical().terms;
   // parseSupport (admin.jsx) is the single source of truth for splitting the
   // "Name · email" support string — same logic the edit modal uses.
   const contacts = support
-    ? [{ ...parseSupport(support), role: 'Union office' }]
-    : [{ name: 'Union office', role: 'Support', email: '' }];
+    ? [{ ...parseSupport(support), role: t.office }]
+    : [{ name: t.office, role: 'Support', email: '' }];
   return createPortal(
     <div className="task-modal-backdrop" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="task-modal narrow" style={{ maxWidth: 560 }}>
@@ -126,7 +128,7 @@ function HelpModal({ onClose, support }) {
           <div className="task-modal-head-text">
             <div className="task-modal-head-eyebrow">Need Help</div>
             <div className="task-modal-head-title">
-              Support &amp; <em>union office</em>
+              Support &amp; <em>{t.union} office</em>
             </div>
           </div>
           <button className="task-modal-close" onClick={onClose} title="Close">
@@ -184,7 +186,8 @@ function HelpModal({ onClose, support }) {
             }}
           >
             <p style={{ margin: 0, fontSize: 14, lineHeight: 1.55, color: 'var(--ink)' }}>
-              If your club is missing one of the required documents, reach out to the union office.
+              If your {t.club} is missing one of the required documents, reach out to the {t.union}{' '}
+              office.
             </p>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -256,7 +259,7 @@ function HelpModal({ onClose, support }) {
           <div
             style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 14, fontStyle: 'italic' }}
           >
-            Tip: include your club name and which document is outstanding so the office can help
+            Tip: include your {t.club} name and which document is outstanding so the office can help
             quickly.
           </div>
         </div>
@@ -402,6 +405,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   const { memberships, email, signOutUser } = useAuth();
   const location = useLocation();
   const [toastShow, toastNode] = useToast();
+  const authedTerms = useVertical().terms;
   const [showOnboarding, setShowOnboarding] = useStateApp(false);
   // null = closed; {} = create; a league object = edit
   const [showLeagueForm, setShowLeagueForm] = useStateApp(null);
@@ -495,8 +499,9 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
             No access
           </h1>
           <p className="ps-desc">
-            Your account isn&apos;t linked to {tenantConfig?.branding?.name ?? 'this union'}. Ask an
-            administrator to invite you, or sign out and try another account.
+            Your account isn&apos;t linked to{' '}
+            {tenantConfig?.branding?.name ?? `this ${authedTerms.union}`}. Ask an administrator to
+            invite you, or sign out and try another account.
           </p>
           <Btn tone="ink" size="sm" onClick={signOutUser}>
             Sign out
@@ -515,7 +520,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   if (!tenantConfig)
     return tenantConfigError ? (
       <Splash
-        message="Couldn't load configuration for this union. Refresh to retry."
+        message={`Couldn't load configuration for this ${authedTerms.union}. Refresh to retry.`}
         action={
           <Btn tone="ink" size="sm" onClick={onRetryTenantConfig}>
             Retry
@@ -577,16 +582,16 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   // onboarding effect runs — otherwise it races an unresolved /me, reads an empty map, and
   // re-opens the walkthrough every visit even after it's been dismissed/completed.
   if (dataLoading || seriesQuery.isLoading || meQuery.isLoading)
-    return <Splash message="Loading your clubs…" />;
+    return <Splash message={`Loading your ${authedTerms.clubs}…`} />;
   if (dataError || seriesQuery.isError)
     return (
       <Splash
         message={
           clubNotFound
-            ? 'That club could not be found — it may have been removed. Sign out and choose another account.'
+            ? `That ${authedTerms.club} could not be found — it may have been removed. Sign out and choose another account.`
             : import.meta.env.VITE_LOCAL_AUTH === '1'
               ? 'Could not reach the local API. Is it running? Start it with `npm run dev:local`.'
-              : 'Could not load your clubs. Refresh to retry.'
+              : `Could not load your ${authedTerms.clubs}. Refresh to retry.`
         }
         action={
           clubNotFound ? (
@@ -1181,6 +1186,15 @@ function Shell({
   // Per-tenant compliance-doc catalogue (ADR 0009). Absent ⇒ the shared default list —
   // same fallback shape as allDistricts above — so a legacy tenant's behaviour is unchanged.
   const requiredDocs = tenantConfig?.requiredDocs ?? DEFAULT_REQUIRED_DOCS;
+  // Sport-vertical modules: a disabled module's nav items, views and always-on queries are
+  // dropped (the API 403s its routes), so e.g. a football tenant never fetches clearances.
+  const vertical = useVertical();
+  const terms = vertical.terms;
+  const seasonLabel = useSeasonLabel();
+  const veteransOn = useModule('veterans');
+  const cqiOn = useModule('cqi');
+  const complianceOn = useModule('compliance');
+  const clearancesOn = useModule('clearances');
 
   // ── Derive clubId from URL ──
   let clubId;
@@ -1239,7 +1253,7 @@ function Shell({
   const clearancesQuery = useQuery({
     queryKey: qk.clearances(clubId),
     queryFn: () => api.getClearances(clubId),
-    enabled: role === 'club' && !!clubId,
+    enabled: role === 'club' && !!clubId && clearancesOn,
   });
   const clubDirectoryQuery = useQuery({
     queryKey: qk.clubDirectory(),
@@ -1252,12 +1266,12 @@ function Shell({
   const veteransRequestsQuery = useQuery({
     queryKey: qk.veteransRequests(clubId),
     queryFn: () => api.getVeteransRequests(clubId),
-    enabled: role === 'club' && !!clubId,
+    enabled: role === 'club' && !!clubId && veteransOn,
   });
   const allClearancesQuery = useQuery({
     queryKey: qk.allClearances(),
     queryFn: api.getAllClearances,
-    enabled: role === 'admin',
+    enabled: role === 'admin' && clearancesOn,
   });
   // Tenant-wide club signup link (admin) — drives the share modal + Settings card.
   const signupLinkQuery = useQuery({
@@ -1269,13 +1283,13 @@ function Shell({
   const allReviewsQuery = useQuery({
     queryKey: qk.allRegistrationReviews(),
     queryFn: api.getAllRegistrationReviews,
-    enabled: role === 'admin',
+    enabled: role === 'admin' && clearancesOn,
   });
   // Every veterans squad-selection request in the tenant (admin oversight, ADR 0013).
   const allVeteransRequestsQuery = useQuery({
     queryKey: qk.allVeteransRequests(),
     queryFn: api.getAllVeteransRequests,
-    enabled: role === 'admin',
+    enabled: role === 'admin' && veteransOn,
   });
   // Anonymised player demographics for Insights + the league drill-down (admin only;
   // reps never reach /admin/*). Undefined until loaded — the card is simply skipped.
@@ -1308,6 +1322,19 @@ function Shell({
     if (location.pathname === base || location.pathname === base + '/') view = 'home';
     else view = location.pathname.slice(base.length + 1);
   }
+  // Deep-link guard: a disabled module's view (hand-typed or stale URL) renders home instead
+  // of a broken page — its API routes 403 and its nav item is hidden.
+  const moduleForView: Record<string, boolean> =
+    role === 'admin'
+      ? {
+          documents: complianceOn,
+          cqi_admin: cqiOn,
+          clearances: clearancesOn,
+          reg_reviews: clearancesOn,
+          vet_requests: veteransOn,
+        }
+      : { documents: complianceOn, cqi: cqiOn, clearances: clearancesOn, veterans: veteransOn };
+  if (moduleForView[view] === false) view = role === 'admin' ? 'dashboard' : 'home';
 
   // ── Refetch page data on every in-console navigation ──
   // Shell stays mounted (pages are URL-derived), so its useQuery hooks never remount and
@@ -2118,7 +2145,7 @@ function Shell({
   // series (fixtures now reference a missing id) and the admin clearance list —
   // refresh all four, then land back on the list the club just vanished from.
   function deleteClub(id) {
-    return withToast(() => api.deleteClub(id), 'Could not remove club').then(() => {
+    return withToast(() => api.deleteClub(id), `Could not remove ${terms.club}`).then(() => {
       invalidate(qk.clubs());
       invalidate(qk.users());
       invalidate(qk.series());
@@ -2126,7 +2153,7 @@ function Shell({
       // Club deletion cascades player deletion (repo cascade) — demographics shift.
       invalidate(qk.demographics());
       gotoAdminView('clubs_list');
-      toastShow('Club removed');
+      toastShow(`${terms.Club} removed`);
     });
   }
   // Re-send the staff invite notification. Resolves to { results } for the caller to surface.
@@ -2191,7 +2218,7 @@ function Shell({
   }
 
   if (!activeClub && role === 'club') {
-    return <Splash message="This club isn't available on your account." />;
+    return <Splash message={`This ${terms.club} isn't available on your account.`} />;
   }
 
   // — NAV —
@@ -2219,7 +2246,8 @@ function Shell({
   const myPendingVetInbound = (veteransRequests.inbound ?? []).filter(
     (r) => r.status === 'pending',
   ).length;
-  const showVeteransNav = role === 'club' && clubPlaysVeterans(activeClub, allLeagues);
+  const showVeteransNav =
+    role === 'club' && veteransOn && clubPlaysVeterans(activeClub, allLeagues);
   // Registration-review badge: admin sees every open review (off-system alerts) cohort-wide.
   const adminOpenReviews = allReviews.filter((r) => r.status === 'open').length;
   const adminPendingVetRequests = allVeteransRequests.filter((r) => r.status === 'pending').length;
@@ -2228,7 +2256,7 @@ function Shell({
   // by label for display (see the `.sort` below) — same for clubNav.
   const adminNav: NavItem[] = [
     { v: 'dashboard', label: 'Cohort Dashboard', icon: Icon.Dashboard },
-    { v: 'clubs_list', label: 'All Clubs', icon: Icon.Clubs, num: clubs.length },
+    { v: 'clubs_list', label: `All ${terms.Clubs}`, icon: Icon.Clubs, num: clubs.length },
     { v: 'players', label: 'Players', icon: Icon.Users },
     {
       v: 'affiliations',
@@ -2237,46 +2265,62 @@ function Shell({
       num: clubs.filter((c) => affiliationSubmitted(c)).length + '/' + clubs.length,
       dot: clubs.filter((c) => !affiliationSubmitted(c)).length ? 'gold' : 'teal',
     },
-    {
-      v: 'documents',
-      label: 'Compliance Docs',
-      icon: Icon.Upload,
-      // Wrapped, not passed bare: filter hands its callback the array index, which would
-      // land in docsAllComplete's catalogue argument.
-      num: clubs.filter((c) => docsAllComplete(c, requiredDocs)).length + '/' + clubs.length,
-      dot: 'gold',
-    },
-    {
-      v: 'cqi_admin',
-      label: 'CQI Submissions',
-      icon: Icon.Star,
-      num: clubs.filter((c) => c.cqi > 0).length + '/' + clubs.length,
-      dot: 'gold',
-    },
+    ...(complianceOn
+      ? [
+          {
+            v: 'documents',
+            label: 'Compliance Docs',
+            icon: Icon.Upload,
+            // Wrapped, not passed bare: filter hands its callback the array index, which would
+            // land in docsAllComplete's catalogue argument.
+            num: clubs.filter((c) => docsAllComplete(c, requiredDocs)).length + '/' + clubs.length,
+            dot: 'gold',
+          },
+        ]
+      : []),
+    ...(cqiOn
+      ? [
+          {
+            v: 'cqi_admin',
+            label: 'CQI Submissions',
+            icon: Icon.Star,
+            num: clubs.filter((c) => c.cqi > 0).length + '/' + clubs.length,
+            dot: 'gold',
+          },
+        ]
+      : []),
     { v: 'leagues', label: 'Leagues', icon: Icon.Shield, num: allLeagues.length },
     { v: 'insights', label: 'Insights', icon: Icon.Chart },
     { v: 'fixtures', label: 'Fixtures & Venues', icon: Icon.Field, dot: 'teal' },
-    {
-      v: 'clearances',
-      label: 'Clearances',
-      icon: Icon.Shield,
-      num: adminPendingClearances || undefined,
-      dot: adminPendingClearances ? 'gold' : 'teal',
-    },
-    {
-      v: 'reg_reviews',
-      label: 'Registration Reviews',
-      icon: Icon.Bell,
-      num: adminOpenReviews || undefined,
-      dot: adminOpenReviews ? 'gold' : 'teal',
-    },
-    {
-      v: 'vet_requests',
-      label: 'Veterans Requests',
-      icon: Icon.Shield,
-      num: adminPendingVetRequests || undefined,
-      dot: adminPendingVetRequests ? 'gold' : 'teal',
-    },
+    ...(clearancesOn
+      ? [
+          {
+            v: 'clearances',
+            label: 'Clearances',
+            icon: Icon.Shield,
+            num: adminPendingClearances || undefined,
+            dot: adminPendingClearances ? 'gold' : 'teal',
+          },
+          {
+            v: 'reg_reviews',
+            label: 'Registration Reviews',
+            icon: Icon.Bell,
+            num: adminOpenReviews || undefined,
+            dot: adminOpenReviews ? 'gold' : 'teal',
+          },
+        ]
+      : []),
+    ...(veteransOn
+      ? [
+          {
+            v: 'vet_requests',
+            label: 'Veterans Requests',
+            icon: Icon.Shield,
+            num: adminPendingVetRequests || undefined,
+            dot: adminPendingVetRequests ? 'gold' : 'teal',
+          },
+        ]
+      : []),
     { v: 'team', label: 'Team & Access', icon: Icon.Users, num: users.length || undefined },
   ].sort((a, b) => a.label.localeCompare(b.label));
 
@@ -2302,13 +2346,26 @@ function Shell({
             icon: Icon.Form,
             dot: affiliationSubmitted(activeClub) ? 'teal' : 'coral',
           },
-          {
-            v: 'documents',
-            label: 'Documents',
-            icon: Icon.Upload,
-            dot: docCompletion(activeClub, requiredDocs) === 100 ? 'teal' : 'gold',
-          },
-          { v: 'cqi', label: 'CQI', icon: Icon.Star, dot: activeClub.cqi > 0 ? 'teal' : 'muted' },
+          ...(complianceOn
+            ? [
+                {
+                  v: 'documents',
+                  label: 'Documents',
+                  icon: Icon.Upload,
+                  dot: docCompletion(activeClub, requiredDocs) === 100 ? 'teal' : 'gold',
+                },
+              ]
+            : []),
+          ...(cqiOn
+            ? [
+                {
+                  v: 'cqi',
+                  label: 'CQI',
+                  icon: Icon.Star,
+                  dot: activeClub.cqi > 0 ? 'teal' : 'muted',
+                },
+              ]
+            : []),
           {
             v: 'players',
             label: 'Players',
@@ -2318,13 +2375,17 @@ function Shell({
             // plain teal "has players" dot.
             dot: myPendingVetInbound ? 'gold' : myPlayerCount ? 'teal' : 'muted',
           },
-          {
-            v: 'clearances',
-            label: 'Clearances',
-            icon: Icon.Shield,
-            num: myPendingClearances || undefined,
-            dot: myPendingClearances ? 'gold' : 'muted',
-          },
+          ...(clearancesOn
+            ? [
+                {
+                  v: 'clearances',
+                  label: 'Clearances',
+                  icon: Icon.Shield,
+                  num: myPendingClearances || undefined,
+                  dot: myPendingClearances ? 'gold' : 'muted',
+                },
+              ]
+            : []),
           // Only for a club the union has fixtured into veterans cricket (nav visibility is
           // cosmetic; the finder is gated server-side on released-series participation).
           ...(showVeteransNav
@@ -2657,6 +2718,7 @@ function Shell({
             allLeagues={allLeagues}
             requiredDocs={requiredDocs}
             onRenameClub={(name) => updateClub({ name })}
+            onSaveExco={saveExco}
           />
         );
       if (view === 'cqi')
@@ -2748,11 +2810,11 @@ function Shell({
     const ownClub = membership?.clubIds?.[0];
     return (
       <Splash
-        message="You don't have access to that club."
+        message={`You don't have access to that ${vertical.terms.club}.`}
         action={
           ownClub ? (
             <Btn tone="ink" size="sm" onClick={() => navigate(`/club/${ownClub}`)}>
-              Go to my club
+              Go to my {vertical.terms.club}
             </Btn>
           ) : (
             <Btn tone="ink" size="sm" onClick={signOutUser}>
@@ -2849,7 +2911,9 @@ function Shell({
           <div>
             <div className="h-user-name">{userName}</div>
             <div className="h-user-role">
-              {role === 'admin' ? `${orgName} · Admin` : activeClub.name + ' · Chair'}
+              {role === 'admin'
+                ? `${orgName} · Admin`
+                : `${activeClub.name} · ${vertical.sport === 'cricket' ? 'Chair' : terms.Chair}`}
             </div>
           </div>
         </div>
@@ -2930,8 +2994,7 @@ function Shell({
 
           <div className="nav-footer">
             <strong>{orgName}</strong> · Smart Club Integration
-            <br />
-            v 1.0.0 · Cricket Services · 2026/27
+            <br />v 1.0.0 · {vertical.terms.Sport} Services · {seasonLabel}
             <br />
             <span style={{ color: 'var(--muted-3)' }}>{orgFooter}</span>
           </div>
@@ -2996,7 +3059,7 @@ function Shell({
           eyebrow={`Phase 01 · ${activeClub.name}`}
           title={
             <>
-              2026/27 <em>Affiliation Form</em>
+              {seasonLabel} <em>Affiliation Form</em>
             </>
           }
           onClose={() => gotoClubView('home')}
@@ -3096,7 +3159,7 @@ function Shell({
       {role === 'admin' && showLeagueForm && (
         <Modal
           closeLabel="Close (your inputs are saved)"
-          eyebrow="Catalogue · Cricket Services"
+          eyebrow={`Catalogue · ${vertical.terms.Sport} Services`}
           maxWidth={820}
           title={
             showLeagueForm.key ? (
@@ -3139,30 +3202,32 @@ function AdminFiltered({
   requiredDocs = DEFAULT_REQUIRED_DOCS,
 }) {
   const docsCols = activeDocs(requiredDocs);
+  const vertical = useVertical();
+  const t = vertical.terms;
+  const seasonLabel = useSeasonLabel();
+  // Column/export header for the lead contact: cricket keeps its short "Chair".
+  const chairHeader = vertical.sport === 'cricket' ? 'Chair' : t.Chair;
   const titles = {
     affiliation: {
       t: 'Affiliation tracker',
       crumb: 'Affiliations',
-      desc: 'Track which clubs have completed the 2026/27 union affiliation form.',
+      desc: `Track which ${t.clubs} have completed the ${seasonLabel} ${t.union} affiliation form.`,
       icon: Icon.Form,
-      empty:
-        'Clubs register themselves via your signup link and appear here — then track who has completed the 2026/27 affiliation form.',
+      empty: `${t.Clubs} register themselves via your signup link and appear here — then track who has completed the ${seasonLabel} affiliation form.`,
     },
     docs: {
       t: 'Compliance docs tracker',
       crumb: 'Compliance Docs',
-      desc: 'Monitor compliance document uploads across all clubs.',
+      desc: `Monitor compliance document uploads across all ${t.clubs}.`,
       icon: Icon.Upload,
-      empty:
-        'Clubs register themselves via your signup link and appear here — then monitor their compliance document uploads.',
+      empty: `${t.Clubs} register themselves via your signup link and appear here — then monitor their compliance document uploads.`,
     },
     cqi: {
       t: 'CQI submission tracker',
       crumb: 'CQI Submissions',
-      desc: 'Real-time view of CQI self-assessments returned by clubs across all five categories.',
+      desc: `Real-time view of CQI self-assessments returned by ${t.clubs} across all five categories.`,
       icon: Icon.Star,
-      empty:
-        'Clubs register themselves via your signup link and appear here — then collect CQI self-assessments across all five categories.',
+      empty: `${t.Clubs} register themselves via your signup link and appear here — then collect CQI self-assessments across all five categories.`,
     },
   }[kind];
 
@@ -3179,18 +3244,18 @@ function AdminFiltered({
     openBccReminder({
       emails: clubs.filter(isOutstanding).map((c) => c.exco?.chair?.email),
       subject: {
-        affiliation: '2026/27 affiliation outstanding — please complete',
+        affiliation: `${seasonLabel} affiliation outstanding — please complete`,
         docs: 'Compliance documents outstanding — please upload',
         cqi: 'CQI self-assessment outstanding — please submit',
       }[kind],
       toast,
-      emptyMessage: 'No outstanding clubs with a chairperson email on file',
+      emptyMessage: `No outstanding ${t.clubs} with a ${t.chair} email on file`,
     });
   }
 
   function exportTracker() {
     const rows = clubs.map((c) => {
-      const base = { Club: c.name, Chair: c.chair };
+      const base = { [t.Club]: c.name, [chairHeader]: c.chair };
       if (kind === 'affiliation')
         return {
           ...base,
@@ -3246,11 +3311,11 @@ function AdminFiltered({
       {clubs.length === 0 ? (
         <EmptyState
           icon={titles.icon}
-          title="No clubs in your cohort yet"
+          title={`No ${t.clubs} in your cohort yet`}
           sub={titles.empty}
           action={
             <Btn tone="teal" icon={Icon.Mail} onClick={onGetSignupLink}>
-              Get the club signup link
+              Get the {t.club} signup link
             </Btn>
           }
         />
@@ -3260,8 +3325,8 @@ function AdminFiltered({
             <table className="tbl">
               <thead>
                 <tr>
-                  <th>Club</th>
-                  <th>Chair</th>
+                  <th>{t.Club}</th>
+                  <th>{chairHeader}</th>
                   {kind === 'affiliation' && (
                     <>
                       <th>Status</th>
@@ -3406,13 +3471,14 @@ function AdminFiltered({
 
 /* ─── Coming soon placeholder ─── */
 function ComingSoon({ title, phase, unlocked, eta }) {
+  const t = useVertical().terms;
   const headline = unlocked ? 'Coming soon' : 'This phase unlocks after affiliation';
   const detailDesc = unlocked
     ? `Phase ${phase} of the Smart Club Integration journey. Your affiliation is in — this module is in final development and will arrive shortly.`
-    : `Phase ${phase} of the Smart Club Integration journey. Activates automatically once your club has completed affiliation and uploaded compliance documents.`;
+    : `Phase ${phase} of the Smart Club Integration journey. Activates automatically once your ${t.club} has completed affiliation and uploaded compliance documents.`;
   const detailBody = unlocked
     ? "We're putting the finishing touches on this module. You'll be notified by email and on your home page the moment it's ready — no action needed from your side."
-    : 'Once your club has been confirmed by the Union office, this module activates with live data — fixtures, player registration, scoring, and clinical management — all sourced from the Medicoach platform.';
+    : `Once your ${t.club} has been confirmed by the ${t.office}, this module activates with live data — fixtures, player registration, scoring, and clinical management — all sourced from the Medicoach platform.`;
   const ring = unlocked ? 'var(--teal)' : 'var(--paper3)';
   const ringBg = unlocked ? 'var(--teal-pale)' : 'var(--paper)';
   const ringFg = unlocked ? 'var(--teal-deep)' : 'var(--muted-2)';
@@ -3515,7 +3581,7 @@ function ComingSoon({ title, phase, unlocked, eta }) {
               Notify me when ready
             </Btn>
             <Btn tone="ghost" size="sm" icon={Icon.Mail}>
-              Talk to the union office
+              Talk to the {t.union} office
             </Btn>
           </div>
         )}

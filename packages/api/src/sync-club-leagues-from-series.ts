@@ -42,6 +42,7 @@
 import { pathToFileURL } from 'node:url';
 import * as repo from './repo.js';
 import { validateClubPatch, resolveRequiredDocs, resolveDistricts } from './catalogue.js';
+import { resolveVertical } from './vertical.js';
 import type { Club, ClubTeam, Series } from './types.js';
 
 type SeriesParticipant = NonNullable<Series['participants']>[number];
@@ -288,6 +289,7 @@ export async function syncClubLeaguesFromSeries(
       validDistricts,
       requiredDocs,
       club.docMeta,
+      resolveVertical(cfg).sport,
     );
     if (invalid) {
       log(`VALIDATION ${clubId}: ${invalid} — skipped (no write)`);

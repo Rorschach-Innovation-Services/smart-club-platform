@@ -61,19 +61,28 @@ interface ClubExportHelpers {
   docCompletion: (c: Club) => number | string;
   overallProgress: (c: Club) => number | string;
   cqiBand: (score: number) => { label: string };
+  /** Chair column header — the vertical's chair leadership label. Default 'Chairperson'. */
+  chairLabel?: string;
+  /** Sport-vertical modules; a disabled module's columns are omitted. Default: all on. */
+  modules?: { cqi: boolean; compliance: boolean };
 }
 export function clubExportRow(
   c: Club,
-  { docCompletion, overallProgress, cqiBand }: ClubExportHelpers,
+  {
+    docCompletion,
+    overallProgress,
+    cqiBand,
+    chairLabel = 'Chairperson',
+    modules = { cqi: true, compliance: true },
+  }: ClubExportHelpers,
 ) {
   return {
     Club: c.name,
     District: c.district || c.sub,
-    Chairperson: c.chair,
+    [chairLabel]: c.chair,
     Affiliation: c.affiliation,
-    'Docs %': docCompletion(c),
-    'CQI Score': c.cqi,
-    'CQI Band': cqiBand(c.cqi).label,
+    ...(modules.compliance ? { 'Docs %': docCompletion(c) } : {}),
+    ...(modules.cqi ? { 'CQI Score': c.cqi, 'CQI Band': cqiBand(c.cqi).label } : {}),
     'Overall %': overallProgress(c),
   };
 }
@@ -100,13 +109,24 @@ const STATUS_LABEL: Record<PlayerStatus, string> = {
  * (optionals coerced to '') because fillSheet derives its columns from the first row's
  * keys alone — a conditionally-omitted key would silently drop that column for the whole
  * sheet. resolveTeam/resolveRole are injected (their label maps live in admin.tsx).
+ *
+ * `playerProfile: 'positions'` (non-cricket verticals) swaps the cricket Role/Batting/
+ * Bowling/Batting type/Bowler type/Wicketkeeper/All-rounder columns for one Position
+ * column in Role's slot; the default ('cricket') key order is unchanged.
+ *
+ * `modules.veterans: false` drops the 'Veterans club' column (same optional gate as
+ * clubExportRow). Default: on, so existing callers' key order is untouched.
  */
 export function playerExportRow(
   p: ExportablePlayer,
   resolveTeam: (team: string | undefined) => string,
   resolveRole: (p: ExportablePlayer) => string,
-) {
-  return {
+  {
+    playerProfile = 'cricket',
+    modules = { veterans: true },
+  }: { playerProfile?: 'cricket' | 'positions'; modules?: { veterans: boolean } } = {},
+): Record<string, string> {
+  const head = {
     'First name': p.firstName || '',
     'Last name': p.lastName || '',
     'Date of birth': p.dob || '',
@@ -121,16 +141,41 @@ export function playerExportRow(
     Club: p.clubName || '',
     Team: resolveTeam(p.team) || '',
     District: p.district || '',
+  };
+  const veterans: Record<string, string> = modules.veterans
+    ? { 'Veterans club': p.veteransClub || '' }
+    : {};
+  const status = p.status ? STATUS_LABEL[p.status] || p.status : 'Active';
+  const minor = p.isMinor ? 'Yes' : 'No';
+  if (playerProfile === 'positions') {
+    return {
+      ...head,
+      Position: p.position || '',
+      ...veterans,
+      Status: status,
+      Minor: minor,
+      ...playerExportRest(p),
+    };
+  }
+  return {
+    ...head,
     Role: resolveRole(p) || '',
     Batting: p.battingHand || '',
     Bowling: p.bowlingHand || '',
-    'Veterans club': p.veteransClub || '',
-    Status: p.status ? STATUS_LABEL[p.status] || p.status : 'Active',
+    ...veterans,
+    Status: status,
     'Batting type': p.battingType || '',
     'Bowler type': p.bowlerType || '',
     Wicketkeeper: p.isWk ? 'Yes' : '',
     'All-rounder': p.isAllRounder ? 'Yes' : '',
-    Minor: p.isMinor ? 'Yes' : 'No',
+    Minor: minor,
+    ...playerExportRest(p),
+  };
+}
+
+/** Columns after the cricket profile block — shared by both player-profile shapes. */
+function playerExportRest(p: ExportablePlayer) {
+  return {
     'Postal address': p.postalAddress || '',
     'Postal code': p.postalCode || '',
     'Previous club': p.lastClub || '',

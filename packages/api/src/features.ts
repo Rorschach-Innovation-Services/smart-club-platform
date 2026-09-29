@@ -5,6 +5,7 @@
  * the TenantConfig type (types.ts).
  */
 import type { TenantConfig } from './types.js';
+import { resolveVertical, type ModuleKey } from './vertical.js';
 
 /**
  * Read a tenant feature flag. Returns the stored boolean when present, else `def`.
@@ -18,4 +19,12 @@ export function hasFeature(
 ): boolean {
   const value = cfg?.features?.[key];
   return typeof value === 'boolean' ? value : def;
+}
+
+/**
+ * Whether a module (veterans / cqi / compliance / clearances) is on for this tenant: the
+ * `module.<key>` feature flag when stored, else the tenant vertical's default (cricket ⇒ on).
+ */
+export function hasModule(cfg: TenantConfig | null | undefined, module: ModuleKey): boolean {
+  return hasFeature(cfg, `module.${module}`, resolveVertical(cfg).moduleDefaults[module]);
 }

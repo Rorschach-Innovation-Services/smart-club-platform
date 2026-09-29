@@ -520,3 +520,39 @@ describe('chairContactOf', () => {
     expect(chairContactOf(c)).toEqual({ name: undefined, email: undefined, cell: undefined });
   });
 });
+
+describe('insightsExportSheets · sport-vertical modules', () => {
+  const base = {
+    clubs: [club({ leagues: ['premier'], cqi: 70 })],
+    leagues: LEAGUES,
+    districts: DISTRICTS,
+    clearances: [{ status: 'pending' as ClearanceStatus }],
+  };
+  const names = (sheets: { name: string }[]) => sheets.map((s) => s.name);
+
+  it('all modules on by default (cricket unchanged)', () => {
+    const sheets = insightsExportSheets(base);
+    expect(names(sheets)).toEqual(
+      expect.arrayContaining(['CQI', 'Document compliance', 'Clearances']),
+    );
+    const summary = sheets.find((s) => s.name === 'Summary')!.rows.map((r) => r.Metric);
+    expect(summary).toContain('Average CQI');
+    expect(summary).toContain('Pending clearances');
+  });
+
+  it('drops the CQI / compliance / clearance sheets and metrics when those modules are off', () => {
+    const sheets = insightsExportSheets({
+      ...base,
+      modules: { cqi: false, compliance: false, clearances: false },
+    });
+    expect(names(sheets)).not.toContain('CQI');
+    expect(names(sheets)).not.toContain('Document compliance');
+    expect(names(sheets)).not.toContain('Clearances');
+    expect(sheets.find((s) => s.name === 'Players')!.rows).toEqual([
+      { Metric: 'Players registered', Count: 0, Percentage: '' },
+    ]);
+    const summary = sheets.find((s) => s.name === 'Summary')!.rows.map((r) => r.Metric);
+    expect(summary).not.toContain('Average CQI');
+    expect(summary).not.toContain('Pending clearances');
+  });
+});

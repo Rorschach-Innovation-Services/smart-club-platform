@@ -9,7 +9,8 @@ import {
   formatDeadlineLong,
   formatDeadlineMid,
 } from './data';
-import { useCopy } from './branding';
+import { useCopy, useModule, useSeasonLabel, useVertical } from './branding';
+import { roleLabel } from './vertical';
 
 export function Onboarding({
   club,
@@ -20,20 +21,28 @@ export function Onboarding({
   requiredDocs = DEFAULT_REQUIRED_DOCS,
 }) {
   useEscapeClose(onClose);
+  const vertical = useVertical();
+  // CQI + compliance both off (e.g. football): the walkthrough is affiliation → fixtures.
+  const cqiOn = useModule('cqi');
+  const complianceOn = useModule('compliance');
   const deadlineLong = formatDeadlineLong(submissionDeadline);
   const deadlineMid = formatDeadlineMid(submissionDeadline);
   const [step, setStep] = useStateOb(1);
   const chair = club.exco?.chair || {};
   const [contact, setContact] = useStateOb({
     name: club.chair || chair.name || '',
-    role: 'Chairperson',
+    role: roleLabel(vertical, 'chair'),
     email: chair.email || '',
     cell: chair.cell || '',
     notify: true,
   });
 
   const totalSteps = 3;
-  const labels = ['Welcome', 'Three submissions', 'Your contact'];
+  const labels = [
+    'Welcome',
+    cqiOn || complianceOn ? 'Three submissions' : 'Affiliation & fixtures',
+    'Your contact',
+  ];
 
   function next() {
     if (step < totalSteps) setStep(step + 1);
@@ -77,7 +86,12 @@ export function Onboarding({
           <div className="ob-step-content" key={step}>
             {step === 1 && <StepWelcome club={club} deadlineLong={deadlineLong} />}
             {step === 2 && (
-              <StepSubmissions deadlineLong={deadlineLong} requiredDocs={requiredDocs} />
+              <StepSubmissions
+                deadlineLong={deadlineLong}
+                requiredDocs={requiredDocs}
+                cqiOn={cqiOn}
+                complianceOn={complianceOn}
+              />
             )}
             {step === 3 && (
               <StepContact
@@ -120,13 +134,15 @@ export function Onboarding({
 /* ─── Step 1 — Cinematic welcome (photo left · content right) ─── */
 function StepWelcome({ club, deadlineLong }) {
   const copy = useCopy();
+  const vertical = useVertical();
+  const seasonLabel = useSeasonLabel();
   return (
     <div className="ob-hero">
       <div className="ob-hero-photo" style={{ backgroundImage: 'var(--hero-image)' }}>
         <div className="ob-hero-overlay">
           <div className="ob-hero-badge">
             <span className="dot" />
-            {copy.eyebrow} · 2026/27
+            {copy.eyebrow} · {seasonLabel}
           </div>
         </div>
       </div>
@@ -136,10 +152,19 @@ function StepWelcome({ club, deadlineLong }) {
           Hello {club.chair.split(' ')[0]},<br />
           <em>welcome to the {copy.orgShort} family.</em>
         </h2>
-        <p className="ob-desc">
-          You're now the chair of <strong>{club.name}</strong> on the Smart Club platform — the
-          digital home for every cricket club in the {copy.orgName} district leagues.
-        </p>
+        {/* Full sentence per sport — the cricket wording ("chair", "cricket club … district
+            leagues") doesn't compose cleanly from terms. */}
+        {vertical.sport === 'cricket' ? (
+          <p className="ob-desc">
+            You're now the chair of <strong>{club.name}</strong> on the Smart Club platform — the
+            digital home for every cricket club in the {copy.orgName} district leagues.
+          </p>
+        ) : (
+          <p className="ob-desc">
+            You're now set up to run <strong>{club.name}</strong> on the Smart Club platform — the
+            digital home for every {vertical.terms.club} in the {copy.orgName} leagues.
+          </p>
+        )}
         <p className="ob-desc">
           We'll walk you through what's required before <strong>{deadlineLong}</strong>, then hand
           over to your first form. The full setup takes about 8 minutes.
@@ -149,8 +174,17 @@ function StepWelcome({ club, deadlineLong }) {
   );
 }
 
-/* ─── Step 2 — Three submissions ─── */
-function StepSubmissions({ deadlineLong, requiredDocs = DEFAULT_REQUIRED_DOCS }) {
+/* ─── Step 2 — Three submissions (or, with CQI + compliance off, affiliation → fixtures) ─── */
+function StepSubmissions({
+  deadlineLong,
+  requiredDocs = DEFAULT_REQUIRED_DOCS,
+  cqiOn = true,
+  complianceOn = true,
+}) {
+  const copy = useCopy();
+  const terms = useVertical().terms;
+  const seasonLabel = useSeasonLabel();
+  const affiliationOnly = !cqiOn && !complianceOn;
   // The doc list is driven by the tenant's catalogue (ADR 0009) — a legacy tenant (no
   // custom requiredDocs) reproduces the same six names in the same order as before.
   // Only docs that count towards completion are named; optional records get a generic
@@ -160,37 +194,58 @@ function StepSubmissions({ deadlineLong, requiredDocs = DEFAULT_REQUIRED_DOCS })
     .join(' · ');
   const optionalCount = activeDocs(requiredDocs).filter((d) => d.optional).length;
   const docsCopy =
-    (docNames ? `${docNames} (max 10 MB each).` : 'No documents are required for your club.') +
+    (docNames
+      ? `${docNames} (max 10 MB each).`
+      : `No documents are required for your ${terms.club}.`) +
     (optionalCount ? ' Optional records can be kept on file too.' : '');
   const items = [
     {
       i: <Icon.Form />,
-      t: '2026/27 Affiliation Form',
-      d: 'Club details, executive committee, leagues entered and coaches by designation.',
+      t: `${seasonLabel} Affiliation Form`,
+      d: `${terms.Club} details, ${terms.exco}, leagues entered and coaches by designation.`,
       tag: '~ 5 min',
     },
-    {
-      i: <Icon.Upload />,
-      t: 'Compliance documents',
-      d: docsCopy,
-      tag: '~ 3 min',
-    },
-    {
-      i: <Icon.Star />,
-      t: 'CQI self-assessment',
-      d: '25 questions across admin, teams, coaching, facilities and representation. Live-scored as a raw quality-index value.',
-      tag: '~ 8 min',
-    },
+    ...(complianceOn
+      ? [
+          {
+            i: <Icon.Upload />,
+            t: 'Compliance documents',
+            d: docsCopy,
+            tag: '~ 3 min',
+          },
+        ]
+      : []),
+    ...(cqiOn
+      ? [
+          {
+            i: <Icon.Star />,
+            t: 'CQI self-assessment',
+            d: '25 questions across admin, teams, coaching, facilities and representation. Live-scored as a raw quality-index value.',
+            tag: '~ 8 min',
+          },
+        ]
+      : []),
+    ...(affiliationOnly
+      ? [
+          {
+            i: <Icon.Field />,
+            t: 'Fixtures',
+            d: `Once your affiliation is in, the ${copy.office} releases your fixtures here — share them with your players straight from the portal.`,
+            tag: 'Automatic',
+          },
+        ]
+      : []),
   ];
   return (
     <div className="ob-panel">
       <div className="ob-eyebrow">What we need from you</div>
       <h2 className="ob-title">
-        Three submissions <em>before {deadlineLong}</em>
+        {affiliationOnly ? 'Your affiliation form' : 'Three submissions'}{' '}
+        <em>before {deadlineLong}</em>
       </h2>
       <p className="ob-desc" style={{ maxWidth: 560 }}>
         Everything below is a digital form built directly on the platform — no printing, no emailing
-        PDFs. We've pre-filled what we can from the union database.
+        PDFs. We've pre-filled what we can from the {terms.union} database.
       </p>
       <div className="ob-deliv">
         {items.map((it, i) => (
@@ -210,6 +265,7 @@ function StepSubmissions({ deadlineLong, requiredDocs = DEFAULT_REQUIRED_DOCS })
 
 /* ─── Step 3 — Verify contact details ─── */
 function StepContact({ contact, setContact, club, deadlineMid }) {
+  const vertical = useVertical();
   function up(k, v) {
     setContact((c) => ({ ...c, [k]: v }));
   }
@@ -221,8 +277,8 @@ function StepContact({ contact, setContact, club, deadlineMid }) {
       </h2>
       <p className="ob-desc" style={{ maxWidth: 560 }}>
         We'll use these details for deadline reminders, fixture notifications and franchise
-        communications. The chairperson is the primary contact — additional bearers come in the
-        affiliation form.
+        communications. The {vertical.terms.chair} is the primary contact — additional bearers come
+        in the affiliation form.
       </p>
       <div className="ob-form">
         <div className="field">
@@ -242,10 +298,9 @@ function StepContact({ contact, setContact, club, deadlineMid }) {
             value={contact.role}
             onChange={(e) => up('role', e.target.value)}
           >
-            <option>Chairperson</option>
-            <option>Secretary</option>
-            <option>Treasurer</option>
-            <option>Vice-Chair</option>
+            {vertical.leadershipRoles.map((r) => (
+              <option key={r.key}>{r.label}</option>
+            ))}
           </select>
         </div>
         <div className="field">

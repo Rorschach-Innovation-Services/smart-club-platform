@@ -24,6 +24,13 @@ export interface League {
    * before: one flat create-series flow, no structure.
    */
   competitions?: Competition[];
+  /**
+   * A fixtures-only entry (e.g. a KO Cup run on its own `setup.calendarId`): it is NOT an
+   * affiliation choice, so it is hidden from the club/registration league pickers and
+   * rejected as a player's team or a rep's affiliation pick. The fixtures machinery
+   * (entrants, season runs, series) treats it like any other league. Absent ⇒ false.
+   */
+  fixturesOnly?: boolean;
 }
 
 /* ─── SEASON CALENDAR (ADR 0008) ───
@@ -446,6 +453,8 @@ export interface ClubGround {
   lon?: number;
   secondaryVenue?: string;
   secondaryAddress?: string;
+  /** Number of playing fields/pitches at the ground (whole number 0–99). */
+  pitchCount?: number;
 }
 
 /**

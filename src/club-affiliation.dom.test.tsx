@@ -135,3 +135,32 @@ describe('AffiliationForm — cross-district (union-entered) leagues', () => {
     expect(payload.leagues).not.toContain('ilembeD2');
   });
 });
+
+describe('AffiliationForm — ground field count (optional)', () => {
+  it('saves the typed number of fields as ground.pitchCount', async () => {
+    const user = userEvent.setup();
+    const onSaveDraft = vi.fn().mockResolvedValue(undefined);
+    renderForm(onSaveDraft, clubTwoInDistrict);
+
+    await user.type(screen.getByPlaceholderText('e.g. 2'), '3');
+    await user.click(screen.getByRole('button', { name: 'Save draft' }));
+
+    expect(onSaveDraft.mock.calls[0][0].ground.pitchCount).toBe(3);
+  });
+
+  it('omits pitchCount when left blank and restores a saved count', async () => {
+    const user = userEvent.setup();
+    const onSaveDraft = vi.fn().mockResolvedValue(undefined);
+    renderForm(onSaveDraft, clubTwoInDistrict);
+    await user.click(screen.getByRole('button', { name: 'Save draft' }));
+    expect(onSaveDraft.mock.calls[0][0].ground.pitchCount).toBeUndefined();
+
+    renderForm(vi.fn(), {
+      ...clubTwoInDistrict,
+      ground: { ...clubTwoInDistrict.ground, pitchCount: 4 },
+    });
+    expect(
+      screen.getAllByPlaceholderText('e.g. 2').map((el) => (el as HTMLInputElement).value),
+    ).toContain('4');
+  });
+});

@@ -22,6 +22,7 @@ import { pathToFileURL } from 'node:url';
 import ExcelJS from 'exceljs';
 import * as repo from './repo.js';
 import type { Club, TenantConfig } from './types.js';
+import { resolveVertical } from './vertical.js';
 
 // Scoring + catalogue from the frontend tree (pure TS — no React, no DOM). Same import
 // mechanism seed-cohort.ts uses for packages/engine/src/*.
@@ -259,13 +260,18 @@ export function buildWorkbook(
 
   // ── 2. Chair & Exco ──
   // Named office-bearers plus any additional members, one row each. The last three
-  // columns are chair-only governance fields; blank for everyone else.
-  const OFFICE_ROLES: Array<[string, string]> = [
-    ['chair', 'Chairperson'],
-    ['sec', 'Secretary'],
-    ['tre', 'Treasurer'],
-    ['vc', 'Vice-chair'],
-  ];
+  // columns are chair-only governance fields; blank for everyone else. Role labels follow
+  // the tenant's sport vertical; the cricket export keeps its historical labels verbatim.
+  const vertical = resolveVertical(config);
+  const OFFICE_ROLES: Array<[string, string]> =
+    vertical.sport === 'cricket'
+      ? [
+          ['chair', 'Chairperson'],
+          ['sec', 'Secretary'],
+          ['tre', 'Treasurer'],
+          ['vc', 'Vice-chair'],
+        ]
+      : vertical.leadershipRoles.map((r): [string, string] => [r.key, r.label]);
   const excoRows: Cell[][] = [];
   for (const club of clubs) {
     const exco = asDict(club.exco);
