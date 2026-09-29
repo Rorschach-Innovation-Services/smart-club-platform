@@ -273,6 +273,12 @@ export default $config({
     //   sst secret set SentryDsnWeb <dolphins-web DSN>
     const sentryDsnApi = new sst.Secret('SentryDsnApi', '');
     const sentryDsnWeb = new sst.Secret('SentryDsnWeb', '');
+    // Build-time only — @sentry/vite-plugin uses it to create the release + upload the
+    // hidden source maps. NOT a VITE_ var, so it is never inlined into the bundle. Empty →
+    // the plugin warns and skips upload (the old behaviour), so an unset secret never
+    // breaks a deploy. See docs/runbooks/sentry-source-maps.md.
+    //   sst secret set SentryAuthToken <org auth token> --stage prod
+    const sentryAuthToken = new sst.Secret('SentryAuthToken', '');
     // One release id shared by the API + web builds so a frontend error and the API
     // call behind it correlate to the same release (and to the uploaded source maps).
     // Platform-wide prefix (one deploy serves every tenant; tenant is an event tag).
@@ -475,6 +481,8 @@ export default $config({
         VITE_SENTRY_DSN: sentryDsnWeb.value,
         VITE_SENTRY_ENVIRONMENT: $app.stage,
         VITE_SENTRY_RELEASE: sentryRelease,
+        // Build child process only (source-map upload); not VITE_-prefixed → not in the bundle.
+        SENTRY_AUTH_TOKEN: sentryAuthToken.value,
       },
 
       // ── SPA fallback ──
