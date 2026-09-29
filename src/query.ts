@@ -25,6 +25,8 @@ const t = () => getActiveTenant() ?? 'unknown';
 
 export const qk = {
   tenant: () => ['tenant', t()],
+  // Global, not tenant-scoped: a certificate serial resolves its own tenant server-side.
+  certificateVerify: (serial: string) => ['certificate-verify', serial],
   me: () => ['me', t()],
   clubs: () => ['clubs', t()],
   club: (id: string) => ['club', t(), id],

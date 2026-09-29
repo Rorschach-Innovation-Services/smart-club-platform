@@ -228,7 +228,7 @@ export interface TenantConfig {
    * previous-club dropdown on public registration. Operator-console only.
    */
   knownClubs: DirectoryClub[];
-  clubSignupLink?: { token: string; createdAt: string };
+  clubSignupLink?: ClubSignupLink;
   leagues?: League[];
   /**
    * Operator-managed district list. Absent ⇒ frontend falls back to the shared
@@ -271,6 +271,23 @@ export interface TenantConfig {
   /** Operator "setup complete" milestone (D6). Present ⇒ setup marked done. */
   setupCompletedAt?: string;
   setupCompletedBy?: string;
+  /**
+   * Clearance transfer-certificate layout. Operator-only. Absent ⇒ 'classic'
+   * (landscape certificate); 'confirmation' = portrait form/table layout.
+   */
+  clearanceCertTemplate?: ClearanceCertTemplate;
+  /** Union contact details for the certificate footer. Operator-only; missing fields omitted. */
+  orgContact?: OrgContact;
+}
+
+export type ClearanceCertTemplate = 'classic' | 'confirmation';
+
+export interface OrgContact {
+  regNo?: string;
+  address?: string;
+  phone?: string;
+  website?: string;
+  email?: string;
 }
 
 /** One row of GET /platform/tenants — a registry projection, not the full config. */
@@ -807,8 +824,82 @@ export interface PlayerClearance {
   overrideReason?: string;
   /** Email of the union admin who overrode, mirroring rejectedBy. Admin overrides only. */
   overriddenBy?: string;
+  /** Email of the source-club official who approved (ECTA approval identity). Club approvals only. */
+  clubApprovedBy?: string;
+  /** Present once a transfer certificate has been issued for this clearance. */
+  certificateMeta?: ClearanceCertificateMeta;
+  /**
+   * An admin override declined a certificate (a disposal, not a transfer) — none will ever be
+   * issued, and the view-url route 409s. Admin overrides only.
+   */
+  certificateDeclined?: boolean;
   version: number;
 }
+
+export interface ClearanceCertificateMeta {
+  serial: string;
+  objectKey: string;
+  contentType: string;
+  generatedAt: string;
+  template: ClearanceCertTemplate;
+  revokedAt?: string;
+  /** Issued with the historical-records approval copy (backfill --include-imported). */
+  historical?: boolean;
+}
+
+/** GET /admin/users — one tenant user with their role, club scope and sign-in status. */
+export interface TenantUser {
+  sub: string;
+  email: string;
+  role: 'admin' | 'rep';
+  clubIds: string[];
+  invitedAt?: string;
+  status: 'active' | 'pending';
+}
+
+/** The tenant-wide club self-registration link token. */
+export interface ClubSignupLink {
+  token: string;
+  createdAt: string;
+}
+
+/** GET /club-signup — the tenant a signup token opens. */
+export interface ClubSignupInfo {
+  tenant: string;
+  orgName: string;
+  districts: string[];
+}
+
+/** POST /club-signup — 201 { clubId, clubName, email }; a 200 replay { clubId, replayed }. */
+export interface ClubSignupResult {
+  clubId: string;
+  clubName?: string;
+  email?: string;
+  replayed?: boolean;
+}
+
+/** GET /verify/:serial — public certificate check. Revoked certificates are status-only. */
+export type CertificateVerifyResult =
+  | {
+      serial: string;
+      status: 'valid';
+      issuedAt: string;
+      playerName: string;
+      idNumberMasked: string;
+      fromClubName: string;
+      toClubName: string;
+      effectiveDate: string;
+      orgName: string;
+      tenantBranding: { name: string; logoUrl: string; colors: Record<string, string> };
+      signedPayload: string;
+      /** Null when the signing key was unavailable (KMS fail-soft) — the registry answer stands. */
+      publicKeyPem: string | null;
+      /** Signing key id (the JWS header `kid`). */
+      kid?: string;
+      /** Hex SHA-256 of the issued PDF bytes — lets the holder check a digital copy. */
+      sha256: string;
+    }
+  | { serial: string; status: 'revoked'; issuedAt: string; revokedAt: string };
 
 /**
  * A clearance as GET /admin/clearances returns it — the stored row plus two derived fields.

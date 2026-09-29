@@ -114,9 +114,19 @@ import {
 import { exportRowsToXlsx, exportSheetsToXlsx, clubExportRow, playerExportRow } from './exportXlsx';
 import { Sentry } from './sentry';
 import { openBccReminder } from './mailto';
-import { EMAIL_RE, ApiError, SERIES_CONFLICT_MESSAGE, SERIES_CONFLICT_FRIENDLY } from './api';
+import {
+  EMAIL_RE,
+  ApiError,
+  SERIES_CONFLICT_MESSAGE,
+  SERIES_CONFLICT_FRIENDLY,
+  getAdminClearanceCertificateViewUrl,
+} from './api';
 import { parseSupport } from './support';
 import { DocPreviewModal } from './DocPreviewModal';
+import {
+  ClearanceCertificateModal,
+  clearanceHasCertificateStatus,
+} from './ClearanceCertificateModal';
 import { PlayerDetailModal } from './PlayerDetailModal';
 import { RegLinkModal } from './RegLinkModal';
 import { ReleaseDialog } from './ReleaseDialog';
@@ -168,11 +178,12 @@ type ConfirmDialogState = {
 type ReleaseSeriesState = { id: string; name: string; [k: string]: unknown };
 /** The clearance-admin confirm modal (kind-discriminated; onYes may take a note/target). */
 type ClearanceConfirmState = {
-  kind: 'reassign' | 'reject' | 'override' | 'reopen';
+  kind: 'reassign' | 'reject' | 'override' | 'reopen' | 'revoke';
   title: string;
   body: ReactNode;
   req: AdminClearanceView;
-  onYes: (arg?: string) => void | Promise<unknown>;
+  // `flag` carries the override dialog's "Issue transfer certificate" checkbox.
+  onYes: (arg?: string, flag?: boolean) => void | Promise<unknown>;
 };
 /** The veterans-request accept/decline confirm. */
 type VeteransConfirmState = { kind: 'accept' | 'decline'; req: Record<string, unknown> };
@@ -6898,12 +6909,18 @@ export function AdminClearances({
   onReject,
   onReassign,
   onReopen,
+  onRevokeCertificate,
+  onCertificateViewed = undefined,
   busyId,
   busyAction,
 }) {
   const [confirm, setConfirm] = useStateA<ClearanceConfirmState | null>(null);
   // Optional note the admin attaches to a rejection (shown to both clubs).
   const [reason, setReason] = useStateA('');
+  // Override dialog: issue a transfer certificate (default). Unticked for a disposal override.
+  const [issueCert, setIssueCert] = useStateA(true);
+  // The clearance whose transfer certificate is open in the inline viewer.
+  const [certFor, setCertFor] = useStateA<AdminClearanceView | null>(null);
   // Target club for a reallocation (the reassign confirm's picker).
   const [reassignTarget, setReassignTarget] = useStateA('');
   const [filter, setFilter] = useStateA('all');
@@ -7224,6 +7241,7 @@ export function AdminClearances({
                     disabled={busy}
                     onClick={() => {
                       setReason('');
+                      setIssueCert(true);
                       setConfirm({
                         kind: 'override',
                         title: 'Issue this clearance?',
@@ -7235,8 +7253,8 @@ export function AdminClearances({
                         // on 'conflict' — the toast already told the admin and the card has
                         // refetched, so a retry would only 409 again. Stay open only for a
                         // transient 'failed' so the admin can retry.
-                        onYes: async (note) => {
-                          const result = await onOverride(req, note);
+                        onYes: async (note, issue) => {
+                          const result = await onOverride(req, note, issue !== false);
                           if (result !== 'failed') setConfirm(null);
                         },
                       });
@@ -7284,6 +7302,11 @@ export function AdminClearances({
                       "{req.overrideReason}"
                     </span>
                   )}
+                  {req.certificateMeta?.revokedAt && (
+                    <Pill tone="coral">
+                      Certificate revoked · {fmtDay(req.certificateMeta.revokedAt)}
+                    </Pill>
+                  )}
                   <span
                     style={{
                       fontSize: 11,
@@ -7324,6 +7347,36 @@ export function AdminClearances({
                       {busy && busyAction === 'reopen' ? 'Reopening…' : 'Reopen'}
                     </Btn>
                   )}
+                  {clearanceHasCertificateStatus(req) && (
+                    <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 6 }}>
+                      {req.certificateMeta && !req.certificateMeta.revokedAt && (
+                        <Btn
+                          tone="outline"
+                          size="sm"
+                          disabled={busy}
+                          onClick={() => {
+                            setReason('');
+                            setConfirm({
+                              kind: 'revoke',
+                              title: 'Revoke this transfer certificate?',
+                              req,
+                              body: `Certificate ${req.certificateMeta.serial} for ${req.playerName} (${req.fromClubName} → ${req.toClubName}) will stop verifying — anyone scanning its QR code will see it as REVOKED. The clearance itself is not changed. This cannot be undone.`,
+                              // Close on success; stay open on failure so the admin can retry.
+                              onYes: async (note) => {
+                                const result = await onRevokeCertificate(req, note);
+                                if (result !== 'failed') setConfirm(null);
+                              },
+                            });
+                          }}
+                        >
+                          {busy && busyAction === 'revoke' ? 'Revoking…' : 'Revoke certificate'}
+                        </Btn>
+                      )}
+                      <Btn tone="outline" size="sm" icon={Icon.Doc} onClick={() => setCertFor(req)}>
+                        View certificate
+                      </Btn>
+                    </span>
+                  )}
                   {req.status === 'rejected' && !req.rejectOutcome && (
                     <span
                       style={{
@@ -7343,6 +7396,20 @@ export function AdminClearances({
         })}
       </div>
 
+      {certFor && (
+        <ClearanceCertificateModal
+          clearance={certFor}
+          fetchUrl={() =>
+            getAdminClearanceCertificateViewUrl(certFor.id, certFor.fromClubId).then((r) => {
+              // No pointer on the row ⇒ this view lazily issued it: refetch so Revoke/serial appear.
+              if (!certFor.certificateMeta) onCertificateViewed?.();
+              return r.viewUrl;
+            })
+          }
+          onClose={() => setCertFor(null)}
+        />
+      )}
+
       {confirm &&
         createPortal(
           <div
@@ -7350,8 +7417,10 @@ export function AdminClearances({
             onClick={(e) => e.target === e.currentTarget && setConfirm(null)}
           >
             <div className="fix-confirm-box">
-              <div className={`fix-confirm-icon ${confirm.kind === 'reject' ? 'danger' : 'go'}`}>
-                {confirm.kind === 'reject' ? (
+              <div
+                className={`fix-confirm-icon ${confirm.kind === 'reject' || confirm.kind === 'revoke' ? 'danger' : 'go'}`}
+              >
+                {confirm.kind === 'reject' || confirm.kind === 'revoke' ? (
                   <svg viewBox="0 0 24 24" fill="none">
                     <path
                       d="M6 6l12 12M18 6L6 18"
@@ -7374,7 +7443,9 @@ export function AdminClearances({
               </div>
               <div className="fix-confirm-title">{confirm.title}</div>
               <div className="fix-confirm-body">{confirm.body}</div>
-              {(confirm.kind === 'reject' || confirm.kind === 'override') && (
+              {(confirm.kind === 'reject' ||
+                confirm.kind === 'override' ||
+                confirm.kind === 'revoke') && (
                 <textarea
                   className="field-input"
                   rows={2}
@@ -7382,12 +7453,47 @@ export function AdminClearances({
                   placeholder={
                     confirm.kind === 'reject'
                       ? 'Reason (optional — shown to both clubs)'
-                      : 'Reason (optional — shown to both clubs, recorded against your name)'
+                      : confirm.kind === 'revoke'
+                        ? 'Reason (required — recorded against your name)'
+                        : 'Reason (optional — shown to both clubs, recorded against your name)'
                   }
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
                   style={{ width: '100%', marginTop: 10, resize: 'vertical', fontSize: 13 }}
                 />
+              )}
+              {confirm.kind === 'override' && (
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: 10,
+                    marginTop: 10,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={issueCert}
+                    onChange={(e) => setIssueCert(e.target.checked)}
+                    style={{
+                      width: 16,
+                      height: 16,
+                      marginTop: 2,
+                      cursor: 'pointer',
+                      flexShrink: 0,
+                      accentColor: 'var(--teal-deep)',
+                    }}
+                  />
+                  <span style={{ fontSize: 13, color: 'var(--ink)' }}>
+                    <span style={{ fontWeight: 600 }}>Issue transfer certificate</span>
+                    <span style={{ display: 'block', fontSize: 12, color: 'var(--muted)' }}>
+                      Untick if this override disposes of a clearance that should not exist (e.g. a
+                      junk registration you will delete next).
+                    </span>
+                  </span>
+                </label>
               )}
               {confirm.kind === 'reassign' && (
                 <select
@@ -7426,7 +7532,9 @@ export function AdminClearances({
                         ? 'Reallocating…'
                         : busyAction === 'reopen'
                           ? 'Reopening…'
-                          : 'Issuing…';
+                          : busyAction === 'revoke'
+                            ? 'Revoking…'
+                            : 'Issuing…';
                   if (confirm.kind === 'reject')
                     return (
                       <Btn tone="ink" disabled={cbusy} onClick={() => confirm.onYes(reason.trim())}>
@@ -7450,9 +7558,24 @@ export function AdminClearances({
                         tone="teal"
                         icon={Icon.Arrow}
                         disabled={cbusy}
+                        onClick={() => confirm.onYes(reason.trim(), issueCert)}
+                      >
+                        {/* Issuance runs inline (~1–3s) when the certificate box is ticked. */}
+                        {cbusy
+                          ? issueCert
+                            ? 'Issuing certificate…'
+                            : busyLabel
+                          : 'Yes, issue clearance'}
+                      </Btn>
+                    );
+                  if (confirm.kind === 'revoke')
+                    return (
+                      <Btn
+                        tone="ink"
+                        disabled={!reason.trim() || cbusy}
                         onClick={() => confirm.onYes(reason.trim())}
                       >
-                        {cbusy ? busyLabel : 'Yes, issue clearance'}
+                        {cbusy ? busyLabel : 'Yes, revoke certificate'}
                       </Btn>
                     );
                   if (confirm.kind === 'reassign')

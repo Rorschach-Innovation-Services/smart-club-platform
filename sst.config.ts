@@ -288,6 +288,27 @@ export default $config({
     const gitSha = execFileSync('git', ['rev-parse', '--short', 'HEAD']).toString().trim();
     const sentryRelease = `smart-club@${process.env.npm_package_version ?? '0'}+${gitSha}`;
 
+    // ── Clearance-certificate signing key (KMS, ES256) ──
+    // Signs the JWS stored in each CERT# registry item and served by GET /verify/:serial.
+    // Losing this key breaks verification of every certificate ever issued, so it is
+    // RETAINED on delete on every stage and PROTECTED in prod (dev stays tearable-down via
+    // `deploy:remove`; the retained dev key simply orphans). No rotation: a future rotation
+    // ADDS a key and keeps this one for verify, selected by the JWS `kid`.
+    const certSigningKey = new aws.kms.Key(
+      'CertSigningKey',
+      {
+        description: `smart-club ${$app.stage} clearance-certificate signing (ES256)`,
+        customerMasterKeySpec: 'ECC_NIST_P256',
+        keyUsage: 'SIGN_VERIFY',
+      },
+      { retainOnDelete: true, protect: isProd },
+    );
+    new aws.kms.Alias(
+      'CertSigningKeyAlias',
+      { name: `alias/smart-club-${$app.stage}-cert-signing`, targetKeyId: certSigningKey.keyId },
+      { retainOnDelete: true },
+    );
+
     // ── API: one Hono Lambda behind a $default route ──
     // JWT is verified inside the app (aws-jwt-verify) so public routes (/tenant,
     // /register) and protected routes can coexist on one catch-all route.
@@ -342,90 +363,6 @@ export default $config({
       });
       sharedApiCnameTarget = sharedDn.domainNameConfiguration.targetDomainName;
     }
-    api.route('$default', {
-      handler: 'packages/api/src/index.handler',
-      // Linking grants IAM + Resource access. userPool link lets the API call
-      // AdminCreateUser for the invite flow.
-      link: [
-        table,
-        uploads,
-        // Logo uploads: the platform portal presigns POSTs into the public
-        // tutorial-assets bucket under branding/<slug>/ (login pages need the
-        // logo unauthenticated, so the private Uploads bucket is wrong for it).
-        tutorialAssets,
-        userPool,
-        userPoolClient,
-        fromEmail,
-        candidateHandleSecret,
-        whatsappAccessToken,
-        whatsappPhoneNumberId,
-      ],
-      // SES isn't covered by `link` (it's not an SST resource), so grant it directly.
-      // SES authorizes by verified identity, not resource ARN, hence resources: ['*'].
-      // Works cross-region/same-account: this stack deploys with the medicoach profile,
-      // so the Lambda role can SendEmail for that account's eu-west-1 identity.
-      permissions: [{ actions: ['ses:SendEmail', 'ses:SendRawEmail'], resources: ['*'] }],
-      // Two external calls (SES + Meta), each with up to 3 backoff retries, can run long
-      // on a bad day; give the handler headroom over the worst case.
-      timeout: '30 seconds',
-      environment: {
-        USER_POOL_ID: userPool.id,
-        USER_POOL_CLIENT_ID: userPoolClient.id,
-        UPLOADS_BUCKET: uploads.name,
-        TABLE_NAME: table.name,
-        // STAGE gates the dev-only x-tenant header (prod resolves tenant by host).
-        STAGE: $app.stage,
-        // Sentry (errors only). Empty DSN → instrument.ts init is a no-op. STAGE is
-        // reused as the Sentry `environment`; SENTRY_RELEASE matches the web build.
-        SENTRY_DSN: sentryDsnApi.value,
-        SENTRY_RELEASE: sentryRelease,
-        // Base URL (public S3) for the tutorial videos. DEFAULT_TUTORIALS builds
-        // absolute `${TUTORIALS_BASE_URL}/tutorials/<file>` links from this.
-        TUTORIALS_BASE_URL: tutorialsBaseUrl,
-        // Bucket name for the platform logo-upload presigned POSTs (branding/<slug>/…).
-        TUTORIALS_BUCKET: tutorialAssets.name,
-        // Host→tenant map for custom domains (JSON). Consulted by resolveTenant() before
-        // the leftmost-label fallback. Empty off-prod (dev uses the x-tenant header).
-        TENANT_HOST_MAP: JSON.stringify(isProd ? TENANT_HOST_MAP : {}),
-        // Trusted CORS origins (custom tenant domains in prod). The web app is cross-origin
-        // to the API (different subdomains), so its origin must be listed here.
-        // Enumerated per enabled vanity entry — no suffix matching (originAllowed()
-        // also anti-phishing-validates invite/reg-link URLs).
-        ALLOWED_ORIGINS: isProd
-          ? allowedOrigins(VANITY).join(',')
-          : (process.env.ALLOWED_ORIGINS ?? ''),
-        // ── Wildcard platform (scheme 1) ── Inert until WILDCARD_ENABLED='1'. See
-        // infra/tenants.ts + packages/api/src/{auth,origins}.ts.
-        // '1' arms the Origin-based tenant resolution on SHARED_API_HOST, the wildcard
-        // CORS/canonical-origin logic, and the DNS sheet's "already live" copy.
-        WILDCARD_ENABLED: wildcardEnabled ? '1' : '',
-        // The shared API host + web wildcard suffix the resolver/origins logic keys on.
-        SHARED_API_HOST: isProd ? SHARED_API_HOST : '',
-        WILDCARD_WEB_SUFFIX: isProd ? WILDCARD_WEB_SUFFIX : '',
-        // slug → canonical vanity web origin (JSON). canonicalWebOrigin() falls back to
-        // `https://<slug>${WILDCARD_WEB_SUFFIX}` for tenants not in this map.
-        WEB_ORIGIN_MAP: JSON.stringify(isProd ? webOriginMap(VANITY) : {}),
-        // Real CNAME targets for the operator DNS sheet (empty → the sheet shows a hint).
-        WEB_CNAME_TARGET: isProd ? WEB_CNAME_TARGET : '',
-        SHARED_API_CNAME_TARGET: sharedApiCnameTarget,
-        // Outbound messaging. SES_REGION must stay eu-west-1 — that's where the
-        // verified identity with production access lives (this account's af-south-1
-        // SES exists but is sandboxed: unverified recipients are rejected).
-        SES_REGION: 'eu-west-1',
-        FROM_EMAIL: fromEmail.value,
-        // Veterans-candidate handle HMAC key (ADR 0013). Empty until set → fails closed off-local.
-        CANDIDATE_HANDLE_SECRET: candidateHandleSecret.value,
-        WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
-        WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
-        // Template names/languages come from the code registry (whatsapp-templates.ts),
-        // not the Lambda env — see the note by the secrets above.
-        // Force dry-run regardless of secrets (set NOTIFY_DRY_RUN=1 in the deploy env)
-        // — the verified-only/dry-run gate while awaiting SES production access.
-        NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
-      },
-      nodejs: { install: ['aws-jwt-verify'] },
-    });
-
     // ── Web: existing StaticSite, now wired to the API + Cognito ──
     const web = new sst.aws.StaticSite('Web', {
       build: { command: 'npm run build', output: 'dist' },
@@ -516,6 +453,111 @@ export default $config({
           },
         ],
       },
+    });
+
+    // Declared AFTER the web StaticSite: non-prod VERIFY_BASE_URL is `web.url`. No cycle — the
+    // site depends only on the gateway's url, never on this route's function.
+    api.route('$default', {
+      handler: 'packages/api/src/index.handler',
+      // Linking grants IAM + Resource access. userPool link lets the API call
+      // AdminCreateUser for the invite flow.
+      link: [
+        table,
+        uploads,
+        // Logo uploads: the platform portal presigns POSTs into the public
+        // tutorial-assets bucket under branding/<slug>/ (login pages need the
+        // logo unauthenticated, so the private Uploads bucket is wrong for it).
+        tutorialAssets,
+        userPool,
+        userPoolClient,
+        fromEmail,
+        candidateHandleSecret,
+        whatsappAccessToken,
+        whatsappPhoneNumberId,
+      ],
+      // SES isn't covered by `link` (it's not an SST resource), so grant it directly.
+      // SES authorizes by verified identity, not resource ARN, hence resources: ['*'].
+      // Works cross-region/same-account: this stack deploys with the medicoach profile,
+      // so the Lambda role can SendEmail for that account's eu-west-1 identity.
+      permissions: [
+        { actions: ['ses:SendEmail', 'ses:SendRawEmail'], resources: ['*'] },
+        { actions: ['kms:Sign', 'kms:GetPublicKey'], resources: [certSigningKey.arn] },
+      ],
+      // Two external calls (SES + Meta), each with up to 3 backoff retries, can run long
+      // on a bad day; give the handler headroom over the worst case.
+      timeout: '30 seconds',
+      environment: {
+        USER_POOL_ID: userPool.id,
+        USER_POOL_CLIENT_ID: userPoolClient.id,
+        UPLOADS_BUCKET: uploads.name,
+        TABLE_NAME: table.name,
+        // STAGE gates the dev-only x-tenant header (prod resolves tenant by host).
+        STAGE: $app.stage,
+        // Sentry (errors only). Empty DSN → instrument.ts init is a no-op. STAGE is
+        // reused as the Sentry `environment`; SENTRY_RELEASE matches the web build.
+        SENTRY_DSN: sentryDsnApi.value,
+        SENTRY_RELEASE: sentryRelease,
+        // Base URL (public S3) for the tutorial videos. DEFAULT_TUTORIALS builds
+        // absolute `${TUTORIALS_BASE_URL}/tutorials/<file>` links from this.
+        TUTORIALS_BASE_URL: tutorialsBaseUrl,
+        // Bucket name for the platform logo-upload presigned POSTs (branding/<slug>/…).
+        TUTORIALS_BUCKET: tutorialAssets.name,
+        // Host→tenant map for custom domains (JSON). Consulted by resolveTenant() before
+        // the leftmost-label fallback. Empty off-prod (dev uses the x-tenant header).
+        TENANT_HOST_MAP: JSON.stringify(isProd ? TENANT_HOST_MAP : {}),
+        // Trusted CORS origins (custom tenant domains in prod). The web app is cross-origin
+        // to the API (different subdomains), so its origin must be listed here.
+        // Enumerated per enabled vanity entry — no suffix matching (originAllowed()
+        // also anti-phishing-validates invite/reg-link URLs).
+        ALLOWED_ORIGINS: isProd
+          ? allowedOrigins(VANITY).join(',')
+          : (process.env.ALLOWED_ORIGINS ?? ''),
+        // ── Wildcard platform (scheme 1) ── Inert until WILDCARD_ENABLED='1'. See
+        // infra/tenants.ts + packages/api/src/{auth,origins}.ts.
+        // '1' arms the Origin-based tenant resolution on SHARED_API_HOST, the wildcard
+        // CORS/canonical-origin logic, and the DNS sheet's "already live" copy.
+        WILDCARD_ENABLED: wildcardEnabled ? '1' : '',
+        // The shared API host + web wildcard suffix the resolver/origins logic keys on.
+        SHARED_API_HOST: isProd ? SHARED_API_HOST : '',
+        WILDCARD_WEB_SUFFIX: isProd ? WILDCARD_WEB_SUFFIX : '',
+        // slug → canonical vanity web origin (JSON). canonicalWebOrigin() falls back to
+        // `https://<slug>${WILDCARD_WEB_SUFFIX}` for tenants not in this map.
+        WEB_ORIGIN_MAP: JSON.stringify(isProd ? webOriginMap(VANITY) : {}),
+        // Real CNAME targets for the operator DNS sheet (empty → the sheet shows a hint).
+        WEB_CNAME_TARGET: isProd ? WEB_CNAME_TARGET : '',
+        SHARED_API_CNAME_TARGET: sharedApiCnameTarget,
+        // Outbound messaging. SES_REGION must stay eu-west-1 — that's where the
+        // verified identity with production access lives (this account's af-south-1
+        // SES exists but is sandboxed: unverified recipients are rejected).
+        SES_REGION: 'eu-west-1',
+        FROM_EMAIL: fromEmail.value,
+        // Veterans-candidate handle HMAC key (ADR 0013). Empty until set → fails closed off-local.
+        CANDIDATE_HANDLE_SECRET: candidateHandleSecret.value,
+        WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
+        WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+        // Template names/languages come from the code registry (whatsapp-templates.ts),
+        // not the Lambda env — see the note by the secrets above.
+        // Force dry-run regardless of secrets (set NOTIFY_DRY_RUN=1 in the deploy env)
+        // — the verified-only/dry-run gate while awaiting SES production access.
+        NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
+        // Clearance certificates: the KMS key that signs each certificate's JWS, and the
+        // origin the printed QR code points at (`${VERIFY_BASE_URL}/verify/<serial>`).
+        // That URL is printed on paper forever, so it is a PLATFORM host, never a tenant
+        // vanity domain (those churn): prod uses the reserved `platform` label on the
+        // wildcard suffix (armed since Jul 2026; primary vanity host only as a pre-wildcard
+        // fallback), non-prod the stage's own CloudFront URL.
+        CERT_SIGNING_KEY_ARN: certSigningKey.arn,
+        VERIFY_BASE_URL: isProd
+          ? wildcardEnabled
+            ? `https://platform${WILDCARD_WEB_SUFFIX}`
+            : `https://${primaryVanity.webHost}`
+          : web.url,
+      },
+      nodejs: { install: ['aws-jwt-verify'] },
+      // The certificate renderer's EB Garamond TTFs are read from disk at runtime, which
+      // esbuild can't see — without this they silently miss the bundle and the first
+      // issuance fails. Lands at <function root>/certificates/fonts (see render-common.ts).
+      copyFiles: [{ from: 'packages/api/src/certificates/fonts', to: 'certificates/fonts' }],
     });
 
     return {

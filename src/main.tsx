@@ -30,6 +30,7 @@ import { Login } from './Login';
 import { RegisterPage } from './RegisterPage';
 import { ClubSignupPage } from './ClubSignupPage';
 import { TutorialsPage } from './TutorialsPage';
+import { VerifyCertificatePage } from './VerifyCertificatePage';
 import {
   DEFAULT_REQUIRED_DOCS,
   activeDocs,
@@ -336,6 +337,11 @@ function App() {
 
 function AppRoutes() {
   const { status } = useAuth();
+  // The public certificate check is tenant-INDEPENDENT: it runs on the platform verify host
+  // (which may resolve to no tenant, or the wrong one) and themes itself from the
+  // certificate's own tenant. So neither the host's /tenant theme nor its 404 screen applies.
+  const { pathname } = useLocation();
+  const onVerify = pathname === '/verify' || pathname.startsWith('/verify/');
 
   // Tenant branding/config (public). Apply theme as soon as it loads.
   // retry the tenant config: it carries the league/district catalogue the authed app
@@ -350,11 +356,11 @@ function AppRoutes() {
     retry: (count, err) => !(err instanceof ApiError && err.status === 404) && count < 2,
   });
   useEffect(() => {
-    if (tenantQuery.data?.branding) applyTheme(tenantQuery.data.branding);
-  }, [tenantQuery.data]);
+    if (tenantQuery.data?.branding && !onVerify) applyTheme(tenantQuery.data.branding);
+  }, [tenantQuery.data, onVerify]);
 
   const tenantMissing = tenantQuery.error instanceof ApiError && tenantQuery.error.status === 404;
-  if (tenantMissing) return <UnknownClub />;
+  if (tenantMissing && !onVerify) return <UnknownClub />;
 
   return (
     <Routes>
@@ -364,6 +370,9 @@ function AppRoutes() {
       <Route path="/signup" element={<ClubSignupPage />} />
       {/* Public how-to-use-the-app tutorial videos (linked from chair onboarding + portal nav). */}
       <Route path="/tutorials" element={<TutorialsPage />} />
+      {/* Public transfer-certificate check — the target of the certificate's QR code. */}
+      <Route path="/verify" element={<VerifyCertificatePage />} />
+      <Route path="/verify/:serial" element={<VerifyCertificatePage />} />
       <Route
         path="/*"
         element={
@@ -1206,7 +1215,7 @@ function Shell({
   // Override button reads "Issuing…". (approveClearance is the club-rep view — it
   // sets only busyClearanceId and needs no action kind.)
   const [busyClearanceAction, setBusyClearanceAction] = useStateApp<
-    'reject' | 'override' | 'reassign' | 'reopen' | null
+    'reject' | 'override' | 'reassign' | 'reopen' | 'revoke' | null
   >(null);
   const [busyReviewId, setBusyReviewId] = useStateApp(null);
   // Which veterans request (id) is mid-action, and which action, so the admin table can label
@@ -1744,7 +1753,9 @@ function Shell({
       .finally(() => setBusyVeteransId(null));
   }
   // Admin overrides an overdue request, issuing it on the source club's behalf.
-  function overrideClearance(req, reason) {
+  // `issueCertificate` (default true) — the admin unticks it when the override is a disposal of
+  // a clearance that should never have existed, not a genuine transfer.
+  function overrideClearance(req, reason, issueCertificate = true) {
     setBusyClearanceId(req.id);
     setBusyClearanceAction('override');
     // Its 409 set includes DestinationClubGoneError (a stale destination club), so a
@@ -1756,6 +1767,7 @@ function Shell({
             fromClubId: req.fromClubId,
             version: req.version,
             reason: reason || undefined,
+            issueCertificate,
           }),
         'Could not override clearance',
         {
@@ -1768,7 +1780,7 @@ function Shell({
           ],
         },
       )
-        .then(() => {
+        .then((res) => {
           // Both clubs' clearance views AND rosters change (the player moved), so the
           // club-scoped caches must drop too — not just the admin list.
           invalidate(qk.allClearances());
@@ -1781,9 +1793,14 @@ function Shell({
           // clearance that should never have existed, in which case "cleared to X" is the wrong
           // sentence. Stay neutral when one was given.
           toastShow(
-            reason
+            (reason
               ? `${req.playerName}'s clearance resolved · Union override`
-              : `${req.playerName} cleared to ${req.toClubName} · Union override`,
+              : `${req.playerName} cleared to ${req.toClubName} · Union override`) +
+              // Issuance is non-fatal server-side: the approval stands and the certificate is
+              // issued lazily on first view.
+              ((res as { certificatePending?: boolean } | null)?.certificatePending
+                ? ' · certificate will be issued on first view'
+                : ''),
           );
           return 'ok';
         })
@@ -1797,6 +1814,35 @@ function Shell({
           setBusyClearanceAction(null);
         })
     );
+  }
+  // Admin revokes an issued transfer certificate (reason required). The clearance itself stands;
+  // only the certificate stops verifying — /verify/<serial> then shows REVOKED.
+  function revokeClearanceCertificateReq(req, reason) {
+    setBusyClearanceId(req.id);
+    setBusyClearanceAction('revoke');
+    return withToast(
+      () => api.revokeClearanceCertificate(req.id, req.fromClubId, reason),
+      'Could not revoke certificate',
+      {
+        invalidate: [
+          qk.allClearances(),
+          qk.clearances(req.fromClubId),
+          qk.clearances(req.toClubId),
+        ],
+      },
+    )
+      .then(() => {
+        invalidate(qk.allClearances());
+        invalidate(qk.clearances(req.fromClubId));
+        invalidate(qk.clearances(req.toClubId));
+        toastShow(`${req.playerName}'s transfer certificate revoked`);
+        return 'ok';
+      })
+      .catch(() => 'failed')
+      .finally(() => {
+        setBusyClearanceId(null);
+        setBusyClearanceAction(null);
+      });
   }
   // Admin rejects a pending request on the clubs' behalf. Reject now CANCELS THE MOVE: the
   // player ends up active at the source club, regardless of how the clearance was created. How
@@ -2544,6 +2590,8 @@ function Shell({
             onReject={rejectClearanceReq}
             onReassign={reassignClearanceReq}
             onReopen={reopenClearanceReq}
+            onRevokeCertificate={revokeClearanceCertificateReq}
+            onCertificateViewed={() => invalidate(qk.allClearances())}
             busyId={busyClearanceId}
             busyAction={busyClearanceAction}
           />
@@ -2682,6 +2730,7 @@ function Shell({
             onApprove={approveClearance}
             onOpenRequest={() => setShowRequestPlayer(true)}
             busyId={busyClearanceId}
+            onCertificateViewed={() => invalidate(qk.clearances(clubId))}
           />
         );
       }

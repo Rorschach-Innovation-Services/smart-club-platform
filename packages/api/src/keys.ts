@@ -297,6 +297,16 @@ export const tokenKey = (token: string) => ({
   sk: 'META',
 });
 
+/**
+ * Clearance-certificate registry item. GLOBAL (not tenant-prefixed) like TOKEN#: the public
+ * verify route resolves the tenant FROM the item, never from the request host. Not
+ * tenant-enumerable, so erasure harvests serials from clearance rows' certificateMeta.
+ */
+export const certKey = (serial: string) => ({
+  pk: `CERT#${serial}`,
+  sk: 'META',
+});
+
 /** A user profile (memberships live here — source of truth for PreTokenGen). */
 export const userKey = (sub: string) => ({
   pk: `USER#${sub}`,

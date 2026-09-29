@@ -24,13 +24,54 @@ const SAMPLE_PDF = `${import.meta.env.BASE_URL || '/'}sample-document.pdf`;
  * iframe, so "Open in new tab" is a first-class action, not a footnote. The presigned URL
  * expires (server-side, 15 min); "Try again" re-mints it if a stale preview fails.
  */
-export function DocPreviewModal({ clubId, docKey, docName, clubName, meta, objectKey, onClose }) {
+export function DocPreviewModal({
+  clubId,
+  docKey,
+  docName,
+  clubName,
+  meta,
+  objectKey,
+  onClose,
+  fetchUrl,
+  eyebrow,
+  caption: captionOverride,
+  onFetchError,
+}: {
+  clubId?: string;
+  docKey?: string;
+  docName: string;
+  clubName?: string;
+  meta?: { objectKey?: string; contentType?: string; size?: number; uploadedAt?: string } | null;
+  objectKey?: string;
+  onClose: () => void;
+  /**
+   * Custom presign — e.g. a clearance certificate. When set, the compliance-doc source
+   * decision (demo/none) is skipped: the modal always mints via this fn and renders the
+   * result by `meta` (pass { contentType: 'application/pdf' } for a PDF).
+   */
+  fetchUrl?: () => Promise<string>;
+  /** Header eyebrow text; defaults to "Compliance · <clubName>". */
+  eyebrow?: string;
+  /** Muted line above the preview; defaults to the file meta text. */
+  caption?: string;
+  /**
+   * Called when `fetchUrl` rejects. Return a node to render in place of the generic
+   * "Preview unavailable" state (e.g. a revoked-certificate notice), or null for the default.
+   */
+  onFetchError?: (err: unknown) => React.ReactNode | null;
+}) {
   useEscapeClose(onClose);
 
   // `meta` is always a single file entry: multi-file docs (safeguarding) pass the
   // selected entry plus its objectKey so the API presigns that specific file.
-  const source = resolvePreviewSource(meta, import.meta.env.VITE_LOCAL_AUTH === '1');
-  const [state, setState] = useState({ status: 'loading', src: null });
+  const source = fetchUrl
+    ? 'real'
+    : resolvePreviewSource(meta, import.meta.env.VITE_LOCAL_AUTH === '1');
+  const [state, setState] = useState<{
+    status: 'loading' | 'ready' | 'error' | 'nofile';
+    src: string | null;
+    errorNode?: React.ReactNode;
+  }>({ status: 'loading', src: null });
   const [reloadKey, setReloadKey] = useState(0);
   const { metaText } = docFileMeta(meta);
 
@@ -45,15 +86,26 @@ export function DocPreviewModal({ clubId, docKey, docName, clubName, meta, objec
     }
     let alive = true;
     setState({ status: 'loading', src: null });
-    getDocViewUrl(clubId, docKey, objectKey)
-      .then((r) => alive && setState({ status: 'ready', src: r.viewUrl }))
-      .catch(() => alive && setState({ status: 'error', src: null }));
+    const mint =
+      fetchUrl ?? (() => getDocViewUrl(clubId, docKey, objectKey).then((r) => r.viewUrl));
+    mint()
+      .then((src) => alive && setState({ status: 'ready', src }))
+      .catch(
+        (err) =>
+          alive && setState({ status: 'error', src: null, errorNode: onFetchError?.(err) ?? null }),
+      );
     return () => {
       alive = false;
     };
+    // fetchUrl/onFetchError are expected to be stable for the modal's lifetime (inline
+    // closures from the opener); re-minting only on the identity inputs + Try again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [source, clubId, docKey, objectKey, reloadKey]);
 
-  const caption = metaText || (source === 'demo' ? 'Demo preview · sample document' : 'Document');
+  const caption =
+    captionOverride ||
+    metaText ||
+    (source === 'demo' ? 'Demo preview · sample document' : 'Document');
   // Demo mode always serves the bundled sample PDF, so force the pdf iframe even when the
   // entry itself is a non-PDF file — the "open in new tab" hint would otherwise point at a
   // PDF and read as broken.
@@ -64,7 +116,7 @@ export function DocPreviewModal({ clubId, docKey, docName, clubName, meta, objec
       <div className="task-modal" style={{ maxWidth: 880, width: '92vw' }}>
         <div className="task-modal-head">
           <div className="task-modal-head-text">
-            <div className="task-modal-head-eyebrow">Compliance · {clubName}</div>
+            <div className="task-modal-head-eyebrow">{eyebrow ?? `Compliance · ${clubName}`}</div>
             <div className="task-modal-head-title">{docName}</div>
           </div>
           <button className="task-modal-close" onClick={onClose} title="Close">
@@ -100,7 +152,9 @@ export function DocPreviewModal({ clubId, docKey, docName, clubName, meta, objec
             </div>
           )}
 
-          {(state.status === 'error' || state.status === 'nofile') && (
+          {state.status === 'error' && state.errorNode}
+
+          {(state.status === 'nofile' || (state.status === 'error' && !state.errorNode)) && (
             <div style={{ textAlign: 'center', padding: '48px 8px', color: 'var(--muted)' }}>
               <div style={{ fontWeight: 600, color: 'var(--ink)', marginBottom: 4 }}>
                 {state.status === 'nofile' ? 'No file on record' : 'Preview unavailable'}

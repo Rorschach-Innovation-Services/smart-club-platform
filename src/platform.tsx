@@ -43,6 +43,8 @@ import type {
   DirectoryClub,
   League,
   Competition,
+  ClearanceCertTemplate,
+  OrgContact,
 } from './types';
 import {
   BRAND_ROLES,
@@ -733,6 +735,12 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           <FeaturesCard key={`ft-${config.tenant}`} config={config} save={save} toast={toast} />
           <AdminsCard key={`ad-${config.tenant}`} config={config} toast={toast} />
         </div>
+        <ClearanceCertificateCard
+          key={`cc-${config.tenant}`}
+          config={config}
+          save={save}
+          toast={toast}
+        />
         <CopyCard
           key={`cp-${config.tenant}`}
           config={config}
@@ -1297,6 +1305,122 @@ function DeadlineCard({
       </Field>
       <Btn tone="teal" size="sm" onClick={saveIt} disabled={value === initial || busy}>
         {busy ? 'Saving…' : 'Save deadline'}
+      </Btn>
+    </Panel>
+  );
+}
+
+const ORG_CONTACT_FIELDS: { key: keyof OrgContact; label: string; placeholder: string }[] = [
+  { key: 'regNo', label: 'Reg no', placeholder: 'e.g. NPO 123-456' },
+  { key: 'address', label: 'Address', placeholder: 'Street, suburb, city' },
+  { key: 'phone', label: 'Telephone', placeholder: '031 000 0000' },
+  { key: 'website', label: 'Website', placeholder: 'www.example.co.za' },
+  { key: 'email', label: 'Email', placeholder: 'office@example.co.za' },
+];
+
+/**
+ * Clearance transfer-certificate settings: which layout the auto-issued certificate uses, and
+ * the union contact details printed in its footer (the confirmation layout). Operator-only;
+ * absent template ⇒ classic. Blank contact fields are omitted from the certificate.
+ */
+function ClearanceCertificateCard({
+  config,
+  save,
+  toast,
+}: {
+  config: TenantConfig;
+  save: (p: Partial<TenantConfig>) => Promise<TenantConfig>;
+  toast: Toast;
+}) {
+  const initialTemplate: ClearanceCertTemplate = config.clearanceCertTemplate ?? 'classic';
+  const initialContact: OrgContact = config.orgContact ?? {};
+  const [template, setTemplate] = useState<ClearanceCertTemplate>(initialTemplate);
+  const [contact, setContact] = useState<OrgContact>(initialContact);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  // Trimmed, blank-dropped — what is actually saved, and what dirtiness compares.
+  const cleaned = (c: OrgContact): OrgContact =>
+    Object.fromEntries(
+      ORG_CONTACT_FIELDS.map((f) => [f.key, (c[f.key] ?? '').trim()]).filter(([, v]) => v),
+    );
+  const dirty =
+    template !== initialTemplate ||
+    JSON.stringify(cleaned(contact)) !== JSON.stringify(cleaned(initialContact));
+
+  async function saveIt() {
+    setErr('');
+    const orgContact = cleaned(contact);
+    if (orgContact.email && !EMAIL_RE.test(orgContact.email)) {
+      setErr('Enter a valid email address');
+      return;
+    }
+    setBusy(true);
+    try {
+      await save({ clearanceCertTemplate: template, orgContact });
+      toast('Certificate settings saved');
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'Could not save — try again');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel
+      title="Clearance certificate"
+      sub="The transfer certificate issued automatically when a clearance is approved or overridden."
+    >
+      <Field
+        label="Template"
+        hint={
+          template === 'classic'
+            ? 'Landscape certificate with a gold border and seal.'
+            : 'Portrait, form-style record with player, transfer and approval tables and the contact footer below.'
+        }
+      >
+        <select
+          className="field-input"
+          value={template}
+          onChange={(e) => setTemplate(e.target.value as ClearanceCertTemplate)}
+        >
+          <option value="classic">Classic certificate</option>
+          <option value="confirmation">Confirmation certificate</option>
+        </select>
+      </Field>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+          columnGap: 12,
+        }}
+      >
+        {ORG_CONTACT_FIELDS.map((f) => (
+          <Field key={f.key} label={f.label}>
+            <input
+              className="field-input"
+              type={f.key === 'email' ? 'email' : 'text'}
+              value={contact[f.key] ?? ''}
+              placeholder={f.placeholder}
+              maxLength={200}
+              onChange={(e) => setContact((c) => ({ ...c, [f.key]: e.target.value }))}
+            />
+          </Field>
+        ))}
+      </div>
+      <p style={{ ...HINT, marginTop: 0, marginBottom: 12 }}>
+        Contact details appear in the certificate footer; blank fields are left out.
+      </p>
+      {/* Non-blocking nudge: saving is still allowed. */}
+      {template === 'confirmation' && Object.keys(cleaned(contact)).length === 0 && (
+        <p role="note" style={{ ...HINT, marginTop: 0, marginBottom: 12, color: '#8A5A00' }}>
+          The confirmation template prints an organisation footer — without contact details it will
+          be sparse.
+        </p>
+      )}
+      {err && <div style={{ ...ERR, marginBottom: 8 }}>{err}</div>}
+      <Btn tone="teal" size="sm" onClick={saveIt} disabled={!dirty || busy}>
+        {busy ? 'Saving…' : 'Save certificate settings'}
       </Btn>
     </Panel>
   );

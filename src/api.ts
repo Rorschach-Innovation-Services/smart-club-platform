@@ -52,6 +52,12 @@ import type {
   InviteRepResponse,
   CommitteeExtractResponse,
   PlatformDocViewUrlResponse,
+  CertificateVerifyResult,
+  ClearanceCertTemplate,
+  TenantUser,
+  ClubSignupLink,
+  ClubSignupInfo,
+  ClubSignupResult,
 } from './types';
 
 /**
@@ -148,7 +154,7 @@ interface RequestOptions {
   query?: Record<string, string | number | null | undefined>;
 }
 
-async function request<T = any>(
+async function request<T = unknown>(
   path: string,
   { method = 'GET', body, auth = true, query }: RequestOptions = {},
 ): Promise<T> {
@@ -424,8 +430,50 @@ export const patchClearance = (fromClubId: string, clearanceId: string, body: un
     body,
   });
 export const getAllClearances = () => request<PlayerClearance[]>('/admin/clearances');
-export const overrideClearance = (clearanceId: string, body: unknown) =>
+// Body { fromClubId, version?, reason?, issueCertificate? } — issueCertificate defaults to true
+// server-side; admins untick it when the override is a disposal (junk clearance), not a transfer.
+export const overrideClearance = (
+  clearanceId: string,
+  body: { issueCertificate?: boolean } & Record<string, unknown>,
+) =>
   request<PlayerClearance>(`/admin/clearances/${clearanceId}/override`, { method: 'POST', body });
+
+// ── Clearance transfer certificates ──
+// Presigned inline GET for the certificate PDF. `:clubId` may be the source OR destination club.
+// 409 = clearance not approved/admin-override; 410 { error, revokedAt } = certificate revoked.
+export interface CertificateViewUrlResponse {
+  viewUrl: string;
+  serial: string;
+  template: ClearanceCertTemplate;
+  generatedAt: string;
+}
+export const getClearanceCertificateViewUrl = (clubId: string, clearanceId: string) =>
+  request<CertificateViewUrlResponse>(
+    `/clubs/${clubId}/clearances/${encodeURIComponent(clearanceId)}/certificate/view-url`,
+    { method: 'POST' },
+  );
+// Admin twins: clearances are stored under the SOURCE club, so the body names it.
+export const getAdminClearanceCertificateViewUrl = (clearanceId: string, fromClubId: string) =>
+  request<CertificateViewUrlResponse>(
+    `/admin/clearances/${encodeURIComponent(clearanceId)}/certificate/view-url`,
+    { method: 'POST', body: { fromClubId } },
+  );
+// Reason required (≤500 chars). Marks the registry entry + both clearance rows revoked.
+export const revokeClearanceCertificate = (
+  clearanceId: string,
+  fromClubId: string,
+  reason: string,
+) =>
+  request<{ serial: string; status: 'revoked'; revokedAt: string }>(
+    `/admin/clearances/${encodeURIComponent(clearanceId)}/certificate/revoke`,
+    {
+      method: 'POST',
+      body: { fromClubId, reason },
+    },
+  );
+// Public (no auth) certificate check behind the QR code. 404 ⇒ ApiError status 404.
+export const verifyCertificate = (serial: string) =>
+  request<CertificateVerifyResult>(`/verify/${encodeURIComponent(serial)}`, { auth: false });
 // Union reject on the clubs' behalf: body { fromClubId, version?, reason? }. Cancels the move —
 // the player ends up active at the source club (how depends on the case; see rejectOutcome on the
 // response). Reversible via reopenClearance.
@@ -579,7 +627,7 @@ export const deleteVenueReq = (id: string) => request(`/venues/${id}`, { method:
 
 // ── Users (admin) ──
 // List every tenant user with role, club scope and sign-in status.
-export const getUsers = () => request<any[]>('/admin/users');
+export const getUsers = () => request<TenantUser[]>('/admin/users');
 /**
  * Provision an admin/rep for this tenant. The body carries { email, role, clubIds?, channels?,
  * link? } — channels selects email/WhatsApp sends and link is the tenant-origin login URL used
@@ -606,8 +654,10 @@ export const changeUserEmail = (sub: string, email: string) =>
 // ── Club self-registration link (admin) ──
 // One tenant-wide link clubs use to register themselves (/signup?t=<token>).
 // Generating replaces any prior token — the old link stops working immediately.
-export const getClubSignupLink = () => request('/admin/club-signup-link');
-export const generateClubSignupLink = () => request('/admin/club-signup-link', { method: 'POST' });
+export const getClubSignupLink = () =>
+  request<{ clubSignupLink: ClubSignupLink | null }>('/admin/club-signup-link');
+export const generateClubSignupLink = () =>
+  request<{ clubSignupLink: ClubSignupLink }>('/admin/club-signup-link', { method: 'POST' });
 export const revokeClubSignupLink = () => request('/admin/club-signup-link', { method: 'DELETE' });
 
 // ── Veterans squad-selection requests (admin, ADR 0013) ──
@@ -675,9 +725,15 @@ export const getRegistrationIdDocUploadUrl = (clubId: string, token: string, con
 
 // ── Public club signup (the tenant-wide self-registration link) ──
 export const getClubSignup = (token: string) =>
-  request('/club-signup', { auth: false, query: { t: token } });
+  request<ClubSignupInfo>('/club-signup', { auth: false, query: { t: token } });
+// 201 echoes { clubId, clubName, email }; a 200 replay carries only { clubId, replayed }.
 export const submitClubSignup = (token: string, body: unknown) =>
-  request('/club-signup', { method: 'POST', auth: false, query: { t: token }, body });
+  request<ClubSignupResult>('/club-signup', {
+    method: 'POST',
+    auth: false,
+    query: { t: token },
+    body,
+  });
 
 // ── Platform operator portal (/platform/*) ──
 // Operator-only routes (membership {tenantId:'*', role:'operator'}); tenant-independent,

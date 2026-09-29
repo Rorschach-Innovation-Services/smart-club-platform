@@ -16,7 +16,14 @@ import {
   TransactWriteCommand,
   type QueryCommandInput,
 } from '@aws-sdk/lib-dynamodb';
-import { S3Client, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  DeleteObjectCommand,
+  DeleteObjectsCommand,
+  ListObjectsV2Command,
+} from '@aws-sdk/client-s3';
+import { rm } from 'node:fs/promises';
+import path from 'node:path';
 import {
   clubKey,
   clubInviteKey,
@@ -51,6 +58,7 @@ import {
   registrationReviewGsi1,
   registrationReviewsListGsi1pk,
   tokenKey,
+  certKey,
   tenantConfigKey,
   tenantConfigGsi1,
   tenantsListGsi1pk,
@@ -81,6 +89,8 @@ import type {
   VeteransAffiliation,
   VeteransRequest,
   PlayerClearance,
+  CertificateMeta,
+  CertificateRecord,
   RejectOutcome,
   RejectCase,
   RejectSnapshot,
@@ -125,6 +135,57 @@ async function deleteUploadObjects(objectKeys: string[]): Promise<void> {
       await s3.send(new DeleteObjectCommand({ Bucket: UPLOADS_BUCKET, Key: key }));
     } catch (err) {
       console.warn(`erase: failed to delete upload object ${key}`, err);
+    }
+  }
+}
+
+/** The S3 prefix every artifact of one clearance lives under (its certificate PDFs). */
+export const clearanceObjectPrefix = (tenant: string, fromClubId: string, clearanceId: string) =>
+  `${tenant}/${fromClubId}/clearances/${clearanceId}/`;
+
+const PREFIX_RE = /^[A-Za-z0-9._/-]+\/$/;
+
+/**
+ * Best-effort delete of EVERY object under each prefix — erasure's backstop for a
+ * certificate PDF orphaned between its S3 put and the pointer write (no row names it).
+ * dev:local / tests (STAGE=local + LOCAL_UPLOADS_DIR) remove the on-disk twin instead.
+ * Never throws, like deleteUploadObjects.
+ */
+export async function deleteUploadPrefixes(prefixes: string[]): Promise<void> {
+  const localDir = process.env.STAGE === 'local' ? process.env.LOCAL_UPLOADS_DIR : undefined;
+  for (const prefix of new Set(prefixes)) {
+    if (!PREFIX_RE.test(prefix) || prefix.includes('..')) {
+      console.warn(`erase: refusing malformed upload prefix ${prefix}`);
+      continue;
+    }
+    try {
+      if (localDir) {
+        await rm(path.join(localDir, prefix), { recursive: true, force: true });
+        continue;
+      }
+      if (!UPLOADS_BUCKET) continue;
+      let token: string | undefined;
+      do {
+        const page = await s3.send(
+          new ListObjectsV2Command({
+            Bucket: UPLOADS_BUCKET,
+            Prefix: prefix,
+            ContinuationToken: token,
+          }),
+        );
+        const objects = (page.Contents ?? []).flatMap((o) => (o.Key ? [{ Key: o.Key }] : []));
+        if (objects.length) {
+          await s3.send(
+            new DeleteObjectsCommand({
+              Bucket: UPLOADS_BUCKET,
+              Delete: { Objects: objects, Quiet: true },
+            }),
+          );
+        }
+        token = page.IsTruncated ? page.NextContinuationToken : undefined;
+      } while (token);
+    } catch (err) {
+      console.warn(`erase: failed to purge upload prefix ${prefix}`, err);
     }
   }
 }
@@ -2045,6 +2106,185 @@ export async function listAllClearances(tenant: string): Promise<PlayerClearance
   return items.map((i) => publicClearance(stripKeys<PlayerClearance>(i)!));
 }
 
+/** A club's INBOUND mirror of one clearance (it is the destination), or null. */
+export async function getInboundClearance(
+  tenant: string,
+  toClubId: string,
+  id: string,
+): Promise<PlayerClearance | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: inboundClearanceKey(tenant, toClubId, id) }),
+  );
+  return stripKeys<PlayerClearance>(res.Item);
+}
+
+// ── Clearance certificates ──
+
+/** Thrown when a certificate pointer/registry write loses a race to a concurrent issuer. */
+export class CertificateRaceError extends Error {
+  constructor() {
+    super('certificate already issued for this clearance');
+    this.name = 'CertificateRaceError';
+  }
+}
+
+/**
+ * Write a registry item only if none exists for its serial. Returns false when one already did
+ * (a concurrent self-heal, or a re-run) — the existing item is never overwritten, so a revoked
+ * certificate can't be resurrected as valid.
+ */
+export async function putCertificateRecord(record: CertificateRecord): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...certKey(record.serial), ...record },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+export async function getCertificateBySerial(serial: string): Promise<CertificateRecord | null> {
+  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: certKey(serial) }));
+  return stripKeys<CertificateRecord>(res.Item);
+}
+
+export async function deleteCertificateRecord(serial: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: certKey(serial) }));
+}
+
+/**
+ * Point a clearance at its certificate. The CANONICAL write is conditional on no pointer yet —
+ * that condition is the issuance race gate (a loser gets {@link CertificateRaceError} and must
+ * clean up its own PDF + registry item). The mirror follows unconditionally on existence; a
+ * vanished mirror is tolerated (the canonical is the source of truth for issuance).
+ */
+export async function setClearanceCertificate(
+  tenant: string,
+  c: Pick<PlayerClearance, 'id' | 'fromClubId' | 'toClubId'>,
+  meta: CertificateMeta,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: clearanceKey(tenant, c.fromClubId, c.id),
+        UpdateExpression: 'SET certificateMeta = :m',
+        ConditionExpression:
+          'attribute_exists(sk) AND attribute_not_exists(certificateMeta) AND #s IN (:a, :o)',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':m': meta, ':a': 'approved', ':o': 'admin-override' },
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) throw new CertificateRaceError();
+    throw err;
+  }
+  await swallowCcf(() =>
+    ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: inboundClearanceKey(tenant, c.toClubId, c.id),
+        UpdateExpression: 'SET certificateMeta = :m',
+        ConditionExpression: 'attribute_exists(sk)',
+        ExpressionAttributeValues: { ':m': meta },
+      }),
+    ),
+  );
+}
+
+/** Remove the certificate pointer from both clearance rows (player erasure). Idempotent. */
+export async function clearClearanceCertificate(
+  tenant: string,
+  c: Pick<PlayerClearance, 'id' | 'fromClubId' | 'toClubId'>,
+): Promise<void> {
+  for (const Key of [
+    clearanceKey(tenant, c.fromClubId, c.id),
+    inboundClearanceKey(tenant, c.toClubId, c.id),
+  ]) {
+    await swallowCcf(() =>
+      ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key,
+          UpdateExpression: 'REMOVE certificateMeta',
+          ConditionExpression: 'attribute_exists(sk)',
+        }),
+      ),
+    );
+  }
+}
+
+/**
+ * Revoke a certificate: the registry item flips to 'revoked' (conditional on it still being
+ * valid — a second revoke returns null) and both clearance rows' pointers get `revokedAt`.
+ * Returns the updated record, or null when it was unknown or already revoked.
+ */
+export async function revokeCertificate(
+  serial: string,
+  opts: { by: string; reason: string; at: string },
+): Promise<CertificateRecord | null> {
+  let record: CertificateRecord | null;
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: certKey(serial),
+        UpdateExpression: 'SET #s = :r, revokedAt = :at, revokedBy = :by, revokeReason = :why',
+        ConditionExpression: 'attribute_exists(pk) AND #s = :v',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':r': 'revoked',
+          ':v': 'valid',
+          ':at': opts.at,
+          ':by': opts.by,
+          ':why': opts.reason,
+        },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    record = stripKeys<CertificateRecord>(res.Attributes);
+  } catch (err) {
+    if (isCcf(err)) return null;
+    throw err;
+  }
+  if (!record) return null;
+  for (const Key of [
+    clearanceKey(record.tenant, record.fromClubId, record.clearanceId),
+    inboundClearanceKey(record.tenant, record.toClubId, record.clearanceId),
+  ]) {
+    await swallowCcf(() =>
+      ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key,
+          UpdateExpression: 'SET certificateMeta.revokedAt = :at',
+          ConditionExpression: 'certificateMeta.serial = :s',
+          ExpressionAttributeValues: { ':at': opts.at, ':s': serial },
+        }),
+      ),
+    );
+  }
+  return record;
+}
+
+/**
+ * Purge a clearance's certificate: every object under its S3 prefix, the CERT# item, and the
+ * pointers on both rows. Used when the player is deleted (the disposal flow's second step).
+ */
+export async function purgeClearanceCertificate(tenant: string, c: PlayerClearance): Promise<void> {
+  const objectKeys = c.certificateMeta?.objectKey ? [c.certificateMeta.objectKey] : [];
+  await deleteUploadObjects(objectKeys);
+  await deleteUploadPrefixes([clearanceObjectPrefix(tenant, c.fromClubId, c.id)]);
+  if (c.certificateMeta?.serial) await deleteCertificateRecord(c.certificateMeta.serial);
+  await clearClearanceCertificate(tenant, c);
+}
+
 /**
  * The canonical (source) + mirror (destination) put items for a clearance.
  *
@@ -2640,8 +2880,42 @@ function outcomeForCase(rc: RejectCase): RejectOutcome {
  */
 export function clearanceDocObjectKeys(c: PlayerClearance): string[] {
   const d = c.rejectSnapshot?.destRow;
-  return [d?.idDocMeta?.objectKey, d?.previousIdDocMeta?.objectKey].filter((k): k is string => !!k);
+  return [
+    d?.idDocMeta?.objectKey,
+    d?.previousIdDocMeta?.objectKey,
+    c.certificateMeta?.objectKey,
+  ].filter((k): k is string => !!k);
 }
+
+/**
+ * Whether a clearance's CANONICAL can hold erasable artifacts: a rejected one's snapshot
+ * (destination ID docs), a resolved one's certificate PDF (full PII). Erasure paths read the
+ * raw canonical for these and collect {@link clearanceDocObjectKeys}.
+ */
+export const clearanceHoldsArtifacts = (c: Pick<PlayerClearance, 'status'>): boolean =>
+  c.status === 'rejected' || c.status === 'approved' || c.status === 'admin-override';
+
+/**
+ * Erasure bookkeeping for one clearance row (canonical or mirror): its CERT# registry item
+ * (global, so it must be deleted by serial — verify must 404 afterwards) and, for a resolved
+ * clearance, its whole S3 prefix (catches a PDF orphaned before its pointer landed).
+ */
+function collectCertificateArtifacts(
+  tenant: string,
+  c: PlayerClearance,
+  keys: Array<{ pk: string; sk: string }>,
+  prefixes: string[],
+): void {
+  if (c.certificateMeta?.serial) keys.push(certKey(c.certificateMeta.serial));
+  if (c.status === 'approved' || c.status === 'admin-override') {
+    prefixes.push(clearanceObjectPrefix(tenant, c.fromClubId, c.id));
+  }
+}
+
+/** Dedupe a key list (a canonical and its mirror both name the same CERT# item). */
+const uniqueKeys = (keys: Array<{ pk: string; sk: string }>) => [
+  ...new Map(keys.map((k) => [`${k.pk}\u0000${k.sk}`, k])).values(),
+];
 
 /**
  * Resolve a clearance (club approval or admin override) and MOVE the player from the
@@ -2675,6 +2949,8 @@ export async function resolveClearance(
     at: string;
     by?: string;
     reason?: string;
+    /** Admin override only: the admin opted out of a transfer certificate (disposal). */
+    certificateDeclined?: boolean;
     expectedVersion?: number;
   },
 ): Promise<PlayerClearance> {
@@ -2701,6 +2977,8 @@ export async function resolveClearance(
     feesCleared: opts.mode === 'admin' ? current.feesCleared : true,
     misconductCleared: opts.mode === 'admin' ? current.misconductCleared : true,
     clubApprovedAt: opts.mode === 'club' ? opts.at : (current.clubApprovedAt ?? null),
+    // ECTA: who approved, alongside when. Club mode only — an override's actor is overriddenBy.
+    clubApprovedBy: opts.mode === 'club' ? opts.by : current.clubApprovedBy,
     adminOverrideAt: opts.mode === 'admin' ? opts.at : (current.adminOverrideAt ?? null),
     // Why, and who. Set on an ADMIN override only — a club approval's record is its tick-boxes,
     // so passing mode 'club' also scrubs any value that somehow reached here. Both ride the
@@ -2711,6 +2989,7 @@ export async function resolveClearance(
     // dispute who signed off is as load-bearing as why.
     overrideReason: opts.mode === 'admin' ? opts.reason : undefined,
     overriddenBy: opts.mode === 'admin' ? opts.by : undefined,
+    certificateDeclined: opts.mode === 'admin' && opts.certificateDeclined ? true : undefined,
     version: expectedVersion + 1,
   };
 
@@ -4925,6 +5204,7 @@ export async function eraseTenantData(tenant: string): Promise<number> {
 
   const keys: Array<{ pk: string; sk: string }> = [tenantConfigKey(tenant)];
   const objectKeys: string[] = [];
+  const prefixes: string[] = [];
 
   const clubs = await listClubs(tenant);
   for (const club of clubs) {
@@ -4937,17 +5217,23 @@ export async function eraseTenantData(tenant: string): Promise<number> {
     }
     // Clearance items (canonical CLEARANCE# + mirror INBOUND_CLEARANCE#) live under club
     // pks but carry no gsi1/META listing, so enumerate them per club explicitly. A rejected
-    // clearance retains the destination's ID doc(s) on its canonical snapshot (POPIA) — read
-    // the raw canonical (the list is snapshot-stripped) and collect them.
+    // clearance retains the destination's ID doc(s) on its canonical snapshot, and a resolved
+    // one its certificate PDF (POPIA) — read the raw canonical (the list is snapshot-stripped)
+    // and collect them, plus the global CERT# registry item.
     for (const x of await listClearancesForSource(tenant, club.id)) {
       keys.push(clearanceKey(tenant, club.id, x.id));
-      if (x.status === 'rejected') {
+      if (clearanceHoldsArtifacts(x)) {
         const raw = await getClearanceRaw(tenant, club.id, x.id);
         if (raw) objectKeys.push(...clearanceDocObjectKeys(raw));
       }
+      collectCertificateArtifacts(tenant, x, keys, prefixes);
     }
+    // Mirrors carry certificateMeta too — the only handle on a certificate whose canonical sits
+    // under an off-system (directory) source partition this loop never visits.
     for (const x of await listInboundForDest(tenant, club.id)) {
       keys.push(inboundClearanceKey(tenant, club.id, x.id));
+      if (x.certificateMeta?.objectKey) objectKeys.push(x.certificateMeta.objectKey);
+      collectCertificateArtifacts(tenant, x, keys, prefixes);
     }
     // Registration reviews (REGREVIEW#) also live under club pks without a gsi1/META
     // listing — enumerate per club, and purge any held (cross-club) ID doc.
@@ -4984,9 +5270,11 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   for (const k of await listExportLogKeys(tenant)) keys.push(k);
   for (const k of await listVenueKeys(tenant)) keys.push(k);
 
-  await batchDelete(keys);
+  const unique = uniqueKeys(keys);
+  await batchDelete(unique);
   await deleteUploadObjects(objectKeys);
-  return keys.length;
+  await deleteUploadPrefixes(prefixes);
+  return unique.length;
 }
 
 /**
@@ -4998,6 +5286,7 @@ export async function eraseTenantData(tenant: string): Promise<number> {
 export async function clearCohort(tenant: string): Promise<number> {
   const keys: Array<{ pk: string; sk: string }> = [];
   const objectKeys: string[] = [];
+  const prefixes: string[] = [];
   for (const club of await listClubs(tenant)) {
     keys.push(clubKey(tenant, club.id));
     objectKeys.push(...clubDocObjectKeys(club));
@@ -5007,14 +5296,18 @@ export async function clearCohort(tenant: string): Promise<number> {
     }
     for (const x of await listClearancesForSource(tenant, club.id)) {
       keys.push(clearanceKey(tenant, club.id, x.id));
-      // Rejected clearances retain the destination's ID doc(s) on their snapshot (POPIA).
-      if (x.status === 'rejected') {
+      // Rejected clearances retain the destination's ID doc(s) on their snapshot, resolved ones
+      // their certificate PDF (POPIA).
+      if (clearanceHoldsArtifacts(x)) {
         const raw = await getClearanceRaw(tenant, club.id, x.id);
         if (raw) objectKeys.push(...clearanceDocObjectKeys(raw));
       }
+      collectCertificateArtifacts(tenant, x, keys, prefixes);
     }
     for (const x of await listInboundForDest(tenant, club.id)) {
       keys.push(inboundClearanceKey(tenant, club.id, x.id));
+      if (x.certificateMeta?.objectKey) objectKeys.push(x.certificateMeta.objectKey);
+      collectCertificateArtifacts(tenant, x, keys, prefixes);
     }
     for (const r of await listReviewsForClub(tenant, club.id)) {
       keys.push(registrationReviewKey(tenant, club.id, r.id));
@@ -5044,9 +5337,11 @@ export async function clearCohort(tenant: string): Promise<number> {
       throw new Error(`refusing to clear cohort: unexpected key ${k.pk} / ${k.sk}`);
     }
   }
-  await batchDelete(keys);
+  const unique = uniqueKeys(keys);
+  await batchDelete(unique);
   await deleteUploadObjects(objectKeys);
-  return keys.length;
+  await deleteUploadPrefixes(prefixes);
+  return unique.length;
 }
 
 /**
@@ -5080,6 +5375,7 @@ export async function eraseClubData(
 
   const keys: Array<{ pk: string; sk: string }> = [];
   const objectKeys: string[] = [...clubDocObjectKeys(club)];
+  const prefixes: string[] = [];
 
   const players = await listPlayers(tenant, club.id);
   for (const p of players) {
@@ -5098,12 +5394,14 @@ export async function eraseClubData(
   for (const x of outgoing) {
     keys.push(clearanceKey(tenant, club.id, x.id));
     keys.push(inboundClearanceKey(tenant, x.toClubId, x.id));
-    // A rejected clearance retains the destination's ID doc(s) on its canonical snapshot
-    // (POPIA) — read the raw canonical (this list is snapshot-stripped) and collect them.
-    if (x.status === 'rejected') {
+    // A rejected clearance retains the destination's ID doc(s) on its canonical snapshot, a
+    // resolved one its certificate PDF (POPIA) — read the raw canonical (this list is
+    // snapshot-stripped) and collect them, plus the global CERT# item.
+    if (clearanceHoldsArtifacts(x)) {
       const raw = await getClearanceRaw(tenant, club.id, x.id);
       if (raw) objectKeys.push(...clearanceDocObjectKeys(raw));
     }
+    collectCertificateArtifacts(tenant, x, keys, prefixes);
     // A pending registration-origin clearance pre-created the player at the
     // DESTINATION as 'clearance-pending'. With this (source) club gone there is
     // nobody left to issue it and the clearance items are being erased, so activate
@@ -5141,11 +5439,14 @@ export async function eraseClubData(
     keys.push(clearanceKey(tenant, x.fromClubId, x.id));
     // Destination-club erase path: a rejected clearance's snapshot (with the destination's ID
     // doc keys) lives on the CANONICAL under the SOURCE club, not on this mirror. Read it there
-    // and collect the keys before the canonical is deleted — otherwise the objects leak.
-    if (x.status === 'rejected') {
+    // and collect the keys before the canonical is deleted — otherwise the objects leak. Same
+    // for a resolved clearance's certificate PDF (its pointer rides the mirror too).
+    if (clearanceHoldsArtifacts(x)) {
       const raw = await getClearanceRaw(tenant, x.fromClubId, x.id);
       if (raw) objectKeys.push(...clearanceDocObjectKeys(raw));
     }
+    if (x.certificateMeta?.objectKey) objectKeys.push(x.certificateMeta.objectKey);
+    collectCertificateArtifacts(tenant, x, keys, prefixes);
     if (x.status === 'pending') {
       try {
         await ddb.send(
@@ -5217,12 +5518,13 @@ export async function eraseClubData(
     keys.push(veteransRequestKey(tenant, r.primaryClubId, r.id));
   }
 
-  await batchDelete(keys);
+  await batchDelete(uniqueKeys(keys));
   // S3 purge BEFORE the META delete: the objectKeys are only derivable while the
   // club/player records exist, so a crash after META landed would strand the doc
   // PII unreachably. deleteUploadObjects never throws and S3 deletes are
   // idempotent, so running it first changes nothing else.
   await deleteUploadObjects(objectKeys);
+  await deleteUploadPrefixes(prefixes);
 
   // Sweep DRAFT (unreleased) series so a deleted club doesn't linger in teams[]/fixtures.
   // Released series are left intact (they keep showing "Removed club" — preserves published

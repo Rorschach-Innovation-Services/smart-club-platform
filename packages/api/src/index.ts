@@ -163,6 +163,7 @@ import type {
   VeteransCandidate,
   PlayerClearance,
   AdminClearanceView,
+  CertificateMeta,
   WithheldField,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
@@ -172,21 +173,21 @@ import { buildTenantConfig, type TenantBrandingInput } from './seed-core.js';
 import { validateTenantSlug } from './tenant-validation.js';
 import { grantTenantAdmin, addAdminMembership } from './tenant-admin.js';
 import { originAllowed, originAllowedForTenant, canonicalWebOrigin } from './origins.js';
+import {
+  issueCertificate,
+  ensureCertificateRecord,
+  isCertifiable,
+  CertificateNotIssuableError,
+} from './certificates/issue.js';
+import { normaliseSerial } from './certificates/serial.js';
+import { activeVerifyKeys, certSigner, type VerifyKey } from './certificates/signer.js';
+import { validateCertTemplate, validateOrgContact } from './certificates/config.js';
+import { TENANT_UTC_OFFSET_MINUTES } from './tenant-time.js';
 
 // Strict date-only parsing for calendar validation — dayjs's lenient default would roll
 // '2026-02-31' into March and store a date the operator never entered.
 dayjs.extend(dayjsUtc);
 dayjs.extend(dayjsCustomParseFormat);
-
-/**
- * The union's wall-clock offset from UTC (SAST, +02:00).
- *
- * Lambda runs in UTC, so anything that asks "what day is it" on behalf of a human here
- * has to add this or it stays on yesterday until 02:00 local. The region has no DST, so
- * a fixed offset is exact rather than an approximation — see ADR 0008 on why times are
- * wall-clock and never converted.
- */
-const TENANT_UTC_OFFSET_MINUTES = 120;
 
 const s3 = new S3Client({});
 
@@ -543,6 +544,82 @@ app.get('/tenant', async (c) => {
     // anonymously is payload nobody on that path reads. The admin console fetches them
     // from GET /tenant/config instead.
   });
+});
+
+/**
+ * Public certificate verification (QR target). The serial is the capability: 100 random bits,
+ * normalised the way people retype codes. Unknown (or malformed, or erased) ⇒ one uniform 404.
+ * A VALID certificate returns its facts with the MASKED ID (never the full ID or DOB), the
+ * tenant's branding for theming, and the signed payload + verifying key. A REVOKED one returns
+ * status only — a revoked certificate's assertions must not stay publicly readable. The tenant
+ * comes from the CERT# item, never the request host (the page is served on the platform host).
+ */
+app.get('/verify/:serial', async (c) => {
+  c.header('Cache-Control', 'no-store');
+  const serial = normaliseSerial(c.req.param('serial'));
+  const record = serial ? await repo.getCertificateBySerial(serial) : null;
+  if (!record) throw new HttpError(404, 'not found');
+  if (record.status === 'revoked') {
+    return c.json({
+      serial: record.serial,
+      status: 'revoked',
+      issuedAt: record.issuedAt,
+      revokedAt: record.revokedAt,
+    });
+  }
+  const cfg = await repo.getTenantConfig(record.tenant);
+  // The verifying key travels with the record (rotation-safe). A record without one predates
+  // that and shouldn't exist; fall back to the live key, reported so it gets noticed. A key
+  // failure must not turn a valid certificate into an error page — the registry lookup is the
+  // real proof — so the key is then simply omitted.
+  let publicKeyPem: string | null = record.publicKeyPem ?? null;
+  if (!publicKeyPem) {
+    Sentry.captureMessage(`verify: CERT#${record.serial} has no stored publicKeyPem`);
+    try {
+      publicKeyPem = await certSigner().publicKeyPem();
+    } catch (err) {
+      Sentry.captureException(err);
+      console.error('verify: public key unavailable', err);
+    }
+  }
+  return c.json({
+    serial: record.serial,
+    status: 'valid',
+    issuedAt: record.issuedAt,
+    playerName: record.playerName,
+    idNumberMasked: record.idNumberMasked,
+    fromClubName: record.fromClubName,
+    toClubName: record.toClubName,
+    effectiveDate: record.effectiveDate,
+    orgName: record.orgName,
+    tenantBranding: {
+      name: cfg ? orgCopy(cfg).name : record.orgName,
+      logoUrl: cfg?.branding?.logoUrl ?? '',
+      colors: cfg?.branding?.colors ?? {},
+    },
+    // sha256 of the stored PDF: lets the verify page check a PDF file the viewer holds.
+    sha256: record.sha256,
+    signedPayload: record.signedPayload,
+    kid: record.kid,
+    publicKeyPem,
+  });
+});
+
+/**
+ * Public key directory: the active certificate signing key(s) as { kid, publicKeyPem,
+ * fingerprint } (SHA-256 of the DER SPKI, colon hex). Third parties pin the fingerprint once,
+ * out of band, then verify signedPayload JWS offline without trusting per-request responses.
+ * Fail-soft like /verify's key fallback: a key failure is an empty list + Sentry, not a 500.
+ */
+app.get('/verify-keys', async (c) => {
+  let keys: VerifyKey[] = [];
+  try {
+    keys = await activeVerifyKeys();
+  } catch (err) {
+    Sentry.captureException(err);
+    console.error('verify-keys: signing key unavailable', err);
+  }
+  return c.json(keys);
 });
 
 /**
@@ -2321,8 +2398,34 @@ app.delete('/clubs/:id/players/:nk', async (c) => {
     }
     throw err;
   }
+  await purgePlayerCertificates(ra.tenant, id, player.naturalKey);
   return c.json({ ok: true });
 });
+
+/**
+ * The disposal flow's second step (override, then DELETE the player): a deleted player's
+ * transfer certificates carry their full ID/DOB, so each resolved clearance naming them at this
+ * club — inbound (they moved here) or outgoing (they left) — loses its PDF, CERT# item and
+ * pointers. The row is already gone, so a purge failure is reported rather than failing the
+ * request; erasure's prefix purge remains the backstop.
+ */
+async function purgePlayerCertificates(tenant: string, clubId: string, naturalKey: string) {
+  const [inbound, outgoing] = await Promise.all([
+    repo.listInboundForDest(tenant, clubId),
+    repo.listClearancesForSource(tenant, clubId),
+  ]);
+  const mine = [...inbound, ...outgoing].filter(
+    (x) => x.playerNaturalKey === naturalKey && isCertifiable(x),
+  );
+  for (const x of mine) {
+    try {
+      await repo.purgeClearanceCertificate(tenant, x);
+    } catch (err) {
+      Sentry.captureException(err);
+      console.error(`certificate purge failed for clearance ${x.id}`, err);
+    }
+  }
+}
 
 /**
  * Set (or change) a player's veterans second-club affiliation (admin or the player's own club
@@ -2878,9 +2981,10 @@ app.patch('/clubs/:id/clearances/:cid', async (c) => {
       const resolved = await repo.resolveClearance(ra.tenant, id, cid, {
         mode: 'club',
         at: now(),
+        by: ra.email,
         expectedVersion: body.version,
       });
-      return c.json(resolved);
+      return c.json({ ...resolved, ...(await issueOnResolve(ra.tenant, resolved)) });
     }
     const updated = await repo.updateClearanceFlags(ra.tenant, id, cid, {
       feesCleared: body.feesCleared,
@@ -2894,6 +2998,101 @@ app.patch('/clubs/:id/clearances/:cid', async (c) => {
     if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
     throw err;
   }
+});
+
+/**
+ * Issue a resolved clearance's certificate inline (Lambda has no fire-and-forget). Never
+ * throws: the approval already stands, so a failure is reported to Sentry and surfaced as
+ * `certificatePending` — the first view lazily issues it (certificateViewUrl).
+ */
+async function issueOnResolve(
+  tenant: string,
+  clearance: PlayerClearance,
+): Promise<{ certificateMeta: CertificateMeta } | { certificatePending: true }> {
+  try {
+    const { meta } = await issueCertificate(tenant, clearance.fromClubId, clearance.id);
+    return { certificateMeta: meta };
+  } catch (err) {
+    Sentry.captureException(err);
+    console.error(`certificate issue failed for clearance ${clearance.id}`, err);
+    return { certificatePending: true };
+  }
+}
+
+/**
+ * Presign an inline view of a clearance's certificate PDF, issuing it first if the approve-time
+ * issue failed. 409 unless approved/overridden (or the override declined a certificate); 410
+ * (with revokedAt) once revoked.
+ */
+async function certificateViewUrl(
+  c: Context<HonoEnv>,
+  tenant: string,
+  clearance: PlayerClearance,
+): Promise<{ viewUrl: string; serial: string; template: string; generatedAt: string }> {
+  if (!isCertifiable(clearance)) {
+    throw new HttpError(409, 'this clearance has no certificate — it has not been approved');
+  }
+  if (clearance.certificateDeclined && !clearance.certificateMeta) {
+    throw new HttpError(409, 'no certificate was issued for this clearance');
+  }
+  let meta = clearance.certificateMeta;
+  if (meta) {
+    // A crash between the pointer and registry writes leaves verify 404ing; heal it here. The
+    // PDF itself is fine either way, so a failed heal is reported, not fatal to viewing.
+    try {
+      await ensureCertificateRecord(tenant, clearance);
+    } catch (err) {
+      Sentry.captureException(err);
+      console.error(`certificate registry restore failed for ${meta.serial}`, err);
+    }
+  } else {
+    try {
+      meta = (await issueCertificate(tenant, clearance.fromClubId, clearance.id)).meta;
+    } catch (err) {
+      if (err instanceof CertificateNotIssuableError) throw new HttpError(409, err.message);
+      Sentry.captureException(err);
+      console.error(`certificate lazy issue failed for clearance ${clearance.id}`, err);
+      throw new HttpError(503, 'the certificate could not be generated — try again shortly');
+    }
+  }
+  const revokedAt =
+    meta.revokedAt ??
+    (await repo
+      .getCertificateBySerial(meta.serial)
+      .then((r) => (r?.status === 'revoked' ? r.revokedAt : undefined)));
+  if (revokedAt) throw new HttpError(410, 'certificate revoked', { revokedAt });
+  const info = { serial: meta.serial, template: meta.template, generatedAt: meta.generatedAt };
+  if (meta.objectKey.startsWith('local/') && isLocalUploadsMode()) {
+    const viewUrl = `${new URL(c.req.url).origin}/local-uploads/${meta.objectKey}?ct=${encodeURIComponent(meta.contentType)}`;
+    return { viewUrl, ...info };
+  }
+  const viewUrl = await getSignedUrl(
+    s3,
+    new GetObjectCommand({
+      Bucket: UPLOADS_BUCKET,
+      Key: meta.objectKey,
+      ResponseContentType: 'application/pdf',
+      ResponseContentDisposition: 'inline',
+    }),
+    { expiresIn: 900 },
+  );
+  return { viewUrl, ...info };
+}
+
+/**
+ * View a clearance's transfer certificate from either side: the SOURCE club reads its canonical,
+ * the DESTINATION club its own INBOUND mirror (each club reads only its own partition).
+ */
+app.post('/clubs/:id/clearances/:cid/certificate/view-url', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const cid = c.req.param('cid');
+  assertClubAccess(ra, id);
+  const clearance =
+    (await repo.getClearance(ra.tenant, id, cid)) ??
+    (await repo.getInboundClearance(ra.tenant, id, cid));
+  if (!clearance) throw new HttpError(404, 'clearance not found');
+  return c.json(await certificateViewUrl(c, ra.tenant, clearance));
 });
 
 /** Save the exec committee; also flips docs.exco true when it is a form-satisfied doc. */
@@ -5172,6 +5371,8 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { calendars?: unknown }).calendars;
   delete (patch as { structures?: unknown }).structures;
   delete (patch as { requiredDocs?: unknown }).requiredDocs;
+  delete (patch as { clearanceCertTemplate?: unknown }).clearanceCertTemplate;
+  delete (patch as { orgContact?: unknown }).orgContact;
   const next = await applyTenantConfigPatch(tenant, patch, { preserveCompetitions: true });
   return c.json(next);
 });
@@ -5671,6 +5872,10 @@ app.put('/platform/tenants/:slug', async (c) => {
   if (body.tutorialsNoFallback !== undefined) {
     patch.tutorialsNoFallback = !!body.tutorialsNoFallback;
   }
+  if (body.clearanceCertTemplate !== undefined) {
+    patch.clearanceCertTemplate = validateCertTemplate(body.clearanceCertTemplate);
+  }
+  if (body.orgContact !== undefined) patch.orgContact = validateOrgContact(body.orgContact);
   // Calendars, structures and the competitions binding them go through the shared
   // operator write (validation, version minting, referrer guards, calendar-edit warnings)
   // — the same path an admin's quick start takes.
@@ -8064,11 +8269,23 @@ app.get('/admin/clearances', async (c) => {
 app.post('/admin/clearances/:cid/override', async (c) => {
   const ra = c.get('requestAuth')!;
   const cid = c.req.param('cid');
-  const body = await c.req.json<{ fromClubId?: string; version?: number; reason?: string }>();
+  const body = await c.req.json<{
+    fromClubId?: string;
+    version?: number;
+    reason?: string;
+    issueCertificate?: boolean;
+  }>();
   if (!body.fromClubId) throw new HttpError(400, 'fromClubId required');
   if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 500)) {
     throw new HttpError(400, 'reason must be a string of at most 500 characters');
   }
+  if (body.issueCertificate !== undefined && typeof body.issueCertificate !== 'boolean') {
+    throw new HttpError(400, 'issueCertificate must be a boolean');
+  }
+  // Unticked by admins disposing of a junk clearance (override, then DELETE the player): no
+  // certificate may ever assert a transfer that never happened — recorded on the clearance so
+  // the lazy issue-on-view path refuses too.
+  const declineCertificate = body.issueCertificate === false;
   const current = await repo.getClearance(ra.tenant, body.fromClubId, cid);
   if (!current) throw new HttpError(404, 'clearance not found');
   if (current.status !== 'pending') throw new HttpError(409, 'clearance already resolved');
@@ -8078,18 +8295,56 @@ app.post('/admin/clearances/:cid/override', async (c) => {
       at: now(),
       by: ra.email,
       reason: body.reason?.trim() || undefined,
+      certificateDeclined: declineCertificate,
       expectedVersion: body.version,
     });
     // Best-effort: email BOTH clubs' chairmen that the union issued the transfer (never fails
     // the request). See notifyClearanceResolved re: email-only, no daily cap, destination chair.
     await notifyClearanceResolved(ra.tenant, resolved, 'approved', ra.email);
-    return c.json(repo.publicClearance(resolved));
+    const cert = declineCertificate ? {} : await issueOnResolve(ra.tenant, resolved);
+    return c.json({ ...repo.publicClearance(resolved), ...cert });
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'clearance changed; refetch');
     if (err instanceof repo.PlayerExistsAtDestinationError) throw new HttpError(409, err.message);
     if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
     throw err;
   }
+});
+
+/** Admin twin of the club certificate view-url (any clearance in the tenant). */
+app.post('/admin/clearances/:cid/certificate/view-url', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cid = c.req.param('cid');
+  const body = await c.req.json<{ fromClubId?: string }>();
+  if (!body.fromClubId) throw new HttpError(400, 'fromClubId required');
+  const clearance = await repo.getClearance(ra.tenant, body.fromClubId, cid);
+  if (!clearance) throw new HttpError(404, 'clearance not found');
+  return c.json(await certificateViewUrl(c, ra.tenant, clearance));
+});
+
+/**
+ * Revoke a clearance's certificate (union admin). The registry item and both clearance rows are
+ * marked revoked; the public verify page then shows status only. Irreversible by design — a
+ * corrected certificate is a fresh issue, not an un-revoke.
+ */
+app.post('/admin/clearances/:cid/certificate/revoke', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const cid = c.req.param('cid');
+  const body = await c.req.json<{ fromClubId?: string; reason?: string }>();
+  if (!body.fromClubId) throw new HttpError(400, 'fromClubId required');
+  const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+  if (!reason || reason.length > 500) {
+    throw new HttpError(400, 'reason is required (at most 500 characters)');
+  }
+  const clearance = await repo.getClearance(ra.tenant, body.fromClubId, cid);
+  if (!clearance) throw new HttpError(404, 'clearance not found');
+  const meta = clearance.certificateMeta;
+  if (!meta) throw new HttpError(404, 'no certificate has been issued for this clearance');
+  // A registry item lost to a mid-issue crash is restored first, so it can be revoked.
+  await ensureCertificateRecord(ra.tenant, clearance);
+  const record = await repo.revokeCertificate(meta.serial, { by: ra.email, reason, at: now() });
+  if (!record) throw new HttpError(409, 'certificate already revoked');
+  return c.json({ serial: record.serial, status: record.status, revokedAt: record.revokedAt });
 });
 
 /**

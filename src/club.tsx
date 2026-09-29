@@ -106,8 +106,13 @@ import {
   setPlayerVeteransClub,
   removePlayerVeteransClub,
   searchVeteransCandidates,
+  getClearanceCertificateViewUrl,
 } from './api';
-import type { VeteransRequestPublic, VeteransCandidate } from './types';
+import type { VeteransRequestPublic, VeteransCandidate, PlayerClearance } from './types';
+import {
+  ClearanceCertificateModal,
+  clearanceHasCertificateStatus,
+} from './ClearanceCertificateModal';
 import { qk, queryClient } from './query';
 import { DocPreviewModal } from './DocPreviewModal';
 import { RegLinkModal } from './RegLinkModal';
@@ -5845,15 +5850,45 @@ export function ClubClearancesView({
   onApprove,
   onOpenRequest,
   busyId,
+  onCertificateViewed = undefined,
 }) {
   const teamLabel = labelByKey(leagues);
   const incoming = clearances?.incoming ?? [];
   const outgoing = clearances?.outbound ?? [];
   const incomingPending = incoming.filter((r) => r.status === 'pending');
   const incomingResolved = incoming.filter((r) => r.status !== 'pending');
+  // The clearance whose transfer certificate is open in the inline viewer. Both sides of the
+  // move may view it — the API presigns off this club's own row (source or destination).
+  const [certFor, setCertFor] = useStateC<PlayerClearance | null>(null);
+  const certButton = (req: PlayerClearance) =>
+    clearanceHasCertificateStatus(req) ? (
+      <div style={{ marginTop: 8 }}>
+        <Btn tone="outline" size="sm" icon={Icon.Doc} onClick={() => setCertFor(req)}>
+          View certificate
+        </Btn>
+        {req.certificateMeta?.revokedAt && (
+          <span style={{ marginLeft: 8 }}>
+            <Pill tone="coral">Certificate revoked</Pill>
+          </span>
+        )}
+      </div>
+    ) : null;
 
   return (
     <div>
+      {certFor && (
+        <ClearanceCertificateModal
+          clearance={certFor}
+          fetchUrl={() =>
+            getClearanceCertificateViewUrl(club.id, certFor.id).then((r) => {
+              // No pointer on the row ⇒ this view lazily issued it: refetch so the card catches up.
+              if (!certFor.certificateMeta) onCertificateViewed?.();
+              return r.viewUrl;
+            })
+          }
+          onClose={() => setCertFor(null)}
+        />
+      )}
       <div className="page-head">
         <div className="ph-left">
           <div className="ph-crumb">Club Portal · {club.name} / Clearances</div>
@@ -5959,7 +5994,8 @@ export function ClubClearancesView({
                       disabled={busy}
                       onClick={() => onApprove(req)}
                     >
-                      {busy ? 'Issuing…' : `Issue clearance to ${req.toClubName}`}
+                      {/* Issuing also issues the transfer certificate inline (~1–3s). */}
+                      {busy ? 'Issuing certificate…' : `Issue clearance to ${req.toClubName}`}
                     </Btn>
                   </div>
                 )}
@@ -6009,6 +6045,7 @@ export function ClubClearancesView({
                     {req.status === 'admin-override' && req.overrideReason && (
                       <div className="clr-note">"{req.overrideReason}"</div>
                     )}
+                    {certButton(req)}
                   </div>
                   <Pill tone="teal" dot>
                     {req.status === 'admin-override' ? 'Union approved' : 'Cleared'}
@@ -6070,6 +6107,7 @@ export function ClubClearancesView({
                     {req.status === 'admin-override' && req.overrideReason && (
                       <div className="clr-note">"{req.overrideReason}"</div>
                     )}
+                    {certButton(req)}
                   </div>
                   {req.status === 'pending' ? (
                     <Pill tone="gold" dot>

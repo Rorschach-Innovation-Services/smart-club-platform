@@ -14,6 +14,7 @@ import { screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AdminClearances } from './admin';
 import { renderWithProviders } from './test-utils';
+import { setTokenProvider } from './api';
 
 const leagues = [
   { key: 'premier', label: 'Premier League', group: 'S', district: 'All districts' },
@@ -54,6 +55,8 @@ const setup = (
   const onReject = vi.fn().mockResolvedValue('ok');
   const onReassign = vi.fn().mockResolvedValue('ok');
   const onReopen = vi.fn().mockResolvedValue('ok');
+  const onRevokeCertificate = vi.fn().mockResolvedValue('ok');
+  const onCertificateViewed = vi.fn();
   const user = userEvent.setup();
   renderWithProviders(
     <AdminClearances
@@ -64,11 +67,21 @@ const setup = (
       onReject={onReject}
       onReassign={onReassign}
       onReopen={onReopen}
+      onRevokeCertificate={onRevokeCertificate}
+      onCertificateViewed={onCertificateViewed}
       busyId={busyId}
       busyAction={busyAction}
     />,
   );
-  return { user, onOverride, onReject, onReassign, onReopen };
+  return {
+    user,
+    onOverride,
+    onReject,
+    onReassign,
+    onReopen,
+    onRevokeCertificate,
+    onCertificateViewed,
+  };
 };
 
 const card = (name: RegExp = /sipho/i) =>
@@ -222,7 +235,146 @@ describe('an ordinary clearance', () => {
     expect(onOverride).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'clr-1' }),
       'not a real registration, removing',
+      true,
     );
+  });
+
+  it('issues a transfer certificate on override by default, and lets the admin opt out', async () => {
+    // A disposal override (junk registration) must not mint a certificate for a transfer
+    // that never happened — the admin unticks the box.
+    const { user, onOverride } = setup([request()]);
+
+    await user.click(within(card()).getByRole('button', { name: /override & approve/i }));
+    const box = screen.getByRole('checkbox', { name: /issue transfer certificate/i });
+    expect(box).toBeChecked();
+    await user.click(box);
+    await user.click(screen.getByRole('button', { name: /yes, issue clearance/i }));
+
+    expect(onOverride).toHaveBeenCalledWith(expect.objectContaining({ id: 'clr-1' }), '', false);
+  });
+
+  it('revokes an issued certificate only with a reason', async () => {
+    const { user, onRevokeCertificate } = setup([
+      request({
+        status: 'approved',
+        clubApprovedAt: '2026-07-02T09:00:00.000Z',
+        certificateMeta: {
+          serial: 'SC-TRF-AAAAA-BBBBB-CCCCC-DDDDD',
+          objectKey: 'k.pdf',
+          contentType: 'application/pdf',
+          generatedAt: '2026-07-02T09:00:01.000Z',
+          template: 'classic',
+        },
+      }),
+    ]);
+
+    expect(within(card()).getByRole('button', { name: /view certificate/i })).toBeVisible();
+    await user.click(within(card()).getByRole('button', { name: /revoke certificate/i }));
+    const yes = screen.getByRole('button', { name: /yes, revoke certificate/i });
+    expect(yes).toBeDisabled();
+    await user.type(screen.getByPlaceholderText(/reason \(required/i), '  issued in error  ');
+    await user.click(yes);
+
+    expect(onRevokeCertificate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'clr-1' }),
+      'issued in error',
+    );
+  });
+
+  describe('viewing a certificate', () => {
+    const META = {
+      serial: 'SC-TRF-AAAAA-BBBBB-CCCCC-DDDDD',
+      objectKey: 'k.pdf',
+      contentType: 'application/pdf',
+      generatedAt: '2026-07-02T09:00:01.000Z',
+      template: 'classic',
+    };
+    beforeEach(() => {
+      // An authed route: the client needs a token before it will fetch.
+      setTokenProvider(async () => 'test-token');
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({
+                viewUrl: 'https://example.test/c.pdf',
+                serial: META.serial,
+                template: 'classic',
+                generatedAt: META.generatedAt,
+              }),
+              { status: 200, headers: { 'content-type': 'application/json' } },
+            ),
+        ),
+      );
+      return () => {
+        vi.unstubAllGlobals();
+        setTokenProvider(async () => null);
+      };
+    });
+
+    it('refetches the list when the view lazily issued the certificate', async () => {
+      // No certificateMeta on the row: the view-url call just issued it, so the list must
+      // refetch for Revoke / the serial to appear.
+      const { user, onCertificateViewed } = setup([
+        request({ status: 'approved', clubApprovedAt: '2026-07-02T09:00:00.000Z' }),
+      ]);
+      await user.click(within(card()).getByRole('button', { name: /view certificate/i }));
+
+      await waitFor(() => expect(onCertificateViewed).toHaveBeenCalledTimes(1));
+      expect(await screen.findByTitle(/preview/i)).toHaveAttribute(
+        'src',
+        'https://example.test/c.pdf',
+      );
+    });
+
+    it('does not refetch when the row already carries the certificate', async () => {
+      const { user, onCertificateViewed } = setup([
+        request({
+          status: 'approved',
+          clubApprovedAt: '2026-07-02T09:00:00.000Z',
+          certificateMeta: META,
+        }),
+      ]);
+      await user.click(within(card()).getByRole('button', { name: /view certificate/i }));
+
+      expect(await screen.findByTitle(/preview/i)).toBeVisible();
+      expect(onCertificateViewed).not.toHaveBeenCalled();
+    });
+  });
+
+  it('offers no certificate for an override that declined one', () => {
+    setup([
+      request({
+        status: 'admin-override',
+        adminOverrideAt: '2026-07-02T09:00:00.000Z',
+        certificateDeclined: true,
+      }),
+    ]);
+
+    expect(within(card()).queryByRole('button', { name: /view certificate/i })).toBeNull();
+    expect(within(card()).queryByRole('button', { name: /revoke certificate/i })).toBeNull();
+  });
+
+  it('shows a revoked badge and no revoke action once a certificate is revoked', () => {
+    setup([
+      request({
+        status: 'admin-override',
+        adminOverrideAt: '2026-07-02T09:00:00.000Z',
+        certificateMeta: {
+          serial: 'SC-TRF-AAAAA-BBBBB-CCCCC-DDDDD',
+          objectKey: 'k.pdf',
+          contentType: 'application/pdf',
+          generatedAt: '2026-07-02T09:00:01.000Z',
+          template: 'classic',
+          revokedAt: '2026-07-03T09:00:00.000Z',
+        },
+      }),
+    ]);
+
+    expect(within(card()).getByText(/certificate revoked/i)).toBeVisible();
+    expect(within(card()).queryByRole('button', { name: /revoke certificate/i })).toBeNull();
+    expect(within(card()).getByRole('button', { name: /view certificate/i })).toBeVisible();
   });
 
   it('shows the override reason and who signed off on a resolved card', async () => {

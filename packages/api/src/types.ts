@@ -332,6 +332,16 @@ export interface TenantConfig {
    * anonymous `GET /tenant` serves only matchFormats/matchDays/timeSlots.
    */
   competitionDefaults?: CompetitionDefaults;
+  /**
+   * Which transfer-certificate layout this tenant issues. Absent ⇒ 'classic' (see
+   * resolveCertTemplate). Operator-only: PUT /tenant/config strips it.
+   */
+  clearanceCertTemplate?: CertificateTemplate;
+  /**
+   * Organisation contact details for the certificate footer; missing fields are omitted.
+   * Operator-only: PUT /tenant/config strips it.
+   */
+  orgContact?: OrgContact;
 }
 
 /** Stored club record. Catalogue-derived fields stay client-side. */
@@ -857,7 +867,92 @@ export interface PlayerClearance {
   overrideReason?: string;
   /** Email of the union admin who overrode, mirroring rejectedBy. Admin overrides only. */
   overriddenBy?: string;
+  /**
+   * Email of the source-club rep who issued the clearance (ECTA: the approval's recorded
+   * identity). Set on a CLUB approval only; absent on pre-feature approvals.
+   */
+  clubApprovedBy?: string;
+  /**
+   * Pointer to the issued transfer certificate (see CertificateRecord). Rides the canonical
+   * AND the mirror so both clubs can view it. Written only by the certificate issuer.
+   */
+  certificateMeta?: CertificateMeta;
+  /**
+   * True when the union override opted OUT of a certificate (a disposal, not a real transfer).
+   * Rides both rows; the issuer and both view-url routes refuse such a clearance.
+   */
+  certificateDeclined?: boolean;
   version: number;
+}
+
+export type CertificateTemplate = 'classic' | 'confirmation';
+
+/** The clearance-side pointer to an issued certificate. */
+export interface CertificateMeta {
+  serial: string;
+  objectKey: string;
+  contentType: string;
+  generatedAt: string;
+  template: CertificateTemplate;
+  /** sha256 of the stored PDF — lets a missing registry item be rebuilt from this pointer. */
+  sha256: string;
+  /** Issued with the historical-records approval copy (backfill --include-imported). */
+  historical?: boolean;
+  revokedAt?: string;
+}
+
+/** One side of the approval record as the certificate states it. */
+export interface CertificateApproval {
+  /** 'club' = the club's own portal action; 'admin' = union override; others are copy-only. */
+  kind: 'club' | 'admin' | 'registration' | 'not-recorded' | 'historical';
+  by?: string;
+  at?: string;
+}
+
+/**
+ * The GLOBAL certificate registry item (pk `CERT#<serial>`, sk `META`) — the verify page's
+ * source of truth. Not tenant-enumerable (like TOKEN#), so erasure harvests serials from the
+ * clearance rows' certificateMeta. Carries only the masked ID: it is served publicly.
+ */
+export interface CertificateRecord {
+  serial: string;
+  tenant: string;
+  clearanceId: string;
+  fromClubId: string;
+  toClubId: string;
+  fromClubName: string;
+  toClubName: string;
+  playerName: string;
+  idNumberMasked: string;
+  orgName: string;
+  effectiveDate: string;
+  issuedAt: string;
+  transferringApproval: CertificateApproval;
+  acquiringApproval: CertificateApproval;
+  template: CertificateTemplate;
+  objectKey: string;
+  sha256: string;
+  kid: string;
+  /** Compact JWS (ES256) over the canonical certificate facts. */
+  signedPayload: string;
+  /**
+   * SPKI PEM of the key that signed `signedPayload` (whose id is `kid`). Travels with the
+   * record so verification survives a future key rotation.
+   */
+  publicKeyPem: string;
+  status: 'valid' | 'revoked';
+  revokedAt?: string;
+  revokedBy?: string;
+  revokeReason?: string;
+}
+
+/** Operator-set organisation contact details printed in the confirmation template's footer. */
+export interface OrgContact {
+  regNo?: string;
+  address?: string;
+  phone?: string;
+  website?: string;
+  email?: string;
 }
 
 /**

@@ -36,15 +36,15 @@ export default async function globalSetup(): Promise<void> {
 /** Poll until the API accepts connections (boot in progress), then return the probe status. */
 async function waitForApi(url: string, timeoutMs: number): Promise<number | 'unreachable'> {
   const deadline = Date.now() + timeoutMs;
-  while (true) {
+  do {
     try {
       return (await fetch(url, { headers: apiHeaders(adminAuthHeader()) })).status;
     } catch (err) {
       if (!isConnectionRefused(err)) throw err;
-      if (Date.now() >= deadline) return 'unreachable';
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     }
-  }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  } while (Date.now() < deadline);
+  return 'unreachable';
 }
 
 async function isListening(url: string): Promise<boolean> {
