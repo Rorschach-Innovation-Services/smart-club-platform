@@ -1106,7 +1106,18 @@ export function AffiliationForm({
         }
         return out;
       })(),
-      coaches: club.coaches && club.coaches.length ? club.coaches : [{ ...EMPTY_COACH, teams: [] }],
+      // Backfill form-shape defaults (teams/teamIds arrays, etc.) — imported club
+      // records (e.g. Titans compliance intake) store coaches without them, which
+      // crashed the Coaches step (`c.teams.includes`) on hydrate. DOLPHINS-WEB-6.
+      coaches:
+        club.coaches && club.coaches.length
+          ? club.coaches.map((c) => ({
+              ...EMPTY_COACH,
+              ...c,
+              teams: Array.isArray(c.teams) ? c.teams : [],
+              teamIds: Array.isArray(c.teamIds) ? c.teamIds : [],
+            }))
+          : [{ ...EMPTY_COACH, teams: [] }],
       // Home ground / venue
       groundVenue: ground.venue || '',
       groundAddress: ground.address || '',
