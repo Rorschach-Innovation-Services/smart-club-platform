@@ -4,8 +4,12 @@
  * - CLI under `sst shell`: SST injects `SST_RESOURCE_<Name>` as JSON.
  */
 
-function fromSstResource(name: string, prop: string): string | undefined {
-  const raw = process.env[`SST_RESOURCE_${name}`];
+export function fromSstResource(
+  name: string,
+  prop: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const raw = env[`SST_RESOURCE_${name}`];
   if (!raw) return undefined;
   try {
     return JSON.parse(raw)[prop];

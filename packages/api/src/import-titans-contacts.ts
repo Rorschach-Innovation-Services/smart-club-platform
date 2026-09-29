@@ -10,7 +10,17 @@
  *   … --data-only                                                                 # exco/coach only, no accounts/sends
  *   … --club "ADELAAR"            # one section only
  *   … --skip-club "TITANS SCORERS ASSOCIATION"   # (repeatable) drop a section; the ONLY way an unmatched section stops blocking
+ *   … --confirm --resend          # re-send to EVERYONE matched, ignoring completed send markers
+ *   … --confirm --allow-dry-run-sends   # deliberate test: let a dry-run channel "send" (nothing real goes out)
  *   … --revert [--manifest <path>]
+ *
+ * Notify config under `sst shell`: the SES/WhatsApp secrets reach a Lambda via its
+ * `environment:` block, but `sst shell` only injects them as SST_RESOURCE_<Name> JSON. main()
+ * therefore copies FromEmail / WhatsappAccessToken / WhatsappPhoneNumberId into FROM_EMAIL /
+ * WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID (when unset) BEFORE any notify module loads
+ * (email.ts/whatsapp.ts freeze their dry-run flags at import time). `--confirm` then REFUSES to
+ * run if a requested channel would still be in notify dry-run with sends planned — on 29 Sep
+ * 2026 every invite "sent" in dry-run and the markers were completed, silently.
  *
  * See docs/runbooks/titans-contact-import.md.
  *
@@ -46,7 +56,10 @@ import {
 import { isLegacyXlsBuffer } from './committee-parse.js';
 import { CLUB_MAP } from './titans-import-map.js';
 import { canonicalWebOrigin } from './origins.js';
-import { toE164 } from './notify/whatsapp.js';
+// NOT './notify/whatsapp.js': loading that module freezes WHATSAPP_DRY_RUN from process.env,
+// which must only happen AFTER bootstrapNotifyEnvFromSst() (see main()).
+import { toE164 } from './notify/e164.js';
+import { fromSstResource } from './env.js';
 import type { Channel, ClubCommEvent, Membership } from './types.js';
 
 type RepoModule = typeof import('./repo.js');
@@ -61,6 +74,12 @@ const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 /** Deterministic per-person idempotency key: a re-run replays (reports `sent-previously`)
  * rather than re-billing a Meta conversation / re-sending an email. */
 const idempotencyKeyFor = (email: string): string => `staff-import-${email}`;
+/** The key a `--resend` run claims instead: a DIFFERENT key, so a completed marker under the
+ * normal key (e.g. the 29 Sep 2026 dry-run sends) no longer replays. Deterministic, so a
+ * `--resend` interrupted part-way can be re-run with `--resend` without double-sending the
+ * people it already reached (they replay on this key for its 72h TTL). */
+export const resendIdempotencyKeyFor = (email: string): string =>
+  `${idempotencyKeyFor(email)}#resend`;
 /** Tags every coach entry this import appends, so `--revert` can find and remove exactly the
  * entries this import wrote (matched on email + this source) and never a coach added by others. */
 const COACH_SOURCE = 'import:titans-contacts';
@@ -422,6 +441,10 @@ interface Args {
   dataOnly: boolean;
   revert: boolean;
   manifest: string;
+  /** Claim a fresh idempotency key per person so completed send markers don't replay. */
+  resend: boolean;
+  /** Proceed with --confirm even when a requested channel is in notify dry-run (tests only). */
+  allowDryRunSends: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -434,6 +457,8 @@ function parseArgs(argv: string[]): Args {
     dataOnly: false,
     revert: false,
     manifest: MANIFEST_PATH,
+    resend: false,
+    allowDryRunSends: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -448,6 +473,8 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--data-only') args.dataOnly = true;
     else if (a === '--revert') args.revert = true;
     else if (a === '--manifest') args.manifest = argv[++i] ?? MANIFEST_PATH;
+    else if (a === '--resend') args.resend = true;
+    else if (a === '--allow-dry-run-sends') args.allowDryRunSends = true;
     else throw new Error(`unknown flag ${a}`);
   }
   if (args.revert) return args;
@@ -869,17 +896,102 @@ export interface ConfirmDeps {
   getUserSubByEmail: typeof import('./cognito-users.js').getUserSubByEmail;
   sendStaffInvite: typeof import('./notify/index.js').sendStaffInvite;
   orgCopy: typeof import('./branding.js').orgCopy;
+  /** Whether each channel's sender is in notify dry-run — the notify modules' own
+   * EMAIL_DRY_RUN / WHATSAPP_DRY_RUN, i.e. exactly what sendStaffInvite will do. */
+  dryRun: Record<Channel, boolean>;
 }
 
 async function loadConfirmDeps(): Promise<ConfirmDeps> {
-  const [{ grantClubRep }, { getUserSubByEmail }, { sendStaffInvite }, { orgCopy }] =
-    await Promise.all([
-      import('./tenant-admin.js'),
-      import('./cognito-users.js'),
-      import('./notify/index.js'),
-      import('./branding.js'),
-    ]);
-  return { grantClubRep, getUserSubByEmail, sendStaffInvite, orgCopy };
+  const [
+    { grantClubRep },
+    { getUserSubByEmail },
+    { sendStaffInvite },
+    { orgCopy },
+    { EMAIL_DRY_RUN },
+    { WHATSAPP_DRY_RUN },
+  ] = await Promise.all([
+    import('./tenant-admin.js'),
+    import('./cognito-users.js'),
+    import('./notify/index.js'),
+    import('./branding.js'),
+    import('./notify/email.js'),
+    import('./notify/whatsapp.js'),
+  ]);
+  return {
+    grantClubRep,
+    getUserSubByEmail,
+    sendStaffInvite,
+    orgCopy,
+    dryRun: { email: EMAIL_DRY_RUN, whatsapp: WHATSAPP_DRY_RUN },
+  };
+}
+
+/** process.env name ← SST linked-secret name, for the notify config a Lambda gets via its
+ * `environment:` block (sst.config.ts) but `sst shell` only exposes as SST_RESOURCE_<Name>.
+ * SES_REGION needs no entry: email.ts already defaults it to eu-west-1, the Lambda's value. */
+const NOTIFY_SECRET_ENV: ReadonlyArray<readonly [envName: string, secretName: string]> = [
+  ['FROM_EMAIL', 'FromEmail'],
+  ['WHATSAPP_ACCESS_TOKEN', 'WhatsappAccessToken'],
+  ['WHATSAPP_PHONE_NUMBER_ID', 'WhatsappPhoneNumberId'],
+];
+
+/**
+ * Populate missing notify env from SST linked secrets (the `sst shell` SST_RESOURCE_<Name>
+ * JSON — the same mechanism env.ts uses for the table/pool). MUST run before notify/email.ts or
+ * notify/whatsapp.ts is loaded: both freeze their dry-run flag from process.env at import time.
+ * A value already present in the env wins; an empty secret (the '' default) is not copied, so
+ * that channel stays dry-run and the --confirm guard names it. No SST context (--parse-only,
+ * tests) ⇒ no-op. Returns the env NAMES it filled — never the values.
+ */
+export function bootstrapNotifyEnvFromSst(env: NodeJS.ProcessEnv = process.env): string[] {
+  const filled: string[] = [];
+  for (const [envName, secretName] of NOTIFY_SECRET_ENV) {
+    if (env[envName]) continue;
+    const value = fromSstResource(secretName, 'value', env);
+    if (typeof value === 'string' && value) {
+      env[envName] = value;
+      filled.push(envName);
+    }
+  }
+  return filled;
+}
+
+/** Why a channel is in notify dry-run, naming the missing config (never a value). */
+function dryRunReason(channel: Channel, env: NodeJS.ProcessEnv = process.env): string {
+  if (env.NOTIFY_DRY_RUN === '1') return 'NOTIFY_DRY_RUN=1';
+  const names =
+    channel === 'email' ? ['FROM_EMAIL'] : ['WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID'];
+  const missing = names.filter((n) => !env[n]);
+  // Set now but still dry-run ⇒ the notify module loaded before the env was populated.
+  return missing.length
+    ? `${missing.join(' + ')} unset`
+    : 'notify module loaded before env was set';
+}
+
+/**
+ * The --confirm dry-run send guard. Returns the refusal messages (empty ⇒ proceed): one per
+ * REQUESTED channel that is in notify dry-run, when at least one invite send is planned. A
+ * dry-run send returns a synthetic success, and runConfirm would then COMPLETE the person's
+ * idempotency marker — so the real invite is silently never sent and a plain re-run replays
+ * `sent-previously` (the 29 Sep 2026 incident). Pure over its inputs for testing.
+ */
+export function dryRunSendRefusals(
+  plan: ContactPlan,
+  dryRun: Record<Channel, boolean>,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const anySendPlanned = plan.people.some(
+    (p) =>
+      p.invite && p.account !== 'admin-elsewhere' && p.channels.some((c) => c.status === 'send'),
+  );
+  if (!anySendPlanned) return [];
+  return plan.channels
+    .filter((ch) => dryRun[ch])
+    .map(
+      (ch) =>
+        `${ch} channel is in notify dry-run (${dryRunReason(ch, env)}) — refusing --confirm; ` +
+        'sends would be silently skipped and their markers completed',
+    );
 }
 
 export async function runConfirm(
@@ -890,8 +1002,36 @@ export async function runConfirm(
   args: Args,
   deps?: ConfirmDeps,
 ): Promise<void> {
-  const { grantClubRep, getUserSubByEmail, sendStaffInvite, orgCopy } =
+  const { grantClubRep, getUserSubByEmail, sendStaffInvite, orgCopy, dryRun } =
     deps ?? (await loadConfirmDeps());
+
+  // Dry-run send guard — BEFORE the backup, any exco/account write, and every claim/send, so
+  // a refused run has touched nothing.
+  const refusals = dryRunSendRefusals(plan, dryRun);
+  if (refusals.length && !args.allowDryRunSends) {
+    throw new Error(
+      `${refusals.join('\n')}\n` +
+        'Run under `npx sst shell --stage <stage>` with the FromEmail / WhatsappAccessToken / ' +
+        'WhatsappPhoneNumberId secrets set (or export the env names above), or pass ' +
+        '--allow-dry-run-sends for a deliberate no-real-send test.',
+    );
+  }
+  if (refusals.length) {
+    console.warn(
+      '\n' +
+        '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n' +
+        '!! --allow-dry-run-sends: NO REAL INVITES WILL GO OUT on the channel(s) below.\n' +
+        '!! Their send markers WILL be completed — a later real send needs --resend.\n' +
+        refusals.map((r) => `!!   ${r}\n`).join('') +
+        '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n',
+    );
+  }
+  if (args.resend) {
+    console.log(
+      '· --resend: claiming fresh send keys (…#resend) — every invite-planned person is re-sent, ' +
+        'ignoring completed markers from earlier runs.',
+    );
+  }
 
   // Backup lands next to the manifest (its directory), not in the process CWD — so a test
   // pointing --manifest at a tmp dir keeps the backup there too, without chdir'ing the
@@ -954,7 +1094,9 @@ export async function runConfirm(
       excoWrites: [],
       coachWrites: [],
       commLog: [],
-      idempotencyKey: idempotencyKeyFor(person.email),
+      idempotencyKey: args.resend
+        ? resendIdempotencyKeyFor(person.email)
+        : idempotencyKeyFor(person.email),
       sendMarkerClubId: person.sendMarkerClubId ?? null,
     };
 
@@ -1282,6 +1424,13 @@ export async function runRevert(repo: RepoModule, args: Args, deps?: RevertDeps)
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
+  // FIRST, before any dynamic import below: nothing statically imported by this module loads
+  // notify/email.ts or notify/whatsapp.ts (toE164 comes from the env-free notify/e164.ts), and
+  // they are only loaded later via loadConfirmDeps() — so their import-time dry-run flags see
+  // the env populated here. No SST context (e.g. --parse-only outside sst shell) ⇒ a no-op.
+  const filled = bootstrapNotifyEnvFromSst();
+  if (filled.length) console.log(`· notify config from SST linked secrets: ${filled.join(', ')}`);
+
   if (args.revert) {
     const repo = await import('./repo.js');
     await runRevert(repo, args);
@@ -1315,6 +1464,11 @@ async function main(): Promise<void> {
   }
   if (!args.confirm) {
     console.log('\nRe-run with --confirm to write (accounts + exco + sends).');
+    if (args.resend) {
+      console.log(
+        '(--resend: the --confirm run will re-send to EVERY invite-planned person above, ignoring completed send markers.)',
+      );
+    }
     return;
   }
   await runConfirm(repo, cognito, pool, plan, args);

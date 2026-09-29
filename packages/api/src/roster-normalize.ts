@@ -26,6 +26,11 @@ export function cellString(v: unknown): string {
   if (v instanceof Date) return '';
   if (typeof v === 'object' && 'richText' in (v as object))
     return (v as { richText: Array<{ text: string }> }).richText.map((r) => r.text).join('');
+  // Hyperlink cells (mailto: emails, tel: numbers) are `{ text, hyperlink }` objects in
+  // exceljs — without this branch they stringify to "[object Object]" and 33 of the 40
+  // Titans contact emails (stored as mailto links) parsed as unusable (29 Sep 2026).
+  if (typeof v === 'object' && 'hyperlink' in (v as object))
+    return cellString((v as { text?: unknown }).text ?? '');
   if (typeof v === 'object' && 'result' in (v as object))
     return cellString((v as { result: unknown }).result);
   return String(v).trim();

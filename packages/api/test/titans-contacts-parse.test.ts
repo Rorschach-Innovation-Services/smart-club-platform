@@ -41,6 +41,13 @@ describe('parseContactsWorkbook — sections, people, and row shape', () => {
     ['Cody', 'Naidoo', 'Chairman', '012  382 5396', 'cody@example.com'], // landline-shaped cell
     ['Dina', 'Petersen', 'Secretary', '', 'dina@example.com'], // no cell on file
   ]);
+  // The real workbook stores most emails as mailto HYPERLINK cells, which exceljs surfaces
+  // as `{ text, hyperlink }` objects, not strings — rewrite one cell to that shape so the
+  // parse proves it unwraps them (33/40 real emails parsed as unusable before this).
+  wb.getWorksheet('CLUB CONTACT LIST ')!.getRow(6).getCell(5).value = {
+    text: 'bea@example.com',
+    hyperlink: 'mailto:bea@example.com',
+  };
   const parsed = parseContactsWorkbook(wb);
 
   test('finds the sheet by its trimmed name despite the trailing space', () => {
@@ -66,6 +73,10 @@ describe('parseContactsWorkbook — sections, people, and row shape', () => {
 
   test('emails are trimmed + lowercased; a leading-space mixed-case email is normalised', () => {
     assert.equal(parsed.people[0].email, 'aden@example.com');
+  });
+
+  test('a mailto-hyperlink email cell is unwrapped to its text, not "[object Object]"', () => {
+    assert.equal(parsed.people[1].email, 'bea@example.com');
   });
 
   test('a person with no cell on file keeps a blank cell, never a fabricated one', () => {

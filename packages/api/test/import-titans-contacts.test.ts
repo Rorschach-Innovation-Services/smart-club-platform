@@ -8,9 +8,11 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const {
   buildPlan,
@@ -20,6 +22,9 @@ const {
   effectiveInviteChannels,
   runConfirm,
   runRevert,
+  dryRunSendRefusals,
+  bootstrapNotifyEnvFromSst,
+  resendIdempotencyKeyFor,
 } = await import('../src/import-titans-contacts.js');
 type Mod = typeof import('../src/import-titans-contacts.js');
 type ManifestEntry = Parameters<Mod['mergeManifestEntry']>[0];
@@ -40,6 +45,8 @@ function confirmArgs(manifest: string): Args {
     dataOnly: false,
     revert: false,
     manifest,
+    resend: false,
+    allowDryRunSends: false,
   };
 }
 
@@ -612,6 +619,7 @@ describe('runConfirm — channel + version assembly (findings 1 & 9)', () => {
           };
         }) as never,
         orgCopy: (() => ({ name: 'Titans' })) as never,
+        dryRun: { email: false, whatsapp: false },
       };
 
       const plan = buildPlan(
@@ -765,5 +773,290 @@ describe('runRevert — coach append removal (must-fix 2)', () => {
     );
     // The revert write carries OUR read's version.
     assert.equal(updateClubCalls[0].version, 7);
+  });
+});
+
+// ───────────── 29 Sep 2026 incident: dry-run guard, --resend, sst-shell bootstrap ─────────────
+
+/** A fake repo whose claimInviteSend behaves like repo.ts: the FIRST claim of a key succeeds
+ * (null); a key whose marker is `completed` replays. `completedKeys` seeds prior markers. */
+function incidentHarness(completedKeys: string[] = []) {
+  const markers = new Map<string, 'in_progress' | 'completed'>(
+    completedKeys.map((k) => [k, 'completed']),
+  );
+  const calls = {
+    claims: [] as string[],
+    sends: 0,
+    updateClub: 0,
+    listClubs: 0,
+    grants: 0,
+  };
+  const repo = {
+    listClubs: async () => {
+      calls.listClubs++;
+      return [];
+    },
+    getTenantConfig: async () => null,
+    getClub: async (_t: string, id: string) => ({
+      id,
+      name: 'Adelaar',
+      exco: {},
+      coaches: [],
+      version: 1,
+    }),
+    updateClub: async () => {
+      calls.updateClub++;
+      return {} as never;
+    },
+    getUser: async () => null,
+    claimInviteSend: async (_t: string, _c: string, key: string) => {
+      calls.claims.push(key);
+      const m = markers.get(key);
+      if (m) return { pending: m !== 'completed', results: [] };
+      markers.set(key, 'in_progress');
+      return null;
+    },
+    completeInviteSend: async (_t: string, _c: string, key: string) => {
+      markers.set(key, 'completed');
+    },
+    releaseInviteClaim: async (_t: string, _c: string, key: string) => {
+      markers.delete(key);
+    },
+    appendClubCommEvents: async () => {},
+  } as unknown as FakeRepo;
+  const deps = (dryRun: { email: boolean; whatsapp: boolean }): ConfirmDeps => ({
+    grantClubRep: (async () => {
+      calls.grants++;
+      return { sub: 'sub-1', clubIds: ['adelaar-cricket-club'] };
+    }) as never,
+    getUserSubByEmail: (async () => null) as never,
+    sendStaffInvite: (async () => {
+      calls.sends++;
+      return {
+        results: [{ channel: 'email', status: 'sent', to: 'aden@example.com', messageId: 'm1' }],
+      };
+    }) as never,
+    orgCopy: (() => ({ name: 'Titans' })) as never,
+    dryRun,
+  });
+  return { repo, deps, calls, markers };
+}
+
+const oneChairPlan = (channels: ('email' | 'whatsapp')[] = ['email', 'whatsapp']) =>
+  buildPlan(
+    makeInputs({
+      people: [person('ADELAAR', 'Aden Schadle', 'Chairman', 'aden@example.com', '081 869 5204')],
+      channels,
+    }),
+  );
+
+async function withTmp<T>(fn: (manifest: string) => Promise<T>): Promise<T> {
+  const tmp = mkdtempSync(join(tmpdir(), 'titans-incident-'));
+  try {
+    return await fn(join(tmp, 'manifest.json'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+describe('runConfirm — dry-run send guard (29 Sep 2026 incident)', () => {
+  test('a dry-run email channel aborts BEFORE any backup, write, claim or send', async () => {
+    const h = incidentHarness();
+    await withTmp(async (manifest) => {
+      await assert.rejects(
+        runConfirm(
+          h.repo,
+          {} as never,
+          'pool',
+          oneChairPlan(),
+          confirmArgs(manifest),
+          h.deps({ email: true, whatsapp: false }),
+        ),
+        (err: Error) => {
+          assert.match(err.message, /email channel is in notify dry-run/);
+          assert.match(err.message, /refusing --confirm/);
+          return true;
+        },
+      );
+      // Nothing written: no backup file / manifest in the dir, no DB touch at all.
+      assert.deepEqual(readdirSync(dirname(manifest)), []);
+    });
+    assert.deepEqual(h.calls.claims, []);
+    assert.equal(h.calls.sends, 0);
+    assert.equal(h.calls.updateClub, 0);
+    assert.equal(h.calls.grants, 0);
+    assert.equal(h.calls.listClubs, 0);
+  });
+
+  test('a dry-run whatsapp channel also aborts when whatsapp is requested', async () => {
+    const h = incidentHarness();
+    await withTmp(async (manifest) => {
+      await assert.rejects(
+        runConfirm(
+          h.repo,
+          {} as never,
+          'pool',
+          oneChairPlan(),
+          confirmArgs(manifest),
+          h.deps({ email: false, whatsapp: true }),
+        ),
+        /whatsapp channel is in notify dry-run/,
+      );
+    });
+    assert.deepEqual(h.calls.claims, []);
+  });
+
+  test('--allow-dry-run-sends proceeds (claims + sends) despite a dry-run channel', async () => {
+    const h = incidentHarness();
+    await withTmp(async (manifest) => {
+      await runConfirm(
+        h.repo,
+        {} as never,
+        'pool',
+        oneChairPlan(),
+        { ...confirmArgs(manifest), allowDryRunSends: true },
+        h.deps({ email: true, whatsapp: true }),
+      );
+    });
+    assert.deepEqual(h.calls.claims, ['staff-import-aden@example.com']);
+    assert.equal(h.calls.sends, 1);
+  });
+
+  test('dryRunSendRefusals: only REQUESTED channels count, and nothing fires with no send planned', () => {
+    // whatsapp is dry-run but only email was requested → no refusal.
+    assert.deepEqual(
+      dryRunSendRefusals(oneChairPlan(['email']), { email: false, whatsapp: true }),
+      [],
+    );
+    // --data-only plans no sends → no refusal even with both channels dry-run.
+    const dataOnly = buildPlan(
+      makeInputs({
+        people: [person('ADELAAR', 'Aden Schadle', 'Chairman', 'aden@example.com')],
+        channels: ['email', 'whatsapp'],
+        dataOnly: true,
+      }),
+    );
+    assert.deepEqual(dryRunSendRefusals(dataOnly, { email: true, whatsapp: true }), []);
+    // The refusal names the missing config (and never a value).
+    const [msg] = dryRunSendRefusals(oneChairPlan(['email']), { email: true, whatsapp: false }, {});
+    assert.match(msg, /FROM_EMAIL unset/);
+  });
+});
+
+describe('runConfirm — --resend (29 Sep 2026 recovery)', () => {
+  const completedByIncident = ['staff-import-aden@example.com'];
+
+  test('without --resend a completed marker replays (sent-previously, no send)', async () => {
+    const h = incidentHarness(completedByIncident);
+    await withTmp(async (manifest) => {
+      await runConfirm(
+        h.repo,
+        {} as never,
+        'pool',
+        oneChairPlan(),
+        confirmArgs(manifest),
+        h.deps({ email: false, whatsapp: false }),
+      );
+    });
+    assert.deepEqual(h.calls.claims, ['staff-import-aden@example.com']);
+    assert.equal(h.calls.sends, 0);
+  });
+
+  test('with --resend a FRESH key is claimed, bypassing the completed marker, and the invite sends', async () => {
+    const h = incidentHarness(completedByIncident);
+    await withTmp(async (manifest) => {
+      await runConfirm(
+        h.repo,
+        {} as never,
+        'pool',
+        oneChairPlan(),
+        { ...confirmArgs(manifest), resend: true },
+        h.deps({ email: false, whatsapp: false }),
+      );
+    });
+    assert.deepEqual(h.calls.claims, [resendIdempotencyKeyFor('aden@example.com')]);
+    assert.notEqual(h.calls.claims[0], 'staff-import-aden@example.com');
+    assert.equal(h.calls.sends, 1);
+    assert.equal(h.markers.get(resendIdempotencyKeyFor('aden@example.com')), 'completed');
+  });
+
+  test('a second --resend run replays on the resend key (no double send after a partial run)', async () => {
+    const h = incidentHarness([
+      ...completedByIncident,
+      resendIdempotencyKeyFor('aden@example.com'),
+    ]);
+    await withTmp(async (manifest) => {
+      await runConfirm(
+        h.repo,
+        {} as never,
+        'pool',
+        oneChairPlan(),
+        { ...confirmArgs(manifest), resend: true },
+        h.deps({ email: false, whatsapp: false }),
+      );
+    });
+    assert.equal(h.calls.sends, 0);
+  });
+});
+
+describe('bootstrapNotifyEnvFromSst — sst shell linked secrets', () => {
+  const sstEnv = (): NodeJS.ProcessEnv => ({
+    SST_RESOURCE_FromEmail: JSON.stringify({ type: 'sst.sst.Secret', value: 'info@example.com' }),
+    SST_RESOURCE_WhatsappAccessToken: JSON.stringify({ type: 'sst.sst.Secret', value: 'tok' }),
+    SST_RESOURCE_WhatsappPhoneNumberId: JSON.stringify({ type: 'sst.sst.Secret', value: '123' }),
+  });
+
+  test('fills missing env names from the SST_RESOURCE_* secrets; returns names only', () => {
+    const env = sstEnv();
+    const filled = bootstrapNotifyEnvFromSst(env);
+    assert.deepEqual(filled, ['FROM_EMAIL', 'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID']);
+    assert.equal(env.FROM_EMAIL, 'info@example.com');
+    assert.equal(env.WHATSAPP_ACCESS_TOKEN, 'tok');
+    assert.equal(env.WHATSAPP_PHONE_NUMBER_ID, '123');
+  });
+
+  test('an already-set env value wins; an empty (default) secret is not copied; no SST ⇒ no-op', () => {
+    const env: NodeJS.ProcessEnv = {
+      ...sstEnv(),
+      FROM_EMAIL: 'override@example.com',
+      SST_RESOURCE_WhatsappAccessToken: JSON.stringify({ type: 'sst.sst.Secret', value: '' }),
+    };
+    assert.deepEqual(bootstrapNotifyEnvFromSst(env), ['WHATSAPP_PHONE_NUMBER_ID']);
+    assert.equal(env.FROM_EMAIL, 'override@example.com');
+    assert.equal(env.WHATSAPP_ACCESS_TOKEN, undefined);
+
+    const bare: NodeJS.ProcessEnv = {};
+    assert.deepEqual(bootstrapNotifyEnvFromSst(bare), []);
+    assert.deepEqual(bare, {});
+  });
+
+  test('load order: importing the CLI does not load the notify senders, so they see the bootstrapped env', () => {
+    // A fresh process (module caches are per-process): import the CLI module, bootstrap, THEN
+    // load the notify modules — their import-time dry-run flags must reflect the secrets.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = (f: string) => JSON.stringify(join(here, '..', 'src', f));
+    const code = `
+      const cli = await import(${src('import-titans-contacts.ts')});
+      cli.bootstrapNotifyEnvFromSst();
+      const { EMAIL_DRY_RUN } = await import(${src('notify/email.ts')});
+      const { WHATSAPP_DRY_RUN } = await import(${src('notify/whatsapp.ts')});
+      console.log(JSON.stringify({ EMAIL_DRY_RUN, WHATSAPP_DRY_RUN }));
+    `;
+    const env: NodeJS.ProcessEnv = { ...process.env, ...sstEnv() };
+    for (const k of [
+      'FROM_EMAIL',
+      'WHATSAPP_ACCESS_TOKEN',
+      'WHATSAPP_PHONE_NUMBER_ID',
+      'NOTIFY_DRY_RUN',
+    ])
+      delete env[k];
+    const res = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', '--input-type=module', '-e', code],
+      { env, encoding: 'utf8', cwd: join(here, '..') },
+    );
+    assert.equal(res.status, 0, res.stderr);
+    const out = JSON.parse(res.stdout.trim().split('\n').pop()!);
+    assert.deepEqual(out, { EMAIL_DRY_RUN: false, WHATSAPP_DRY_RUN: false });
   });
 });

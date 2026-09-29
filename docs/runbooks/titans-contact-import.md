@@ -83,7 +83,24 @@ with "tenant has no clubs on this stage" — that is a valid outcome, not a fail
 
 ### 3. Prod dry-run
 
+> **Origin env vars are required.** `sst shell` injects linked resources and secrets but NOT
+> the Lambda's plain env, so `WILDCARD_ENABLED`/`WILDCARD_WEB_SUFFIX` are unset and
+> `canonicalWebOrigin('titans')` resolves to nothing — the run then blocks with
+> "no canonical web origin for titans". Prefix both commands below with the same values prod's
+> Lambda carries (see sst.config.ts / infra/tenants.ts):
+> `WILDCARD_ENABLED=1 WILDCARD_WEB_SUFFIX=.club.medicoach.co.za`
+>
+> **The send secrets need no prefix.** `sst shell` exposes the `FromEmail`,
+> `WhatsappAccessToken` and `WhatsappPhoneNumberId` secrets only as `SST_RESOURCE_*` JSON, not
+> as the `FROM_EMAIL` / `WHATSAPP_*` env the notify senders read. The CLI copies them across at
+> startup (before the senders load; an env value you set yourself wins) and prints
+> `· notify config from SST linked secrets: FROM_EMAIL, WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID`.
+> If that line is missing or incomplete, a secret is unset on the stage and `--confirm` will
+> refuse (see the dry-run send guard below). `SES_REGION` already defaults to `eu-west-1`,
+> the Lambda's value.
+
 ```bash
+WILDCARD_ENABLED=1 WILDCARD_WEB_SUFFIX=.club.medicoach.co.za \
 npx sst shell --stage prod -- \
   npm --prefix packages/api run import-titans-contacts -- \
   --file "/Users/carlton/Downloads/titans-contacts-2026-27.xlsx"
@@ -97,6 +114,7 @@ Resolve each blocker deliberately: add the club first, or exclude the section wi
 ### 4. Prod confirm (writes — run by the deploy owner, never by Claude)
 
 ```bash
+WILDCARD_ENABLED=1 WILDCARD_WEB_SUFFIX=.club.medicoach.co.za \
 npx sst shell --stage prod -- \
   npm --prefix packages/api run import-titans-contacts -- \
   --file "/Users/carlton/Downloads/titans-contacts-2026-27.xlsx" \
@@ -104,7 +122,20 @@ npx sst shell --stage prod -- \
   --confirm
 ```
 
-`--confirm` refuses to run while any blocker stands (no override flag). It writes exco/coach
+`--confirm` refuses to run while any blocker stands (no override flag).
+
+**Dry-run send guard.** Before it writes anything (backup, exco, accounts, send markers),
+`--confirm` checks every channel you requested with `--channels`. If any of them is in notify
+dry-run (`FROM_EMAIL` unset for email; `WHATSAPP_ACCESS_TOKEN` / `WHATSAPP_PHONE_NUMBER_ID`
+unset for WhatsApp; or `NOTIFY_DRY_RUN=1`) and at least one invite is planned, it aborts with
+e.g. `email channel is in notify dry-run (FROM_EMAIL unset) — refusing --confirm`. A dry-run
+"send" returns a fake success and the run would complete that person's send marker, so the
+real invite would never go out and a plain re-run would skip them (the 29 Sep 2026 incident).
+`--allow-dry-run-sends` overrides the guard for a deliberate no-real-send test only; it prints
+a warning banner and still completes the markers, so a later real send needs `--resend`.
+`--data-only` plans no sends, so the guard never fires for it.
+
+After the guards, `--confirm` writes exco/coach
 data, grants rep accounts (unioning the sheet clubs with each person's existing membership —
 `grantClubRep` replaces membership wholesale, so the union prevents stripping prior scopes),
 and sends invites. A backup of the pre-run club state and an incremental revert manifest
@@ -129,8 +160,62 @@ that person's claim and records a per-person failure — so a corrected re-run c
 PARTIAL failure (one channel sent, another failed) completes the marker: that person is
 `sent-previously` on the next run and the failed channel is **not** retried automatically. To
 resend the failed channel you must either let the marker's 72h TTL lapse, or fix the underlying
-cause (e.g. get the WhatsApp template Active in Meta) and use a fresh idempotency key / fresh
-claim.
+cause (e.g. get the WhatsApp template Active in Meta) and re-run with `--resend` (which claims
+a fresh key). `--resend` re-sends **every** channel to **everyone** invite-planned, not just
+the failed channel.
+
+## Recovery: the 29 Sep 2026 dry-run sends (`--resend`, run once)
+
+**What happened.** The prod `--confirm --channels email,whatsapp` run on 29 Sep 2026 wrote
+the exco/coach data and the Cognito/DynamoDB accounts correctly. But all 38 invites went out
+in notify dry-run, because `sst shell` doesn't set `FROM_EMAIL` / `WHATSAPP_*` (see step 3).
+Each "send" returned a fake success, so the CLI **completed** all 38 `staff-invite` markers
+(key `staff-import-<email>`). A plain re-run reports everyone `sent-previously` and sends
+nothing. (Those markers expire 72h after the run, around 2 Oct 2026. `--resend` works before
+and after that.)
+
+**The fix.** `--resend` claims a different key per person (`staff-import-<email>#resend`), so
+the completed markers are ignored and the invite goes out. The rest of the run is already
+idempotent. Accounts show `pending-exists` and are re-granted with the same union of clubs,
+and exco slots show `keep`, so nothing is written twice. A re-run with `--resend` does
+nothing except send the invites. Anyone who has signed in since 29 Sep shows `active` and is
+not re-invited.
+
+**Rules.**
+
+- Use `--resend` **once**, for this incident. It sends to **everyone** the run matches, so
+  use the **same** `--skip-club` filters as the 29 Sep run. Different filters change who
+  matches and which club holds each person's marker.
+- The `#resend` key is fixed. If the resend run is interrupted, running the same command
+  again skips the people it already reached (they show `sent-previously` on the resend key
+  for 72h) and sends only to the rest.
+- Do the dry-run first (same command without `--confirm`) and check that the
+  `notify config from SST linked secrets: FROM_EMAIL, WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID`
+  line is printed. If a secret is missing, the `--confirm` run stops before it writes or
+  sends anything.
+
+```bash
+# 1. dry-run preview (read-only)
+WILDCARD_ENABLED=1 WILDCARD_WEB_SUFFIX=.club.medicoach.co.za \
+npx sst shell --stage prod -- \
+  npm --prefix packages/api run import-titans-contacts -- \
+  --file "/Users/carlton/Downloads/titans-contacts-2026-27.xlsx" \
+  --skip-club "TITANS SCORERS ASSOCIATION" --skip-club "TITANS UMPIRES ASSCOCIATION" \
+  --channels email,whatsapp --resend
+
+# 2. the recovery send (deploy owner only)
+WILDCARD_ENABLED=1 WILDCARD_WEB_SUFFIX=.club.medicoach.co.za \
+npx sst shell --stage prod -- \
+  npm --prefix packages/api run import-titans-contacts -- \
+  --file "/Users/carlton/Downloads/titans-contacts-2026-27.xlsx" \
+  --skip-club "TITANS SCORERS ASSOCIATION" --skip-club "TITANS UMPIRES ASSCOCIATION" \
+  --channels email,whatsapp --confirm --resend
+```
+
+Expect the summary line `· granted N rep account(s), 38 invite(s) sent, 0 already-sent (replay), …`.
+N is the number of people still not signed in; the invite count falls by the same amount if
+anyone has signed in since. A new comm-log entry per channel is added to each club, next to
+the 29 Sep dry-run entries.
 
 ## WhatsApp preconditions (email needs none of this)
 
