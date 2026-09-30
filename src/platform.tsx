@@ -18,6 +18,7 @@ import { queryClient, qk } from './query';
 import * as api from './api';
 import { ApiError, EMAIL_RE } from './api';
 import { resolveCopy } from './branding';
+import { openTenantConsole, resolveTenantSlug } from './config';
 import { resolveVertical, VERTICALS, type ModuleKey, type Sport } from './vertical';
 import { Icon, Pill, Btn, Card, EmptyState, Modal, useToast } from './atoms';
 import { LeagueForm } from './admin';
@@ -383,6 +384,16 @@ export function PlatformPortal({
   const [toastShow, toastNode] = useToast();
   const path = location.pathname;
   const onClients = path === '/platform' || path.startsWith('/platform/tenants');
+  // The tenant this host resolves to — the "Workspace" link returns to its console.
+  // Named from the registry (same cache as the Clients list), else the slug.
+  const hostSlug = resolveTenantSlug();
+  const tenantsQ = useQuery({
+    queryKey: qk.platformTenants(),
+    queryFn: api.platformListTenants,
+    enabled: hasTenantConsole,
+  });
+  const hostName =
+    tenantsQ.data?.find((t: TenantSummary) => t.tenant === hostSlug)?.name || hostSlug;
 
   // One help drawer for the whole operator portal, so a HelpLink in any card, modal or
   // wizard opens it in place rather than falling back to a new tab.
@@ -453,11 +464,15 @@ export function PlatformPortal({
                 <div className="nav-section" style={{ marginTop: 18 }}>
                   Workspace
                 </div>
-                <button className="nav-item" onClick={() => navigate('/')}>
+                <button
+                  className="nav-item"
+                  title={`Open the ${hostName} admin console`}
+                  onClick={() => openTenantConsole(hostSlug)}
+                >
                   <span className="ni-icon">
                     <Icon.Dashboard />
                   </span>
-                  <span className="ni-label">Tenant console</span>
+                  <span className="ni-label">{hostName} console</span>
                 </button>
               </>
             )}
@@ -534,6 +549,37 @@ function CohortStat({ n, label }: { n?: number; label: string }) {
   );
 }
 
+/**
+ * "Open console" — jump into this client's admin console (full page load; see
+ * openTenantConsole). `compact` is the Clients-table variant: the label drops on
+ * narrow viewports (same breakpoint as the hidden columns) so Overview stays on-canvas.
+ */
+function OpenConsoleBtn({
+  slug,
+  name,
+  compact = false,
+}: {
+  slug: string;
+  name: string;
+  compact?: boolean;
+}) {
+  return (
+    <Btn
+      tone="outline"
+      size="sm"
+      icon={Icon.Arrow}
+      aria-label={`Open console: ${name}`}
+      title={`Open the ${name} admin console`}
+      onClick={(e) => {
+        e.stopPropagation();
+        openTenantConsole(slug);
+      }}
+    >
+      {compact ? <span className="hide-narrow">Open console</span> : 'Open console'}
+    </Btn>
+  );
+}
+
 function TenantListPage() {
   const navigate = useNavigate();
   const q = useQuery({ queryKey: qk.platformTenants(), queryFn: api.platformListTenants });
@@ -588,7 +634,7 @@ function TenantListPage() {
                 <th>Cohort</th>
                 <th>Admins</th>
                 <th>Status</th>
-                <th style={{ width: 110 }}></th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -642,6 +688,7 @@ function TenantListPage() {
                     </td>
                     <td style={{ textAlign: 'right', paddingRight: 18, whiteSpace: 'nowrap' }}>
                       {/* Row click opens settings; this drills into the breakdown. */}
+                      <OpenConsoleBtn slug={t.tenant} name={t.name} compact />{' '}
                       <Btn
                         tone="outline"
                         size="sm"
@@ -742,6 +789,7 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           </p>
         </div>
         <div className="ph-actions">
+          <OpenConsoleBtn slug={slug} name={config.branding?.name ?? slug} />
           <Btn
             tone="outline"
             size="sm"
@@ -1019,6 +1067,7 @@ function TenantOverviewPage() {
           </p>
         </div>
         <div className="ph-actions">
+          <OpenConsoleBtn slug={slug} name={d.name} />
           <Btn tone="outline" size="sm" onClick={() => navigate(`/platform/tenants/${slug}`)}>
             Settings
           </Btn>

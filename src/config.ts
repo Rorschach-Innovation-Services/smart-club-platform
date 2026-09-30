@@ -25,7 +25,10 @@ const HOST_TENANT_MAP = (() => {
   }
 })();
 
-/** Resolve the tenant slug: host map → subdomain → ?tenant= → build default → 'dolphins'. */
+/**
+ * Resolve the tenant slug: host map → subdomain → ?tenant= → sticky tab tenant
+ * (sessionStorage, bare hosts only) → build default → 'dolphins'.
+ */
 export function resolveTenantSlug() {
   const host = window.location.hostname.toLowerCase();
   if (HOST_TENANT_MAP[host]) return HOST_TENANT_MAP[host];
@@ -39,8 +42,35 @@ export function resolveTenantSlug() {
   if (!isBareHost && !host.includes('cloudfront.net') && !host.includes('execute-api')) {
     return label;
   }
+  // Bare host (dev CloudFront / localhost): the tenant comes from ?tenant=, which the
+  // SPA drops as soon as it navigates. Remember it per browser tab in sessionStorage so
+  // a refresh (or a link without the param) stays on the same tenant. Only this branch
+  // consults storage — mapped/subdomain hosts are authoritative.
   const qp = new URLSearchParams(window.location.search).get('tenant');
-  return (qp || import.meta.env.VITE_DEFAULT_TENANT || 'dolphins').toLowerCase();
+  if (qp) {
+    writeStickyTenant(qp.toLowerCase());
+    return qp.toLowerCase();
+  }
+  return (readStickyTenant() || import.meta.env.VITE_DEFAULT_TENANT || 'dolphins').toLowerCase();
+}
+
+const STICKY_TENANT_KEY = 'sc.tenant';
+
+// Storage can throw (disabled cookies, Safari private mode, sandboxed iframes). Either
+// failure just means the tenant isn't sticky — the pre-existing ?tenant=/default path.
+function readStickyTenant(): string | null {
+  try {
+    return window.sessionStorage.getItem(STICKY_TENANT_KEY);
+  } catch {
+    return null;
+  }
+}
+function writeStickyTenant(slug: string) {
+  try {
+    window.sessionStorage.setItem(STICKY_TENANT_KEY, slug);
+  } catch {
+    /* not sticky — see readStickyTenant */
+  }
 }
 
 // slug → canonical vanity web origin (mirrors WEB_ORIGIN_MAP in the API). Empty off-prod.
@@ -72,6 +102,29 @@ export function redirectToCanonicalOrigin(): boolean {
     canonical + window.location.pathname + window.location.search + window.location.hash,
   );
   return true;
+}
+
+/**
+ * The admin-console URL for a tenant, for operators hopping between clients. Prod
+ * resolves the tenant from the host (the API ignores x-tenant there), so a tenant's
+ * console lives at its own origin: its vanity origin if mapped, else its wildcard
+ * subdomain. Off-prod (bare CloudFront / localhost) the tenant rides ?tenant= on the
+ * current origin and is then kept sticky by resolveTenantSlug(). Sessions are
+ * per-origin, so in prod the operator signs in once per client origin.
+ */
+export function tenantConsoleUrl(slug: string): string {
+  if (WEB_ORIGIN_MAP[slug]) return `${WEB_ORIGIN_MAP[slug]}/`;
+  const suffix = import.meta.env.VITE_WILDCARD_WEB_SUFFIX ?? '';
+  if (import.meta.env.VITE_WILDCARD_ENABLED === '1' && suffix) return `https://${slug}${suffix}/`;
+  return `${window.location.origin}/?tenant=${encodeURIComponent(slug)}`;
+}
+
+/**
+ * Open a tenant's admin console. Always a full page load: TENANT_SLUG is resolved once
+ * at module load (main.tsx), so an in-app navigate would keep the old tenant.
+ */
+export function openTenantConsole(slug: string) {
+  window.location.assign(tenantConsoleUrl(slug));
 }
 
 /** Inject a tenant's color tokens + font + title + favicon onto the document. Missing tokens fall back to the default theme. */

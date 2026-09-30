@@ -21,8 +21,16 @@ vi.stubEnv(
 let resolveTenantSlug;
 let applyTheme;
 let redirectToCanonicalOrigin;
+let tenantConsoleUrl;
+let openTenantConsole;
 beforeAll(async () => {
-  ({ resolveTenantSlug, applyTheme, redirectToCanonicalOrigin } = await import('./config'));
+  ({
+    resolveTenantSlug,
+    applyTheme,
+    redirectToCanonicalOrigin,
+    tenantConsoleUrl,
+    openTenantConsole,
+  } = await import('./config'));
 });
 
 const atHost = (hostname, search = '') =>
@@ -80,6 +88,104 @@ describe('resolveTenantSlug', () => {
   it('resolves a wildcard club host by leftmost label', () => {
     atHost('demo.club.medicoach.co.za');
     expect(resolveTenantSlug()).toBe('demo');
+  });
+});
+
+// In-memory sessionStorage stand-in (vitest runs in node). `throws` simulates a
+// browser where storage access itself fails (private mode, blocked site data).
+const memoryStorage = (initial: Record<string, string> = {}, throws = false) => {
+  const data = { ...initial };
+  const guard = () => {
+    if (throws) throw new Error('SecurityError: storage disabled');
+  };
+  return {
+    data,
+    getItem: (k: string) => (guard(), k in data ? data[k] : null),
+    setItem: (k: string, v: string) => {
+      guard();
+      data[k] = v;
+    },
+  };
+};
+const atHostWithStorage = (hostname: string, search: string, storage) =>
+  vi.stubGlobal('window', {
+    location: { hostname, search, origin: `https://${hostname}` },
+    sessionStorage: storage,
+  });
+
+describe('resolveTenantSlug — sticky tenant on bare hosts', () => {
+  it('remembers ?tenant= for the tab so a refresh without it keeps the tenant', () => {
+    const storage = memoryStorage();
+    atHostWithStorage('d111abcdef8.cloudfront.net', '?tenant=Lions', storage);
+    expect(resolveTenantSlug()).toBe('lions');
+    expect(storage.data['sc.tenant']).toBe('lions');
+
+    atHostWithStorage('d111abcdef8.cloudfront.net', '', storage);
+    expect(resolveTenantSlug()).toBe('lions');
+  });
+
+  it('lets an explicit ?tenant= override the remembered tenant', () => {
+    const storage = memoryStorage({ 'sc.tenant': 'lions' });
+    atHostWithStorage('localhost', '?tenant=titans', storage);
+    expect(resolveTenantSlug()).toBe('titans');
+    expect(storage.data['sc.tenant']).toBe('titans');
+  });
+
+  it('falls back to the build default when nothing is remembered', () => {
+    atHostWithStorage('localhost', '', memoryStorage());
+    expect(resolveTenantSlug()).toBe('dolphins');
+  });
+
+  it('falls back silently when storage throws', () => {
+    atHostWithStorage('localhost', '', memoryStorage({}, true));
+    expect(resolveTenantSlug()).toBe('dolphins');
+    atHostWithStorage('localhost', '?tenant=lions', memoryStorage({}, true));
+    expect(resolveTenantSlug()).toBe('lions');
+  });
+
+  it('never consults storage on mapped or subdomain hosts', () => {
+    const storage = memoryStorage({ 'sc.tenant': 'lions' });
+    atHostWithStorage('dolphinspipeline.medicoach.co.za', '', storage);
+    expect(resolveTenantSlug()).toBe('dolphins');
+    atHostWithStorage('demo.club.medicoach.co.za', '?tenant=titans', storage);
+    expect(resolveTenantSlug()).toBe('demo');
+    expect(storage.data['sc.tenant']).toBe('lions');
+  });
+});
+
+describe('tenantConsoleUrl / openTenantConsole', () => {
+  afterEach(() => vi.stubEnv('VITE_WILDCARD_ENABLED', ''));
+
+  it('uses the vanity origin for a mapped tenant', () => {
+    vi.stubEnv('VITE_WILDCARD_ENABLED', '1');
+    atHost('demo.club.medicoach.co.za');
+    expect(tenantConsoleUrl('dolphins')).toBe('https://dolphinspipeline.medicoach.co.za/');
+  });
+
+  it('uses the wildcard subdomain for an unmapped tenant when the wildcard is armed', () => {
+    vi.stubEnv('VITE_WILDCARD_ENABLED', '1');
+    atHost('dolphinspipeline.medicoach.co.za');
+    expect(tenantConsoleUrl('titans')).toBe('https://titans.club.medicoach.co.za/');
+  });
+
+  it('uses ?tenant= on the current origin on a bare host (wildcard not armed)', () => {
+    vi.stubGlobal('window', {
+      location: {
+        hostname: 'd111abcdef8.cloudfront.net',
+        origin: 'https://d111abcdef8.cloudfront.net',
+      },
+    });
+    expect(tenantConsoleUrl('titans')).toBe('https://d111abcdef8.cloudfront.net/?tenant=titans');
+    expect(tenantConsoleUrl('a b&c')).toBe('https://d111abcdef8.cloudfront.net/?tenant=a%20b%26c');
+  });
+
+  it('opens the console with a full page load', () => {
+    const assign = vi.fn();
+    vi.stubGlobal('window', {
+      location: { hostname: 'localhost', origin: 'http://localhost:5173', assign },
+    });
+    openTenantConsole('titans');
+    expect(assign).toHaveBeenCalledWith('http://localhost:5173/?tenant=titans');
   });
 });
 

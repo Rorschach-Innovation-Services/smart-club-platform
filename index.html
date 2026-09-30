@@ -1163,6 +1163,34 @@
   /* A concrete "e.g. …" line under a description or in prose — italic, dimmer. */
   .info-pop-eg{display:block;margin-top:3px;color:var(--muted-2);font-style:italic;font-size:11px;line-height:1.5}
 
+  /* Operator client switcher (src/client-switcher.tsx) — portaled + fixed like .info-pop,
+     because the sidebar scrolls (and turns into a horizontal strip on tablets). */
+  .client-switch-pop{
+    position:fixed;width:260px;max-width:calc(100vw - 16px);z-index:1200;
+    background:var(--white);color:var(--ink);
+    border:1px solid var(--line);border-radius:10px;
+    box-shadow:0 18px 44px rgba(10,15,20,0.22), 0 0 0 1px rgba(10,15,20,0.02);
+    padding:6px;font-family:'Montserrat',sans-serif;
+    overflow-y:auto;overscroll-behavior:contain;
+    display:flex;flex-direction:column;gap:1px;
+    animation:infoPopIn .14s ease;
+  }
+  .client-switch-note{padding:8px 10px;font-size:12px;color:var(--muted)}
+  .client-switch-item{
+    display:grid;grid-template-columns:1fr auto;align-items:center;column-gap:8px;
+    width:100%;text-align:left;padding:7px 10px;border-radius:6px;
+  }
+  .client-switch-item:hover:not(:disabled){background:var(--paper2)}
+  .client-switch-item:disabled{cursor:default}
+  .client-switch-name{font-size:12.5px;font-weight:600;color:var(--ink3);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .client-switch-slug{grid-column:1;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:11px;color:var(--muted-2)}
+  .client-switch-tag{grid-column:2;grid-row:1 / span 2;font-size:9.5px;font-weight:700;
+    text-transform:uppercase;letter-spacing:0.09em;color:var(--muted-2);
+    background:var(--paper);padding:2px 7px;border-radius:10px}
+  .client-switch-item.current .client-switch-name{color:var(--ink)}
+
   /* ─── Explainers (season setup): option cards, help drawer, How seasons work,
      status timeline, next steps, field guides. See the explainer section of atoms.tsx
      and src/help/HelpDrawer.tsx. Flat, borders only; one accent (--brand-accent). ─── */
