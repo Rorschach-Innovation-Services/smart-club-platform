@@ -5,7 +5,7 @@
  * full page load (jsdom can't navigate) — its URL building is covered in config.test.ts.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
@@ -22,7 +22,12 @@ vi.mock('./api', async () => {
 });
 vi.mock('./config', async () => {
   const actual = await vi.importActual<typeof import('./config')>('./config');
-  return { ...actual, openTenantConsole: vi.fn() };
+  // tenantConsoleUrl keeps its real behaviour unless a test overrides it (unreachable case).
+  return {
+    ...actual,
+    openTenantConsole: vi.fn(),
+    tenantConsoleUrl: vi.fn(actual.tenantConsoleUrl),
+  };
 });
 
 const tenant = (slug: string, name: string): TenantSummary => ({
@@ -45,6 +50,8 @@ beforeEach(() => {
   vi.mocked(api.platformListTenants).mockReset();
   vi.mocked(api.platformListTenants).mockResolvedValue(TENANTS);
   vi.mocked(config.openTenantConsole).mockReset();
+  vi.mocked(config.tenantConsoleUrl).mockReset();
+  vi.mocked(config.tenantConsoleUrl).mockImplementation((slug) => `/?tenant=${slug}`);
   window.sessionStorage.clear();
 });
 
@@ -56,6 +63,7 @@ const renderPortal = (path = '/platform', hasTenantConsole = true) =>
           userEmail="op@acme.test"
           signOutUser={vi.fn()}
           hasTenantConsole={hasTenantConsole}
+          hostSlug="dolphins"
         />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -74,6 +82,17 @@ describe('Clients table — Open console', () => {
     expect(screen.getByRole('heading', { name: /client unions/i })).toBeInTheDocument();
   });
 
+  it('disables Open console for a client with no reachable console', async () => {
+    vi.mocked(config.tenantConsoleUrl).mockImplementation((slug) =>
+      slug === 'titans' ? null : `/?tenant=${slug}`,
+    );
+    renderPortal();
+    const row = (await screen.findByText('Titans Cricket')).closest('tr') as HTMLElement;
+    const btn = within(row).getByRole('button', { name: /open console/i });
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute('title', 'No web address yet');
+  });
+
   it('keeps Overview in every row next to the new action', async () => {
     renderPortal();
     await screen.findByText('Acme Union');
@@ -89,7 +108,6 @@ describe('Clients table — Open console', () => {
 describe('Portal sidebar — back to this host’s console', () => {
   it('names the host tenant and opens its console with a page load', async () => {
     const user = userEvent.setup();
-    // Bare host (jsdom localhost) → resolves the build default, dolphins.
     renderPortal();
     const link = await screen.findByRole('button', { name: 'Dolphins Pipeline console' });
     await user.click(link);
@@ -152,8 +170,72 @@ describe('Admin shell — ClientSwitcher', () => {
     expect(await screen.findByText(/could not load clients/i)).toBeInTheDocument();
   });
 
-  it('does not fetch the registry when disabled', () => {
+  it('does not fetch the registry when disabled', async () => {
     renderSwitcher(false);
+    // Let react-query run any pending fetch before asserting it never happened.
+    await act(async () => {});
     expect(api.platformListTenants).not.toHaveBeenCalled();
+  });
+
+  it('is keyboard-operable: focus moves in, arrows skip the current item, Enter opens', async () => {
+    const user = userEvent.setup();
+    renderSwitcher();
+    const trigger = screen.getByRole('button', { name: 'Switch client' });
+    trigger.focus();
+    await user.keyboard('{Enter}');
+
+    const menu = await screen.findByRole('menu', { name: 'Switch client' });
+    const items = await within(menu).findAllByRole('menuitem');
+    // Opening focuses the first enabled item (Acme); Dolphins is current → skipped.
+    await vi.waitFor(() => expect(items[0]).toHaveFocus());
+    await user.keyboard('{ArrowDown}');
+    expect(items[2]).toHaveFocus();
+    await user.keyboard('{ArrowDown}'); // wraps
+    expect(items[0]).toHaveFocus();
+    await user.keyboard('{ArrowUp}'); // wraps back
+    expect(items[2]).toHaveFocus();
+    await user.keyboard('{Home}');
+    expect(items[0]).toHaveFocus();
+    await user.keyboard('{End}');
+    expect(items[2]).toHaveFocus();
+
+    await user.keyboard('{Enter}');
+    expect(config.openTenantConsole).toHaveBeenCalledWith('titans');
+  });
+
+  it('Escape and Tab close the menu and return focus to the trigger', async () => {
+    const user = userEvent.setup();
+    renderSwitcher();
+    const trigger = screen.getByRole('button', { name: 'Switch client' });
+
+    await user.click(trigger);
+    const items = await within(await screen.findByRole('menu')).findAllByRole('menuitem');
+    await vi.waitFor(() => expect(items[0]).toHaveFocus());
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    await user.click(trigger);
+    const again = await within(await screen.findByRole('menu')).findAllByRole('menuitem');
+    await vi.waitFor(() => expect(again[0]).toHaveFocus());
+    await user.keyboard('{Tab}');
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it('lists a client with no reachable console as inert, tagged "No address"', async () => {
+    vi.mocked(config.tenantConsoleUrl).mockImplementation((slug) =>
+      slug === 'titans' ? null : `/?tenant=${slug}`,
+    );
+    const user = userEvent.setup();
+    renderSwitcher();
+    await user.click(screen.getByRole('button', { name: 'Switch client' }));
+    const menu = await screen.findByRole('menu');
+    const titans = await within(menu).findByRole('menuitem', { name: /Titans Cricket/ });
+    expect(titans).toBeDisabled();
+    expect(titans).toHaveAttribute('title', 'No web address yet');
+    expect(titans).toHaveTextContent('No address');
+    await user.click(titans);
+    expect(config.openTenantConsole).not.toHaveBeenCalled();
   });
 });

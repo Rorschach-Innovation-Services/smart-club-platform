@@ -1,5 +1,13 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
-import { API_BASE, RUN, signInAsRep, dismissOnboarding, mintRegLink } from './helpers';
+import {
+  API_BASE,
+  RUN,
+  signInAsRep,
+  dismissOnboarding,
+  mintRegLink,
+  operatorAuth,
+  tenantAdminAuth,
+} from './helpers';
 
 /**
  * End-to-end coverage of the Smart School (football) vertical: one platform, a football
@@ -19,25 +27,7 @@ import { API_BASE, RUN, signInAsRep, dismissOnboarding, mintRegLink } from './he
  * wizard test's outcome. Both tenants are run-unique and harmless residue in the shared DB.
  */
 
-const OPERATOR_AUTH = Buffer.from(
-  JSON.stringify({
-    sub: 'dev-operator',
-    email: 'operator@platform.local',
-    memberships: [{ tenantId: '*', role: 'operator', clubIds: [] }],
-  }),
-).toString('base64');
-
-function tenantAdminAuth(tenant: string): string {
-  return Buffer.from(
-    JSON.stringify({
-      sub: 'dev-admin',
-      email: `admin@${tenant}.local`,
-      memberships: [{ tenantId: tenant, role: 'admin', clubIds: [] }],
-    }),
-  ).toString('base64');
-}
-
-const operatorHeaders = { 'content-type': 'application/json', 'x-dev-auth': OPERATOR_AUTH };
+const operatorHeaders = { 'content-type': 'application/json', 'x-dev-auth': operatorAuth() };
 const tenantHeaders = (tenant: string) => ({
   'content-type': 'application/json',
   'x-tenant': tenant,

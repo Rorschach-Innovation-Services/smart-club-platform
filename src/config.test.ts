@@ -179,6 +179,65 @@ describe('tenantConsoleUrl / openTenantConsole', () => {
     expect(tenantConsoleUrl('a b&c')).toBe('https://d111abcdef8.cloudfront.net/?tenant=a%20b%26c');
   });
 
+  it('returns null for an unmapped tenant on a tenant-naming host when the wildcard is off', () => {
+    // ?tenant= would just reload THIS host's tenant (the host map wins), so no address.
+    atLocation({
+      hostname: 'dolphinspipeline.medicoach.co.za',
+      origin: 'https://dolphinspipeline.medicoach.co.za',
+    });
+    expect(tenantConsoleUrl('titans')).toBeNull();
+    atLocation({ hostname: 'lions.medicoach.co.za', origin: 'https://lions.medicoach.co.za' });
+    expect(tenantConsoleUrl('titans')).toBeNull();
+    // A mapped www alias names a tenant too — not a bare host.
+    atLocation({
+      hostname: 'www.dolphinspipeline.medicoach.co.za',
+      origin: 'https://www.dolphinspipeline.medicoach.co.za',
+    });
+    expect(tenantConsoleUrl('titans')).toBeNull();
+  });
+
+  it('never builds a wildcard hostname from an invalid slug', () => {
+    vi.stubEnv('VITE_WILDCARD_ENABLED', '1');
+    atLocation({
+      hostname: 'demo.club.medicoach.co.za',
+      origin: 'https://demo.club.medicoach.co.za',
+    });
+    expect(tenantConsoleUrl('evil.example.com/x')).toBeNull();
+    expect(tenantConsoleUrl('Titans')).toBeNull();
+    // On a bare host the query-string path still works (encoded, never a hostname).
+    atLocation({ hostname: 'localhost', origin: 'http://localhost:5173' });
+    expect(tenantConsoleUrl('evil.example.com/x')).toBe(
+      'http://localhost:5173/?tenant=evil.example.com%2Fx',
+    );
+  });
+
+  it('still falls back to ?tenant= on bare hosts (localhost, IP, execute-api)', () => {
+    for (const [hostname, origin] of [
+      ['localhost', 'http://localhost:3201'],
+      ['127.0.0.1', 'http://127.0.0.1:3201'],
+      [
+        'abc123.execute-api.af-south-1.amazonaws.com',
+        'https://abc123.execute-api.af-south-1.amazonaws.com',
+      ],
+    ]) {
+      atLocation({ hostname, origin });
+      expect(tenantConsoleUrl('titans')).toBe(`${origin}/?tenant=titans`);
+    }
+  });
+
+  it('does nothing when the tenant has no reachable console', () => {
+    const assign = vi.fn();
+    vi.stubGlobal('window', {
+      location: {
+        hostname: 'lions.medicoach.co.za',
+        origin: 'https://lions.medicoach.co.za',
+        assign,
+      },
+    });
+    openTenantConsole('titans');
+    expect(assign).not.toHaveBeenCalled();
+  });
+
   it('opens the console with a full page load', () => {
     const assign = vi.fn();
     vi.stubGlobal('window', {

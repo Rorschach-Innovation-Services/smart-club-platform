@@ -26,22 +26,37 @@ const HOST_TENANT_MAP = (() => {
 })();
 
 /**
+ * A host that does NOT itself name a tenant — localhost, an IP, a `www`/empty label, the
+ * dev CloudFront or execute-api host — so the tenant comes from ?tenant= instead. Mapped
+ * vanity hosts (including their `www.` aliases) always name a tenant, so they never count.
+ */
+export function isBareHost(host: string): boolean {
+  const h = host.toLowerCase();
+  if (HOST_TENANT_MAP[h]) return false;
+  const label = h.split('.')[0];
+  return (
+    !label ||
+    label === 'localhost' ||
+    label === 'www' ||
+    /^\d+$/.test(label) ||
+    h.includes('cloudfront.net') ||
+    h.includes('execute-api')
+  );
+}
+
+/**
  * Resolve the tenant slug: host map → subdomain → ?tenant= → sticky tab tenant
  * (sessionStorage, bare hosts only) → build default → 'dolphins'.
  */
 export function resolveTenantSlug() {
   const host = window.location.hostname.toLowerCase();
   if (HOST_TENANT_MAP[host]) return HOST_TENANT_MAP[host];
-  const label = host.split('.')[0];
   // Mirrors resolveTenant() in packages/api/src/auth.ts, with two client-only guards the
   // backend doesn't need (it never sees a CloudFront/execute-api Host): a bare/cloudfront/
   // execute-api host here falls through to ?tenant=/VITE_DEFAULT_TENANT rather than mis-
   // reading the leftmost label. For mapped hosts both resolvers agree. A wildcard host
   // `<slug>.club.medicoach.co.za` resolves here via the leftmost label — the same path.
-  const isBareHost = !label || label === 'localhost' || label === 'www' || /^\d+$/.test(label);
-  if (!isBareHost && !host.includes('cloudfront.net') && !host.includes('execute-api')) {
-    return label;
-  }
+  if (!isBareHost(host)) return host.split('.')[0];
   // Bare host (dev CloudFront / localhost): the tenant comes from ?tenant=, which the
   // SPA drops as soon as it navigates. Remember it per browser tab in sessionStorage so
   // a refresh (or a link without the param) stays on the same tenant. Only this branch
@@ -111,20 +126,31 @@ export function redirectToCanonicalOrigin(): boolean {
  * subdomain. Off-prod (bare CloudFront / localhost) the tenant rides ?tenant= on the
  * current origin and is then kept sticky by resolveTenantSlug(). Sessions are
  * per-origin, so in prod the operator signs in once per client origin.
+ *
+ * Returns null when the tenant has no reachable console from here (not mapped, wildcard
+ * not armed or slug not a valid DNS label, and this host names a tenant itself).
  */
-export function tenantConsoleUrl(slug: string): string {
+export function tenantConsoleUrl(slug: string): string | null {
   if (WEB_ORIGIN_MAP[slug]) return `${WEB_ORIGIN_MAP[slug]}/`;
   const suffix = import.meta.env.VITE_WILDCARD_WEB_SUFFIX ?? '';
-  if (import.meta.env.VITE_WILDCARD_ENABLED === '1' && suffix) return `https://${slug}${suffix}/`;
+  if (import.meta.env.VITE_WILDCARD_ENABLED === '1' && suffix && LABEL_RE.test(slug))
+    return `https://${slug}${suffix}/`;
+  // ?tenant= only picks the tenant on a bare host. On a tenant-naming host (vanity or
+  // subdomain) it would just reload THIS tenant, so the target has no reachable address.
+  if (!isBareHost(window.location.hostname)) return null;
   return `${window.location.origin}/?tenant=${encodeURIComponent(slug)}`;
 }
+
+/** A safe single DNS label — mirrors LABEL_RE in packages/api/src/origins.ts. */
+const LABEL_RE = /^[a-z0-9-]+$/;
 
 /**
  * Open a tenant's admin console. Always a full page load: TENANT_SLUG is resolved once
  * at module load (main.tsx), so an in-app navigate would keep the old tenant.
  */
 export function openTenantConsole(slug: string) {
-  window.location.assign(tenantConsoleUrl(slug));
+  const url = tenantConsoleUrl(slug);
+  if (url) window.location.assign(url);
 }
 
 /** Inject a tenant's color tokens + font + title + favicon onto the document. Missing tokens fall back to the default theme. */

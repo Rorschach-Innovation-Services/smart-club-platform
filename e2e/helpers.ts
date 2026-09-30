@@ -11,9 +11,50 @@ export const TENANT = 'dolphins';
 
 type Membership = { tenantId: string; role: string; clubIds: string[] };
 
-/** base64(JSON) identity for the `x-dev-auth` header the local API trusts. */
+/** A dev "login as" identity — the shape src/devAuth.ts stores and `x-dev-auth` carries. */
+export interface DevIdentity {
+  sub: string;
+  email: string;
+  memberships: Membership[];
+}
+
+/** base64(JSON) of an identity, for the `x-dev-auth` header the local API trusts. */
+export function encodeDevAuth(identity: DevIdentity): string {
+  return Buffer.from(JSON.stringify(identity)).toString('base64');
+}
+
 function devAuth(memberships: Membership[], sub: string, email: string): string {
-  return Buffer.from(JSON.stringify({ sub, email, memberships })).toString('base64');
+  return encodeDevAuth({ sub, email, memberships });
+}
+
+/**
+ * A platform operator: the tenant-independent '*' operator membership, plus admin on each
+ * of `adminTenants` — the cloud shape, where operators are auto-granted admin on every
+ * tenant. With no admin tenants it matches the dev picker's "operator" identity.
+ */
+export function operatorIdentity(adminTenants: string[] = []): DevIdentity {
+  return {
+    sub: 'dev-operator',
+    email: 'operator@platform.local',
+    memberships: [
+      { tenantId: '*', role: 'operator', clubIds: [] },
+      ...adminTenants.map((tenantId) => ({ tenantId, role: 'admin', clubIds: [] })),
+    ],
+  };
+}
+
+/** `x-dev-auth` for a platform operator (see operatorIdentity). */
+export function operatorAuth(adminTenants: string[] = []): string {
+  return encodeDevAuth(operatorIdentity(adminTenants));
+}
+
+/** `x-dev-auth` for an admin of `tenant` (any tenant, not just the default). */
+export function tenantAdminAuth(tenant: string): string {
+  return devAuth(
+    [{ tenantId: tenant, role: 'admin', clubIds: [] }],
+    'dev-admin',
+    `admin@${tenant}.local`,
+  );
 }
 
 export function adminAuthHeader(): string {

@@ -485,7 +485,12 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     (location.pathname === '/platform' || location.pathname.startsWith('/platform/'))
   ) {
     return (
-      <PlatformPortal userEmail={email} signOutUser={signOutUser} hasTenantConsole={!!membership} />
+      <PlatformPortal
+        userEmail={email}
+        signOutUser={signOutUser}
+        hasTenantConsole={!!membership}
+        hostSlug={TENANT_SLUG}
+      />
     );
   }
 
@@ -2982,7 +2987,7 @@ function Shell({
                 <span className="ni-label">Operator portal</span>
               </button>
               {/* One-click hop into another client's console (full page load). */}
-              <ClientSwitcher currentSlug={TENANT_SLUG} enabled={showOperatorNav} />
+              <ClientSwitcher currentSlug={TENANT_SLUG} />
             </>
           )}
 

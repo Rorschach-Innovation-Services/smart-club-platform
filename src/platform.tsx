@@ -18,7 +18,7 @@ import { queryClient, qk } from './query';
 import * as api from './api';
 import { ApiError, EMAIL_RE } from './api';
 import { resolveCopy } from './branding';
-import { openTenantConsole, resolveTenantSlug } from './config';
+import { openTenantConsole, tenantConsoleUrl } from './config';
 import { resolveVertical, VERTICALS, type ModuleKey, type Sport } from './vertical';
 import { Icon, Pill, Btn, Card, EmptyState, Modal, useToast } from './atoms';
 import { LeagueForm } from './admin';
@@ -374,19 +374,21 @@ export function PlatformPortal({
   userEmail,
   signOutUser,
   hasTenantConsole,
+  hostSlug,
 }: {
   userEmail: string;
   signOutUser: () => void;
   hasTenantConsole: boolean;
+  /** The tenant this host resolved to at boot (main.tsx TENANT_SLUG). */
+  hostSlug: string;
 }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [toastShow, toastNode] = useToast();
   const path = location.pathname;
   const onClients = path === '/platform' || path.startsWith('/platform/tenants');
-  // The tenant this host resolves to — the "Workspace" link returns to its console.
-  // Named from the registry (same cache as the Clients list), else the slug.
-  const hostSlug = resolveTenantSlug();
+  // The "Workspace" link returns to this host's tenant console. Named from the
+  // registry (same cache as the Clients list), else the slug.
   const tenantsQ = useQuery({
     queryKey: qk.platformTenants(),
     queryFn: api.platformListTenants,
@@ -563,13 +565,16 @@ function OpenConsoleBtn({
   name: string;
   compact?: boolean;
 }) {
+  // No reachable console from this host (see tenantConsoleUrl) → inert, with the reason.
+  const unreachable = tenantConsoleUrl(slug) === null;
   return (
     <Btn
       tone="outline"
       size="sm"
       icon={Icon.Arrow}
       aria-label={`Open console: ${name}`}
-      title={`Open the ${name} admin console`}
+      title={unreachable ? 'No web address yet' : `Open the ${name} admin console`}
+      disabled={unreachable}
       onClick={(e) => {
         e.stopPropagation();
         openTenantConsole(slug);

@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { API_BASE, RUN, TENANT } from './helpers';
+import { API_BASE, RUN, TENANT, operatorAuth, operatorIdentity } from './helpers';
 
 /**
  * Operator ↔ client navigation in one click, both directions:
@@ -19,16 +19,9 @@ import { API_BASE, RUN, TENANT } from './helpers';
 const SECOND = `sw-${RUN}`;
 const SECOND_NAME = `Switch Union ${RUN}`;
 
-const OPERATOR_IDENTITY = {
-  sub: 'dev-operator',
-  email: 'operator@platform.local',
-  memberships: [
-    { tenantId: '*', role: 'operator', clubIds: [] },
-    { tenantId: TENANT, role: 'admin', clubIds: [] },
-    { tenantId: SECOND, role: 'admin', clubIds: [] },
-  ],
-};
-const OPERATOR_AUTH = Buffer.from(JSON.stringify(OPERATOR_IDENTITY)).toString('base64');
+const OPERATOR_IDENTITY = operatorIdentity([TENANT, SECOND]);
+// The first tenant's branded name, read from the registry so the spec doesn't hard-code it.
+let firstName = '';
 
 async function signInAsOperatorAdmin(page: Page) {
   await page.addInitScript((identity) => {
@@ -41,10 +34,17 @@ const orgFooter = (page: Page) => page.locator('.nav-footer strong');
 
 test.beforeAll(async ({ request }) => {
   const created = await request.post(`${API_BASE}/platform/tenants`, {
-    headers: { 'content-type': 'application/json', 'x-dev-auth': OPERATOR_AUTH },
+    headers: { 'content-type': 'application/json', 'x-dev-auth': operatorAuth() },
     data: { slug: SECOND, branding: { name: SECOND_NAME }, submissionDeadline: '2027-03-01' },
   });
   expect(created.status(), await created.text()).toBe(201);
+
+  const first = await request.get(`${API_BASE}/platform/tenants/${TENANT}`, {
+    headers: { 'x-dev-auth': operatorAuth() },
+  });
+  expect(first.ok(), `GET /platform/tenants/${TENANT} → ${first.status()}`).toBeTruthy();
+  firstName = ((await first.json()) as { branding?: { name?: string } }).branding?.name ?? '';
+  expect(firstName).not.toBe('');
 });
 
 test('an operator hops from the portal into a client console and back via the switcher', async ({
@@ -57,7 +57,8 @@ test('an operator hops from the portal into a client console and back via the sw
   const row = page.getByRole('row', { name: new RegExp(SECOND_NAME) });
   await row.getByRole('button', { name: /open console/i }).click();
 
-  await expect(page).toHaveURL(new RegExp(`\\?tenant=${SECOND}$`));
+  // `/` redirects to the dashboard (dropping ?tenant=), so assert where we landed + whose it is.
+  await expect(page).toHaveURL(/\/admin\/dashboard/);
   await expect(orgFooter(page)).toHaveText(SECOND_NAME);
   await expect(page.getByRole('button', { name: 'Switch client' })).toBeVisible();
 
@@ -75,8 +76,9 @@ test('an operator hops from the portal into a client console and back via the sw
   await expect(current).toBeDisabled();
 
   await menu.getByRole('menuitem', { name: new RegExp(`\\b${TENANT}\\b`) }).click();
-  await expect(page).toHaveURL(new RegExp(`\\?tenant=${TENANT}$`));
-  await expect(orgFooter(page)).not.toHaveText(SECOND_NAME);
+  await expect(page).toHaveURL(/\/admin\/dashboard/);
+  // Positive check: the URL was already /admin/dashboard, so only the branding proves the hop.
+  await expect(orgFooter(page)).toHaveText(firstName);
   await page.getByRole('button', { name: 'Switch client' }).click();
   await expect(
     page

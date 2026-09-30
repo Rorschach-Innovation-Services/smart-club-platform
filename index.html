@@ -1256,6 +1256,8 @@
   .help-drawer-more{display:inline-block;font-size:13px;font-weight:500;color:var(--brand-primary-mid);border-radius:6px}
   .help-drawer-more:hover{color:var(--brand-primary)}
   .help-drawer-more:focus-visible{outline:2px solid var(--brand-primary-bright);outline-offset:1px}
+  /* Operator client switcher items — global button{outline:none} would hide focus. */
+  .client-switch-item:focus-visible{outline:2px solid var(--brand-primary-bright);outline-offset:-2px}
 
   .hsw{display:flex;flex-direction:column;gap:16px;font-family:var(--brand-font)}
   .hsw.compact{gap:8px}
