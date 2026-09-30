@@ -1,0 +1,6339 @@
+[
+  {
+    "id": "s-planb-veterans-promotion-t20-1",
+    "name": "Veterans Promotion · T20 · Group 1",
+    "leagueKey": "veterans-promotion",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-09-26",
+    "endDate": "2026-11-07",
+    "released": true,
+    "releasedAt": "2026-09-03T16:59:17.463Z",
+    "version": 13,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "east-coast-cc",
+      "tm_simplex-reservoir-hills-crimson_veterans-promotion_0",
+      "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+      "forest-hills-cricket-club",
+      "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+      "hillary-malvern-cricket-club",
+      "tm_meadowridge-sporting-cricket-club_veterans-promotion_0"
+    ],
+    "participants": [
+      {
+        "teamId": "east-coast-cc",
+        "clubId": "east-coast-cc",
+        "name": "East Coast CC"
+      },
+      {
+        "teamId": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0",
+        "clubId": "simplex-reservoir-hills-crimson",
+        "name": "Simplex Reservoir Hills Crimson A"
+      },
+      {
+        "teamId": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "clubId": "hollywoodbets-chatsworth-sporting",
+        "name": "Hollywoodbets Chatsworth Sporting B"
+      },
+      {
+        "teamId": "forest-hills-cricket-club",
+        "clubId": "forest-hills-cricket-club",
+        "name": "Forest Hills Cricket Club"
+      },
+      {
+        "teamId": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "clubId": "rhythm-dhsob-cricket-club",
+        "name": "Rhythm DHSOB Cricket club B"
+      },
+      {
+        "teamId": "hillary-malvern-cricket-club",
+        "clubId": "hillary-malvern-cricket-club",
+        "name": "Hillary/Malvern Cricket Club"
+      },
+      {
+        "teamId": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "clubId": "meadowridge-sporting-cricket-club",
+        "name": "Meadowridge Sporting Cricket Club A"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-09-26",
+        "time": "13:00",
+        "home": "east-coast-cc",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-09-26",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-09-26",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "away": "hillary-malvern-cricket-club"
+      },
+      {
+        "id": "f4",
+        "round": 2,
+        "date": "2026-10-03",
+        "time": "13:00",
+        "home": "forest-hills-cricket-club",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f5",
+        "round": 2,
+        "date": "2026-10-03",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "hillary-malvern-cricket-club"
+      },
+      {
+        "id": "f6",
+        "round": 2,
+        "date": "2026-10-03",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "away": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0"
+      },
+      {
+        "id": "f7",
+        "round": 3,
+        "date": "2026-10-10",
+        "time": "13:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f8",
+        "round": 3,
+        "date": "2026-10-10",
+        "time": "13:00",
+        "home": "forest-hills-cricket-club",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f9",
+        "round": 3,
+        "date": "2026-10-10",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0"
+      },
+      {
+        "id": "f10",
+        "round": 4,
+        "date": "2026-10-17",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f11",
+        "round": 4,
+        "date": "2026-10-17",
+        "time": "13:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f12",
+        "round": 4,
+        "date": "2026-10-17",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f13",
+        "round": 5,
+        "date": "2026-10-24",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f14",
+        "round": 5,
+        "date": "2026-10-24",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f15",
+        "round": 5,
+        "date": "2026-10-24",
+        "time": "13:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f16",
+        "round": 6,
+        "date": "2026-10-31",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f17",
+        "round": 6,
+        "date": "2026-10-31",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f18",
+        "round": 6,
+        "date": "2026-10-31",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f19",
+        "round": 7,
+        "date": "2026-11-07",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f20",
+        "round": 7,
+        "date": "2026-11-07",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f21",
+        "round": 7,
+        "date": "2026-11-07",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "hillary-malvern-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-veterans-premier-t20-1",
+    "name": "Veterans Premier · T20 · Group 1",
+    "leagueKey": "veterans-premier",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-09-26",
+    "endDate": "2026-10-24",
+    "released": true,
+    "releasedAt": "2026-09-03T16:59:30.507Z",
+    "version": 16,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "phoenix-cricket-club",
+      "saints-cricket-club",
+      "hollywoodbets-chatsworth-sporting",
+      "harlequins-cricket-club",
+      "rhythm-dhsob-cricket-club",
+      "railways-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "phoenix-cricket-club",
+        "clubId": "phoenix-cricket-club",
+        "name": "Phoenix Cricket Club"
+      },
+      {
+        "teamId": "saints-cricket-club",
+        "clubId": "saints-cricket-club",
+        "name": "Saints Cricket Club"
+      },
+      {
+        "teamId": "hollywoodbets-chatsworth-sporting",
+        "clubId": "hollywoodbets-chatsworth-sporting",
+        "name": "Hollywoodbets Chatsworth Sporting"
+      },
+      {
+        "teamId": "harlequins-cricket-club",
+        "clubId": "harlequins-cricket-club",
+        "name": "Harlequins Cricket Club"
+      },
+      {
+        "teamId": "rhythm-dhsob-cricket-club",
+        "clubId": "rhythm-dhsob-cricket-club",
+        "name": "Rhythm DHSOB Cricket club"
+      },
+      {
+        "teamId": "railways-cricket-club",
+        "clubId": "railways-cricket-club",
+        "name": "Railways Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-09-26",
+        "time": "13:00",
+        "home": "phoenix-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-09-26",
+        "time": "13:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "harlequins-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-09-26",
+        "time": "13:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "railways-cricket-club"
+      },
+      {
+        "id": "f4",
+        "round": 2,
+        "date": "2026-10-03",
+        "time": "13:00",
+        "home": "harlequins-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 2,
+        "date": "2026-10-03",
+        "time": "13:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "phoenix-cricket-club"
+      },
+      {
+        "id": "f6",
+        "round": 2,
+        "date": "2026-10-03",
+        "time": "13:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "railways-cricket-club"
+      },
+      {
+        "id": "f7",
+        "round": 3,
+        "date": "2026-10-10",
+        "time": "13:00",
+        "home": "railways-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f8",
+        "round": 3,
+        "date": "2026-10-10",
+        "time": "13:00",
+        "home": "harlequins-cricket-club",
+        "away": "phoenix-cricket-club"
+      },
+      {
+        "id": "f9",
+        "round": 3,
+        "date": "2026-10-10",
+        "time": "13:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f10",
+        "round": 4,
+        "date": "2026-10-17",
+        "time": "13:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f11",
+        "round": 4,
+        "date": "2026-10-17",
+        "time": "13:00",
+        "home": "railways-cricket-club",
+        "away": "phoenix-cricket-club"
+      },
+      {
+        "id": "f12",
+        "round": 4,
+        "date": "2026-10-17",
+        "time": "13:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "harlequins-cricket-club"
+      },
+      {
+        "id": "f13",
+        "round": 5,
+        "date": "2026-10-24",
+        "time": "13:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f14",
+        "round": 5,
+        "date": "2026-10-24",
+        "time": "13:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "phoenix-cricket-club"
+      },
+      {
+        "id": "f15",
+        "round": 5,
+        "date": "2026-10-24",
+        "time": "13:00",
+        "home": "railways-cricket-club",
+        "away": "harlequins-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-veterans-promotion-t20-2",
+    "name": "Veterans Promotion · T20 · Group 2",
+    "leagueKey": "veterans-promotion",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-09-26",
+    "endDate": "2026-11-07",
+    "released": true,
+    "releasedAt": "2026-09-03T16:59:37.308Z",
+    "version": 15,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "tm_saints-cricket-club_veterans-promotion_1",
+      "tm_simplex-reservoir-hills-crimson_veterans-promotion_1",
+      "tm_rhythm-dhsob-cricket-club_veterans-promotion_2",
+      "tm_amanzimtoti-cricket-club_veterans-promotion_1",
+      "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+      "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+      "tongaat-cricket-association",
+      "southern-natal"
+    ],
+    "participants": [
+      {
+        "teamId": "tm_saints-cricket-club_veterans-promotion_1",
+        "clubId": "saints-cricket-club",
+        "name": "Saints Cricket Club B"
+      },
+      {
+        "teamId": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1",
+        "clubId": "simplex-reservoir-hills-crimson",
+        "name": "Simplex Reservoir Hills Crimson B"
+      },
+      {
+        "teamId": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2",
+        "clubId": "rhythm-dhsob-cricket-club",
+        "name": "Rhythm DHSOB Cricket club C"
+      },
+      {
+        "teamId": "tm_amanzimtoti-cricket-club_veterans-promotion_1",
+        "clubId": "amanzimtoti-cricket-club",
+        "name": "Amanzimtoti Cricket Club B"
+      },
+      {
+        "teamId": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "clubId": "meadowridge-sporting-cricket-club",
+        "name": "Meadowridge Sporting Cricket Club B"
+      },
+      {
+        "teamId": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "clubId": "simplex-reservoir-hills-crimson",
+        "name": "Simplex Reservoir Hills Crimson C"
+      },
+      {
+        "teamId": "tongaat-cricket-association",
+        "clubId": "tongaat-cricket-association",
+        "name": "Tongaat Cricket Association"
+      },
+      {
+        "teamId": "southern-natal",
+        "clubId": "southern-natal",
+        "name": "Southern Natal"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-09-26",
+        "time": "13:00",
+        "home": "tm_saints-cricket-club_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-09-26",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-09-26",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2"
+      },
+      {
+        "id": "f4",
+        "round": 1,
+        "date": "2026-09-26",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f5",
+        "round": 2,
+        "date": "2026-10-03",
+        "time": "13:00",
+        "home": "tm_amanzimtoti-cricket-club_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f6",
+        "round": 2,
+        "date": "2026-10-03",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f7",
+        "round": 2,
+        "date": "2026-10-03",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2"
+      },
+      {
+        "id": "f8",
+        "round": 2,
+        "date": "2026-10-03",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f9",
+        "round": 3,
+        "date": "2026-10-10",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f10",
+        "round": 3,
+        "date": "2026-10-10",
+        "time": "13:00",
+        "home": "tm_amanzimtoti-cricket-club_veterans-promotion_1",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f11",
+        "round": 3,
+        "date": "2026-10-10",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f12",
+        "round": 3,
+        "date": "2026-10-10",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f13",
+        "round": 4,
+        "date": "2026-10-17",
+        "time": "13:00",
+        "home": "southern-natal",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f14",
+        "round": 4,
+        "date": "2026-10-17",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f15",
+        "round": 4,
+        "date": "2026-10-17",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f16",
+        "round": 4,
+        "date": "2026-10-17",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2",
+        "away": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f17",
+        "round": 5,
+        "date": "2026-10-24",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f18",
+        "round": 5,
+        "date": "2026-10-24",
+        "time": "13:00",
+        "home": "southern-natal",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f19",
+        "round": 5,
+        "date": "2026-10-24",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f20",
+        "round": 5,
+        "date": "2026-10-24",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f21",
+        "round": 6,
+        "date": "2026-10-31",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f22",
+        "round": 6,
+        "date": "2026-10-31",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f23",
+        "round": 6,
+        "date": "2026-10-31",
+        "time": "13:00",
+        "home": "southern-natal",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f24",
+        "round": 6,
+        "date": "2026-10-31",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2"
+      },
+      {
+        "id": "f25",
+        "round": 7,
+        "date": "2026-11-07",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f26",
+        "round": 7,
+        "date": "2026-11-07",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f27",
+        "round": 7,
+        "date": "2026-11-07",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f28",
+        "round": 7,
+        "date": "2026-11-07",
+        "time": "13:00",
+        "home": "southern-natal",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-veterans-premier-t20-2",
+    "name": "Veterans Premier · T20 · Group 2",
+    "leagueKey": "veterans-premier",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-09-26",
+    "endDate": "2026-10-24",
+    "released": true,
+    "releasedAt": "2026-09-03T16:59:43.789Z",
+    "version": 12,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "ptcc",
+      "kccd",
+      "dawnheights-cricket-club",
+      "amanzimtoti-cricket-club",
+      "crusaders",
+      "delta-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "ptcc",
+        "clubId": "ptcc",
+        "name": "Pinetown Topham Cricket Club"
+      },
+      {
+        "teamId": "kccd",
+        "clubId": "kccd",
+        "name": "KCCD"
+      },
+      {
+        "teamId": "dawnheights-cricket-club",
+        "clubId": "dawnheights-cricket-club",
+        "name": "Dawnheights Cricket Club"
+      },
+      {
+        "teamId": "amanzimtoti-cricket-club",
+        "clubId": "amanzimtoti-cricket-club",
+        "name": "Amanzimtoti Cricket Club"
+      },
+      {
+        "teamId": "crusaders",
+        "clubId": "crusaders",
+        "name": "Crusaders"
+      },
+      {
+        "teamId": "delta-cricket-club",
+        "clubId": "delta-cricket-club",
+        "name": "Delta Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-09-26",
+        "time": "13:00",
+        "home": "ptcc",
+        "away": "kccd"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-09-26",
+        "time": "13:00",
+        "home": "dawnheights-cricket-club",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-09-26",
+        "time": "13:00",
+        "home": "crusaders",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f4",
+        "round": 2,
+        "date": "2026-10-03",
+        "time": "13:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f5",
+        "round": 2,
+        "date": "2026-10-03",
+        "time": "13:00",
+        "home": "crusaders",
+        "away": "ptcc"
+      },
+      {
+        "id": "f6",
+        "round": 2,
+        "date": "2026-10-03",
+        "time": "13:00",
+        "home": "dawnheights-cricket-club",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f7",
+        "round": 3,
+        "date": "2026-10-10",
+        "time": "13:00",
+        "home": "delta-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f8",
+        "round": 3,
+        "date": "2026-10-10",
+        "time": "13:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f9",
+        "round": 3,
+        "date": "2026-10-10",
+        "time": "13:00",
+        "home": "crusaders",
+        "away": "dawnheights-cricket-club"
+      },
+      {
+        "id": "f10",
+        "round": 4,
+        "date": "2026-10-17",
+        "time": "13:00",
+        "home": "dawnheights-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f11",
+        "round": 4,
+        "date": "2026-10-17",
+        "time": "13:00",
+        "home": "delta-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f12",
+        "round": 4,
+        "date": "2026-10-17",
+        "time": "13:00",
+        "home": "crusaders",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f13",
+        "round": 5,
+        "date": "2026-10-24",
+        "time": "13:00",
+        "home": "crusaders",
+        "away": "kccd"
+      },
+      {
+        "id": "f14",
+        "round": 5,
+        "date": "2026-10-24",
+        "time": "13:00",
+        "home": "dawnheights-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f15",
+        "round": 5,
+        "date": "2026-10-24",
+        "time": "13:00",
+        "home": "delta-cricket-club",
+        "away": "amanzimtoti-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-premier-men-t20-1",
+    "name": "Premier League · T20 · Group 1",
+    "leagueKey": "premier",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-09-27",
+    "endDate": "2026-10-11",
+    "released": true,
+    "releasedAt": "2026-09-03T16:59:50.163Z",
+    "version": 12,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "umzinto",
+      "african-warriors-cc",
+      "hillary-malvern-cricket-club",
+      "chatsworth-united-cricket-club",
+      "ukzn-cricket-club",
+      "delta-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "umzinto",
+        "clubId": "umzinto",
+        "name": "Umzinto"
+      },
+      {
+        "teamId": "african-warriors-cc",
+        "clubId": "african-warriors-cc",
+        "name": "African Warriors CC"
+      },
+      {
+        "teamId": "hillary-malvern-cricket-club",
+        "clubId": "hillary-malvern-cricket-club",
+        "name": "Hillary/Malvern Cricket Club"
+      },
+      {
+        "teamId": "chatsworth-united-cricket-club",
+        "clubId": "chatsworth-united-cricket-club",
+        "name": "Chatsworth United Cricket Club"
+      },
+      {
+        "teamId": "ukzn-cricket-club",
+        "clubId": "ukzn-cricket-club",
+        "name": "UKZN CRICKET CLUB"
+      },
+      {
+        "teamId": "delta-cricket-club",
+        "clubId": "delta-cricket-club",
+        "name": "Delta Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "umzinto",
+        "away": "african-warriors-cc"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "ukzn-cricket-club",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f4",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "chatsworth-united-cricket-club",
+        "away": "african-warriors-cc"
+      },
+      {
+        "id": "f5",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "ukzn-cricket-club",
+        "away": "umzinto"
+      },
+      {
+        "id": "f6",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "hillary-malvern-cricket-club",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f7",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "delta-cricket-club",
+        "away": "african-warriors-cc"
+      },
+      {
+        "id": "f8",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "chatsworth-united-cricket-club",
+        "away": "umzinto"
+      },
+      {
+        "id": "f9",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "ukzn-cricket-club",
+        "away": "hillary-malvern-cricket-club"
+      },
+      {
+        "id": "f10",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "hillary-malvern-cricket-club",
+        "away": "african-warriors-cc"
+      },
+      {
+        "id": "f11",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "delta-cricket-club",
+        "away": "umzinto"
+      },
+      {
+        "id": "f12",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "ukzn-cricket-club",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f13",
+        "round": 3,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "ukzn-cricket-club",
+        "away": "african-warriors-cc"
+      },
+      {
+        "id": "f14",
+        "round": 3,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "umzinto"
+      },
+      {
+        "id": "f15",
+        "round": 3,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "delta-cricket-club",
+        "away": "chatsworth-united-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-premier-women-t20-g2",
+    "name": "Premier Women’s League · T20 · Group 2",
+    "leagueKey": "premierWomen",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-09-27",
+    "endDate": "2026-10-11",
+    "released": true,
+    "releasedAt": "2026-09-03T16:59:55.226Z",
+    "version": 12,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "kccd",
+      "chatsworth-united-cricket-club",
+      "lindelani-cricket-club",
+      "african-warriors-cc"
+    ],
+    "participants": [
+      {
+        "teamId": "kccd",
+        "clubId": "kccd",
+        "name": "KCCD"
+      },
+      {
+        "teamId": "chatsworth-united-cricket-club",
+        "clubId": "chatsworth-united-cricket-club",
+        "name": "Chatsworth United Cricket Club"
+      },
+      {
+        "teamId": "lindelani-cricket-club",
+        "clubId": "lindelani-cricket-club",
+        "name": "Lindelani Cricket Club"
+      },
+      {
+        "teamId": "african-warriors-cc",
+        "clubId": "african-warriors-cc",
+        "name": "African Warriors CC"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "kccd",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f2",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "lindelani-cricket-club",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "african-warriors-cc",
+        "away": "kccd"
+      },
+      {
+        "id": "f4",
+        "round": 3,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "african-warriors-cc",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 3,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "lindelani-cricket-club",
+        "away": "kccd"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-premier-women-t20-g1",
+    "name": "Premier Women’s League · T20 · Group 1",
+    "leagueKey": "premierWomen",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-09-27",
+    "endDate": "2026-10-11",
+    "released": true,
+    "releasedAt": "2026-09-03T17:00:02.025Z",
+    "version": 13,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "hollywoodbets-chatsworth-sporting",
+      "rhythm-dhsob-cricket-club",
+      "delta-cricket-club",
+      "kwamashu-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "hollywoodbets-chatsworth-sporting",
+        "clubId": "hollywoodbets-chatsworth-sporting",
+        "name": "Hollywoodbets Chatsworth Sporting"
+      },
+      {
+        "teamId": "rhythm-dhsob-cricket-club",
+        "clubId": "rhythm-dhsob-cricket-club",
+        "name": "Rhythm DHSOB Cricket club"
+      },
+      {
+        "teamId": "delta-cricket-club",
+        "clubId": "delta-cricket-club",
+        "name": "Delta Cricket Club"
+      },
+      {
+        "teamId": "kwamashu-cricket-club",
+        "clubId": "kwamashu-cricket-club",
+        "name": "KwaMashu Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f2",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "delta-cricket-club",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "kwamashu-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f4",
+        "round": 3,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "kwamashu-cricket-club",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 3,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "delta-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-promotion-men-t20-g4",
+    "name": "Promotion League · T20 · Group 4",
+    "leagueKey": "promotion",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-09-27",
+    "endDate": "2026-10-11",
+    "released": true,
+    "releasedAt": "2026-09-03T17:00:07.407Z",
+    "version": 13,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "saints-cricket-club",
+      "forest-hills-cricket-club",
+      "east-coast-cc",
+      "kwamashu-cricket-club",
+      "phoenix-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "saints-cricket-club",
+        "clubId": "saints-cricket-club",
+        "name": "Saints Cricket Club"
+      },
+      {
+        "teamId": "forest-hills-cricket-club",
+        "clubId": "forest-hills-cricket-club",
+        "name": "Forest Hills Cricket Club"
+      },
+      {
+        "teamId": "east-coast-cc",
+        "clubId": "east-coast-cc",
+        "name": "East Coast CC"
+      },
+      {
+        "teamId": "kwamashu-cricket-club",
+        "clubId": "kwamashu-cricket-club",
+        "name": "KwaMashu Cricket Club"
+      },
+      {
+        "teamId": "phoenix-cricket-club",
+        "clubId": "phoenix-cricket-club",
+        "name": "Phoenix Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "saints-cricket-club",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "east-coast-cc",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 2,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "saints-cricket-club",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f4",
+        "round": 2,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "phoenix-cricket-club",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 3,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "kwamashu-cricket-club",
+        "away": "phoenix-cricket-club"
+      },
+      {
+        "id": "f6",
+        "round": 3,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "east-coast-cc",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f7",
+        "round": 4,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "phoenix-cricket-club",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f8",
+        "round": 4,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "saints-cricket-club",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f9",
+        "round": 5,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "forest-hills-cricket-club",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f10",
+        "round": 5,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "saints-cricket-club",
+        "away": "phoenix-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-promotion-men-t20-g1",
+    "name": "Promotion League · T20 · Group 1",
+    "leagueKey": "promotion",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-09-27",
+    "endDate": "2026-10-11",
+    "released": true,
+    "releasedAt": "2026-09-03T17:00:15.802Z",
+    "version": 14,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "simplex-reservoir-hills-crimson",
+      "spartan-sporting",
+      "lindelani-cricket-club",
+      "durban-university-of-technology-dut",
+      "dawnheights-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "simplex-reservoir-hills-crimson",
+        "clubId": "simplex-reservoir-hills-crimson",
+        "name": "Simplex Reservoir Hills Crimson"
+      },
+      {
+        "teamId": "spartan-sporting",
+        "clubId": "spartan-sporting",
+        "name": "Spartan Sporting"
+      },
+      {
+        "teamId": "lindelani-cricket-club",
+        "clubId": "lindelani-cricket-club",
+        "name": "Lindelani Cricket Club"
+      },
+      {
+        "teamId": "durban-university-of-technology-dut",
+        "clubId": "durban-university-of-technology-dut",
+        "name": "Durban University of Technology (DUT)"
+      },
+      {
+        "teamId": "dawnheights-cricket-club",
+        "clubId": "dawnheights-cricket-club",
+        "name": "Dawnheights Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "simplex-reservoir-hills-crimson",
+        "away": "spartan-sporting"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "lindelani-cricket-club",
+        "away": "durban-university-of-technology-dut"
+      },
+      {
+        "id": "f3",
+        "round": 2,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "lindelani-cricket-club",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f4",
+        "round": 2,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "dawnheights-cricket-club",
+        "away": "durban-university-of-technology-dut"
+      },
+      {
+        "id": "f5",
+        "round": 3,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "durban-university-of-technology-dut",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f6",
+        "round": 3,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "dawnheights-cricket-club",
+        "away": "spartan-sporting"
+      },
+      {
+        "id": "f7",
+        "round": 4,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "spartan-sporting",
+        "away": "lindelani-cricket-club"
+      },
+      {
+        "id": "f8",
+        "round": 4,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "simplex-reservoir-hills-crimson",
+        "away": "dawnheights-cricket-club"
+      },
+      {
+        "id": "f9",
+        "round": 5,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "spartan-sporting",
+        "away": "durban-university-of-technology-dut"
+      },
+      {
+        "id": "f10",
+        "round": 5,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "dawnheights-cricket-club",
+        "away": "lindelani-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-promotion-men-t20-g3",
+    "name": "Promotion League · T20 · Group 3",
+    "leagueKey": "promotion",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-09-27",
+    "endDate": "2026-10-11",
+    "released": true,
+    "releasedAt": "2026-09-03T17:00:20.547Z",
+    "version": 13,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "kccd",
+      "west-cc",
+      "umlazi-cricket-club",
+      "tongaat-cricket-association",
+      "railways-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "kccd",
+        "clubId": "kccd",
+        "name": "KCCD"
+      },
+      {
+        "teamId": "west-cc",
+        "clubId": "west-cc",
+        "name": "West CC"
+      },
+      {
+        "teamId": "umlazi-cricket-club",
+        "clubId": "umlazi-cricket-club",
+        "name": "uMlazi cricket club"
+      },
+      {
+        "teamId": "tongaat-cricket-association",
+        "clubId": "tongaat-cricket-association",
+        "name": "Tongaat Cricket Association"
+      },
+      {
+        "teamId": "railways-cricket-club",
+        "clubId": "railways-cricket-club",
+        "name": "Railways Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "kccd",
+        "away": "west-cc"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "umlazi-cricket-club",
+        "away": "tongaat-cricket-association"
+      },
+      {
+        "id": "f3",
+        "round": 2,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "umlazi-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f4",
+        "round": 2,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "west-cc",
+        "away": "railways-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 3,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "umlazi-cricket-club",
+        "away": "west-cc"
+      },
+      {
+        "id": "f6",
+        "round": 3,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "railways-cricket-club",
+        "away": "tongaat-cricket-association"
+      },
+      {
+        "id": "f7",
+        "round": 4,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "railways-cricket-club",
+        "away": "umlazi-cricket-club"
+      },
+      {
+        "id": "f8",
+        "round": 4,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "tongaat-cricket-association",
+        "away": "kccd"
+      },
+      {
+        "id": "f9",
+        "round": 5,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "tongaat-cricket-association",
+        "away": "west-cc"
+      },
+      {
+        "id": "f10",
+        "round": 5,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "kccd",
+        "away": "railways-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-promotion-men-t20-g2",
+    "name": "Promotion League · T20 · Group 2",
+    "leagueKey": "promotion",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-09-27",
+    "endDate": "2026-10-11",
+    "released": true,
+    "releasedAt": "2026-09-03T17:00:24.972Z",
+    "version": 14,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "verulam-cricket-club",
+      "ptcc",
+      "newlands-cricket-club",
+      "meadowridge-sporting-cricket-club",
+      "ilembe-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "verulam-cricket-club",
+        "clubId": "verulam-cricket-club",
+        "name": "Verulam Cricket Club"
+      },
+      {
+        "teamId": "ptcc",
+        "clubId": "ptcc",
+        "name": "Pinetown Topham Cricket Club"
+      },
+      {
+        "teamId": "newlands-cricket-club",
+        "clubId": "newlands-cricket-club",
+        "name": "Newlands Cricket Club"
+      },
+      {
+        "teamId": "meadowridge-sporting-cricket-club",
+        "clubId": "meadowridge-sporting-cricket-club",
+        "name": "Meadowridge Sporting Cricket Club"
+      },
+      {
+        "teamId": "ilembe-cricket-club",
+        "clubId": "ilembe-cricket-club",
+        "name": "iLembe Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "verulam-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "newlands-cricket-club",
+        "away": "meadowridge-sporting-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 2,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "ilembe-cricket-club",
+        "away": "verulam-cricket-club"
+      },
+      {
+        "id": "f4",
+        "round": 2,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "ptcc",
+        "away": "newlands-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 3,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "meadowridge-sporting-cricket-club",
+        "away": "ilembe-cricket-club"
+      },
+      {
+        "id": "f6",
+        "round": 3,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "newlands-cricket-club",
+        "away": "verulam-cricket-club"
+      },
+      {
+        "id": "f7",
+        "round": 4,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "ptcc",
+        "away": "meadowridge-sporting-cricket-club"
+      },
+      {
+        "id": "f8",
+        "round": 4,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "ilembe-cricket-club",
+        "away": "newlands-cricket-club"
+      },
+      {
+        "id": "f9",
+        "round": 5,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "verulam-cricket-club",
+        "away": "meadowridge-sporting-cricket-club"
+      },
+      {
+        "id": "f10",
+        "round": 5,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "ilembe-cricket-club",
+        "away": "ptcc"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-premier-men-t20-2",
+    "name": "Premier League · T20 · Group 2",
+    "leagueKey": "premier",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-09-27",
+    "endDate": "2026-10-11",
+    "released": true,
+    "releasedAt": "2026-09-03T17:00:29.801Z",
+    "version": 13,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "southern-natal",
+      "amanzimtoti-cricket-club",
+      "harlequins-cricket-club",
+      "hollywoodbets-chatsworth-sporting",
+      "crusaders",
+      "rhythm-dhsob-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "southern-natal",
+        "clubId": "southern-natal",
+        "name": "Southern Natal"
+      },
+      {
+        "teamId": "amanzimtoti-cricket-club",
+        "clubId": "amanzimtoti-cricket-club",
+        "name": "Amanzimtoti Cricket Club"
+      },
+      {
+        "teamId": "harlequins-cricket-club",
+        "clubId": "harlequins-cricket-club",
+        "name": "Harlequins Cricket Club"
+      },
+      {
+        "teamId": "hollywoodbets-chatsworth-sporting",
+        "clubId": "hollywoodbets-chatsworth-sporting",
+        "name": "Hollywoodbets Chatsworth Sporting"
+      },
+      {
+        "teamId": "crusaders",
+        "clubId": "crusaders",
+        "name": "Crusaders"
+      },
+      {
+        "teamId": "rhythm-dhsob-cricket-club",
+        "clubId": "rhythm-dhsob-cricket-club",
+        "name": "Rhythm DHSOB Cricket club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "southern-natal",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "harlequins-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "09:00",
+        "home": "crusaders",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f4",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "crusaders",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f6",
+        "round": 1,
+        "date": "2026-09-27",
+        "time": "13:30",
+        "home": "harlequins-cricket-club",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f7",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f8",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f9",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "09:00",
+        "home": "crusaders",
+        "away": "harlequins-cricket-club"
+      },
+      {
+        "id": "f10",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "harlequins-cricket-club",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f11",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f12",
+        "round": 2,
+        "date": "2026-10-04",
+        "time": "13:30",
+        "home": "crusaders",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f13",
+        "round": 3,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "crusaders",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f14",
+        "round": 3,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "harlequins-cricket-club",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f15",
+        "round": 3,
+        "date": "2026-10-11",
+        "time": "09:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-promotion-women-t20-gc",
+    "name": "Promotion Women’s League · T20 · Group C",
+    "leagueKey": "promotion-women-s-league",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-10-24",
+    "endDate": "2027-02-21",
+    "released": true,
+    "releasedAt": "2026-09-03T17:00:34.945Z",
+    "version": 13,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "kwamashu-cricket-club",
+      "simplex-reservoir-hills-crimson",
+      "lamontville-cc",
+      "umgababa-cricket-club",
+      "amanzimtoti-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "kwamashu-cricket-club",
+        "clubId": "kwamashu-cricket-club",
+        "name": "KwaMashu Cricket Club"
+      },
+      {
+        "teamId": "simplex-reservoir-hills-crimson",
+        "clubId": "simplex-reservoir-hills-crimson",
+        "name": "Simplex Reservoir Hills Crimson"
+      },
+      {
+        "teamId": "lamontville-cc",
+        "clubId": "lamontville-cc",
+        "name": "Lamontville CC"
+      },
+      {
+        "teamId": "umgababa-cricket-club",
+        "clubId": "umgababa-cricket-club",
+        "name": "Umgababa Cricket Club"
+      },
+      {
+        "teamId": "amanzimtoti-cricket-club",
+        "clubId": "amanzimtoti-cricket-club",
+        "name": "Amanzimtoti Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "08:30",
+        "home": "kwamashu-cricket-club",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "08:30",
+        "home": "lamontville-cc",
+        "away": "umgababa-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "11:30",
+        "home": "umgababa-cricket-club",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f4",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "11:30",
+        "home": "lamontville-cc",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "14:30",
+        "home": "amanzimtoti-cricket-club",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f6",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "14:30",
+        "home": "umgababa-cricket-club",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f7",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "08:30",
+        "home": "lamontville-cc",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f8",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "08:30",
+        "home": "amanzimtoti-cricket-club",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f9",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "11:30",
+        "home": "lamontville-cc",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f10",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "11:30",
+        "home": "amanzimtoti-cricket-club",
+        "away": "umgababa-cricket-club"
+      },
+      {
+        "id": "f11",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "08:30",
+        "home": "kwamashu-cricket-club",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f12",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "08:30",
+        "home": "lamontville-cc",
+        "away": "umgababa-cricket-club"
+      },
+      {
+        "id": "f13",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "11:30",
+        "home": "umgababa-cricket-club",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f14",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "11:30",
+        "home": "lamontville-cc",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f15",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "14:30",
+        "home": "amanzimtoti-cricket-club",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f16",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "14:30",
+        "home": "umgababa-cricket-club",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f17",
+        "round": 2,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "lamontville-cc",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f18",
+        "round": 2,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "amanzimtoti-cricket-club",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f19",
+        "round": 2,
+        "date": "2026-11-22",
+        "time": "11:30",
+        "home": "lamontville-cc",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f20",
+        "round": 2,
+        "date": "2026-11-22",
+        "time": "11:30",
+        "home": "amanzimtoti-cricket-club",
+        "away": "umgababa-cricket-club"
+      },
+      {
+        "id": "f21",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "08:30",
+        "home": "kwamashu-cricket-club",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f22",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "08:30",
+        "home": "lamontville-cc",
+        "away": "umgababa-cricket-club"
+      },
+      {
+        "id": "f23",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "11:30",
+        "home": "umgababa-cricket-club",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f24",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "11:30",
+        "home": "lamontville-cc",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f25",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "14:30",
+        "home": "amanzimtoti-cricket-club",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f26",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "14:30",
+        "home": "umgababa-cricket-club",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f27",
+        "round": 3,
+        "date": "2027-01-24",
+        "time": "08:30",
+        "home": "lamontville-cc",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f28",
+        "round": 3,
+        "date": "2027-01-24",
+        "time": "08:30",
+        "home": "amanzimtoti-cricket-club",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f29",
+        "round": 3,
+        "date": "2027-01-24",
+        "time": "11:30",
+        "home": "lamontville-cc",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f30",
+        "round": 3,
+        "date": "2027-01-24",
+        "time": "11:30",
+        "home": "amanzimtoti-cricket-club",
+        "away": "umgababa-cricket-club"
+      },
+      {
+        "id": "f31",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "08:30",
+        "home": "kwamashu-cricket-club",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f32",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "08:30",
+        "home": "lamontville-cc",
+        "away": "umgababa-cricket-club"
+      },
+      {
+        "id": "f33",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "11:30",
+        "home": "umgababa-cricket-club",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f34",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "11:30",
+        "home": "lamontville-cc",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f35",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "14:30",
+        "home": "amanzimtoti-cricket-club",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f36",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "14:30",
+        "home": "umgababa-cricket-club",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f37",
+        "round": 4,
+        "date": "2027-02-21",
+        "time": "08:30",
+        "home": "lamontville-cc",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f38",
+        "round": 4,
+        "date": "2027-02-21",
+        "time": "08:30",
+        "home": "amanzimtoti-cricket-club",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f39",
+        "round": 4,
+        "date": "2027-02-21",
+        "time": "11:30",
+        "home": "lamontville-cc",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f40",
+        "round": 4,
+        "date": "2027-02-21",
+        "time": "11:30",
+        "home": "amanzimtoti-cricket-club",
+        "away": "umgababa-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-promotion-women-t20-gb",
+    "name": "Promotion Women’s League · T20 · Group B",
+    "leagueKey": "promotion-women-s-league",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-10-24",
+    "endDate": "2027-02-21",
+    "released": true,
+    "releasedAt": "2026-09-03T17:00:39.505Z",
+    "version": 18,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "tm_umlazi-cricket-club_promotion-women-s-league_1",
+      "chesterville-cricket-clube",
+      "parkgate-hambanathi-cc",
+      "fam-kwamakhutha",
+      "ukzn-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "tm_umlazi-cricket-club_promotion-women-s-league_1",
+        "clubId": "umlazi-cricket-club",
+        "name": "uMlazi cricket club B"
+      },
+      {
+        "teamId": "chesterville-cricket-clube",
+        "clubId": "chesterville-cricket-clube",
+        "name": "Chesterville Cricket Club"
+      },
+      {
+        "teamId": "parkgate-hambanathi-cc",
+        "clubId": "parkgate-hambanathi-cc",
+        "name": "Parkgate Hambanathi CC"
+      },
+      {
+        "teamId": "fam-kwamakhutha",
+        "clubId": "fam-kwamakhutha",
+        "name": "FAM Kwamakhutha"
+      },
+      {
+        "teamId": "ukzn-cricket-club",
+        "clubId": "ukzn-cricket-club",
+        "name": "UKZN CRICKET CLUB"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "08:30",
+        "home": "tm_umlazi-cricket-club_promotion-women-s-league_1",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "08:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "fam-kwamakhutha"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "11:30",
+        "home": "fam-kwamakhutha",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f4",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "11:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "ukzn-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "14:30",
+        "home": "ukzn-cricket-club",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f6",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "14:30",
+        "home": "fam-kwamakhutha",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_1"
+      },
+      {
+        "id": "f7",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "08:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f8",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "08:30",
+        "home": "ukzn-cricket-club",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_1"
+      },
+      {
+        "id": "f9",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "11:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_1"
+      },
+      {
+        "id": "f10",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "11:30",
+        "home": "ukzn-cricket-club",
+        "away": "fam-kwamakhutha"
+      },
+      {
+        "id": "f11",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "08:30",
+        "home": "tm_umlazi-cricket-club_promotion-women-s-league_1",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f12",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "08:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "fam-kwamakhutha"
+      },
+      {
+        "id": "f13",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "11:30",
+        "home": "fam-kwamakhutha",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f14",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "11:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "ukzn-cricket-club"
+      },
+      {
+        "id": "f15",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "14:30",
+        "home": "ukzn-cricket-club",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f16",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "14:30",
+        "home": "fam-kwamakhutha",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_1"
+      },
+      {
+        "id": "f17",
+        "round": 2,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f18",
+        "round": 2,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "ukzn-cricket-club",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_1"
+      },
+      {
+        "id": "f19",
+        "round": 2,
+        "date": "2026-11-22",
+        "time": "11:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_1"
+      },
+      {
+        "id": "f20",
+        "round": 2,
+        "date": "2026-11-22",
+        "time": "11:30",
+        "home": "ukzn-cricket-club",
+        "away": "fam-kwamakhutha"
+      },
+      {
+        "id": "f21",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "08:30",
+        "home": "tm_umlazi-cricket-club_promotion-women-s-league_1",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f22",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "08:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "fam-kwamakhutha"
+      },
+      {
+        "id": "f23",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "11:30",
+        "home": "fam-kwamakhutha",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f24",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "11:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "ukzn-cricket-club"
+      },
+      {
+        "id": "f25",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "14:30",
+        "home": "ukzn-cricket-club",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f26",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "14:30",
+        "home": "fam-kwamakhutha",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_1"
+      },
+      {
+        "id": "f27",
+        "round": 3,
+        "date": "2027-01-24",
+        "time": "08:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f28",
+        "round": 3,
+        "date": "2027-01-24",
+        "time": "08:30",
+        "home": "ukzn-cricket-club",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_1"
+      },
+      {
+        "id": "f29",
+        "round": 3,
+        "date": "2027-01-24",
+        "time": "11:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_1"
+      },
+      {
+        "id": "f30",
+        "round": 3,
+        "date": "2027-01-24",
+        "time": "11:30",
+        "home": "ukzn-cricket-club",
+        "away": "fam-kwamakhutha"
+      },
+      {
+        "id": "f31",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "08:30",
+        "home": "tm_umlazi-cricket-club_promotion-women-s-league_1",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f32",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "08:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "fam-kwamakhutha"
+      },
+      {
+        "id": "f33",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "11:30",
+        "home": "fam-kwamakhutha",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f34",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "11:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "ukzn-cricket-club"
+      },
+      {
+        "id": "f35",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "14:30",
+        "home": "ukzn-cricket-club",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f36",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "14:30",
+        "home": "fam-kwamakhutha",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_1"
+      },
+      {
+        "id": "f37",
+        "round": 4,
+        "date": "2027-02-21",
+        "time": "08:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "chesterville-cricket-clube"
+      },
+      {
+        "id": "f38",
+        "round": 4,
+        "date": "2027-02-21",
+        "time": "08:30",
+        "home": "ukzn-cricket-club",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_1"
+      },
+      {
+        "id": "f39",
+        "round": 4,
+        "date": "2027-02-21",
+        "time": "11:30",
+        "home": "parkgate-hambanathi-cc",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_1"
+      },
+      {
+        "id": "f40",
+        "round": 4,
+        "date": "2027-02-21",
+        "time": "11:30",
+        "home": "ukzn-cricket-club",
+        "away": "fam-kwamakhutha"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-promotion-women-t20-ga",
+    "name": "Promotion Women’s League · T20 · Group A",
+    "leagueKey": "promotion-women-s-league",
+    "maxOvers": 20,
+    "seriesType": "Twenty20 (16-25 overs)",
+    "startDate": "2026-10-24",
+    "endDate": "2027-02-21",
+    "released": true,
+    "releasedAt": "2026-09-03T17:00:43.726Z",
+    "version": 14,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "crusaders",
+      "west-cc",
+      "southern-natal",
+      "tm_umlazi-cricket-club_promotion-women-s-league_0",
+      "ilembe-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "crusaders",
+        "clubId": "crusaders",
+        "name": "Crusaders"
+      },
+      {
+        "teamId": "west-cc",
+        "clubId": "west-cc",
+        "name": "West CC"
+      },
+      {
+        "teamId": "southern-natal",
+        "clubId": "southern-natal",
+        "name": "Southern Natal"
+      },
+      {
+        "teamId": "tm_umlazi-cricket-club_promotion-women-s-league_0",
+        "clubId": "umlazi-cricket-club",
+        "name": "uMlazi cricket club A"
+      },
+      {
+        "teamId": "ilembe-cricket-club",
+        "clubId": "ilembe-cricket-club",
+        "name": "iLembe Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "08:30",
+        "home": "crusaders",
+        "away": "west-cc"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "08:30",
+        "home": "southern-natal",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_0"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "11:30",
+        "home": "tm_umlazi-cricket-club_promotion-women-s-league_0",
+        "away": "west-cc"
+      },
+      {
+        "id": "f4",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "11:30",
+        "home": "southern-natal",
+        "away": "ilembe-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "14:30",
+        "home": "ilembe-cricket-club",
+        "away": "west-cc"
+      },
+      {
+        "id": "f6",
+        "round": 1,
+        "date": "2026-10-24",
+        "time": "14:30",
+        "home": "tm_umlazi-cricket-club_promotion-women-s-league_0",
+        "away": "crusaders"
+      },
+      {
+        "id": "f7",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "08:30",
+        "home": "southern-natal",
+        "away": "west-cc"
+      },
+      {
+        "id": "f8",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "08:30",
+        "home": "ilembe-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f9",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "11:30",
+        "home": "southern-natal",
+        "away": "crusaders"
+      },
+      {
+        "id": "f10",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "11:30",
+        "home": "ilembe-cricket-club",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_0"
+      },
+      {
+        "id": "f11",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "08:30",
+        "home": "crusaders",
+        "away": "west-cc"
+      },
+      {
+        "id": "f12",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "08:30",
+        "home": "southern-natal",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_0"
+      },
+      {
+        "id": "f13",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "11:30",
+        "home": "tm_umlazi-cricket-club_promotion-women-s-league_0",
+        "away": "west-cc"
+      },
+      {
+        "id": "f14",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "11:30",
+        "home": "southern-natal",
+        "away": "ilembe-cricket-club"
+      },
+      {
+        "id": "f15",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "14:30",
+        "home": "ilembe-cricket-club",
+        "away": "west-cc"
+      },
+      {
+        "id": "f16",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "14:30",
+        "home": "tm_umlazi-cricket-club_promotion-women-s-league_0",
+        "away": "crusaders"
+      },
+      {
+        "id": "f17",
+        "round": 2,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "southern-natal",
+        "away": "west-cc"
+      },
+      {
+        "id": "f18",
+        "round": 2,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "ilembe-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f19",
+        "round": 2,
+        "date": "2026-11-22",
+        "time": "11:30",
+        "home": "southern-natal",
+        "away": "crusaders"
+      },
+      {
+        "id": "f20",
+        "round": 2,
+        "date": "2026-11-22",
+        "time": "11:30",
+        "home": "ilembe-cricket-club",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_0"
+      },
+      {
+        "id": "f21",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "08:30",
+        "home": "crusaders",
+        "away": "west-cc"
+      },
+      {
+        "id": "f22",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "08:30",
+        "home": "southern-natal",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_0"
+      },
+      {
+        "id": "f23",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "11:30",
+        "home": "tm_umlazi-cricket-club_promotion-women-s-league_0",
+        "away": "west-cc"
+      },
+      {
+        "id": "f24",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "11:30",
+        "home": "southern-natal",
+        "away": "ilembe-cricket-club"
+      },
+      {
+        "id": "f25",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "14:30",
+        "home": "ilembe-cricket-club",
+        "away": "west-cc"
+      },
+      {
+        "id": "f26",
+        "round": 3,
+        "date": "2027-01-23",
+        "time": "14:30",
+        "home": "tm_umlazi-cricket-club_promotion-women-s-league_0",
+        "away": "crusaders"
+      },
+      {
+        "id": "f27",
+        "round": 3,
+        "date": "2027-01-24",
+        "time": "08:30",
+        "home": "southern-natal",
+        "away": "west-cc"
+      },
+      {
+        "id": "f28",
+        "round": 3,
+        "date": "2027-01-24",
+        "time": "08:30",
+        "home": "ilembe-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f29",
+        "round": 3,
+        "date": "2027-01-24",
+        "time": "11:30",
+        "home": "southern-natal",
+        "away": "crusaders"
+      },
+      {
+        "id": "f30",
+        "round": 3,
+        "date": "2027-01-24",
+        "time": "11:30",
+        "home": "ilembe-cricket-club",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_0"
+      },
+      {
+        "id": "f31",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "08:30",
+        "home": "crusaders",
+        "away": "west-cc"
+      },
+      {
+        "id": "f32",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "08:30",
+        "home": "southern-natal",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_0"
+      },
+      {
+        "id": "f33",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "11:30",
+        "home": "tm_umlazi-cricket-club_promotion-women-s-league_0",
+        "away": "west-cc"
+      },
+      {
+        "id": "f34",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "11:30",
+        "home": "southern-natal",
+        "away": "ilembe-cricket-club"
+      },
+      {
+        "id": "f35",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "14:30",
+        "home": "ilembe-cricket-club",
+        "away": "west-cc"
+      },
+      {
+        "id": "f36",
+        "round": 4,
+        "date": "2027-02-20",
+        "time": "14:30",
+        "home": "tm_umlazi-cricket-club_promotion-women-s-league_0",
+        "away": "crusaders"
+      },
+      {
+        "id": "f37",
+        "round": 4,
+        "date": "2027-02-21",
+        "time": "08:30",
+        "home": "southern-natal",
+        "away": "west-cc"
+      },
+      {
+        "id": "f38",
+        "round": 4,
+        "date": "2027-02-21",
+        "time": "08:30",
+        "home": "ilembe-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f39",
+        "round": 4,
+        "date": "2027-02-21",
+        "time": "11:30",
+        "home": "southern-natal",
+        "away": "crusaders"
+      },
+      {
+        "id": "f40",
+        "round": 4,
+        "date": "2027-02-21",
+        "time": "11:30",
+        "home": "ilembe-cricket-club",
+        "away": "tm_umlazi-cricket-club_promotion-women-s-league_0"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-premier-women-30ov-top4",
+    "name": "Premier Women’s League · 30 Over · Top 4",
+    "leagueKey": "premierWomen",
+    "maxOvers": 30,
+    "seriesType": "One-Day (40-50 overs)",
+    "startDate": "2026-10-25",
+    "endDate": "2026-11-29",
+    "released": true,
+    "releasedAt": "2026-09-03T17:00:49.467Z",
+    "version": 13,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "delta-cricket-club",
+      "lindelani-cricket-club",
+      "rhythm-dhsob-cricket-club",
+      "african-warriors-cc"
+    ],
+    "participants": [
+      {
+        "teamId": "delta-cricket-club",
+        "clubId": "delta-cricket-club",
+        "name": "Delta Cricket Club"
+      },
+      {
+        "teamId": "lindelani-cricket-club",
+        "clubId": "lindelani-cricket-club",
+        "name": "Lindelani Cricket Club"
+      },
+      {
+        "teamId": "rhythm-dhsob-cricket-club",
+        "clubId": "rhythm-dhsob-cricket-club",
+        "name": "Rhythm DHSOB Cricket club"
+      },
+      {
+        "teamId": "african-warriors-cc",
+        "clubId": "african-warriors-cc",
+        "name": "African Warriors CC"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "08:30",
+        "home": "delta-cricket-club",
+        "away": "lindelani-cricket-club"
+      },
+      {
+        "id": "f2",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "08:30",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "lindelani-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "08:30",
+        "home": "african-warriors-cc",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f4",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "08:30",
+        "home": "african-warriors-cc",
+        "away": "lindelani-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "08:30",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f6",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "08:30",
+        "home": "delta-cricket-club",
+        "away": "lindelani-cricket-club"
+      },
+      {
+        "id": "f7",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "lindelani-cricket-club"
+      },
+      {
+        "id": "f8",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "african-warriors-cc",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f9",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "08:30",
+        "home": "african-warriors-cc",
+        "away": "lindelani-cricket-club"
+      },
+      {
+        "id": "f10",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "08:30",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "delta-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-premier-women-30ov-bottom4",
+    "name": "Premier Women’s League · 30 Over · Bottom 4",
+    "leagueKey": "premierWomen",
+    "maxOvers": 30,
+    "seriesType": "One-Day (40-50 overs)",
+    "startDate": "2026-10-25",
+    "endDate": "2026-11-29",
+    "released": true,
+    "releasedAt": "2026-09-03T17:00:54.381Z",
+    "version": 12,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "kwamashu-cricket-club",
+      "hollywoodbets-chatsworth-sporting",
+      "kccd",
+      "chatsworth-united-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "kwamashu-cricket-club",
+        "clubId": "kwamashu-cricket-club",
+        "name": "KwaMashu Cricket Club"
+      },
+      {
+        "teamId": "hollywoodbets-chatsworth-sporting",
+        "clubId": "hollywoodbets-chatsworth-sporting",
+        "name": "Hollywoodbets Chatsworth Sporting"
+      },
+      {
+        "teamId": "kccd",
+        "clubId": "kccd",
+        "name": "KCCD"
+      },
+      {
+        "teamId": "chatsworth-united-cricket-club",
+        "clubId": "chatsworth-united-cricket-club",
+        "name": "Chatsworth United Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "08:30",
+        "home": "kwamashu-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f2",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "08:30",
+        "home": "kccd",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f3",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "08:30",
+        "home": "chatsworth-united-cricket-club",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f4",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "08:30",
+        "home": "chatsworth-united-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f5",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "08:30",
+        "home": "kccd",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f6",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "08:30",
+        "home": "kwamashu-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f7",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "kccd",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f8",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "chatsworth-united-cricket-club",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f9",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "08:30",
+        "home": "chatsworth-united-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f10",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "08:30",
+        "home": "kccd",
+        "away": "kwamashu-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-promotion-men-30ov-bottom10",
+    "name": "Promotion League · 30 Over · Bottom 10",
+    "leagueKey": "promotion",
+    "maxOvers": 30,
+    "seriesType": "One-Day (40-50 overs)",
+    "startDate": "2026-10-25",
+    "endDate": "2027-02-07",
+    "released": true,
+    "releasedAt": "2026-09-03T17:00:59.006Z",
+    "version": 14,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "west-cc",
+      "east-coast-cc",
+      "durban-university-of-technology-dut",
+      "forest-hills-cricket-club",
+      "tongaat-cricket-association",
+      "meadowridge-sporting-cricket-club",
+      "simplex-reservoir-hills-crimson",
+      "kwamashu-cricket-club",
+      "spartan-sporting",
+      "verulam-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "west-cc",
+        "clubId": "west-cc",
+        "name": "West CC"
+      },
+      {
+        "teamId": "east-coast-cc",
+        "clubId": "east-coast-cc",
+        "name": "East Coast CC"
+      },
+      {
+        "teamId": "durban-university-of-technology-dut",
+        "clubId": "durban-university-of-technology-dut",
+        "name": "Durban University of Technology (DUT)"
+      },
+      {
+        "teamId": "forest-hills-cricket-club",
+        "clubId": "forest-hills-cricket-club",
+        "name": "Forest Hills Cricket Club"
+      },
+      {
+        "teamId": "tongaat-cricket-association",
+        "clubId": "tongaat-cricket-association",
+        "name": "Tongaat Cricket Association"
+      },
+      {
+        "teamId": "meadowridge-sporting-cricket-club",
+        "clubId": "meadowridge-sporting-cricket-club",
+        "name": "Meadowridge Sporting Cricket Club"
+      },
+      {
+        "teamId": "simplex-reservoir-hills-crimson",
+        "clubId": "simplex-reservoir-hills-crimson",
+        "name": "Simplex Reservoir Hills Crimson"
+      },
+      {
+        "teamId": "kwamashu-cricket-club",
+        "clubId": "kwamashu-cricket-club",
+        "name": "KwaMashu Cricket Club"
+      },
+      {
+        "teamId": "spartan-sporting",
+        "clubId": "spartan-sporting",
+        "name": "Spartan Sporting"
+      },
+      {
+        "teamId": "verulam-cricket-club",
+        "clubId": "verulam-cricket-club",
+        "name": "Verulam Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "13:00",
+        "home": "west-cc",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "13:00",
+        "home": "durban-university-of-technology-dut",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "meadowridge-sporting-cricket-club"
+      },
+      {
+        "id": "f4",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "13:00",
+        "home": "simplex-reservoir-hills-crimson",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "13:00",
+        "home": "spartan-sporting",
+        "away": "verulam-cricket-club"
+      },
+      {
+        "id": "f6",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "13:00",
+        "home": "forest-hills-cricket-club",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f7",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "13:00",
+        "home": "spartan-sporting",
+        "away": "west-cc"
+      },
+      {
+        "id": "f8",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "13:00",
+        "home": "durban-university-of-technology-dut",
+        "away": "meadowridge-sporting-cricket-club"
+      },
+      {
+        "id": "f9",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f10",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "13:00",
+        "home": "simplex-reservoir-hills-crimson",
+        "away": "verulam-cricket-club"
+      },
+      {
+        "id": "f11",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "13:00",
+        "home": "meadowridge-sporting-cricket-club",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f12",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "13:00",
+        "home": "forest-hills-cricket-club",
+        "away": "west-cc"
+      },
+      {
+        "id": "f13",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "13:00",
+        "home": "durban-university-of-technology-dut",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f14",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "verulam-cricket-club"
+      },
+      {
+        "id": "f15",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "13:00",
+        "home": "spartan-sporting",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f16",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "13:00",
+        "home": "kwamashu-cricket-club",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f17",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "13:00",
+        "home": "meadowridge-sporting-cricket-club",
+        "away": "west-cc"
+      },
+      {
+        "id": "f18",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "13:00",
+        "home": "spartan-sporting",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f19",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "13:00",
+        "home": "durban-university-of-technology-dut",
+        "away": "verulam-cricket-club"
+      },
+      {
+        "id": "f20",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f21",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "13:00",
+        "home": "verulam-cricket-club",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f22",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "13:00",
+        "home": "kwamashu-cricket-club",
+        "away": "west-cc"
+      },
+      {
+        "id": "f23",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "13:00",
+        "home": "meadowridge-sporting-cricket-club",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f24",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "13:00",
+        "home": "durban-university-of-technology-dut",
+        "away": "simplex-reservoir-hills-crimson"
+      },
+      {
+        "id": "f25",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "13:00",
+        "home": "spartan-sporting",
+        "away": "tongaat-cricket-association"
+      },
+      {
+        "id": "f26",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "13:00",
+        "home": "simplex-reservoir-hills-crimson",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f27",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "13:00",
+        "home": "verulam-cricket-club",
+        "away": "west-cc"
+      },
+      {
+        "id": "f28",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "13:00",
+        "home": "kwamashu-cricket-club",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f29",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "13:00",
+        "home": "spartan-sporting",
+        "away": "meadowridge-sporting-cricket-club"
+      },
+      {
+        "id": "f30",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "13:00",
+        "home": "durban-university-of-technology-dut",
+        "away": "tongaat-cricket-association"
+      },
+      {
+        "id": "f31",
+        "round": 7,
+        "date": "2027-01-24",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f32",
+        "round": 7,
+        "date": "2027-01-24",
+        "time": "13:00",
+        "home": "simplex-reservoir-hills-crimson",
+        "away": "west-cc"
+      },
+      {
+        "id": "f33",
+        "round": 7,
+        "date": "2027-01-24",
+        "time": "13:00",
+        "home": "verulam-cricket-club",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f34",
+        "round": 7,
+        "date": "2027-01-24",
+        "time": "13:00",
+        "home": "kwamashu-cricket-club",
+        "away": "meadowridge-sporting-cricket-club"
+      },
+      {
+        "id": "f35",
+        "round": 7,
+        "date": "2027-01-24",
+        "time": "13:00",
+        "home": "spartan-sporting",
+        "away": "durban-university-of-technology-dut"
+      },
+      {
+        "id": "f36",
+        "round": 8,
+        "date": "2027-01-31",
+        "time": "13:00",
+        "home": "durban-university-of-technology-dut",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f37",
+        "round": 8,
+        "date": "2027-01-31",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "west-cc"
+      },
+      {
+        "id": "f38",
+        "round": 8,
+        "date": "2027-01-31",
+        "time": "13:00",
+        "home": "simplex-reservoir-hills-crimson",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f39",
+        "round": 8,
+        "date": "2027-01-31",
+        "time": "13:00",
+        "home": "verulam-cricket-club",
+        "away": "meadowridge-sporting-cricket-club"
+      },
+      {
+        "id": "f40",
+        "round": 8,
+        "date": "2027-01-31",
+        "time": "13:00",
+        "home": "spartan-sporting",
+        "away": "kwamashu-cricket-club"
+      },
+      {
+        "id": "f41",
+        "round": 9,
+        "date": "2027-02-07",
+        "time": "13:00",
+        "home": "spartan-sporting",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f42",
+        "round": 9,
+        "date": "2027-02-07",
+        "time": "13:00",
+        "home": "durban-university-of-technology-dut",
+        "away": "west-cc"
+      },
+      {
+        "id": "f43",
+        "round": 9,
+        "date": "2027-02-07",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f44",
+        "round": 9,
+        "date": "2027-02-07",
+        "time": "13:00",
+        "home": "simplex-reservoir-hills-crimson",
+        "away": "meadowridge-sporting-cricket-club"
+      },
+      {
+        "id": "f45",
+        "round": 9,
+        "date": "2027-02-07",
+        "time": "13:00",
+        "home": "verulam-cricket-club",
+        "away": "kwamashu-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-premier-men-50ov-top6",
+    "name": "Premier League · 50 Over · Top 6",
+    "leagueKey": "premier",
+    "maxOvers": 50,
+    "seriesType": "One-Day (40-50 overs)",
+    "startDate": "2026-10-25",
+    "endDate": "2027-01-31",
+    "released": true,
+    "releasedAt": "2026-09-03T17:01:03.384Z",
+    "version": 14,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "amanzimtoti-cricket-club",
+      "crusaders",
+      "delta-cricket-club",
+      "ukzn-cricket-club",
+      "hillary-malvern-cricket-club",
+      "hollywoodbets-chatsworth-sporting"
+    ],
+    "participants": [
+      {
+        "teamId": "amanzimtoti-cricket-club",
+        "clubId": "amanzimtoti-cricket-club",
+        "name": "Amanzimtoti Cricket Club"
+      },
+      {
+        "teamId": "crusaders",
+        "clubId": "crusaders",
+        "name": "Crusaders"
+      },
+      {
+        "teamId": "delta-cricket-club",
+        "clubId": "delta-cricket-club",
+        "name": "Delta Cricket Club"
+      },
+      {
+        "teamId": "ukzn-cricket-club",
+        "clubId": "ukzn-cricket-club",
+        "name": "UKZN CRICKET CLUB"
+      },
+      {
+        "teamId": "hillary-malvern-cricket-club",
+        "clubId": "hillary-malvern-cricket-club",
+        "name": "Hillary/Malvern Cricket Club"
+      },
+      {
+        "teamId": "hollywoodbets-chatsworth-sporting",
+        "clubId": "hollywoodbets-chatsworth-sporting",
+        "name": "Hollywoodbets Chatsworth Sporting"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "09:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "09:00",
+        "home": "delta-cricket-club",
+        "away": "ukzn-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "09:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f4",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "09:00",
+        "home": "ukzn-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f5",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "09:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f6",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "09:00",
+        "home": "delta-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f7",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "09:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "crusaders"
+      },
+      {
+        "id": "f8",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "09:00",
+        "home": "ukzn-cricket-club",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f9",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "09:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f10",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "09:00",
+        "home": "delta-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f11",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "09:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f12",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "09:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "ukzn-cricket-club"
+      },
+      {
+        "id": "f13",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "09:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f14",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "09:00",
+        "home": "delta-cricket-club",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f15",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "09:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "ukzn-cricket-club"
+      },
+      {
+        "id": "f16",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "09:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f17",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "09:00",
+        "home": "delta-cricket-club",
+        "away": "ukzn-cricket-club"
+      },
+      {
+        "id": "f18",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "09:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f19",
+        "round": 7,
+        "date": "2026-12-06",
+        "time": "09:00",
+        "home": "ukzn-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f20",
+        "round": 7,
+        "date": "2026-12-06",
+        "time": "09:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f21",
+        "round": 7,
+        "date": "2026-12-06",
+        "time": "09:00",
+        "home": "delta-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f22",
+        "round": 8,
+        "date": "2026-12-13",
+        "time": "09:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "crusaders"
+      },
+      {
+        "id": "f23",
+        "round": 8,
+        "date": "2026-12-13",
+        "time": "09:00",
+        "home": "ukzn-cricket-club",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f24",
+        "round": 8,
+        "date": "2026-12-13",
+        "time": "09:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f25",
+        "round": 9,
+        "date": "2027-01-24",
+        "time": "09:00",
+        "home": "delta-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f26",
+        "round": 9,
+        "date": "2027-01-24",
+        "time": "09:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f27",
+        "round": 9,
+        "date": "2027-01-24",
+        "time": "09:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "ukzn-cricket-club"
+      },
+      {
+        "id": "f28",
+        "round": 10,
+        "date": "2027-01-31",
+        "time": "09:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f29",
+        "round": 10,
+        "date": "2027-01-31",
+        "time": "09:00",
+        "home": "delta-cricket-club",
+        "away": "amanzimtoti-cricket-club"
+      },
+      {
+        "id": "f30",
+        "round": 10,
+        "date": "2027-01-31",
+        "time": "09:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "ukzn-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-promotion-men-30ov-top10",
+    "name": "Promotion League · 30 Over · Top 10",
+    "leagueKey": "promotion",
+    "maxOvers": 30,
+    "seriesType": "One-Day (40-50 overs)",
+    "startDate": "2026-10-25",
+    "endDate": "2027-02-07",
+    "released": true,
+    "releasedAt": "2026-09-03T17:01:08.391Z",
+    "version": 17,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "kccd",
+      "newlands-cricket-club",
+      "ilembe-cricket-club",
+      "dawnheights-cricket-club",
+      "railways-cricket-club",
+      "saints-cricket-club",
+      "lindelani-cricket-club",
+      "ptcc",
+      "phoenix-cricket-club",
+      "umlazi-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "kccd",
+        "clubId": "kccd",
+        "name": "KCCD"
+      },
+      {
+        "teamId": "newlands-cricket-club",
+        "clubId": "newlands-cricket-club",
+        "name": "Newlands Cricket Club"
+      },
+      {
+        "teamId": "ilembe-cricket-club",
+        "clubId": "ilembe-cricket-club",
+        "name": "iLembe Cricket Club"
+      },
+      {
+        "teamId": "dawnheights-cricket-club",
+        "clubId": "dawnheights-cricket-club",
+        "name": "Dawnheights Cricket Club"
+      },
+      {
+        "teamId": "railways-cricket-club",
+        "clubId": "railways-cricket-club",
+        "name": "Railways Cricket Club"
+      },
+      {
+        "teamId": "saints-cricket-club",
+        "clubId": "saints-cricket-club",
+        "name": "Saints Cricket Club"
+      },
+      {
+        "teamId": "lindelani-cricket-club",
+        "clubId": "lindelani-cricket-club",
+        "name": "Lindelani Cricket Club"
+      },
+      {
+        "teamId": "ptcc",
+        "clubId": "ptcc",
+        "name": "Pinetown Topham Cricket Club"
+      },
+      {
+        "teamId": "phoenix-cricket-club",
+        "clubId": "phoenix-cricket-club",
+        "name": "Phoenix Cricket Club"
+      },
+      {
+        "teamId": "umlazi-cricket-club",
+        "clubId": "umlazi-cricket-club",
+        "name": "uMlazi cricket club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "08:30",
+        "home": "kccd",
+        "away": "newlands-cricket-club"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "08:30",
+        "home": "ilembe-cricket-club",
+        "away": "dawnheights-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "08:30",
+        "home": "railways-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f4",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "08:30",
+        "home": "lindelani-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f5",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "08:30",
+        "home": "phoenix-cricket-club",
+        "away": "umlazi-cricket-club"
+      },
+      {
+        "id": "f6",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "08:30",
+        "home": "dawnheights-cricket-club",
+        "away": "newlands-cricket-club"
+      },
+      {
+        "id": "f7",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "08:30",
+        "home": "phoenix-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f8",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "08:30",
+        "home": "ilembe-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f9",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "08:30",
+        "home": "railways-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f10",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "08:30",
+        "home": "lindelani-cricket-club",
+        "away": "umlazi-cricket-club"
+      },
+      {
+        "id": "f11",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "08:30",
+        "home": "saints-cricket-club",
+        "away": "newlands-cricket-club"
+      },
+      {
+        "id": "f12",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "08:30",
+        "home": "dawnheights-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f13",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "08:30",
+        "home": "ilembe-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f14",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "08:30",
+        "home": "railways-cricket-club",
+        "away": "umlazi-cricket-club"
+      },
+      {
+        "id": "f15",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "08:30",
+        "home": "phoenix-cricket-club",
+        "away": "lindelani-cricket-club"
+      },
+      {
+        "id": "f16",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "08:30",
+        "home": "ptcc",
+        "away": "newlands-cricket-club"
+      },
+      {
+        "id": "f17",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "08:30",
+        "home": "saints-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f18",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "08:30",
+        "home": "phoenix-cricket-club",
+        "away": "dawnheights-cricket-club"
+      },
+      {
+        "id": "f19",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "08:30",
+        "home": "ilembe-cricket-club",
+        "away": "umlazi-cricket-club"
+      },
+      {
+        "id": "f20",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "08:30",
+        "home": "railways-cricket-club",
+        "away": "lindelani-cricket-club"
+      },
+      {
+        "id": "f21",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "umlazi-cricket-club",
+        "away": "newlands-cricket-club"
+      },
+      {
+        "id": "f22",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "ptcc",
+        "away": "kccd"
+      },
+      {
+        "id": "f23",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "saints-cricket-club",
+        "away": "dawnheights-cricket-club"
+      },
+      {
+        "id": "f24",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "ilembe-cricket-club",
+        "away": "lindelani-cricket-club"
+      },
+      {
+        "id": "f25",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "08:30",
+        "home": "phoenix-cricket-club",
+        "away": "railways-cricket-club"
+      },
+      {
+        "id": "f26",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "08:30",
+        "home": "lindelani-cricket-club",
+        "away": "newlands-cricket-club"
+      },
+      {
+        "id": "f27",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "08:30",
+        "home": "umlazi-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f28",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "08:30",
+        "home": "ptcc",
+        "away": "dawnheights-cricket-club"
+      },
+      {
+        "id": "f29",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "08:30",
+        "home": "phoenix-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f30",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "08:30",
+        "home": "ilembe-cricket-club",
+        "away": "railways-cricket-club"
+      },
+      {
+        "id": "f31",
+        "round": 7,
+        "date": "2027-01-24",
+        "time": "08:30",
+        "home": "railways-cricket-club",
+        "away": "newlands-cricket-club"
+      },
+      {
+        "id": "f32",
+        "round": 7,
+        "date": "2027-01-24",
+        "time": "08:30",
+        "home": "lindelani-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f33",
+        "round": 7,
+        "date": "2027-01-24",
+        "time": "08:30",
+        "home": "umlazi-cricket-club",
+        "away": "dawnheights-cricket-club"
+      },
+      {
+        "id": "f34",
+        "round": 7,
+        "date": "2027-01-24",
+        "time": "08:30",
+        "home": "ptcc",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f35",
+        "round": 7,
+        "date": "2027-01-24",
+        "time": "08:30",
+        "home": "phoenix-cricket-club",
+        "away": "ilembe-cricket-club"
+      },
+      {
+        "id": "f36",
+        "round": 8,
+        "date": "2027-01-31",
+        "time": "08:30",
+        "home": "ilembe-cricket-club",
+        "away": "newlands-cricket-club"
+      },
+      {
+        "id": "f37",
+        "round": 8,
+        "date": "2027-01-31",
+        "time": "08:30",
+        "home": "railways-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f38",
+        "round": 8,
+        "date": "2027-01-31",
+        "time": "08:30",
+        "home": "lindelani-cricket-club",
+        "away": "dawnheights-cricket-club"
+      },
+      {
+        "id": "f39",
+        "round": 8,
+        "date": "2027-01-31",
+        "time": "08:30",
+        "home": "umlazi-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f40",
+        "round": 8,
+        "date": "2027-01-31",
+        "time": "08:30",
+        "home": "phoenix-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f41",
+        "round": 9,
+        "date": "2027-02-07",
+        "time": "08:30",
+        "home": "phoenix-cricket-club",
+        "away": "newlands-cricket-club"
+      },
+      {
+        "id": "f42",
+        "round": 9,
+        "date": "2027-02-07",
+        "time": "08:30",
+        "home": "ilembe-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f43",
+        "round": 9,
+        "date": "2027-02-07",
+        "time": "08:30",
+        "home": "railways-cricket-club",
+        "away": "dawnheights-cricket-club"
+      },
+      {
+        "id": "f44",
+        "round": 9,
+        "date": "2027-02-07",
+        "time": "08:30",
+        "home": "lindelani-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f45",
+        "round": 9,
+        "date": "2027-02-07",
+        "time": "08:30",
+        "home": "umlazi-cricket-club",
+        "away": "ptcc"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-premier-men-50ov-bottom6",
+    "name": "Premier League · 50 Over · Bottom 6",
+    "leagueKey": "premier",
+    "maxOvers": 50,
+    "seriesType": "One-Day (40-50 overs)",
+    "startDate": "2026-10-25",
+    "endDate": "2027-01-31",
+    "released": true,
+    "releasedAt": "2026-09-03T17:01:13.332Z",
+    "version": 13,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "umzinto",
+      "chatsworth-united-cricket-club",
+      "harlequins-cricket-club",
+      "rhythm-dhsob-cricket-club",
+      "southern-natal",
+      "african-warriors-cc"
+    ],
+    "participants": [
+      {
+        "teamId": "umzinto",
+        "clubId": "umzinto",
+        "name": "Umzinto"
+      },
+      {
+        "teamId": "chatsworth-united-cricket-club",
+        "clubId": "chatsworth-united-cricket-club",
+        "name": "Chatsworth United Cricket Club"
+      },
+      {
+        "teamId": "harlequins-cricket-club",
+        "clubId": "harlequins-cricket-club",
+        "name": "Harlequins Cricket Club"
+      },
+      {
+        "teamId": "rhythm-dhsob-cricket-club",
+        "clubId": "rhythm-dhsob-cricket-club",
+        "name": "Rhythm DHSOB Cricket club"
+      },
+      {
+        "teamId": "southern-natal",
+        "clubId": "southern-natal",
+        "name": "Southern Natal"
+      },
+      {
+        "teamId": "african-warriors-cc",
+        "clubId": "african-warriors-cc",
+        "name": "African Warriors CC"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "09:00",
+        "home": "umzinto",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "09:00",
+        "home": "harlequins-cricket-club",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-10-25",
+        "time": "09:00",
+        "home": "southern-natal",
+        "away": "african-warriors-cc"
+      },
+      {
+        "id": "f4",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "09:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "09:00",
+        "home": "southern-natal",
+        "away": "umzinto"
+      },
+      {
+        "id": "f6",
+        "round": 2,
+        "date": "2026-11-01",
+        "time": "09:00",
+        "home": "harlequins-cricket-club",
+        "away": "african-warriors-cc"
+      },
+      {
+        "id": "f7",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "09:00",
+        "home": "african-warriors-cc",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f8",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "09:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "umzinto"
+      },
+      {
+        "id": "f9",
+        "round": 3,
+        "date": "2026-11-08",
+        "time": "09:00",
+        "home": "southern-natal",
+        "away": "harlequins-cricket-club"
+      },
+      {
+        "id": "f10",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "09:00",
+        "home": "harlequins-cricket-club",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f11",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "09:00",
+        "home": "african-warriors-cc",
+        "away": "umzinto"
+      },
+      {
+        "id": "f12",
+        "round": 4,
+        "date": "2026-11-15",
+        "time": "09:00",
+        "home": "southern-natal",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f13",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "09:00",
+        "home": "southern-natal",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f14",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "09:00",
+        "home": "harlequins-cricket-club",
+        "away": "umzinto"
+      },
+      {
+        "id": "f15",
+        "round": 5,
+        "date": "2026-11-22",
+        "time": "09:00",
+        "home": "african-warriors-cc",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f16",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "09:00",
+        "home": "umzinto",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f17",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "09:00",
+        "home": "harlequins-cricket-club",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f18",
+        "round": 6,
+        "date": "2026-11-29",
+        "time": "09:00",
+        "home": "southern-natal",
+        "away": "african-warriors-cc"
+      },
+      {
+        "id": "f19",
+        "round": 7,
+        "date": "2026-12-06",
+        "time": "09:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f20",
+        "round": 7,
+        "date": "2026-12-06",
+        "time": "09:00",
+        "home": "southern-natal",
+        "away": "umzinto"
+      },
+      {
+        "id": "f21",
+        "round": 7,
+        "date": "2026-12-06",
+        "time": "09:00",
+        "home": "harlequins-cricket-club",
+        "away": "african-warriors-cc"
+      },
+      {
+        "id": "f22",
+        "round": 8,
+        "date": "2026-12-13",
+        "time": "09:00",
+        "home": "african-warriors-cc",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f23",
+        "round": 8,
+        "date": "2026-12-13",
+        "time": "09:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "umzinto"
+      },
+      {
+        "id": "f24",
+        "round": 8,
+        "date": "2026-12-13",
+        "time": "09:00",
+        "home": "southern-natal",
+        "away": "harlequins-cricket-club"
+      },
+      {
+        "id": "f25",
+        "round": 9,
+        "date": "2027-01-24",
+        "time": "09:00",
+        "home": "harlequins-cricket-club",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f26",
+        "round": 9,
+        "date": "2027-01-24",
+        "time": "09:00",
+        "home": "african-warriors-cc",
+        "away": "umzinto"
+      },
+      {
+        "id": "f27",
+        "round": 9,
+        "date": "2027-01-24",
+        "time": "09:00",
+        "home": "southern-natal",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f28",
+        "round": 10,
+        "date": "2027-01-31",
+        "time": "09:00",
+        "home": "southern-natal",
+        "away": "chatsworth-united-cricket-club"
+      },
+      {
+        "id": "f29",
+        "round": 10,
+        "date": "2027-01-31",
+        "time": "09:00",
+        "home": "harlequins-cricket-club",
+        "away": "umzinto"
+      },
+      {
+        "id": "f30",
+        "round": 10,
+        "date": "2027-01-31",
+        "time": "09:00",
+        "home": "african-warriors-cc",
+        "away": "rhythm-dhsob-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-veterans-premier-30ov",
+    "name": "Veterans Premier · 30 Over",
+    "leagueKey": "veterans-premier",
+    "maxOvers": 30,
+    "seriesType": "One-Day (40-50 overs)",
+    "startDate": "2026-11-14",
+    "endDate": "2027-02-27",
+    "released": true,
+    "releasedAt": "2026-09-03T17:01:18.184Z",
+    "version": 15,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "ptcc",
+      "kccd",
+      "railways-cricket-club",
+      "hollywoodbets-chatsworth-sporting",
+      "dawnheights-cricket-club",
+      "crusaders",
+      "harlequins-cricket-club",
+      "saints-cricket-club",
+      "phoenix-cricket-club",
+      "rhythm-dhsob-cricket-club",
+      "amanzimtoti-cricket-club",
+      "delta-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "ptcc",
+        "clubId": "ptcc",
+        "name": "Pinetown Topham Cricket Club"
+      },
+      {
+        "teamId": "kccd",
+        "clubId": "kccd",
+        "name": "KCCD"
+      },
+      {
+        "teamId": "railways-cricket-club",
+        "clubId": "railways-cricket-club",
+        "name": "Railways Cricket Club"
+      },
+      {
+        "teamId": "hollywoodbets-chatsworth-sporting",
+        "clubId": "hollywoodbets-chatsworth-sporting",
+        "name": "Hollywoodbets Chatsworth Sporting"
+      },
+      {
+        "teamId": "dawnheights-cricket-club",
+        "clubId": "dawnheights-cricket-club",
+        "name": "Dawnheights Cricket Club"
+      },
+      {
+        "teamId": "crusaders",
+        "clubId": "crusaders",
+        "name": "Crusaders"
+      },
+      {
+        "teamId": "harlequins-cricket-club",
+        "clubId": "harlequins-cricket-club",
+        "name": "Harlequins Cricket Club"
+      },
+      {
+        "teamId": "saints-cricket-club",
+        "clubId": "saints-cricket-club",
+        "name": "Saints Cricket Club"
+      },
+      {
+        "teamId": "phoenix-cricket-club",
+        "clubId": "phoenix-cricket-club",
+        "name": "Phoenix Cricket Club"
+      },
+      {
+        "teamId": "rhythm-dhsob-cricket-club",
+        "clubId": "rhythm-dhsob-cricket-club",
+        "name": "Rhythm DHSOB Cricket club"
+      },
+      {
+        "teamId": "amanzimtoti-cricket-club",
+        "clubId": "amanzimtoti-cricket-club",
+        "name": "Amanzimtoti Cricket Club"
+      },
+      {
+        "teamId": "delta-cricket-club",
+        "clubId": "delta-cricket-club",
+        "name": "Delta Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-11-14",
+        "time": "13:00",
+        "home": "ptcc",
+        "away": "kccd"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-11-14",
+        "time": "13:00",
+        "home": "railways-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-11-14",
+        "time": "13:00",
+        "home": "dawnheights-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f4",
+        "round": 1,
+        "date": "2026-11-14",
+        "time": "13:00",
+        "home": "harlequins-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f5",
+        "round": 1,
+        "date": "2026-11-14",
+        "time": "13:00",
+        "home": "phoenix-cricket-club",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f6",
+        "round": 1,
+        "date": "2026-11-14",
+        "time": "13:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f7",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "13:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "kccd"
+      },
+      {
+        "id": "f8",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "13:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f9",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "13:00",
+        "home": "railways-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f10",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "13:00",
+        "home": "dawnheights-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f11",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "13:00",
+        "home": "harlequins-cricket-club",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f12",
+        "round": 2,
+        "date": "2026-11-21",
+        "time": "13:00",
+        "home": "phoenix-cricket-club",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f13",
+        "round": 3,
+        "date": "2026-11-28",
+        "time": "13:00",
+        "home": "crusaders",
+        "away": "kccd"
+      },
+      {
+        "id": "f14",
+        "round": 3,
+        "date": "2026-11-28",
+        "time": "13:00",
+        "home": "hollywoodbets-chatsworth-sporting",
+        "away": "ptcc"
+      },
+      {
+        "id": "f15",
+        "round": 3,
+        "date": "2026-11-28",
+        "time": "13:00",
+        "home": "railways-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f16",
+        "round": 3,
+        "date": "2026-11-28",
+        "time": "13:00",
+        "home": "dawnheights-cricket-club",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f17",
+        "round": 3,
+        "date": "2026-11-28",
+        "time": "13:00",
+        "home": "harlequins-cricket-club",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f18",
+        "round": 3,
+        "date": "2026-11-28",
+        "time": "13:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "phoenix-cricket-club"
+      },
+      {
+        "id": "f19",
+        "round": 4,
+        "date": "2026-12-05",
+        "time": "13:00",
+        "home": "saints-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f20",
+        "round": 4,
+        "date": "2026-12-05",
+        "time": "13:00",
+        "home": "crusaders",
+        "away": "ptcc"
+      },
+      {
+        "id": "f21",
+        "round": 4,
+        "date": "2026-12-05",
+        "time": "13:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f22",
+        "round": 4,
+        "date": "2026-12-05",
+        "time": "13:00",
+        "home": "railways-cricket-club",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f23",
+        "round": 4,
+        "date": "2026-12-05",
+        "time": "13:00",
+        "home": "dawnheights-cricket-club",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f24",
+        "round": 4,
+        "date": "2026-12-05",
+        "time": "13:00",
+        "home": "harlequins-cricket-club",
+        "away": "phoenix-cricket-club"
+      },
+      {
+        "id": "f25",
+        "round": 5,
+        "date": "2026-12-12",
+        "time": "13:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f26",
+        "round": 5,
+        "date": "2026-12-12",
+        "time": "13:00",
+        "home": "saints-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f27",
+        "round": 5,
+        "date": "2026-12-12",
+        "time": "13:00",
+        "home": "crusaders",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f28",
+        "round": 5,
+        "date": "2026-12-12",
+        "time": "13:00",
+        "home": "railways-cricket-club",
+        "away": "delta-cricket-club"
+      },
+      {
+        "id": "f29",
+        "round": 5,
+        "date": "2026-12-12",
+        "time": "13:00",
+        "home": "dawnheights-cricket-club",
+        "away": "phoenix-cricket-club"
+      },
+      {
+        "id": "f30",
+        "round": 5,
+        "date": "2026-12-12",
+        "time": "13:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "harlequins-cricket-club"
+      },
+      {
+        "id": "f31",
+        "round": 6,
+        "date": "2027-01-23",
+        "time": "13:00",
+        "home": "delta-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f32",
+        "round": 6,
+        "date": "2027-01-23",
+        "time": "13:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f33",
+        "round": 6,
+        "date": "2027-01-23",
+        "time": "13:00",
+        "home": "saints-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f34",
+        "round": 6,
+        "date": "2027-01-23",
+        "time": "13:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f35",
+        "round": 6,
+        "date": "2027-01-23",
+        "time": "13:00",
+        "home": "railways-cricket-club",
+        "away": "phoenix-cricket-club"
+      },
+      {
+        "id": "f36",
+        "round": 6,
+        "date": "2027-01-23",
+        "time": "13:00",
+        "home": "dawnheights-cricket-club",
+        "away": "harlequins-cricket-club"
+      },
+      {
+        "id": "f37",
+        "round": 7,
+        "date": "2027-01-30",
+        "time": "13:00",
+        "home": "phoenix-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f38",
+        "round": 7,
+        "date": "2027-01-30",
+        "time": "13:00",
+        "home": "delta-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f39",
+        "round": 7,
+        "date": "2027-01-30",
+        "time": "13:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f40",
+        "round": 7,
+        "date": "2027-01-30",
+        "time": "13:00",
+        "home": "saints-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f41",
+        "round": 7,
+        "date": "2027-01-30",
+        "time": "13:00",
+        "home": "railways-cricket-club",
+        "away": "harlequins-cricket-club"
+      },
+      {
+        "id": "f42",
+        "round": 7,
+        "date": "2027-01-30",
+        "time": "13:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "dawnheights-cricket-club"
+      },
+      {
+        "id": "f43",
+        "round": 8,
+        "date": "2027-02-06",
+        "time": "13:00",
+        "home": "harlequins-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f44",
+        "round": 8,
+        "date": "2027-02-06",
+        "time": "13:00",
+        "home": "phoenix-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f45",
+        "round": 8,
+        "date": "2027-02-06",
+        "time": "13:00",
+        "home": "delta-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f46",
+        "round": 8,
+        "date": "2027-02-06",
+        "time": "13:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f47",
+        "round": 8,
+        "date": "2027-02-06",
+        "time": "13:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f48",
+        "round": 8,
+        "date": "2027-02-06",
+        "time": "13:00",
+        "home": "railways-cricket-club",
+        "away": "dawnheights-cricket-club"
+      },
+      {
+        "id": "f49",
+        "round": 9,
+        "date": "2027-02-13",
+        "time": "13:00",
+        "home": "dawnheights-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f50",
+        "round": 9,
+        "date": "2027-02-13",
+        "time": "13:00",
+        "home": "harlequins-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f51",
+        "round": 9,
+        "date": "2027-02-13",
+        "time": "13:00",
+        "home": "phoenix-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f52",
+        "round": 9,
+        "date": "2027-02-13",
+        "time": "13:00",
+        "home": "delta-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f53",
+        "round": 9,
+        "date": "2027-02-13",
+        "time": "13:00",
+        "home": "rhythm-dhsob-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f54",
+        "round": 9,
+        "date": "2027-02-13",
+        "time": "13:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "railways-cricket-club"
+      },
+      {
+        "id": "f55",
+        "round": 10,
+        "date": "2027-02-20",
+        "time": "13:00",
+        "home": "railways-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f56",
+        "round": 10,
+        "date": "2027-02-20",
+        "time": "13:00",
+        "home": "dawnheights-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f57",
+        "round": 10,
+        "date": "2027-02-20",
+        "time": "13:00",
+        "home": "harlequins-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f58",
+        "round": 10,
+        "date": "2027-02-20",
+        "time": "13:00",
+        "home": "phoenix-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f59",
+        "round": 10,
+        "date": "2027-02-20",
+        "time": "13:00",
+        "home": "delta-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f60",
+        "round": 10,
+        "date": "2027-02-20",
+        "time": "13:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "rhythm-dhsob-cricket-club"
+      },
+      {
+        "id": "f61",
+        "round": 11,
+        "date": "2027-02-27",
+        "time": "13:00",
+        "home": "amanzimtoti-cricket-club",
+        "away": "kccd"
+      },
+      {
+        "id": "f62",
+        "round": 11,
+        "date": "2027-02-27",
+        "time": "13:00",
+        "home": "railways-cricket-club",
+        "away": "ptcc"
+      },
+      {
+        "id": "f63",
+        "round": 11,
+        "date": "2027-02-27",
+        "time": "13:00",
+        "home": "dawnheights-cricket-club",
+        "away": "hollywoodbets-chatsworth-sporting"
+      },
+      {
+        "id": "f64",
+        "round": 11,
+        "date": "2027-02-27",
+        "time": "13:00",
+        "home": "harlequins-cricket-club",
+        "away": "crusaders"
+      },
+      {
+        "id": "f65",
+        "round": 11,
+        "date": "2027-02-27",
+        "time": "13:00",
+        "home": "phoenix-cricket-club",
+        "away": "saints-cricket-club"
+      },
+      {
+        "id": "f66",
+        "round": 11,
+        "date": "2027-02-27",
+        "time": "13:00",
+        "home": "delta-cricket-club",
+        "away": "rhythm-dhsob-cricket-club"
+      }
+    ]
+  },
+  {
+    "id": "s-planb-veterans-promotion-30ov",
+    "name": "Veterans Promotion · 30 Over",
+    "leagueKey": "veterans-promotion",
+    "maxOvers": 30,
+    "seriesType": "One-Day (40-50 overs)",
+    "startDate": "2026-11-28",
+    "endDate": "2027-04-10",
+    "released": true,
+    "releasedAt": "2026-09-03T17:01:22.344Z",
+    "version": 15,
+    "withheld": {
+      "venue": true
+    },
+    "teams": [
+      "tm_rhythm-dhsob-cricket-club_veterans-promotion_2",
+      "tm_amanzimtoti-cricket-club_veterans-promotion_1",
+      "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+      "tm_simplex-reservoir-hills-crimson_veterans-promotion_1",
+      "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+      "southern-natal",
+      "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+      "tm_simplex-reservoir-hills-crimson_veterans-promotion_0",
+      "tongaat-cricket-association",
+      "tm_saints-cricket-club_veterans-promotion_1",
+      "east-coast-cc",
+      "forest-hills-cricket-club",
+      "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+      "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+      "hillary-malvern-cricket-club"
+    ],
+    "participants": [
+      {
+        "teamId": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2",
+        "clubId": "rhythm-dhsob-cricket-club",
+        "name": "Rhythm DHSOB Cricket club C"
+      },
+      {
+        "teamId": "tm_amanzimtoti-cricket-club_veterans-promotion_1",
+        "clubId": "amanzimtoti-cricket-club",
+        "name": "Amanzimtoti Cricket Club B"
+      },
+      {
+        "teamId": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "clubId": "hollywoodbets-chatsworth-sporting",
+        "name": "Hollywoodbets Chatsworth Sporting B"
+      },
+      {
+        "teamId": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1",
+        "clubId": "simplex-reservoir-hills-crimson",
+        "name": "Simplex Reservoir Hills Crimson B"
+      },
+      {
+        "teamId": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "clubId": "simplex-reservoir-hills-crimson",
+        "name": "Simplex Reservoir Hills Crimson C"
+      },
+      {
+        "teamId": "southern-natal",
+        "clubId": "southern-natal",
+        "name": "Southern Natal"
+      },
+      {
+        "teamId": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "clubId": "meadowridge-sporting-cricket-club",
+        "name": "Meadowridge Sporting Cricket Club A"
+      },
+      {
+        "teamId": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0",
+        "clubId": "simplex-reservoir-hills-crimson",
+        "name": "Simplex Reservoir Hills Crimson A"
+      },
+      {
+        "teamId": "tongaat-cricket-association",
+        "clubId": "tongaat-cricket-association",
+        "name": "Tongaat Cricket Association"
+      },
+      {
+        "teamId": "tm_saints-cricket-club_veterans-promotion_1",
+        "clubId": "saints-cricket-club",
+        "name": "Saints Cricket Club B"
+      },
+      {
+        "teamId": "east-coast-cc",
+        "clubId": "east-coast-cc",
+        "name": "East Coast CC"
+      },
+      {
+        "teamId": "forest-hills-cricket-club",
+        "clubId": "forest-hills-cricket-club",
+        "name": "Forest Hills Cricket Club"
+      },
+      {
+        "teamId": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "clubId": "meadowridge-sporting-cricket-club",
+        "name": "Meadowridge Sporting Cricket Club B"
+      },
+      {
+        "teamId": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "clubId": "rhythm-dhsob-cricket-club",
+        "name": "Rhythm DHSOB Cricket club B"
+      },
+      {
+        "teamId": "hillary-malvern-cricket-club",
+        "clubId": "hillary-malvern-cricket-club",
+        "name": "Hillary/Malvern Cricket Club"
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "f1",
+        "round": 1,
+        "date": "2026-11-28",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f2",
+        "round": 1,
+        "date": "2026-11-28",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f3",
+        "round": 1,
+        "date": "2026-11-28",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f4",
+        "round": 1,
+        "date": "2026-11-28",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f5",
+        "round": 1,
+        "date": "2026-11-28",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f6",
+        "round": 1,
+        "date": "2026-11-28",
+        "time": "13:00",
+        "home": "east-coast-cc",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f7",
+        "round": 1,
+        "date": "2026-11-28",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f8",
+        "round": 2,
+        "date": "2026-12-05",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f9",
+        "round": 2,
+        "date": "2026-12-05",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f10",
+        "round": 2,
+        "date": "2026-12-05",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f11",
+        "round": 2,
+        "date": "2026-12-05",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f12",
+        "round": 2,
+        "date": "2026-12-05",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f13",
+        "round": 2,
+        "date": "2026-12-05",
+        "time": "13:00",
+        "home": "east-coast-cc",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f14",
+        "round": 2,
+        "date": "2026-12-05",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "hillary-malvern-cricket-club"
+      },
+      {
+        "id": "f15",
+        "round": 3,
+        "date": "2026-12-12",
+        "time": "13:00",
+        "home": "southern-natal",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f16",
+        "round": 3,
+        "date": "2026-12-12",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f17",
+        "round": 3,
+        "date": "2026-12-12",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f18",
+        "round": 3,
+        "date": "2026-12-12",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f19",
+        "round": 3,
+        "date": "2026-12-12",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f20",
+        "round": 3,
+        "date": "2026-12-12",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f21",
+        "round": 3,
+        "date": "2026-12-12",
+        "time": "13:00",
+        "home": "east-coast-cc",
+        "away": "hillary-malvern-cricket-club"
+      },
+      {
+        "id": "f22",
+        "round": 4,
+        "date": "2027-01-23",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f23",
+        "round": 4,
+        "date": "2027-01-23",
+        "time": "13:00",
+        "home": "southern-natal",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f24",
+        "round": 4,
+        "date": "2027-01-23",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f25",
+        "round": 4,
+        "date": "2027-01-23",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f26",
+        "round": 4,
+        "date": "2027-01-23",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f27",
+        "round": 4,
+        "date": "2027-01-23",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "hillary-malvern-cricket-club"
+      },
+      {
+        "id": "f28",
+        "round": 4,
+        "date": "2027-01-23",
+        "time": "13:00",
+        "home": "east-coast-cc",
+        "away": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f29",
+        "round": 5,
+        "date": "2027-01-30",
+        "time": "13:00",
+        "home": "tm_saints-cricket-club_veterans-promotion_1",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f30",
+        "round": 5,
+        "date": "2027-01-30",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f31",
+        "round": 5,
+        "date": "2027-01-30",
+        "time": "13:00",
+        "home": "southern-natal",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f32",
+        "round": 5,
+        "date": "2027-01-30",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f33",
+        "round": 5,
+        "date": "2027-01-30",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f34",
+        "round": 5,
+        "date": "2027-01-30",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "hillary-malvern-cricket-club"
+      },
+      {
+        "id": "f35",
+        "round": 5,
+        "date": "2027-01-30",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f36",
+        "round": 6,
+        "date": "2027-02-06",
+        "time": "13:00",
+        "home": "forest-hills-cricket-club",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f37",
+        "round": 6,
+        "date": "2027-02-06",
+        "time": "13:00",
+        "home": "tm_saints-cricket-club_veterans-promotion_1",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f38",
+        "round": 6,
+        "date": "2027-02-06",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f39",
+        "round": 6,
+        "date": "2027-02-06",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f40",
+        "round": 6,
+        "date": "2027-02-06",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "hillary-malvern-cricket-club"
+      },
+      {
+        "id": "f41",
+        "round": 6,
+        "date": "2027-02-06",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f42",
+        "round": 6,
+        "date": "2027-02-06",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f43",
+        "round": 7,
+        "date": "2027-02-13",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f44",
+        "round": 7,
+        "date": "2027-02-13",
+        "time": "13:00",
+        "home": "forest-hills-cricket-club",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f45",
+        "round": 7,
+        "date": "2027-02-13",
+        "time": "13:00",
+        "home": "tm_saints-cricket-club_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f46",
+        "round": 7,
+        "date": "2027-02-13",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f47",
+        "round": 7,
+        "date": "2027-02-13",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "hillary-malvern-cricket-club"
+      },
+      {
+        "id": "f48",
+        "round": 7,
+        "date": "2027-02-13",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f49",
+        "round": 7,
+        "date": "2027-02-13",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f50",
+        "round": 8,
+        "date": "2027-02-20",
+        "time": "13:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f51",
+        "round": 8,
+        "date": "2027-02-20",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f52",
+        "round": 8,
+        "date": "2027-02-20",
+        "time": "13:00",
+        "home": "forest-hills-cricket-club",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f53",
+        "round": 8,
+        "date": "2027-02-20",
+        "time": "13:00",
+        "home": "tm_saints-cricket-club_veterans-promotion_1",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f54",
+        "round": 8,
+        "date": "2027-02-20",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f55",
+        "round": 8,
+        "date": "2027-02-20",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f56",
+        "round": 8,
+        "date": "2027-02-20",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "tongaat-cricket-association"
+      },
+      {
+        "id": "f57",
+        "round": 9,
+        "date": "2027-02-27",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f58",
+        "round": 9,
+        "date": "2027-02-27",
+        "time": "13:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f59",
+        "round": 9,
+        "date": "2027-02-27",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f60",
+        "round": 9,
+        "date": "2027-02-27",
+        "time": "13:00",
+        "home": "forest-hills-cricket-club",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f61",
+        "round": 9,
+        "date": "2027-02-27",
+        "time": "13:00",
+        "home": "tm_saints-cricket-club_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f62",
+        "round": 9,
+        "date": "2027-02-27",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "east-coast-cc"
+      },
+      {
+        "id": "f63",
+        "round": 9,
+        "date": "2027-02-27",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "tongaat-cricket-association"
+      },
+      {
+        "id": "f64",
+        "round": 10,
+        "date": "2027-03-06",
+        "time": "13:00",
+        "home": "east-coast-cc",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f65",
+        "round": 10,
+        "date": "2027-03-06",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f66",
+        "round": 10,
+        "date": "2027-03-06",
+        "time": "13:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f67",
+        "round": 10,
+        "date": "2027-03-06",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f68",
+        "round": 10,
+        "date": "2027-03-06",
+        "time": "13:00",
+        "home": "forest-hills-cricket-club",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f69",
+        "round": 10,
+        "date": "2027-03-06",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "tongaat-cricket-association"
+      },
+      {
+        "id": "f70",
+        "round": 10,
+        "date": "2027-03-06",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0"
+      },
+      {
+        "id": "f71",
+        "round": 11,
+        "date": "2027-03-13",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f72",
+        "round": 11,
+        "date": "2027-03-13",
+        "time": "13:00",
+        "home": "east-coast-cc",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f73",
+        "round": 11,
+        "date": "2027-03-13",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f74",
+        "round": 11,
+        "date": "2027-03-13",
+        "time": "13:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f75",
+        "round": 11,
+        "date": "2027-03-13",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f76",
+        "round": 11,
+        "date": "2027-03-13",
+        "time": "13:00",
+        "home": "forest-hills-cricket-club",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f77",
+        "round": 11,
+        "date": "2027-03-13",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0"
+      },
+      {
+        "id": "f78",
+        "round": 12,
+        "date": "2027-03-20",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f79",
+        "round": 12,
+        "date": "2027-03-20",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f80",
+        "round": 12,
+        "date": "2027-03-20",
+        "time": "13:00",
+        "home": "east-coast-cc",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f81",
+        "round": 12,
+        "date": "2027-03-20",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f82",
+        "round": 12,
+        "date": "2027-03-20",
+        "time": "13:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f83",
+        "round": 12,
+        "date": "2027-03-20",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f84",
+        "round": 12,
+        "date": "2027-03-20",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2"
+      },
+      {
+        "id": "f85",
+        "round": 13,
+        "date": "2027-03-27",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f86",
+        "round": 13,
+        "date": "2027-03-27",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f87",
+        "round": 13,
+        "date": "2027-03-27",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f88",
+        "round": 13,
+        "date": "2027-03-27",
+        "time": "13:00",
+        "home": "east-coast-cc",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f89",
+        "round": 13,
+        "date": "2027-03-27",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f90",
+        "round": 13,
+        "date": "2027-03-27",
+        "time": "13:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f91",
+        "round": 13,
+        "date": "2027-03-27",
+        "time": "13:00",
+        "home": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f92",
+        "round": 14,
+        "date": "2027-04-03",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "tm_amanzimtoti-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f93",
+        "round": 14,
+        "date": "2027-04-03",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f94",
+        "round": 14,
+        "date": "2027-04-03",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f95",
+        "round": 14,
+        "date": "2027-04-03",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f96",
+        "round": 14,
+        "date": "2027-04-03",
+        "time": "13:00",
+        "home": "east-coast-cc",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f97",
+        "round": 14,
+        "date": "2027-04-03",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f98",
+        "round": 14,
+        "date": "2027-04-03",
+        "time": "13:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f99",
+        "round": 15,
+        "date": "2027-04-10",
+        "time": "13:00",
+        "home": "tm_hollywoodbets-chatsworth-sporting_veterans-promotion_1",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_2"
+      },
+      {
+        "id": "f100",
+        "round": 15,
+        "date": "2027-04-10",
+        "time": "13:00",
+        "home": "tm_simplex-reservoir-hills-crimson_veterans-promotion_2",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_1"
+      },
+      {
+        "id": "f101",
+        "round": 15,
+        "date": "2027-04-10",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_0",
+        "away": "southern-natal"
+      },
+      {
+        "id": "f102",
+        "round": 15,
+        "date": "2027-04-10",
+        "time": "13:00",
+        "home": "tongaat-cricket-association",
+        "away": "tm_simplex-reservoir-hills-crimson_veterans-promotion_0"
+      },
+      {
+        "id": "f103",
+        "round": 15,
+        "date": "2027-04-10",
+        "time": "13:00",
+        "home": "east-coast-cc",
+        "away": "tm_saints-cricket-club_veterans-promotion_1"
+      },
+      {
+        "id": "f104",
+        "round": 15,
+        "date": "2027-04-10",
+        "time": "13:00",
+        "home": "tm_meadowridge-sporting-cricket-club_veterans-promotion_1",
+        "away": "forest-hills-cricket-club"
+      },
+      {
+        "id": "f105",
+        "round": 15,
+        "date": "2027-04-10",
+        "time": "13:00",
+        "home": "hillary-malvern-cricket-club",
+        "away": "tm_rhythm-dhsob-cricket-club_veterans-promotion_1"
+      }
+    ]
+  }
+]

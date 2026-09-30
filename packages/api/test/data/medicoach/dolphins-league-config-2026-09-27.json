@@ -1,0 +1,810 @@
+{
+  "tenant": "dolphins",
+  "leagues": [
+    {
+      "key": "premier",
+      "label": "Premier League",
+      "group": "Overarching Leagues",
+      "district": "All districts"
+    },
+    {
+      "key": "promotion",
+      "label": "Promotion League",
+      "group": "Overarching Leagues",
+      "district": "All districts"
+    },
+    {
+      "key": "premierWomen",
+      "label": "Premier Women’s League",
+      "group": "Overarching Leagues",
+      "district": "All districts"
+    },
+    {
+      "key": "veterans",
+      "label": "Veterans League",
+      "group": "Overarching Leagues",
+      "district": "All districts"
+    },
+    {
+      "key": "emcuD1",
+      "label": "EMCU Division 1",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD2",
+      "label": "EMCU Division 2",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD3_s1",
+      "label": "EMCU Division 3 · Stream 1",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD3_s2",
+      "label": "EMCU Division 3 · Stream 2",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD4_s1",
+      "label": "EMCU Division 4 · Stream 1",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD4_s2",
+      "label": "EMCU Division 4 · Stream 2",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD5_s1",
+      "label": "EMCU Division 5 · Stream 1",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuD5_s2",
+      "label": "EMCU Division 5 · Stream 2",
+      "group": "EMCU Divisions",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuU11",
+      "label": "Under 11",
+      "group": "Juniors",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "emcuU13",
+      "label": "Under 13",
+      "group": "Juniors",
+      "district": "Ethekwini Metro Cricket Union"
+    },
+    {
+      "key": "kcSat",
+      "label": "KZN SU King Cetshwayo Saturday League",
+      "group": "King Cetshwayo",
+      "district": "Umkhanyakude Cricket District"
+    },
+    {
+      "key": "kcD1",
+      "label": "KZN SU King Cetshwayo Division 1",
+      "group": "King Cetshwayo",
+      "district": "Umkhanyakude Cricket District"
+    },
+    {
+      "key": "kcWebber",
+      "label": "KZN SU King Cetshwayo Webber Cup",
+      "group": "King Cetshwayo",
+      "district": "Umkhanyakude Cricket District"
+    },
+    {
+      "key": "snT20",
+      "label": "KZN SU Southern Natal T20",
+      "group": "Southern Natal",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "sn30",
+      "label": "KZN SU Southern Natal 30 Overs",
+      "group": "Southern Natal",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "snAutumn100",
+      "label": "KZN SU Southern Natal Autumn 100",
+      "group": "Southern Natal",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "umzT20",
+      "label": "KZN SU Umzinto T20",
+      "group": "Umzinto",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "umz100",
+      "label": "KZN SU Umzinto 100",
+      "group": "Umzinto",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "umzLeague30",
+      "label": "KZN SU Umzinto League 30 Overs",
+      "group": "Umzinto",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "uguU11",
+      "label": "Under 11",
+      "group": "Juniors",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "uguU13",
+      "label": "Under 13",
+      "group": "Juniors",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "uguU15",
+      "label": "Under 15",
+      "group": "Juniors",
+      "district": "Ugu Cricket District"
+    },
+    {
+      "key": "ilembeA30",
+      "label": "KZN SU ILEMBE Senior 30 overs League A",
+      "group": "Ilembe Senior",
+      "district": "Illembe Cricket District"
+    },
+    {
+      "key": "ilembeBT20",
+      "label": "KZN SU ILEMBE Senior T20 League B",
+      "group": "Ilembe Senior",
+      "district": "Illembe Cricket District"
+    },
+    {
+      "key": "promotion-women-s-league",
+      "label": "Promotion Women’s League",
+      "group": "Overarching Leagues",
+      "district": "All districts"
+    },
+    {
+      "key": "seed-premier-men",
+      "label": "Premier Men",
+      "group": "Senior Men",
+      "district": "All districts"
+    },
+    {
+      "key": "seed-reserve-men",
+      "label": "Reserve Men",
+      "group": "Senior Men",
+      "district": "All districts"
+    },
+    {
+      "key": "seed-premier-women",
+      "label": "Premier Women",
+      "group": "Senior Women",
+      "district": "All districts"
+    },
+    {
+      "key": "demo",
+      "label": "Demo",
+      "group": "Overarching Leagues",
+      "district": "All districts"
+    }
+  ],
+  "structures": [
+    {
+      "version": 3,
+      "id": "st_afa4e35b",
+      "stages": [
+        {
+          "name": "Double round",
+          "entrants": {
+            "groups": {
+              "kind": "even",
+              "count": 2
+            },
+            "kind": "manual"
+          },
+          "schedule": {
+            "cadence": {
+              "kind": "weekly"
+            },
+            "blockIndex": 0,
+            "activateFrom": "2026-09-27"
+          },
+          "format": {
+            "kind": "round-robin",
+            "legs": 2
+          },
+          "groupLabels": ["Top group", "Bottom group"],
+          "id": "double-round"
+        },
+        {
+          "format": {
+            "legs": 1,
+            "kind": "round-robin"
+          },
+          "entrants": {
+            "kind": "manual",
+            "derivedFrom": {
+              "rule": "swap",
+              "fromStage": "double-round",
+              "detail": "Last in the top group swaps with first in the bottom group, carrying the outgoing position’s points",
+              "carryPoints": true
+            },
+            "groups": {
+              "kind": "even",
+              "count": 2
+            }
+          },
+          "id": "final-round",
+          "groupLabels": ["Top group", "Bottom group"],
+          "outcome": {
+            "relegated": [-1],
+            "champion": [1]
+          },
+          "name": "Final round",
+          "schedule": {
+            "cadence": {
+              "kind": "weekly"
+            },
+            "blockIndex": 1
+          }
+        }
+      ],
+      "name": "Premier League Split league with mid-season swap",
+      "templateId": "split-league-swap"
+    },
+    {
+      "version": 1,
+      "stages": [
+        {
+          "format": {
+            "legs": 1,
+            "kind": "round-robin"
+          },
+          "schedule": {
+            "blockIndex": 0,
+            "cadence": {
+              "kind": "weekly"
+            }
+          },
+          "outcome": {
+            "champion": [1]
+          },
+          "id": "season",
+          "entrants": {
+            "kind": "all-registered"
+          },
+          "name": "League season"
+        }
+      ],
+      "templateId": "flat-round-robin",
+      "id": "st-2026-27-flat-round-robin",
+      "name": "Flat round robin"
+    },
+    {
+      "version": 1,
+      "templateId": "split-league-swap",
+      "name": "Split league with mid-season swap",
+      "stages": [
+        {
+          "name": "Double round",
+          "groupLabels": ["Top group", "Bottom group"],
+          "format": {
+            "legs": 2,
+            "kind": "round-robin"
+          },
+          "schedule": {
+            "blockIndex": 0,
+            "cadence": {
+              "kind": "weekly"
+            }
+          },
+          "id": "double-round",
+          "entrants": {
+            "groups": {
+              "count": 2,
+              "kind": "even"
+            },
+            "kind": "manual"
+          }
+        },
+        {
+          "groupLabels": ["Top group", "Bottom group"],
+          "name": "Final round",
+          "outcome": {
+            "champion": [1],
+            "relegated": [-1]
+          },
+          "schedule": {
+            "blockIndex": 1,
+            "cadence": {
+              "kind": "weekly"
+            }
+          },
+          "entrants": {
+            "derivedFrom": {
+              "detail": "Last in the top group swaps with first in the bottom group, carrying the outgoing position’s points",
+              "rule": "swap",
+              "fromStage": "double-round",
+              "carryPoints": true
+            },
+            "kind": "manual",
+            "groups": {
+              "count": 2,
+              "kind": "even"
+            }
+          },
+          "format": {
+            "kind": "round-robin",
+            "legs": 1
+          },
+          "id": "final-round"
+        }
+      ],
+      "id": "st-2026-27-split-league-swap"
+    },
+    {
+      "version": 2,
+      "id": "st-2026-27-pools-to-knockout",
+      "stages": [
+        {
+          "format": {
+            "kind": "round-robin",
+            "legs": 1
+          },
+          "schedule": {
+            "blockIndex": 0,
+            "cadence": {
+              "kind": "weekly"
+            }
+          },
+          "entrants": {
+            "method": "snake",
+            "kind": "seeded-split",
+            "groups": {
+              "count": 2,
+              "kind": "even"
+            }
+          },
+          "id": "pools",
+          "name": "Pool stage"
+        },
+        {
+          "format": {
+            "pairing": "cross-pool",
+            "kind": "knockout"
+          },
+          "schedule": {
+            "blockIndex": 1,
+            "cadence": {
+              "kind": "weekly"
+            }
+          },
+          "entrants": {
+            "kind": "manual",
+            "derivedFrom": {
+              "fromStage": "pools",
+              "rule": "from-standings",
+              "detail": "Top two from each pool, paired across pools"
+            }
+          },
+          "outcome": {
+            "champion": [1]
+          },
+          "name": "Semi-finals & final",
+          "id": "finals"
+        }
+      ],
+      "name": "Seeded pools → cross-pool semis → final",
+      "templateId": "pools-to-knockout"
+    },
+    {
+      "templateId": "split-league-swap",
+      "version": 1,
+      "name": "Split league with mid-season swap",
+      "id": "st_83bdf7e9",
+      "stages": [
+        {
+          "format": {
+            "kind": "round-robin",
+            "legs": 2
+          },
+          "name": "Double round",
+          "groupLabels": ["Top group", "Bottom group"],
+          "entrants": {
+            "kind": "manual",
+            "groups": {
+              "kind": "even",
+              "count": 2
+            }
+          },
+          "id": "double-round",
+          "schedule": {
+            "activateFrom": "2026-09-27",
+            "blockIndex": 0,
+            "cadence": {
+              "kind": "weekly"
+            }
+          }
+        },
+        {
+          "outcome": {
+            "relegated": [-1],
+            "champion": [1]
+          },
+          "format": {
+            "kind": "round-robin",
+            "legs": 1
+          },
+          "groupLabels": ["Top group", "Bottom group"],
+          "schedule": {
+            "cadence": {
+              "kind": "weekly"
+            },
+            "blockIndex": 1
+          },
+          "entrants": {
+            "groups": {
+              "count": 2,
+              "kind": "even"
+            },
+            "kind": "manual",
+            "derivedFrom": {
+              "fromStage": "double-round",
+              "rule": "swap",
+              "carryPoints": true,
+              "detail": "Last in the top group swaps with first in the bottom group, carrying the outgoing position’s points"
+            }
+          },
+          "id": "final-round",
+          "name": "Final round"
+        },
+        {
+          "format": {
+            "legs": 1,
+            "kind": "round-robin"
+          },
+          "name": "Stage 3",
+          "entrants": {
+            "kind": "all-registered"
+          },
+          "schedule": {
+            "blockIndex": 0,
+            "cadence": {
+              "kind": "weekly"
+            }
+          },
+          "id": "stg_c889d2e4"
+        }
+      ]
+    },
+    {
+      "version": 1,
+      "id": "st_916d7be0",
+      "name": "Seeded pools → cross-pool semis → final",
+      "templateId": "pools-to-knockout",
+      "stages": [
+        {
+          "groupLabels": ["Group A", "Group B"],
+          "schedule": {
+            "activateFrom": "2026-09-27",
+            "blockIndex": 0,
+            "cadence": {
+              "kind": "weekly"
+            }
+          },
+          "format": {
+            "kind": "round-robin",
+            "legs": 1
+          },
+          "name": "Pool stage",
+          "id": "pools",
+          "entrants": {
+            "method": "blocks",
+            "kind": "seeded-split",
+            "groups": {
+              "kind": "even",
+              "count": 2
+            }
+          }
+        },
+        {
+          "id": "finals",
+          "name": "Semi-finals & final",
+          "schedule": {
+            "activateFrom": "2026-11-01",
+            "cadence": {
+              "kind": "weekly"
+            },
+            "blockIndex": 0
+          },
+          "entrants": {
+            "method": "blocks",
+            "groups": {
+              "count": 2,
+              "kind": "even"
+            },
+            "kind": "seeded-split"
+          },
+          "format": {
+            "pairing": "cross-pool",
+            "kind": "knockout"
+          },
+          "groupLabels": ["Group A", "Group B"],
+          "outcome": {
+            "champion": [1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Seeded pools → cross-pool semis → final",
+      "id": "st_e7c5dfb9",
+      "version": 1,
+      "templateId": "pools-to-knockout",
+      "stages": [
+        {
+          "format": {
+            "legs": 1,
+            "kind": "round-robin"
+          },
+          "groupLabels": ["Top 6", "Bottom 6"],
+          "name": "Pool stage",
+          "entrants": {
+            "kind": "seeded-split",
+            "groups": {
+              "count": 2,
+              "kind": "even"
+            },
+            "method": "snake"
+          },
+          "id": "pools",
+          "schedule": {
+            "blockIndex": 0,
+            "activateFrom": "2026-09-27",
+            "cadence": {
+              "kind": "weekly"
+            }
+          }
+        },
+        {
+          "entrants": {
+            "kind": "manual",
+            "derivedFrom": {
+              "fromStage": "pools",
+              "rule": "from-standings",
+              "detail": "Top two from each pool, paired across pools"
+            }
+          },
+          "outcome": {
+            "champion": [1]
+          },
+          "format": {
+            "pairing": "cross-pool",
+            "kind": "knockout"
+          },
+          "schedule": {
+            "activateFrom": "2026-11-08",
+            "cadence": {
+              "kind": "weekly"
+            },
+            "blockIndex": 0
+          },
+          "name": "Semi-finals & final",
+          "id": "finals",
+          "groupLabels": ["Top 6", "Bottom 6"]
+        }
+      ]
+    },
+    {
+      "version": 1,
+      "stages": [
+        {
+          "id": "stg_4acaa9e7",
+          "format": {
+            "legs": 1,
+            "kind": "round-robin"
+          },
+          "entrants": {
+            "kind": "seeded-split",
+            "method": "blocks",
+            "groups": {
+              "kind": "even",
+              "count": 2
+            }
+          },
+          "schedule": {
+            "cadence": {
+              "kind": "weekly"
+            },
+            "blockIndex": 0
+          },
+          "name": "League season",
+          "groupLabels": ["Top Six", "Bottom Six"]
+        },
+        {
+          "groupLabels": ["Top Six", "Bottom Six"],
+          "schedule": {
+            "cadence": {
+              "kind": "weekly"
+            },
+            "blockIndex": 1
+          },
+          "name": "Stage 2",
+          "format": {
+            "legs": 1,
+            "kind": "round-robin"
+          },
+          "id": "stg_9c55727c",
+          "entrants": {
+            "kind": "seeded-split",
+            "method": "blocks",
+            "groups": {
+              "count": 2,
+              "kind": "even"
+            }
+          }
+        },
+        {
+          "entrants": {
+            "method": "blocks",
+            "kind": "seeded-split",
+            "groups": {
+              "kind": "even",
+              "count": 2
+            }
+          },
+          "schedule": {
+            "cadence": {
+              "kind": "weekly"
+            },
+            "blockIndex": 2
+          },
+          "groupLabels": ["Top Six", "Bottom Six"],
+          "name": "Stage 3",
+          "format": {
+            "kind": "round-robin",
+            "legs": 1
+          },
+          "id": "stg_ef0e39f3"
+        },
+        {
+          "schedule": {
+            "blockIndex": 3,
+            "cadence": {
+              "kind": "weekly"
+            }
+          },
+          "id": "stg_f98f6c59",
+          "entrants": {
+            "kind": "seeded-split",
+            "method": "blocks",
+            "groups": {
+              "kind": "even",
+              "count": 2
+            }
+          },
+          "name": "Stage 4",
+          "groupLabels": ["Top Six", "Bottom Six"],
+          "format": {
+            "legs": 1,
+            "kind": "round-robin"
+          }
+        }
+      ],
+      "name": "New structure",
+      "id": "st_2a22689f"
+    }
+  ],
+  "calendars": [
+    {
+      "id": "cal-2026-27",
+      "blocks": [
+        {
+          "start": "2026-08-01",
+          "label": "First half",
+          "end": "2026-12-19",
+          "id": "block-1"
+        },
+        {
+          "label": "Second half",
+          "start": "2027-01-16",
+          "end": "2027-05-29",
+          "id": "block-2"
+        }
+      ],
+      "timezone": "Africa/Johannesburg",
+      "breaks": [
+        {
+          "start": "2026-12-20",
+          "end": "2027-01-15",
+          "label": "Festive break"
+        }
+      ],
+      "label": "2026/27 season"
+    },
+    {
+      "blocks": [
+        {
+          "label": "T20",
+          "end": "2026-11-08",
+          "id": "blk_fb6c5c8f",
+          "start": "2026-09-27"
+        },
+        {
+          "label": "50 Overs",
+          "id": "blk_3c638229",
+          "start": "2026-11-15",
+          "end": "2026-12-13"
+        },
+        {
+          "end": "2027-02-21",
+          "id": "blk_2633bd39",
+          "label": "50 Overs",
+          "start": "2027-01-24"
+        },
+        {
+          "start": "2027-02-28",
+          "label": "3rd round",
+          "id": "blk_ec99513d",
+          "end": "2027-03-28"
+        }
+      ],
+      "label": "Mohau 26/27",
+      "breaks": [],
+      "id": "cal_1b3c84dd",
+      "excludeDates": []
+    },
+    {
+      "id": "cal_99a42bda",
+      "breaks": [],
+      "excludeDates": [],
+      "label": "testing",
+      "blocks": [
+        {
+          "end": "2026-11-20",
+          "label": "Block 1",
+          "id": "blk_bb23c5d3",
+          "start": "2026-09-25"
+        },
+        {
+          "end": "2027-01-16",
+          "start": "2026-11-21",
+          "id": "blk_bbdc4e71",
+          "label": "Block 2"
+        }
+      ]
+    },
+    {
+      "excludeDates": [],
+      "label": "testing09",
+      "id": "cal_1159f98b",
+      "breaks": [],
+      "blocks": [
+        {
+          "end": "2026-11-20",
+          "start": "2026-09-25",
+          "id": "blk_393d6020",
+          "label": "Block 1"
+        },
+        {
+          "start": "2026-11-21",
+          "end": "2027-01-16",
+          "label": "Block 2",
+          "id": "blk_705e30f6"
+        }
+      ]
+    }
+  ]
+}
