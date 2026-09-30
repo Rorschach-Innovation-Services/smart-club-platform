@@ -3,13 +3,19 @@
  * snapshot immutability — plus the run-time `pairingOverride` guard on POST/PATCH.
  *
  * What is pinned:
- * - the snapshot adopted is the SERVER's live structure, gated twice: the live version
- *   must equal the one the admin reviewed (409 otherwise), and the run write is
- *   version-conditional like PATCH (409 on a stale run);
+ * - the snapshot adopted is the SERVER's live structure, gated twice: the live structure
+ *   id and version must equal the ones the admin reviewed (409 otherwise), and the run
+ *   write is version-conditional like PATCH (409 on a stale run);
+ * - the target is the league's CURRENT setup structure (a clone or per-season fork the
+ *   league moved onto), falling back to the snapshot's id when the league has no setup;
  * - stage reconciliation, including the rules the client cannot infer for itself
  *   (its divergence check compares pairings only, and confirmed groups shadow the spec):
  *   entrant change clears groups, schedule change marks `staleSchedule`, format change
  *   drops `pairingOverride`, a dangling `fromStage` warns;
+ * - the ROOT format marker: a rebase onto a structure whose `name`/`overs` changed stamps
+ *   `formatChanged` on every surviving stage; the next generate adopts the new name/overs
+ *   and clears it, while a regenerate WITHOUT it keeps a released series' stored
+ *   `seriesType`/`maxOvers`; a client can neither set nor clear it;
  * - audit entries are stamped server-side;
  * - PATCH still strips a client-supplied snapshot after a rebase.
  *
@@ -21,12 +27,16 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import type {
+  Club,
   CompetitionStructure,
   SeasonCalendar,
   SeasonRun,
+  Series,
   StageRun,
   StageSpec,
 } from '../src/types.js';
+import { bindSetup, startRunBody } from './season-run-harness.js';
+import { rebaseTargetFor } from '../../engine/src/run.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
 const DDB_PORT = 4639; // next free odd port after veterans-requests (4637)
@@ -201,9 +211,13 @@ const confirmedStages = (): StageRun[] => [
   },
 ];
 
+// A league with no setup in config: its runs fall back to their snapshot's own structure.
+const NO_SETUP = 'no-setup-league';
+
 const run = (over: Partial<SeasonRun> = {}): SeasonRun => ({
   id: 'sr-rb',
   leagueKey: 'premier-men',
+  // A stored deprecated competitionId is inert.
   competitionId: 'comp-1',
   seasonLabel: '2026/27',
   structureSnapshot: V1,
@@ -270,6 +284,12 @@ before(async () => {
 
   const cfg = await repo.getTenantConfig('dolphins');
   await repo.putTenantConfig({ ...cfg!, structures: [V2, LEGACY_V2, REVEAL_V2] });
+  // POST /season-runs freezes what config sets up: premier-men runs the live V2.
+  await bindSetup(repo, 'dolphins', {
+    leagueKey: 'premier-men',
+    structure: V2,
+    calendar: CALENDAR,
+  });
 });
 
 after(() => {
@@ -279,35 +299,50 @@ after(() => {
 describe('POST /season-runs/:id/rebase — guards', () => {
   test('a club rep cannot rebase', async () => {
     await repo.putSeasonRun('dolphins', run({ id: 'sr-rep' }));
-    const res = await rebase('sr-rep', { structureVersion: 2, version: 1 }, REP);
+    const res = await rebase(
+      'sr-rep',
+      { structureId: 'st-rb', structureVersion: 2, version: 1 },
+      REP,
+    );
     assert.equal(res.status, 403);
   });
 
   test('an unknown run is a 404', async () => {
-    const res = await rebase('nope', { structureVersion: 2, version: 1 });
+    const res = await rebase('nope', { structureId: 'st-rb', structureVersion: 2, version: 1 });
     assert.equal(res.status, 404);
   });
 
   test('a deleted structure is a 404 — there is nothing live to adopt', async () => {
     await repo.putSeasonRun(
       'dolphins',
-      run({ id: 'sr-gone', structureSnapshot: { ...V1, id: 'st-deleted' } }),
+      run({ id: 'sr-gone', leagueKey: NO_SETUP, structureSnapshot: { ...V1, id: 'st-deleted' } }),
     );
-    const res = await rebase('sr-gone', { structureVersion: 2, version: 1 });
+    const res = await rebase('sr-gone', {
+      structureId: 'st-deleted',
+      structureVersion: 2,
+      version: 1,
+    });
     assert.equal(res.status, 404);
   });
 
   test('missing versions are a 400, never an unconditional write', async () => {
     await repo.putSeasonRun('dolphins', run({ id: 'sr-400' }));
-    assert.equal((await rebase('sr-400', { structureVersion: 2 })).status, 400);
-    assert.equal((await rebase('sr-400', { version: 1 })).status, 400);
+    assert.equal(
+      (await rebase('sr-400', { structureId: 'st-rb', structureVersion: 2 })).status,
+      400,
+    );
+    assert.equal((await rebase('sr-400', { structureId: 'st-rb', version: 1 })).status, 400);
     assert.equal((await repo.getSeasonRun('dolphins', 'sr-400'))?.structureSnapshot.version, 1);
   });
 
   test('a structure edited since the review is a 409 and nothing is written', async () => {
     await repo.putSeasonRun('dolphins', run({ id: 'sr-live409' }));
     // The admin reviewed v3; the live structure is v2.
-    const res = await rebase('sr-live409', { structureVersion: 3, version: 1 });
+    const res = await rebase('sr-live409', {
+      structureId: 'st-rb',
+      structureVersion: 3,
+      version: 1,
+    });
     assert.equal(res.status, 409);
     // Coded so the console can say "reopen Review changes" rather than string-match.
     assert.equal(((await res.json()) as { code?: string }).code, 'structure_changed');
@@ -316,9 +351,21 @@ describe('POST /season-runs/:id/rebase — guards', () => {
     assert.equal(stored?.version, 1);
   });
 
+  test('a missing structureId is a 400 naming what is missing', async () => {
+    await repo.putSeasonRun('dolphins', run({ id: 'sr-noid' }));
+    const res = await rebase('sr-noid', { structureVersion: 2, version: 1 });
+    assert.equal(res.status, 400);
+    assert.match(await res.text(), /id of the structure you reviewed/);
+    assert.equal((await repo.getSeasonRun('dolphins', 'sr-noid'))?.structureSnapshot.version, 1);
+  });
+
   test('a stale run version is a 409, same as PATCH', async () => {
     await repo.putSeasonRun('dolphins', run({ id: 'sr-run409', version: 4 }));
-    const res = await rebase('sr-run409', { structureVersion: 2, version: 3 });
+    const res = await rebase('sr-run409', {
+      structureId: 'st-rb',
+      structureVersion: 2,
+      version: 3,
+    });
     assert.equal(res.status, 409);
     assert.equal(
       (await repo.getSeasonRun('dolphins', 'sr-run409'))?.structureSnapshot.version,
@@ -329,7 +376,7 @@ describe('POST /season-runs/:id/rebase — guards', () => {
 
   test('already on the live version is a no-op — no version bump, no audit noise', async () => {
     await repo.putSeasonRun('dolphins', run({ id: 'sr-noop', structureSnapshot: V2 }));
-    const res = await rebase('sr-noop', { structureVersion: 2, version: 1 });
+    const res = await rebase('sr-noop', { structureId: 'st-rb', structureVersion: 2, version: 1 });
     assert.equal(res.status, 200);
     const body = (await res.json()) as SeasonRun;
     assert.equal(body.version, 1);
@@ -341,9 +388,17 @@ describe('POST /season-runs/:id/rebase — guards', () => {
       'dolphins',
       run({ id: 'sr-noop409', structureSnapshot: V2, version: 3 }),
     );
-    const stale = await rebase('sr-noop409', { structureVersion: 2, version: 2 });
+    const stale = await rebase('sr-noop409', {
+      structureId: 'st-rb',
+      structureVersion: 2,
+      version: 2,
+    });
     assert.equal(stale.status, 409, 'the no-op return must not mask a stale run version');
-    const fresh = await rebase('sr-noop409', { structureVersion: 2, version: 3 });
+    const fresh = await rebase('sr-noop409', {
+      structureId: 'st-rb',
+      structureVersion: 2,
+      version: 3,
+    });
     assert.equal(fresh.status, 200);
     assert.equal(((await fresh.json()) as SeasonRun).version, 3, 'still a no-op — no bump');
   });
@@ -356,6 +411,7 @@ describe('POST /season-runs/:id/rebase — reconciliation', () => {
   before(async () => {
     await repo.putSeasonRun('dolphins', run());
     const res = await rebase('sr-rb', {
+      structureId: 'st-rb',
       structureVersion: 2,
       version: 1,
       // A client-supplied snapshot is not a thing this route reads.
@@ -374,6 +430,8 @@ describe('POST /season-runs/:id/rebase — reconciliation', () => {
     );
     assert.equal(body.version, 2);
     assert.equal(body.warnings, undefined, 'no warnings key on a clean rebase');
+    // v1 → v2 kept the root name and overs, so no stage is marked to adopt a new format.
+    assert.ok(body.stages.every((st) => st.formatChanged === undefined));
   });
 
   test('an entrant-spec change clears groups to awaiting-entrants, keeping the old grouping in the audit', () => {
@@ -413,11 +471,16 @@ describe('POST /season-runs/:id/rebase — reconciliation', () => {
       'dolphins',
       run({
         id: 'sr-reveal',
+        leagueKey: NO_SETUP,
         structureSnapshot: REVEAL_V1,
         stages: confirmedStages().filter((s) => s.specId === 'plate'),
       }),
     );
-    const res = await rebase('sr-reveal', { structureVersion: 2, version: 1 });
+    const res = await rebase('sr-reveal', {
+      structureId: 'st-reveal',
+      structureVersion: 2,
+      version: 1,
+    });
     assert.equal(res.status, 200);
     const plate = ((await res.json()) as SeasonRun).stages.find((s) => s.specId === 'plate')!;
     assert.equal(plate.staleSchedule, true);
@@ -476,9 +539,13 @@ describe('POST /season-runs/:id/rebase — dangling fromStage', () => {
   test('a derivation naming no live stage is reported as a warning', async () => {
     await repo.putSeasonRun(
       'dolphins',
-      run({ id: 'sr-warn', structureSnapshot: LEGACY_V1, stages: [] }),
+      run({ id: 'sr-warn', leagueKey: NO_SETUP, structureSnapshot: LEGACY_V1, stages: [] }),
     );
-    const res = await rebase('sr-warn', { structureVersion: 2, version: 1 });
+    const res = await rebase('sr-warn', {
+      structureId: 'st-legacy',
+      structureVersion: 2,
+      version: 1,
+    });
     assert.equal(res.status, 200);
     const body = (await res.json()) as SeasonRun & { warnings?: string[] };
     assert.equal(body.structureSnapshot.version, 2);
@@ -523,13 +590,271 @@ describe('pairingOverride guard on the season-run write paths', () => {
       method: 'POST',
       headers: headers(ADMIN),
       body: JSON.stringify(
-        run({
+        startRunBody({
           id: 'sr-po-post',
+          // One season per league per label: the directly-seeded runs hold '2026/27'.
+          seasonLabel: 'po-post',
           stages: [{ specId: 'ko', status: 'ready', groups: [], pairingOverride: 'x' as never }],
         }),
       ),
     });
     assert.equal(res.status, 400);
     assert.equal(await repo.getSeasonRun('dolphins', 'sr-po-post'), null);
+
+    // Control: the same body with a known override starts — so the 400 above was the
+    // override, not the binding.
+    const ok = await app.request('/season-runs', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify(
+        startRunBody({
+          id: 'sr-po-post',
+          seasonLabel: 'po-post',
+          stages: [{ specId: 'ko', status: 'ready', groups: [], pairingOverride: 'within-pool' }],
+        }),
+      ),
+    });
+    assert.equal(ok.status, 201, await ok.clone().text());
+    const stored = await repo.getSeasonRun('dolphins', 'sr-po-post');
+    assert.equal(stored?.structureSnapshot.version, V2.version, 'froze the live structure');
+    assert.equal(stored?.stages[0]?.pairingOverride, 'within-pool');
+  });
+});
+
+describe('the rebase root-format marker (formatChanged)', () => {
+  const LEAGUE = 'fmt-league';
+  const RUN = 'sr-fmt';
+  const SERIES = `s-${RUN}-league-g1`;
+  const LEAGUE_STAGE: StageSpec = {
+    id: 'league',
+    name: 'League',
+    format: { kind: 'round-robin', legs: 1 },
+    entrants: { kind: 'all-registered' },
+    schedule: weekly(0),
+  };
+  const FMT_V1: CompetitionStructure = {
+    id: 'st-fmt',
+    name: 'One-Day League',
+    version: 1,
+    overs: 50,
+    stages: [LEAGUE_STAGE],
+  };
+  // Same stages; only the ROOT name and overs change.
+  const FMT_V2: CompetitionStructure = { ...FMT_V1, version: 2, name: 'T20 League', overs: 20 };
+
+  const generate = (version: number) =>
+    app.request(`/season-runs/${RUN}/stages/league/generate`, {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify({ version, confirmReleasedOverwrite: true }),
+    });
+  const stored = async (): Promise<SeasonRun> => (await repo.getSeasonRun('dolphins', RUN))!;
+  const series = async (): Promise<Series> => (await repo.getSeries('dolphins', SERIES))!;
+
+  before(async () => {
+    for (const id of ['fmt-a', 'fmt-b', 'fmt-c', 'fmt-d'])
+      await repo.putClub('dolphins', {
+        id,
+        name: `Club ${id}`,
+        leagues: [LEAGUE],
+        ground: { venue: `${id} Oval` },
+        affiliation: 'complete',
+      } as unknown as Club);
+    await bindSetup(repo, 'dolphins', { leagueKey: LEAGUE, structure: FMT_V1, calendar: CALENDAR });
+    const res = await app.request('/season-runs', {
+      method: 'POST',
+      headers: headers(ADMIN),
+      body: JSON.stringify(startRunBody({ id: RUN, leagueKey: LEAGUE, seasonLabel: 'fmt' })),
+    });
+    assert.equal(res.status, 201, await res.clone().text());
+    const gen = await generate(1);
+    assert.equal(gen.status, 200, await gen.clone().text());
+    const s = await series();
+    assert.equal(s.seriesType, 'One-Day League');
+    assert.equal(s.maxOvers, 50);
+    // Released — and, like a competitions-era series, carrying its own format label.
+    await repo.putSeries('dolphins', {
+      ...s,
+      seriesType: '50 Over (Red Ball)',
+      maxOvers: 45,
+      approved: true,
+      released: true,
+      releasedAt: '2026-09-01T00:00:00.000Z',
+    });
+  });
+
+  test('a regenerate WITHOUT the marker keeps a released series’ stored seriesType/maxOvers', async () => {
+    const res = await generate((await stored()).version);
+    assert.equal(res.status, 200, await res.clone().text());
+    const s = await series();
+    assert.equal(s.released, true);
+    assert.equal(s.seriesType, '50 Over (Red Ball)');
+    assert.equal(s.maxOvers, 45);
+  });
+
+  test('a rebase onto a new root name/overs stamps formatChanged on every surviving stage', async () => {
+    const cfg = await repo.getTenantConfig('dolphins');
+    await repo.putTenantConfig({
+      ...cfg!,
+      structures: (cfg!.structures ?? []).map((st) => (st.id === FMT_V2.id ? FMT_V2 : st)),
+    });
+    const res = await rebase(RUN, {
+      structureId: FMT_V2.id,
+      structureVersion: 2,
+      version: (await stored()).version,
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    const body = (await res.json()) as SeasonRun;
+    assert.equal(body.stages.length, 1);
+    assert.equal(body.stages[0]!.formatChanged, true);
+    // The stage spec itself is unchanged: no audit entry, groups kept.
+    assert.equal(body.stages[0]!.groups[0]!.seriesId, SERIES);
+    assert.equal((await stored()).stages[0]!.formatChanged, true, 'stored, not response-only');
+  });
+
+  test('a client can neither clear the marker nor set it through PATCH or POST', async () => {
+    const current = await stored();
+    const res = await app.request(`/season-runs/${RUN}`, {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        version: current.version,
+        stages: current.stages.map(({ formatChanged: _fc, ...st }) => st),
+      }),
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.equal((await stored()).stages[0]!.formatChanged, true, 'the stored marker is replayed');
+
+    const other = await repo.getSeasonRun('dolphins', 'sr-po');
+    const set = await app.request('/season-runs/sr-po', {
+      method: 'PATCH',
+      headers: headers(ADMIN),
+      body: JSON.stringify({
+        version: other!.version,
+        stages: [{ specId: 'ko', status: 'ready', groups: [], formatChanged: true }],
+      }),
+    });
+    assert.equal(set.status, 200, await set.clone().text());
+    assert.equal(
+      (await repo.getSeasonRun('dolphins', 'sr-po'))!.stages[0]!.formatChanged,
+      undefined,
+    );
+  });
+
+  test('the next generate adopts the new name/overs and clears the marker', async () => {
+    const res = await generate((await stored()).version);
+    assert.equal(res.status, 200, await res.clone().text());
+    const s = await series();
+    assert.equal(s.released, true, 'still published');
+    assert.equal(s.seriesType, 'T20 League');
+    assert.equal(s.maxOvers, 20);
+    assert.equal((await stored()).stages[0]!.formatChanged, undefined);
+  });
+
+  test('after that, a regenerate keeps the adopted format', async () => {
+    await repo.putSeries('dolphins', { ...(await series()), seriesType: 'Kept label' });
+    const res = await generate((await stored()).version);
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.equal((await series()).seriesType, 'Kept label');
+  });
+});
+
+describe('rebase follows the league’s current setup structure', () => {
+  const LEAGUE = 'clone-league';
+  // The migration's per-league clone / a per-season fork: same stage ids as the original,
+  // its own id, name and overs.
+  const CLONE: CompetitionStructure = {
+    ...V2,
+    id: 'st-rb-clone-league',
+    name: 'Pools to knockout (Clone League)',
+    version: 1,
+    overs: 50,
+  };
+  const onClone = (id: string, over: Partial<SeasonRun> = {}) =>
+    run({ id, leagueKey: LEAGUE, structureSnapshot: V1, ...over });
+
+  before(async () => {
+    await bindSetup(repo, 'dolphins', { leagueKey: LEAGUE, structure: CLONE, calendar: CALENDAR });
+  });
+
+  test('the league’s setup structure is the target — not the snapshot’s original', async () => {
+    await repo.putSeasonRun('dolphins', onClone('sr-clone'));
+    const res = await rebase('sr-clone', {
+      structureId: CLONE.id,
+      structureVersion: CLONE.version,
+      version: 1,
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    const body = (await res.json()) as SeasonRun;
+    assert.equal(body.structureSnapshot.id, CLONE.id);
+    assert.equal(body.structureSnapshot.name, CLONE.name);
+    assert.equal(body.version, 2);
+    // Stage ids carried over, so the reconciliation is stage by stage, as with a version bump.
+    const pools = body.stages.find((s) => s.specId === 'pools')!;
+    assert.equal(pools.status, 'awaiting-entrants');
+    assert.equal(
+      body.stages.find((s) => s.specId === 'dropped'),
+      undefined,
+    );
+    assert.ok(body.stages.find((s) => s.specId === 'bowl'));
+    // The root name/overs moved, so every survivor adopts them on its next generate.
+    assert.ok(
+      body.stages.filter((s) => s.specId !== 'bowl').every((s) => s.formatChanged === true),
+    );
+  });
+
+  test('a client that reviewed the original structure is a 409 structure_changed', async () => {
+    await repo.putSeasonRun('dolphins', onClone('sr-clone-stale'));
+    const res = await rebase('sr-clone-stale', {
+      structureId: 'st-rb',
+      structureVersion: 2,
+      version: 1,
+    });
+    assert.equal(res.status, 409);
+    assert.equal(((await res.json()) as { code?: string }).code, 'structure_changed');
+    const stored = await repo.getSeasonRun('dolphins', 'sr-clone-stale');
+    assert.equal(stored?.structureSnapshot.id, 'st-rb');
+    assert.equal(stored?.version, 1);
+  });
+
+  test('editing the ORIGINAL no longer produces skew for a run already on the clone', async () => {
+    await repo.putSeasonRun('dolphins', onClone('sr-clone-noop', { structureSnapshot: CLONE }));
+    const cfg = await repo.getTenantConfig('dolphins');
+    await repo.putTenantConfig({
+      ...cfg!,
+      structures: (cfg!.structures ?? []).map((st) =>
+        st.id === V2.id ? { ...V2, version: 3, overs: 20 } : st,
+      ),
+    });
+    try {
+      const target = rebaseTargetFor(
+        (await repo.getSeasonRun('dolphins', 'sr-clone-noop'))!,
+        await repo.getTenantConfig('dolphins'),
+      );
+      assert.equal(target?.id, CLONE.id);
+      assert.equal(target?.version, CLONE.version);
+      // Nothing to adopt: the original's v3 is never offered, and applying is a no-op.
+      const res = await rebase('sr-clone-noop', {
+        structureId: CLONE.id,
+        structureVersion: CLONE.version,
+        version: 1,
+      });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as SeasonRun;
+      assert.equal(body.version, 1);
+      assert.equal(body.structureSnapshot.overs, 50);
+      const toOriginal = await rebase('sr-clone-noop', {
+        structureId: V2.id,
+        structureVersion: 3,
+        version: 1,
+      });
+      assert.equal(toOriginal.status, 409);
+    } finally {
+      const after = await repo.getTenantConfig('dolphins');
+      await repo.putTenantConfig({
+        ...after!,
+        structures: (after!.structures ?? []).map((st) => (st.id === V2.id ? V2 : st)),
+      });
+    }
   });
 });

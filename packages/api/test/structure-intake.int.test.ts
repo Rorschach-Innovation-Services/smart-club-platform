@@ -418,6 +418,64 @@ describe('POST /platform/tenants/:slug/structure-intake/commit', () => {
     );
   });
 
+  test('intake never stores a forged setup/competitions; an existing league keeps its stored setup', async () => {
+    // Seed a league that already carries an operator binding, straight onto the row.
+    const storedSetup = { structureId: 'st-bound', calendarId: 'cal-bound' };
+    const before = (await repo.getTenantConfig(TENANT))!;
+    await repo.putTenantConfig({
+      ...before,
+      leagues: [
+        ...(before.leagues ?? []),
+        {
+          key: 'bound-league',
+          label: 'Bound League',
+          group: 'Senior',
+          district: 'Test District',
+          setup: storedSetup,
+        },
+      ],
+    });
+
+    const res = await app.request(`/platform/tenants/${TENANT}/structure-intake/commit`, {
+      method: 'POST',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({
+        newLeagues: [
+          {
+            key: 'forged-league',
+            label: 'Forged League',
+            group: 'Senior',
+            district: 'Test District',
+            setup: { structureId: 'ghost', calendarId: 'ghost' },
+            competitions: [{ id: 'ghost-comp' }],
+          },
+          // Re-send of the bound league carrying a DIFFERENT setup — the stored one wins,
+          // so this is an idempotent re-send, not a 409 and not an overwrite.
+          {
+            key: 'bound-league',
+            label: 'Bound League',
+            group: 'Senior',
+            district: 'Test District',
+            setup: { structureId: 'ghost', calendarId: 'ghost' },
+          },
+        ],
+        clubs: [],
+      }),
+    });
+    const body = (await res.json()) as { leaguesAppended: string[] };
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.deepEqual(body.leaguesAppended, ['forged-league']);
+
+    const cfg = (await repo.getTenantConfig(TENANT))!;
+    const forged = cfg.leagues?.find((l) => l.key === 'forged-league');
+    assert.ok(forged, 'the new league itself was appended');
+    assert.equal(forged.setup, undefined, 'forged setup not stored');
+    assert.equal(forged.competitions, undefined, 'forged competitions not stored');
+    const bound = cfg.leagues?.filter((l) => l.key === 'bound-league') ?? [];
+    assert.equal(bound.length, 1);
+    assert.deepEqual(bound[0].setup, storedSetup, 'stored setup preserved exactly');
+  });
+
   test('object-valued venue → per-club error, nothing written for that club', async () => {
     const res = await app.request(`/platform/tenants/${TENANT}/structure-intake/commit`, {
       method: 'POST',

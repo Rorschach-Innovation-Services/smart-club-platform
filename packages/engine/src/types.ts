@@ -17,11 +17,13 @@ export interface League {
   group: string;
   /** A DISTRICTS value, or the 'All districts' sentinel for overarching leagues. */
   district: string;
-  note?: string;
   /**
    * Format streams this league runs (ADR 0008) — e.g. T20 Pink Ball and 50 Over Red Ball
    * side by side over the same registered clubs. Absent ⇒ the league behaves exactly as
    * before: one flat create-series flow, no structure.
+   * @deprecated Replaced by {@link League.setup}. Nothing reads it for scheduling; kept only
+   * so stored configs type-check for the operator-binding overlay, the stale-console 409 and
+   * the setup migration. Retired by `scripts/cleanup-competitions.ts` after prod burn-in.
    */
   competitions?: Competition[];
   /**
@@ -31,6 +33,11 @@ export interface League {
    * (entrants, season runs, series) treats it like any other league. Absent ⇒ false.
    */
   fixturesOnly?: boolean;
+  /**
+   * The league's one operator-authored setup — replaces competitions[]; created/edited only
+   * via the operator wizard/SetupLeagueDialog.
+   */
+  setup?: { structureId: string; calendarId: string };
 }
 
 /* ─── SEASON CALENDAR (ADR 0008) ───
@@ -192,25 +199,10 @@ export type EntrantSpec =
   | { kind: 'seeded-split'; groups: GroupPlan; method: 'blocks' | 'snake' };
 
 /**
- * Points and tie-break configuration, lifted off the create-series form onto the stage.
- * @deprecated Stored but not read; kept so existing structures stay valid. The platform
- * has no results or ladder model, and no UI edits this.
- */
-export interface LadderSpec {
-  winPoints: number;
-  bonusPoints: number;
-  lossPoints: number;
-  tiePoints: number;
-  abandonedPoints: number;
-  /** Tie-break sequence, most significant first. */
-  order: string[];
-}
-
-/**
- * When a stage plays. Names a POSITION into whichever calendar the competition binds,
+ * When a stage plays. Names a POSITION into whichever calendar the league's setup names,
  * not a calendar or block directly — a structure carries no calendar identity of its own,
- * so the same structure can be reused against different calendars. The Competition's
- * binding supplies the actual blocks at generation time.
+ * so the same structure can be reused against different calendars. The setup's calendar
+ * supplies the actual blocks at generation time.
  */
 export interface StageSchedule {
   /** 0-based index into the bound calendar's `blocks` array. */
@@ -229,20 +221,6 @@ export interface StageSchedule {
   startAfter?: 'previous-stage';
 }
 
-/**
- * What finishing where in this stage means — display and next-season carry.
- * @deprecated Stored but not read; kept so existing structures stay valid. Nothing
- * displays or carries it, and new templates no longer set it.
- */
-export interface OutcomeSpec {
-  /** Positions crowned champion, e.g. [1]. */
-  champion?: number[];
-  /** Positions promoted out of this group. */
-  promoted?: number[];
-  /** Positions relegated out of this group. */
-  relegated?: number[];
-}
-
 export interface StageSpec {
   /** Stable within the structure — later stages reference it via DerivationNote. */
   id: string;
@@ -252,10 +230,6 @@ export interface StageSpec {
   schedule: StageSchedule;
   /** Group display names, e.g. ["Top Six", "Bottom Six"]. Falls back to "Group A/B/…". */
   groupLabels?: string[];
-  /** @deprecated Stored but not read; kept so existing structures stay valid. */
-  ladder?: LadderSpec;
-  /** @deprecated Stored but not read; kept so existing structures stay valid. */
-  outcome?: OutcomeSpec;
 }
 
 /**
@@ -275,6 +249,11 @@ export interface CompetitionStructure {
    * `operator`, the pre-existing meaning. Provenance only, like `templateId`.
    */
   source?: 'operator' | 'quick-start' | 'migration';
+  /**
+   * Overs per innings — the one surviving match-format field; feeds `Series.maxOvers`.
+   * Validated 1-200. Absent ⇒ 50.
+   */
+  overs?: number;
   stages: StageSpec[];
 }
 
@@ -324,6 +303,12 @@ export type VenueStatus = 'home' | 'alternative' | 'neutral' | 'unresolved';
  * league could only be ONE thing, but KZNCU Premier Men runs a T20 Pink Ball competition
  * and a 50 Over Red Ball competition in parallel — different structures, different
  * groupings, over the same twelve registered clubs.
+ *
+ * @deprecated Collapsed into {@link League.setup} (one league, one structure, one calendar;
+ * overs move onto {@link CompetitionStructure.overs}). Nothing schedules from it. Kept only
+ * because stored configs still carry it (read by the operator-binding overlay, the
+ * stale-console 409 and the setup migration); retired by `scripts/cleanup-competitions.ts`
+ * after prod burn-in.
  */
 export interface Competition {
   id: string;
@@ -336,13 +321,6 @@ export interface Competition {
   excludeTeamIds?: string[];
 }
 
-/** One match format a tenant offers, e.g. `{ label: 'T20 (Pink Ball)', overs: 20, ballType: 'Pink' }`. */
-export interface MatchFormatDefault {
-  label: string;
-  overs?: number;
-  ballType?: string;
-}
-
 /**
  * Tenant-configured defaults that replace sport- and union-specific constants (ADR 0014,
  * "Tenant-configured defaults instead of constants"). Every field is optional: an absent
@@ -350,12 +328,6 @@ export interface MatchFormatDefault {
  * tenant that never configured any of this behaves exactly as before.
  */
 export interface CompetitionDefaults {
-  /** The formats offered where an admin picks one. Absent ⇒ the built-in list. */
-  matchFormats?: MatchFormatDefault[];
-  /** Default weekdays for "set days only". Absent ⇒ Saturday. */
-  matchDays?: Weekday[];
-  /** Default start times for double-headers. Absent ⇒ 08:00 / 13:30. */
-  timeSlots?: TimeSlot[];
   /** Travel cost estimate. Per-series values win. Absent ⇒ R4.50/km × 3 cars. */
   travel?: { costPerKm: number; carsPerAwayTrip: number };
   /**
@@ -398,6 +370,14 @@ export interface StageRun {
    */
   staleSchedule?: boolean;
   /**
+   * STORED, server-owned. Set by `POST /season-runs/:id/rebase` on every surviving stage
+   * when the adopted structure's ROOT `name` or `overs` changed. A regenerate normally keeps
+   * each existing series' stored `seriesType`/`maxOvers`; while this is set, the next
+   * generate of the stage adopts the new structure name/overs instead and clears it. Never
+   * accepted from a client (POST drops it, PATCH replays the stored value).
+   */
+  formatChanged?: boolean;
+  /**
    * Who confirmed this stage's entrants, when, what was proposed and whether they took
    * it. Relegation and points carry ride on these decisions, so the trail is a
    * governance requirement rather than a nicety.
@@ -427,7 +407,12 @@ export interface StageRun {
 export interface SeasonRun {
   id: string;
   leagueKey: string;
-  competitionId: string;
+  /**
+   * @deprecated Inert since the competition layer collapsed into `League.setup` — runs
+   * resolve via `leagueKey` alone. It stays on already-stored runs forever (no cleanup
+   * script touches season runs); new runs omit it, and nothing reads it.
+   */
+  competitionId?: string;
   /** e.g. "2026/27". */
   seasonLabel: string;
   structureSnapshot: CompetitionStructure;
@@ -437,11 +422,32 @@ export interface SeasonRun {
   createdBy?: string;
   version: number;
   /**
-   * @deprecated Flat seasons are retired (ADR 0014); `scripts/migrate-flat-runs.ts` moves
-   * each flat run onto a real competition whose `matchFormat` holds this choice. Migrated
-   * data may still carry the field briefly. No code reads it — do not start.
+   * @deprecated Flat seasons are retired (ADR 0014); the one-off flat-run migration moved
+   * every flat run onto a real structure. Old stored runs may still carry the field. No code
+   * reads it — do not start.
    */
   flatFormat?: { seriesType: string; overs: number };
+  /**
+   * STORED, server-owned (ISO timestamp): when this run's calendar was frozen — its first
+   * generate, or a rebase of a run that already had series. Once set, the run never goes
+   * back to following the live calendar, even if a rebase clears every group's series
+   * back-pointer. Never accepted from a client (POST ignores it, PATCH strips it). Legacy
+   * runs without it are treated as frozen as soon as any group carries a `seriesId`.
+   */
+  calendarFrozenAt?: string;
+  /**
+   * RESPONSE-ONLY, never stored (PATCH strips it). Set by GET /season-runs[/:id]: `true`
+   * when the run has no generated series yet, so `calendarSnapshot` above is the LIVE
+   * calendar its competition is bound to (the run follows it until the first generate
+   * freezes it); `false` when that binding no longer resolves and the stored snapshot is
+   * shown instead. Absent on a generated run.
+   */
+  calendarLive?: boolean;
+  /**
+   * RESPONSE-ONLY, never stored (PATCH strips it). Advisory lines about the run — e.g.
+   * its competition or calendar was removed before it generated.
+   */
+  warnings?: string[];
 }
 
 /** A club's home/secondary ground. */

@@ -1,8 +1,14 @@
 /* ─── Shared atom components ─── */
 
-import { useState, useEffect, useRef, useId } from 'react';
+import { useState, useEffect, useMemo, useRef, useId, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
-import type { ReactNode, CSSProperties, ComponentType, ButtonHTMLAttributes } from 'react';
+import type {
+  ReactNode,
+  CSSProperties,
+  ComponentType,
+  ButtonHTMLAttributes,
+  MutableRefObject,
+} from 'react';
 import { scoreCQI, cqiBand } from './cqiScore';
 import type { Club } from './types';
 import { GUIDE_URL, HelpLink } from './help/HelpDrawer';
@@ -848,7 +854,10 @@ export function useNestedEscapeClose(onClose: () => void) {
  * - focus moves into the dialog on open (unless a child already took it, e.g. `autoFocus`)
  *   and returns to whatever had it when the dialog closes;
  * - a click on the backdrop closes, unless `dismissable={false}` (a form that must not lose
- *   its input to a stray click).
+ *   its input to a stray click);
+ * - with `confirmClose`, a close request (Escape, ×, backdrop) first asks "Discard your
+ *   changes?" inside the dialog; content can also intercept it with `useModalCloseGuard`,
+ *   and route its own Cancel through the same ask with `useModalRequestClose`.
  *
  * Portalled to document.body so the fixed backdrop centres on the viewport, not on the
  * residual transform the fadeUp animation leaves on `.main > *`. The help drawer's
@@ -864,6 +873,7 @@ export function Modal({
   labelledBy,
   dismissable = true,
   closeLabel = 'Close',
+  confirmClose = false,
 }: {
   eyebrow?: ReactNode;
   title: ReactNode;
@@ -879,8 +889,36 @@ export function Modal({
   dismissable?: boolean;
   /** Tooltip on the close button. */
   closeLabel?: string;
+  /** True ⇒ the dialog holds unsaved input: closing asks before discarding it. */
+  confirmClose?: boolean;
 }) {
-  useEscapeClose(onClose);
+  const guardRef = useRef<(() => boolean) | null>(null);
+  const [asking, setAsking] = useState(false);
+  const askingNow = asking && confirmClose;
+  // What had focus when the ask opened: its "Keep editing" autoFocus takes it away.
+  const askedFrom = useRef<Element | null>(null);
+  const stopAsking = () => {
+    setAsking(false);
+    const back = askedFrom.current;
+    askedFrom.current = null;
+    if (back instanceof HTMLElement && back.isConnected) back.focus();
+  };
+  const requestClose = (viaEscape = false) => {
+    if (guardRef.current?.()) return;
+    if (!confirmClose) return onClose();
+    if (viaEscape && askingNow) return stopAsking();
+    if (!askingNow) askedFrom.current = document.activeElement;
+    setAsking(true);
+  };
+  const requestCloseRef = useRef(requestClose);
+  useEffect(() => {
+    requestCloseRef.current = requestClose;
+  });
+  const closeContext = useMemo(
+    () => ({ guardRef, requestClose: () => requestCloseRef.current() }),
+    [],
+  );
+  useEscapeClose(() => requestClose(true));
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   useFocusTrap(dialogRef, true);
@@ -899,11 +937,12 @@ export function Modal({
   }, []);
   const style: CSSProperties = {};
   if (maxWidth) style.maxWidth = maxWidth;
-  if (footer) style.gridTemplateRows = 'auto 1fr auto';
+  if (footer || askingNow)
+    style.gridTemplateRows = `auto ${askingNow ? 'auto ' : ''}1fr${footer ? ' auto' : ''}`;
   return createPortal(
     <div
       className="task-modal-backdrop"
-      onClick={(e) => dismissable && e.target === e.currentTarget && onClose()}
+      onClick={(e) => dismissable && e.target === e.currentTarget && requestClose()}
     >
       <div
         ref={dialogRef}
@@ -921,16 +960,83 @@ export function Modal({
               {title}
             </div>
           </div>
-          <button className="task-modal-close" onClick={onClose} title={closeLabel}>
+          <button className="task-modal-close" onClick={() => requestClose()} title={closeLabel}>
             <Icon.X />
           </button>
         </div>
-        <div className="task-modal-body">{children}</div>
-        {footer && <div className="task-modal-foot">{footer}</div>}
+        {askingNow && (
+          <div
+            role="alert"
+            className="insights-callout"
+            style={{
+              margin: 0,
+              borderRadius: 0,
+              padding: '10px 26px',
+              display: 'flex',
+              gap: 10,
+              alignItems: 'center',
+              flexWrap: 'wrap',
+            }}
+          >
+            <span style={{ flex: 1 }}>Discard your changes?</span>
+            <Btn tone="ink" size="sm" onClick={onClose}>
+              Discard
+            </Btn>
+            <Btn tone="outline" size="sm" autoFocus onClick={stopAsking}>
+              Keep editing
+            </Btn>
+          </div>
+        )}
+        <CloseGuardContext.Provider value={closeContext}>
+          <div className="task-modal-body">{children}</div>
+          {footer && <div className="task-modal-foot">{footer}</div>}
+        </CloseGuardContext.Provider>
       </div>
     </div>,
     document.body,
   );
+}
+
+const CloseGuardContext = createContext<{
+  guardRef: MutableRefObject<(() => boolean) | null>;
+  requestClose: () => void;
+} | null>(null);
+
+/**
+ * Lets a Modal's content intercept the Modal's own close (Escape, ×, backdrop): `guard`
+ * returns true when it handled the request and the dialog must stay open.
+ */
+export function useModalCloseGuard(guard: () => boolean) {
+  const ref = useContext(CloseGuardContext)?.guardRef;
+  useEffect(() => {
+    if (!ref) return;
+    ref.current = guard;
+    return () => {
+      if (ref.current === guard) ref.current = null;
+    };
+  });
+}
+
+/**
+ * The enclosing Modal's own close request — the same path as ×, so a Cancel button asks
+ * "Discard your changes?" under `confirmClose` (and honours `useModalCloseGuard`) instead
+ * of dropping input. `undefined` outside a Modal.
+ */
+export function useModalRequestClose(): (() => void) | undefined {
+  return useContext(CloseGuardContext)?.requestClose;
+}
+
+/**
+ * A Modal's Cancel button: closes the way × does, so the Modal's `onClose` is what runs.
+ * `onClickOutsideModal` runs only when rendered outside a Modal — put any cleanup in the
+ * Modal's `onClose`, never here.
+ */
+export function ModalCancelBtn({
+  onClickOutsideModal,
+  ...rest
+}: Omit<BtnProps, 'onClick'> & { onClickOutsideModal?: () => void }) {
+  const requestClose = useModalRequestClose();
+  return <Btn {...rest} onClick={requestClose ? () => requestClose() : onClickOutsideModal} />;
 }
 
 /**
@@ -1376,15 +1482,15 @@ export function OptionCards<T extends string>({
   );
 }
 
-const HSW_PIPELINE = ['Competition', 'Season', 'Stage', 'Group', 'Fixtures'];
+const HSW_PIPELINE = ['League', 'Season', 'Stage', 'Group', 'Fixtures'];
 
 const HSW_IDEAS: Array<{ title: string; text: string }> = [
   {
-    title: 'A league is not a competition',
-    text: 'A league holds one or more competitions, each a format stream with its own shape and dates, so the same clubs can play a T20 in groups and a 50-over league in two halves.',
+    title: 'A league has one setup',
+    text: 'A league your operator has set up has one structure and one season calendar. The same clubs can still play a T20 in groups and a 50-over league in two halves: those are two leagues, each with its own setup.',
   },
   {
-    title: 'A competition is a pipeline of stages',
+    title: 'A structure is a pipeline of stages',
     text: 'Each stage is one phase of play and answers three questions: who plays, who plays whom, and when.',
   },
   {
@@ -1413,8 +1519,8 @@ export function HowSeasonsWork({ compact }: { compact?: boolean }) {
       <section className="hsw compact">
         {strip}
         <p className="hsw-summary">
-          A competition is a pipeline of stages; each stage plays in one block, and each of its
-          groups becomes one series of fixtures. <HelpLink topic="blocks-vs-stages" />
+          A structure is a pipeline of stages; each stage plays in one block, and each of its groups
+          becomes one series of fixtures. <HelpLink topic="blocks-vs-stages" />
         </p>
       </section>
     );

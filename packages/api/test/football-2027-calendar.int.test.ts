@@ -5,7 +5,7 @@
  * Built through the real write paths only — the operator creates a football tenant
  * (POST /platform/tenants), configures one age-group league plus a fixtures-only KO Cup,
  * each bound to ITS OWN calendar and structure (PUT /platform/tenants/:slug), the admin
- * starts a season run per competition (POST /season-runs) and generates it
+ * starts a season run per league setup (POST /season-runs) and generates it
  * (POST /season-runs/:id/stages/:specId/generate). Dates are then checked against the
  * week table on the client's registration form:
  *
@@ -43,7 +43,7 @@ import type { Server } from 'node:http';
 import type { Club, SeasonCalendar, SeasonRun, Series, StageSpec } from '../src/types.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load.
-const DDB_PORT = 4653; // next free odd port after sport-vertical (4651)
+const DDB_PORT = 4659; // unique: next free odd port after sport-vertical (4657)
 const TABLE = 'SmartClubFootball2027Test';
 process.env.TABLE_NAME = TABLE;
 process.env.DYNAMO_ENDPOINT = `http://localhost:${DDB_PORT}`;
@@ -196,10 +196,10 @@ interface GenerateResponse {
 
 async function startRun(
   id: string,
-  competitionId: string,
   leagueKey: string,
   stage: StageSpec,
   calendar: SeasonCalendar,
+  seasonLabel = '2027',
 ) {
   const res = await app.request('/season-runs', {
     method: 'POST',
@@ -207,8 +207,7 @@ async function startRun(
     body: JSON.stringify({
       id,
       leagueKey,
-      competitionId,
-      seasonLabel: '2027',
+      seasonLabel,
       structureSnapshot: { id: `st-${id}`, name: stage.name, version: 1, stages: [stage] },
       calendarSnapshot: calendar,
       stages: [{ specId: stage.id, status: 'ready', groups: [] }],
@@ -313,14 +312,7 @@ before(async () => {
           label: 'Boys U15',
           group: 'Boys',
           district: 'All districts',
-          competitions: [
-            {
-              id: 'cmp-u15',
-              label: 'League',
-              structureId: 'st-league',
-              calendarId: LEAGUE_CALENDAR.id,
-            },
-          ],
+          setup: { structureId: 'st-league', calendarId: LEAGUE_CALENDAR.id },
         },
         {
           key: KO,
@@ -328,9 +320,7 @@ before(async () => {
           group: 'Boys',
           district: 'All districts',
           fixturesOnly: true,
-          competitions: [
-            { id: 'cmp-ko', label: 'KO Cup', structureId: 'st-cup', calendarId: KO_CALENDAR.id },
-          ],
+          setup: { structureId: 'st-cup', calendarId: KO_CALENDAR.id },
         },
       ],
     }),
@@ -360,7 +350,7 @@ describe('2027 Cape Peninsula calendar — league + KO Cup on separate calendars
   let cup: Series;
 
   test('the U15 league generates 11 rounds, one per league week, on Wednesdays', async () => {
-    await startRun('run-u15', 'cmp-u15', U15, LEAGUE_STAGE, LEAGUE_CALENDAR);
+    await startRun('run-u15', U15, LEAGUE_STAGE, LEAGUE_CALENDAR);
     const res = await generate('run-u15', 'league');
     assert.equal(res.status, 200, await res.clone().text());
     const out = (await res.json()) as GenerateResponse;
@@ -403,7 +393,7 @@ describe('2027 Cape Peninsula calendar — league + KO Cup on separate calendars
   });
 
   test('the KO Cup generates six rounds on the cup Fridays, the final on Fri 3 Sep 2027', async () => {
-    await startRun('run-ko', 'cmp-ko', KO, KO_STAGE, KO_CALENDAR);
+    await startRun('run-ko', KO, KO_STAGE, KO_CALENDAR);
     const res = await generate('run-ko', 'cup');
     assert.equal(res.status, 200, await res.clone().text());
     const out = (await res.json()) as GenerateResponse;
@@ -482,7 +472,36 @@ describe('2027 Cape Peninsula calendar — league + KO Cup on separate calendars
       ],
       breaks: [],
     };
-    await startRun('run-two-terms', 'cmp-u15', U15, LEAGUE_STAGE, twoBlocks);
+    // A run's calendar is server-fetched from the league's setup (the client's snapshot is
+    // ignored), so the operator binds the U15 league to the two-block calendar first. One
+    // season per league per label: U15 already runs '2027' above, so the probe starts under
+    // its own label.
+    const rebind = await app.request(`/platform/tenants/${TENANT}`, {
+      method: 'PUT',
+      headers: headers(OPERATOR),
+      body: JSON.stringify({
+        calendars: [LEAGUE_CALENDAR, KO_CALENDAR, twoBlocks],
+        leagues: [
+          {
+            key: U15,
+            label: 'Boys U15',
+            group: 'Boys',
+            district: 'All districts',
+            setup: { structureId: 'st-league', calendarId: twoBlocks.id },
+          },
+          {
+            key: KO,
+            label: 'KO Cup',
+            group: 'Boys',
+            district: 'All districts',
+            fixturesOnly: true,
+            setup: { structureId: 'st-cup', calendarId: KO_CALENDAR.id },
+          },
+        ],
+      }),
+    });
+    assert.equal(rebind.status, 200, await rebind.clone().text());
+    await startRun('run-two-terms', U15, LEAGUE_STAGE, twoBlocks, '2027 two-terms probe');
     const res = await generate('run-two-terms', 'league');
     assert.equal(res.status, 409);
     const body = (await res.json()) as { code?: string; error: string };

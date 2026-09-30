@@ -1,8 +1,9 @@
 /**
  * Integration tests for the series schedule guard on a season-run series.
  *
- * A flat season started with custom dates builds a run whose `calendarSnapshot` is a
- * synthetic `cal-flat-<league>` that exists ONLY inside the run, never in tenant config.
+ * A run can carry a `calendarSnapshot` that exists ONLY inside the run, never in tenant
+ * config (a flat season started with custom dates before quick start was removed, or a
+ * calendar deleted since). No league setup is needed: the run is the whole context.
  * Stage generation writes that snapshot's calendarId/blockId onto every series, so
  * validating a run-backed series against `config.calendars` 400'd every generate. The
  * rule pinned here: a series with `seasonRunId` is checked against its run's snapshot; a
@@ -67,7 +68,6 @@ const STRUCTURE: CompetitionStructure = {
 const RUN = {
   id: 'sr-flat',
   leagueKey: 'friendlies',
-  competitionId: 'comp-flat',
   seasonLabel: '2026/27',
   structureSnapshot: STRUCTURE,
   calendarSnapshot: FLAT_CALENDAR,
@@ -144,12 +144,10 @@ before(async () => {
   assert.ok(config, 'seeded tenant config');
   await repo.putTenantConfig({ ...config, calendars: [] });
 
-  const res = await app.request('/season-runs', {
-    method: 'POST',
-    headers: headers(ADMIN),
-    body: JSON.stringify(RUN),
-  });
-  assert.equal(res.status, 201, await res.text());
+  // Stored directly: `POST /season-runs` now freezes only what tenant config binds, so a
+  // run whose calendar lives nowhere but its snapshot is legacy data (pre-migration flat
+  // runs, or a calendar deleted after start) — which is exactly what this guard must read.
+  await repo.putSeasonRun('dolphins', { ...RUN, createdAt: new Date().toISOString() });
 });
 
 after(() => {

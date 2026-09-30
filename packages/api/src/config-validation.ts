@@ -26,7 +26,6 @@ import type {
   SeasonCalendar,
   StageSpec,
   TimeSlot,
-  Weekday,
 } from './types.js';
 
 // `HH:MM`, 24h — matches the `IsoTime` doc comment on types.ts, not parsed via dayjs
@@ -228,6 +227,11 @@ export function validateStructures(
       throw new HttpError(400, `"${name}" needs a whole version number of 1 or more`);
     if (st.source !== undefined && !STRUCTURE_SOURCES.has(st.source))
       throw new HttpError(400, `"${name}" has an unknown source`);
+    if (
+      st.overs !== undefined &&
+      (!Number.isInteger(st.overs) || (st.overs as number) < 1 || (st.overs as number) > 200)
+    )
+      throw new HttpError(400, `"${name}" needs a whole number of overs between 1 and 200`);
 
     if (!Array.isArray(st.stages) || st.stages.length === 0)
       throw new HttpError(400, `"${name}" needs at least one stage`);
@@ -251,8 +255,8 @@ export function validateStructures(
         throw new HttpError(400, `stage "${sName}" must play 1, 2 or 3 legs`);
       if (!stage.entrants || !ENTRANT_KINDS.has(stage.entrants.kind))
         throw new HttpError(400, `stage "${sName}" has an unknown entrant rule`);
-      // blockIndex names a POSITION into whichever calendar the competition later binds
-      // (validateCompetitions checks the bound calendar actually has that many blocks) —
+      // blockIndex names a POSITION into whichever calendar a league's setup later binds
+      // (validateSetups checks the bound calendar actually has that many blocks) —
       // the structure itself has no calendar to check the index against.
       if (
         !Number.isInteger(stage.schedule?.blockIndex) ||
@@ -353,67 +357,52 @@ export function validateStructures(
 }
 
 /**
- * A league's competition bindings. Each names a structure and a calendar that must
- * actually exist on the tenant — a dangling reference is a season nobody can start, and
- * the failure would only surface later at generation time.
+ * Structures and calendars are authored independently, so a structure's stages can name a
+ * position past the end of the bound calendar's blocks. Caught at bind time — the one place
+ * all three are in scope — rather than surfacing months later as "That playing block no
+ * longer exists" the first time someone tries to generate a season.
  */
-export function validateCompetitions(
+function assertStagesFitCalendar(
+  subject: string,
+  structure: CompetitionStructure,
+  calendar: SeasonCalendar,
+): void {
+  const overrun = structure.stages.find(
+    (stage) => stage.schedule.blockIndex >= calendar.blocks.length,
+  );
+  if (overrun)
+    throw new HttpError(
+      400,
+      `${subject}: stage "${overrun.name}" plays in block ${overrun.schedule.blockIndex + 1} but calendar ${calendar.label} has only ${calendar.blocks.length} block${calendar.blocks.length === 1 ? '' : 's'} — add a block to the calendar, or change the stage's "Plays in" block`,
+    );
+}
+
+/**
+ * A league's one setup (`League.setup`): the structure and calendar its seasons run on.
+ * Both must actually exist on the tenant — a dangling reference is a season nobody can
+ * start, and the failure would only surface later at generation time.
+ *
+ * The deprecated `competitions[]` a league may still carry (and `note`, and a stage's
+ * `ladder`/`outcome`) are NOT validated and NOT stripped here: they are inert stored data
+ * during the dual window, removed only by scripts/cleanup-competitions.ts after burn-in.
+ */
+export function validateSetups(
   leagues: League[],
   structures: CompetitionStructure[],
   calendars: SeasonCalendar[],
 ): void {
   for (const lg of leagues) {
-    if (lg.competitions === undefined) continue;
-    if (!Array.isArray(lg.competitions))
-      throw new HttpError(400, `competitions on "${lg.label}" must be an array`);
-    if (lg.competitions.length > 10)
-      throw new HttpError(400, `"${lg.label}" is limited to 10 competitions`);
-    const ids = lg.competitions.map((comp): unknown => comp?.id);
-    if (ids.some((id) => typeof id !== 'string' || !(id as string).trim()))
-      throw new HttpError(400, `every competition on "${lg.label}" needs an id`);
-    if (new Set(ids).size !== ids.length)
-      throw new HttpError(409, `duplicate competition id on "${lg.label}"`);
-    for (const comp of lg.competitions) {
-      if (!comp.label?.trim())
-        throw new HttpError(400, `every competition on "${lg.label}" needs a label`);
-      const structure = structures.find((st) => st.id === comp.structureId);
-      if (!structure)
-        throw new HttpError(
-          400,
-          `competition "${comp.label}" points at a structure that doesn't exist`,
-        );
-      const calendar = calendars.find((cal) => cal.id === comp.calendarId);
-      if (!calendar)
-        throw new HttpError(
-          400,
-          `competition "${comp.label}" points at a calendar that doesn't exist`,
-        );
-      // There is no UI for exclusions yet — they arrive by JSON import or a raw API call,
-      // which is exactly when a shape guard earns its keep. A bare string here would be
-      // iterated character by character on the client and silently drop the wrong sides.
-      if (comp.excludeTeamIds !== undefined) {
-        if (
-          !Array.isArray(comp.excludeTeamIds) ||
-          comp.excludeTeamIds.some((id): boolean => typeof id !== 'string' || !id.trim())
-        )
-          throw new HttpError(
-            400,
-            `competition "${comp.label}": excludeTeamIds must be an array of team ids`,
-          );
-      }
-      // Structures and calendars are authored independently, so a structure's stages can
-      // name a position past the end of the bound calendar's blocks. Caught here — the one
-      // place all three are in scope — rather than surfacing months later as "That playing
-      // block no longer exists" the first time someone tries to generate a season.
-      const overrun = structure.stages.find(
-        (stage) => stage.schedule.blockIndex >= calendar.blocks.length,
-      );
-      if (overrun)
-        throw new HttpError(
-          400,
-          `competition "${comp.label}": stage "${overrun.name}" plays in block ${overrun.schedule.blockIndex + 1} but calendar ${calendar.label} has only ${calendar.blocks.length} block${calendar.blocks.length === 1 ? '' : 's'} — add a block to the calendar, or change the stage's "Plays in" block`,
-        );
-    }
+    if (lg.setup === undefined) continue;
+    const setup = lg.setup as unknown;
+    if (!setup || typeof setup !== 'object' || Array.isArray(setup))
+      throw new HttpError(400, `the setup on "${lg.label}" must be an object`);
+    const structure = structures.find((st) => st.id === lg.setup!.structureId);
+    if (!structure)
+      throw new HttpError(400, `"${lg.label}" is set up on a structure that doesn't exist`);
+    const calendar = calendars.find((cal) => cal.id === lg.setup!.calendarId);
+    if (!calendar)
+      throw new HttpError(400, `"${lg.label}" is set up on a calendar that doesn't exist`);
+    assertStagesFitCalendar(`"${lg.label}"`, structure, calendar);
   }
 }
 
@@ -581,8 +570,6 @@ function assertMatchHints(key: string, matchHints: unknown): void {
   }
 }
 
-const MAX_MATCH_FORMATS = 20;
-const MAX_TIME_SLOTS = 8;
 const MAX_VENUE_ALIASES = 500;
 
 /**
@@ -590,57 +577,16 @@ const MAX_VENUE_ALIASES = 500;
  * the tenant admin's `PUT /tenant/config` and the operator's `PUT /platform/tenants/:slug` —
  * through `applyTenantConfigPatch`. Returns the value to store: strings trimmed, absent
  * fields left absent, so a stored object never carries an explicit `undefined`.
+ *
+ * Only `venueAliases` and `travel` survive as tenant configuration (config-only, no UI).
+ * The retired `matchFormats`/`matchDays`/`timeSlots` revert to built-ins and are dropped
+ * from the returned value — never validated, never stored again.
  */
 export function validateCompetitionDefaults(value: unknown): CompetitionDefaults {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new HttpError(400, 'competitionDefaults must be an object');
   const d = value as Record<string, unknown>;
   const out: CompetitionDefaults = {};
-
-  if (d.matchFormats !== undefined) {
-    if (!Array.isArray(d.matchFormats)) throw new HttpError(400, 'match formats must be an array');
-    if (d.matchFormats.length > MAX_MATCH_FORMATS)
-      throw new HttpError(400, `no more than ${MAX_MATCH_FORMATS} match formats`);
-    out.matchFormats = d.matchFormats.map((raw) => {
-      const f = (raw ?? {}) as { label?: unknown; overs?: unknown; ballType?: unknown };
-      if (typeof f.label !== 'string' || !f.label.trim())
-        throw new HttpError(400, 'every match format needs a label');
-      const label = f.label.trim();
-      if (label.length > 60)
-        throw new HttpError(400, 'match format labels must be 60 characters or fewer');
-      if (
-        f.overs !== undefined &&
-        (!Number.isInteger(f.overs) || (f.overs as number) < 1 || (f.overs as number) > 200)
-      )
-        throw new HttpError(400, `"${label}" needs a whole number of overs between 1 and 200`);
-      if (f.ballType !== undefined && typeof f.ballType !== 'string')
-        throw new HttpError(400, `"${label}" ball type must be text`);
-      const ballType = (f.ballType as string | undefined)?.trim();
-      if (ballType && ballType.length > 30)
-        throw new HttpError(400, `"${label}" ball type must be 30 characters or fewer`);
-      return {
-        label,
-        ...(f.overs !== undefined ? { overs: f.overs as number } : {}),
-        ...(ballType ? { ballType } : {}),
-      };
-    });
-  }
-
-  if (d.matchDays !== undefined) {
-    if (!Array.isArray(d.matchDays)) throw new HttpError(400, 'match days must be an array');
-    if (d.matchDays.some((n) => !Number.isInteger(n) || n < 0 || n > 6))
-      throw new HttpError(400, 'match days must be weekdays 0 (Sunday) to 6 (Saturday)');
-    if (new Set(d.matchDays).size !== d.matchDays.length)
-      throw new HttpError(400, 'match days must not repeat');
-    out.matchDays = d.matchDays as Weekday[];
-  }
-
-  if (d.timeSlots !== undefined) {
-    assertValidTimeSlots(d.timeSlots, 'the default time slots');
-    if (d.timeSlots.length > MAX_TIME_SLOTS)
-      throw new HttpError(400, `no more than ${MAX_TIME_SLOTS} default time slots`);
-    out.timeSlots = d.timeSlots.map((sl) => ({ label: sl.label.trim(), start: sl.start }));
-  }
 
   if (d.travel !== undefined) {
     const t = d.travel as { costPerKm?: unknown; carsPerAwayTrip?: unknown } | null;

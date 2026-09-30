@@ -33,8 +33,7 @@ export type HelpTopicId =
   | 'structure-versions-and-rebase'
   | 'blocks-vs-stages'
   | 'blocks-vs-competitions'
-  | 'legacy-series'
-  | 'competition-defaults';
+  | 'legacy-series';
 
 export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
   'how-dates-are-planned': {
@@ -120,7 +119,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
       'Allocation runs after fixtures exist. It tries the home ground first and falls back in a fixed order, and every fixture gets a reason.',
     body: [
       'For each fixture it tries the home side’s ground, then that club’s secondary ground, then the away side’s ground, then the nearest free neutral ground.',
-      'It looks at every series in the union at once. Two competitions cannot book the same ground past its capacity, or the same side twice on one day.',
+      'It looks at every series in the union at once. Two series cannot book the same ground past its capacity, or the same side twice on one day.',
       'Every fixture carries a reason. A fixture it cannot place is marked unresolved, not put somewhere wrong.',
       'A ground set by hand is kept. Running allocation again never moves it.',
     ],
@@ -150,7 +149,7 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
       'An activation date hides a released series from clubs until that date. The fixtures exist and the admin can see them the whole time.',
     body: [
       'A stage can carry an activation date. Its fixtures are generated and released as normal, but clubs do not see them until that date.',
-      'Use it when a competition is planned early but should stay out of sight, such as junior fixtures that start in the second block.',
+      'Use it when a stage is planned early but should stay out of sight, such as junior fixtures that start in the second block.',
       'Nothing else changes. Grounds are still booked and the clash check still sees the fixtures.',
     ],
     example:
@@ -179,10 +178,11 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
       'A season keeps a copy of the structure it started with. Rebase moves a running season onto the latest version without touching its series.',
     body: [
       'Every save that changes a structure gives it a new version. A season takes a copy when it starts, so later edits never reshape a season already running.',
-      'Rebase moves a running season onto the latest version. The server fetches the structure itself, and refuses if it changed again after you reviewed it.',
+      'Rebase moves a running season onto the latest version of the structure its league is set up on now — if the operator moved the league onto another structure, that one. The server fetches the structure itself, and refuses if it changed again after you reviewed it.',
       'Existing series are never touched. A stage whose teams setting changed goes back to awaiting entrants. A stage whose schedule changed is marked “Needs regenerating”.',
-      'The calendar is not rebased. A season keeps the calendar copy it started with.',
-      'An edit made for one season gives that season its own copy of the structure. The other seasons keep the original, and a season already running keeps the shape it started with.',
+      'Until a season generates its first fixtures, its dates follow the calendar in its league’s setup, so an operator’s date fix or a re-pointed calendar shows up straight away.',
+      'The first generate freezes the calendar for that season. After that, calendar edits no longer reach it; only structure changes do, through Review changes.',
+      'An edit made for one season gives that season its own copy of the structure. The other seasons keep the original. A season already running keeps the shape it started with until Review changes moves it onto the copy.',
     ],
     example:
       'Premier Men’s season started on version 3. The operator moves the final round to Block 2, which makes version 4. Rebase moves the season to version 4 and marks the final round “Needs regenerating”. The Top Six fixtures already released stay as they are.',
@@ -195,55 +195,39 @@ export const HELP_TOPICS: Record<HelpTopicId, HelpTopic> = {
       'A block is a stretch of dates on the calendar. A stage is a phase of play. Each stage plays in one block.',
     body: [
       'A block is a stretch of the season calendar, such as Block 1, 13 Sep – 13 Dec 2026. It says when play can happen.',
-      'A stage is a phase of a competition, such as a round-robin stage or a knockout stage. It says who plays whom.',
+      'A stage is a phase of a season, such as a round-robin stage or a knockout stage. It says who plays whom.',
       'Each stage plays in one block. Two stages can share a block, one after the other, or sit in different blocks either side of a break.',
-      'A block is not a match format either. Two formats played side by side, such as T20 and 30 Over, are two competitions on the league, not two blocks. See “Blocks and competitions”.',
+      'A block is not a match format either. Two formats played side by side, such as T20 and 30 Over, are two league entries, each with its own setup, not two blocks. See “Blocks and formats”.',
     ],
     example:
       'KZNCU Premier Men T20 plays its round-robin stage in Block 1 and its knockout stage in Block 2, after the mid-season break. EMCU Division 1 30 Over plays both stages in Block 1, with the semi-finals starting the week after the groups finish.',
   },
   'blocks-vs-competitions': {
     id: 'blocks-vs-competitions',
-    title: 'Blocks and competitions',
+    title: 'Blocks and formats',
     summary:
-      'Does anything — standings, qualification, the winner — survive the boundary? If yes, they are blocks of one competition. If no, they are separate competitions.',
+      'Does anything — standings, qualification, the winner — survive the boundary? If yes, they are blocks of one league’s season. If no, they are separate league entries.',
     body: [
       'A block is a stretch of time on the season calendar, such as Block 1 or First half. It says when play can happen, and nothing else.',
-      'A competition is one of a league’s format streams. It has its own structure, its own match format and its own winner.',
-      'Naming blocks after formats, such as a T20 block and a 30 Over block, breaks this. One competition cannot be 20 overs in one block and 30 in the next, nothing carries from one format to the other, and the two formats often overlap in time.',
-      'So ask whether anything carries across the boundary. If the standings, the qualifiers or the winner carry over, it is one competition across two blocks. If nothing does, it is two competitions.',
+      'A league’s setup — one structure on one calendar — is created by your operator. The structure carries the match format (its overs), and the season has one winner. Two formats are two league entries, each with its own setup.',
+      'Naming blocks after formats, such as a T20 block and a 30 Over block, breaks this. One structure cannot be 20 overs in one block and 30 in the next, nothing carries from one format to the other, and the two formats often overlap in time.',
+      'So ask whether anything carries across the boundary. If the standings, the qualifiers or the winner carry over, it is one league’s season across two blocks. If nothing does, it is two league entries.',
     ],
     example:
-      'EMCU Division 1 plays a T20 and a 30 Over format side by side. That is two competitions on the league, each with its own structure, both on the same calendar. KZNCU Premier Men plays Block 1 and Block 2 either side of the mid-season break, and the round-robin standings carry into the second half. That is one competition across two blocks.',
+      'EMCU Division 1 plays a T20 and a 30 Over format side by side. That is two league entries, EMCU Division 1 T20 and EMCU Division 1 30 Over, each set up with its own structure, both on the same calendar. KZNCU Premier Men plays Block 1 and Block 2 either side of the mid-season break, and the round-robin standings carry into the second half. That is one league’s season across two blocks.',
   },
   'legacy-series': {
     id: 'legacy-series',
     guideAnchor: 'imported-series',
     title: 'Series made without a structure',
     summary:
-      'Every season is now started from a structure. A league with no competition is quick-started; the only series without a season are imported schedules and stand-alone series.',
+      'Every season is now started from a league’s setup. The only series without a season are imported schedules and stand-alone series.',
     body: [
-      'A league with no competition bound is started with quick start: the admin picks a starter shape, a calendar and a match format, and the platform creates the competition and its season in one step.',
+      'A league’s setup — one structure on one calendar — is created by your operator. Once a league is set up, the admin starts its season from Start a season; a league without one waits for the operator.',
       'Imported schedules (the union’s Plan B fixtures) and stand-alone series are not part of a season, so they have no stages. Rebase and “Needs regenerating” do not apply to them.',
       'They cannot be regenerated. They can be edited fixture by fixture, and approval, release, ground allocation and broadcasts behave as they do for any series.',
     ],
     example:
-      'EMCU Division 4 has no competition. The admin opens Start a season, picks Division 4, quick-starts a flat round robin on Block 1 and gets a season whose one stage generates 11 rounds for 12 sides.',
-  },
-  'competition-defaults': {
-    id: 'competition-defaults',
-    guideAnchor: 'competition-defaults',
-    title: 'How the platform uses your defaults',
-    summary:
-      'Competition defaults are the union’s own answers to questions the platform would otherwise answer with built-in values: formats, match days, start times, travel cost and ground spellings.',
-    body: [
-      'Match formats are offered when an admin starts a season. The first one is the default, and picking one fills in its overs and ball type.',
-      'Match days and start times are filled in when a stage plays on set days only or has set start times. They are a starting point, not a rule: every stage can still change them.',
-      'Travel cost prices the travel estimates on the fixtures screens and exports. A series that carries its own figures keeps them.',
-      'Venue aliases tell the clash check that two spellings are one ground, so a fixture at either books the same field.',
-      'Anything left empty uses the built-in value. Changing a default never changes a season or structure that already exists.',
-    ],
-    example:
-      'A union sets its formats to 50 Over (Red Ball) and T20 (Pink Ball), and its match days to Saturday and Sunday. Starting a season now offers those two formats, and a stage set to set days only starts with Saturday and Sunday ticked.',
+      'The operator sets EMCU Division 4 up with a flat round robin on Block 1. The admin opens Start a season, picks Division 4 and gets a season whose one stage generates 11 rounds for 12 sides.',
   },
 };

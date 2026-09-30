@@ -6,7 +6,7 @@
  * (isOperator in routing.ts, mirroring requirePlatformOperator on the API).
  * Three screens: client list → per-client settings (identity, branding, copy,
  * color tokens, feature flags, districts, league catalogue, deadline, admins,
- * DNS go-live sheet) → a create-client wizard. All writes go through the
+ * setup hand-off) → a create-client wizard. All writes go through the
  * /platform/* client in api.ts.
  */
 import { useState, useRef, useEffect } from 'react';
@@ -26,12 +26,12 @@ import { OVERARCHING_DISTRICT } from '../packages/engine/src/leagues';
 import { InsightsBreakdown, LeagueTeamDirectoryCard, DemographicsCard } from './insights';
 import { CalendarsCard } from './platform-calendars';
 import { formatDayYear, formatStampDay } from './dates';
-import { StructuresCard, CompetitionsModal } from './platform-structures';
+import { StructuresCard } from './platform-structures';
+import { SetupLeagueDialog, describeSetup } from './platform-setup-league';
 import { SeasonSetupWizard } from './platform-season-wizard';
 import { HelpLink, HelpProvider } from './help/HelpDrawer';
 import { TutorialsCard } from './platform-tutorials';
 import { RequiredDocsCard } from './platform-required-docs';
-import { CompetitionDefaultsCard } from './competition-defaults';
 import { DocIntakeWizard } from './platform-intake';
 import { StructureIntakeWizard } from './platform-structure-intake';
 import { RosterIntakeWizard } from './platform-roster-intake';
@@ -43,7 +43,6 @@ import type {
   BrandingCopy,
   DirectoryClub,
   League,
-  Competition,
   ClearanceCertTemplate,
   OrgContact,
 } from './types';
@@ -704,14 +703,19 @@ function TenantEditPage({ toast }: { toast: Toast }) {
     const next = await api.platformUpdateTenant(slug, patch);
     // Informational only (ADR 0008 phase 1 gap 4) — a calendar block edit landed on
     // dates a series already schedules against; the save still succeeded. Shared by
-    // every save path (calendars/structures/competitions all funnel through here).
+    // every save path (calendars/structures/league setups all funnel through here).
     next.warnings?.forEach((w) => toast(w, 'warn'));
     // `warnings` is a one-time signal off THIS response, not part of the tenant's state —
     // caching it would leave a phantom `warnings` key on the config until the next
     // refetch quietly drops it.
     const { warnings: _warnings, ...cached } = next;
     void _warnings;
-    queryClient.setQueryData(qk.platformTenant(slug), cached);
+    // The PUT response has no response-only `liveUrl` — carry the last GET's forward so
+    // the Setup card's live links don't vanish after every save.
+    queryClient.setQueryData<api.PlatformTenant>(qk.platformTenant(slug), (prev) => ({
+      ...cached,
+      liveUrl: prev?.liveUrl,
+    }));
     queryClient.invalidateQueries({ queryKey: qk.platformTenants() });
     // The Overview button makes edit→overview a one-click flow; without this the
     // breakdown can show pre-edit leagues/districts/name for up to staleTime (30s).
@@ -734,7 +738,7 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           </h1>
           <p className="ph-desc">
             Branding, copy, theme tokens, feature flags, districts, leagues, admin access and the
-            vanity-domain go-live checklist for this client.
+            setup hand-off for this client.
           </p>
         </div>
         <div className="ph-actions">
@@ -822,7 +826,7 @@ function TenantEditPage({ toast }: { toast: Toast }) {
             <h2 className="library-title">Library</h2>
             <p className="library-desc">
               Everything the season wizard creates lives here. Come back to extend a calendar
-              mid-season, edit a structure stage by stage, or fix a single binding.
+              mid-season, edit a structure stage by stage, or change one league&rsquo;s setup.
             </p>
           </div>
           <HelpLink topic="structure-versions-and-rebase" />
@@ -859,18 +863,6 @@ function TenantEditPage({ toast }: { toast: Toast }) {
             toast={toast}
           />
         </div>
-        {/* The union's own answers to what the platform used to hard-code (ADR 0014). Read
-            by the season forms, the structure editor, the travel estimates and the clash
-            check, so it sits with the library it feeds. */}
-        <div id="setup-competition-defaults">
-          <CompetitionDefaultsCard
-            key={`cd-${config.tenant}`}
-            config={config}
-            fetchLatest={() => api.platformGetTenant(slug)}
-            save={save}
-            toast={toast}
-          />
-        </div>
         <TutorialsCard
           key={`tut-${config.tenant}`}
           slug={slug}
@@ -878,8 +870,13 @@ function TenantEditPage({ toast }: { toast: Toast }) {
           save={save}
           toast={toast}
         />
-        <SetupCard key={`setup-${config.tenant}`} slug={slug} config={config} toast={toast} />
-        <DnsPanel slug={slug} />
+        <SetupCard
+          key={`setup-${config.tenant}`}
+          slug={slug}
+          config={config}
+          liveUrl={config.liveUrl ?? null}
+          toast={toast}
+        />
       </div>
 
       {seasonWizard && (
@@ -2030,8 +2027,11 @@ function LeaguesCard({
 }) {
   const [form, setForm] = useState<League | 'new' | null>(null);
   const [confirm, setConfirm] = useState<League | null>(null);
-  const [competitionsFor, setCompetitionsFor] = useState<League | null>(null);
+  const [setupFor, setSetupFor] = useState<League | null>(null);
   const leagues = config.leagues ?? [];
+  const structures = config.structures ?? [];
+  const calendars = config.calendars ?? [];
+  const oversOf = (structureId: string) => structures.find((s) => s.id === structureId)?.overs;
 
   /**
    * Rebuild-and-PUT against the server's latest catalogue, not this tab's cache:
@@ -2066,16 +2066,6 @@ function LeaguesCard({
       // key is the immutable matching token stored on clubs — never overwritten
       return fresh.map((l) => (l.key === key ? { ...l, ...patch, key: l.key } : l));
     }, 'Could not save league');
-  const onSaveCompetitions = (key: string, competitions: Competition[]) =>
-    saveLeagues(
-      (fresh) =>
-        fresh.map((l) =>
-          l.key === key
-            ? { ...l, competitions: competitions.length ? competitions : undefined }
-            : l,
-        ),
-      'Could not save competitions',
-    );
   function onDelete(league: League) {
     setConfirm(null);
     saveLeagues((fresh) => fresh.filter((l) => l.key !== league.key), 'Could not delete league')
@@ -2108,9 +2098,8 @@ function LeaguesCard({
                   <th>League</th>
                   <th>District</th>
                   <th>Group</th>
-                  <th>Note</th>
-                  <th>Competitions</th>
-                  <th style={{ width: 210 }}></th>
+                  <th>Setup</th>
+                  <th style={{ width: 230 }}></th>
                 </tr>
               </thead>
               <tbody>
@@ -2151,25 +2140,21 @@ function LeaguesCard({
                       <Pill tone="muted">{L.group}</Pill>
                     </td>
                     <td>
-                      <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>{L.note ?? ''}</span>
-                    </td>
-                    <td>
-                      {L.competitions?.length ? (
-                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                          {L.competitions.map((comp) => (
-                            <Pill key={comp.id} tone="muted">
-                              {comp.label}
-                            </Pill>
-                          ))}
-                        </div>
+                      {L.setup ? (
+                        <span style={{ fontSize: 12.5 }}>
+                          {describeSetup(L.setup, structures, calendars)}
+                          {oversOf(L.setup.structureId)
+                            ? ` · ${oversOf(L.setup.structureId)} overs`
+                            : ''}
+                        </span>
                       ) : (
-                        <span style={{ fontSize: 12.5, color: 'var(--muted-2)' }}>Flat</span>
+                        <span style={{ fontSize: 12.5, color: 'var(--muted-2)' }}>Not set up</span>
                       )}
                     </td>
                     <td>
                       <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
-                        <Btn tone="outline" size="sm" onClick={() => setCompetitionsFor(L)}>
-                          Competitions
+                        <Btn tone="outline" size="sm" onClick={() => setSetupFor(L)}>
+                          {L.setup ? 'Change setup' : 'Set up'}
                         </Btn>
                         <Btn tone="outline" size="sm" onClick={() => setForm(L)}>
                           Edit
@@ -2223,13 +2208,14 @@ function LeaguesCard({
         </Modal>
       )}
 
-      {competitionsFor && (
-        <CompetitionsModal
-          league={competitionsFor}
+      {setupFor && (
+        <SetupLeagueDialog
+          slug={slug}
           config={config}
-          onSave={onSaveCompetitions}
-          onClose={() => setCompetitionsFor(null)}
+          league={setupFor}
+          save={save}
           toast={toast}
+          onClose={() => setSetupFor(null)}
         />
       )}
 
@@ -3118,22 +3104,30 @@ function AdminsCard({ config, toast }: { config: TenantConfig; toast: Toast }) {
  * blocked by unchecked items). Once complete it becomes a hand-off summary (the live
  * URLs to share) with a low-key "Reopen setup".
  */
-function SetupCard({ slug, config, toast }: { slug: string; config: TenantConfig; toast: Toast }) {
+function SetupCard({
+  slug,
+  config,
+  liveUrl,
+  toast,
+}: {
+  slug: string;
+  config: TenantConfig;
+  /** The client's canonical club-site URL — response-only on the platform-tenant read. */
+  liveUrl: string | null;
+  toast: Toast;
+}) {
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
-  // Shared with DnsPanel (same query key) — gives us the canonical live URL.
-  const dns = useQuery({
-    queryKey: qk.platformDns(slug),
-    queryFn: () => api.platformDnsSheet(slug),
-  });
-  const liveUrl = dns.data?.liveUrl ?? null;
   const complete = !!config.setupCompletedAt;
 
   async function apply(fn: () => Promise<TenantConfig>, msg: string) {
     setBusy(true);
     try {
       const next = await fn();
-      queryClient.setQueryData(qk.platformTenant(slug), next);
+      queryClient.setQueryData<api.PlatformTenant>(qk.platformTenant(slug), (prev) => ({
+        ...next,
+        liveUrl: prev?.liveUrl,
+      }));
       queryClient.invalidateQueries({ queryKey: qk.platformTenants() });
       toast(msg);
     } catch (e) {
@@ -3174,8 +3168,8 @@ function SetupCard({ slug, config, toast }: { slug: string; config: TenantConfig
       anchor: 'setup-structures',
     },
     {
-      label: 'Competitions bound to leagues',
-      done: (config.leagues ?? []).some((l) => (l.competitions?.length ?? 0) > 0),
+      label: 'Leagues set up (structure + calendar)',
+      done: (config.leagues ?? []).some((l) => !!l.setup),
       anchor: 'setup-leagues',
     },
     { label: 'First admin added', done: (config.adminCount ?? 0) > 0 },
@@ -3227,7 +3221,7 @@ function SetupCard({ slug, config, toast }: { slug: string; config: TenantConfig
               </>
             ) : (
               <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: 0 }}>
-                Live URL unavailable — see the DNS / go-live panel below.
+                Live URL unavailable — the club site isn&rsquo;t reachable yet.
               </p>
             )}
           </div>
@@ -3322,116 +3316,6 @@ function LinkRow({ label, url }: { label: string; url: string }) {
         {copied ? 'Copied' : 'Copy'}
       </button>
     </div>
-  );
-}
-
-function DnsPanel({ slug }: { slug: string }) {
-  const q = useQuery({ queryKey: qk.platformDns(slug), queryFn: () => api.platformDnsSheet(slug) });
-  const sheet = q.data;
-
-  return (
-    <Panel
-      title="DNS / go-live"
-      sub="The vanity-domain checklist — values in ‹angle brackets› are operator-filled from the deploy outputs."
-    >
-      {q.isLoading ? (
-        <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>Loading checklist…</p>
-      ) : q.isError || !sheet ? (
-        <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>
-          Could not load the checklist — refresh to retry.
-        </p>
-      ) : (
-        <>
-          <p style={{ fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.6, margin: '0 0 16px' }}>
-            {sheet.note}
-          </p>
-          <ol style={{ margin: 0, padding: 0, listStyle: 'none' }}>
-            {sheet.steps.map((s, i) => (
-              <li
-                key={s.key}
-                style={{
-                  display: 'flex',
-                  gap: 14,
-                  padding: '14px 0',
-                  borderTop: i === 0 ? 'none' : '1px solid var(--line2)',
-                }}
-              >
-                <span
-                  style={{
-                    width: 26,
-                    height: 26,
-                    borderRadius: '50%',
-                    flexShrink: 0,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    background: 'var(--green-pale)',
-                    color: 'var(--green)',
-                    fontFamily: "'Montserrat',sans-serif",
-                    fontSize: 12,
-                    fontWeight: 700,
-                  }}
-                >
-                  {i + 1}
-                </span>
-                <div style={{ minWidth: 0 }}>
-                  <div
-                    style={{ fontSize: 13, fontWeight: 700, fontFamily: "'Montserrat',sans-serif" }}
-                  >
-                    {s.title}
-                  </div>
-                  <p
-                    style={{
-                      fontSize: 12.5,
-                      color: 'var(--muted)',
-                      lineHeight: 1.6,
-                      margin: '4px 0 0',
-                    }}
-                  >
-                    {s.detail}
-                  </p>
-                  {s.records && (
-                    <div style={{ overflowX: 'auto', marginTop: 10 }}>
-                      <table style={{ borderCollapse: 'collapse', ...MONO }}>
-                        <thead>
-                          <tr>
-                            {['Type', 'Host', 'Target'].map((h) => (
-                              <th
-                                key={h}
-                                style={{
-                                  textAlign: 'left',
-                                  padding: '4px 18px 4px 0',
-                                  fontSize: 11,
-                                  color: 'var(--muted-2)',
-                                  fontWeight: 600,
-                                }}
-                              >
-                                {h}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {s.records.map((r, j) => (
-                            <tr key={j}>
-                              <td style={{ padding: '4px 18px 4px 0' }}>{r.type}</td>
-                              <td style={{ padding: '4px 18px 4px 0' }}>{r.host}</td>
-                              <td style={{ padding: '4px 18px 4px 0', color: 'var(--muted)' }}>
-                                {r.target}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ol>
-        </>
-      )}
-    </Panel>
   );
 }
 
@@ -3646,7 +3530,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
             Slug, branding basics, deadline and the first admin.{' '}
             {wildcardLive
               ? 'The client is live at its own club subdomain the moment it’s created; a vanity domain is an optional extra.'
-              : 'The client is usable on the platform host at once; its domain goes live per the DNS sheet.'}
+              : 'The client is usable on the platform host at once; its own domain goes live once DNS is set up.'}
           </p>
         </div>
         <div className="ph-actions">
@@ -3999,7 +3883,7 @@ function CreateTenantWizard({ toast }: { toast: Toast }) {
                 )}
                 Finish branding, districts, leagues and the first admin on the settings page, then
                 mark setup complete for the hand-off summary. A dedicated vanity domain is an
-                optional extra (DNS / go-live panel).
+                optional extra, set up outside the console.
               </p>
               <div style={footRow}>
                 <Btn

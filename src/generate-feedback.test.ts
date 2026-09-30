@@ -80,19 +80,8 @@ describe('seasonConflictMessage', () => {
     );
   });
 
-  it('explains an unbound competition and the two ways out', () => {
-    const err = new ApiError(
-      409,
-      'competition no longer bound to this league',
-      'competition_unbound',
-    );
-    expect(seasonConflictMessage(err)).toBe(
-      "This league's competition was removed from the operator console. Quick-start a new season, or ask your operator to re-bind one.",
-    );
-  });
-
   it('never shows a code to the admin', () => {
-    for (const code of ['awaiting_entrants', 'does_not_fit', 'no_block', 'competition_unbound']) {
+    for (const code of ['awaiting_entrants', 'does_not_fit', 'no_block']) {
       const msg = seasonConflictMessage(new ApiError(409, 'x', code)) ?? '';
       expect(msg).not.toContain(code);
       expect(msg.length).toBeGreaterThan(0);

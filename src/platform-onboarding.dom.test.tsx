@@ -11,13 +11,7 @@ import { queryClient } from './query';
 import { OnboardingPage } from './platform-onboarding';
 import { PlatformPortal } from './platform';
 import * as api from './api';
-import type {
-  DnsSheet,
-  RequiredDoc,
-  TenantConfig,
-  TenantOverview,
-  TenantRepsResponse,
-} from './types';
+import type { RequiredDoc, TenantConfig, TenantOverview, TenantRepsResponse } from './types';
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api');
@@ -26,7 +20,6 @@ vi.mock('./api', async () => {
     platformGetTenant: vi.fn(),
     platformTenantOverview: vi.fn(),
     platformTenantReps: vi.fn(),
-    platformDnsSheet: vi.fn(),
   };
 });
 
@@ -303,14 +296,11 @@ describe('OnboardingPage', () => {
   });
 });
 
-const EMPTY_DNS: DnsSheet = { tenant: 'acme', liveUrl: null, note: '', steps: [] };
-
 describe('TenantEditPage card swap', () => {
   it('replaces "Bulk document intake" with a single "Client onboarding" card', async () => {
     vi.mocked(api.platformGetTenant).mockResolvedValue(BASE_CONFIG);
     vi.mocked(api.platformTenantOverview).mockResolvedValue(BASE_OVERVIEW);
     vi.mocked(api.platformTenantReps).mockResolvedValue(EMPTY_REPS);
-    vi.mocked(api.platformDnsSheet).mockResolvedValue(EMPTY_DNS);
     queryClient.clear();
 
     render(
@@ -332,5 +322,92 @@ describe('TenantEditPage card swap', () => {
     expect(within(card).getByRole('button', { name: 'Rosters' })).toBeInTheDocument();
     expect(within(card).getByRole('button', { name: 'Reps' })).toBeInTheDocument();
     expect(within(card).getByRole('button', { name: 'Open checklist' })).toBeInTheDocument();
+  });
+});
+
+describe('TenantEditPage setup card', () => {
+  const renderEditPage = () =>
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/platform/tenants/acme']}>
+          <PlatformPortal userEmail="op@acme.test" signOutUser={vi.fn()} hasTenantConsole={false} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  /** The readiness dot beside a checklist row. */
+  const dotFor = (label: string) =>
+    screen.getByRole('button', { name: label }).previousElementSibling as HTMLElement;
+
+  it('reads the live URL from the tenant read, with no DNS / go-live card', async () => {
+    vi.mocked(api.platformGetTenant).mockResolvedValue({
+      ...BASE_CONFIG,
+      liveUrl: 'https://acme.club.example',
+    } as api.PlatformTenant);
+    vi.mocked(api.platformTenantOverview).mockResolvedValue(BASE_OVERVIEW);
+    vi.mocked(api.platformTenantReps).mockResolvedValue(EMPTY_REPS);
+    queryClient.clear();
+    renderEditPage();
+
+    expect(await screen.findByRole('link', { name: 'https://acme.club.example' })).toHaveAttribute(
+      'href',
+      'https://acme.club.example',
+    );
+    expect(screen.queryByText('DNS / go-live')).not.toBeInTheDocument();
+  });
+
+  it('counts a league as set up only once it has a setup (structure + calendar)', async () => {
+    vi.mocked(api.platformTenantOverview).mockResolvedValue(BASE_OVERVIEW);
+    vi.mocked(api.platformTenantReps).mockResolvedValue(EMPTY_REPS);
+    vi.mocked(api.platformGetTenant).mockResolvedValue(BASE_CONFIG);
+    queryClient.clear();
+    const { unmount } = renderEditPage();
+    await screen.findByText('Leagues set up (structure + calendar)');
+    expect(dotFor('Leagues set up (structure + calendar)')).toHaveClass('muted');
+    unmount();
+
+    vi.mocked(api.platformGetTenant).mockResolvedValue({
+      ...BASE_CONFIG,
+      leagues: [
+        { key: 'a-league', label: 'A League', setup: { structureId: 'st', calendarId: 'cal' } },
+      ],
+    } as unknown as TenantConfig);
+    queryClient.clear();
+    renderEditPage();
+    await screen.findByText('Leagues set up (structure + calendar)');
+    expect(dotFor('Leagues set up (structure + calendar)')).toHaveClass('teal');
+  });
+});
+
+describe('TenantEditPage league catalogue — Setup column', () => {
+  it('shows each league’s setup (with overs when set), "Not set up" otherwise, and opens the dialog', async () => {
+    vi.mocked(api.platformTenantOverview).mockResolvedValue(BASE_OVERVIEW);
+    vi.mocked(api.platformTenantReps).mockResolvedValue(EMPTY_REPS);
+    vi.mocked(api.platformGetTenant).mockResolvedValue({
+      ...BASE_CONFIG,
+      calendars: [{ id: 'cal', label: '2026/27', blocks: [], breaks: [], excludeDates: [] }],
+      structures: [{ id: 'st', name: 'T20 league', version: 1, overs: 20, stages: [] }],
+      leagues: [
+        { key: 'a-league', label: 'A League', setup: { structureId: 'st', calendarId: 'cal' } },
+        { key: 'b-league', label: 'B League' },
+      ],
+    } as unknown as TenantConfig);
+    queryClient.clear();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/platform/tenants/acme']}>
+          <PlatformPortal userEmail="op@acme.test" signOutUser={vi.fn()} hasTenantConsole={false} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    const a = within(await screen.findByRole('row', { name: /A League.*Change setup/ }));
+    expect(a.getByText('T20 league · 2026/27 · 20 overs')).toBeInTheDocument();
+    expect(a.getByRole('button', { name: 'Change setup' })).toBeInTheDocument();
+    const b = within(screen.getByRole('row', { name: /B League.*Set up/ }));
+    expect(b.getByText('Not set up')).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Note' })).toBeNull();
+
+    b.getByRole('button', { name: 'Set up' }).click();
+    expect(await screen.findByRole('dialog', { name: 'Set up B League' })).toBeInTheDocument();
   });
 });

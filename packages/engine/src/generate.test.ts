@@ -53,7 +53,7 @@ const args = (run: SeasonRun, specId: string) => ({
   participants: TEAMS,
   leagueTeams: TEAMS,
   league: { label: 'Premier Men' },
-  competition: { label: '50 Over', matchFormat: { overs: 50 } },
+  format: { structureName: 'Pools then finals', overs: 40 },
 });
 
 describe('generateStage', () => {
@@ -75,10 +75,22 @@ describe('generateStage', () => {
     expect(generateStage(args(RUN, 'pools'))).toEqual(generateStage(args(RUN, 'pools')));
   });
 
-  it('honours the competition exclusions in who is drawn, not in the snapshot pool', () => {
+  it('draws only the given participants, not the whole snapshot pool', () => {
     const out = generateStage({ ...args(RUN, 'pools'), participants: TEAMS.slice(0, 4) });
     if (out.status !== 'ready') throw new Error(out.status);
     expect(out.series.flatMap((s) => s.teams).sort()).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('stamps every series with the setup structure’s name and overs', () => {
+    const out = generateStage(args(RUN, 'pools'));
+    if (out.status !== 'ready') throw new Error(out.status);
+    expect(out.series.map((s) => [s.seriesType, s.maxOvers])).toEqual([
+      ['Pools then finals', 40],
+      ['Pools then finals', 40],
+    ]);
+    const bare = generateStage({ ...args(RUN, 'pools'), format: undefined });
+    if (bare.status !== 'ready') throw new Error(bare.status);
+    expect(bare.series.map((s) => [s.seriesType, s.maxOvers])[0]).toEqual(['Pool stage', 50]);
   });
 
   it('reports an unconfirmed manual stage as awaiting entrants', () => {

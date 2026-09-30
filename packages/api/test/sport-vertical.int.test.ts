@@ -13,7 +13,7 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 
-const DDB_PORT = 4651; // next free odd port after backfill-venue-aliases (4649)
+const DDB_PORT = 4657; // unique: next free odd port after season-live-calendar (4655)
 const TABLE = 'SmartClubVerticalTest';
 process.env.TABLE_NAME = TABLE;
 process.env.DYNAMO_ENDPOINT = `http://localhost:${DDB_PORT}`;

@@ -278,7 +278,7 @@ interface AdminFixturesProps {
   tenantConfig?;
   allLeagues?: League[];
   onCreateSeasonRun?;
-  /** Refetch the runs list and tenant config after the launcher's quick start. */
+  /** Refetch the runs list and tenant config — the launcher calls it when it opens. */
   onSeasonSetupChanged?: () => Promise<unknown> | void;
   onPatchSeasonRun?;
   onDeleteSeasonRun?;
@@ -451,8 +451,8 @@ export function AdminFixtures({
   const copy = useCopy();
   // Overs are cricket label metadata — other sports never show them.
   const showOvers = useVertical().sport === 'cricket';
-  // The single "Start a season" entry point — the league picked here decides whether the
-  // admin lands in StartSeasonForm (a competition the operator set up) or Quick start.
+  // The single "Start a season" entry point — only a league the operator has set up can
+  // continue to StartSeasonForm; the rest are listed with the hand-off to the operator.
   // Owned here, not in SeasonRunsPanel, so its own button and the header button share it.
   const [launcherOpen, setLauncherOpen] = useStateA(false);
   const [viewerOpen, setViewerOpen] = useStateA(false);
@@ -588,10 +588,10 @@ export function AdminFixtures({
             Fixtures &amp; <em>Venues</em>
           </h1>
           <p className="ph-desc">
-            Every league runs a season, stage by stage — on a competition your platform operator set
-            up, or one you quick-start from a template. A one-off cup or festival is a season too:
-            start it from the One-off tournament template. Home venues flow from the affiliation
-            form. Travel distance and fuel cost are calculated for every away fixture.{' '}
+            Every league runs a season, stage by stage, on the setup your platform operator created
+            for it. A one-off cup or festival is a season too: your operator can add a One-off
+            tournament structure for it. Home venues flow from the affiliation form. Travel distance
+            and fuel cost are calculated for every away fixture.{' '}
             <a className="help-link" href={GUIDE_URL} target="_blank" rel="noopener noreferrer">
               Open the full guide
             </a>
@@ -604,8 +604,8 @@ export function AdminFixtures({
               are in the release bar under its fixtures.
             </p>
             <p>
-              <strong>Start a season</strong> — build a season’s schedule stage by stage, including
-              a one-off tournament.
+              <strong>Start a season</strong> — build a season’s schedule stage by stage on a league
+              your operator has set up, including a one-off tournament.
             </p>
             <p>
               <strong>Approve</strong> — sign the active series off internally. Nothing is published
@@ -698,7 +698,7 @@ export function AdminFixtures({
           <EmptyState
             icon={Icon.Field}
             title="No series yet"
-            sub="Start a season to work through a league’s competition stage by stage — one your platform operator set up, or one you quick-start from a template. A one-off cup or festival uses the One-off tournament template."
+            sub="Start a season on a league your platform operator has set up and work through it stage by stage. For a one-off cup or festival, your operator can add a One-off tournament structure."
             action={
               <Btn tone="teal" icon={Icon.Plus} onClick={() => setLauncherOpen(true)}>
                 Start a season
@@ -881,7 +881,9 @@ export function AdminFixtures({
             onCreateSeasonRun ||
             (() => Promise.reject(new Error('season-run creation is not wired for this host')))
           }
-          onSeasonSetupChanged={onSeasonSetupChanged}
+          // Refetch runs + tenant config: opening the launcher must show what the server
+          // will freeze into the new season, not a config cached earlier.
+          onRefreshConfig={onSeasonSetupChanged}
           onClose={() => setLauncherOpen(false)}
           toast={toast}
         />
@@ -2257,7 +2259,6 @@ export function AdminLeagues({
   onEdit,
   onDeleteLeague,
   toast,
-  defaultsCard = null,
 }: {
   allLeagues;
   clubs;
@@ -2265,8 +2266,6 @@ export function AdminLeagues({
   onEdit;
   onDeleteLeague;
   toast;
-  /** The tenant's competition defaults card (ADR 0014), rendered under the catalogue. */
-  defaultsCard?: ReactNode;
 }) {
   const vt = useVertical().terms;
   const copy = useCopy();
@@ -2367,8 +2366,6 @@ export function AdminLeagues({
         </div>
       )}
 
-      {defaultsCard && <div style={{ marginTop: 18 }}>{defaultsCard}</div>}
-
       {confirm &&
         createPortal(
           <div
@@ -2426,7 +2423,6 @@ export function LeagueForm({
   const [label, setLabel] = useStateA(league?.label || '');
   const [group, setGroup] = useStateA(league?.group || 'Overarching Leagues');
   const [district, setDistrict] = useStateA(league?.district || OVERARCHING_DISTRICT);
-  const [note, setNote] = useStateA(league?.note || '');
   const [busy, setBusy] = useStateA(false);
 
   // Key is the immutable matching token. New leagues slug it from the name; edits keep it.
@@ -2441,7 +2437,6 @@ export function LeagueForm({
       label: label.trim(),
       group: group.trim(),
       district,
-      note: note.trim() || undefined,
     };
     const p = editing ? onUpdate(league.key, patch) : onCreate({ key, ...patch });
     Promise.resolve(p)
@@ -2517,15 +2512,6 @@ export function LeagueForm({
             placeholder="e.g. EMCU Divisions"
           />
         </div>
-      </div>
-      <div className="field">
-        <div className="field-label">Note (optional)</div>
-        <input
-          className="field-input"
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          placeholder="Shown under the league in the picker"
-        />
       </div>
       <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
         <Btn tone="outline" onClick={onClose}>
@@ -3935,6 +3921,7 @@ function EditDeadlineModal({ currentISO, defaultISO, onClose, onSave, toast }) {
   const vt = useVertical().terms;
   const seasonLabel = useSeasonLabel();
   const [value, setValue] = useStateA(currentISO || defaultISO);
+  const [busy, setBusy] = useStateA(false);
   const long = formatDeadlineLong(value);
   const days = daysUntil(value);
   const daysLine =
@@ -3952,10 +3939,14 @@ function EditDeadlineModal({ currentISO, defaultISO, onClose, onSave, toast }) {
   })();
 
   function save() {
-    if (!value) return;
-    onSave && onSave(value);
-    toast && toast(`Deadline updated · ${long}`);
-    onClose && onClose();
+    if (!value || busy) return;
+    setBusy(true);
+    Promise.resolve(onSave && onSave(value))
+      .then(() => {
+        toast && toast(`Deadline updated · ${long}`);
+        onClose && onClose();
+      })
+      .catch(() => setBusy(false));
   }
   function resetToDefault() {
     setValue(defaultISO);
@@ -4058,7 +4049,7 @@ function EditDeadlineModal({ currentISO, defaultISO, onClose, onSave, toast }) {
               <Btn tone="outline" onClick={onClose}>
                 Cancel
               </Btn>
-              <Btn tone="teal" icon={Icon.Check} disabled={!value} onClick={save}>
+              <Btn tone="teal" icon={Icon.Check} disabled={!value || busy} onClick={save}>
                 Save deadline
               </Btn>
             </div>

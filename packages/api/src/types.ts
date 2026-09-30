@@ -19,9 +19,7 @@ import type {
   GroupPlan,
   IsoDate,
   IsoTime,
-  LadderSpec,
   League,
-  OutcomeSpec,
   SeasonBlock,
   SeasonBreak,
   SeasonCalendar,
@@ -49,9 +47,7 @@ export type {
   GroupPlan,
   IsoDate,
   IsoTime,
-  LadderSpec,
   League,
-  OutcomeSpec,
   SeasonBlock,
   SeasonBreak,
   SeasonCalendar,
@@ -333,11 +329,10 @@ export interface TenantConfig {
   setupCompletedBy?: string;
   /**
    * Tenant-configured defaults that replace sport- and union-specific constants (ADR 0014):
-   * match formats, match days, double-header slots, travel cost and venue aliases. Absent
-   * (or any absent field) ⇒ the built-in fallback (`resolveCompetitionDefaults`, engine
-   * defaults.ts). Admin-level setup data like leagues: writable by BOTH `PUT /tenant/config`
-   * and `PUT /platform/tenants/:slug`, validated by `validateCompetitionDefaults`. The
-   * anonymous `GET /tenant` serves only matchFormats/matchDays/timeSlots.
+   * travel cost and venue aliases (config-only, no UI). Absent (or any absent field) ⇒ the
+   * built-in fallback (`resolveCompetitionDefaults`, engine defaults.ts). Admin-level setup
+   * data like leagues: writable by BOTH `PUT /tenant/config` and `PUT /platform/tenants/:slug`,
+   * validated by `validateCompetitionDefaults`. The anonymous `GET /tenant` serves none of it.
    */
   competitionDefaults?: CompetitionDefaults;
   /**

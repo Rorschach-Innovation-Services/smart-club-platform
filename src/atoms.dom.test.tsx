@@ -311,7 +311,7 @@ describe('HowSeasonsWork', () => {
     const nodes = within(screen.getByRole('list', { name: /how a season is put together/i }))
       .getAllByRole('listitem')
       .map((li) => li.textContent);
-    expect(nodes).toEqual(['Competition', 'Season', 'Stage', 'Group', 'Fixtures']);
+    expect(nodes).toEqual(['League', 'Season', 'Stage', 'Group', 'Fixtures']);
     expect(screen.getAllByRole('heading', { level: 4 })).toHaveLength(4);
     expect(screen.getByText(/The operator builds the shape once/)).toBeInTheDocument();
   });
@@ -423,5 +423,65 @@ describe('Modal — the one dialog shell', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Open' }));
     await userEvent.click(document.querySelector('.task-modal-backdrop') as HTMLElement);
     expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  describe('confirmClose — a dialog holding unsaved input', () => {
+    function Draft() {
+      const [open, setOpen] = useState(true);
+      const [text, setText] = useState('');
+      return open ? (
+        <Modal title="Draft" onClose={() => setOpen(false)} confirmClose={text !== ''}>
+          <input aria-label="Note" value={text} onChange={(e) => setText(e.target.value)} />
+        </Modal>
+      ) : null;
+    }
+
+    it('closes at once while nothing is entered', async () => {
+      const user = userEvent.setup();
+      render(<Draft />);
+      await user.keyboard('{Escape}');
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
+    it('asks before discarding; Keep editing keeps the input, Discard closes', async () => {
+      const user = userEvent.setup();
+      render(<Draft />);
+      await user.type(screen.getByRole('textbox', { name: 'Note' }), 'half-typed');
+
+      await user.click(screen.getByTitle('Close'));
+      expect(screen.getByRole('alert')).toHaveTextContent('Discard your changes?');
+      await user.click(screen.getByRole('button', { name: 'Keep editing' }));
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.getByRole('textbox', { name: 'Note' })).toHaveValue('half-typed');
+
+      // Escape asks too, and a second Escape answers "keep editing".
+      await user.keyboard('{Escape}');
+      expect(screen.getByRole('alert')).toBeInTheDocument();
+      await user.keyboard('{Escape}');
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+      await user.keyboard('{Escape}');
+      await user.click(screen.getByRole('button', { name: 'Discard' }));
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
+    it('returns focus to where it was when the ask closes without discarding', async () => {
+      const user = userEvent.setup();
+      render(<Draft />);
+      const note = screen.getByRole('textbox', { name: 'Note' });
+      await user.type(note, 'half-typed');
+
+      await user.keyboard('{Escape}');
+      expect(screen.getByRole('button', { name: 'Keep editing' })).toHaveFocus();
+      await user.click(screen.getByRole('button', { name: 'Keep editing' }));
+      expect(note).toHaveFocus();
+
+      // A second Escape answers "keep editing" the same way.
+      await user.keyboard('{Escape}');
+      expect(note).not.toHaveFocus();
+      await user.keyboard('{Escape}');
+      expect(note).toHaveFocus();
+    });
   });
 });

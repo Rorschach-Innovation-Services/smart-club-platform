@@ -242,3 +242,20 @@ describe('source (provenance)', () => {
       (err: unknown) => err instanceof HttpError && /unknown source/.test(err.message),
     ));
 });
+
+describe('overs (the one surviving match-format field)', () => {
+  test('a whole number 1-200 is accepted, and absent still validates (⇒ 50 at generate)', () => {
+    for (const overs of [1, 20, 50, 200])
+      assert.doesNotThrow(() => validateStructures([{ ...structure([pools()]), overs }]));
+    accepts([pools()], 'no overs — every structure saved before the field existed');
+  });
+  test('0, 201, a fraction or a string is rejected', () => {
+    for (const overs of [0, 201, 20.5, '20'])
+      assert.throws(
+        () => validateStructures([{ ...structure([pools()]), overs: overs as unknown as number }]),
+        (err: unknown) =>
+          err instanceof HttpError && /whole number of overs between 1 and 200/.test(err.message),
+        JSON.stringify(overs),
+      );
+  });
+});

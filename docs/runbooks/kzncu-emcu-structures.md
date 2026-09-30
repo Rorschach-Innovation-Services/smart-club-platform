@@ -2,7 +2,7 @@
 
 Operator cheat-sheet for turning the union's structure-requirements document into real
 structures in the platform's season/structure wizard. Every capability listed below —
-multi-stage competitions, seeded/manual splits, group labels, all four cadence kinds,
+multi-stage structures, seeded/manual splits, group labels, all four cadence kinds,
 activate-from dates, and per-stage time slots — already ships (see
 [configurable-league-structures.md](./configurable-league-structures.md)). Nothing here is
 new capability; it is the mapping from the requirements document's checklist items to the
@@ -10,8 +10,12 @@ existing starter templates and controls.
 
 Build calendars and venues first (see
 [`configurable-league-structures.md`](./configurable-league-structures.md), step 4, items
-1–2), then work down this list league by league in **Structures** and **Leagues →
-Competitions**.
+1–2), then work down this list league by league: build the structure in **Competition
+structures** (set its **Overs**; empty = 50), then **Set up** the league from its row in the
+**League catalogue** (structure + calendar). One setup per league, so each format is its own
+league: Premier Men 50-Over and Premier Men T20 are two catalogue entries, each set up on its
+own structure. See the
+[setup model](./configurable-league-structures.md#the-setup-model-since-27-sep-2026-read-this-first).
 
 ## Template quick-reference
 
@@ -20,7 +24,7 @@ Competitions**.
 | `split-league-swap` | Split league with mid-season swap       | Two groups double (or single) round, a mid-season swap carrying points, then a final round |
 | `pools-to-knockout` | Seeded pools → cross-pool semis → final | Seeded pools round robin, then top finishers cross into a knockout                         |
 | `stream-and-cup`    | Stream + knockout cup                   | Two streams round robin; the lower stream then plays a straight knockout cup               |
-| — (none)            | Flat season                             | Single round robin, no stages — the default create-series flow                             |
+| `flat-round-robin`  | Flat round robin                        | One stage, everyone plays everyone once                                                    |
 
 ## League-by-league checklist
 
@@ -32,15 +36,15 @@ Competitions**.
 | KZNCU Promotion T20                 | `pools-to-knockout` | Seeded-split, count = 4 groups (20 entrants → 5 each). Time slots default to T20 morning/afternoon — no change needed.                                                                                                                                                                                                     | Block 1                                                                                                     |
 | KZNCU Premier Women 30-Over         | `split-league-swap` | Group labels → "Top Four" / "Bottom Four". **Change the final-round stage's format from single to double round robin** — this league runs a double round in both halves, unlike the Premier Men template default.                                                                                                          | Block 1 → Block 2                                                                                           |
 | KZNCU Premier Women T20             | `pools-to-knockout` | Seeded-split, count = 2 groups (8 entrants → 4 each). Time slots default correctly.                                                                                                                                                                                                                                        | Block 1                                                                                                     |
-| KZNCU Promotion Women               | Flat season         | No changes — weekly cadence is the create-series default.                                                                                                                                                                                                                                                                  | Block 1                                                                                                     |
-| EMCU Division 1                     | Flat season         | No changes — weekly cadence default.                                                                                                                                                                                                                                                                                       | Block 1                                                                                                     |
-| EMCU Division 2                     | Flat season         | No changes — weekly cadence default.                                                                                                                                                                                                                                                                                       | Block 1                                                                                                     |
-| EMCU Division 3 Stream 1            | Flat season         | No changes — weekly cadence default.                                                                                                                                                                                                                                                                                       | Block 1                                                                                                     |
-| EMCU Division 3 Stream 2            | Flat season         | Cadence → "Every 2 weeks" (`every-n-weeks`, n=2). Set a first-round anchor so the stride lands on Saturdays: either set **Scheduling options → First round** to a Saturday, or simply start the season's calendar block on a Saturday.                                                                                     | Block 1                                                                                                     |
-| EMCU Division 4                     | Flat season         | Same as Division 3 Stream 2 — cadence "Every 2 weeks", anchor the first round (or the block start) on a Saturday.                                                                                                                                                                                                          | Block 1                                                                                                     |
-| EMCU Division 5                     | Flat season         | Cadence → "Set days only", tick Saturday only.                                                                                                                                                                                                                                                                             | Block 1                                                                                                     |
-| Juniors U11                         | Flat season         | On the Start flat season form, the standalone **Activate from** field (after Match format, not inside Scheduling options) set to the third week of January.                                                                                                                                                                | Block 2                                                                                                     |
-| Juniors U13                         | Flat season         | On the Start flat season form, the standalone **Activate from** field (after Match format, not inside Scheduling options) set to the third week of January.                                                                                                                                                                | Block 2                                                                                                     |
+| KZNCU Promotion Women               | `flat-round-robin`  | No changes — weekly cadence is the template default.                                                                                                                                                                                                                                                                       | Block 1                                                                                                     |
+| EMCU Division 1                     | `flat-round-robin`  | No changes — weekly cadence default.                                                                                                                                                                                                                                                                                       | Block 1                                                                                                     |
+| EMCU Division 2                     | `flat-round-robin`  | No changes — weekly cadence default.                                                                                                                                                                                                                                                                                       | Block 1                                                                                                     |
+| EMCU Division 3 Stream 1            | `flat-round-robin`  | No changes — weekly cadence default.                                                                                                                                                                                                                                                                                       | Block 1                                                                                                     |
+| EMCU Division 3 Stream 2            | `flat-round-robin`  | Cadence → "Every N weeks", N = 2. Rounds step from the block's first day, so start the calendar block on a Saturday for the stride to land on Saturdays.                                                                                                                                                                   | Block 1                                                                                                     |
+| EMCU Division 4                     | `flat-round-robin`  | Same as Division 3 Stream 2 — cadence "Every N weeks", N = 2, block starting on a Saturday.                                                                                                                                                                                                                                | Block 1                                                                                                     |
+| EMCU Division 5                     | `flat-round-robin`  | Cadence → "Set days only", tick Saturday only.                                                                                                                                                                                                                                                                             | Block 1                                                                                                     |
+| Juniors U11                         | `flat-round-robin`  | On the stage's **Schedule** section, set **Activate from** to the third week of January.                                                                                                                                                                                                                                   | Block 2                                                                                                     |
+| Juniors U13                         | `flat-round-robin`  | On the stage's **Schedule** section, set **Activate from** to the third week of January.                                                                                                                                                                                                                                   | Block 2                                                                                                     |
 
 ## Notes on specific controls
 
@@ -50,24 +54,25 @@ Competitions**.
   anywhere. Use "Exact sizes" only for an uneven split (e.g. `5, 5, 5, 4`), which none of the
   leagues above need.
 - **T20 time slots ship as the template default.** `pools-to-knockout`'s two stages carry
-  the tenant's default start times (`competitionDefaults.timeSlots`, ADR 0014), falling back to
-  `FALLBACK_TIME_SLOTS` (`packages/engine/src/defaults.ts`) — Morning 08:00 / Afternoon 13:30 —
-  for every T20 competition (Premier Men, Promotion Men, Premier Women). No per-league edit is
-  needed unless a competition should deviate from the union's stated slots.
+  the built-in Morning 08:00 / Afternoon 13:30 slots (`packages/engine/src/templates.ts`) for
+  every T20 league (Premier Men, Promotion Men, Premier Women). There is no tenant-wide
+  slot setting any more; edit a stage's slots only if a league deviates from the union's
+  stated times.
 - **Kingsmead's preliminary round is automatic.** `knockoutShape` (`packages/engine/src/formats.ts`)
   computes the preliminary/main-draw split from entrant count alone — 9 entrants always
   produces one preliminary among the two lowest seeds and an 8-side main draw. There is no
   "preliminary round" toggle to set by hand.
 - **"Every 2 weeks" is the `every-n-weeks` cadence with n=2** — pick **Every N weeks** and set
   the number of weeks to 2 (any whole number from 1 to 12 is accepted).
-- **First-round anchoring for bi-weekly cadences** lives under the Start flat season form's
-  collapsed "Scheduling options" section, alongside cadence — it defaults to the block's start
-  date if left blank, so anchoring on a Saturday only matters when the block itself doesn't
-  already start on one.
-- **Activate from applies to both flat seasons and structure stages** — the Start flat season
-  form has its own standalone "Activate from" field, after Match format and NOT inside
-  Scheduling options (used here for the Juniors divisions); a stage inside a structure has the
-  same field per-stage, for competitions that need a stage to open late mid-structure.
+- **Bi-weekly cadences anchor on the block start.** A stage's rounds step from the first
+  day of its block, so an every-2-weeks league lands on Saturdays only if the block starts
+  on one. There is no separate first-round field on a structure stage.
+- **Activate from is a per-stage field** in the structure editor's Schedule section (used
+  here for the Juniors divisions): fixtures are generated up front and stay hidden from
+  clubs until that date.
+- **Starting the season** is the admin's job once the league is set up: **Fixtures → Start
+  a season** lists only set-up leagues → season label → start. The old "Start flat season"
+  form, with its Match format and Scheduling options fields, no longer exists.
 
 ## Double-headers, non-adjacent cross-pool derivation, and multi-leg finals
 
@@ -171,18 +176,16 @@ control together. Authoring it end to end:
   hand through the **Position** column on that stage's confirm step at the start of the
   season. Treat "seed from the prior log" as a per-season admin task, every season, not a
   one-time setup step.
-- **Deploy the API before the web app.** `src/admin.tsx`'s flat-series **Regenerate**
-  button is the belt-and-braces path here: it doesn't ask the structure what the schedule
-  should be, it reads `series.schedule.roundsPerDay` straight off whatever was actually
-  persisted on that series and rebuilds fixtures from it (`admin.tsx`'s `regenerate()`,
-  `~line 686`) — so a double-header series keeps double-heading through any later
-  regenerate, independent of which web bundle is running, PROVIDED the field made it into
-  storage in the first place. That's only guaranteed once the API validates and accepts
-  `roundsPerDay` (`packages/api/src/config-validation.ts`, `index.ts`). Deploy web first
-  and a schedule save can reach an API that doesn't recognise the field yet — silently
-  storing a series with no `roundsPerDay` even though the operator picked "AM + PM
-  double-headers" — and the belt-and-braces regenerate path then has nothing to read back.
-  Ship the API first, so every write of `roundsPerDay` lands on an API that keeps it.
+- **Deploy the API before the web app.** (The old flat-series **Regenerate** button this
+  note used to lean on is retired — ADR 0014; regenerates now run through the season
+  stage card's server generate route, which rebuilds from the run's frozen structure
+  snapshot.) The rule stands for the same underlying reason: `roundsPerDay` only survives
+  a regenerate if it was validated and stored in the first place
+  (`packages/api/src/config-validation.ts`, `index.ts`). Deploy web first and a schedule
+  save can reach an API that doesn't recognise the field yet — silently storing a
+  structure with no `roundsPerDay` even though the operator picked "AM + PM
+  double-headers", so every season started from it single-headers. Ship the API first,
+  so every write of `roundsPerDay` lands on an API that keeps it.
 - **Running seasons keep their existing `structureSnapshot`.** A `SeasonRun` freezes the
   structure it was started against (src/main.tsx) — editing a structure's schedule to add
   `roundsPerDay`, a non-adjacent `derivedFrom.fromStage`, or a different `legOrder` only

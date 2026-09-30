@@ -5,7 +5,7 @@
  */
 import type { ResolveContext } from './entrants';
 import { materialiseStructure, poolQualifiersFor, type StageMaterialisation } from './structure';
-import type { SeasonRun, StageRun, StageSpec } from './types';
+import type { CompetitionStructure, League, SeasonRun, StageRun, StageSpec } from './types';
 
 /**
  * The confirmed groups of the stage a standings-dependent stage draws from.
@@ -79,4 +79,23 @@ export function materialiseRun(
     crossPoolQualifiers,
   });
   return { stages, materialisations };
+}
+
+/**
+ * The structure a running season is offered to rebase onto: the one its league is set up
+ * on NOW (`league.setup.structureId`), when that resolves — so a league moved onto a clone
+ * or a per-season fork brings its season along, and edits to the structure it left are
+ * never offered to it. Falls back to the snapshot's own structure id when the league has
+ * no resolvable setup (legacy runs, a removed setup). `undefined` when neither resolves.
+ * Shared by the console's skew banner and `POST /season-runs/:id/rebase`, so what the
+ * admin reviews is what the server adopts.
+ */
+export function rebaseTargetFor(
+  run: Pick<SeasonRun, 'leagueKey' | 'structureSnapshot'>,
+  config: { leagues?: League[]; structures?: CompetitionStructure[] } | null | undefined,
+): CompetitionStructure | undefined {
+  const structures = config?.structures ?? [];
+  const setupId = (config?.leagues ?? []).find((l) => l.key === run.leagueKey)?.setup?.structureId;
+  const bySetup = setupId ? structures.find((st) => st.id === setupId) : undefined;
+  return bySetup ?? structures.find((st) => st.id === run.structureSnapshot.id);
 }

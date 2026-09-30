@@ -31,6 +31,8 @@ import {
   Modal,
   OptionCards,
   Pill,
+  useModalCloseGuard,
+  useNestedEscapeClose,
   type OptionCard,
 } from './atoms';
 import { HelpLink } from './help/HelpDrawer';
@@ -46,7 +48,6 @@ import {
   type DatePlan,
 } from '../packages/engine/src/calendar';
 import {
-  blockOverrun,
   chainFeeder,
   derivedEntrantTotal,
   previewFitAll,
@@ -54,17 +55,10 @@ import {
   uncoveredBlocks,
 } from '../packages/engine/src/structure';
 import {
-  describeBlockOverrun,
   describeStage,
   describeStructure,
   describeUncoveredBlock,
 } from '../packages/engine/src/narrative';
-import {
-  FALLBACK_MATCH_DAYS,
-  FALLBACK_TIME_SLOTS,
-  resolveCompetitionDefaults,
-  type ResolvedCompetitionDefaults,
-} from '../packages/engine/src/defaults';
 import { groupSizes } from '../packages/engine/src/entrants';
 import { isPoolKnockout, roundsForFormat } from '../packages/engine/src/formats';
 import {
@@ -91,12 +85,10 @@ import {
 } from '../packages/engine/src/stage-kinds';
 import type {
   Cadence,
-  Competition,
   CompetitionStructure,
   EntrantSpec,
   FormatSpec,
   GroupPlan,
-  League,
   SeasonCalendar,
   StageSpec,
   TenantConfig,
@@ -105,6 +97,16 @@ import type {
 } from './types';
 
 type Toast = (m: string, t?: string) => void;
+
+/** A new "set days only" cadence plays Saturdays (tenant-configured match days are retired). */
+const DEFAULT_MATCH_DAYS: readonly Weekday[] = [6];
+/** Set start times, when switched on: a morning and an afternoon start. */
+const DEFAULT_TIME_SLOTS: readonly TimeSlot[] = [
+  { label: 'Morning', start: '08:00' },
+  { label: 'Afternoon', start: '13:30' },
+];
+/** Overs a structure's fixtures play when it names none. */
+const DEFAULT_OVERS = 50;
 
 /**
  * Which calendar the structure editor should preview against.
@@ -115,7 +117,7 @@ type Toast = (m: string, t?: string) => void;
  * the operator's own current pick, else the tenant's only calendar (nothing to choose),
  * else the calendar the bindings agree on, else none.
  *
- * "The bindings agree on" is deliberately not "the first binding" — several competitions
+ * "The bindings agree on" is deliberately not "the first binding" — several leagues
  * routinely bind one structure, and taking `bindingCalendarIds[0]` picked whichever
  * happened to sort first even when the others named a DIFFERENT calendar (or one that no
  * longer exists). Ask, don't guess: only a single distinct, real calendar id resolves.
@@ -544,7 +546,6 @@ export function StageRow({
   onChange,
   onRemove,
   onMove,
-  defaults,
 }: {
   stage: StageSpec;
   index: number;
@@ -558,11 +559,6 @@ export function StageRow({
   onChange: (patch: Partial<StageSpec>) => void;
   onRemove: () => void;
   onMove: (dir: -1 | 1) => void;
-  /**
-   * The tenant's match days and double-header slots (`resolveCompetitionDefaults`), used
-   * when "set days only" or set start times are switched on. Absent ⇒ the fallbacks.
-   */
-  defaults?: Pick<ResolvedCompetitionDefaults, 'matchDays' | 'timeSlots'>;
 }) {
   // Radio-group names must be unique per row: two rows can show the same stage (the
   // season wizard renders a shared template instance once per league that holds it).
@@ -575,14 +571,10 @@ export function StageRow({
   const [labelText, setLabelText] = useState(() => (stage.groupLabels ?? []).join(', '));
 
   // Remembers the slots to restore when the control is switched back on — either the
-  // tenant's default slots, or whatever was there before (including a saved structure's own
+  // default morning/afternoon slots, or whatever was there before (including a saved structure's own
   // values, so re-toggling never resets an operator's edits back to the default).
   const [pendingSlots, setPendingSlots] = useState<TimeSlot[]>(
-    () =>
-      stage.schedule.slots ??
-      (defaults?.timeSlots?.length ? defaults.timeSlots : FALLBACK_TIME_SLOTS).map((sl) => ({
-        ...sl,
-      })),
+    () => stage.schedule.slots ?? DEFAULT_TIME_SLOTS.map((sl) => ({ ...sl })),
   );
 
   const perGroup = preview.sizes[0] ?? 0;
@@ -652,7 +644,7 @@ export function StageRow({
         : kind === 'weekdays'
           ? {
               kind: 'weekdays',
-              days: [...(defaults?.matchDays?.length ? defaults.matchDays : FALLBACK_MATCH_DAYS)],
+              days: [...DEFAULT_MATCH_DAYS],
             }
           : kind === 'spread'
             ? { kind: 'spread' }
@@ -1638,25 +1630,23 @@ function PreviewRail({
 
 /* ─── Structure editor ─── */
 
-/** One competition that binds the structure being edited — a season using it. */
+/** One league whose setup plays the structure being edited — a season using it. */
 type StructureBinding = {
   league: string;
   leagueKey: string;
-  competition: string;
-  competitionId: string;
   calendarId: string;
 };
 
 /**
- * Repoint one competition from the structure being edited to its own fork. The card
+ * Repoint one league's setup from the structure being edited to its own fork. The card
  * re-checks `fromStructureId` against the FRESH config before writing anything.
  */
-type Rebind = { leagueKey: string; competitionId: string; fromStructureId: string };
+type Rebind = { leagueKey: string; fromStructureId: string };
 
-/** The scoped competition moved or vanished while the editor was open — nothing was written. */
+/** The scoped league's setup moved or vanished while the editor was open — nothing was written. */
 class BindingChangedError extends Error {
   constructor() {
-    super('This season’s binding changed while you were editing — reopen and try again');
+    super('This season’s setup changed while you were editing — reopen and try again');
     this.name = 'BindingChangedError';
   }
 }
@@ -1681,21 +1671,49 @@ function forkForSeason(draft: CompetitionStructure, calendarLabel: string): Comp
   };
 }
 
+/** Whole overs from 1 to 200, as the server accepts; '' is "not set" (plays 50). */
+function parseOvers(text: string): { ok: boolean; value?: number } {
+  const t = text.trim();
+  if (!t) return { ok: true };
+  const n = Number(t);
+  return Number.isInteger(n) && n >= 1 && n <= 200 ? { ok: true, value: n } : { ok: false };
+}
+
+/** While mounted, Escape runs `onEscape` instead of reaching the modal's own close. */
+function EscapeTo({ onEscape }: { onEscape: () => void }) {
+  useNestedEscapeClose(onEscape);
+  return null;
+}
+
+export type StructureEditorMode = 'preview' | 'edit';
+
 function StructureEditor({
   initial,
   calendars,
   bindings = [],
-  defaults,
+  mode,
+  onModeChange,
+  isNew = false,
   onSave,
   onClose,
   toast,
 }: {
   initial: CompetitionStructure;
   calendars: SeasonCalendar[];
-  /** The tenant's resolved competition defaults — a new stage's match days and slots. */
-  defaults?: ResolvedCompetitionDefaults;
   /**
-   * The competitions that bind this structure, and the calendar each one names.
+   * 'preview' reads the structure (rail, narrative, dates picker and teams box stay live)
+   * with no form inputs and no Save; 'edit' is the full editor. The card owns it so the
+   * dialog title can follow.
+   */
+  mode: StructureEditorMode;
+  onModeChange: (mode: StructureEditorMode) => void;
+  /**
+   * A structure not yet in the library (just picked from a template, built from scratch or
+   * imported). There is nothing to go back and preview, so Cancel closes the dialog.
+   */
+  isNew?: boolean;
+  /**
+   * The leagues whose setup plays this structure, and the calendar each one names.
    *
    * Load-bearing twice over: it is the best signal for which calendar to EDIT against
    * (the server only accepts blocks that are on the bound calendar), and it is what lets
@@ -1704,13 +1722,45 @@ function StructureEditor({
   bindings?: StructureBinding[];
   /**
    * `rebind` is set only for a per-season fork: `s` is then a NEW structure, and the
-   * named competition is repointed at it in the same write.
+   * named league's setup is repointed at it in the same write.
    */
   onSave: (s: CompetitionStructure, opts?: { rebind?: Rebind }) => Promise<void>;
   onClose: () => void;
   toast: Toast;
 }) {
   const [draft, setDraft] = useState<CompetitionStructure>(initial);
+  const oversId = useId();
+  // Raw text, so an out-of-range value can be shown (and refused) rather than swallowed.
+  const [oversText, setOversText] = useState(initial.overs ? String(initial.overs) : '');
+  const overs = parseOvers(oversText);
+  /** Asking "discard your changes?" before going back to the preview. */
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const dirty =
+    JSON.stringify(draft) !== JSON.stringify(initial) ||
+    oversText !== (initial.overs ? String(initial.overs) : '');
+  const editing = mode === 'edit';
+  const goPreview = () => {
+    setDraft(initial);
+    setOversText(initial.overs ? String(initial.overs) : '');
+    setSaveErr('');
+    setConfirmDiscard(false);
+    onModeChange('preview');
+  };
+  /** Esc / Cancel from Edit: back to the preview, asking first when there are unsaved edits. */
+  const leaveEdit = () => {
+    if (isNew) return dirty ? setConfirmDiscard(true) : onClose();
+    if (confirmDiscard) return setConfirmDiscard(false);
+    if (dirty) return setConfirmDiscard(true);
+    goPreview();
+  };
+  // The dialog's own close (×, and Escape where EscapeTo isn't mounted) asks the same
+  // question instead of dropping unsaved edits.
+  useModalCloseGuard(() => {
+    if (!editing || !dirty) return false;
+    // A second request while already asking means "keep editing", as it does elsewhere.
+    setConfirmDiscard((asking) => !asking);
+    return true;
+  });
   // A structure carries no calendar identity of its own any more, so there is nothing
   // stored to reopen against — only the tenant's own calendar or the binding(s) that use
   // this structure can suggest one. See `resolvePreviewCalendarId`.
@@ -1778,6 +1828,8 @@ function StructureEditor({
    */
   const errors: string[] = [];
   if (!draft.name.trim()) errors.push('Give the structure a name.');
+  if (!overs.ok)
+    errors.push('Overs must be a whole number from 1 to 200 — or leave it empty for 50.');
   if (draft.stages.length === 0) errors.push('Add at least one stage.');
   const seen = new Set<string>();
   for (const s of draft.stages) {
@@ -1832,8 +1884,8 @@ function StructureEditor({
    * structure gets retargeted), so the mixture is the thing to catch rather than the
    * edit itself.
    *
-   * And a bound competition on another calendar is a hard server rule
-   * (`validateCompetitions`) that 400s the entire tenant PUT — discarding the whole edit
+   * And a league set up on another calendar is a hard server rule
+   * (`validateSetups`) that 400s the entire tenant PUT — discarding the whole edit
    * and naming a calendar the operator was never shown — so it is mirrored here, in the
    * operator's own words.
    */
@@ -1874,7 +1926,7 @@ function StructureEditor({
     if (!orphans.length) continue;
     const who = inScope
       .filter((b) => b.calendarId === calId)
-      .map((b) => `${b.competition} (${b.league})`)
+      .map((b) => b.league)
       .join(', ');
     errors.push(
       `${orphans.map((s) => `"${s.name || 'A stage'}"`).join(', ')} ${
@@ -1919,24 +1971,23 @@ function StructureEditor({
     setSaveErr('');
     setBusy(true);
     try {
-      const next: CompetitionStructure = { ...draft, name: draft.name.trim() };
+      const { overs: _overs, ...rest } = draft;
+      void _overs;
+      const next: CompetitionStructure = {
+        ...rest,
+        name: draft.name.trim(),
+        ...(overs.value ? { overs: overs.value } : {}),
+      };
       if (forking && scoped) {
         // Copy-on-write: this season gets its own structure and the others keep the
-        // original, byte-unchanged. A season ALREADY RUNNING on this competition is not
-        // offered these edits: its snapshot references the ORIGINAL structure id, and
-        // both the console's skew check (season-run.tsx, `structures.find(s => s.id ===
-        // active.structureSnapshot.id)`) and the server's rebase route
-        // (`POST /season-runs/:id/rebase`, same lookup) follow that id — never the
-        // competition's current `structureId`. The original's version doesn't move, so no
-        // "Review changes" appears; the fork only shapes seasons started from now on.
+        // original, byte-unchanged. A season ALREADY RUNNING on this league follows the
+        // league's setup (`rebaseTargetFor`, shared by the console's skew check and
+        // `POST /season-runs/:id/rebase`), so it is offered "Review changes" onto the fork;
+        // the fork keeps the original's stage ids, so the rebase diffs stage by stage.
         const calLabel = calendarLabelOf(scoped.calendarId);
         const clone = forkForSeason(next, calLabel);
         await onSave(clone, {
-          rebind: {
-            leagueKey: scoped.leagueKey,
-            competitionId: scoped.competitionId,
-            fromStructureId: initial.id,
-          },
+          rebind: { leagueKey: scoped.leagueKey, fromStructureId: initial.id },
         });
         toast(`Created ${clone.name} for ${scoped.league} · ${calLabel}`);
       } else {
@@ -1962,8 +2013,195 @@ function StructureEditor({
       .catch(() => toast('Could not copy', 'warn'));
   }
 
+  /** What saving will do — the edit-mode strip states it after "Editing — ". */
+  const scopeConsequence =
+    bindings.length === 0 ? (
+      'not used by any league yet.'
+    ) : scoped ? (
+      <>
+        for <strong>{bindingLabel(scoped)}</strong> — saving affects only this season.
+      </>
+    ) : (
+      <>
+        for <strong>all {seasons(bindings.length)}</strong> using this structure — saving affects
+        every one of them.
+      </>
+    );
+
+  const datesFromPicker = !scoped && (
+    <div>
+      <div className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+        Show dates from
+        <InfoDot title="Show dates from">
+          <p>
+            A <strong>preview only</strong>. Structures don’t belong to a calendar — a stage binds
+            to a block by position, and the real calendar is chosen when a league is set up with
+            this structure. Pick one here just to see real dates and check the stages fit.
+          </p>
+        </InfoDot>
+      </div>
+      <Select value={calendarId} onChange={pickCalendar} width={260} label="Show dates from">
+        <option value="">No calendar</option>
+        {calendars.map((c) => (
+          <option key={c.id} value={c.id}>
+            {`${c.label} · ${calendarSpan(c)}`}
+          </option>
+        ))}
+      </Select>
+    </div>
+  );
+
+  const banners = (
+    <>
+      {/* Nothing resolved: no calendar could be picked automatically — more than one
+          on the tenant, and no league is set up with this structure yet. "No calendar"
+          would otherwise read as "you haven't picked one", while the real message is
+          "we can't tell, and only you can say". */}
+      {!calendar && !calendarChosen && !scoped && offPreview.length > 0 && (
+        <div
+          style={{
+            border: '1px solid var(--line)',
+            borderLeft: '3px solid var(--coral, #C0392B)',
+            borderRadius: 8,
+            padding: '10px 12px',
+            marginBottom: 10,
+            fontSize: 12.5,
+            lineHeight: 1.55,
+          }}
+        >
+          Pick a calendar under <strong>Show dates from</strong> to check this structure&apos;s
+          stages fit.
+          <div style={{ ...HINT, marginTop: 6 }}>
+            {offPreview
+              .map((s) => `${s.name || 'a stage'} → position ${s.schedule.blockIndex + 1}`)
+              .join(' · ')}
+          </div>
+        </div>
+      )}
+      {/* The preview is pointed at a calendar this structure doesn't live on. Say so
+          once, at the top, with the way out — rather than leaving the operator to
+          infer it from a column of identical per-stage errors. */}
+      {calendar && offPreview.length > 0 && (
+        <div
+          style={{
+            border: '1px solid var(--line)',
+            borderLeft: '3px solid var(--coral, #C0392B)',
+            borderRadius: 8,
+            padding: '10px 12px',
+            marginBottom: 10,
+            fontSize: 12.5,
+            lineHeight: 1.55,
+          }}
+        >
+          {offPreview.length === 1 ? 'One stage plays' : `${offPreview.length} stages play`} a block
+          position <strong>{calendar.label}</strong> doesn&apos;t have.
+          {bindings.length > 0 && !scoped ? (
+            <div style={{ ...HINT, marginTop: 6 }}>
+              This structure is in use while{' '}
+              {[...new Set(bindings.map((b) => b.league))].join(', ')}{' '}
+              {bindings.length === 1 ? 'uses' : 'use'}{' '}
+              {[...new Set(bindings.map((b) => b.calendarId))]
+                .map((id) => calendars.find((c) => c.id === id)?.label ?? id)
+                .join(', ')}
+              . Switch <strong>Show dates from</strong> back to{' '}
+              {[...new Set(bindings.map((b) => b.calendarId))]
+                .map((id) => calendars.find((c) => c.id === id)?.label ?? id)
+                .join(' or ')}{' '}
+              to keep editing it there — or change the league&apos;s setup first, or clone this
+              structure to run it here.
+            </div>
+          ) : (
+            <div style={{ ...HINT, marginTop: 6 }}>Pick each stage&apos;s block by hand.</div>
+          )}
+        </div>
+      )}
+    </>
+  );
+
+  const rail = (
+    <PreviewRail
+      structure={draft}
+      calendar={calendar}
+      previews={previews}
+      previewTeams={previewTeams}
+      onPreviewTeams={setPreviewTeams}
+      uncovered={uncovered}
+      scopeEcho={
+        bindings.length === 0
+          ? undefined
+          : scoped
+            ? `for ${bindingLabel(scoped)} only`
+            : `for all ${seasons(bindings.length)}`
+      }
+    />
+  );
+
+  const gridStyle: CSSProperties = {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1fr) 280px',
+    gap: 18,
+    marginTop: 18,
+    alignItems: 'start',
+  };
+
+  if (!editing) {
+    return (
+      <div data-testid="structure-preview">
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <div style={{ flex: 1, minWidth: 240 }}>
+            <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>{initial.name}</h3>
+            <div style={{ fontSize: 12.5, color: 'var(--muted)', marginTop: 4 }}>
+              {initial.overs
+                ? `${initial.overs} overs per side`
+                : `${DEFAULT_OVERS} overs per side (not set — the default)`}
+            </div>
+          </div>
+          {datesFromPicker}
+          <Btn tone="outline" size="sm" onClick={copyJson}>
+            Copy JSON
+          </Btn>
+          <Btn tone="teal" onClick={() => onModeChange('edit')}>
+            Edit structure
+          </Btn>
+        </div>
+        <div style={{ ...HINT, marginTop: 8 }}>
+          You&apos;re previewing — nothing here changes anything.
+        </div>
+
+        <div style={gridStyle} className="structure-editor-grid">
+          <div>
+            {banners}
+            <ol style={{ listStyle: 'none', margin: 0, padding: 0 }} aria-label="Stages">
+              {draft.stages.map((stage, i) => (
+                <li
+                  key={stage.id}
+                  style={{
+                    border: '1px solid var(--line)',
+                    borderRadius: 10,
+                    marginBottom: 10,
+                    padding: '10px 14px',
+                    background: 'var(--white, #fff)',
+                  }}
+                >
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>
+                    {ordinal(i)} stage · {stage.name || 'Untitled'}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: 'var(--muted)', marginTop: 2 }}>
+                    {describeStage(stage, calendar)}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </div>
+          {rail}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
+      {!isNew && <EscapeTo onEscape={leaveEdit} />}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <div style={{ flex: 1, minWidth: 240 }}>
           <div className="field-label">
@@ -1974,6 +2212,23 @@ function StructureEditor({
             value={draft.name}
             onChange={(e) => setDraft({ ...draft, name: e.target.value })}
             placeholder="e.g. Split league with mid-season swap"
+          />
+        </div>
+        <div>
+          <label className="field-label" htmlFor={`${oversId}`}>
+            Overs (optional)
+          </label>
+          <input
+            id={oversId}
+            className="field-input"
+            type="number"
+            min={1}
+            max={200}
+            step={1}
+            style={{ width: 110 }}
+            placeholder={String(DEFAULT_OVERS)}
+            value={oversText}
+            onChange={(e) => setOversText(e.target.value)}
           />
         </div>
         {bindings.length > 0 && (
@@ -1996,132 +2251,57 @@ function StructureEditor({
             >
               <option value="-1">{`All seasons using this structure (${bindings.length})`}</option>
               {bindings.map((b, i) => (
-                <option key={`${b.leagueKey}|${b.competitionId}`} value={String(i)}>
-                  {`${bindingLabel(b)}${
-                    bindings.filter((o) => bindingLabel(o) === bindingLabel(b)).length > 1
-                      ? ` (${b.competition})`
-                      : ''
-                  }${bindings.length === 1 ? ' — only season using it' : ''}`}
+                <option key={b.leagueKey} value={String(i)}>
+                  {`${bindingLabel(b)}${bindings.length === 1 ? ' — only season using it' : ''}`}
                 </option>
               ))}
             </Select>
           </div>
         )}
-        {!scoped && (
-          <div>
-            <div className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-              Show dates from
-              <InfoDot title="Show dates from">
-                <p>
-                  A <strong>preview only</strong>. Structures don’t belong to a calendar — a stage
-                  binds to a block by position, and the real calendar is chosen when a league binds
-                  this structure. Pick one here just to see real dates and check the stages fit.
-                </p>
-              </InfoDot>
-            </div>
-            <Select value={calendarId} onChange={pickCalendar} width={260} label="Show dates from">
-              <option value="">No calendar</option>
-              {calendars.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {`${c.label} · ${calendarSpan(c)}`}
-                </option>
-              ))}
-            </Select>
-          </div>
-        )}
+        {datesFromPicker}
         <Btn tone="outline" size="sm" onClick={copyJson}>
           Copy JSON
         </Btn>
       </div>
+      <div className="field-guide" style={{ marginTop: 8 }}>
+        <p>
+          Fixtures generated from this structure play this many overs; leave empty for{' '}
+          {DEFAULT_OVERS}.
+        </p>
+      </div>
       {/* What is being edited, always in view — the dropdown alone only implies it. */}
       <div data-testid="edit-scope-line" style={{ ...WARN, marginTop: 8 }}>
-        {bindings.length === 0 ? (
-          'Not bound to any season yet.'
-        ) : scoped ? (
-          <>
-            Editing for <strong>{bindingLabel(scoped)}</strong> — saving affects only this season.
-          </>
-        ) : (
-          <>
-            Editing for <strong>all {seasons(bindings.length)}</strong> using this structure —
-            saving affects every one of them.
-          </>
-        )}
+        Editing — {scopeConsequence}
       </div>
+      {confirmDiscard && (
+        <div
+          role="alert"
+          className="insights-callout"
+          style={{
+            marginTop: 10,
+            display: 'flex',
+            gap: 10,
+            alignItems: 'center',
+            flexWrap: 'wrap',
+          }}
+        >
+          <span style={{ flex: 1 }}>
+            {isNew
+              ? 'Discard your unsaved changes?'
+              : 'Discard your unsaved changes and go back to the preview?'}
+          </span>
+          <Btn tone="ink" size="sm" onClick={isNew ? onClose : goPreview}>
+            Discard changes
+          </Btn>
+          <Btn tone="outline" size="sm" onClick={() => setConfirmDiscard(false)}>
+            Keep editing
+          </Btn>
+        </div>
+      )}
 
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'minmax(0, 1fr) 280px',
-          gap: 18,
-          marginTop: 18,
-          alignItems: 'start',
-        }}
-        className="structure-editor-grid"
-      >
+      <div style={gridStyle} className="structure-editor-grid">
         <div>
-          {/* Nothing resolved: no calendar could be picked automatically — more than one
-              on the tenant, and no competition binds this structure yet. "No calendar"
-              would otherwise read as "you haven't picked one", while the real message is
-              "we can't tell, and only you can say". */}
-          {!calendar && !calendarChosen && !scoped && offPreview.length > 0 && (
-            <div
-              style={{
-                border: '1px solid var(--line)',
-                borderLeft: '3px solid var(--coral, #C0392B)',
-                borderRadius: 8,
-                padding: '10px 12px',
-                marginBottom: 10,
-                fontSize: 12.5,
-                lineHeight: 1.55,
-              }}
-            >
-              Pick a calendar under <strong>Show dates from</strong> to check this structure&apos;s
-              stages fit.
-              <div style={{ ...HINT, marginTop: 6 }}>
-                {offPreview
-                  .map((s) => `${s.name || 'a stage'} → position ${s.schedule.blockIndex + 1}`)
-                  .join(' · ')}
-              </div>
-            </div>
-          )}
-          {/* The preview is pointed at a calendar this structure doesn't live on. Say so
-              once, at the top, with the way out — rather than leaving the operator to
-              infer it from a column of identical per-stage errors. */}
-          {calendar && offPreview.length > 0 && (
-            <div
-              style={{
-                border: '1px solid var(--line)',
-                borderLeft: '3px solid var(--coral, #C0392B)',
-                borderRadius: 8,
-                padding: '10px 12px',
-                marginBottom: 10,
-                fontSize: 12.5,
-                lineHeight: 1.55,
-              }}
-            >
-              {offPreview.length === 1 ? 'One stage plays' : `${offPreview.length} stages play`} a
-              block position <strong>{calendar.label}</strong> doesn&apos;t have.
-              {bindings.length > 0 && !scoped ? (
-                <div style={{ ...HINT, marginTop: 6 }}>
-                  This structure is bound while{' '}
-                  {[...new Set(bindings.map((b) => `${b.competition} (${b.league})`))].join(', ')}{' '}
-                  {bindings.length === 1 ? 'uses' : 'use'}{' '}
-                  {[...new Set(bindings.map((b) => b.calendarId))]
-                    .map((id) => calendars.find((c) => c.id === id)?.label ?? id)
-                    .join(', ')}
-                  . Switch <strong>Show dates from</strong> back to{' '}
-                  {[...new Set(bindings.map((b) => b.calendarId))]
-                    .map((id) => calendars.find((c) => c.id === id)?.label ?? id)
-                    .join(' or ')}{' '}
-                  to keep editing it there — or change the competition&apos;s calendar first, or
-                  clone this structure to run it here.
-                </div>
-              ) : (
-                <div style={{ ...HINT, marginTop: 6 }}>Pick each stage&apos;s block by hand.</div>
-              )}
-            </div>
-          )}
+          {banners}
           {draft.stages.map((stage, i) => (
             <StageRow
               key={stage.id}
@@ -2138,7 +2318,6 @@ function StructureEditor({
                 setDraft((d) => ({ ...d, stages: d.stages.filter((_, j) => j !== i) }))
               }
               onMove={(dir) => moveStage(i, dir)}
-              defaults={defaults}
             />
           ))}
           <Btn
@@ -2155,21 +2334,7 @@ function StructureEditor({
           </Btn>
         </div>
 
-        <PreviewRail
-          structure={draft}
-          calendar={calendar}
-          previews={previews}
-          previewTeams={previewTeams}
-          onPreviewTeams={setPreviewTeams}
-          uncovered={uncovered}
-          scopeEcho={
-            bindings.length === 0
-              ? undefined
-              : scoped
-                ? `for ${bindingLabel(scoped)} only`
-                : `for all ${seasons(bindings.length)}`
-          }
-        />
+        {rail}
       </div>
 
       {errors.map((e, i) => (
@@ -2187,9 +2352,8 @@ function StructureEditor({
             current one.
           </div>
           <div style={{ marginTop: 6 }}>
-            A season already started on this competition keeps the shape it started with and will
-            NOT be offered these changes — to change a running season, edit for all seasons and use
-            Review changes in the admin console.
+            A season already started for this league keeps the shape it started with until an admin
+            applies Review changes in the admin console, which will offer them this copy.
           </div>
         </div>
       ) : (
@@ -2210,7 +2374,7 @@ function StructureEditor({
                 ? 'Save for this season only'
                 : `Save for all ${seasons(bindings.length)}`}
         </Btn>
-        <Btn tone="outline" onClick={onClose}>
+        <Btn tone="outline" onClick={leaveEdit}>
           Cancel
         </Btn>
       </div>
@@ -2222,14 +2386,11 @@ function StructureEditor({
 
 function StartPicker({
   calendars,
-  defaults,
   onPick,
   onClose,
   toast,
 }: {
   calendars: SeasonCalendar[];
-  /** The tenant's resolved defaults — a template's set start times become the tenant's. */
-  defaults?: ResolvedCompetitionDefaults;
   onPick: (s: CompetitionStructure) => void;
   onClose: () => void;
   toast: Toast;
@@ -2385,9 +2546,7 @@ function StartPicker({
             <Btn
               tone="teal"
               size="sm"
-              onClick={() =>
-                onPick(instantiateTemplate(chosen, calendar, undefined, placement, defaults))
-              }
+              onClick={() => onPick(instantiateTemplate(chosen, calendar, undefined, placement))}
             >
               Use this template
             </Btn>
@@ -2429,7 +2588,17 @@ export function StructuresCard({
   toast: Toast;
 }) {
   const [picking, setPicking] = useState(false);
-  const [editing, setEditing] = useState<CompetitionStructure | null>(null);
+  /**
+   * The structure open in the editor. A library structure opens in the read-only preview;
+   * one just started (template, scratch or import) opens straight into editing.
+   */
+  const [editing, setEditingState] = useState<{
+    structure: CompetitionStructure;
+    mode: StructureEditorMode;
+    isNew: boolean;
+  } | null>(null);
+  const setEditing = (s: CompetitionStructure | null, isNew = false) =>
+    setEditingState(s ? { structure: s, mode: isNew ? 'edit' : 'preview', isNew } : null);
   const [confirm, setConfirm] = useState<CompetitionStructure | null>(null);
   // A refused delete (e.g. series still scheduled against it) is shown inside the confirm
   // box, where the operator is looking, and the box stays open.
@@ -2440,7 +2609,6 @@ export function StructuresCard({
   };
   const structures = config.structures ?? [];
   const calendars = config.calendars ?? [];
-  const defaults = resolveCompetitionDefaults(config);
 
   /** Rebuild-and-PUT against the server's latest list — same guard as LeaguesCard. */
   async function saveStructures(
@@ -2457,30 +2625,22 @@ export function StructuresCard({
   }
 
   /**
-   * A per-season fork: the clone appended, and ONLY the scoped competition repointed at
+   * A per-season fork: the clone appended, and ONLY the scoped league's setup repointed at
    * it, in one PUT. Rebuilt against the fresh config like every other write here — and if
-   * the competition vanished or no longer binds the structure the editor opened, refused
-   * without writing anything (the wizard commit's identical-binding care).
+   * the league vanished or its setup no longer names the structure the editor opened,
+   * refused without writing anything.
    */
   async function forkSave(clone: CompetitionStructure, rebind: Rebind): Promise<void> {
     try {
       const current = await api.platformGetTenant(slug);
       const leagues = current.leagues ?? [];
       const league = leagues.find((l) => l.key === rebind.leagueKey);
-      const competition = league?.competitions?.find((c) => c.id === rebind.competitionId);
-      if (!league || !competition || competition.structureId !== rebind.fromStructureId)
+      if (!league?.setup || league.setup.structureId !== rebind.fromStructureId)
         throw new BindingChangedError();
       await save({
         structures: [...(current.structures ?? []), clone],
         leagues: leagues.map((l) =>
-          l === league
-            ? {
-                ...l,
-                competitions: (l.competitions ?? []).map((c) =>
-                  c === competition ? { ...c, structureId: clone.id } : c,
-                ),
-              }
-            : l,
+          l === league && l.setup ? { ...l, setup: { ...l.setup, structureId: clone.id } } : l,
         ),
       });
     } catch (e) {
@@ -2511,25 +2671,21 @@ export function StructuresCard({
   async function onDelete(structure: CompetitionStructure) {
     setDeleteErr('');
     try {
-      // Cascade: the server 409s a delete while any league still binds the structure, so
-      // the bindings come off in the SAME PUT. A RUNNING season is unaffected either
+      // Cascade: the server refuses a delete while any league's setup still names the
+      // structure, so those setups come off in the SAME PUT. A RUNNING season is unaffected either
       // way — it holds its own snapshot; this only stops new seasons starting from it.
       const current = await api.platformGetTenant(slug);
       const patch: Partial<TenantConfig> = {
         structures: (current.structures ?? []).filter((s) => s.id !== structure.id),
       };
-      const bound = (current.leagues ?? []).filter((l) =>
-        (l.competitions ?? []).some((c) => c.structureId === structure.id),
-      );
+      const bound = (current.leagues ?? []).filter((l) => l.setup?.structureId === structure.id);
       if (bound.length > 0)
-        patch.leagues = (current.leagues ?? []).map((l) =>
-          bound.includes(l)
-            ? {
-                ...l,
-                competitions: (l.competitions ?? []).filter((c) => c.structureId !== structure.id),
-              }
-            : l,
-        );
+        patch.leagues = (current.leagues ?? []).map((l) => {
+          if (!bound.includes(l)) return l;
+          const { setup: _setup, ...rest } = l;
+          void _setup;
+          return rest;
+        });
       await save(patch);
       setConfirm(null);
       toast(`${structure.name} · deleted`);
@@ -2538,47 +2694,32 @@ export function StructuresCard({
     }
   }
 
-  const usedBy = (id: string) =>
-    (config.leagues ?? []).filter((l) => (l.competitions ?? []).some((c) => c.structureId === id));
+  /** The leagues whose setup plays structure `id`. */
+  const usedBy = (id: string) => (config.leagues ?? []).filter((l) => l.setup?.structureId === id);
 
   /**
-   * Every competition that binds a structure, flattened with the calendar it names.
+   * Every league set up with a structure, with the calendar its setup names.
    *
    * `usedBy` answers "which leagues" — enough for the delete guard, not enough for the
    * editor, which needs the CALENDAR to open against and to mirror the server's
-   * bound-calendar rule. One structure is routinely bound by several leagues.
+   * bound-calendar rule. One structure is routinely shared by several leagues.
    */
-  const bindingsFor = (id: string) =>
-    (config.leagues ?? []).flatMap((l) =>
-      (l.competitions ?? [])
-        .filter((c) => c.structureId === id)
-        .map(
-          (c): StructureBinding => ({
-            league: l.label,
-            leagueKey: l.key,
-            competition: c.label,
-            competitionId: c.id,
-            calendarId: c.calendarId,
-          }),
-        ),
+  const bindingsFor = (id: string): StructureBinding[] =>
+    usedBy(id).map((l) => ({
+      league: l.label,
+      leagueKey: l.key,
+      calendarId: l.setup!.calendarId,
+    }));
+
+  /** "<league> · <calendar>" per league set up with the structure, in config order. */
+  const bindingPairsFor = (id: string) =>
+    usedBy(id).map(
+      (l) =>
+        `${l.label} · ${calendars.find((cal) => cal.id === l.setup!.calendarId)?.label ?? l.setup!.calendarId}`,
     );
 
-  /** "<league> · <calendar>" per distinct binding pair, in config order. */
-  const bindingPairsFor = (id: string) => [
-    ...new Set(
-      (config.leagues ?? []).flatMap((l) =>
-        (l.competitions ?? [])
-          .filter((c) => c.structureId === id)
-          .map(
-            (c) =>
-              `${l.label} · ${calendars.find((cal) => cal.id === c.calendarId)?.label ?? c.calendarId}`,
-          ),
-      ),
-    ),
-  ];
-
   /**
-   * Blocks a bound competition's calendar doesn't have — the editor will refuse to save.
+   * Blocks a league setup's calendar doesn't have — the editor will refuse to save.
    * `needed` is read off the structure itself (its highest position + 1, not a stored
    * count), `has` off the first mismatched bound calendar found.
    */
@@ -2669,7 +2810,7 @@ export function StructuresCard({
                       <td>
                         <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
                           <Btn tone="outline" size="sm" onClick={() => setEditing(s)}>
-                            Edit
+                            View
                           </Btn>
                           <Btn tone="ghost" size="sm" onClick={() => askDelete(s)}>
                             Delete
@@ -2702,11 +2843,10 @@ export function StructuresCard({
         >
           <StartPicker
             calendars={calendars}
-            defaults={defaults}
             toast={toast}
             onPick={(s) => {
               setPicking(false);
-              setEditing(s);
+              setEditing(s, true);
             }}
             onClose={() => setPicking(false)}
           />
@@ -2718,17 +2858,26 @@ export function StructuresCard({
           eyebrow="Platform · Competition structures"
           maxWidth={1040}
           title={
-            <>
-              Edit <em>structure</em>
-            </>
+            editing.mode === 'edit' ? (
+              <>
+                Edit <em>structure</em>
+              </>
+            ) : (
+              <>
+                View <em>structure</em>
+              </>
+            )
           }
           onClose={() => setEditing(null)}
+          dismissable={false}
         >
           <StructureEditor
-            initial={editing}
+            initial={editing.structure}
             calendars={calendars}
-            bindings={bindingsFor(editing.id)}
-            defaults={defaults}
+            bindings={bindingsFor(editing.structure.id)}
+            mode={editing.mode}
+            onModeChange={(mode) => setEditingState((e) => (e ? { ...e, mode } : e))}
+            isNew={editing.isNew}
             onSave={upsert}
             onClose={() => setEditing(null)}
             toast={toast}
@@ -2763,7 +2912,7 @@ export function StructuresCard({
               <div className="fix-confirm-body">
                 {usedBy(confirm.id).length > 0 && (
                   <>
-                    Also removes its competition from{' '}
+                    Also removes the setup of{' '}
                     <strong>
                       {usedBy(confirm.id)
                         .map((l) => l.label)
@@ -2795,307 +2944,14 @@ export function StructuresCard({
   );
 }
 
-/* ─── Competitions: binding a league to its format streams ─── */
+/* ─── Non-operator structures ─── */
 
 /**
- * Structures not authored by an operator, listed apart in the competition picker so an
- * operator can still bind one deliberately but never mistakes it for a library structure.
+ * Structures not authored by an operator, listed apart in the setup pickers so an operator
+ * can still adopt one deliberately (as the league's own copy) but never mistakes it for a
+ * library structure.
  */
 export const NON_OPERATOR_GROUPS = [
   { source: 'quick-start', label: 'Created by admin quick start' },
   { source: 'migration', label: 'Migrated flat seasons' },
 ] as const;
-
-/**
- * A league's format streams. This is the join that lets Premier Men run T20 Pink Ball and
- * 50 Over Red Ball side by side over the same twelve registered clubs — the thing the
- * pre-ADR-0008 model could not express at all, because a league could only be one thing.
- *
- * Kept next to structures rather than inside LeaguesCard: a competition is mostly a
- * pointer at a structure and a calendar, and this is where both are understood.
- */
-export function CompetitionsEditor({
-  league,
-  config,
-  onSave,
-  onClose,
-  toast,
-}: {
-  league: League;
-  config: TenantConfig;
-  onSave: (key: string, competitions: Competition[]) => Promise<void>;
-  onClose: () => void;
-  toast: Toast;
-}) {
-  const [draft, setDraft] = useState<Competition[]>(league.competitions ?? []);
-  const [err, setErr] = useState('');
-  const [busy, setBusy] = useState(false);
-  const structures = config.structures ?? [];
-  const calendars = config.calendars ?? [];
-
-  const patch = (i: number, p: Partial<Competition>) =>
-    setDraft((d) => d.map((c, j) => (i === j ? { ...c, ...p } : c)));
-
-  /**
-   * Blocks of this competition's calendar its structure never plays in. Per competition
-   * because that is what's actionable here — another stream on the same calendar may well
-   * cover the block (the calendars card shows that collective view). A warning only:
-   * never in `errors`, never disables Save. Suppressed when the pair overruns (below):
-   * the red line owns that pair, and a gold aside about the opposite direction would only
-   * muddy it — same rule as the structure editor's uncovered lines.
-   */
-  const uncoveredFor = (c: Competition): string[] => {
-    const structure = structures.find((s) => s.id === c.structureId);
-    const calendar = calendars.find((cal) => cal.id === c.calendarId);
-    if (!structure || !calendar || blockOverrun(structure, calendar)) return [];
-    return uncoveredBlocks(structure, calendar).map((block) =>
-      describeUncoveredBlock(block, calendar.blocks.indexOf(block)),
-    );
-  };
-
-  /**
-   * The red line when this competition's structure plays past its calendar's last block.
-   * A hard stop, like the structure editor's own bound-calendar overrun: the server would
-   * reject the binding (400), so Save is disabled until the pair fits.
-   */
-  const overrunFor = (c: Competition): string | null => {
-    const structure = structures.find((s) => s.id === c.structureId);
-    const calendar = calendars.find((cal) => cal.id === c.calendarId);
-    const o = structure && calendar ? blockOverrun(structure, calendar) : null;
-    return structure && o ? describeBlockOverrun(structure, o) : null;
-  };
-
-  const errors: string[] = [];
-  for (const c of draft) {
-    if (!c.label.trim()) errors.push('Every competition needs a label.');
-    if (!c.structureId) errors.push(`"${c.label || 'A competition'}" needs a structure.`);
-    if (!c.calendarId) errors.push(`"${c.label || 'A competition'}" needs a calendar.`);
-  }
-  if (new Set(draft.map((c) => c.label.trim())).size !== draft.length && draft.length)
-    errors.push('Two competitions share a label.');
-  // Shown inline on the row, so not repeated in `errors` — but it blocks Save all the same.
-  const blocked = errors.length > 0 || draft.some((c) => overrunFor(c) !== null);
-
-  async function submit() {
-    if (blocked || busy) return;
-    setErr('');
-    setBusy(true);
-    try {
-      await onSave(
-        league.key,
-        draft.map((c) => ({ ...c, label: c.label.trim() })),
-      );
-      toast(`${league.label} · competitions saved`);
-      onClose();
-    } catch (e) {
-      setErr(describeError(e, 'Could not save — try again'));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (structures.length === 0 || calendars.length === 0) {
-    return (
-      <div>
-        <p style={{ margin: 0, fontSize: 13, color: 'var(--muted)', lineHeight: 1.6 }}>
-          A competition points at a structure and a season calendar, so both have to exist first.{' '}
-          {structures.length === 0 && 'No structures are configured yet. '}
-          {calendars.length === 0 && 'No season calendars are configured yet. '}
-          Set them up on this page, then come back.
-        </p>
-        <div style={{ marginTop: 16 }}>
-          <Btn tone="outline" onClick={onClose}>
-            Close
-          </Btn>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
-        Format streams this league runs. Most leagues have one; a league that plays both a T20 and a
-        50 Over competition over the same clubs has two, each with its own structure.
-      </p>
-
-      {draft.length === 0 && (
-        <p style={{ ...HINT, marginTop: 0 }}>
-          None yet — this league uses the flat create-series flow.
-        </p>
-      )}
-
-      {draft.map((c, i) => (
-        <div
-          key={c.id}
-          style={{
-            border: '1px solid var(--line)',
-            borderRadius: 10,
-            padding: 12,
-            marginBottom: 10,
-            display: 'grid',
-            gap: 8,
-          }}
-        >
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <input
-              className="field-input"
-              style={{ flex: 1 }}
-              placeholder="e.g. 50 Over (Red Ball)"
-              value={c.label}
-              onChange={(e) => patch(i, { label: e.target.value })}
-            />
-            <Btn
-              tone="ghost"
-              size="sm"
-              onClick={() => setDraft((d) => d.filter((_, j) => j !== i))}
-            >
-              Remove
-            </Btn>
-          </div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <Select
-              value={c.structureId}
-              onChange={(v) => patch(i, { structureId: v })}
-              width={230}
-            >
-              <option value="">Structure…</option>
-              {structures
-                .filter((s) => s.source === undefined || s.source === 'operator')
-                .map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-              {NON_OPERATOR_GROUPS.map(({ source, label }) => {
-                const inGroup = structures.filter((s) => s.source === source);
-                if (inGroup.length === 0) return null;
-                return (
-                  <optgroup key={source} label={label}>
-                    {inGroup.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name}
-                      </option>
-                    ))}
-                  </optgroup>
-                );
-              })}
-            </Select>
-            <Select
-              value={c.calendarId}
-              onChange={(v) => patch(i, { calendarId: v })}
-              width={220}
-              label="Calendar"
-            >
-              <option value="">Calendar…</option>
-              {calendars.map((cal) => (
-                <option key={cal.id} value={cal.id}>
-                  {`${cal.label} · ${calendarSpan(cal)}`}
-                </option>
-              ))}
-            </Select>
-            <input
-              className="field-input"
-              type="number"
-              min={1}
-              max={200}
-              style={{ width: 90 }}
-              placeholder="Overs"
-              value={c.matchFormat?.overs ?? ''}
-              onChange={(e) =>
-                patch(i, {
-                  matchFormat: { ...c.matchFormat, overs: +e.target.value || undefined },
-                })
-              }
-            />
-            <input
-              className="field-input"
-              style={{ width: 150 }}
-              placeholder="Ball type"
-              value={c.matchFormat?.ballType ?? ''}
-              onChange={(e) =>
-                patch(i, { matchFormat: { ...c.matchFormat, ballType: e.target.value } })
-              }
-            />
-          </div>
-          {overrunFor(c) && <div style={{ ...ERR, marginTop: 0 }}>{overrunFor(c)}</div>}
-          {uncoveredFor(c).map((line) => (
-            <div key={line} style={{ ...WARN, marginTop: 0 }}>
-              {line}
-            </div>
-          ))}
-        </div>
-      ))}
-
-      <Btn
-        tone="outline"
-        size="sm"
-        icon={Icon.Plus}
-        onClick={() =>
-          setDraft((d) => [
-            ...d,
-            {
-              id: newStructureId('comp'),
-              label: '',
-              structureId: structures[0]?.id ?? '',
-              calendarId: calendars[0]?.id ?? '',
-            },
-          ])
-        }
-      >
-        Add competition
-      </Btn>
-
-      {errors.map((e, i) => (
-        <div key={i} style={ERR}>
-          {e}
-        </div>
-      ))}
-      {err && <div style={ERR}>{err}</div>}
-
-      <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
-        <Btn tone="teal" onClick={submit} disabled={blocked || busy}>
-          {busy ? 'Saving…' : 'Save competitions'}
-        </Btn>
-        <Btn tone="outline" onClick={onClose}>
-          Cancel
-        </Btn>
-      </div>
-    </div>
-  );
-}
-
-/** Modal host so LeaguesCard doesn't need to know the structures vocabulary. */
-export function CompetitionsModal({
-  league,
-  config,
-  onSave,
-  onClose,
-  toast,
-}: {
-  league: League;
-  config: TenantConfig;
-  onSave: (key: string, competitions: Competition[]) => Promise<void>;
-  onClose: () => void;
-  toast: Toast;
-}) {
-  return (
-    <Modal
-      eyebrow="Platform · Competition structures"
-      title={
-        <>
-          Competitions · <em>{league.label}</em>
-        </>
-      }
-      onClose={onClose}
-    >
-      <CompetitionsEditor
-        league={league}
-        config={config}
-        onSave={onSave}
-        onClose={onClose}
-        toast={toast}
-      />
-    </Modal>
-  );
-}

@@ -16,11 +16,24 @@ One command (`packages/api/src/seed-cohort.ts`) writes a complete ADR 0008 cohor
 | ----------- | --------------------------------------------------------------------------------------- |
 | Calendar    | Two blocks either side of a festive break                                               |
 | Structures  | Flat round robin, split league with swap, pools → knockout (from `STRUCTURE_TEMPLATES`) |
-| Leagues     | 3 by default, each with three competitions binding a structure + the calendar           |
+| Leagues     | 3 base keys by default, each minted as 3 per-format leagues, each with its own `setup`  |
 | Clubs       | Up to 24 real KZN clubs with grounds and coordinates; two field a second side           |
 | Venues      | One per club, from its ground                                                           |
-| Season runs | One per league — the flat round robin, materialised                                     |
+| Season runs | One per base key — its flat round robin (50 overs), materialised                        |
 | Series      | One per stage-group — **approved and released**, so a rep can see them                  |
+
+**One league per format.** A league has exactly one setup (structure + calendar), so each
+`--leagues` key becomes three leagues sharing the season calendar:
+
+| League key    | Label suffix     | Structure                         | Overs |
+| ------------- | ---------------- | --------------------------------- | ----- |
+| `<key>`       | `50 Over`        | Flat round robin                  | 50    |
+| `<key>-t20`   | `T20`            | Pools → knockout                  | 20    |
+| `<key>-split` | `Premier League` | Split league with mid-season swap | 50    |
+
+A club entered in a base key is registered in all three. Only the base (flat) league gets a
+season run; the other two are set up for driving by hand, and their later stages sit at
+_awaiting entrants_ until an admin confirms standings. That is the feature working.
 
 **Clubs overlap between leagues on purpose.** Every club enters the first league (so it
 always has a full field); the rest fan out across the others by index. A club playing
@@ -53,17 +66,18 @@ AWS_REGION=localhost AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local \
     --admin admin@example.com --rep rep@example.com
 ```
 
-Expected output at the defaults — 16 clubs across 3 leagues, with two clubs fielding a
-second side (so Premier Men runs 18 sides → 153 fixtures):
+Expected output at the defaults — 16 clubs across 3 base keys (9 leagues), with two clubs
+fielding a second side (so Premier Men 50 Over runs 18 sides → 153 fixtures). Counts can drift
+as the seed evolves; the shape is what to check:
 
 ```
-· config: calendar "2026/27 season", 3 structures, 3 leagues (Premier Men, Reserve Men, Premier Women)
+· config: calendar "2026/27 season", 3 structures, 9 leagues (Premier Men 50 Over, Premier Men T20, Premier Men Premier League, Reserve Men 50 Over, …)
 · 16 clubs
 · 16 venues
-· Premier Men: 16 clubs · run run-seed-premier-men-2026-27 · 1 series, 153 fixtures — approved + released
-· Reserve Men: 8 clubs · run run-seed-reserve-men-2026-27 · 1 series, 45 fixtures — approved + released
-· Premier Women: 8 clubs · run run-seed-premier-women-2026-27 · 1 series, 28 fixtures — approved + released
-· 3 series, 226 fixtures across 3 leagues
+· Premier Men 50 Over: 16 clubs · run run-seed-premier-men-2026-27 · 1 series, 153 fixtures — approved + released
+· Reserve Men 50 Over: 8 clubs · run run-seed-reserve-men-2026-27 · 1 series, 45 fixtures — approved + released
+· Premier Women 50 Over: 8 clubs · run run-seed-premier-women-2026-27 · 1 series, 28 fixtures — approved + released
+· 3 series, 226 fixtures across 3 base leagues
 ```
 
 Offline the Cognito calls are stubbed (`LOCAL_AUTH=1`), so the grants print a
@@ -290,7 +304,7 @@ npx sst shell --stage dev -- npm --prefix packages/api run clear-cohort -- dolph
 ```
 
 Removes clubs, players, series and season runs. **Keeps** the tenant config (so the
-calendar, structures and league survive) and **keeps** venues. Both are intentional and
+calendar, structures and leagues survive) and **keeps** venues. Both are intentional and
 harmless — a re-seed converges on them, because the venue ids are derived from club ids.
 
 ---
@@ -309,8 +323,8 @@ would break at once, none of which fails loudly:
   it back to date the next round; a miss doesn't error, it silently falls through to the
   legacy "+7 days" path — straight into the mid-season break that season calendars exist
   to remove.
-- Any **operator-authored** structure bound to that calendar would start failing
-  `validateCompetitions`, which runs on every `PUT /platform/tenants/:slug`. That takes
+- Any **operator-authored** structure a league's setup pairs with that calendar would start
+  failing `validateSetups`, which runs on every `PUT /platform/tenants/:slug`. That takes
   down the re-seed _and_ leaves the tenant unsaveable from the console until someone
   hand-edits the structure.
 - `CompetitionStructure.calendarId` resolution (`resolveDesignCalendarId`) uses block

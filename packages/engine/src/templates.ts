@@ -15,8 +15,13 @@
  * "group phase before the break, deciders after it" shape both unions use.
  */
 
-import type { CompetitionStructure, SeasonCalendar, StageSpec } from './types';
-import { FALLBACK_TIME_SLOTS, type ResolvedCompetitionDefaults } from './defaults';
+import type { CompetitionStructure, SeasonCalendar, StageSpec, TimeSlot } from './types';
+
+/** A double-header day's built-in start times: a morning and an afternoon match. */
+const DOUBLE_HEADER_SLOTS: readonly TimeSlot[] = [
+  { label: 'Morning', start: '08:00' },
+  { label: 'Afternoon', start: '13:30' },
+];
 
 export interface StructureTemplate {
   id: string;
@@ -103,8 +108,12 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
         format: { kind: 'round-robin', legs: 1 },
         entrants: { kind: 'seeded-split', groups: { kind: 'even', count: 2 }, method: 'snake' },
         // A short-format day plays a morning and an afternoon match. The static template
-        // carries the fallback slots; `instantiateTemplate` swaps in the tenant's own.
-        schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, slots: [...FALLBACK_TIME_SLOTS] },
+        // carries the built-in slots; `instantiateTemplate` swaps in any passed `defaults`.
+        schedule: {
+          blockIndex: 0,
+          cadence: { kind: 'weekly' },
+          slots: DOUBLE_HEADER_SLOTS.map((sl) => ({ ...sl })),
+        },
       },
       {
         id: 'finals',
@@ -119,7 +128,11 @@ export const STRUCTURE_TEMPLATES: StructureTemplate[] = [
             qualifiersPerGroup: 2,
           },
         },
-        schedule: { blockIndex: 0, cadence: { kind: 'weekly' }, slots: [...FALLBACK_TIME_SLOTS] },
+        schedule: {
+          blockIndex: 0,
+          cadence: { kind: 'weekly' },
+          slots: DOUBLE_HEADER_SLOTS.map((sl) => ({ ...sl })),
+        },
       },
     ],
   },
@@ -286,24 +299,16 @@ export function instantiateTemplate(
   calendar: SeasonCalendar | undefined,
   name?: string,
   placement?: number[],
-  /**
-   * The tenant's resolved defaults (`resolveCompetitionDefaults`). A stage the template
-   * gives set start times takes the tenant's `timeSlots` instead of the fallback ones.
-   */
-  defaults?: Pick<ResolvedCompetitionDefaults, 'timeSlots'>,
 ): CompetitionStructure {
   const placed = defaultPlacement(template, calendar?.blocks?.length ?? 0);
   const blocks = template.stages.map((_, i) => placement?.[i] ?? placed[i]);
-  const tenantSlots = defaults?.timeSlots?.length ? defaults.timeSlots : undefined;
   const copies = template.stages.map((stage) => ({
     ...stage,
     schedule: {
       ...stage.schedule,
       // Fresh copies, and only when the template has slots at all — never an explicit
       // `slots: undefined` key (the whole branch omits the key to mean "no set times").
-      ...(stage.schedule.slots
-        ? { slots: (tenantSlots ?? stage.schedule.slots).map((s) => ({ ...s })) }
-        : {}),
+      ...(stage.schedule.slots ? { slots: stage.schedule.slots.map((s) => ({ ...s })) } : {}),
     },
   }));
   return {

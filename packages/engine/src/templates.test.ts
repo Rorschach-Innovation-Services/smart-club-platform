@@ -12,7 +12,6 @@ import {
 } from './templates';
 import { materialiseStage } from './structure';
 import { describeStage } from './narrative';
-import { FALLBACK_TIME_SLOTS } from './defaults';
 import { STAGE_KINDS } from './stage-kinds';
 import type { SeasonCalendar } from './types';
 
@@ -224,30 +223,15 @@ describe('instantiateTemplate', () => {
   });
 
   // A short-format day plays a morning and an afternoon match, so the starter template
-  // carries the fallback slots on both its stages out of the box.
-  it('carries the fallback morning/afternoon slots on both stages of pools-to-knockout', () => {
-    const st = instantiateTemplate(findTemplate('pools-to-knockout')!, CAL);
-    expect(st.stages[0].schedule.slots).toEqual(FALLBACK_TIME_SLOTS);
-    expect(st.stages[1].schedule.slots).toEqual(FALLBACK_TIME_SLOTS);
-  });
-
-  it('swaps in the tenant’s own time slots where the template sets start times', () => {
-    const slots = [
-      { label: 'Early', start: '09:30' },
-      { label: 'Late', start: '14:00' },
+  // carries the built-in 08:00 / 13:30 slots on both its stages out of the box.
+  it('carries the built-in morning/afternoon slots on both stages of pools-to-knockout', () => {
+    const builtIn = [
+      { label: 'Morning', start: '08:00' },
+      { label: 'Afternoon', start: '13:30' },
     ];
-    const st = instantiateTemplate(findTemplate('pools-to-knockout')!, CAL, undefined, undefined, {
-      timeSlots: slots,
-    });
-    expect(st.stages[0].schedule.slots).toEqual(slots);
-    expect(st.stages[1].schedule.slots).toEqual(slots);
-    // Fresh copies: editing the structure never edits the tenant's config.
-    expect(st.stages[0].schedule.slots).not.toBe(slots);
-    // A template with no set times stays without them.
-    const flat = instantiateTemplate(findTemplate('flat-round-robin')!, CAL, undefined, undefined, {
-      timeSlots: slots,
-    });
-    expect('slots' in flat.stages[0].schedule).toBe(false);
+    const st = instantiateTemplate(findTemplate('pools-to-knockout')!, CAL);
+    expect(st.stages[0].schedule.slots).toEqual(builtIn);
+    expect(st.stages[1].schedule.slots).toEqual(builtIn);
   });
 
   // Templates and stage-kind examples are read by every tenant, so they describe a shape,
@@ -302,7 +286,7 @@ describe('JSON import / export', () => {
   });
 
   // A structure carries no calendar identity of its own (ADR 0008 Phase 1) — stages name
-  // a block POSITION, and the Competition binding supplies the calendar at generation
+  // a block POSITION, and the league's setup supplies the calendar at generation
   // time. Export/import round-trips the stages as-is; there is no calendarId to lose.
   it('rejects a legacy export that still carries concrete blockId references', () => {
     const legacy = {

@@ -42,7 +42,7 @@ export const FIELD_GUIDES: Record<FieldGuideId, FieldGuide> = {
     howUsed: 'Every stage in the block plans its rounds between these two dates, both included.',
     example: 'Block 1: 2026-09-13 to 2026-12-13.',
     convention:
-      'Dates are YYYY-MM-DD. A block that ends before it starts is refused. Name blocks after time ("Block 1", "First half"), never after a format — a format is a competition on the league.',
+      'Dates are YYYY-MM-DD. A block that ends before it starts is refused. Name blocks after time ("Block 1", "First half"), never after a format — a format lives on the structure (its overs), not the calendar.',
   },
   breaks: {
     label: 'Breaks',

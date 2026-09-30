@@ -52,8 +52,10 @@ flag; see ADR 0006).
 
 The client is already live at `https://<slug>.club.medicoach.co.za`. A vanity domain (their
 own hostname) is an upsell. With the shared API host it needs only a **single web-cert
-reissue** — no per-tenant API cert. The client's settings page has a **DNS sheet** with the
-records; `infra/tenants.ts` carries the same runbook. **Sequence matters.**
+reissue** — no per-tenant API cert. There is no DNS card in the console any more (it was
+deleted in September 2026); the client settings page only shows the live URL on the setup
+card. The records and steps live here and in the header comment of `infra/tenants.ts`.
+**Sequence matters.**
 
 1. **Reissue the WEB cert with the new SANs.** ACM cannot append SANs to an existing cert —
    request a new **us-east-1** cert covering **all** existing web hosts plus `<webHost>` and
@@ -89,8 +91,10 @@ records; `infra/tenants.ts` carries the same runbook. **Sequence matters.**
    distribution, `TENANT_HOST_MAP`, `WEB_ORIGIN_MAP`, the CORS allowlist, and the SPA's
    web→API map. Then `npx sst deploy --stage prod` (deploys are user-run).
 
-5. **Client creates the live CNAMEs** (targets in the deploy outputs / DNS sheet):
-   `<webHost>` and `www.<webHost>` → the CloudFront distribution domain. (Never advertise
+5. **Client creates the live CNAMEs** at their DNS provider / cPanel:
+   `<webHost>` and `www.<webHost>` → the CloudFront distribution domain. That target is
+   `WEB_CNAME_TARGET` in `infra/tenants.ts`; if it is ever empty, read it from
+   `aws cloudfront list-distributions --profile medicoach`. (Never advertise
    `www.<slug>.club.medicoach.co.za` — the single-label wildcard cert doesn't cover it.)
 
 6. **Verify.** Open `https://<webHost>` — the login paints with the client's branding and

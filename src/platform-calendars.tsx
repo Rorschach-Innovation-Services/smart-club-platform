@@ -43,8 +43,8 @@ const GOLD = 'var(--gold, #B7791F)';
 
 /**
  * A label that reads like a match format rather than a stretch of time. Operators have
- * named blocks "T20" and "30 Over" to model two formats — but formats are competitions on
- * a league, and a block is only time. Leading AND trailing boundaries, or "Crossover" and
+ * named blocks "T20" and "30 Over" to model two formats — but a format lives on the
+ * structure (its overs), a league has one setup, and a block is only time. Leading AND trailing boundaries, or "Crossover" and
  * "Handover" would match. Advisory only: it drives a hint, never a validation error.
  */
 export const FORMAT_LIKE_LABEL = /\b(t20|t10|\d+\s*overs?|overs?|red ball|pink ball|white ball)\b/i;
@@ -53,8 +53,8 @@ export const FORMAT_LIKE_LABEL = /\b(t20|t10|\d+\s*overs?|overs?|red ball|pink b
 function FormatLikeHint() {
   return (
     <div style={{ ...HINT, marginTop: 4, color: GOLD }}>
-      This looks like a match format. Formats are competitions on a league; a block is a stretch of
-      time (Block 1, First half).{' '}
+      This looks like a match format. A format lives on the structure (its overs), and each league
+      has one setup; a block is a stretch of time (Block 1, First half).{' '}
       <HelpLink topic="blocks-vs-competitions">What&apos;s the difference?</HelpLink>
     </div>
   );
@@ -242,14 +242,14 @@ function validate(draft: SeasonCalendar): { errors: string[]; warnings: Calendar
   );
 
   // Overlapping blocks aren't illegal, but they are either a typo or two formats modelled
-  // as blocks — which should be two competitions on the league — so they warn, not block.
+  // as blocks — which should be two leagues, each with its own setup — so they warn, not block.
   for (let i = 0; i < usable.length; i++) {
     for (let j = i + 1; j < usable.length; j++) {
       const a = usable[i];
       const b = usable[j];
       if (a.start <= b.end && b.start <= a.end)
         warnings.push({
-          text: `${a.label} and ${b.label} overlap. Blocks are stretches of time — two formats running side by side are two competitions on the league, not two blocks.`,
+          text: `${a.label} and ${b.label} overlap. Blocks are stretches of time — two formats running side by side are two leagues, each with its own setup, not two blocks.`,
           topic: 'blocks-vs-competitions',
         });
     }
@@ -473,7 +473,7 @@ export function CalendarForm({
             seasons list.
           </p>
           <p>
-            A competition’s stages bind to blocks <strong>by order</strong> — stage 1 to the first
+            A structure’s stages bind to blocks <strong>by order</strong> — stage 1 to the first
             block, stage 2 to the second — so the sequence here matters.
           </p>
         </InfoDot>
@@ -712,47 +712,41 @@ export function CalendarsCard({
     }, 'Could not save calendar');
 
   /**
-   * Every league competition scheduled on `cal`, with its structure resolved (null when
-   * the id no longer matches one) — the card's "who uses this calendar" lines.
+   * Every league whose setup plays on `cal`, with its structure resolved (null when the id
+   * no longer matches one) — the card's "who uses this calendar" lines.
    */
   const bindingsOf = (cal: SeasonCalendar) =>
-    (config.leagues ?? []).flatMap((l) =>
-      (l.competitions ?? [])
-        .filter((comp) => comp.calendarId === cal.id)
-        .map((comp) => ({
-          key: `${l.key}:${comp.id}`,
-          league: l.label,
-          competition: comp.label,
-          structure: (config.structures ?? []).find((st) => st.id === comp.structureId) ?? null,
-        })),
-    );
+    (config.leagues ?? [])
+      .filter((l) => l.setup?.calendarId === cal.id)
+      .map((l) => ({
+        key: l.key,
+        league: l.label,
+        structure: (config.structures ?? []).find((st) => st.id === l.setup?.structureId) ?? null,
+      }));
 
-  /** Leagues whose competitions bind `cal` — drives the cascade warning and the cascade. */
+  /** Leagues whose setup plays on `cal` — drives the cascade warning and the cascade. */
   const leaguesBinding = (cal: SeasonCalendar) =>
-    (config.leagues ?? []).filter((l) =>
-      (l.competitions ?? []).some((comp) => comp.calendarId === cal.id),
-    );
+    (config.leagues ?? []).filter((l) => l.setup?.calendarId === cal.id);
 
   async function onDelete(cal: SeasonCalendar) {
     setDeleteErr('');
     try {
-      // Cascade: a competition pointing at a deleted calendar would fail the server's
-      // cross-check, so the bindings go in the SAME PUT. Series scheduled against the
+      // Cascade: a league setup pointing at a deleted calendar would fail the server's
+      // cross-check, so those setups come off in the SAME PUT. Series scheduled against the
       // calendar still hard-block server-side — that guard is the one worth keeping,
       // and its 409 message is surfaced as-is.
       const current = await api.platformGetTenant(slug);
       const patch: Partial<TenantConfig> = {
         calendars: (current.calendars ?? []).filter((c) => c.id !== cal.id),
       };
-      const bound = (current.leagues ?? []).filter((l) =>
-        (l.competitions ?? []).some((comp) => comp.calendarId === cal.id),
-      );
+      const bound = (current.leagues ?? []).filter((l) => l.setup?.calendarId === cal.id);
       if (bound.length > 0)
-        patch.leagues = (current.leagues ?? []).map((l) =>
-          bound.includes(l)
-            ? { ...l, competitions: (l.competitions ?? []).filter((c) => c.calendarId !== cal.id) }
-            : l,
-        );
+        patch.leagues = (current.leagues ?? []).map((l) => {
+          if (!bound.includes(l)) return l;
+          const { setup: _setup, ...rest } = l;
+          void _setup;
+          return rest;
+        });
       await save(patch);
       setConfirm(null);
       toast(`${cal.label} · deleted`);
@@ -862,14 +856,14 @@ export function CalendarsCard({
                         <td colSpan={5} style={{ paddingTop: 0, fontSize: 12, lineHeight: 1.5 }}>
                           {bindings.length === 0 ? (
                             <span style={{ color: 'var(--muted-2)' }}>
-                              No competitions on this calendar yet.
+                              No league is set up on this calendar yet.
                             </span>
                           ) : (
                             bindings.map((x) => (
                               <div key={x.key} style={{ color: 'var(--muted)' }}>
-                                {x.league} — {x.competition}{' '}
+                                {x.league} —{' '}
                                 {x.structure
-                                  ? `(${x.structure.name} v${x.structure.version})`
+                                  ? `${x.structure.name} (v${x.structure.version})`
                                   : '(structure missing)'}
                               </div>
                             ))
@@ -950,7 +944,7 @@ export function CalendarsCard({
               <div className="fix-confirm-body">
                 {leaguesBinding(confirm).length > 0 && (
                   <>
-                    Also removes its competition from{' '}
+                    Also removes the setup of{' '}
                     <strong>
                       {leaguesBinding(confirm)
                         .map((l) => l.label)

@@ -426,29 +426,7 @@ describe('leagueParticipants', () => {
     expect(first.club.id).toBe('glenwood');
   });
 
-  it('drops sides listed in excludeTeamIds', () => {
-    expect(leagueParticipants(clubs as any, 'premier', ['tm_b']).map((p) => p.teamId)).toEqual([
-      'tm_a',
-      'berea',
-    ]);
-  });
-
-  it('excludes one side of a club without excluding the other', () => {
-    // A club may enter its A side in the T20 and hold the B side back, so the filter
-    // has to be on teamId, not clubId.
-    const left = leagueParticipants(clubs as any, 'premier', ['tm_a']);
-    expect(left.map((p) => p.teamId)).toEqual(['tm_b', 'berea']);
-  });
-
-  it('ignores exclusions that name a side in another league', () => {
-    expect(leagueParticipants(clubs as any, 'premier', ['ukzn']).map((p) => p.teamId)).toEqual([
-      'tm_a',
-      'tm_b',
-      'berea',
-    ]);
-  });
-
-  it('defaults to no exclusions and tolerates a missing club list', () => {
+  it('tolerates a missing club list', () => {
     expect(leagueParticipants(clubs as any, 't20').map((p) => p.teamId)).toEqual([
       'glenwood',
       'ukzn',
@@ -470,7 +448,7 @@ describe('the affiliation gate', () => {
   // seed-cohort and the API pass no predicate; their pool must not shrink.
   it('applies no gate when the caller supplies no predicate', () => {
     expect(ids(leagueParticipants(clubs, 'premier'))).toEqual(['glenwood', 'berea', 'delta']);
-    expect(ids(leagueParticipants(clubs, 'premier', [], { includeUnaffiliated: false }))).toEqual([
+    expect(ids(leagueParticipants(clubs, 'premier', { includeUnaffiliated: false }))).toEqual([
       'glenwood',
       'berea',
       'delta',
@@ -478,7 +456,7 @@ describe('the affiliation gate', () => {
   });
 
   it('drops unaffiliated clubs once a predicate is supplied', () => {
-    expect(ids(leagueParticipants(clubs, 'premier', [], { isAffiliated }))).toEqual([
+    expect(ids(leagueParticipants(clubs, 'premier', { isAffiliated }))).toEqual([
       'glenwood',
       'delta',
     ]);
@@ -487,7 +465,7 @@ describe('the affiliation gate', () => {
   it('lifts the gate with includeUnaffiliated', () => {
     expect(
       ids(
-        leagueParticipants(clubs, 'premier', [], {
+        leagueParticipants(clubs, 'premier', {
           isAffiliated,
           includeUnaffiliated: true,
         }),
@@ -495,14 +473,13 @@ describe('the affiliation gate', () => {
     ).toEqual(['glenwood', 'berea', 'delta']);
   });
 
-  it('reports the held-back sides separately, honouring exclusions on both lists', () => {
+  it('reports the held-back sides separately', () => {
     const { participants, unaffiliated } = leagueParticipantsWithStatus(
       clubs,
       'premier',
-      ['delta'],
       isAffiliated,
     );
-    expect(ids(participants)).toEqual(['glenwood']);
+    expect(ids(participants)).toEqual(['glenwood', 'delta']);
     expect(ids(unaffiliated)).toEqual(['berea']);
   });
 });

@@ -1,6 +1,7 @@
 /**
  * validateCompetitionDefaults — the shape guard both config PUTs run on
- * `TenantConfig.competitionDefaults` (ADR 0014).
+ * `TenantConfig.competitionDefaults` (ADR 0014). Only `venueAliases` and `travel` survive
+ * (config-only); the format fields reverted to built-ins.
  *
  * Run with the API package's test runner (tsx --test).
  */
@@ -16,24 +17,12 @@ const rejects = (value: unknown, message: RegExp) =>
   );
 
 describe('validateCompetitionDefaults', () => {
-  test('accepts a full object and returns it trimmed, with absent fields left absent', () => {
+  test('accepts the surviving fields and returns them normalised', () => {
     const out = validateCompetitionDefaults({
-      matchFormats: [
-        { label: ' 50 Over (Red Ball) ', overs: 50, ballType: ' Red ' },
-        { label: 'Multi-Day' },
-      ],
-      matchDays: [0, 6],
-      timeSlots: [{ label: ' Morning ', start: '08:00' }],
       travel: { costPerKm: 5.2, carsPerAwayTrip: 0 },
       venueAliases: { 'Riverside Bowl': ' riversideoval ' },
     });
     assert.deepEqual(out, {
-      matchFormats: [
-        { label: '50 Over (Red Ball)', overs: 50, ballType: 'Red' },
-        { label: 'Multi-Day' },
-      ],
-      matchDays: [0, 6],
-      timeSlots: [{ label: 'Morning', start: '08:00' }],
       travel: { costPerKm: 5.2, carsPerAwayTrip: 0 },
       venueAliases: { riversidebowl: 'riversideoval' },
     });
@@ -46,27 +35,16 @@ describe('validateCompetitionDefaults', () => {
     rejects('x', /must be an object/);
   });
 
-  test('match formats: label non-blank and ≤60, overs a whole number 1–200, ball type ≤30', () => {
-    rejects({ matchFormats: {} }, /must be an array/);
-    rejects({ matchFormats: [{ label: '  ' }] }, /needs a label/);
-    rejects({ matchFormats: [{ label: 'x'.repeat(61) }] }, /60 characters/);
-    rejects({ matchFormats: [{ label: 'T20', overs: 0 }] }, /between 1 and 200/);
-    rejects({ matchFormats: [{ label: 'T20', overs: 201 }] }, /between 1 and 200/);
-    rejects({ matchFormats: [{ label: 'T20', overs: 20.5 }] }, /between 1 and 200/);
-    rejects({ matchFormats: [{ label: 'T20', ballType: 'x'.repeat(31) }] }, /30 characters/);
-    rejects({ matchFormats: [{ label: 'T20', ballType: 3 }] }, /ball type must be text/);
-  });
-
-  test('match days: weekdays 0–6, no repeats', () => {
-    rejects({ matchDays: [7] }, /0 \(Sunday\) to 6/);
-    rejects({ matchDays: [-1] }, /0 \(Sunday\) to 6/);
-    rejects({ matchDays: [6, 6] }, /must not repeat/);
-    rejects({ matchDays: 6 }, /must be an array/);
-  });
-
-  test('time slots: the same HH:MM rule as a stage’s slots', () => {
-    rejects({ timeSlots: [{ label: 'Morning', start: '8am' }] }, /HH:MM/);
-    rejects({ timeSlots: [{ label: '', start: '08:00' }] }, /needs a label/);
+  test('the retired matchFormats/matchDays/timeSlots are neither validated nor kept', () => {
+    // Values the old guard refused are no longer a 400 — the fields revert to built-ins,
+    // so an old console sending them saves cleanly and they are simply not stored.
+    const out = validateCompetitionDefaults({
+      matchFormats: [{ label: '  ', overs: 0 }],
+      matchDays: [7, 7],
+      timeSlots: [{ label: '', start: '8am' }],
+      travel: { costPerKm: 4.5, carsPerAwayTrip: 3 },
+    });
+    assert.deepEqual(out, { travel: { costPerKm: 4.5, carsPerAwayTrip: 3 } });
   });
 
   test('travel: both numbers present and 0 or more', () => {

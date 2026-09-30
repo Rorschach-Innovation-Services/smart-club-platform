@@ -2,7 +2,7 @@
  * Tests for scripts/backfill-venue-aliases.ts — the one-off copy of the code-default
  * ground-name aliases into the dolphins tenant's `competitionDefaults.venueAliases`.
  *
- * Same harness as migrate-flat-runs.test.ts (in-process dynalite, real repo functions).
+ * Same harness as migrate-league-setups.test.ts (in-process dynalite, real repo functions).
  * Run with the API package's test runner (tsx --test).
  */
 import { test, before, after, describe } from 'node:test';
@@ -93,7 +93,9 @@ const quiet = () => {};
 
 describe('backfill-venue-aliases', () => {
   test('a dry run reports the aliases it would write and writes nothing', async () => {
-    await repo.putTenantConfig(config('dolphins', { competitionDefaults: { matchDays: [0] } }));
+    await repo.putTenantConfig(
+      config('dolphins', { competitionDefaults: { travel: { costPerKm: 6, carsPerAwayTrip: 2 } } }),
+    );
     const r = await backfill({ confirm: false, log: quiet });
     assert.equal(r.outcome, 'would-write');
     assert.equal(r.aliases, Object.keys(DEFAULTS).length);
@@ -106,7 +108,7 @@ describe('backfill-venue-aliases', () => {
     assert.equal(r.outcome, 'written');
     const stored = await repo.getTenantConfig('dolphins');
     assert.deepEqual(stored?.competitionDefaults?.venueAliases, DEFAULTS);
-    assert.deepEqual(stored?.competitionDefaults?.matchDays, [0]);
+    assert.deepEqual(stored?.competitionDefaults?.travel, { costPerKm: 6, carsPerAwayTrip: 2 });
   });
 
   test('is idempotent: a second run finds the aliases and writes nothing', async () => {
@@ -132,7 +134,9 @@ describe('backfill-venue-aliases', () => {
   });
 
   test('aborts, writing nothing, when the tenant disappears before the write', async () => {
-    await repo.putTenantConfig(config('dolphins', { competitionDefaults: { matchDays: [6] } }));
+    await repo.putTenantConfig(
+      config('dolphins', { competitionDefaults: { travel: { costPerKm: 5, carsPerAwayTrip: 3 } } }),
+    );
     let reads = 0;
     const puts: TenantConfig[] = [];
     const lines: string[] = [];

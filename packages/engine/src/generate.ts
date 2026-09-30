@@ -11,15 +11,15 @@
 import { findBlock } from './calendar';
 import type { TeamParticipant } from './leagues';
 import { materialiseRun } from './run';
-import { buildStageSeries } from './series-builder';
-import type { Competition, League, SeasonRun, Series, StageRun, StageSpec } from './types';
+import { buildStageSeries, type StageSeriesFormat } from './series-builder';
+import type { League, SeasonRun, Series, StageRun, StageSpec } from './types';
 
 export interface StageGenerationArgs {
   run: SeasonRun;
   specId: string;
   /**
-   * The sides the stage draws from: `leagueParticipants` for the run's league with the
-   * competition's `excludeTeamIds` applied — the same list the console materialises over.
+   * The sides the stage draws from: `leagueParticipants` for the run's league — the same
+   * list the console materialises over.
    */
   participants: ReadonlyArray<{ teamId: string }>;
   /**
@@ -28,9 +28,8 @@ export interface StageGenerationArgs {
    */
   leagueTeams: readonly TeamParticipant[];
   league?: Pick<League, 'label'>;
-  competition?: Pick<Competition, 'label' | 'matchFormat'>;
-  /** Overs when the competition's match format names none — see `buildStageSeries`. */
-  defaultOvers?: number;
+  /** The setup structure's name and overs — see `buildStageSeries`. */
+  format?: StageSeriesFormat;
 }
 
 /** One group as generated: what the run's StageRun records against it. */
@@ -73,8 +72,7 @@ export function generateStage({
   participants,
   leagueTeams,
   league,
-  competition,
-  defaultOvers,
+  format,
 }: StageGenerationArgs): StageGeneration {
   const index = run.structureSnapshot.stages.findIndex((s) => s.id === specId);
   if (index < 0) return { status: 'unknown-stage' };
@@ -107,11 +105,10 @@ export function generateStage({
         // to the block it plays in rather than a blank `startDate` (a gsi1 sort key).
         startDate: g.plan.dates[0] ?? block.start,
         league,
-        competition,
+        format,
       },
       multi,
       leagueTeams,
-      defaultOvers,
     }),
   );
   // Named for the pairing THIS season plays (the run's override laid over the spec).

@@ -1,5 +1,4 @@
 import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
-import { CompetitionDefaultsCard } from './competition-defaults';
 import { Sentry } from './sentry'; // first — installs global error handlers before render
 import { useState as useStateApp, useMemo as useMemoApp, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
@@ -54,6 +53,7 @@ import { seasonConflictMessage } from './generate-feedback';
 import {
   releaseErrorMessage,
   seasonRunConflictMessage,
+  startSeasonErrorMessage,
   toastCopy,
   type ToastCopyOptions,
 } from './error-copy';
@@ -545,8 +545,8 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   const allCalendars = tenantConfig?.calendars ?? [];
   // Structures live only on the authenticated read; absent for reps, who never need them.
   const allStructures = tenantConfigQuery.data?.structures ?? [];
-  // Competition defaults (ADR 0014): the authenticated read carries all of it; the public
-  // payload only the pickers' fields (formats, days, slots) — enough until the read lands.
+  // Competition defaults (ADR 0014): only travel cost and venue aliases survive, and only
+  // the authenticated read carries them; absent ⇒ the built-in travel fallback.
   const competitionDefaults =
     tenantConfigQuery.data?.competitionDefaults ?? tenantConfig?.competitionDefaults;
   const allSeasonRuns = seasonRunsQuery.data ?? [];
@@ -667,7 +667,13 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   }
   /* ─── Season runs (ADR 0008) ─── */
   function createSeasonRun(run) {
-    return withToast(() => api.createSeasonRun(run), 'Could not start the season').then((r) => {
+    // A league with no setup (400 setup_missing) or a label already running (409
+    // season_exists) gets copy that says what to do, not the generic refresh line. A 409
+    // means this tab's runs list missed a season, so that is what it refetches.
+    return withToast(() => api.createSeasonRun(run), 'Could not start the season', {
+      errorMessage: startSeasonErrorMessage,
+      invalidate: [qk.seasonRuns()],
+    }).then((r) => {
       invalidate(qk.seasonRuns());
       return r;
     });
@@ -717,7 +723,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       () => generateStageSeriesInner(run, stage),
       'Could not generate the fixtures',
       // A structured refusal (clash gate, released overwrite, awaiting entrants, does not
-      // fit, missing block, unbound competition) names what to do; any other 409 is a
+      // fit, missing block) names what to do; any other 409 is a
       // version race and keeps the generic refresh line. Both refetch (below).
       { invalidate: [qk.series(), qk.seasonRuns()], conflictMessage: seasonConflictMessage },
     ).catch((e) => {
@@ -886,9 +892,11 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       .catch(() => {});
   }
   function setSubmissionDeadline(iso) {
-    withToast(() => api.putTenantConfig({ submissionDeadline: iso }), 'Could not save deadline')
-      .then(() => invalidate(qk.tenant()))
-      .catch(() => {});
+    // Returned raw (no .catch swallow) so the deadline modal stays open on a failed save.
+    return withToast(
+      () => api.putTenantConfig({ submissionDeadline: iso }),
+      'Could not save deadline',
+    ).then(() => invalidate(qk.tenant()));
   }
   function saveOrgName(name) {
     const trimmed = (name || '').trim();
@@ -934,9 +942,9 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     if (!cur) return Promise.resolve();
     const merged = { ...cur, ...patch, key: cur.key }; // key is immutable
     const next = allLeagues.map((l) => (l.key === key ? merged : l));
-    return withToast(() => api.putTenantConfig({ leagues: next }), 'Could not save league')
-      .then(() => invalidate(qk.tenant()))
-      .catch(() => {});
+    return withToast(() => api.putTenantConfig({ leagues: next }), 'Could not save league').then(
+      () => invalidate(qk.tenant()),
+    );
   }
   function deleteLeague(key) {
     const next = allLeagues.filter((l) => l.key !== key);
@@ -2556,23 +2564,6 @@ function Shell({
             onEdit={(L) => setShowLeagueForm(L)}
             onDeleteLeague={deleteLeague}
             toast={toastShow}
-            defaultsCard={
-              // Admin-level setup data like the leagues above (ADR 0014). Keyed on the
-              // stored value so the card reopens on what the server holds after a save.
-              <CompetitionDefaultsCard
-                key={JSON.stringify(competitionDefaults ?? {})}
-                config={{ ...tenantConfig, competitionDefaults }}
-                fetchLatest={api.getTenantConfig}
-                save={async (patch) => {
-                  const next = await api.putTenantConfig(patch);
-                  invalidate(qk.tenantConfig());
-                  invalidate(qk.tenant());
-                  return next;
-                }}
-                toast={toastShow}
-                aliasesReadOnly
-              />
-            }
           />
         );
       if (view === 'insights')
@@ -2836,9 +2827,9 @@ function Shell({
           .slice(0, 2)
           .join('');
 
-  // After a quick start (POST /season-runs/quick-start) the server has made the
-  // competition, its structure and calendar, and the run in one go — so both the runs list
-  // and the tenant config (where leagues carry their competitions) are stale.
+  // Refetch the season setup: the runs list and the tenant config (where leagues carry
+  // their operator-created setup). The launcher calls it on open so what it shows is what
+  // the server will freeze.
   function refetchSeasonSetup() {
     return Promise.all([invalidate(qk.seasonRuns()), invalidate(qk.tenantConfig())]);
   }

@@ -22,7 +22,7 @@ import {
   generateStage,
   getMe,
   getTenant,
-  quickStartSeason,
+  platformGetTenant,
   setAuthLostHandler,
   setTokenProvider,
 } from './api';
@@ -123,48 +123,15 @@ describe('request auth contract', () => {
   });
 });
 
-describe('quickStartSeason', () => {
-  it('POSTs the request body to /season-runs/quick-start and returns the server payload', async () => {
-    const payload = {
-      run: { id: 'run-1' },
-      competitionId: 'cmp_1',
-      structureId: 'st_1',
-      calendarId: 'cal_1',
-    };
+describe('platformGetTenant', () => {
+  it('passes the response-only liveUrl through with the config', async () => {
+    const payload = { tenant: 'sharks', leagues: [], liveUrl: 'https://sharks.club.example' };
     (fetch as any).mockResolvedValueOnce(okResponse(payload));
-    const body = {
-      leagueKey: 'premier-men',
-      templateId: 'flat-round-robin',
-      seasonLabel: '2026/27',
-      calendar: { label: '2026/27', start: '2026-09-13', end: '2027-03-28' },
-    };
-    const res = await quickStartSeason(body);
-    const [url, init] = (fetch as any).mock.calls[0];
-    expect(new URL(url).pathname).toBe('/season-runs/quick-start');
-    expect(init.method).toBe('POST');
-    expect(JSON.parse(init.body)).toEqual(body);
-    expect(res).toEqual(payload);
-  });
-
-  it('passes the server coverage warnings through when present', async () => {
-    const warning =
-      '2026/27: Block 2 (17 Jan 2027 → 26 Mar 2027) — no competition on this calendar uses it';
-    (fetch as any).mockResolvedValueOnce(
-      okResponse({
-        run: { id: 'run-1' },
-        competitionId: 'cmp_1',
-        structureId: 'st_1',
-        calendarId: 'cal_1',
-        warnings: [warning],
-      }),
-    );
-    const res = await quickStartSeason({
-      leagueKey: 'premier-men',
-      templateId: 'flat-round-robin',
-      seasonLabel: '2026/27',
-      calendar: { id: 'cal_1' },
-    });
-    expect(res.warnings).toEqual([warning]);
+    const res = await platformGetTenant('sharks');
+    const [url] = (fetch as any).mock.calls[0];
+    expect(new URL(url).pathname).toBe('/platform/tenants/sharks');
+    expect(res.liveUrl).toBe('https://sharks.club.example');
+    expect(res.tenant).toBe('sharks');
   });
 });
 

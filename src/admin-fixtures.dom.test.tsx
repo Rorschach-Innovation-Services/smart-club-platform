@@ -17,7 +17,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { AdminFixtures, FixtureTable, SCHEDULE_COLS } from './admin';
+import { AdminFixtures, AdminLeagues, FixtureTable, SCHEDULE_COLS } from './admin';
 import { ApiError } from './api';
 import { renderWithProviders } from './test-utils';
 import type { Clash, Club, SeasonCalendar, SeasonRun, Series, TenantConfig } from './types';
@@ -631,11 +631,46 @@ describe('a tenant with no series still gets the season machinery', () => {
     expect(screen.queryByRole('button', { name: /create (a )?series/i })).toBeNull();
     expect(screen.queryByText(/one-off series/i)).toBeNull();
   });
+
+  // Quick start is gone: seasons run on the operator's setup, and a one-off cup is an
+  // operator-created structure — the page says so rather than pointing at a template.
+  it('hands one-off cups to the operator and never mentions quick start', () => {
+    renderPage();
+    expect(screen.getByText(/on the setup your platform operator created for it/i)).toBeTruthy();
+    expect(
+      screen.getByText(/your operator can add a One-off tournament structure for it/i),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        /For a one-off cup or festival, your operator can add a One-off tournament structure\./,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/quick-start|quick start/i)).toBeNull();
+  });
+});
+
+describe('the admin Leagues page', () => {
+  // The Competition defaults card is gone from the admin console: formats, match days and
+  // start times are built-ins now, and aliases/travel are config-only.
+  it('lists the catalogue with no competition defaults card under it', () => {
+    renderWithProviders(
+      <AdminLeagues
+        allLeagues={[{ key: 'premier', label: 'Premier League', group: 'Senior' }]}
+        clubs={[]}
+        onCreate={vi.fn()}
+        onEdit={vi.fn()}
+        onDeleteLeague={vi.fn()}
+        toast={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Premier League')).toBeTruthy();
+    expect(screen.queryByText(/match formats|competition defaults|venue aliases/i)).toBeNull();
+  });
 });
 
 describe('the "Start a season" launcher — one entry point, routed by league', () => {
-  // A minimal bound competition so `premier` is season-capable; `friendlies` has none, so
-  // it gets Quick start. Both leagues share the same registered clubs.
+  // A minimal setup so `premier` is season-capable; `friendlies` has none, so it waits for
+  // the operator. Both leagues share the same registered clubs.
   const structure = {
     id: 'struct-1',
     name: 'Straight round robin',
@@ -665,7 +700,7 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
       label: 'Premier League',
       group: 'Senior',
       district: 'All districts',
-      competitions: [{ id: 'c1', label: '50 Over', structureId: 'struct-1', calendarId: 'cal-1' }],
+      setup: { structureId: 'struct-1', calendarId: 'cal-1' },
     },
     { key: 'friendlies', label: 'Friendlies', group: 'Senior', district: 'All districts' },
   ] as unknown as import('./types').League[];
@@ -675,8 +710,8 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     { id: 'c2', name: 'Club 2', affiliation: 'complete', leagues: ['premier', 'friendlies'] },
   ] as unknown as Club[];
 
-  // What belongs to THIS boundary is the routing decision: a league with a competition
-  // gets the season form, one without gets Quick start. There is no third path.
+  // What belongs to THIS boundary is the routing decision: a set-up league gets the season
+  // form, one without is listed disabled with the hand-off to the operator. No third path.
   const renderPage = () => ({
     ...renderWithProviders(
       <AdminFixtures
@@ -726,28 +761,26 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     expect(screen.queryByRole('button', { name: /continue/i })).toBeNull();
   });
 
-  it('offers Quick start in place for a league with no competition', async () => {
+  it('lists a league with no setup disabled, with the hand-off to the operator', async () => {
     const user = userEvent.setup();
     renderPage();
     await openLauncher(user);
 
-    await user.selectOptions(
-      within(launcher()).getByRole('combobox', { name: 'League' }),
-      'friendlies',
-    );
-
-    // Same modal, no Continue: the league's status, then the quick start form under it.
+    const select = within(launcher()).getByRole('combobox', { name: 'League' });
+    expect(within(select).getByRole('option', { name: 'Friendlies' })).toBeDisabled();
     expect(
-      within(launcher()).getByText(/No competition has been set up for this league yet/),
+      within(launcher()).getByText(
+        'Friendlies has no season setup. Ask your operator to set this league up.',
+      ),
     ).toBeTruthy();
+    // No quick start in place of the season form.
     expect(
-      within(launcher()).getByRole('radiogroup', { name: /how the season is played/i }),
-    ).toBeTruthy();
-    expect(within(launcher()).queryByRole('button', { name: /continue/i })).toBeNull();
+      within(launcher()).queryByRole('radiogroup', { name: /how the season is played/i }),
+    ).toBeNull();
     expect(screen.queryByRole('dialog', { name: /create.*series/i })).toBeNull();
   });
 
-  it('has exactly two paths — the one-off option is gone, the template replaces it', async () => {
+  it('offers only leagues — the one-off option is gone and there is no template picker', async () => {
     const user = userEvent.setup();
     renderPage();
     await openLauncher(user);
@@ -756,17 +789,12 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
       .getAllByRole('option')
       .map((o) => o.getAttribute('value'));
     expect(options).toEqual(['premier', 'friendlies']);
-
-    await user.selectOptions(
-      within(launcher()).getByRole('combobox', { name: 'League' }),
-      'friendlies',
-    );
-    expect(within(launcher()).getByRole('radio', { name: /^one-off tournament/i })).toBeTruthy();
+    expect(within(launcher()).queryByRole('radio', { name: /^one-off tournament/i })).toBeNull();
   });
 
-  it('groups the league select by whether the operator set up a competition', async () => {
-    // `leagues` above has one season-capable league ('premier') and one flat league
-    // ('friendlies'), so both optgroups should render.
+  it('groups the league select by whether the operator set it up', async () => {
+    // `leagues` above has one set-up league ('premier') and one without ('friendlies'),
+    // so both optgroups should render.
     const user = userEvent.setup();
     renderPage();
     await openLauncher(user);
@@ -775,10 +803,7 @@ describe('the "Start a season" launcher — one entry point, routed by league', 
     const groups = Array.from(select.querySelectorAll('optgroup')).map((g) =>
       g.getAttribute('label'),
     );
-    expect(groups).toEqual([
-      'Competition set up by your operator',
-      'No competition yet — quick start one',
-    ]);
+    expect(groups).toEqual(['Set up by your operator', 'Not set up yet — ask your operator']);
   });
 });
 

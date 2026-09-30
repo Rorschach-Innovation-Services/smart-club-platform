@@ -24,6 +24,8 @@ import {
 } from '@aws-sdk/client-s3';
 // Pure module (no env reads at load) — safe to import before the env block below.
 import { DEFAULT_REQUIRED_DOCS, resolveRequiredDocs } from '../src/catalogue.js';
+import type { CompetitionStructure, SeasonCalendar, TenantConfig } from '../src/types.js';
+import { bindSetup } from './season-run-harness.js';
 
 // Env must be set BEFORE importing repo/app — repo reads TABLE_NAME at module load,
 // index.ts reads TUTORIALS_BASE_URL / TUTORIALS_BUCKET at module load.
@@ -962,22 +964,19 @@ describe('tenant-admin PUT /tenant/config hardening', () => {
     assert.ok(stored?.leagues?.some((l) => l.key === 'hardening-lg'));
   });
 
-  // `applyTenantConfigPatch(tenant, patch, { preserveCompetitions: true })` — League
-  // competitions (ADR 0008 format streams) are operator-only. A tenant-admin PUT can
-  // still rename/reorder leagues, but whatever it sends for `competitions` must be
-  // discarded in favour of what is already stored, never merged or unioned in.
-  test('PUT /tenant/config never changes a league’s stored competitions', async (t) => {
-    const before = await repo.getTenantConfig('dolphins');
-    assert.ok(before);
-    t.after(() => repo.putTenantConfig(before));
-
+  // `applyTenantConfigPatch(tenant, patch, { preserveOperatorBindings: true })` — a league's
+  // `setup` (and the deprecated `competitions[]` it may still carry) is operator-only. A
+  // tenant-admin PUT can still rename/reorder leagues, but whatever it sends for either —
+  // including NOTHING, from a console that built its leagues list from a stale cache — is
+  // discarded in favour of what is already stored, never merged, emptied or forged.
+  describe('preserveOperatorBindings', () => {
     const calendar = {
-      id: 'preserve-comp-cal',
+      id: 'preserve-cal',
       label: '2026/27',
       blocks: [{ id: 'b1', label: 'Block 1', start: '2026-09-13', end: '2026-12-13' }],
     };
     const structure = {
-      id: 'preserve-comp-st',
+      id: 'preserve-st',
       name: 'Flat round robin',
       version: 1,
       stages: [
@@ -990,57 +989,202 @@ describe('tenant-admin PUT /tenant/config hardening', () => {
         },
       ],
     };
-    const realCompetitions = [
-      {
-        id: 'comp-1',
-        label: '50 Over',
-        structureId: 'preserve-comp-st',
-        calendarId: 'preserve-comp-cal',
-      },
+    const realSetup = { structureId: 'preserve-st', calendarId: 'preserve-cal' };
+    // Deprecated, inert — written straight to the row the way pre-setup data sits there.
+    const legacyCompetitions = [
+      { id: 'comp-1', label: '50 Over', structureId: 'preserve-st', calendarId: 'preserve-cal' },
     ];
     const league = {
-      key: 'preserve-comp-lg',
-      label: 'Preserve Competitions League',
+      key: 'preserve-lg',
+      label: 'Preserve Bindings League',
       group: 'Senior Leagues',
       district: 'KCCD',
-      competitions: realCompetitions,
     };
 
-    // Operator establishes the real binding first.
-    const setup = await app.request('/platform/tenants/dolphins', {
-      method: 'PUT',
-      headers: platformHeaders(OPERATOR),
-      body: JSON.stringify({
+    /** Operator sets the league up, then the legacy competitions land on the row. */
+    async function establish(before: TenantConfig): Promise<void> {
+      const res = await app.request('/platform/tenants/dolphins', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({
+          calendars: [...(before.calendars ?? []), calendar],
+          structures: [...(before.structures ?? []), structure],
+          leagues: [...(before.leagues ?? []), { ...league, setup: realSetup }],
+        }),
+      });
+      assert.equal(res.status, 200, await res.clone().text());
+      const cfg = (await repo.getTenantConfig('dolphins'))!;
+      await repo.putTenantConfig({
+        ...cfg,
+        leagues: cfg.leagues!.map((l) =>
+          l.key === league.key ? { ...l, competitions: legacyCompetitions } : l,
+        ),
+      });
+    }
+    const storedLeague = async () =>
+      (await repo.getTenantConfig('dolphins'))?.leagues?.find((l) => l.key === league.key);
+    const adminPut = (leagues: unknown[]) =>
+      app.request('/tenant/config', {
+        method: 'PUT',
+        headers: tenantHeaders(DOLPHINS_ADMIN, 'dolphins'),
+        body: JSON.stringify({ leagues }),
+      });
+
+    test('an admin PUT built from a cached league list WITHOUT setup does not wipe it', async (t) => {
+      const before = (await repo.getTenantConfig('dolphins'))!;
+      t.after(() => repo.putTenantConfig(before));
+      await establish(before);
+
+      // The stale admin tab: its league object predates the setup entirely.
+      const res = await adminPut([...(before.leagues ?? []), { ...league, label: 'Renamed' }]);
+      assert.equal(res.status, 200, await res.clone().text());
+
+      const stored = await storedLeague();
+      assert.equal(stored?.label, 'Renamed', 'non-binding fields DO patch');
+      assert.deepEqual(stored?.setup, realSetup, 'setup untouched, not wiped');
+      assert.deepEqual(stored?.competitions, legacyCompetitions, 'competitions not stripped');
+    });
+
+    test('an admin PUT cannot forge a setup or change competitions', async (t) => {
+      const before = (await repo.getTenantConfig('dolphins'))!;
+      t.after(() => repo.putTenantConfig(before));
+      await establish(before);
+
+      const forged = await adminPut([
+        ...(before.leagues ?? []),
+        {
+          ...league,
+          setup: { structureId: 'some-other-st', calendarId: 'some-other-cal' },
+          competitions: [],
+        },
+        // A brand-new league cannot arrive already set up either.
+        {
+          key: 'admin-new-lg',
+          label: 'Admin new',
+          group: 'Senior Leagues',
+          district: 'KCCD',
+          setup: realSetup,
+        },
+      ]);
+      assert.equal(forged.status, 200, await forged.clone().text());
+      const stored = await storedLeague();
+      assert.deepEqual(stored?.setup, realSetup);
+      assert.deepEqual(stored?.competitions, legacyCompetitions);
+      const fresh = (await repo.getTenantConfig('dolphins'))?.leagues?.find(
+        (l) => l.key === 'admin-new-lg',
+      );
+      assert.ok(fresh, 'the new league itself is saved');
+      assert.equal(fresh?.setup, undefined, 'but not its setup');
+    });
+  });
+
+  describe('operator competitions saves (dual window)', () => {
+    const calendar = {
+      id: 'stale-cal',
+      label: '2026/27',
+      blocks: [{ id: 'b1', label: 'Block 1', start: '2026-09-13', end: '2026-12-13' }],
+    };
+    const structure = {
+      id: 'stale-st',
+      name: 'Flat round robin',
+      version: 1,
+      stages: [
+        {
+          id: 'season',
+          name: 'League season',
+          format: { kind: 'round-robin', legs: 1 },
+          entrants: { kind: 'all-registered' },
+          schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+        },
+      ],
+    };
+    const legacy = [
+      { id: 'comp-1', label: '50 Over', structureId: 'stale-st', calendarId: 'stale-cal' },
+    ];
+    const KEY = 'stale-lg';
+    const base = { key: KEY, label: 'Stale League', group: 'Senior Leagues', district: 'KCCD' };
+
+    async function seed(before: TenantConfig): Promise<TenantConfig> {
+      const next: TenantConfig = {
+        ...before,
         calendars: [...(before.calendars ?? []), calendar],
-        structures: [...(before.structures ?? []), structure],
-        leagues: [...(before.leagues ?? []), league],
-      }),
-    });
-    assert.equal(setup.status, 200);
+        structures: [...(before.structures ?? []), structure as CompetitionStructure],
+        leagues: [...(before.leagues ?? []), { ...base, competitions: legacy }],
+      };
+      await repo.putTenantConfig(next);
+      return next;
+    }
+    const operatorLeagues = (leagues: unknown[]) =>
+      app.request('/platform/tenants/dolphins', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ leagues }),
+      });
+    const storedComps = async () =>
+      (await repo.getTenantConfig('dolphins'))?.leagues?.find((l) => l.key === KEY)?.competitions;
 
-    // Tenant admin tries to smuggle a different competitions array through a routine
-    // rename patch — a plausible forgery, and the exact one ADR 0008 fences off.
-    const forged = await app.request('/tenant/config', {
-      method: 'PUT',
-      headers: tenantHeaders(DOLPHINS_ADMIN, 'dolphins'),
-      body: JSON.stringify({
-        leagues: [
-          ...(before.leagues ?? []),
-          { ...league, label: 'Renamed by tenant admin', competitions: [] },
+    test('competitions deep-equal to stored are accepted unchanged; absent ones are kept', async (t) => {
+      const before = (await repo.getTenantConfig('dolphins'))!;
+      t.after(() => repo.putTenantConfig(before));
+      const seeded = await seed(before);
+
+      // Same content, keys in a different order — deep-equal, not byte-equal.
+      const echoed = seeded.leagues!.map((l) =>
+        l.key === KEY
+          ? { ...l, label: 'Stale League (renamed)', competitions: [{ ...legacy[0] }].reverse() }
+          : l,
+      );
+      const same = await operatorLeagues(echoed);
+      assert.equal(same.status, 200, await same.clone().text());
+      assert.deepEqual(await storedComps(), legacy);
+
+      // A new console that no longer sends competitions: nothing is stripped on save.
+      const omitted = seeded.leagues!.map((l) => {
+        if (l.key !== KEY) return l;
+        const { competitions: _c, ...rest } = l;
+        return rest;
+      });
+      const res = await operatorLeagues(omitted);
+      assert.equal(res.status, 200, await res.clone().text());
+      assert.deepEqual(await storedComps(), legacy);
+    });
+
+    test('an edited competitions array is a 409 console_stale — never silently ignored', async (t) => {
+      const before = (await repo.getTenantConfig('dolphins'))!;
+      t.after(() => repo.putTenantConfig(before));
+      const seeded = await seed(before);
+
+      for (const competitions of [
+        [{ ...legacy[0], label: 'T20' }],
+        [],
+        [
+          ...legacy,
+          { id: 'comp-2', label: 'T20', structureId: 'stale-st', calendarId: 'stale-cal' },
         ],
-      }),
+      ]) {
+        const res = await operatorLeagues(
+          seeded.leagues!.map((l) => (l.key === KEY ? { ...l, label: 'Edited', competitions } : l)),
+        );
+        assert.equal(res.status, 409, JSON.stringify(competitions));
+        const body = (await res.json()) as { error: string; code?: string };
+        assert.equal(body.code, 'console_stale');
+        assert.equal(body.error, 'this console is out of date — refresh it and try again');
+      }
+      const stored = (await repo.getTenantConfig('dolphins'))?.leagues?.find((l) => l.key === KEY);
+      assert.equal(stored?.label, 'Stale League', 'nothing was written');
+      assert.deepEqual(stored?.competitions, legacy);
     });
-    assert.equal(forged.status, 200);
 
-    const stored = await repo.getTenantConfig('dolphins');
-    const storedLeague = stored?.leagues?.find((l) => l.key === 'preserve-comp-lg');
-    assert.ok(storedLeague, 'league itself still saved (rename honoured)');
-    assert.equal(storedLeague?.label, 'Renamed by tenant admin', 'non-competition fields DO patch');
-    assert.deepEqual(
-      storedLeague?.competitions,
-      realCompetitions,
-      'competitions untouched by the tenant-admin patch, not emptied',
-    );
+    test('a brand-new league arriving WITH competitions is also stale', async (t) => {
+      const before = (await repo.getTenantConfig('dolphins'))!;
+      t.after(() => repo.putTenantConfig(before));
+      const res = await operatorLeagues([
+        ...(before.leagues ?? []),
+        { ...base, key: 'stale-new', competitions: legacy },
+      ]);
+      assert.equal(res.status, 409);
+      assert.equal(((await res.json()) as { code?: string }).code, 'console_stale');
+    });
   });
 });
 
@@ -2117,35 +2261,41 @@ describe('POST /platform/tenants/:slug/tutorial-upload/complete and /abort', () 
   });
 });
 
-describe('GET /platform/tenants/:slug/dns', () => {
-  test('returns the go-live steps as data', async () => {
+describe('GET /platform/tenants/:slug liveUrl (the DNS sheet is gone)', () => {
+  test('the DNS route is deleted', async () => {
     const res = await app.request('/platform/tenants/sharks/dns', {
       headers: platformHeaders(OPERATOR),
     });
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as {
-      tenant: string;
-      liveUrl: string | null;
-      steps: Array<{ key: string; title: string; detail: string; records?: unknown[] }>;
-    };
-    assert.equal(body.tenant, 'sharks');
-    // Vanity upsell is now a single web-cert reissue (no per-tenant API cert).
-    assert.deepEqual(
-      body.steps.map((s) => s.key),
-      ['web-certificate', 'client-dns', 'registry', 'deploy'],
-    );
-    // web + www CNAMEs (the client shares the platform API host — no api record here).
-    const dns = body.steps.find((s) => s.key === 'client-dns')!;
-    assert.equal(dns.records?.length, 2);
-    const registry = body.steps.find((s) => s.key === 'registry')!;
-    assert.match(registry.detail, /slug: 'sharks'/);
+    assert.equal(res.status, 404);
   });
 
-  test('unknown tenant → 404', async () => {
-    const res = await app.request('/platform/tenants/ghost/dns', {
+  test('GET carries a computed liveUrl that a PUT echoing the row cannot persist', async () => {
+    const res = await app.request('/platform/tenants/sharks', {
       headers: platformHeaders(OPERATOR),
     });
-    assert.equal(res.status, 404);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.ok('liveUrl' in body, 'liveUrl is on the response');
+    const { canonicalWebOrigin } = await import('../src/origins.js');
+    assert.equal(body.liveUrl, canonicalWebOrigin('sharks'));
+    assert.equal(
+      ((await repo.getTenantConfig('sharks')) as Record<string, unknown> | null)?.liveUrl,
+      undefined,
+      'response-only: never stored',
+    );
+
+    // The operator console round-trips the whole row — liveUrl included, even tampered.
+    const put = await app.request('/platform/tenants/sharks', {
+      method: 'PUT',
+      headers: platformHeaders(OPERATOR),
+      body: JSON.stringify({ ...body, liveUrl: 'https://evil.example' }),
+    });
+    assert.equal(put.status, 200, await put.clone().text());
+    assert.equal(
+      ((await repo.getTenantConfig('sharks')) as Record<string, unknown> | null)?.liveUrl,
+      undefined,
+      'the PUT whitelist has no liveUrl',
+    );
   });
 });
 
@@ -2625,18 +2775,15 @@ describe('competition defaults (ADR 0014)', () => {
   const CD_ADMIN = devAuthAs('cd-adm', 'admin@cd', [{ tenantId: T, role: 'admin', clubIds: [] }]);
   const CD_REP = devAuthAs('cd-rep', 'rep@cd', [{ tenantId: T, role: 'rep', clubIds: [] }]);
 
+  // Only the two config-only fields survive; the format fields reverted to built-ins.
   const full = {
-    matchFormats: [
-      { label: '50 Over (Red Ball)', overs: 50, ballType: 'Red' },
-      { label: 'T20 (Pink Ball)', overs: 20, ballType: 'Pink' },
-    ],
-    matchDays: [6],
-    timeSlots: [
-      { label: 'Morning', start: '09:00' },
-      { label: 'Afternoon', start: '14:00' },
-    ],
     travel: { costPerKm: 5, carsPerAwayTrip: 2 },
     venueAliases: { riversidebowl: 'riversideoval' },
+  };
+  const retired = {
+    matchFormats: [{ label: '50 Over (Red Ball)', overs: 50, ballType: 'Red' }],
+    matchDays: [6 as const],
+    timeSlots: [{ label: 'Morning', start: '09:00' }],
   };
 
   before(async () => {
@@ -2649,17 +2796,15 @@ describe('competition defaults (ADR 0014)', () => {
     });
   });
 
-  test('an operator PUT round-trips, trimmed, through GET /tenant/config', async () => {
+  test('an operator PUT round-trips, normalised, through GET /tenant/config; retired fields drop', async () => {
     const res = await app.request(`/platform/tenants/${T}`, {
       method: 'PUT',
       headers: OP,
       body: JSON.stringify({
         competitionDefaults: {
           ...full,
-          matchFormats: [
-            { ...full.matchFormats[0], label: ' 50 Over (Red Ball) ' },
-            full.matchFormats[1],
-          ],
+          ...retired,
+          venueAliases: { 'Riverside Bowl': 'riversideoval' },
         },
       }),
     });
@@ -2672,7 +2817,7 @@ describe('competition defaults (ADR 0014)', () => {
   });
 
   test('a tenant admin PUT /tenant/config writes it too — admin-level setup data, not stripped', async () => {
-    const next = { ...full, matchDays: [0, 6], travel: { costPerKm: 6, carsPerAwayTrip: 3 } };
+    const next = { ...full, travel: { costPerKm: 6, carsPerAwayTrip: 3 } };
     const res = await app.request('/tenant/config', {
       method: 'PUT',
       headers: tenantHeaders(CD_ADMIN, T),
@@ -2687,13 +2832,13 @@ describe('competition defaults (ADR 0014)', () => {
     const res = await app.request('/tenant/config', {
       method: 'PUT',
       headers: tenantHeaders(CD_REP, T),
-      body: JSON.stringify({ competitionDefaults: { matchDays: [1] } }),
+      body: JSON.stringify({ competitionDefaults: { travel: full.travel } }),
     });
     assert.equal(res.status, 403);
   });
 
   test('both write paths reject a malformed value with a 400', async () => {
-    const bad = { competitionDefaults: { matchFormats: [{ label: 'T20', overs: 0 }] } };
+    const bad = { competitionDefaults: { travel: { costPerKm: -1, carsPerAwayTrip: 3 } } };
     const op = await app.request(`/platform/tenants/${T}`, {
       method: 'PUT',
       headers: OP,
@@ -2708,17 +2853,15 @@ describe('competition defaults (ADR 0014)', () => {
     assert.equal(adm.status, 400);
   });
 
-  test('the anonymous GET /tenant serves only formats, days and slots — never travel or aliases', async () => {
+  test('the anonymous GET /tenant serves no competition defaults at all — never travel or aliases', async () => {
+    // Even a row still carrying the retired format fields exposes nothing.
+    const cfg = await repo.getTenantConfig(T);
+    await repo.putTenantConfig({ ...cfg!, competitionDefaults: { ...full, ...retired } });
     const res = await app.request('/tenant', { headers: { 'x-tenant': T } });
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { competitionDefaults: Record<string, unknown> };
-    assert.deepEqual(Object.keys(body.competitionDefaults).sort(), [
-      'matchDays',
-      'matchFormats',
-      'timeSlots',
-    ]);
-    assert.equal(body.competitionDefaults.travel, undefined);
-    assert.equal(body.competitionDefaults.venueAliases, undefined);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.equal(body.competitionDefaults, undefined);
+    assert.doesNotMatch(JSON.stringify(body), /riversideoval|costPerKm|matchFormats/);
   });
 });
 
@@ -3066,53 +3209,73 @@ describe('competition structures (ADR 0008)', () => {
     assert.equal(res.status, 200);
   });
 
-  test('a competition must point at a structure and calendar that exist', async () => {
+  test('a league setup must point at a structure and calendar that exist', async () => {
     await put({ structures: [structure()] });
     const league = { key: 'premier', label: 'Premier', group: 'Senior', district: 'All districts' };
 
     const badStructure = await put({
-      leagues: [
-        {
-          ...league,
-          competitions: [{ id: 'c1', label: '50 Over', structureId: 'ghost', calendarId: 'cal' }],
-        },
-      ],
+      leagues: [{ ...league, setup: { structureId: 'ghost', calendarId: 'cal' } }],
     });
     assert.equal(badStructure.status, 400);
     assert.match(await errorOf(badStructure), /structure that doesn't exist/);
 
     const badCalendar = await put({
-      leagues: [
-        {
-          ...league,
-          competitions: [
-            { id: 'c1', label: '50 Over', structureId: 'split-league', calendarId: 'ghost' },
-          ],
-        },
-      ],
+      leagues: [{ ...league, setup: { structureId: 'split-league', calendarId: 'ghost' } }],
     });
     assert.equal(badCalendar.status, 400);
     assert.match(await errorOf(badCalendar), /calendar that doesn't exist/);
 
     const ok = await put({
-      leagues: [
-        {
-          ...league,
-          competitions: [
-            { id: 'c1', label: '50 Over', structureId: 'split-league', calendarId: 'cal' },
-          ],
-        },
-      ],
+      leagues: [{ ...league, setup: { structureId: 'split-league', calendarId: 'cal' } }],
     });
     assert.equal(ok.status, 200);
+    assert.deepEqual((await repo.getTenantConfig(T))?.leagues?.[0]?.setup, {
+      structureId: 'split-league',
+      calendarId: 'cal',
+    });
   });
 
-  // `blockIndex` names a POSITION into whichever calendar the competition binds — the
-  // structure alone can't check it (it has no calendar), so this is enforced only once
-  // a competition actually binds a structure to a calendar. Each test uses its OWN
-  // structure id and league key, and the describe block restores the tenant's config
-  // afterward — the later "still used by 1 competition" test depends on
-  // `structures.length === 1`.
+  test('stored competitions, a league note and stage ladder/outcome are accepted as inert', async () => {
+    const before = await repo.getTenantConfig(T);
+    try {
+      // Written straight to the row (pre-setup data): a dangling legacy competition is
+      // neither validated nor stripped by an operator save that echoes it back unchanged.
+      const legacy = [{ id: 'c-old', label: 'Old', structureId: 'ghost', calendarId: 'ghost' }];
+      await repo.putTenantConfig({
+        ...before!,
+        leagues: (before!.leagues ?? []).map((l) =>
+          l.key === 'premier' ? { ...l, note: 'legacy note', competitions: legacy } : l,
+        ),
+      });
+      const echoed = (await repo.getTenantConfig(T))!;
+      const res = await put({
+        leagues: echoed.leagues,
+        structures: [
+          structure({
+            stages: [
+              stage('double-round', {
+                ladder: { winPoints: 4, tieBreakers: ['nrr'] },
+                outcome: { champion: [1] },
+              }),
+              stage('final-round'),
+            ],
+          }),
+        ],
+      });
+      assert.equal(res.status, 200, await res.clone().text());
+      const stored = (await repo.getTenantConfig(T))!.leagues!.find((l) => l.key === 'premier');
+      assert.deepEqual(stored?.competitions, legacy);
+      assert.equal((stored as { note?: string } | undefined)?.note, 'legacy note');
+    } finally {
+      await repo.putTenantConfig(before!);
+    }
+  });
+
+  // `blockIndex` names a POSITION into whichever calendar a league's setup binds — the
+  // structure alone can't check it (it has no calendar), so this is enforced only once a
+  // setup actually binds a structure to a calendar. Each test uses its OWN structure id
+  // and league key, and the describe block restores the tenant's config afterward — the
+  // later "still used by 1 league" test depends on `structures.length === 1`.
   describe('block-count check against the bound calendar', () => {
     let priorConfig: Awaited<ReturnType<typeof repo.getTenantConfig>>;
     before(async () => {
@@ -3147,18 +3310,11 @@ describe('competition structures (ADR 0008)', () => {
       };
 
       const overrun = await put({
-        leagues: [
-          {
-            ...league,
-            competitions: [
-              { id: 'c1', label: '50 Over', structureId: 'overrun-test', calendarId: 'cal' },
-            ],
-          },
-        ],
+        leagues: [{ ...league, setup: { structureId: 'overrun-test', calendarId: 'cal' } }],
       });
       assert.equal(overrun.status, 400);
       const msg = await errorOf(overrun);
-      assert.match(msg, /stage "only-stage"/);
+      assert.match(msg, /"Overrun League": stage "only-stage"/);
       assert.match(msg, /plays in block 2/);
       assert.match(msg, /has only 1 block/);
     });
@@ -3187,63 +3343,33 @@ describe('competition structures (ADR 0008)', () => {
       };
 
       const res = await put({
-        leagues: [
-          {
-            ...league,
-            competitions: [
-              { id: 'c1', label: '50 Over', structureId: 'inrange-test', calendarId: 'cal' },
-            ],
-          },
-        ],
+        leagues: [{ ...league, setup: { structureId: 'inrange-test', calendarId: 'cal' } }],
       });
       assert.equal(res.status, 200);
     });
   });
 
-  test('excludeTeamIds must be an array of team ids', async () => {
-    const league = { key: 'premier', label: 'Premier', group: 'Senior', district: 'All districts' };
-    const comp = (excludeTeamIds: unknown) => ({
-      leagues: [
-        {
-          ...league,
-          competitions: [
-            {
-              id: 'c1',
-              label: '50 Over',
-              structureId: 'split-league',
-              calendarId: 'cal',
-              excludeTeamIds,
-            },
-          ],
-        },
-      ],
-    });
-
-    // A bare string is iterable, so it would pass a naive check and then be read
-    // character by character on the client — the exact silent-wrong-answer case.
-    const asString = await put(comp('tm_a'));
-    assert.equal(asString.status, 400);
-    assert.match(await errorOf(asString), /excludeTeamIds must be an array/);
-
-    const withBlank = await put(comp(['tm_a', '  ']));
-    assert.equal(withBlank.status, 400);
-
-    const ok = await put(comp(['tm_a', 'tm_b']));
+  test('structure overs: a whole number 1-200 when present', async () => {
+    for (const overs of [0, 201, 20.5, '20'])
+      assert.equal(
+        (await put({ structures: [structure({ overs })] })).status,
+        400,
+        JSON.stringify(overs),
+      );
+    const ok = await put({ structures: [structure({ overs: 20 })] });
     assert.equal(ok.status, 200);
-    assert.deepEqual(
-      (await repo.getTenantConfig(T))?.leagues?.[0]?.competitions?.[0]?.excludeTeamIds,
-      ['tm_a', 'tm_b'],
-    );
+    assert.equal((await repo.getTenantConfig(T))?.structures?.[0]?.overs, 20);
+    await put({ structures: [structure()] });
   });
 
-  test('deleting a structure a competition still binds to is blocked', async () => {
+  test('deleting a structure a league is still set up on is blocked', async () => {
     const res = await put({ structures: [] });
     assert.equal(res.status, 409);
-    assert.match(await errorOf(res), /still used by 1 competition/);
+    assert.match(await errorOf(res), /still used by 1 league \(Premier\)/);
     assert.equal((await repo.getTenantConfig(T))?.structures?.length, 1);
   });
 
-  test('one PUT may add a structure and the competition that uses it together', async () => {
+  test('one PUT may add a structure and the league setup that uses it together', async () => {
     const stored = await repo.getTenantConfig(T);
     const res = await put({
       structures: [...(stored?.structures ?? []), structure({ id: 'flat', name: 'Flat' })],
@@ -3253,7 +3379,7 @@ describe('competition structures (ADR 0008)', () => {
           label: 'EMCU Division 1',
           group: 'Senior',
           district: 'All districts',
-          competitions: [{ id: 'c1', label: '50 Over', structureId: 'flat', calendarId: 'cal' }],
+          setup: { structureId: 'flat', calendarId: 'cal' },
         },
       ],
     });
@@ -3262,16 +3388,16 @@ describe('competition structures (ADR 0008)', () => {
 });
 
 /**
- * Calendar coverage warnings: a calendar block NO competition bound to it plays in is
- * reported in the PUT's `warnings` (never a 400), aggregated across every competition on
- * the calendar, and only on the save that changed the calendar's blocks, its bindings, or
- * the content of a structure bound to it.
+ * Calendar coverage warnings: a calendar block NO league set up on it plays in is reported
+ * in the PUT's `warnings` (never a 400), aggregated across every league setup on the
+ * calendar, and only on the save that changed the calendar's blocks, its setups, or the
+ * content of a structure set up on it.
  */
 describe('calendar coverage warnings', () => {
   const T = 'coverage';
   const OP = platformHeaders(OPERATOR);
   const COVERAGE_LINE =
-    '2026/27: Block 2 (Second half, 17 Jan 2027 → 26 Mar 2027) — no competition on this calendar uses it';
+    '2026/27: Block 2 (Second half, 17 Jan 2027 → 26 Mar 2027) — no league set up on this calendar uses it';
 
   const stageIn = (id: string, blockIndex: number) => ({
     id,
@@ -3293,18 +3419,12 @@ describe('calendar coverage warnings', () => {
     { id: 'second-only', name: 'Second half only', version: 1, stages: [stageIn('rr', 1)] },
     { id: 'overrun', name: 'Overrun', version: 1, stages: [stageIn('rr', 2)] },
   ];
-  const league = (key: string, label: string, competitions: ReturnType<typeof comp>[]) => ({
+  const league = (key: string, label: string, structureId?: string) => ({
     key,
     label,
     group: 'Senior',
     district: 'All districts',
-    competitions,
-  });
-  const comp = (id: string, label: string, structureId: string) => ({
-    id,
-    label,
-    structureId,
-    calendarId: 'season',
+    ...(structureId ? { setup: { structureId, calendarId: 'season' } } : {}),
   });
   const put = (body: unknown) =>
     app.request(`/platform/tenants/${T}`, {
@@ -3321,41 +3441,33 @@ describe('calendar coverage warnings', () => {
       branding: { name: 'Coverage Union', title: 'Cov', logoUrl: '', colors: {}, copy: {} },
       submissionDeadline: '2026-12-31',
       knownClubs: [],
-      leagues: [league('premier', 'Premier', [])],
+      leagues: [league('premier', 'Premier')],
       calendars: [calendar],
       structures,
     });
   });
 
-  test('binding a structure that uses only block 1 to a 2-block calendar warns', async () => {
-    const res = await put({
-      leagues: [league('premier', 'Premier', [comp('t20', 'T20', 'first-only')])],
-    });
+  test('setting a league up on a structure that uses only block 1 of a 2-block calendar warns', async () => {
+    const res = await put({ leagues: [league('premier', 'Premier', 'first-only')] });
     assert.equal(res.status, 200);
     assert.deepEqual(await warningsOf(res), [COVERAGE_LINE]);
   });
 
-  test('two competitions covering the shared calendar between them do not warn', async () => {
+  test('two per-format leagues covering the shared calendar between them do not warn', async () => {
     const res = await put({
       leagues: [
-        league('premier', 'Premier', [
-          comp('t20', 'T20', 'first-only'),
-          comp('fifty', '50 Over', 'second-only'),
-        ]),
+        league('premier', 'Premier', 'first-only'),
+        league('premier-50', 'Premier 50 Over', 'second-only'),
       ],
     });
     assert.equal(res.status, 200);
     assert.deepEqual(await warningsOf(res), []);
   });
 
-  test('a later save that leaves bindings and the calendar alone does not re-warn', async () => {
-    const first = await put({
-      leagues: [league('premier', 'Premier', [comp('t20', 'T20', 'first-only')])],
-    });
+  test('a later save that leaves setups and the calendar alone does not re-warn', async () => {
+    const first = await put({ leagues: [league('premier', 'Premier', 'first-only')] });
     assert.deepEqual(await warningsOf(first), [COVERAGE_LINE]);
-    const renamed = await put({
-      leagues: [league('premier', 'Premier League', [comp('t20', 'T20', 'first-only')])],
-    });
+    const renamed = await put({ leagues: [league('premier', 'Premier League', 'first-only')] });
     assert.equal(renamed.status, 200);
     assert.deepEqual(await warningsOf(renamed), []);
   });
@@ -3369,13 +3481,13 @@ describe('calendar coverage warnings', () => {
     };
     const bind = await put({
       structures: [...structures, covering],
-      leagues: [league('premier', 'Premier', [comp('t20', 'T20', 'both-halves')])],
+      leagues: [league('premier', 'Premier', 'both-halves')],
     });
     assert.equal(bind.status, 200);
     assert.deepEqual(await warningsOf(bind), [], 'a covering structure raises nothing');
 
     // Only the structure changes: its block-2 stage moves into block 1. Neither the
-    // calendar's blocks nor the binding tuples change, yet Block 2 is now uncovered.
+    // calendar's blocks nor the setup tuples change, yet Block 2 is now uncovered.
     const moved = { ...covering, stages: [stageIn('rr', 0), stageIn('ko', 0)] };
     const res = await put({ structures: [...structures, moved] });
     assert.equal(res.status, 200);
@@ -3388,11 +3500,67 @@ describe('calendar coverage warnings', () => {
   });
 
   test('a stage past the end of the bound calendar is still a 400', async () => {
-    const res = await put({
-      leagues: [league('premier', 'Premier', [comp('bad', 'Bad', 'overrun')])],
-    });
+    const res = await put({ leagues: [league('premier', 'Premier', 'overrun')] });
     assert.equal(res.status, 400);
     assert.match(((await res.json()) as { error: string }).error, /has only 2 blocks/);
+  });
+
+  test('re-pointing a setup warns for its ungenerated runs; a first-time setup with none does not', async () => {
+    const other = {
+      id: 'season-2',
+      label: '2027/28',
+      blocks: [{ id: 'b1', label: 'First half', start: '2027-09-12', end: '2027-12-12' }],
+    };
+    const set = await put({
+      calendars: [calendar, other],
+      leagues: [league('premier', 'Premier', 'both')],
+      structures: [
+        ...structures,
+        { id: 'both', name: 'Both', version: 1, stages: [stageIn('rr', 0), stageIn('ko', 1)] },
+      ],
+    });
+    assert.equal(set.status, 200, await set.clone().text());
+    assert.deepEqual(await warningsOf(set), [], 'first-time setup, no runs to move');
+
+    const run = (id: string, generated: boolean) => ({
+      id,
+      leagueKey: 'premier',
+      seasonLabel: id,
+      structureSnapshot: structures[0],
+      calendarSnapshot: calendar,
+      stages: [
+        {
+          specId: 'rr',
+          status: generated ? 'generated' : 'awaiting-entrants',
+          groups: generated ? [{ id: 'g1', label: 'A', entrants: [], seriesId: 's-x' }] : [],
+        },
+      ],
+      version: 1,
+    });
+    await repo.putSeasonRun(T, run('run-a', false) as never);
+    await repo.putSeasonRun(T, run('run-b', false) as never);
+    await repo.putSeasonRun(T, run('run-done', true) as never);
+
+    const cfg = (await repo.getTenantConfig(T))!;
+    const repointed = await put({
+      leagues: cfg.leagues!.map((l) => ({
+        ...l,
+        setup: { structureId: 'first-only', calendarId: 'season-2' },
+      })),
+    });
+    assert.equal(repointed.status, 200, await repointed.clone().text());
+    assert.ok(
+      (await warningsOf(repointed)).includes(
+        '2 ungenerated season runs of "Premier" will follow the new dates',
+      ),
+    );
+
+    // A rename that leaves the setup where it is fires neither warning.
+    const renamed = await put({
+      leagues: (await repo.getTenantConfig(T))!.leagues!.map((l) => ({ ...l, label: 'Premier!' })),
+    });
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(await warningsOf(renamed), []);
   });
 });
 
@@ -3403,30 +3571,32 @@ describe('season runs (ADR 0008)', () => {
   const REP = devAuthAs('sr-rep', 'rep@sr', [{ tenantId: T, role: 'rep', clubIds: ['alpha'] }]);
   const H = (auth: string) => tenantHeaders(auth, T);
 
+  const STRUCTURE: CompetitionStructure = {
+    id: 'split',
+    name: 'Split',
+    version: 1,
+    stages: [
+      {
+        id: 's1',
+        name: 'Double round',
+        format: { kind: 'round-robin', legs: 2 },
+        entrants: { kind: 'manual' },
+        schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
+      },
+    ],
+  };
+  const CALENDAR: SeasonCalendar = {
+    id: 'cal',
+    label: '2026/27',
+    blocks: [{ id: 'b1', label: 'Block 1', start: '2026-09-13', end: '2026-12-13' }],
+  };
+  // Snapshots still ride along for the repo-seeded runs below; POST ignores them.
   const run = (extra: Record<string, unknown> = {}) => ({
     id: 'run-1',
     leagueKey: 'premier',
-    competitionId: 'c1',
     seasonLabel: '2026/27',
-    structureSnapshot: {
-      id: 'split',
-      name: 'Split',
-      version: 1,
-      stages: [
-        {
-          id: 's1',
-          name: 'Double round',
-          format: { kind: 'round-robin', legs: 2 },
-          entrants: { kind: 'manual' },
-          schedule: { blockIndex: 0, cadence: { kind: 'weekly' } },
-        },
-      ],
-    },
-    calendarSnapshot: {
-      id: 'cal',
-      label: '2026/27',
-      blocks: [{ id: 'b1', label: 'Block 1', start: '2026-09-13', end: '2026-12-13' }],
-    },
+    structureSnapshot: STRUCTURE,
+    calendarSnapshot: CALENDAR,
     stages: [],
     version: 1,
     ...extra,
@@ -3443,6 +3613,8 @@ describe('season runs (ADR 0008)', () => {
       knownClubs: [],
       leagues: [],
     });
+    // POST /season-runs freezes the structure + calendar the league's setup names.
+    await bindSetup(repo, T, { leagueKey: 'premier', structure: STRUCTURE, calendar: CALENDAR });
   });
 
   test('admin creates a run; it lists and reads back', async () => {
@@ -3467,11 +3639,32 @@ describe('season runs (ADR 0008)', () => {
     assert.equal((await post(run({ id: 'rep-run' }), REP)).status, 403);
   });
 
-  test('rejects a run missing its structure or calendar snapshot', async () => {
-    const noStructure = await post(run({ id: 'r2', structureSnapshot: undefined }));
-    assert.equal(noStructure.status, 400);
-    const noCalendar = await post(run({ id: 'r3', calendarSnapshot: undefined }));
-    assert.equal(noCalendar.status, 400);
+  test('rejects a run for a league with no setup, or an unknown league', async () => {
+    // Snapshots are server-fetched, so the league's setup is what must resolve.
+    const cfg = await repo.getTenantConfig(T);
+    await repo.putTenantConfig({
+      ...cfg!,
+      leagues: [
+        ...(cfg!.leagues ?? []),
+        { key: 'bare', label: 'Bare', group: 'Test', district: 'All districts' },
+      ],
+    });
+    const unset = await post(run({ id: 'r2', leagueKey: 'bare' }));
+    assert.equal(unset.status, 400);
+    assert.equal(((await unset.json()) as { code?: string }).code, 'setup_missing');
+    const unknownLeague = await post(run({ id: 'r3', leagueKey: 'nope' }));
+    assert.equal(unknownLeague.status, 400);
+  });
+
+  test('the quick-start route is gone', async () => {
+    const res = await app.request('/season-runs/quick-start', {
+      method: 'POST',
+      headers: H(ADMIN),
+      body: JSON.stringify({ leagueKey: 'premier', templateId: 'flat-round-robin' }),
+    });
+    // No route of its own any more: it falls through to nothing that creates a run.
+    assert.notEqual(res.status, 201);
+    assert.equal((await repo.listSeasonRuns(T)).length, 1);
   });
 
   test('rejects a duplicate id rather than silently overwriting a live season', async () => {

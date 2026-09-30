@@ -325,12 +325,9 @@ export function teamCounts(
 /**
  * Every side registered for a league, in a stable order — the pool a season draws on.
  *
- * `excludeTeamIds` (from the bound Competition) drops sides entered in the LEAGUE but not
- * in this competition: a club that plays the 50 Over and sits out the T20. Honouring it
- * here is what makes the field true — declared but unread, it promised an exclusion the
- * runtime ignored, which is worse than not having the field at all.
- *
- * It filters on teamId, not clubId, so a club can enter one side and hold another back.
+ * There is no exclusion list: a league has one setup, and a side sitting a stage out is
+ * handled by the stage-level Edit-entrants flow, which supersedes the retired
+ * per-competition exclusion list.
  *
  * ── The affiliation gate ──
  * A club that has not submitted its affiliation form is not yet in the season. The CALLER
@@ -351,17 +348,14 @@ export function teamCounts(
 export function leagueParticipants<C extends ClubSidesSource & { leagues?: string[] }>(
   clubs: C[],
   leagueKey: string,
-  exclude: string[] = [],
   options: ParticipantGateOptions<C> = {},
 ): (TeamParticipant & { club: C })[] {
-  const dropped = new Set(exclude);
   const gate =
     options.isAffiliated && !options.includeUnaffiliated ? options.isAffiliated : undefined;
   return (clubs || [])
     .filter((c) => Array.isArray(c.leagues) && c.leagues.includes(leagueKey))
     .filter((c) => !gate || gate(c))
-    .flatMap((c) => clubTeamsForLeague(c, leagueKey).map((p) => ({ ...p, club: c })))
-    .filter((p) => !dropped.has(p.teamId));
+    .flatMap((c) => clubTeamsForLeague(c, leagueKey).map((p) => ({ ...p, club: c })));
 }
 
 /**
@@ -370,6 +364,12 @@ export function leagueParticipants<C extends ClubSidesSource & { leagues?: strin
  */
 export function isAffiliated(club: { affiliation?: string }): boolean {
   return club.affiliation === 'complete';
+}
+
+/** {@link leagueParticipantsWithStatus}' result: the gated pool and the sides held back. */
+export interface ParticipantsWithStatus<C> {
+  participants: (TeamParticipant & { club: C })[];
+  unaffiliated: (TeamParticipant & { club: C })[];
 }
 
 /** Options for {@link leagueParticipants}' affiliation gate. */
@@ -385,8 +385,8 @@ export interface ParticipantGateOptions<C> {
 
 /**
  * The gated pool plus the sides the gate held back, so a console can list them greyed
- * with an "Include anyway". `excludeTeamIds` is honoured on both lists: a side the
- * competition excludes is not "held back by affiliation", it is not entered at all.
+ * with an "Include anyway". No exclusion list: the stage-level Edit-entrants flow
+ * supersedes the retired per-competition exclusion list.
  *
  * `isAffiliated` is required here — without it nothing is ever held back, and the caller
  * wants {@link leagueParticipants}.
@@ -394,13 +394,9 @@ export interface ParticipantGateOptions<C> {
 export function leagueParticipantsWithStatus<C extends ClubSidesSource & { leagues?: string[] }>(
   clubs: C[],
   leagueKey: string,
-  exclude: string[] = [],
   isAffiliated: (club: C) => boolean,
-): {
-  participants: (TeamParticipant & { club: C })[];
-  unaffiliated: (TeamParticipant & { club: C })[];
-} {
-  const all = leagueParticipants(clubs, leagueKey, exclude);
+): ParticipantsWithStatus<C> {
+  const all = leagueParticipants(clubs, leagueKey);
   return {
     participants: all.filter((p) => isAffiliated(p.club)),
     unaffiliated: all.filter((p) => !isAffiliated(p.club)),
