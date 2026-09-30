@@ -24,8 +24,12 @@ function semisAndFinal(
   ];
 }
 
-/** Top two per group, crossed: G1-1 v G2-2, G2-1 v G1-2, then the final. */
-function crossPoolTopTwo(name: string, sizes: number[]): CompetitionRecipe {
+/**
+ * Top two per group, crossed: G1-1 v G2-2, G2-1 v G1-2, then the final. The handover says
+ * "top 2 cross-pool semis" without the exact pairing, so the crossing is an assumption and
+ * carries a confirm note naming the league.
+ */
+function crossPoolTopTwo(leagueLabel: string, name: string, sizes: number[]): CompetitionRecipe {
   return {
     name,
     format: {
@@ -38,6 +42,7 @@ function crossPoolTopTwo(name: string, sizes: number[]): CompetitionRecipe {
     cricketMatchFormat: 'T20',
     expectedGroupSizes: sizes,
     laterFixtures: semisAndFinal([gp(1, 1), gp(2, 2)], [gp(2, 1), gp(1, 2)]),
+    confirm: `${leagueLabel} ${name}: semis are the top two per group; the pairing is not specified (exported crossed as G1-1 v G2-2, G2-1 v G1-2). Confirm with Dolphins.`,
   };
 }
 
@@ -111,7 +116,7 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
     },
     premierWomen: {
       competitions: {
-        t20: crossPoolTopTwo('T20', [4, 4]),
+        t20: crossPoolTopTwo('Premier Women', 'T20', [4, 4]),
         '30-over': {
           name: '30 Over',
           format: { type: 'league', rounds: 2, extraPhases: [], teamsPerGroup: 4 },
@@ -133,7 +138,7 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
       group: 'Overarching Leagues',
       district: 'All districts',
       competitions: {
-        t20: crossPoolTopTwo('T20', [6, 6]),
+        t20: crossPoolTopTwo('Veterans Premier', 'T20', [6, 6]),
         '30-over': {
           name: '30 Over',
           format: { type: 'league', rounds: 1, extraPhases: [], teamsPerGroup: 12 },
@@ -154,7 +159,8 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
             rounds: 1,
             extraPhases: [],
             teamsPerGroup: 8,
-            advancePerGroup: 2,
+            // No advancePerGroup: only G1 1st and G2 2nd go through, which no per-group count
+            // expresses. The explicit final fixture below is the truth.
           },
           cricketMatchFormat: 'T20',
           expectedGroupSizes: [7, 8],
@@ -162,7 +168,7 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
             { slotId: 'final', stage: 'Final', round: 1, home: gp(1, 1), away: gp(2, 2) },
           ],
           confirm:
-            'Veterans Promotion T20: the final is G1 1st v G2 2nd (uneven 7+8 groups). Confirm this is intentional.',
+            'Veterans Promotion T20: the final is G1 1st v G2 2nd (uneven 7+8 groups), so one side qualifies from Group 1 and one (the runner-up) from Group 2; exported without advancePerGroup, the final fixture carries the rule. Confirm this is intentional.',
         },
         '30-over': {
           name: '30 Over',

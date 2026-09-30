@@ -258,3 +258,113 @@ describe('a setup league through buildBundle', () => {
     assert.ok(MedicoachBundleSchema.safeParse(bundle).success);
   });
 });
+
+describe('season runs: snapshot precedence and multiple runs', () => {
+  const split = structure('st-2026-27-split-league-swap');
+  const flat = structure('st-2026-27-flat-round-robin');
+  const cal = config.calendars!.find((c) => c.id === 'cal-2026-27')!;
+  const teams = Array.from({ length: 12 }, (_, i) => `club${i + 1}`);
+  const participants = teams.map((t) => ({ teamId: t, clubId: t, name: t.toUpperCase() }));
+  // The catalogue setup now names the FLAT structure: an operator edited it after the run started.
+  const cfg = {
+    ...config,
+    leagues: [
+      {
+        key: 'div1',
+        label: 'Division 1',
+        group: 'Seniors',
+        district: 'All districts',
+        setup: { structureId: flat.id, calendarId: cal.id },
+      },
+    ],
+  } as TenantConfig;
+  const makeRun = (id: string, createdAt: string) => {
+    const sid = (g: number) => `s-${id}-double-round-g${g}`;
+    const run = {
+      id,
+      leagueKey: 'div1',
+      seasonLabel: '2026/27',
+      structureSnapshot: split,
+      calendarSnapshot: cal,
+      createdAt,
+      version: 1,
+      stages: [
+        {
+          specId: 'double-round',
+          status: 'generated',
+          groups: [
+            { id: 'g1', label: 'Top group', entrants: teams.slice(0, 6), seriesId: sid(1) },
+            { id: 'g2', label: 'Bottom group', entrants: teams.slice(6), seriesId: sid(2) },
+          ],
+        },
+        { specId: 'final-round', status: 'awaiting-entrants', groups: [] },
+      ],
+    } as SeasonRun;
+    const series = [1, 2].map(
+      (g) =>
+        ({
+          id: sid(g),
+          name: `Division 1 · Double round · Group ${g}`,
+          seasonRunId: id,
+          stageSpecId: 'double-round',
+          groupId: `g${g}`,
+          teams: g === 1 ? teams.slice(0, 6) : teams.slice(6),
+          participants: participants.filter((p) =>
+            (g === 1 ? teams.slice(0, 6) : teams.slice(6)).includes(p.teamId),
+          ),
+          fixtures: [
+            {
+              id: 'f1',
+              round: 1,
+              date: '2026-10-03',
+              home: teams[(g - 1) * 6],
+              away: teams[(g - 1) * 6 + 1],
+            },
+          ],
+          released: true,
+          releasedAt: null,
+          version: 1,
+          startDate: '2026-10-03',
+        }) as Series,
+    );
+    return { run, series };
+  };
+  const build = (runs: Array<ReturnType<typeof makeRun>>) =>
+    buildBundle({
+      tenant: 'acme',
+      config: cfg,
+      clubs: [],
+      playersByClub: new Map(),
+      series: runs.flatMap((r) => r.series),
+      seasonRuns: runs.map((r) => r.run),
+      recipes: { tenant: 'acme', utcOffset: '+02:00', leagues: {} },
+      options: { generatedAt: 'x' },
+    });
+
+  test('a run maps from its own structure snapshot, not the since-edited catalogue setup', () => {
+    const { bundle } = build([makeRun('run-1', '2026-08-01T00:00:00Z')]);
+    const c = bundle.leagues[0].competitions[0];
+    assert.equal(c.name, split.name);
+    assert.deepEqual(c.format.extraPhases, [{ type: 'league', rounds: 1, groupSeeding: 'carry' }]);
+    assert.equal(c.format.rounds, 2);
+    assert.equal(bundle.leagues[0].relegation.swaps.length, 1);
+    assert.ok(c.fixtures.every((f) => f.stage === 'Double round' && f.phase === 1));
+  });
+
+  test('two runs on one league: newest is `main`, the older `main-<runId>`, and the bundle validates', () => {
+    const { bundle, summary } = build([
+      makeRun('run-old', '2025-08-01T00:00:00Z'),
+      makeRun('run-new', '2026-08-01T00:00:00Z'),
+    ]);
+    const comps = bundle.leagues[0].competitions;
+    assert.deepEqual(
+      comps.map((c) => c.externalRef),
+      ['smartclub:acme:competition:div1:main', 'smartclub:acme:competition:div1:main-run-old'],
+    );
+    assert.ok(comps[0].fixtures[0].externalRef.includes('s-run-new-'));
+    assert.deepEqual(summary.leagues.multiRun, ['div1']);
+    assert.equal(summary.warnings.filter((w) => /season runs/.test(w)).length, 1);
+    const r = MedicoachBundleSchema.safeParse(bundle);
+    assert.ok(r.success, r.success ? '' : r.error.issues.map((i) => i.message).join('\n'));
+  });
+});

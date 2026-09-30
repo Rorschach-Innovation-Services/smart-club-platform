@@ -20,7 +20,7 @@ import type { Club, PlayerRegistration, TenantConfig, VeteransAffiliation } from
 // export-medicoach.ts imports repo.ts, which resolves the table name at import time. The
 // test never touches DynamoDB; the name only has to exist.
 process.env.TABLE_NAME ??= 'medicoach-export-test-unused';
-const { parseArgs } = await import('../src/export-medicoach.js');
+const { parseArgs, UsageError } = await import('../src/export-medicoach.js');
 
 const T = 'acme';
 const config = {
@@ -298,5 +298,13 @@ describe('masking and args', () => {
     );
     assert.throws(() => parseArgs(['--out', 'o.json']), /--tenant is required/);
     assert.throws(() => parseArgs(['--tenant', 'd', '--bogus']), /unknown argument/);
+  });
+
+  test('an explicitly empty --leagues list is a usage error, not "export everything"', () => {
+    for (const empty of [',', ' , ,'])
+      assert.throws(
+        () => parseArgs(['--tenant', 'd', '--out', 'o.json', '--leagues', empty]),
+        (e: Error) => e instanceof UsageError && /at least one league key/.test(e.message),
+      );
   });
 });

@@ -49,3 +49,9 @@ cohort-export-*.xlsx
 # Playwright E2E (browser-driven admin tests)
 test-results/
 playwright-report/
+
+# MedicoachBundle exports from export-medicoach (names, emails, cells, dates of birth) —
+# never commit. Default --out names like dolphins-bundle.json / dolphins-bundle-dev.json.
+# The pinned test inputs under packages/api/test/data/medicoach/ don't match either pattern.
+*-bundle*.json
+*medicoach*bundle*.json

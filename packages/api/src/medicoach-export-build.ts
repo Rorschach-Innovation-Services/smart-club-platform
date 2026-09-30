@@ -10,9 +10,11 @@
  *   - Leagues: catalogue entries minus `seed-*` / `demo` (and minus anything outside
  *     `--leagues`), plus leagueKeys that only appear on series (synthesised from recipes).
  *   - Competitions: one per format stream. Plan-B series are grouped by (leagueKey, stream)
- *     where the stream comes from the series name "League · Stream · Group". Season-run
- *     series form one `main` competition per league. The format comes from the league's
- *     `setup` structure, else the tenant recipe, else inference from the fixtures.
+ *     where the stream comes from the series name "League · Stream · Group" (`series` when
+ *     the name has no stream). Season-run series form one competition per run: the newest
+ *     run is stream `main`, older runs `main-<runId>`. A run's format comes from its own
+ *     structure snapshot (else the league's setup structure); Plan-B streams use the
+ *     tenant recipe, else inference from the fixtures.
  *   - Teams: `clubTeamsForLeague` for clubs registered in the league, plus any series
  *     participant not already covered. Team refs always include the leagueKey.
  *   - Fixtures: cancelled → skipped and counted; postponed → scheduled with a note;
@@ -86,6 +88,8 @@ export interface ExportSummary {
     excluded: string[];
     synthesised: string[];
     withoutCompetitions: string[];
+    /** Leagues with 2+ season runs: the newest exports as stream `main`, older ones as `main-<runId>`. */
+    multiRun: string[];
   };
   competitions: Array<{
     league: string;
@@ -101,9 +105,12 @@ export interface ExportSummary {
     exported: number;
     placeholders: number;
     cancelledSkipped: number;
+    /** Postponed fixtures present in the final bundle (after orphan and league drops). */
     postponed: number;
+    /** Fixtures marked completed in smart club, present in the final bundle. */
     completedInSource: number;
     undatedSkipped: number;
+    missingIdSkipped: number;
     unresolvedSideSkipped: number;
     orphanSlotSkipped: number;
     seriesUnmatched: string[];
@@ -472,7 +479,7 @@ export interface SourceFixture {
 }
 
 export type FixtureOutcome =
-  | { kind: 'skip'; reason: 'cancelled' | 'undated' | 'unresolved-side' }
+  | { kind: 'skip'; reason: 'cancelled' | 'undated' | 'unresolved-side' | 'missing-id' }
   | { kind: 'ok'; fixture: BundleFixture; postponed: boolean; completed: boolean };
 
 export interface FixtureContext {
@@ -501,6 +508,8 @@ export function scheduledInstant(date: string, time: string | undefined, offset:
  */
 export function mapFixture(f: SourceFixture, ctx: FixtureContext): FixtureOutcome {
   const status = f.status ?? null;
+  // A fixture without an id can't get a stable ref; guessing one would duplicate on re-import.
+  if (f.id == null || String(f.id).trim() === '') return { kind: 'skip', reason: 'missing-id' };
   if (status === 'cancelled') return { kind: 'skip', reason: 'cancelled' };
   if (!f.date || !/^\d{4}-\d{2}-\d{2}$/.test(f.date)) return { kind: 'skip', reason: 'undated' };
 
@@ -597,7 +606,7 @@ export function buildBundle(input: BuildInputs): BuildResult {
   const confirmations: string[] = [];
 
   const summary: ExportSummary = {
-    leagues: { exported: [], excluded: [], synthesised: [], withoutCompetitions: [] },
+    leagues: { exported: [], excluded: [], synthesised: [], withoutCompetitions: [], multiRun: [] },
     competitions: [],
     fixtures: {
       read: 0,
@@ -607,6 +616,7 @@ export function buildBundle(input: BuildInputs): BuildResult {
       postponed: 0,
       completedInSource: 0,
       undatedSkipped: 0,
+      missingIdSkipped: 0,
       unresolvedSideSkipped: 0,
       orphanSlotSkipped: 0,
       seriesUnmatched: [],
@@ -735,7 +745,8 @@ export function buildBundle(input: BuildInputs): BuildResult {
       w.runs.set(run.id, entry);
     } else {
       const { streamLabel, groupLabel } = parseSeriesName(s.name);
-      const stream = streamLabel ? slugify(streamLabel) || 'main' : 'main';
+      // `series`, not `main`: `main` belongs to the league's season-run competition.
+      const stream = streamLabel ? slugify(streamLabel) || 'series' : 'series';
       const entry = w.streams.get(stream) ?? { label: streamLabel, items: [] };
       entry.items.push({ series: s, groupLabel });
       w.streams.set(stream, entry);
@@ -831,15 +842,18 @@ export function buildBundle(input: BuildInputs): BuildResult {
         : null;
     };
 
+    let missingIds = 0;
     const collect = (outcome: FixtureOutcome, into: BundleFixture[]) => {
       if (outcome.kind === 'skip') {
         if (outcome.reason === 'cancelled') summary.fixtures.cancelledSkipped++;
         else if (outcome.reason === 'undated') summary.fixtures.undatedSkipped++;
-        else summary.fixtures.unresolvedSideSkipped++;
+        else if (outcome.reason === 'missing-id') {
+          summary.fixtures.missingIdSkipped++;
+          missingIds++;
+        } else summary.fixtures.unresolvedSideSkipped++;
         return;
       }
-      if (outcome.postponed) summary.fixtures.postponed++;
-      if (outcome.completed) summary.fixtures.completedInSource++;
+      // postponed/completed are tallied from the final bundle, after orphan and league drops.
       into.push(outcome.fixture);
     };
 
@@ -847,12 +861,32 @@ export function buildBundle(input: BuildInputs): BuildResult {
     const setupStructure = w.catalogue?.setup
       ? structuresById.get(w.catalogue.setup.structureId)
       : undefined;
-    for (const { run, series } of w.runs.values()) {
-      const structure = setupStructure ?? run.structureSnapshot;
+    // Newest run first: it keeps stream `main`; older runs export as `main-<runId>` so the
+    // competition refs stay unique (a league normally has one run per season).
+    const runsNewestFirst = [...w.runs.values()].sort(
+      (a, b) =>
+        str(b.run.createdAt).localeCompare(str(a.run.createdAt)) ||
+        b.run.id.localeCompare(a.run.id),
+    );
+    if (runsNewestFirst.length > 1) {
+      summary.leagues.multiRun.push(w.key);
+      warnings.push(
+        `league ${w.key}: ${runsNewestFirst.length} season runs; newest (${runsNewestFirst[0].run.id}) is stream "main", older runs are "main-<runId>"`,
+      );
+    }
+    for (const [ri, { run, series }] of runsNewestFirst.entries()) {
+      // The run's own snapshot is what its series were generated from; the catalogue
+      // structure may have been edited since (a new version never reshapes a running season).
+      const structure = run.structureSnapshot ?? setupStructure;
+      if (!structure) {
+        warnings.push(`league ${w.key}: run ${run.id} has no structure; skipped`);
+        continue;
+      }
       const mapping = mapStructureToFormat(structure);
       for (const m of mapping.warnings) warnings.push(`league ${w.key}: ${m}`);
       const seriesById = new Map(series.map((s) => [s.id, s]));
-      const compRef = refs.competition(tenant, w.key, 'main');
+      const stream = ri === 0 ? 'main' : `main-${slugify(run.id) || ri}`;
+      const compRef = refs.competition(tenant, w.key, stream);
       const groups: BundleGroup[] = [];
       const fixtures: BundleFixture[] = [];
       const firstStage = run.stages[0];
@@ -916,7 +950,7 @@ export function buildBundle(input: BuildInputs): BuildResult {
       const overs = structure.overs ?? optNum(series[0]?.maxOvers);
       competitions.push({
         externalRef: compRef,
-        stream: 'main',
+        stream,
         name: structure.name,
         formatSource: 'setup',
         format: {
@@ -930,10 +964,6 @@ export function buildBundle(input: BuildInputs): BuildResult {
         groups,
         fixtures,
       });
-      if (w.runs.size > 1)
-        warnings.push(
-          `league ${w.key}: ${w.runs.size} season runs; each exports as competition "main" (refs collide)`,
-        );
     }
 
     // Plan-B streams → one competition per stream.
@@ -1048,6 +1078,10 @@ export function buildBundle(input: BuildInputs): BuildResult {
         warnings.push(`league ${w.key}: recipe stream "${stream}" has no series; not exported`);
 
     if (recipe?.confirm) confirmations.push(`${w.key}: ${recipe.confirm}`);
+    if (missingIds)
+      warnings.push(
+        `league ${w.key}: ${missingIds} fixture(s) have no id; skipped (no stable ref)`,
+      );
 
     // Remove fixtures whose slot source was skipped (cancelled/undated), transitively.
     for (const c of competitions) {
@@ -1179,6 +1213,12 @@ export function buildBundle(input: BuildInputs): BuildResult {
       ...(recipe?.confirm ? { confirm: recipe.confirm } : {}),
     });
     summary.leagues.exported.push(w.key);
+  }
+
+  // Status tallies from what the bundle actually holds (after orphan-slot and league drops).
+  for (const f of leagues.flatMap((l) => l.competitions.flatMap((c) => c.fixtures))) {
+    if (f.sourceStatus === 'postponed') summary.fixtures.postponed++;
+    if (f.sourceStatus === 'completed') summary.fixtures.completedInSource++;
   }
 
   // Drop relegations into leagues that are not in this bundle (e.g. a --leagues filter).

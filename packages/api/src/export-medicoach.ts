@@ -20,7 +20,7 @@
  * counts) before it is written. An invalid bundle is not written and the run exits 1.
  */
 import { randomUUID } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
+import { chmod, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MedicoachBundleSchema } from './medicoach-bundle.js';
@@ -46,6 +46,14 @@ interface Args {
 const USAGE =
   'usage: export-medicoach --tenant <t> --out <file> [--leagues k1,k2] [--include-inactive-players] [--confirm]';
 
+/** A bad command line: main() exits 2 for these (1 is for runtime/validation failures). */
+export class UsageError extends Error {
+  constructor(message: string) {
+    super(`${message}\n${USAGE}`);
+    this.name = 'UsageError';
+  }
+}
+
 export function parseArgs(argv: string[]): Args {
   let tenant: string | undefined;
   let out: string | undefined;
@@ -56,22 +64,24 @@ export function parseArgs(argv: string[]): Args {
     const flag = argv[i];
     const value = () => {
       const v = argv[++i];
-      if (!v || v.startsWith('--')) throw new Error(`${flag} needs a value\n${USAGE}`);
+      if (!v || v.startsWith('--')) throw new UsageError(`${flag} needs a value`);
       return v;
     };
     if (flag === '--tenant') tenant = value();
     else if (flag === '--out') out = value();
-    else if (flag === '--leagues')
+    else if (flag === '--leagues') {
       leagues = value()
         .split(',')
         .map((k) => k.trim())
         .filter(Boolean);
-    else if (flag === '--include-inactive-players') includeInactivePlayers = true;
+      // `--leagues ,` must not silently widen to "every league".
+      if (!leagues.length) throw new UsageError('--leagues needs at least one league key');
+    } else if (flag === '--include-inactive-players') includeInactivePlayers = true;
     else if (flag === '--confirm') confirm = true;
-    else throw new Error(`unknown argument: ${flag}\n${USAGE}`);
+    else throw new UsageError(`unknown argument: ${flag}`);
   }
-  if (!tenant) throw new Error(`--tenant is required\n${USAGE}`);
-  if (!out) throw new Error(`--out is required\n${USAGE}`);
+  if (!tenant) throw new UsageError('--tenant is required');
+  if (!out) throw new UsageError('--out is required');
   return { tenant, out, leagues, includeInactivePlayers, confirm };
 }
 
@@ -99,6 +109,7 @@ function printSummary(summary: ExportSummary, counts: Record<string, number>): v
   line('exported', summary.leagues.exported.join(', ') || '—');
   line('excluded (seed-*/demo/filter)', summary.leagues.excluded.join(', ') || '—');
   line('synthesised from series', summary.leagues.synthesised.join(', ') || '—');
+  line('2+ season runs (main-<runId>)', summary.leagues.multiRun.join(', ') || '—');
   line('without competitions', summary.leagues.withoutCompetitions.join(', ') || '—');
 
   if (summary.competitions.length) {
@@ -118,6 +129,7 @@ function printSummary(summary: ExportSummary, counts: Record<string, number>): v
   line('postponed → scheduled + note', f.postponed);
   line('completed in smart club', f.completedInSource);
   line('undated → skipped', f.undatedSkipped);
+  line('no fixture id → skipped', f.missingIdSkipped);
   line('unresolved side → skipped', f.unresolvedSideSkipped);
   line('orphaned slot → skipped', f.orphanSlotSkipped);
   line('series with no league', f.seriesUnmatched.length ? f.seriesUnmatched.join(', ') : 0);
@@ -237,6 +249,8 @@ async function main(): Promise<void> {
 
   const outPath = path.resolve(args.out);
   await writeFile(outPath, JSON.stringify(bundle, null, 2), { mode: 0o600 });
+  // `mode` only applies when the file is created; tighten an existing file too.
+  await chmod(outPath, 0o600);
   console.log(`\n✓ bundle valid → ${outPath} (contains PII: keep local, delete after import)`);
 
   if (args.confirm) {
@@ -262,6 +276,6 @@ async function main(): Promise<void> {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error(err instanceof Error ? err.message : err);
-    process.exit(1);
+    process.exit(err instanceof UsageError ? 2 : 1);
   });
 }

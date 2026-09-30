@@ -258,7 +258,65 @@ describe('flagship recipes (handover §9.3)', () => {
     assert.equal(ko[0].stage, 'Final');
     assert.deepEqual([ko[0].homeSlot, ko[0].awaySlot], [gpos(1, 1), gpos(2, 2)]);
     assert.match(t20.confirm ?? '', /intentional/);
+    // Only G1 1st and G2 2nd qualify: no per-group advance count, the final carries the rule.
+    assert.equal(t20.format.advancePerGroup, undefined);
     assert.deepEqual(sizes(comp('veterans-promotion', '30-over')), [15]);
+  });
+
+  test('assumed crossed semis (Premier Women, Veterans Premier) are in the union confirmation list', () => {
+    for (const [key, label] of [
+      ['premierWomen', 'Premier Women'],
+      ['veterans-premier', 'Veterans Premier'],
+    ]) {
+      assert.match(comp(key, 't20').confirm ?? '', /pairing is not specified/);
+      assert.ok(
+        summary.confirmations.some((m) => m.startsWith(`${key} t20: ${label} T20: semis`)),
+        `${key} t20 confirmation printed`,
+      );
+      assert.ok(bundle.meta.confirmations.some((m) => m.startsWith(`${key} t20:`)));
+    }
+  });
+
+  test('refs are invariant under --leagues: a premier-only export yields the same refs for premier', () => {
+    const only = buildBundle({
+      tenant: 'dolphins',
+      config,
+      clubs: [],
+      playersByClub: new Map(),
+      series,
+      seasonRuns: [],
+      recipes: DOLPHINS_RECIPES,
+      options: { leagues: ['premier'], generatedAt: 'x' },
+    }).bundle;
+    const refsOf = (b: typeof bundle) => {
+      const l = b.leagues.find((x) => x.key === 'premier')!;
+      return {
+        league: l.externalRef,
+        season: l.season.externalRef,
+        teams: [...l.teamRefs].sort(),
+        teamObjects: b.teams
+          .filter((t) => t.leagueKey === 'premier')
+          .map((t) => [t.externalRef, t.institutionRef])
+          .sort(),
+        competitions: l.competitions.map((c) => c.externalRef).sort(),
+        groups: l.competitions.flatMap((c) =>
+          c.groups.map((g) => `${c.stream}/${g.name}:${g.teamRefs.join(',')}`),
+        ),
+        fixtures: l.competitions
+          .flatMap((c) =>
+            c.fixtures.map((f) =>
+              [
+                f.externalRef,
+                f.homeTeamRef ?? JSON.stringify(f.homeSlot),
+                f.awayTeamRef ?? JSON.stringify(f.awaySlot),
+              ].join('|'),
+            ),
+          )
+          .sort(),
+        swaps: l.relegation.swaps,
+      };
+    };
+    assert.deepEqual(refsOf(only), refsOf(bundle));
   });
 
   test('--leagues filter drops a relegation whose target is not exported', () => {

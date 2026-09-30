@@ -80,6 +80,19 @@ describe('mapFixture status', () => {
   });
 });
 
+describe('mapFixture id', () => {
+  test('a fixture without an id is skipped, never given an `undefined` ref', () => {
+    assert.deepEqual(mapFixture({ ...base, id: undefined }, ctx), {
+      kind: 'skip',
+      reason: 'missing-id',
+    });
+    assert.deepEqual(mapFixture({ ...base, id: '  ' }, ctx), {
+      kind: 'skip',
+      reason: 'missing-id',
+    });
+  });
+});
+
 describe('mapFixture sides', () => {
   test('a materialised side exports its concrete teamRef', () => {
     const f = ok(base).fixture;
@@ -188,10 +201,19 @@ describe('buildBundle fixture bookkeeping', () => {
     teams: ['a', 'b', 'c', 'd'],
     participants: clubs.map((c) => ({ teamId: c.id, clubId: c.id, name: c.name })),
     fixtures: [
-      { id: 'f1', round: 1, date: '2026-10-03', home: 'a', away: 'b' },
+      { id: 'f1', round: 1, date: '2026-10-03', home: 'a', away: 'b', status: 'completed' },
       { id: 'f2', round: 1, date: '2026-10-03', home: 'c', away: 'd', status: 'cancelled' },
-      { id: 'f3', round: 2, date: '2026-10-10', home: 'win:f1', away: 'win:f2' },
+      // Postponed but orphaned (fed by the cancelled f2): dropped, so not counted as postponed.
+      {
+        id: 'f3',
+        round: 2,
+        date: '2026-10-10',
+        home: 'win:f1',
+        away: 'win:f2',
+        status: 'postponed',
+      },
       { id: 'f4', round: 1, date: '2026-10-04', home: 'b', away: 'c', status: 'postponed' },
+      { round: 1, date: '2026-10-05', home: 'a', away: 'd' },
     ],
     released: true,
     releasedAt: null,
@@ -212,7 +234,11 @@ describe('buildBundle fixture bookkeeping', () => {
   test('cancelled is counted; a fixture fed by a cancelled one is dropped as an orphan slot', () => {
     assert.equal(summary.fixtures.cancelledSkipped, 1);
     assert.equal(summary.fixtures.orphanSlotSkipped, 1);
+    // Status tallies reflect the final bundle: f3 was postponed but orphan-dropped.
     assert.equal(summary.fixtures.postponed, 1);
+    assert.equal(summary.fixtures.completedInSource, 1);
+    assert.equal(summary.fixtures.missingIdSkipped, 1);
+    assert.ok(summary.warnings.some((w) => /1 fixture\(s\) have no id/.test(w)));
     const ids = bundle.leagues[0].competitions[0].fixtures.map((f) =>
       f.externalRef.split(':').pop(),
     );
