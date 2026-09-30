@@ -1190,6 +1190,8 @@
     text-transform:uppercase;letter-spacing:0.09em;color:var(--muted-2);
     background:var(--paper);padding:2px 7px;border-radius:10px}
   .client-switch-item.current .client-switch-name{color:var(--ink)}
+  /* Unreachable ("No address") items are inert — dim them so they don't read as clickable. */
+  .client-switch-item:disabled:not(.current){opacity:.55}
 
   /* ─── Explainers (season setup): option cards, help drawer, How seasons work,
      status timeline, next steps, field guides. See the explainer section of atoms.tsx

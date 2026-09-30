@@ -51,8 +51,10 @@ export function ClientSwitcher({
   } | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
-  // Focus the first item once per opening — not again when the list re-renders.
+  // Focus an item once per opening — not again when the list re-renders. `focusEdge`
+  // says which end: ArrowUp on the trigger lands on the last item, anything else the first.
   const focusedOnOpen = useRef(false);
+  const focusEdge = useRef<'first' | 'last'>('first');
   const menuId = useId();
 
   const place = () => {
@@ -122,11 +124,26 @@ export function ClientSwitcher({
   // only after the registry loads.
   useEffect(() => {
     if (!open || !pos || focusedOnOpen.current) return;
-    const first = popRef.current?.querySelector<HTMLButtonElement>(ENABLED_ITEM);
-    if (!first) return;
-    first.focus();
+    const items = popRef.current?.querySelectorAll<HTMLButtonElement>(ENABLED_ITEM);
+    if (!items?.length) return;
+    (focusEdge.current === 'last' ? items[items.length - 1] : items[0]).focus();
     focusedOnOpen.current = true;
   }, [open, pos, tenants.length]);
+
+  // WAI-ARIA menu button: ArrowDown/ArrowUp on the trigger open the menu at the first/last
+  // item (or, if already open, move focus there).
+  const onTriggerKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    const edge = e.key === 'ArrowUp' ? 'last' : 'first';
+    if (open) {
+      const items = popRef.current?.querySelectorAll<HTMLButtonElement>(ENABLED_ITEM);
+      if (items?.length) (edge === 'last' ? items[items.length - 1] : items[0]).focus();
+      return;
+    }
+    focusEdge.current = edge;
+    setOpen(true);
+  };
 
   const onMenuKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'Tab') {
@@ -169,7 +186,11 @@ export function ClientSwitcher({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          focusEdge.current = 'first';
+          setOpen((v) => !v);
+        }}
+        onKeyDown={onTriggerKeyDown}
         onBlur={open ? onBlur : undefined}
       >
         <span className="ni-icon">

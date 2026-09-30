@@ -30,6 +30,8 @@ vi.mock('./config', async () => {
   };
 });
 
+const actualConfig = await vi.importActual<typeof import('./config')>('./config');
+
 const tenant = (slug: string, name: string): TenantSummary => ({
   tenant: slug,
   name,
@@ -50,8 +52,9 @@ beforeEach(() => {
   vi.mocked(api.platformListTenants).mockReset();
   vi.mocked(api.platformListTenants).mockResolvedValue(TENANTS);
   vi.mocked(config.openTenantConsole).mockReset();
+  // Back to the REAL function (on Vitest 2, mockReset alone leaves it returning undefined).
   vi.mocked(config.tenantConsoleUrl).mockReset();
-  vi.mocked(config.tenantConsoleUrl).mockImplementation((slug) => `/?tenant=${slug}`);
+  vi.mocked(config.tenantConsoleUrl).mockImplementation(actualConfig.tenantConsoleUrl);
   window.sessionStorage.clear();
 });
 
@@ -201,6 +204,26 @@ describe('Admin shell — ClientSwitcher', () => {
 
     await user.keyboard('{Enter}');
     expect(config.openTenantConsole).toHaveBeenCalledWith('titans');
+  });
+
+  it('ArrowDown on the trigger opens the menu on the first enabled item', async () => {
+    const user = userEvent.setup();
+    renderSwitcher();
+    screen.getByRole('button', { name: 'Switch client' }).focus();
+    await user.keyboard('{ArrowDown}');
+    const items = await within(await screen.findByRole('menu')).findAllByRole('menuitem');
+    await vi.waitFor(() => expect(items[0]).toHaveFocus());
+    expect(items[0]).toHaveTextContent('Acme Union');
+  });
+
+  it('ArrowUp on the trigger opens the menu on the last enabled item', async () => {
+    const user = userEvent.setup();
+    renderSwitcher();
+    screen.getByRole('button', { name: 'Switch client' }).focus();
+    await user.keyboard('{ArrowUp}');
+    const items = await within(await screen.findByRole('menu')).findAllByRole('menuitem');
+    await vi.waitFor(() => expect(items[2]).toHaveFocus());
+    expect(items[2]).toHaveTextContent('Titans Cricket');
   });
 
   it('Escape and Tab close the menu and return focus to the trigger', async () => {
