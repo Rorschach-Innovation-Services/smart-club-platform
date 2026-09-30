@@ -207,3 +207,51 @@ describe('results backfill file schema', () => {
     assert.equal(fractional.success, false);
   });
 });
+
+describe('host institution', () => {
+  const build = (config: Partial<TenantConfig>, host?: { name: string; slugHint: string }) =>
+    buildBundle({
+      tenant: T,
+      config: { tenant: T, leagues: [], ...config } as unknown as TenantConfig,
+      clubs: [],
+      playersByClub: new Map(),
+      series: [],
+      seasonRuns: [],
+      recipes: { tenant: T, utcOffset: '+02:00', leagues: {}, ...(host ? { host } : {}) },
+      options: { generatedAt: '2026-09-30T00:00:00.000Z' },
+    });
+  const fellBack = (w: string[]) => w.filter((m) => m.includes('host name fell back'));
+
+  test('uses the branding name for the host name and slugHint, with no warning', () => {
+    const { bundle, summary } = build({
+      branding: { name: 'Acme Cricket Union', title: 'Acme Pipeline' },
+    } as unknown as Partial<TenantConfig>);
+    assert.deepEqual(bundle.host, { name: 'Acme Cricket Union', slugHint: 'acme-cricket-union' });
+    assert.deepEqual(fellBack(summary.warnings), []);
+  });
+
+  test('falls through to copy.orgShort, then the title, before the slug', () => {
+    const short = build({
+      branding: { name: ' ', title: 'Acme Pipeline', copy: { orgShort: 'Acme' } },
+    } as unknown as Partial<TenantConfig>);
+    assert.equal(short.bundle.host.name, 'Acme');
+    const title = build({
+      branding: { title: 'Acme Pipeline' },
+    } as unknown as Partial<TenantConfig>);
+    assert.equal(title.bundle.host.name, 'Acme Pipeline');
+    assert.deepEqual(fellBack(title.summary.warnings), []);
+  });
+
+  test('without branding it falls back to the tenant slug and records a warning', () => {
+    const { bundle, summary } = build({});
+    assert.deepEqual(bundle.host, { name: T, slugHint: T });
+    assert.equal(fellBack(summary.warnings).length, 1);
+    assert.match(fellBack(summary.warnings)[0], /set the tenant's display name/);
+  });
+
+  test('a recipe host override wins and suppresses the fallback warning', () => {
+    const { bundle, summary } = build({}, { name: 'Recipe Host', slugHint: 'recipe-host' });
+    assert.deepEqual(bundle.host, { name: 'Recipe Host', slugHint: 'recipe-host' });
+    assert.deepEqual(fellBack(summary.warnings), []);
+  });
+});

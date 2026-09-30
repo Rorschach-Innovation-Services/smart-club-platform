@@ -1265,10 +1265,7 @@ export function buildBundle(input: BuildInputs): BuildResult {
   summary.staff.assignments = staff.reduce((n, s) => n + s.assignments.length, 0);
   summary.players.exported = players.length;
 
-  const host = recipes.host ?? {
-    name: config.branding?.name || tenant,
-    slugHint: slugify(config.branding?.name || tenant) || tenant,
-  };
+  const host = recipes.host ?? hostFromConfig(tenant, config, warnings);
   const body = {
     schema: BUNDLE_SCHEMA,
     version: BUNDLE_VERSION,
@@ -1286,6 +1283,30 @@ export function buildBundle(input: BuildInputs): BuildResult {
     counts: computeCounts(body as Omit<MedicoachBundle, 'counts'>),
   } as MedicoachBundle;
   return { bundle, summary };
+}
+
+/**
+ * The host institution's display name from the tenant's branding: the organisation name,
+ * then the short org handle, then the app title. Only when none is set does it fall back
+ * to the bare tenant slug, and that fallback is recorded as a warning so a bundle never
+ * silently ships "dolphins" as the host name. slugHint derives from the resolved name.
+ */
+export function hostFromConfig(
+  tenant: string,
+  config: Pick<TenantConfig, 'branding'> | null | undefined,
+  warnings: string[],
+): { name: string; slugHint: string } {
+  const b = config?.branding;
+  const name = [b?.name, b?.copy?.orgShort, b?.title]
+    .map((s) => (typeof s === 'string' ? s.trim() : ''))
+    .find(Boolean);
+  if (!name) {
+    warnings.push(
+      `host name fell back to tenant slug "${tenant}" — set the tenant's display name (branding.name)`,
+    );
+    return { name: tenant, slugHint: slugify(tenant) || tenant };
+  }
+  return { name, slugHint: slugify(name) || tenant };
 }
 
 function lastEnd(c: SeasonCalendar): string {
