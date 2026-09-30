@@ -249,6 +249,14 @@ describe('host institution', () => {
     assert.match(fellBack(summary.warnings)[0], /set the tenant's display name/);
   });
 
+  test('a unicode-only branding name keeps the name, slugHint falls back to the tenant', () => {
+    const { bundle, summary } = build({
+      branding: { name: 'ドルフィンズ' },
+    } as unknown as Partial<TenantConfig>);
+    assert.deepEqual(bundle.host, { name: 'ドルフィンズ', slugHint: T });
+    assert.deepEqual(fellBack(summary.warnings), []);
+  });
+
   test('a recipe host override wins and suppresses the fallback warning', () => {
     const { bundle, summary } = build({}, { name: 'Recipe Host', slugHint: 'recipe-host' });
     assert.deepEqual(bundle.host, { name: 'Recipe Host', slugHint: 'recipe-host' });

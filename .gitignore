@@ -55,3 +55,12 @@ playwright-report/
 # The pinned test inputs under packages/api/test/data/medicoach/ don't match either pattern.
 *-bundle*.json
 *medicoach*bundle*.json
+# make-medicoach-e2e-bundle output (synthetic people, but a generated artifact — never
+# commit). Exact names, so the pinned inputs under packages/api/test/data/medicoach/
+# (dolphins-*.json) stay tracked.
+bundle-full.json
+bundle-small.json
+people-cases.json
+results.json
+results-bad.json
+results-phase1.json

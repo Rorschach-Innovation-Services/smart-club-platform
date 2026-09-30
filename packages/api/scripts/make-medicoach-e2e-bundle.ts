@@ -34,7 +34,13 @@ const T = 'dolphins';
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
-  return i === -1 ? undefined : process.argv[i + 1];
+  if (i === -1) return undefined;
+  const v = process.argv[i + 1];
+  if (v === undefined || v.startsWith('--')) {
+    console.error(`--${name} needs a value${v ? ` (got the flag ${v})` : ''}`);
+    process.exit(2);
+  }
+  return v;
 }
 const outDir = arg('out-dir');
 if (!outDir) {
@@ -47,6 +53,11 @@ const load = (f: string) =>
 const series = load('dolphins-planb-series-2026-09-10.json') as Series[];
 const config = load('dolphins-league-config-2026-09-27.json') as TenantConfig;
 
+// The pinned config is trimmed (no branding), so without this the exporter would fall back
+// to the bare tenant slug for the host. Pin the host here rather than editing the config:
+// the slug-fallback path stays a unit-test case (test/medicoach-bundle.test.ts).
+const HOST = { name: 'Dolphins Cricket Union', slugHint: 'dolphins-cricket-union' };
+
 /* ─────────────── Synthetic people on four real Plan-B clubs ─────────────── */
 // Club ids are real participants. `leagues: []` keeps the exporter from adding
 // club-roster sides next to the series sides, so every club has exactly one side per
@@ -56,14 +67,14 @@ const B = 'crusaders'; // premier, veterans-premier, promotion-women-s-league
 const C = 'harlequins-cricket-club'; // premier, veterans-premier
 const D = 'umzinto'; // premier only
 
-export const DUP_EMAIL = 'dup.person@example.test';
-export const PRE_EXISTING_COACH_EMAIL = 'preexisting.coach@example.test';
-export const PRE_EXISTING_PLAYER = {
+const DUP_EMAIL = 'dup.person@example.test';
+const PRE_EXISTING_COACH_EMAIL = 'preexisting.coach@example.test';
+const PRE_EXISTING_PLAYER = {
   name: 'Pat Preexisting',
   email: 'pat.preexisting@example.test',
 };
-export const PLACEHOLDER_EMAIL = 'pl.holder.x1y2z3@noreply.medicoach.co.za';
-export const INVALID_GUARDIAN_EMAIL = 'guardian@localhost';
+const PLACEHOLDER_EMAIL = 'pl.holder.x1y2z3@noreply.medicoach.co.za';
+const INVALID_GUARDIAN_EMAIL = 'guardian@localhost';
 
 const clubs: Club[] = [
   {
@@ -77,7 +88,8 @@ const clubs: Club[] = [
         name: 'Dana Duplicate',
         email: 'Dup.Person@Example.test',
         cell: '082 555 1001',
-        idNumber: '8001015009087',
+        // Synthetic and checksum-broken on purpose (fails the SA ID Luhn check): no real person.
+        idNumber: '8001015009088',
       },
       sec: { name: 'Sipho Secretary', email: 'sipho.sec@example.test' },
     },
@@ -248,7 +260,7 @@ function build(leagues?: string[]): MedicoachBundle {
     playersByClub,
     series,
     seasonRuns: [],
-    recipes: DOLPHINS_RECIPES,
+    recipes: { ...DOLPHINS_RECIPES, host: HOST },
     options: { generatedAt: '2026-09-30T00:00:00.000Z', ...(leagues ? { leagues } : {}) },
   });
   const parsed = MedicoachBundleSchema.safeParse(bundle);
@@ -257,8 +269,10 @@ function build(leagues?: string[]): MedicoachBundle {
     throw new Error('generated bundle failed MedicoachBundleSchema');
   }
   console.log(
-    `bundle${leagues ? ` [${leagues.join(',')}]` : ''}: ${JSON.stringify(bundle.counts)}; players exported ${summary.players.exported ?? bundle.people.players.length}, noTeam ${summary.players.noTeam}, ambiguous ${summary.players.ambiguousSide}`,
+    `bundle${leagues ? ` [${leagues.join(',')}]` : ''}: ${JSON.stringify(bundle.counts)}; players exported ${summary.players.exported ?? bundle.people.players.length}, noTeam ${summary.players.noTeam}, ambiguous ${summary.players.ambiguousSide}; warnings ${summary.warnings.length}`,
   );
+  // stdout, not stderr: the medicoach harness logs only stdout on success.
+  for (const w of summary.warnings) console.log(`  warning: ${w}`);
   return bundle;
 }
 
