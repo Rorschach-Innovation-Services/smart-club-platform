@@ -53,6 +53,20 @@ const load = (f: string) =>
 const series = load('dolphins-planb-series-2026-09-10.json') as Series[];
 const config = load('dolphins-league-config-2026-09-27.json') as TenantConfig;
 
+// The pinned Plan-B data has no time-withheld series, so the importer's
+// timeTbc path would only ever be unit-tested. Withhold the time on ONE real
+// series so every bundle carries at least one timeWithheld fixture for the
+// medicoach e2e harness to assert end-to-end (its stored row must carry
+// timeTbc). Venue stays revealed: this exercises the time flag in isolation.
+{
+  const first = series.find((s) => (s.fixtures?.length ?? 0) > 0);
+  if (!first) throw new Error('pinned series data has no fixtures to withhold');
+  (first as { withheld?: { venue?: boolean; time?: boolean } }).withheld = {
+    ...(first as { withheld?: object }).withheld,
+    time: true,
+  };
+}
+
 // The pinned config is trimmed (no branding), so without this the exporter would fall back
 // to the bare tenant slug for the host. Pin the host here rather than editing the config:
 // the slug-fallback path stays a unit-test case (test/medicoach-bundle.test.ts).
