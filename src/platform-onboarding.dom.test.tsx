@@ -306,7 +306,12 @@ describe('TenantEditPage card swap', () => {
     render(
       <QueryClientProvider client={queryClient}>
         <MemoryRouter initialEntries={['/platform/tenants/acme']}>
-          <PlatformPortal userEmail="op@acme.test" signOutUser={vi.fn()} hasTenantConsole={false} />
+          <PlatformPortal
+            userEmail="op@acme.test"
+            signOutUser={vi.fn()}
+            hasTenantConsole={false}
+            hostSlug="acme"
+          />
         </MemoryRouter>
       </QueryClientProvider>,
     );
@@ -330,7 +335,12 @@ describe('TenantEditPage setup card', () => {
     render(
       <QueryClientProvider client={queryClient}>
         <MemoryRouter initialEntries={['/platform/tenants/acme']}>
-          <PlatformPortal userEmail="op@acme.test" signOutUser={vi.fn()} hasTenantConsole={false} />
+          <PlatformPortal
+            userEmail="op@acme.test"
+            signOutUser={vi.fn()}
+            hasTenantConsole={false}
+            hostSlug="acme"
+          />
         </MemoryRouter>
       </QueryClientProvider>,
     );
@@ -395,7 +405,12 @@ describe('TenantEditPage league catalogue — Setup column', () => {
     render(
       <QueryClientProvider client={queryClient}>
         <MemoryRouter initialEntries={['/platform/tenants/acme']}>
-          <PlatformPortal userEmail="op@acme.test" signOutUser={vi.fn()} hasTenantConsole={false} />
+          <PlatformPortal
+            userEmail="op@acme.test"
+            signOutUser={vi.fn()}
+            hasTenantConsole={false}
+            hostSlug="acme"
+          />
         </MemoryRouter>
       </QueryClientProvider>,
     );

@@ -25,6 +25,7 @@ import { setActiveTenant } from './api';
 import { AuthProvider, useAuth, membershipFor } from './auth';
 import { routingRole, clubRouteRedirect, isOperator } from './routing';
 import { PlatformPortal } from './platform';
+import { ClientSwitcher } from './client-switcher';
 import { Login } from './Login';
 import { RegisterPage } from './RegisterPage';
 import { ClubSignupPage } from './ClubSignupPage';
@@ -484,7 +485,12 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     (location.pathname === '/platform' || location.pathname.startsWith('/platform/'))
   ) {
     return (
-      <PlatformPortal userEmail={email} signOutUser={signOutUser} hasTenantConsole={!!membership} />
+      <PlatformPortal
+        userEmail={email}
+        signOutUser={signOutUser}
+        hasTenantConsole={!!membership}
+        hostSlug={TENANT_SLUG}
+      />
     );
   }
 
@@ -2980,6 +2986,8 @@ function Shell({
                 </span>
                 <span className="ni-label">Operator portal</span>
               </button>
+              {/* One-click hop into another client's console (full page load). */}
+              <ClientSwitcher currentSlug={TENANT_SLUG} />
             </>
           )}
 
