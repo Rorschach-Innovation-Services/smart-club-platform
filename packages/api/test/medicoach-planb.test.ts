@@ -7,8 +7,9 @@
  *     calendars from league-setups-backup-dolphins-2026-09-27…json.
  * The raw backups are gitignored; these trimmed copies are what the tests pin.
  *
- * Encodes the handover §9.3 recipes for the six flagship leagues (via
- * medicoach-recipes/dolphins.ts). Carry vs subdivide is the highest-risk mapping.
+ * Encodes the handover §9.3 recipes for the five flagship leagues (via
+ * medicoach-recipes/dolphins.ts). The sixth, Promotion Women's, does not exist yet (union,
+ * 1 Oct 2026) and is excluded by recipe even though the catalogue and series carry it. Carry vs subdivide is the highest-risk mapping.
  *
  * Run with the API package's test runner (tsx --test).
  */
@@ -36,6 +37,8 @@ const { bundle, summary } = buildBundle({
   options: { generatedAt: '2026-09-30T00:00:00.000Z' },
 });
 
+const PW = 'promotion-women-s-league';
+
 function comp(leagueKey: string, stream: string): BundleCompetition {
   const l = bundle.leagues.find((x) => x.key === leagueKey);
   assert.ok(l, `league ${leagueKey} exported`);
@@ -60,22 +63,28 @@ describe('Plan-B backup → bundle', () => {
     );
   });
 
-  test('every one of the 620 source fixtures is exported, plus 13 recipe placeholders', () => {
-    assert.equal(summary.fixtures.read, 620);
+  test('all 500 fixtures of the exported leagues are exported, plus 13 recipe placeholders', () => {
+    // 620 in the source; the excluded Promotion Women's series carry the other 120.
+    const total = series.reduce((n, s) => n + (s.fixtures?.length ?? 0), 0);
+    const excludedPw = series
+      .filter((s) => s.leagueKey === PW)
+      .reduce((n, s) => n + (s.fixtures?.length ?? 0), 0);
+    assert.equal(total, 620);
+    assert.equal(excludedPw, 120);
+    assert.equal(summary.fixtures.read, 500);
     assert.equal(summary.fixtures.cancelledSkipped, 0);
     assert.equal(summary.fixtures.unresolvedSideSkipped, 0);
-    assert.equal(bundle.counts.fixtures, 633);
+    assert.equal(bundle.counts.fixtures, 513);
     assert.equal(bundle.counts.placeholderFixtures, 13);
   });
 
-  test('one competition per (league, stream): 11 competitions, 23 groups', () => {
+  test('one competition per (league, stream): 10 competitions, 20 groups', () => {
     const got = summary.competitions.map((c) => `${c.league}/${c.stream}`).sort();
     assert.deepEqual(got, [
       'premier/50-over',
       'premier/t20',
       'premierWomen/30-over',
       'premierWomen/t20',
-      'promotion-women-s-league/t20',
       'promotion/30-over',
       'promotion/t20',
       'veterans-premier/30-over',
@@ -83,7 +92,10 @@ describe('Plan-B backup → bundle', () => {
       'veterans-promotion/30-over',
       'veterans-promotion/t20',
     ]);
-    assert.equal(bundle.counts.groups, 23);
+    assert.equal(bundle.counts.groups, 20);
+    assert.equal(bundle.counts.competitions, 10);
+    assert.equal(bundle.counts.swaps, 1);
+    assert.equal(bundle.counts.positionRelegations, 1); // Premier Men only
   });
 
   test('all null-status fixtures land as scheduled with sourceStatus null', () => {
@@ -201,7 +213,7 @@ describe('flagship recipes (handover §9.3)', () => {
     assert.equal(c.confirm, undefined);
   });
 
-  test('Premier Women: T20 2×4 cross-pool semis; 30 Over rounds 2, relegate G2 last to Promotion Women', () => {
+  test('Premier Women: T20 2×4 cross-pool semis; 30 Over rounds 2, no relegation yet', () => {
     const t20 = comp('premierWomen', 't20');
     assert.equal(t20.format.type, 'groups_knockout');
     assert.deepEqual(sizes(t20), [4, 4]);
@@ -218,27 +230,23 @@ describe('flagship recipes (handover §9.3)', () => {
     assert.equal(ov30.format.rounds, 2);
     assert.deepEqual(sizes(ov30), [4, 4]);
     const pw = bundle.leagues.find((l) => l.key === 'premierWomen')!;
-    assert.deepEqual(pw.relegation.positionRelegations, [
-      {
-        competitionRef: ov30.externalRef,
-        group: 'Group 2',
-        position: 4,
-        targetLeagueRef: 'smartclub:dolphins:league:promotion-women-s-league',
-      },
-    ]);
-    assert.deepEqual(pw.relegation.targetLeagueRefs, [
-      'smartclub:dolphins:league:promotion-women-s-league',
-    ]);
+    // The relegation into Promotion Women's waits for that league to exist.
+    assert.deepEqual(pw.relegation.positionRelegations, []);
+    assert.deepEqual(pw.relegation.targetLeagueRefs, []);
+    // Not configured at all, so the drop-unexported-target path stays quiet.
+    assert.ok(!summary.warnings.some((w) => /relegation target not exported/.test(w)));
   });
 
-  test('Promotion Women: exported so the relegation target exists; format inferred from fixtures, flagged', () => {
-    const c = comp('promotion-women-s-league', 't20');
-    assert.equal(c.formatSource, 'inferred');
-    assert.equal(c.format.type, 'league');
-    assert.equal(c.format.rounds, 2); // pairs meet more than twice; clamped and warned
-    assert.equal(c.groups.length, 3);
-    assert.ok(summary.warnings.some((w) => /promotion-women-s-league t20: a pair meets/.test(w)));
-    assert.ok(summary.confirmations.some((m) => m.startsWith('promotion-women-s-league:')));
+  test('Promotion Women: excluded by recipe (not yet created by the union), absent from the bundle', () => {
+    assert.ok(
+      summary.warnings.includes(`league ${PW} excluded by recipe: not yet created by the union`),
+    );
+    assert.equal(bundle.leagues.length, 30);
+    assert.ok(!bundle.leagues.some((l) => l.key === PW));
+    assert.ok(!bundle.teams.some((t) => t.leagueKey === PW));
+    assert.ok(!summary.leagues.exported.includes(PW));
+    // Not a seed/demo exclusion either: the key appears nowhere in the bundle, meta included.
+    assert.ok(!JSON.stringify(bundle).includes(PW));
   });
 
   test('Veterans Premier: T20 2×6 cross-pool; 30 Over a single group of 12', () => {
@@ -263,13 +271,12 @@ describe('flagship recipes (handover §9.3)', () => {
     assert.deepEqual(sizes(comp('veterans-promotion', '30-over')), [15]);
   });
 
-  test('union answers (1 Oct 2026) leave only the Promotion Women structure question open', () => {
+  test('union answers (1 Oct 2026) leave no open questions', () => {
     for (const key of ['premierWomen', 'veterans-premier']) {
       assert.equal(comp(key, 't20').confirm, undefined, `${key} t20 crossed semis confirmed`);
     }
-    assert.equal(summary.confirmations.length, 1);
-    assert.ok(summary.confirmations[0].startsWith('promotion-women-s-league:'));
-    assert.deepEqual(bundle.meta.confirmations, summary.confirmations);
+    assert.deepEqual(summary.confirmations, []);
+    assert.deepEqual(bundle.meta.confirmations, []);
   });
 
   test('refs are invariant under --leagues: a premier-only export yields the same refs for premier', () => {

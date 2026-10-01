@@ -76,4 +76,11 @@ export interface TenantRecipes {
   /** Offset for the tenant's wall-clock fixture times, e.g. `+02:00` (SAST, no DST). */
   utcOffset: string;
   leagues: Record<string, LeagueRecipe>;
+  /**
+   * League keys kept out of the bundle entirely (no league, teams, competitions or
+   * fixtures), keyed by leagueKey with the reason. Unlike the seed and demo exclusions these
+   * are not listed in `meta.excludedLeagues`; the exporter prints one warning per key it
+   * meets: `league <key> excluded by recipe: <reason>`.
+   */
+  excludeLeagues?: Record<string, string>;
 }

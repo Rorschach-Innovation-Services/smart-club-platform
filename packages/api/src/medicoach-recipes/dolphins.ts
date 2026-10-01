@@ -1,6 +1,7 @@
 /**
- * Dolphins (KZNCU) medicoach recipes: the six flagship leagues, per the medicoach
- * League handover (§9.3). See ./types.ts for what a recipe is and when it applies.
+ * Dolphins (KZNCU) medicoach recipes: the five flagship leagues, per the medicoach
+ * League handover (§9.3). The handover's sixth, Promotion Women's, is excluded until the
+ * union creates it. See ./types.ts for what a recipe is and when it applies.
  *
  * Every `confirm` note is an open question for the union. The exporter prints them in
  * its summary and copies them into the bundle's `meta.confirmations`. Don't resolve them
@@ -123,17 +124,17 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
           format: { type: 'league', rounds: 2, extraPhases: [], teamsPerGroup: 4 },
           cricketMatchFormat: 'T30',
           expectedGroupSizes: [4, 4],
-          positionRelegations: [
-            { group: 2, position: 4, targetLeagueKey: 'promotion-women-s-league' },
-          ],
+          // The union is still defining the Promotion Women's League (per 1 Oct 2026), so
+          // there is no relegation target yet. Restore this once the league exists:
+          // positionRelegations: [
+          //   { group: 2, position: 4, targetLeagueKey: 'promotion-women-s-league' },
+          // ],
         },
       },
     },
-    'promotion-women-s-league': {
-      competitions: {},
-      confirm:
-        'Promotion Women’s League: structure not specified in the handover. Exported so the Premier Women relegation target exists; competitions are inferred from the fixtures. Confirm the format with Dolphins.',
-    },
+    // 'promotion-women-s-league': the union is still defining this league (per 1 Oct 2026).
+    // When it exists, add its recipe here, restore the Premier Women relegation above and
+    // drop it from `excludeLeagues` below.
     'veterans-premier': {
       label: 'Veterans Premier',
       group: 'Overarching Leagues',
@@ -179,5 +180,9 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
         },
       },
     },
+  },
+  // The smart-club catalogue still carries this key, but the league does not exist yet.
+  excludeLeagues: {
+    'promotion-women-s-league': 'not yet created by the union',
   },
 };

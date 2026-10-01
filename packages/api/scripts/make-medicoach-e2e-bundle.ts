@@ -10,7 +10,8 @@
  *     club ids are real Plan-B participants, so the people phases have real coverage.
  *
  * Writes into --out-dir (the medicoach harness's gitignored out/ dir):
- *   bundle-full.json      every Dolphins league (flagship six carry fixtures)
+ *   bundle-full.json      every Dolphins league (the five flagship leagues carry fixtures;
+ *                         promotion-women-s-league is excluded by recipe)
  *   bundle-small.json     premier + veterans-premier only (crash/fault/rollback scenarios)
  *   results.json          10 valid results (one super-over, one no-result, two via matchKeys)
  *   results-bad.json      the valid ones plus one entry that matches no fixture
@@ -77,7 +78,7 @@ const HOST = { name: 'Dolphins Cricket Union', slugHint: 'dolphins-cricket-union
 // club-roster sides next to the series sides, so every club has exactly one side per
 // league it plays in (players resolve to a single team; no ambiguity).
 const A = 'delta-cricket-club'; // premier, premierWomen, veterans-premier
-const B = 'crusaders'; // premier, veterans-premier, promotion-women-s-league
+const B = 'crusaders'; // premier, veterans-premier (its promotion-women-s-league side is excluded)
 const C = 'harlequins-cricket-club'; // premier, veterans-premier
 const D = 'umzinto'; // premier only
 

@@ -37,18 +37,29 @@ Team reviews → merge to development → flow to main per your release process.
 
 ## 3. Long-lead items — start these NOW, they gate nothing else
 
-- **Dolphins confirmations** (from the handover PDF + export summary):
-  Promotion Women's structure is still open. The union answered the rest on
-  1 Oct 2026: the Promotion Men's T20 semi pairings (G1vG2, G3vG4), the
-  Hollywoodbets Kingsmead Cup (the name of Group 2's 30-over subdivide stage),
-  the crossed semis for Premier Women's T20 + Veterans Premier T20, and the
-  Veterans Promotion final's G1-1 v G2-2 pairing are all confirmed.
+No union asks are outstanding. Only the Meta template below is still open.
+
 - **Meta**: register WhatsApp template `platform_access_announcement`
   (exact body in apps/api/src/lib/onboarding-whatsapp-templates.ts — must stay
   byte-identical). After approval, flip its status to "registered" (ask Claude).
-- **Results file**: real scores for played 2026-27 fixtures, in the schema in
-  packages/api/src/medicoach-bundle.ts (per-side wickets/overs). Without it,
-  played games stay "scheduled" with empty standings.
+
+Resolved, no action needed:
+
+- **Dolphins structure answers**: all received 1 Oct 2026. These cover the
+  Promotion Men's T20 semi pairings (G1vG2, G3vG4) and the Hollywoodbets
+  Kingsmead Cup, which is the name of Group 2's 30-over subdivide stage. They
+  also confirm the crossed semis for Premier Women's T20 and Veterans Premier
+  T20, and the Veterans Promotion final's G1-1 v G2-2 pairing. The export's
+  confirm-list is now empty.
+- **Promotion Women's League**: it doesn't exist yet, because the union is
+  still defining it. The export excludes it by recipe and prints the warning
+  `league promotion-women-s-league excluded by recipe: not yet created by the union`.
+  The Premier Women's relegation into it is switched off. Revisit when the
+  union creates the league: add its recipe in
+  packages/api/src/medicoach-recipes/dolphins.ts, restore the commented-out
+  relegation, and remove it from `excludeLeagues`.
+- **Results**: none are needed. No Dolphins fixtures have been played and the
+  season starts after cutover (see step 7).
 
 ## 4. Smart-club prod prep
 
@@ -68,8 +79,12 @@ npx sst shell --stage prod -- npm --prefix packages/api run export-medicoach -- 
   --tenant dolphins --out ~/dolphins-bundle.json --confirm
 ```
 
-Check the summary: `noTeam`/`ambiguous` player counts sane, the confirm-list
-matches step 3's answers, host name shows the real branding (not "dolphins").
+Check the summary:
+
+- the `noTeam`/`ambiguous` player counts look sane;
+- the confirm-list is empty;
+- the only league exclusion is the Promotion Women's warning;
+- the host name shows the real branding (not "dolphins").
 The file contains PII: keep it local, delete after the prod import.
 
 ## 6. Medicoach testing pass (after the PR reaches main + testing deploy)
@@ -95,9 +110,13 @@ aws dynamodb create-backup --table-name prod-Medicoach-MedicoachTable \
 
 node import-bundle.mjs --bundle ~/dolphins-bundle.json \
   --host https://api.medicoach.co.za --env prod --map league-map.prod.json \
-  --bind-host <DOLPHINS_INSTITUTION_ID> --results ~/dolphins-results.json
+  --bind-host <DOLPHINS_INSTITUTION_ID>
 # dry-run output sane → add --apply (phased with --only if preferred)
 ```
+The season starts after cutover, so standings legitimately begin empty and all
+scoring happens in medicoach. The importer's `--results` flag stays available
+if a backfill is ever needed.
+
 Publish happens automatically when each league reconciles. Then:
 ```bash
 node import-bundle.mjs --env prod --map league-map.prod.json --notify
@@ -119,7 +138,7 @@ node import-bundle.mjs --env prod --map league-map.prod.json --notify \
 ## 9. Close-out
 
 - Reconciliation report clean; commit `league-map.prod.json` (ids only).
-- Delete local bundle + results copies; confirm the EXPORT# audit entry in
+- Delete local bundle copies; confirm the EXPORT# audit entry in
   smart club (`--confirm` wrote it in step 5).
 - Tear down the rehearsal stage: `npx sst remove --stage league-rehearsal`
   (Claude can run this on request).

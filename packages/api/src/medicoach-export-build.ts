@@ -701,8 +701,18 @@ export function buildBundle(input: BuildInputs): BuildResult {
   const filter = opts.leagues?.length ? new Set(opts.leagues) : null;
   const inScope = (key: string) => !isExcludedLeagueKey(key) && (!filter || filter.has(key));
   const excluded = new Set<string>();
+  // Recipe exclusions stay out of the bundle entirely (not even meta.excludedLeagues).
+  const recipeExcluded = new Set<string>();
   const works = new Map<string, LeagueWork>();
   const workFor = (key: string, catalogue?: League): LeagueWork | null => {
+    const excludeReason = recipes.excludeLeagues?.[key];
+    if (excludeReason !== undefined) {
+      if (!recipeExcluded.has(key)) {
+        recipeExcluded.add(key);
+        warnings.push(`league ${key} excluded by recipe: ${excludeReason}`);
+      }
+      return null;
+    }
     if (!inScope(key)) {
       excluded.add(key);
       return null;
