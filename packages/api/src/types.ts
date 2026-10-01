@@ -515,7 +515,11 @@ export interface ClubCommEvent {
  */
 export interface ExportLogEntry {
   id: string;
-  kind: 'player-export';
+  /**
+   * `player-export`: the admin register download. `medicoach-export`: the export-medicoach
+   * CLI's bundle, written only under `--confirm` (actor is the CLI, counts are per entity).
+   */
+  kind: 'player-export' | 'medicoach-export';
   /** Human-readable actor (caller email), mirroring notes[].author / commLog[].by. */
   by: string;
   /** Stable Cognito sub of the actor. */
@@ -531,6 +535,12 @@ export interface ExportLogEntry {
    * register as a clean export.
    */
   erroredClubs?: number;
+  /** Where the data went (medicoach-export only). */
+  destination?: 'medicoach';
+  /** Per-entity counts (medicoach-export only): the bundle's `counts` block. No PII. */
+  counts?: Record<string, number>;
+  /** League keys the export covered (medicoach-export only). */
+  leagues?: string[];
 }
 
 /** Onboard payload: a Club plus the flat chair contact fields the admin form sends. */
