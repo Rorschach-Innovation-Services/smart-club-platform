@@ -181,7 +181,7 @@ describe('flagship recipes (handover §9.3)', () => {
     ]);
   });
 
-  test('Promotion Men 30 Over: SUBDIVIDE into 2 sub-groups (Kingsmead Cup flagged), not carry', () => {
+  test('Promotion Men 30 Over: SUBDIVIDE into 2 sub-groups (Kingsmead Cup confirmed), not carry', () => {
     const c = comp('promotion', '30-over');
     assert.equal(c.format.type, 'league');
     assert.equal(c.format.rounds, 1);
@@ -189,16 +189,16 @@ describe('flagship recipes (handover §9.3)', () => {
       { type: 'league', rounds: 1, groupSeeding: 'subdivide', subGroups: 2 },
     ]);
     assert.deepEqual(sizes(c), [10, 10]);
-    assert.match(c.confirm ?? '', /Kingsmead/);
+    assert.equal(c.confirm, undefined);
     assert.equal(bundle.leagues.find((l) => l.key === 'promotion')!.relegation.swaps.length, 0);
   });
 
-  test('Promotion Men T20: 4×5 groups, semis from the four winners (pairing flagged)', () => {
+  test('Promotion Men T20: 4×5 groups, semis from the four winners (pairing confirmed)', () => {
     const c = comp('promotion', 't20');
     assert.equal(c.format.type, 'groups_knockout');
     assert.deepEqual(sizes(c), [5, 5, 5, 5]);
     assert.equal(placeholders(c).length, 3);
-    assert.match(c.confirm ?? '', /pairing/);
+    assert.equal(c.confirm, undefined);
   });
 
   test('Premier Women: T20 2×4 cross-pool semis; 30 Over rounds 2, relegate G2 last to Promotion Women', () => {
@@ -257,24 +257,19 @@ describe('flagship recipes (handover §9.3)', () => {
     assert.equal(ko.length, 1);
     assert.equal(ko[0].stage, 'Final');
     assert.deepEqual([ko[0].homeSlot, ko[0].awaySlot], [gpos(1, 1), gpos(2, 2)]);
-    assert.match(t20.confirm ?? '', /intentional/);
+    assert.equal(t20.confirm, undefined);
     // Only G1 1st and G2 2nd qualify: no per-group advance count, the final carries the rule.
     assert.equal(t20.format.advancePerGroup, undefined);
     assert.deepEqual(sizes(comp('veterans-promotion', '30-over')), [15]);
   });
 
-  test('assumed crossed semis (Premier Women, Veterans Premier) are in the union confirmation list', () => {
-    for (const [key, label] of [
-      ['premierWomen', 'Premier Women'],
-      ['veterans-premier', 'Veterans Premier'],
-    ]) {
-      assert.match(comp(key, 't20').confirm ?? '', /pairing is not specified/);
-      assert.ok(
-        summary.confirmations.some((m) => m.startsWith(`${key} t20: ${label} T20: semis`)),
-        `${key} t20 confirmation printed`,
-      );
-      assert.ok(bundle.meta.confirmations.some((m) => m.startsWith(`${key} t20:`)));
+  test('union answers (1 Oct 2026) leave only the Promotion Women structure question open', () => {
+    for (const key of ['premierWomen', 'veterans-premier']) {
+      assert.equal(comp(key, 't20').confirm, undefined, `${key} t20 crossed semis confirmed`);
     }
+    assert.equal(summary.confirmations.length, 1);
+    assert.ok(summary.confirmations[0].startsWith('promotion-women-s-league:'));
+    assert.deepEqual(bundle.meta.confirmations, summary.confirmations);
   });
 
   test('refs are invariant under --leagues: a premier-only export yields the same refs for premier', () => {

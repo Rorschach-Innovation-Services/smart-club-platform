@@ -25,11 +25,11 @@ function semisAndFinal(
 }
 
 /**
- * Top two per group, crossed: G1-1 v G2-2, G2-1 v G1-2, then the final. The handover says
- * "top 2 cross-pool semis" without the exact pairing, so the crossing is an assumption and
- * carries a confirm note naming the league.
+ * Top two per group, crossed: G1-1 v G2-2, G2-1 v G1-2, then the final. The handover said
+ * "top 2 cross-pool semis" without the exact pairing. Confirmed by the union 1 Oct 2026:
+ * crossed semis for Premier Women's T20 and Veterans Premier T20.
  */
-function crossPoolTopTwo(leagueLabel: string, name: string, sizes: number[]): CompetitionRecipe {
+function crossPoolTopTwo(name: string, sizes: number[]): CompetitionRecipe {
   return {
     name,
     format: {
@@ -42,7 +42,6 @@ function crossPoolTopTwo(leagueLabel: string, name: string, sizes: number[]): Co
     cricketMatchFormat: 'T20',
     expectedGroupSizes: sizes,
     laterFixtures: semisAndFinal([gp(1, 1), gp(2, 2)], [gp(2, 1), gp(1, 2)]),
-    confirm: `${leagueLabel} ${name}: semis are the top two per group; the pairing is not specified (exported crossed as G1-1 v G2-2, G2-1 v G1-2). Confirm with Dolphins.`,
   };
 }
 
@@ -95,9 +94,8 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
           },
           cricketMatchFormat: 'T20',
           expectedGroupSizes: [5, 5, 5, 5],
+          // Confirmed by the union 1 Oct 2026: winners semis pair G1vG2 and G3vG4.
           laterFixtures: semisAndFinal([gp(1, 1), gp(2, 1)], [gp(3, 1), gp(4, 1)]),
-          confirm:
-            'Promotion T20: semis are the four group winners; the pairing is not specified (exported as G1-1 v G2-1, G3-1 v G4-1). Confirm with Dolphins.',
         },
         '30-over': {
           name: '30 Over',
@@ -109,14 +107,17 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
           },
           cricketMatchFormat: 'T30',
           expectedGroupSizes: [10, 10],
-          confirm:
-            'Promotion 30 Over: phase 2 subdivides each group in two; Group 2’s branch is the "Hollywood Kingsmead Cup". Confirm naming and that the cup is part of this competition.',
+          // Confirmed by the union 1 Oct 2026: the "Hollywoodbets Kingsmead Cup" is the NAME of
+          // the Bottom-10 group's (Group 2's) subdivide stage, so this structural model stands.
+          // medicoach auto-names the subdivide children "Group 2 A"/"Group 2 B"; showing the Cup
+          // name would be a post-boundary rename in medicoach, which is NOT safe through today's
+          // group-save paths (see medicoach docs/league-migration-guide.md §9.8).
         },
       },
     },
     premierWomen: {
       competitions: {
-        t20: crossPoolTopTwo('Premier Women', 'T20', [4, 4]),
+        t20: crossPoolTopTwo('T20', [4, 4]),
         '30-over': {
           name: '30 Over',
           format: { type: 'league', rounds: 2, extraPhases: [], teamsPerGroup: 4 },
@@ -138,7 +139,7 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
       group: 'Overarching Leagues',
       district: 'All districts',
       competitions: {
-        t20: crossPoolTopTwo('Veterans Premier', 'T20', [6, 6]),
+        t20: crossPoolTopTwo('T20', [6, 6]),
         '30-over': {
           name: '30 Over',
           format: { type: 'league', rounds: 1, extraPhases: [], teamsPerGroup: 12 },
@@ -164,11 +165,11 @@ export const DOLPHINS_RECIPES: TenantRecipes = {
           },
           cricketMatchFormat: 'T20',
           expectedGroupSizes: [7, 8],
+          // Confirmed by the union 1 Oct 2026: the final G1 1st v G2 2nd (uneven 7+8 groups) is
+          // intended.
           laterFixtures: [
             { slotId: 'final', stage: 'Final', round: 1, home: gp(1, 1), away: gp(2, 2) },
           ],
-          confirm:
-            'Veterans Promotion T20: the final is G1 1st v G2 2nd (uneven 7+8 groups), so one side qualifies from Group 1 and one (the runner-up) from Group 2; exported without advancePerGroup, the final fixture carries the rule. Confirm this is intentional.',
         },
         '30-over': {
           name: '30 Over',

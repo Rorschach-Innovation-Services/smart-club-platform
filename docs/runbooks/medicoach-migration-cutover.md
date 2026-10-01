@@ -38,9 +38,11 @@ Team reviews → merge to development → flow to main per your release process.
 ## 3. Long-lead items — start these NOW, they gate nothing else
 
 - **Dolphins confirmations** (from the handover PDF + export summary):
-  Promotion Men's T20 semi pairings; the Hollywood Kingsmead Cup shape
-  (Group 2's 30-over branch); Promotion Women's structure; Veterans
-  Promotion final's G1-1 v G2-2 pairing.
+  Promotion Women's structure is still open. The union answered the rest on
+  1 Oct 2026: the Promotion Men's T20 semi pairings (G1vG2, G3vG4), the
+  Hollywoodbets Kingsmead Cup (the name of Group 2's 30-over subdivide stage),
+  the crossed semis for Premier Women's T20 + Veterans Premier T20, and the
+  Veterans Promotion final's G1-1 v G2-2 pairing are all confirmed.
 - **Meta**: register WhatsApp template `platform_access_announcement`
   (exact body in apps/api/src/lib/onboarding-whatsapp-templates.ts — must stay
   byte-identical). After approval, flip its status to "registered" (ask Claude).
