@@ -53,6 +53,7 @@ import { fixtureSyncRef } from '../fixture-identity.js';
 import {
   ChangesResponseSchema,
   changesPathAndQuery,
+  isoInstant,
   parseFixtureRef,
   parseTeamRef,
   signRequest,
@@ -246,7 +247,7 @@ function resultItem(
     seriesId,
     fixtureId,
     ref,
-    orderAt: r.recordedAt,
+    orderAt: isoInstant(r.recordedAt),
     homeScore: r.homeScore,
     awayScore: r.awayScore,
     summary: r.summary,
@@ -254,7 +255,7 @@ function resultItem(
     method: r.method,
     noResult: r.noResult,
     resultSource: r.source,
-    recordedAt: r.recordedAt,
+    recordedAt: isoInstant(r.recordedAt),
     scoringSide: r.scoringSide,
     // No captainRef: a player ref is never kept on the result (POPIA). It rides only on the
     // REPORTOPEN# marker while the reports are pending.
@@ -435,7 +436,7 @@ export async function runMedicoachSync(
               ref: change.ref,
               seriesId,
               fixtureId,
-              recordedAt: change.result.recordedAt,
+              recordedAt: isoInstant(change.result.recordedAt),
               createdAt: now().toISOString(),
               attempts: 0,
               // The only place the player ref is kept, and only until the reports opened.
@@ -483,9 +484,9 @@ export async function runMedicoachSync(
             seriesId,
             fixtureId,
             ref: change.ref,
-            orderAt: change.resultClearedAt,
+            orderAt: isoInstant(change.resultClearedAt),
             cleared: true,
-            clearedAt: change.resultClearedAt,
+            clearedAt: isoInstant(change.resultClearedAt),
             storedAt: now().toISOString(),
           });
           if (cleared) {

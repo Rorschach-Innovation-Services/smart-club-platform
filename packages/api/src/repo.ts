@@ -131,6 +131,7 @@ import type {
 
 import { tableName } from './env.js';
 import { teamIdsForClub } from './teams.js';
+import { isoInstant } from './medicoach-sync-contract.js';
 
 const TABLE = tableName();
 // DYNAMO_ENDPOINT points at a local DynamoDB (dynalite) for offline dev; any
@@ -1022,16 +1023,18 @@ export async function putFixtureResultIfNewer(
   result: StoredFixtureResult,
 ): Promise<boolean> {
   // Never persist a player ref on the result (POPIA), whatever the caller passed.
-  const { captainRef: _playerRef, ...item } = result as StoredFixtureResult & {
+  const { captainRef: _playerRef, ...rest } = result as StoredFixtureResult & {
     captainRef?: unknown;
   };
+  // One canonical spelling: the condition below compares strings (ADR 0016).
+  const item = { ...rest, orderAt: isoInstant(rest.orderAt) };
   try {
     await ddb.send(
       new PutCommand({
         TableName: TABLE,
         Item: { ...item, ...fixtureResultKey(tenant, result.seriesId, result.fixtureId) },
         ConditionExpression: 'attribute_not_exists(pk) OR orderAt < :o',
-        ExpressionAttributeValues: { ':o': result.orderAt },
+        ExpressionAttributeValues: { ':o': item.orderAt },
       }),
     );
     return true;
@@ -1173,7 +1176,12 @@ export async function deleteSyncConflict(tenant: string, ref: string): Promise<v
  * snapshot (two concurrent edits, a CLI racing an admin) can never replace a newer one. An
  * older or equal snapshot is a silent no-op — the newer one already in the row goes out.
  */
-export async function putPendingSync(tenant: string, row: PendingScheduleSync): Promise<void> {
+export async function putPendingSync(tenant: string, pending: PendingScheduleSync): Promise<void> {
+  // One canonical spelling: the condition compares strings (ADR 0016).
+  const row = {
+    ...pending,
+    schedule: { ...pending.schedule, changedAt: isoInstant(pending.schedule.changedAt) },
+  };
   try {
     await ddb.send(
       new PutCommand({

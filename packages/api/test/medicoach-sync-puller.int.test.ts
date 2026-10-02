@@ -355,6 +355,24 @@ describe('medicoach sync puller', () => {
     assert.equal(hookCalls.length, 1);
   });
 
+  test('instants are ordered by time, not by spelling (…58Z vs …58.500Z)', async () => {
+    const first = example('changes-live-result');
+    first.fixtures[0].result.recordedAt = '2026-10-04T14:31:58Z';
+    pages = [first];
+    assert.equal((await run()).counts.resultsStored, 1);
+    const stored = await repo.getFixtureResult('dolphins', 's-planb-premier-men-t20-g1', 'f3');
+    assert.equal(stored?.orderAt, '2026-10-04T14:31:58.000Z');
+    // Half a second later, spelled with milliseconds: newer, so it must win.
+    const later = example('changes-live-result');
+    later.nextCursor = '2026-10-04T15:00:00.000Z';
+    later.fixtures[0].result.recordedAt = '2026-10-04T14:31:58.500Z';
+    later.fixtures[0].result.summary = 'Umzinto won by 24 runs';
+    pages = [later];
+    assert.equal((await run()).counts.resultsStored, 1);
+    const after = await repo.getFixtureResult('dolphins', 's-planb-premier-men-t20-g1', 'f3');
+    assert.equal(after?.summary, 'Umzinto won by 24 runs');
+  });
+
   test('an older recordedAt is ignored', async () => {
     pages = [example('changes-live-result')];
     await run();

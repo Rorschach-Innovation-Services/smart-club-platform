@@ -38,6 +38,17 @@ export const SCHEDULE_PUSH_MAX = 100;
 
 /** ISO-8601 UTC instant, e.g. 2026-10-04T14:32:10.123Z. */
 const isoUtc = z.string().datetime();
+
+/**
+ * An instant in ONE canonical spelling (`YYYY-MM-DDTHH:mm:ss.sssZ`). The contract accepts any
+ * precision (`…58Z`, `…58.5Z`), and smart club orders by plain string comparison in
+ * DynamoDB conditions (`orderAt < :o`, `changedAt < :c`), where `…58Z` sorts AFTER `…58.5Z`.
+ * Every stored or compared sync timestamp goes through this first.
+ */
+export function isoInstant(value: string): string {
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : value;
+}
 /** ISO-8601 instant with an explicit offset, e.g. 2026-10-04T09:00:00+02:00. */
 const isoWithOffset = z.string().datetime({ offset: true });
 const ref = z.string().min(1);

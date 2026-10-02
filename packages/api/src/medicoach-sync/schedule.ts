@@ -37,6 +37,7 @@ import { randomUUID } from 'node:crypto';
 import { isSlotRef } from '../../../engine/src/formats.js';
 import { fixtureSyncRef } from '../fixture-identity.js';
 import {
+  isoInstant,
   MEDICOACH_SYNC_VERSION,
   SCHEDULE_PATH,
   SCHEDULE_PUSH_MAX,
@@ -704,7 +705,7 @@ export async function applyInboundSchedule(
     if (!built.changed.length) return 'unchanged';
     const next: ScheduleFixture = {
       ...built.fixture,
-      schedule: { ...(fixture.schedule ?? {}), changedAt: schedule.changedAt },
+      schedule: { ...(fixture.schedule ?? {}), changedAt: isoInstant(schedule.changedAt) },
     };
     const nextFixtures = fixtures.map((f, j) => (j === i ? next : f));
     if (series.released) {

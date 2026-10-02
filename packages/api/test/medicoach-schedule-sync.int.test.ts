@@ -645,6 +645,13 @@ describe('Slice 4 — the outbox', () => {
     await repo.putPendingSync(T, row('2026-10-02T10:00:01.000Z', '10:00'));
     const [kept] = await repo.listPendingSync(T);
     assert.equal(kept.schedule.scheduledTime, '2026-10-04T11:00:00+02:00');
+    // Same rule whatever the spelling: …09Z then …09.500Z (newer) wins.
+    await repo.putPendingSync(T, row('2026-10-02T10:00:08Z', '11:30'));
+    await repo.putPendingSync(T, row('2026-10-02T10:00:08.500Z', '11:45'));
+    assert.equal(
+      (await repo.listPendingSync(T))[0].schedule.scheduledTime,
+      '2026-10-04T11:45:00+02:00',
+    );
     await repo.putPendingSync(T, row('2026-10-02T10:00:09.000Z', '12:00'));
     assert.equal(
       (await repo.listPendingSync(T))[0].schedule.scheduledTime,
