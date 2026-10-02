@@ -22,6 +22,11 @@
  *     becomes a slot; a concrete side stays a teamRef.
  *   - People: exco + coaches deduped per person (email, else name+cell), players active
  *     only by default, deduped by naturalKey, with veterans second-club team refs.
+ *   - Player placement (2026-10-02): the registered league's single side as before. A player
+ *     left with NO team after that and the veterans pass is placed by fallback: every side
+ *     of their club in that league when it has several, else the club's league-less squad
+ *     team (`clubSquad`, one per club that needs it). Players who already had a team are
+ *     never touched, so every pre-existing ref and teamRefs list stays byte-identical.
  */
 import { createHash } from 'node:crypto';
 import { clubTeamsForLeague, isVeteransLeague } from '../../engine/src/leagues.js';
@@ -122,8 +127,34 @@ export interface ExportSummary {
     placeholdersSkipped: number;
     duplicateRowsMerged: number;
     withTeam: number;
+    /** Main-club lookups (and veterans lookups) that found 2+ sides. Unchanged meaning. */
     ambiguousSide: number;
+    /** After placement; 0 by construction (every player can fall back to a club squad). */
     noTeam: number;
+    /** How each exported player got their team(s). Sums to `exported`. */
+    placement: {
+      /** The registered league's single side (with any veterans side). */
+      singleSide: number;
+      /** No main-club side, but a veterans second-club side. */
+      veteransOnly: number;
+      /** Fallback: the club has several sides in the player's league → all of them. */
+      allSidesOfAmbiguous: number;
+      /** Fallback: no usable league → the club's squad team. */
+      clubSquad: number;
+    };
+    /** Why each club-squad player had no usable league. Sums to placement.clubSquad. */
+    clubSquadReasons: {
+      /** No registered league and the club has no single affiliation league to infer. */
+      noRegisteredLeague: number;
+      /** No registered league and the club is in 2+ affiliation leagues. */
+      multipleCandidateLeagues: number;
+      /** The registered league is not in the bundle (excluded, filtered, or unknown). */
+      leagueNotExported: number;
+      /** The league is in the bundle but the club has no side in it. */
+      noSideInLeague: number;
+    };
+    /** Club squad teams created (one per club that needed one). */
+    squadTeams: number;
   };
   veterans: {
     playersWithVeteransClub: number;
@@ -630,6 +661,14 @@ export function buildBundle(input: BuildInputs): BuildResult {
       withTeam: 0,
       ambiguousSide: 0,
       noTeam: 0,
+      placement: { singleSide: 0, veteransOnly: 0, allSidesOfAmbiguous: 0, clubSquad: 0 },
+      clubSquadReasons: {
+        noRegisteredLeague: 0,
+        multipleCandidateLeagues: 0,
+        leagueNotExported: 0,
+        noSideInLeague: 0,
+      },
+      squadTeams: 0,
     },
     veterans: {
       playersWithVeteransClub: 0,
@@ -1265,7 +1304,17 @@ export function buildBundle(input: BuildInputs): BuildResult {
   const staff = buildStaff(input, clubsById, institutions, exportedKeys, sidesOf, summary);
 
   /* ── Players ── */
-  const players = buildPlayers(input, clubsById, institutions, leagues, sidesOf, summary);
+  const { players, squadTeams } = buildPlayers(
+    input,
+    clubsById,
+    institutions,
+    leagues,
+    sidesOf,
+    summary,
+  );
+  // Appended after every league team so the existing teams keep their order.
+  teams.push(...squadTeams);
+  summary.players.squadTeams = squadTeams.length;
 
   const institutionList = [...institutions.values()].sort((a, b) =>
     a.sourceId.localeCompare(b.sourceId),
@@ -1472,8 +1521,24 @@ function buildPlayers(
   leagues: BundleLeague[],
   sidesOf: (clubId: string, leagueKey: string) => BundleTeam[],
   summary: ExportSummary,
-): BundlePlayer[] {
+): { players: BundlePlayer[]; squadTeams: BundleTeam[] } {
   const { tenant } = input;
+  const squads = new Map<string, BundleTeam>(); // by clubId
+  const squadOf = (clubId: string): BundleTeam => {
+    let t = squads.get(clubId);
+    if (!t) {
+      const inst = institutions.get(clubId)!;
+      t = {
+        externalRef: refs.squadTeam(tenant, clubId),
+        institutionRef: inst.externalRef,
+        sourceTeamId: clubId,
+        name: `${inst.name} Squad`,
+        clubSquad: true,
+      };
+      squads.set(clubId, t);
+    }
+    return t;
+  };
   const includeInactive = input.options?.includeInactivePlayers === true;
   const leagueKeys = new Set(leagues.map((l) => l.key));
   const affiliationLeagues = leagues.filter((l) => !l.fixturesOnly);
@@ -1521,11 +1586,13 @@ function buildPlayers(
 
     // Main club side: the registered league, else the club's only affiliation league.
     let leagueKey = p.team && leagueKeys.has(p.team) ? p.team : undefined;
+    let candidateCount = 0;
     if (!p.team) {
       const club = clubsById.get(p.clubId);
       const candidates = (club?.leagues ?? []).filter((k) =>
         affiliationLeagues.some((l) => l.key === k),
       );
+      candidateCount = candidates.length;
       if (candidates.length === 1) leagueKey = candidates[0];
     }
     const sides = leagueKey ? sidesOf(p.clubId, leagueKey) : [];
@@ -1547,6 +1614,24 @@ function buildPlayers(
         } else if (vs.length > 1) summary.players.ambiguousSide++;
       }
       if (resolved) summary.veterans.resolvedVeteransTeam++;
+    }
+
+    // Fallback placement, ONLY for a player the rules above left without any team: an
+    // already-placed player keeps exactly the teamRefs earlier exports gave it.
+    const placement = summary.players.placement;
+    if (sides.length === 1) placement.singleSide++;
+    else if (teamRefs.length) placement.veteransOnly++;
+    else if (sides.length > 1) {
+      for (const s of sides) teamRefs.push(s.externalRef);
+      placement.allSidesOfAmbiguous++;
+    } else {
+      teamRefs.push(squadOf(p.clubId).externalRef);
+      placement.clubSquad++;
+      const why = summary.players.clubSquadReasons;
+      if (p.team && !leagueKey) why.leagueNotExported++;
+      else if (leagueKey) why.noSideInLeague++;
+      else if (candidateCount > 1) why.multipleCandidateLeagues++;
+      else why.noRegisteredLeague++;
     }
 
     if (teamRefs.length) summary.players.withTeam++;
@@ -1589,5 +1674,8 @@ function buildPlayers(
     }
   }
 
-  return out.sort((a, b) => a.externalRef.localeCompare(b.externalRef));
+  return {
+    players: out.sort((a, b) => a.externalRef.localeCompare(b.externalRef)),
+    squadTeams: [...squads.values()].sort((a, b) => a.externalRef.localeCompare(b.externalRef)),
+  };
 }

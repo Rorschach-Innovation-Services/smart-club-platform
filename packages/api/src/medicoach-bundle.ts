@@ -14,6 +14,11 @@
  *   team         smartclub:<tenant>:team:<leagueKey>:<teamId>
  *                  leagueKey is part of the ref because a single-side club uses its clubId
  *                  as the teamId in EVERY league, so teamId alone collides across leagues.
+ *   club squad   smartclub:<tenant>:team:<clubId>:squad
+ *                  a league-less institution team (`clubSquad: true`, no leagueKey) for the
+ *                  club's players whose registration names no usable league. One per club
+ *                  that needs it; added 2026-10-02 as an optional v1 field (older bundles
+ *                  simply have none).
  *   staff        smartclub:<tenant>:staff:<sha256(identity) truncated>
  *                  hashed: refs end up in a committed mapping file, so no names/emails.
  *   player       smartclub:<tenant>:player:<naturalKey>
@@ -46,6 +51,7 @@ export const refs = {
   institution: (t: string, clubId: string) => `smartclub:${t}:club:${clubId}`,
   team: (t: string, leagueKey: string, teamId: string) =>
     `smartclub:${t}:team:${leagueKey}:${teamId}`,
+  squadTeam: (t: string, clubId: string) => `smartclub:${t}:team:${clubId}:squad`,
   staff: (t: string, identityHash: string) => `smartclub:${t}:staff:${identityHash}`,
   player: (t: string, naturalKey: string) => `smartclub:${t}:player:${naturalKey}`,
   league: (t: string, leagueKey: string) => `smartclub:${t}:league:${leagueKey}`,
@@ -103,7 +109,14 @@ export const TeamSchema = z.object({
   /** The smart-club team id (a clubId for a single-side club, `tm_…` otherwise). */
   sourceTeamId: z.string().min(1),
   name: z.string().min(1),
-  leagueKey: z.string().min(1),
+  /** The league the side plays in. Absent only on a club squad. */
+  leagueKey: z.string().min(1).optional(),
+  /**
+   * A league-less institution team holding the club's players who have no usable league
+   * (no registered league, or one that is not exported, or several candidates). Never in a
+   * league's team list, so it plays no fixtures. Exactly one of leagueKey / clubSquad.
+   */
+  clubSquad: z.literal(true).optional(),
   venue: z.string().optional(),
   lat: z.number().optional(),
   lon: z.number().optional(),
@@ -426,10 +439,18 @@ export const MedicoachBundleSchema = BundleShape.superRefine((b, ctx) => {
       issue(`${where}: ${r} does not resolve to a ${kind}${got ? ` (is a ${got})` : ''}`);
   };
   const leagueKeys = new Set(b.leagues.map((l) => l.key));
+  const squadRefs = new Set<string>();
   for (const t of b.teams) {
     expect(t.institutionRef, 'institution', `team ${t.externalRef}`);
-    if (!leagueKeys.has(t.leagueKey))
+    if (t.clubSquad) {
+      squadRefs.add(t.externalRef);
+      if (t.leagueKey !== undefined)
+        issue(`team ${t.externalRef}: a club squad has no leagueKey (got ${t.leagueKey})`);
+    } else if (t.leagueKey === undefined) {
+      issue(`team ${t.externalRef}: leagueKey is required unless clubSquad is true`);
+    } else if (!leagueKeys.has(t.leagueKey)) {
       issue(`team ${t.externalRef}: league ${t.leagueKey} not in bundle`);
+    }
   }
   for (const s of b.people.staff)
     for (const a of s.assignments) {
@@ -443,7 +464,10 @@ export const MedicoachBundleSchema = BundleShape.superRefine((b, ctx) => {
     for (const tr of p.teamRefs) expect(tr, 'team', `player ${p.externalRef}`);
   }
   for (const l of b.leagues) {
-    for (const tr of l.teamRefs) expect(tr, 'team', `league ${l.key}`);
+    for (const tr of l.teamRefs) {
+      expect(tr, 'team', `league ${l.key}`);
+      if (squadRefs.has(tr)) issue(`league ${l.key}: club squad ${tr} cannot be a league team`);
+    }
     const leagueTeams = new Set(l.teamRefs);
     const groupsByComp = new Map<string, Set<string>>();
     for (const c of l.competitions) {
