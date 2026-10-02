@@ -57,19 +57,22 @@ flowchart TB
 
 ## Decision records
 
-| ADR                                                   | Decision                                               |
-| ----------------------------------------------------- | ------------------------------------------------------ |
-| [0001](0001-aws-native-dynamodb.md)                   | AWS-native backend on DynamoDB (not Supabase/Firebase) |
-| [0002](0002-single-tenant-saas-vs-isolated-stacks.md) | One shared multi-tenant stack (not per-union stacks)   |
-| [0003](0003-cognito-passwordless-memberships.md)      | Cognito passwordless OTP + `memberships[]` claim       |
-| [0004](0004-thin-crud-client-side-compute.md)         | Thin CRUD API, computation stays client-side           |
-| [0005](0005-frozen-catalogues-v1.md)                  | Districts/leagues/CQI frozen shared defaults in v1     |
-| [0006](0006-platform-operator-and-tenant-registry.md) | Platform operator role, tenant registry, `/platform`   |
-| [0007](0007-wildcard-subdomains-shared-api-host.md)   | Wildcard subdomains on one shared API host             |
-| [0008](0008-configurable-league-structures.md)        | Configurable league structures as stage pipelines      |
-| [0009](0009-per-tenant-required-docs.md)              | Per-tenant compliance-doc catalogue                    |
-| [0010](0010-self-serve-onboarding.md)                 | Self-serve client onboarding suite (operator portal)   |
-| [0011](0011-progressive-fixture-release.md)           | Progressive fixture release (withhold venues/times)    |
-| [0012](0012-clearance-reject-cancels-the-move.md)     | Clearance reject cancels the move, reversible reopen   |
+| ADR                                                        | Decision                                               |
+| ---------------------------------------------------------- | ------------------------------------------------------ |
+| [0001](0001-aws-native-dynamodb.md)                        | AWS-native backend on DynamoDB (not Supabase/Firebase) |
+| [0002](0002-single-tenant-saas-vs-isolated-stacks.md)      | One shared multi-tenant stack (not per-union stacks)   |
+| [0003](0003-cognito-passwordless-memberships.md)           | Cognito passwordless OTP + `memberships[]` claim       |
+| [0004](0004-thin-crud-client-side-compute.md)              | Thin CRUD API, computation stays client-side           |
+| [0005](0005-frozen-catalogues-v1.md)                       | Districts/leagues/CQI frozen shared defaults in v1     |
+| [0006](0006-platform-operator-and-tenant-registry.md)      | Platform operator role, tenant registry, `/platform`   |
+| [0007](0007-wildcard-subdomains-shared-api-host.md)        | Wildcard subdomains on one shared API host             |
+| [0008](0008-configurable-league-structures.md)             | Configurable league structures as stage pipelines      |
+| [0009](0009-per-tenant-required-docs.md)                   | Per-tenant compliance-doc catalogue                    |
+| [0010](0010-self-serve-onboarding.md)                      | Self-serve client onboarding suite (operator portal)   |
+| [0011](0011-progressive-fixture-release.md)                | Progressive fixture release (withhold venues/times)    |
+| [0012](0012-clearance-reject-cancels-the-move.md)          | Clearance reject cancels the move, reversible reopen   |
+| [0013](0013-veterans-squad-selection.md)                   | Veterans squad selection by request and confirm        |
+| [0014](0014-seasons-one-vocabulary-one-path-one-engine.md) | Seasons: one vocabulary, one path, one engine          |
+| [0015](0015-fixture-postponement-negotiation.md)           | Fixture postponement by negotiation between clubs      |
 
 For the data layout and access patterns, see [data-model.md](data-model.md).
