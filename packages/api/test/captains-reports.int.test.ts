@@ -750,6 +750,51 @@ describe('a cleared result', () => {
   });
 });
 
+describe('a cleared then re-recorded result', () => {
+  test('re-opens the void reports with new links and notifies each recipient exactly once more', async () => {
+    await seedCaptain();
+    page = liveResultPage('live');
+    await runPull();
+    assert.equal(notices.length, 2);
+    const before = await reportsOf();
+    const live = liveResultPage('live');
+    const recordedAt = Date.parse(live.fixtures[0].result.recordedAt);
+    const clearedAt = new Date(recordedAt + 60_000).toISOString();
+    page = {
+      ...live,
+      nextCursor: clearedAt,
+      fixtures: [{ ...live.fixtures[0], result: null, resultClearedAt: clearedAt }],
+    };
+    await runPull();
+    assert.ok((await reportsOf()).every((r) => r.status === 'void'));
+
+    const again = liveResultPage('live');
+    again.nextCursor = new Date(recordedAt + 120_000).toISOString();
+    again.fixtures[0].result.recordedAt = new Date(recordedAt + 120_000).toISOString();
+    page = again;
+    await runPull();
+    const reopened = await reportsOf();
+    assert.ok(reopened.every((r) => r.status === 'pending'));
+    for (const r of reopened)
+      assert.notEqual(
+        r.recipient.memberId,
+        before.find((b) => b.id === r.id)!.recipient.memberId,
+        'a new link',
+      );
+    assert.equal(notices.length, 4, 'one new notice per re-opened report');
+    assert.deepEqual(
+      notices
+        .slice(2)
+        .map((n) => n.reportId)
+        .sort(),
+      reopened.map((r) => r.id).sort(),
+    );
+    // A replay of the re-record sends nothing more.
+    await runPull();
+    assert.equal(notices.length, 4);
+  });
+});
+
 describe('admin list', () => {
   test('filters by status and date; no late status anywhere; reps are refused', async () => {
     await seedCaptain();

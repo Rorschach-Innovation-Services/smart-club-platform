@@ -537,7 +537,11 @@ async function notifyReportOpened(
   const secret = (deps.linkSecret ?? captainsReportLinkSecret)();
   const base = (deps.linkBase ?? captainsReportLinkBase)();
   const { token, url } = reportLink(tenant, report, secret, base);
-  if (!(await repo.claimCaptainsReportNotify(tenant, report.id, 'recipient'))) return false;
+  // The ledger audience is per RECIPIENT (its random memberId), not per report: a report
+  // voided by a cleared result and re-opened by a re-recorded one gets a new memberId (a new
+  // link) and must be notified again, while a replay of the same opening never is.
+  const audience = `recipient#${report.recipient.memberId}`;
+  if (!(await repo.claimCaptainsReportNotify(tenant, report.id, audience))) return false;
   const home = report.side === 'home' ? report.clubName : report.opponentName;
   const away = report.side === 'home' ? report.opponentName : report.clubName;
   const cc =
@@ -569,7 +573,7 @@ async function notifyReportOpened(
       error: err instanceof Error ? err.message : 'send failed',
     }));
   }
-  await repo.completeCaptainsReportNotify(tenant, report.id, 'recipient', results);
+  await repo.completeCaptainsReportNotify(tenant, report.id, audience, results);
   return true;
 }
 
