@@ -16,6 +16,11 @@ const {
   leagueKeyForSection,
   isKnownStructureAnomaly,
   SKIP_ROSTER,
+  scopeClubs,
+  leagueKeyForEntryLabel,
+  WOMENS_AGGREGATE,
+  MULTI_FILE_DOC_KEYS,
+  TITANS_DOC_KEYS,
 } = await import('../src/titans-import-map.js');
 
 const {
@@ -31,7 +36,14 @@ const {
 } = await import('../src/roster-normalize.js');
 
 const { dobFromSaId } = await import('../src/player-identity.js');
-const { maskId, findCrossClubDuplicates } = await import('../src/import-titans-roster.js');
+const {
+  maskId,
+  findCrossClubDuplicates,
+  parseArgs: parseRosterArgs,
+  findLiveCrossClubDuplicates,
+  expectedCollisionReport,
+  DEFAULT_MARKER,
+} = await import('../src/import-titans-roster.js');
 
 const {
   isImportObjectKey,
@@ -39,7 +51,14 @@ const {
   catalogueCoverageProblems,
   readCreatedClubsManifest,
   writeCreatedClubsManifest,
-  CREATED_CLUBS_MANIFEST_PATH,
+  createdClubsManifestPath,
+  resolveManifestStage,
+  LEGACY_CREATED_CLUBS_MANIFEST_PATH,
+  parseArgs: parseComplianceArgs,
+  entryFormProblems,
+  diffEntryForm,
+  applyEntryFormDiff,
+  EMPTY_STORED_PLAN,
 } = await import('../src/import-titans-compliance.js');
 const { readFile, writeFile, rm } = await import('node:fs/promises');
 
@@ -614,6 +633,14 @@ describe('catalogueCoverageProblems — two-directional multiFile assertion', ()
       minFiles: 1,
       maxFiles: 10,
     },
+    {
+      key: 'safeguardingCoaching',
+      name: 'Safeguarding & coaching certificates',
+      multiFile: true,
+      minFiles: 1,
+      maxFiles: 10,
+      optional: true,
+    },
   ];
 
   test('a well-formed catalogue (forward direction satisfied, no other key multiFile) reports nothing', () => {
@@ -629,6 +656,7 @@ describe('catalogueCoverageProblems — two-directional multiFile assertion', ()
       ...baseDocs,
       { key: 'agm', name: 'AGM' }, // multiFile omitted
       wellFormedMultiDocs[1],
+      wellFormedMultiDocs[2],
     ];
     const problems = catalogueCoverageProblems(docs as never, new Map());
     assert.ok(problems.some((p) => p.includes('"agm"') && p.includes('single-file')));
@@ -649,6 +677,9 @@ describe('catalogueCoverageProblems — two-directional multiFile assertion', ()
 });
 
 describe('created-clubs manifest — read/write durability', () => {
+  // Resolved once from the test process env (normally no SST stage → the `.unknown.json`
+  // fallback); every read/write below goes through the same resolver.
+  const CREATED_CLUBS_MANIFEST_PATH = createdClubsManifestPath();
   let originalRaw: string | undefined;
 
   before(async () => {
@@ -791,5 +822,453 @@ describe('revertManifestGate', () => {
   test('the corrupt case is reported as corrupt, not as missing', () => {
     const gate = revertManifestGate({ all: true }, CORRUPT);
     assert.match(gate.kind === 'warn' ? gate.message : '', /unreadable\/malformed/);
+  });
+});
+
+// ───────────────────────── Oct 2026 top-up (TUT + Pretoria East) ─────────────────────────
+
+describe('classifyFile — the Oct 2026 top-up drop (real filenames)', () => {
+  const cases: Array<[string, string]> = [
+    // jpg certificate — accepted only by the new key
+    ['Pretoria East/Coaching Certificate - Aamir Samaai.jpg', 'safeguardingCoaching'],
+    ['Pretoria East/Safeguarding Awareness Certificate - Aamir Samaai.pdf', 'safeguardingCoaching'],
+    // "Leve II" typo — "safe guarding" (spaced) matches first
+    ['TUT/TUT_ Safe guarding and Leve II Coach Evidence.pdf', 'safeguardingCoaching'],
+    // no "financial" wording — FILE_OVERRIDES forces it
+    ['Pretoria East/PECC AFS and Transactions 2025-2026.pdf', 'financials'],
+    // the superseding committee workbook still classifies normally
+    ['TUT/Club Committee-  2026 - 2027 _ Updated _ 300926.xls', 'committee'],
+    // pack-prep rename of the PDF-misnamed-.docx AGM
+    ['TUT/TUT_ AGM Minutes held on 25 July 2026.pdf', 'agm'],
+    // the two facility docs still go to facilityAgreement, not the new key
+    [
+      'Pretoria East/Lease Agreement Pretoria East Cricket Club (Maragon Mooikloof).pdf',
+      'facilityAgreement',
+    ],
+  ];
+  for (const [rel, docKey] of cases) {
+    test(`${rel} → ${docKey}`, () => {
+      const filename = rel.split('/')[1];
+      assert.equal(classifyFile(rel, filename).docKey, docKey);
+    });
+  }
+
+  test('TUT\'s superseded 31 Jul committee (double space after "Committee-") is an explicit skip', () => {
+    const rel = 'TUT/Club Committee-  2026 - 2027 _ TUT 310726.xls';
+    assert.equal(classifyFile(rel, rel.split('/')[1]).kind, 'skip');
+    // single-space spelling is NOT the override — it would classify as committee
+    const single = 'TUT/Club Committee- 2026 - 2027 _ TUT 310726.xls';
+    assert.equal(classifyFile(single, single.split('/')[1]).docKey, 'committee');
+  });
+
+  test('every file in the staged top-up pack classifies (zero unclassified)', () => {
+    const pack = [
+      'Pretoria East/Club Assets Register 2026 - 2027.xlsx',
+      'Pretoria East/Club Committee-  2026 - 2027.xlsx',
+      'Pretoria East/Club Database 2026-2027.xlsx',
+      'Pretoria East/Club Health Tracker 2026-2027.xlsx',
+      'Pretoria East/Club League Entry - 2026 - 2027.xls',
+      'Pretoria East/Coaching Certificate - Aamir Samaai.jpg',
+      'Pretoria East/Constitution PECC 2026-2027.pdf',
+      'Pretoria East/Lease Agreement Pretoria East Cricket Club (Maragon Mooikloof).pdf',
+      'Pretoria East/PECC AFS and Transactions 2025-2026.pdf',
+      'Pretoria East/PECC Agreement (Woodhill).pdf',
+      'Pretoria East/PECCS AGM Minutes 29 August 2026.pdf',
+      'Pretoria East/Safeguarding Awareness Certificate - Aamir Samaai.pdf',
+      'TUT/2026-27 Club League Entry _ TUT 310726.xls',
+      'TUT/Club Assets Register 2026-2027_ TUT 310726.xlsx',
+      'TUT/Club Committee-  2026 - 2027 _ TUT 310726.xls',
+      'TUT/Club Committee-  2026 - 2027 _ Updated _ 300926.xls',
+      'TUT/Club Health Tracker 2026-2027_ TUT 310726.xlsx',
+      'TUT/Clubs Databse _TUT 310726.xlsx',
+      'TUT/TUT _ FINANCIAL REPORT 2025 - 2026 SEASON.pdf',
+      'TUT/TUT Cricket Constitution_ UPDATED 2026.pdf',
+      'TUT/TUT_ AGM Minutes held on 25 July 2026.pdf',
+      'TUT/TUT_ Safe guarding and Leve II Coach Evidence.pdf',
+    ];
+    const unclassified = pack.filter(
+      (rel) => classifyFile(rel, rel.split('/')[1]).kind === 'unclassified',
+    );
+    assert.deepEqual(unclassified, []);
+  });
+
+  test('safeguardingCoaching is a multi-file key the import writes', () => {
+    assert.ok(MULTI_FILE_DOC_KEYS.has('safeguardingCoaching'));
+    assert.ok(TITANS_DOC_KEYS.includes('safeguardingCoaching'));
+  });
+});
+
+describe('scopeClubs — partial-pack scoping', () => {
+  test('only clubs whose folder is present are in scope; the rest are out of scope', () => {
+    const { inScope, outOfScope } = scopeClubs(['TUT', 'Pretoria East', 'TUT']);
+    assert.deepEqual(inScope.map((c) => c.id).sort(), [
+      'pretoria-east-cricket-club',
+      'tut-cricket-club',
+    ]);
+    assert.equal(outOfScope.length, CLUB_MAP.length - 2);
+    assert.ok(!outOfScope.some((c) => c.folder === 'TUT'));
+  });
+
+  test('a full pack scopes to every CLUB_MAP club, none out of scope', () => {
+    const { inScope, outOfScope } = scopeClubs(CLUB_MAP.map((c) => c.folder));
+    assert.equal(inScope.length, CLUB_MAP.length);
+    assert.equal(outOfScope.length, 0);
+  });
+
+  test('an empty or unrelated folder set is an empty scope (callers refuse to run)', () => {
+    assert.equal(scopeClubs([]).inScope.length, 0);
+    assert.equal(scopeClubs(['Not A Club']).inScope.length, 0);
+  });
+
+  test('folder matching is exact (no case/whitespace folding)', () => {
+    assert.equal(scopeClubs(['tut', 'Pretoria East ']).inScope.length, 0);
+  });
+});
+
+describe('leagueKeyForEntryLabel — ENTRY_LEAGUE_MAP', () => {
+  test('the 2026-27 form labels resolve to tenant league keys (parentheticals ignored)', () => {
+    assert.equal(leagueKeyForEntryLabel('Premier League'), 'premier-league');
+    assert.equal(leagueKeyForEntryLabel('Promotion League'), 'promotion-league');
+    assert.equal(leagueKeyForEntryLabel('2nd League (45 Overs)'), 'second-league');
+    assert.equal(leagueKeyForEntryLabel('3rd League (45 Overs)'), 'third-league');
+    assert.equal(leagueKeyForEntryLabel('4th League (45 Overs)'), 'fourth-league');
+    assert.equal(leagueKeyForEntryLabel('5th League (35 Overs)'), 'fifth-league');
+    assert.equal(leagueKeyForEntryLabel('Veterans '), 'veterans-league');
+    assert.equal(leagueKeyForEntryLabel('Under 9'), 'u9');
+    assert.equal(leagueKeyForEntryLabel('Under 15'), 'u15');
+  });
+
+  test('Reserve/President/Junior Girls are recognised but have no tenant league (null)', () => {
+    assert.equal(leagueKeyForEntryLabel('Reserve League'), null);
+    assert.equal(leagueKeyForEntryLabel('President League'), null);
+    assert.equal(leagueKeyForEntryLabel('Junior Girls'), null);
+  });
+
+  test("the single women's row resolves to the aggregate sentinel", () => {
+    assert.equal(leagueKeyForEntryLabel("Womens' League (35 Overs)"), WOMENS_AGGREGATE);
+    assert.equal(leagueKeyForEntryLabel("Women's League"), WOMENS_AGGREGATE);
+  });
+
+  test('an unknown label is undefined (fails closed)', () => {
+    assert.equal(leagueKeyForEntryLabel('Sixth League'), undefined);
+    assert.equal(leagueKeyForEntryLabel('Under 17'), undefined);
+  });
+});
+
+/** Entry-form row fixture (count/venue only — no contact data exists on these rows). */
+function entryRow(label: string, count: number, venue = '', extra: Record<string, unknown> = {}) {
+  return { section: 'SENIORS' as const, label, rowNumber: 1, prevCount: 0, count, venue, ...extra };
+}
+
+describe('entryFormProblems — fail-closed form checks', () => {
+  test('a clean form has no problems', () => {
+    assert.deepEqual(
+      entryFormProblems([entryRow('Promotion League', 1), entryRow('Under 9', 2)]),
+      [],
+    );
+  });
+
+  test('unknown label, duplicate league key, and a non-numeric count are all problems', () => {
+    const problems = entryFormProblems([
+      entryRow('Sixth League', 1),
+      entryRow('Promotion League', 1),
+      entryRow('Promotion League (Div B)', 1),
+      entryRow('Under 9', 0, '', { countRaw: '2 teams' }),
+    ]);
+    assert.ok(problems.some((p) => /unknown league label "Sixth League"/.test(p)));
+    assert.ok(problems.some((p) => /both resolve to league "promotion-league"/.test(p)));
+    assert.ok(problems.some((p) => /"2 teams" is not a whole number/.test(p)));
+  });
+});
+
+describe('diffEntryForm / applyEntryFormDiff — entry-form team mode', () => {
+  const club = { id: 'tut-cricket-club', name: 'TUT Cricket Club' };
+  const stored = {
+    leagues: ['premier-league', 'second-league', 'u11', 'womens-premier-league', 'sixth-league'],
+    leagueTeams: { 'premier-league': 1, 'second-league': 1, u11: 3, 'womens-premier-league': 1 },
+    teamRosters: {
+      u11: [
+        { id: 'tm_tut-cricket-club_u11_0', name: 'TUT A', venue: 'TUT Oval' },
+        { id: 'tm_tut-cricket-club_u11_1', name: 'TUT B', venue: 'TUT Oval' },
+        { id: 'tm_tut-cricket-club_u11_2', name: 'TUT C', venue: 'TUT Oval' },
+      ],
+    },
+  };
+
+  test("diff marks only real differences UPDATE; null-mapped and women's mismatches are manual", () => {
+    const diff = diffEntryForm(
+      [
+        entryRow('Premier League', 0),
+        entryRow('Promotion League', 1, 'TUT Oval'),
+        entryRow('Reserve League', 1),
+        entryRow('2nd League (45 Overs)', 1),
+        entryRow("Womens' League (35 Overs)", 2),
+        entryRow('Under 11', 2),
+        entryRow('Under 13', 0),
+      ],
+      stored,
+    );
+    const by = (label: string) => diff.find((d) => d.label === label);
+    assert.equal(by('Premier League')?.action, 'UPDATE'); // 1 → 0
+    assert.equal(by('Promotion League')?.action, 'UPDATE'); // 0 → 1
+    assert.equal(by('2nd League (45 Overs)')?.action, 'none');
+    assert.equal(by('Reserve League')?.action, 'manual');
+    const womens = by("Womens' League (35 Overs)");
+    assert.equal(womens?.action, 'manual');
+    assert.equal(womens?.stored, 1);
+    assert.equal(by('Under 11')?.action, 'UPDATE'); // 3 → 2
+    assert.equal(by('Under 13'), undefined); // 0 both sides — omitted
+    // a stored league no form row covers is kept, not dropped
+    const sixth = diff.find((d) => d.leagueKey === 'sixth-league');
+    assert.equal(sixth?.action, 'none');
+    assert.equal(sixth?.stored, 1);
+  });
+
+  test('apply: removes 0-leagues, appends new ones, truncates shrink from the end, keeps the rest verbatim', () => {
+    const diff = diffEntryForm(
+      [
+        entryRow('Premier League', 0),
+        entryRow('Promotion League', 1, 'TUT Oval'),
+        entryRow('2nd League (45 Overs)', 1),
+        entryRow('Under 11', 2),
+      ],
+      stored,
+    );
+    const { plan, droppedTeamIds, addedTeamIds } = applyEntryFormDiff(club, stored, diff);
+    assert.ok(!plan.leagues.includes('premier-league'));
+    assert.equal(plan.leagueTeams['premier-league'], undefined);
+    assert.ok(plan.leagues.includes('promotion-league'));
+    assert.equal(plan.leagueTeams['promotion-league'], 1);
+    assert.equal(plan.teamRosters['promotion-league'], undefined);
+    assert.deepEqual(plan.teamRosters.u11, stored.teamRosters.u11.slice(0, 2));
+    assert.deepEqual(droppedTeamIds, ['tm_tut-cricket-club_u11_2']);
+    assert.deepEqual(addedTeamIds, []);
+    // untouched leagues keep their stored counts
+    assert.equal(plan.leagueTeams['sixth-league'], 1);
+    assert.equal(plan.leagueTeams['womens-premier-league'], 1);
+  });
+
+  test('apply: shrink to 1 DELETES the roster (rosters exist only for counts >= 2)', () => {
+    const diff = diffEntryForm([entryRow('Under 11', 1)], stored);
+    const { plan, droppedTeamIds } = applyEntryFormDiff(club, stored, diff);
+    assert.equal(plan.leagueTeams.u11, 1);
+    assert.ok(!('u11' in plan.teamRosters), 'teamRosters.u11 must be deleted, not truncated');
+    assert.equal(droppedTeamIds.length, 3);
+  });
+
+  test('apply: growth keeps existing sides and appends generated ids with the form venue', () => {
+    const diff = diffEntryForm([entryRow('Under 11', 4, 'Shalang')], stored);
+    const { plan, addedTeamIds } = applyEntryFormDiff(club, stored, diff);
+    assert.equal(plan.teamRosters.u11.length, 4);
+    assert.deepEqual(plan.teamRosters.u11.slice(0, 3), stored.teamRosters.u11);
+    assert.deepEqual(addedTeamIds, ['tm_tut-cricket-club_u11_3']);
+    assert.equal(plan.teamRosters.u11[3].venue, 'Shalang');
+  });
+
+  test('apply: 1 → 2 builds a full two-side roster; generated ids never collide', () => {
+    const diff = diffEntryForm([entryRow('2nd League (45 Overs)', 2, 'TUT Oval')], stored);
+    const { plan } = applyEntryFormDiff(club, stored, diff);
+    const ids = plan.teamRosters['second-league'].map((t) => t.id);
+    assert.deepEqual(ids, [
+      'tm_tut-cricket-club_second-league_0',
+      'tm_tut-cricket-club_second-league_1',
+    ]);
+  });
+
+  test('a fresh club (empty stored plan) takes the form as its initial plan', () => {
+    const rows = [
+      entryRow('Promotion League', 1),
+      entryRow('Under 11', 2, 'TUT Oval'),
+      entryRow('Reserve League', 1),
+    ];
+    const diff = diffEntryForm(rows, EMPTY_STORED_PLAN);
+    const { plan } = applyEntryFormDiff(club, EMPTY_STORED_PLAN, diff);
+    assert.deepEqual(plan.leagues, ['promotion-league', 'u11']);
+    assert.deepEqual(plan.leagueTeams, { 'promotion-league': 1, u11: 2 });
+    assert.equal(plan.teamRosters.u11.length, 2);
+  });
+
+  test('re-diffing the applied plan against the same form is all "none" (idempotent)', () => {
+    const rows = [
+      entryRow('Premier League', 0),
+      entryRow('Under 11', 2),
+      entryRow('Promotion League', 1),
+    ];
+    const { plan } = applyEntryFormDiff(club, stored, diffEntryForm(rows, stored));
+    const again = diffEntryForm(rows, plan);
+    assert.ok(again.every((d) => d.action !== 'UPDATE'));
+  });
+});
+
+describe('import-titans-compliance parseArgs — top-up flags', () => {
+  test('--structure is optional now', () => {
+    const a = parseComplianceArgs(['--dir', 'x']);
+    assert.equal(a.structure, '');
+  });
+
+  test('--with-teams still requires --structure', () => {
+    assert.throws(
+      () => parseComplianceArgs(['--dir', 'x', '--with-teams']),
+      /requires --structure/,
+    );
+  });
+
+  test('--teams-from-entry needs --entry-forms and excludes --with-teams/--structure', () => {
+    assert.ok(
+      parseComplianceArgs(['--dir', 'x', '--teams-from-entry', '--entry-forms', 'y'])
+        .teamsFromEntry,
+    );
+    assert.throws(
+      () => parseComplianceArgs(['--dir', 'x', '--teams-from-entry']),
+      /requires --entry-forms/,
+    );
+    assert.throws(
+      () =>
+        parseComplianceArgs([
+          '--dir',
+          'x',
+          '--structure',
+          's',
+          '--teams-from-entry',
+          '--entry-forms',
+          'y',
+        ]),
+      /mutually exclusive/,
+    );
+    assert.throws(
+      () => parseComplianceArgs(['--dir', 'x', '--entry-forms', 'y']),
+      /only makes sense/,
+    );
+  });
+
+  test('--revert accepts --club and refuses the import-only flags', () => {
+    assert.equal(
+      parseComplianceArgs(['--revert', '--club', 'tut-cricket-club']).club,
+      'tut-cricket-club',
+    );
+    assert.throws(
+      () => parseComplianceArgs(['--revert', '--teams-from-entry']),
+      /--revert takes no/,
+    );
+  });
+});
+
+describe('created-clubs manifest — stage-scoped path', () => {
+  test('SST_STAGE wins', () => {
+    assert.equal(
+      createdClubsManifestPath({ SST_STAGE: 'dev' }),
+      './titans-import-created-clubs.dev.json',
+    );
+  });
+
+  test('falls back to SST_RESOURCE_App.stage (what sst shell injects)', () => {
+    assert.equal(
+      createdClubsManifestPath({ SST_RESOURCE_App: JSON.stringify({ name: 'x', stage: 'prod' }) }),
+      './titans-import-created-clubs.prod.json',
+    );
+  });
+
+  test('no stage → ".unknown" (flagged unresolved), never the legacy August-prod file', () => {
+    assert.equal(createdClubsManifestPath({}), './titans-import-created-clubs.unknown.json');
+    assert.equal(resolveManifestStage({}).resolved, false);
+    assert.notEqual(createdClubsManifestPath({}), LEGACY_CREATED_CLUBS_MANIFEST_PATH);
+  });
+
+  test('dev and prod never share a manifest', () => {
+    assert.notEqual(
+      createdClubsManifestPath({ SST_STAGE: 'dev' }),
+      createdClubsManifestPath({ SST_STAGE: 'prod' }),
+    );
+  });
+
+  test('an unsafe stage or malformed SST_RESOURCE_App throws', () => {
+    assert.throws(() => createdClubsManifestPath({ SST_STAGE: '../x' }), /unsafe stage/);
+    assert.throws(() => createdClubsManifestPath({ SST_RESOURCE_App: '{' }), /not valid JSON/);
+  });
+});
+
+describe('import-titans-roster parseArgs — --marker', () => {
+  test('imports default to the August marker', () => {
+    const a = parseRosterArgs(['--dir', 'x']);
+    assert.equal(a.marker, 'import:titans-compliance-2026');
+    assert.equal(DEFAULT_MARKER, 'import:titans-compliance-2026');
+    assert.equal(a.markerExplicit, false);
+  });
+
+  test('an explicit import: marker overrides the default', () => {
+    const a = parseRosterArgs(['--dir', 'x', '--marker', 'import:titans-compliance-2026-topup']);
+    assert.equal(a.marker, 'import:titans-compliance-2026-topup');
+  });
+
+  test('a marker outside the import: namespace (or a bare prefix) is refused', () => {
+    assert.throws(
+      () => parseRosterArgs(['--dir', 'x', '--marker', 'intake:abc']),
+      /must start with "import:"/,
+    );
+    assert.throws(() => parseRosterArgs(['--dir', 'x', '--marker', 'import:']), /must start with/);
+    assert.throws(() => parseRosterArgs(['--dir', 'x', '--marker']), /must start with/);
+  });
+
+  test('--revert REQUIRES an explicit --marker — no default that would select the August batch', () => {
+    assert.throws(() => parseRosterArgs(['--revert']), /requires an explicit --marker/);
+    const a = parseRosterArgs(['--revert', '--marker', 'import:titans-compliance-2026-topup']);
+    assert.equal(a.marker, 'import:titans-compliance-2026-topup');
+    assert.ok(a.revert);
+  });
+});
+
+describe('roster live checks — tenant-wide duplicate + expected collisions', () => {
+  const row = (naturalKey: string, idNumber?: string, rowNumber = 5) =>
+    ({ player: { naturalKey, idNumber }, rowNumber }) as never;
+
+  test('a row already registered at another club is excluded and reported masked', async () => {
+    const rows = [
+      {
+        clubId: 'tut-cricket-club',
+        clubName: 'TUT Cricket Club',
+        row: row('nkHit', '9503015012085'),
+      },
+      { clubId: 'tut-cricket-club', clubName: 'TUT Cricket Club', row: row('nkMiss') },
+    ];
+    const lookups: Array<[string, string]> = [];
+    const { duplicateNaturalKeys, report } = await findLiveCrossClubDuplicates(
+      rows,
+      async (nk, exclude) => {
+        lookups.push([nk, exclude]);
+        return nk === 'nkHit'
+          ? [{ clubId: 'tuks-cricket-club', clubName: 'TUKS Cricket Club', status: 'active' }]
+          : [];
+      },
+    );
+    assert.deepEqual([...duplicateNaturalKeys], ['tut-cricket-club::nkHit']);
+    assert.equal(report.length, 1);
+    assert.match(report[0], /TUKS Cricket Club \(active\)/);
+    assert.doesNotMatch(report[0], /9503015012085/); // never a raw id
+    assert.ok(
+      lookups.every(([, exclude]) => exclude === 'tut-cricket-club'),
+      'own club excluded',
+    );
+  });
+
+  test('a dob-only live match prints no identifying value', async () => {
+    const rows = [{ clubId: 'a', clubName: 'A', row: row('nkDob') }];
+    const { report } = await findLiveCrossClubDuplicates(rows, async () => [
+      { clubId: 'b', clubName: 'B' },
+    ]);
+    assert.match(report[0], /^dob-only match/);
+  });
+
+  test('expected-collision report counts already-present vs new per club', async () => {
+    const rows = [
+      { clubId: 'a', clubName: 'A', row: row('nk1') },
+      { clubId: 'a', clubName: 'A', row: row('nk2') },
+      { clubId: 'b', clubName: 'B', row: row('nk3') },
+    ];
+    const present = new Set(['a::nk1']);
+    const out = await expectedCollisionReport(rows, async (c, nk) => present.has(`${c}::${nk}`));
+    assert.deepEqual(out, [
+      { clubId: 'a', clubName: 'A', alreadyPresent: 1, new: 1 },
+      { clubId: 'b', clubName: 'B', alreadyPresent: 0, new: 1 },
+    ]);
   });
 });

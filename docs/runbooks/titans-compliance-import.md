@@ -39,8 +39,8 @@ normalization (header detection, ID cleanup, race/gender/age-group mapping) live
 > **Revert caveat:** the `intake:roster:…` / `intake:structure:…` provenance the wizards
 > write is the same _shape_ as these scripts' own `import:titans-*` markers, but a
 > `--revert` mode that understands `intake:*` batches is **not built yet** —
-> `import-titans-roster.ts --revert` is hardcoded to
-> `registeredBy === 'import:titans-compliance-2026'` (see
+> `import-titans-roster.ts --revert` selects exactly one `import:*` marker, passed
+> explicitly with `--marker` (see
 > [Revert semantics](#revert-semantics)). It's recorded in
 > [ADR 0010 §4](../architecture/0010-self-serve-onboarding.md#4-provenance-is-the-revert-contract--there-is-no-portal-undo)
 > as the natural next step; until then, recovering an operator commit is a hand-written
@@ -196,9 +196,12 @@ npx sst shell --stage <stage> -- npm --prefix packages/api run import-titans-ros
   --dir "<pack>/Compliance Documents"                      # dry-run
 … --confirm                                                 # strict mode: drops unusable-ID rows
 … --confirm --allow-missing-id                              # also writes dob-only rows
-… --revert
-… --revert --confirm
+… --revert --marker import:titans-compliance-2026           # --marker is REQUIRED on revert
+… --revert --marker import:titans-compliance-2026 --confirm
 ```
+
+For a later top-up drop (a partial pack, entry-form teams, a separate roster marker),
+see [2026 top-up](#2026-top-up-partial-packs-entry-form-teams-roster-markers).
 
 ## Choosing the roster ID mode (read before `--confirm`)
 
@@ -395,8 +398,10 @@ The old `--all` erased every `mine` club unconditionally, including one it only 
 a missing `ground.venue` into — a real chair, real exco, a real roster, gone.
 
 Every `--confirm` run of `import-titans-compliance.ts` records the id of every club it
-actually **created** (not merged into) to a stable manifest,
-`./titans-import-created-clubs.json` (gitignored — see `.gitignore`), merging with
+actually **created** (not merged into) to a stable, **stage-scoped** manifest,
+`./titans-import-created-clubs.<stage>.json` (gitignored — see `.gitignore`; see
+[2026 top-up](#2026-top-up-partial-packs-entry-form-teams-roster-markers) for why it is
+stage-scoped and what the legacy unsuffixed file is), merging with
 whatever the file already had from a prior run. Each id is persisted the moment its
 `createClub` is attempted — write-before-create, not batched at the end of the club
 loop — so an interrupted run (throttle, expired credentials, Ctrl-C) never loses the ids
@@ -430,7 +435,7 @@ only stays at version 1 until the very next merge/doc-upload write touches it, w
 routinely happens later in the same run. Recording creation at the moment it happens is
 the only signal that can't drift from what actually occurred.)
 
-**Keep `titans-import-created-clubs.json` until the import is fully signed off** —
+**Keep `titans-import-created-clubs.<stage>.json` until the import is fully signed off** —
 alongside the `titans-import-backup-*.json` snapshots, it's local revert-support state,
 not repo content (gitignored, never committed).
 
@@ -447,9 +452,10 @@ failed S3 delete doesn't abort the DynamoDB strip already in progress for that c
 confirm summary line now reports the object count: `Reverted: 2 club(s) deleted, 5
 club(s) stripped of import docs (11 S3 object(s) deleted).`
 
-**Roster script** (`import-titans-roster.ts --revert`): deletes every player row whose
-`registeredBy === 'import:titans-compliance-2026'` (the exact marker this import writes,
-never a real chair/rep-registered row), then reconciles `playerCount` on every touched
+**Roster script** (`import-titans-roster.ts --revert --marker <marker>`): deletes every
+player row whose `registeredBy` equals the given marker exactly (the August batch is
+`import:titans-compliance-2026`; never a real chair/rep-registered row, and never an
+`intake:*` row — `--marker` must start with `import:`), then reconciles `playerCount` on every touched
 club. Run the roster revert **before** the compliance revert if reverting everything —
 a pristine-check on a club that still has import-created players will correctly refuse
 the club-level delete.
@@ -457,6 +463,155 @@ the club-level delete.
 Content-addressed S3 keys (`titans/${clubId}/${docKey}-import-${sha256.slice(0,16)}.${ext}`)
 make a re-import after a partial revert idempotent: re-running `--confirm` never
 re-uploads or duplicates a file whose content hash is already on record.
+
+## 2026 top-up (partial packs, entry-form teams, roster markers)
+
+Added Oct 2026 for the TUT + Pretoria East drop: a **refresh** of two clubs already
+imported to prod on 18 Aug, not new clubs. Everything below also applies to any later
+partial drop.
+
+### Pack prep (originals never modified)
+
+```
+~/Downloads/titans-topup-2026/
+  Compliance Documents/
+    TUT/             ← copy; "TUT_ AGM Minutes held on 25 July 2026.docx" copied as .pdf
+    Pretoria East/   ← straight copy
+  entry-forms/
+    TUT.xlsx           ← .xlsx Save-As of TUT's league-entry .xls
+    Pretoria East.xlsx ← .xlsx Save-As of PECC's league-entry .xls
+```
+
+- The TUT AGM is PDF bytes named `.docx`. MIME is resolved from the **extension** only
+  (`validateDocMimes`), so it must be renamed, or PDF bytes would be stored labelled docx.
+- The league-entry forms are BIFF `.xls`, which ExcelJS cannot read. The entry-form team
+  parser reads `.xlsx` copies named exactly `<CLUB_MAP.folder>.xlsx`. The `.xls`
+  originals still upload untouched as the `leagueEntry` document.
+- New map entries: `safeguardingCoaching` (catalogue key + `DOC_RULES` rule placed before
+  the facility rule); `FILE_OVERRIDES` skip TUT's superseded 31 Jul committee workbook
+  (note the double space after `Committee-`) and force PECC's "AFS and Transactions"
+  to `financials`.
+
+### Catalogue first
+
+`safeguardingCoaching` is a new **optional** multi-file key (pdf/doc/docx/jpg/jpeg/png).
+It is not a revival of the archived `safeguarding` key, whose `minFiles: 2` would flip
+every club non-compliant. The compliance dry-run refuses to run until the tenant
+catalogue has it. `configure-tenant-docs` now prints a **full-definition diff** (changed
+attributes per key), not just key lists. `--confirm` replaces the stored catalogue
+wholesale, so any `~` line you didn't expect is a portal edit about to be reverted. Dump
+the stage's current `requiredDocs` before confirming.
+
+### Partial-pack scoping (both CLIs)
+
+A club is **in scope** iff its exact `CLUB_MAP` folder is present in `--dir`. Every run
+prints the in-scope list and **always** the out-of-scope list. Out-of-scope clubs are
+never parsed, coverage-checked, created, merged, audit-noted or written. That covers the
+dry-run diff, `--confirm` targets, doc upload and roster targets. An empty scope aborts.
+A full pack scopes to all 21, so the full-pack fail-closed checks are unchanged.
+`--club` must name an in-scope club.
+
+### `--structure` is optional; `--teams-from-entry`
+
+`--with-teams` (the August structure-workbook path) still requires `--structure`.
+`--teams-from-entry --entry-forms <dir>` is the top-up's team source and is mutually
+exclusive with both. With neither, team plans are untouched.
+
+```bash
+P=~/Downloads/titans-topup-2026
+npx tsx packages/api/src/import-titans-compliance.ts --parse-only \
+  --dir "$P/Compliance Documents" --teams-from-entry --entry-forms "$P/entry-forms"
+# docs (dry-run, then --confirm)
+npx sst shell --stage <stage> -- npm --prefix packages/api run import-titans-compliance -- \
+  --dir "$P/Compliance Documents"
+# teams as a separate pass: dry-run prints the diff, --confirm writes UPDATE rows only
+… --skip-docs --teams-from-entry --entry-forms "$P/entry-forms"
+… --confirm --skip-docs --teams-from-entry --entry-forms "$P/entry-forms"
+```
+
+The dry-run prints, per club, `league | stored | requested | action`:
+
+- `none`: the stored count already matches. The league's stored roster (August side
+  names and venues) is kept **verbatim**.
+- `UPDATE`: the stored count differs. This is the only kind of row ever written. Growth
+  appends generated `tm_` ids with the form's home venue. Shrink truncates from the end.
+  Shrink to 1 **deletes** `teamRosters[key]`, because rosters exist only for counts ≥ 2.
+  Requested 0 removes the league. Every dropped or added `tm_` id is printed.
+- `manual`: a union follow-up, never written. These are Reserve/President/Junior Girls
+  requests (no tenant league), and a women's request whose count differs from the
+  **sum** of the club's stored `womens-*` counts (which women's league a side belongs
+  in is the union's call).
+- A stored league that no form row covers is listed `(not on form)` and kept.
+
+Fail-closed: an unknown form label, two labels resolving to the same league, a non-blank
+requested count that isn't a whole number, a missing `<folder>.xlsx`, or a requested
+league key not configured on the tenant (`ensureLeaguesConfigured`; `EXTRA_LEAGUES` still
+needs `--add-missing-leagues`) all abort. On a stage where the club doesn't exist yet
+(the dev rehearsal), the form's plan becomes the club's **initial** plan.
+
+**Before any `--confirm` of the teams pass:** the stored plans are the union's
+_accepted_ structure, and entry forms are club _requests_. Get every `UPDATE` row signed
+off, and confirm the stage has **no season runs/series** referencing `tm_` ids. The team
+write pins the club's version, so a concurrent admin edit fails it rather than being
+overwritten.
+
+### Multi-file keys accumulate
+
+`agm`, `facilityAgreement` and `safeguardingCoaching` **union**: a re-supplied lease or
+AGM with different bytes sits **beside** August's file. Nothing supersedes or deletes it
+(only single-file keys replace their earlier import version). Check what August stored
+for a club's AGM before the write. If August holds the same bytes as `.docx`, the
+renamed `.pdf` will sit beside it.
+
+### Stage-scoped created-clubs manifest
+
+The manifest is `./titans-import-created-clubs.<stage>.json`. The stage comes from
+`SST_STAGE`, else from `SST_RESOURCE_App` (what `sst shell` injects). Outside `sst shell`
+it falls back to `.unknown.json` with a warning. Club ids are identical on every stage,
+so with one shared file a dev rehearsal that _creates_ `tut-cricket-club` would make a
+later prod `--revert --all` (run from the same directory) hard-delete the live prod club.
+
+The **legacy** unsuffixed `titans-import-created-clubs.json` is the August 2026 **prod**
+manifest only. It is never read automatically, and every confirm/revert run warns if it
+is sitting in the working directory. If a prod revert ever needs it, rename it to
+`titans-import-created-clubs.prod.json` by hand.
+
+### Compliance `--revert` on prod: don't
+
+Every import-authored objectKey shares the `-import-` marker, so a plain `--revert`
+strips **August's** documents along with the top-up's. To recover from a bad top-up
+document, fix the pack and re-run `--confirm` (single-file keys replace their import
+version). Never run a prod compliance revert. `--revert` now honours `--club`.
+
+### Roster: `--marker`, live duplicate check, collision report
+
+```bash
+npx tsx packages/api/src/import-titans-roster.ts --parse-only --dir "$P/Compliance Documents"
+npx sst shell --stage <stage> -- npm --prefix packages/api run import-titans-roster -- \
+  --dir "$P/Compliance Documents"                                        # strict dry-run
+… --confirm --allow-missing-id --marker import:titans-compliance-2026-topup
+# rollback (rosters ONLY):
+… --revert --marker import:titans-compliance-2026-topup [--confirm]
+```
+
+- `--marker` stamps `registeredBy`. It defaults to `import:titans-compliance-2026` for
+  imports (back-compat) and must start with `import:`. **`--revert` requires an explicit
+  `--marker`**, because the old implicit default would select the entire August player
+  base. The active marker is printed in every run/revert header.
+- **Live cross-club check** (dry-run and confirm): with only two clubs' sheets, the
+  in-run duplicate gate can't see the other 19 clubs. Every writable identity is
+  therefore looked up at every _other_ club on the live tenant
+  (`repo.findPlayerAcrossClubs`). A hit is excluded and reported (masked ID, or
+  "dob-only match"), with the same semantics as the in-run gate.
+- **Expected-collision report** (dry-run and confirm): a point-get per writable
+  `(club, identity)`, printed as already-present vs new per club. Idempotency holds only
+  if a row resolves the same identity form (ID vs name+dob) as in August. A "new" count
+  close to the club's whole roster means the identities drifted, so stop before
+  `--confirm`.
+- **Create-only.** The top-up never _updates_ an existing player: already-present rows
+  are skipped. Corrected details for August players are ignored by design and have to
+  be fixed in the console.
+- `--parse-only` stays AWS-free.
 
 ## Known limitations
 
