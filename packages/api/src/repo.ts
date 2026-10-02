@@ -1143,11 +1143,26 @@ export async function deleteSyncConflict(tenant: string, ref: string): Promise<v
   await ddb.send(new DeleteCommand({ TableName: TABLE, Key: syncConflictKey(tenant, ref) }));
 }
 
-/** Enqueue (or collapse onto) a fixture's outbox row: the latest snapshot wins. */
+/**
+ * Enqueue (or collapse onto) a fixture's outbox row: the latest snapshot wins. Conditional on
+ * the stored row's `schedule.changedAt` being OLDER, so a slower writer holding an older
+ * snapshot (two concurrent edits, a CLI racing an admin) can never replace a newer one. An
+ * older or equal snapshot is a silent no-op — the newer one already in the row goes out.
+ */
 export async function putPendingSync(tenant: string, row: PendingScheduleSync): Promise<void> {
-  await ddb.send(
-    new PutCommand({ TableName: TABLE, Item: { ...row, ...pendingSyncKey(tenant, row.ref) } }),
-  );
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...row, ...pendingSyncKey(tenant, row.ref) },
+        ConditionExpression: 'attribute_not_exists(pk) OR #sch.changedAt < :c',
+        ExpressionAttributeNames: { '#sch': 'schedule' },
+        ExpressionAttributeValues: { ':c': row.schedule.changedAt },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
 }
 
 export async function listPendingSync(tenant: string): Promise<PendingScheduleSync[]> {

@@ -560,6 +560,35 @@ describe('Slice 4 — the outbox', () => {
     assert.equal(log.push?.applied, 1);
   });
 
+  test('an older snapshot never replaces a newer outbox row (a slow concurrent writer)', async () => {
+    const row = (changedAt: string, time: string) => ({
+      ref: REF(S1, 'f1'),
+      seriesId: S1,
+      fixtureId: 'f1',
+      schedule: {
+        scheduledTime: `2026-10-04T${time}:00+02:00`,
+        timeTbc: false,
+        dateTbc: false,
+        venue: 'Kingsmead Oval',
+        postponed: false,
+        cancelled: false,
+        changedAt,
+      },
+      origin: 'admin' as const,
+      enqueuedAt: changedAt,
+      attempts: 0,
+    });
+    await repo.putPendingSync(T, row('2026-10-02T10:00:05.000Z', '11:00'));
+    await repo.putPendingSync(T, row('2026-10-02T10:00:01.000Z', '10:00'));
+    const [kept] = await repo.listPendingSync(T);
+    assert.equal(kept.schedule.scheduledTime, '2026-10-04T11:00:00+02:00');
+    await repo.putPendingSync(T, row('2026-10-02T10:00:09.000Z', '12:00'));
+    assert.equal(
+      (await repo.listPendingSync(T))[0].schedule.scheduledTime,
+      '2026-10-04T12:00:00+02:00',
+    );
+  });
+
   test('several edits before a flush collapse onto one row with the latest schedule', async () => {
     await patchFixture(S1, 'f1', { time: '10:00' });
     await patchFixture(S1, 'f1', { time: '11:00' });
