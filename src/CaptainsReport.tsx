@@ -2,8 +2,8 @@
 
 import { useState, useMemo, useEffect } from 'react';
 import type { ReactNode } from 'react';
-import { Icon, Btn, Pill, YN, Choice } from './atoms';
-import { ownRoster, oppositionRoster } from './captainsReportRoster';
+import { Icon, Btn, Choice } from './atoms';
+import { ownRoster } from './captainsReportRoster';
 import { clubFixtures, localISO } from './season';
 
 // Part One guidance from the union's Captain's Report on Umpires form.
@@ -39,88 +39,6 @@ const CONCERN_AREAS = [
   { key: 'noBallWide', label: 'No balls / wides' },
   { key: 'conditions', label: 'Ground / weather / light' },
   { key: 'other', label: 'Other' },
-];
-
-// Annexure A — Schedule of Offences and Mandatory Penalties (Code of Behaviour).
-// `penalty` is playing days suspended for a 1st / 2nd / 3rd offence.
-export const OFFENCE_LEVELS = [
-  {
-    level: 1,
-    penalty: ['4 days', '6 days', '8 days'],
-    offences: [
-      {
-        code: '1.1',
-        text: "Disputing an umpire's decision or acting provocatively / in a disapproving manner",
-      },
-      { code: '1.2', text: 'Verbal abuse of a player' },
-      { code: '1.3', text: 'Incitement of any person to verbally abuse' },
-      { code: '1.4', text: 'Crude or abusive hand signals or gestures' },
-      { code: '1.5', text: 'Excessive appealing after being warned by the umpires' },
-      { code: '1.6', text: 'Aggressive pointing or gesturing towards the pavilion on a dismissal' },
-      { code: '1.7', text: 'Abuse of cricket equipment or property' },
-      {
-        code: '1.8',
-        text: 'Captain failing to control players after being requested to by an umpire / official',
-      },
-      {
-        code: '1.9',
-        text: 'Captain failing to control players where no official umpires are appointed',
-      },
-    ],
-  },
-  {
-    level: 2,
-    penalty: ['6 days', '8 days', '10 days'],
-    offences: [
-      {
-        code: '2.1',
-        text: 'Intimidation (e.g. throwing the ball at or near a player or official)',
-      },
-      { code: '2.2', text: 'Threat of assault or physical interference' },
-      { code: '2.3', text: 'Incitement or provocation of any person to physical assault' },
-      {
-        code: '2.4',
-        text: 'Public criticism of a match incident or official, including on social media',
-      },
-      { code: '2.5', text: 'Charging or advancing towards the umpire in an aggressive manner' },
-      { code: '2.6', text: 'Deliberate and malicious distraction or obstruction on the field' },
-      { code: '2.7', text: 'Public acts of misconduct or unruly behaviour' },
-      { code: '2.8', text: 'Alcohol or narcotic use by a player while the match is in progress' },
-    ],
-  },
-  {
-    level: 3,
-    penalty: ['6 days', '8 days', '10 days'],
-    offences: [
-      { code: '3.1', text: 'Verbal abuse of an umpire or official' },
-      {
-        code: '3.2',
-        text: 'Intimidation of an umpire, or threat of assault / physical interference',
-      },
-      { code: '3.3', text: 'Physical interference (other than towards an umpire)' },
-      { code: '3.4', text: 'Changing the condition of the ball or pitch' },
-      { code: '3.5', text: 'Racial, religious, cultural or sexual remark or comment' },
-      {
-        code: '3.6',
-        text: 'Ball / pitch tampering with no individual identified (captain held responsible)',
-      },
-    ],
-  },
-  {
-    level: 4,
-    penalty: ['20 days', '30 days', '40 days'],
-    offences: [
-      { code: '4.1', text: 'Assault — intentional infliction of minor physical harm or injury' },
-    ],
-  },
-  {
-    level: 5,
-    penalty: ['40 days', 'Life ban', '—'],
-    offences: [
-      { code: '5.1', text: 'Physical assault with intent to do grievous bodily harm' },
-      { code: '5.2', text: 'Collusion to contrive a result or match-fixing' },
-    ],
-  },
 ];
 
 // Umpire panel from the union's Captain's Report workbook (Criteria sheet) — offered as
@@ -182,20 +100,6 @@ function remember(clubId, data) {
   }
 }
 
-const OFFENDER_ROLES = ['Player', 'Captain', 'Coach', 'Team official', 'Spectator'];
-const OTHER = '__other';
-// Which roster list feeds the name picker for each offender role.
-const ROSTER_FOR_ROLE = {
-  Player: 'players',
-  Captain: 'players',
-  Coach: 'coaches',
-  'Team official': 'officials',
-};
-const offenceLevel = (code) =>
-  OFFENCE_LEVELS.find((l) => l.offences.some((o) => o.code === code))?.level ?? null;
-// Clause 10.3 — captain's penalty is doubled, except for these two offences.
-const CAPTAIN_EXEMPT = ['1.8', '3.6'];
-
 interface UmpireReport {
   name: string;
   ratings: Record<string, number | undefined>;
@@ -210,20 +114,6 @@ const emptyUmpire = (): UmpireReport => ({
   otherConcern: '',
   comments: '',
 });
-const emptyIncident = (witnesses = '') => ({
-  id: Math.random().toString(36).slice(2, 9),
-  name: '',
-  role: 'Player',
-  level: null,
-  offence: '',
-  offenceOther: '',
-  team: null, // null = follow the match opposition
-  when: '',
-  description: '',
-  umpiresInformed: null,
-  witnesses,
-});
-
 const fmtDate = (iso) =>
   iso
     ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', {
@@ -235,29 +125,11 @@ const fmtDate = (iso) =>
     : '';
 
 // Clause 4.1 — report due by 18h00 on the third business day after the match.
-// Weekends are skipped; public holidays aren't modelled (flagged in the copy).
-export function misconductDeadline(matchISO) {
-  if (!matchISO) return null;
-  const d = new Date(matchISO + 'T00:00:00');
-  let added = 0;
-  while (added < 3) {
-    d.setDate(d.getDate() + 1);
-    const day = d.getDay();
-    if (day !== 0 && day !== 6) added++;
-  }
-  return localISO(d);
-}
-
 function avgRating(u) {
   const vals = RATING_CRITERIA.map((c) => u.ratings[c.key]).filter(Boolean);
   return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
 }
 const umpireComplete = (u) => !!u.name.trim() && RATING_CRITERIA.every((c) => u.ratings[c.key]);
-const incidentComplete = (i) =>
-  !!i.name.trim() &&
-  !!i.offence &&
-  (i.offence !== OTHER || !!i.offenceOther.trim()) &&
-  !!i.description.trim();
 
 /**
  * Text field with suggestions: always freely editable, and focusing it (or the
@@ -506,211 +378,6 @@ function UmpireCard({ n, umpire, options, onChange }: UmpireCardProps) {
   );
 }
 
-function IncidentCard({ index, incident, opposition, roster, onChange, onRemove, canRemove }) {
-  const set = (patch) =>
-    onChange((i) => ({ ...i, ...(typeof patch === 'function' ? patch(i) : patch) }));
-  const lvl = OFFENCE_LEVELS.find((l) => l.level === incident.level);
-  const isNonPlayer = !['Player', 'Captain'].includes(incident.role);
-  const isOtherOffence = incident.offence === OTHER;
-  const captainDoubled =
-    incident.role === 'Captain' &&
-    incident.offence &&
-    !isOtherOffence &&
-    !CAPTAIN_EXEMPT.includes(incident.offence);
-  const nameOptions = roster?.[ROSTER_FOR_ROLE[incident.role]] || [];
-  // Team follows the match's opposition until the user types their own.
-  const team = incident.team ?? opposition ?? '';
-
-  return (
-    <div className="cr-incident">
-      <div className="cr-incident-head">
-        <div className="cr-incident-title">
-          <span className="cr-incident-num">{index + 1}</span>
-          Alleged offender
-        </div>
-        {canRemove && (
-          <Btn tone="ghost" size="sm" icon={Icon.X} onClick={onRemove}>
-            Remove
-          </Btn>
-        )}
-      </div>
-
-      <div className="field-grid-3">
-        <div>
-          <label className="field-label">Role</label>
-          <select
-            className="field-select"
-            value={incident.role}
-            onChange={(e) => set({ role: e.target.value })}
-          >
-            {OFFENDER_ROLES.map((r) => (
-              <option key={r}>{r}</option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label className="field-label">
-            Name <span className="req">*</span>
-          </label>
-          <AutoField
-            options={nameOptions}
-            value={incident.name}
-            onChange={(name) => set({ name })}
-            placeholder="Full name"
-            groupLabel={`${team || 'Opposition'} · ${incident.role.toLowerCase()}s${roster?.sample ? ' · sample names' : ''}`}
-          />
-        </div>
-        <div>
-          <label className="field-label">Team</label>
-          <input
-            className="field-input"
-            value={team}
-            onChange={(e) => set({ team: e.target.value })}
-            placeholder="Opposition club"
-          />
-        </div>
-      </div>
-
-      <label className="field-label" style={{ marginTop: 16 }}>
-        Offence level
-      </label>
-      <div className="cr-levels">
-        {OFFENCE_LEVELS.map((l) => (
-          <button
-            key={l.level}
-            type="button"
-            className={`cr-level ${incident.level === l.level ? 'on' : ''} ${l.level >= 4 ? 'severe' : ''}`}
-            // Narrows the offence list; choosing an offence sets the level itself.
-            onClick={() =>
-              set((i) =>
-                i.level === l.level
-                  ? { level: null }
-                  : {
-                      level: l.level,
-                      offence: offenceLevel(i.offence) === l.level ? i.offence : '',
-                    },
-              )
-            }
-          >
-            <span className="cr-level-n">Level {l.level}</span>
-            <span className="cr-level-p">{l.penalty[0]}</span>
-          </button>
-        ))}
-      </div>
-
-      <label className="field-label" style={{ marginTop: 16 }}>
-        Offence <span className="req">*</span>
-      </label>
-      <select
-        className="field-select"
-        value={incident.offence}
-        onChange={(e) => {
-          const code = e.target.value;
-          set((i) => ({ offence: code, level: offenceLevel(code) ?? i.level }));
-        }}
-      >
-        <option value="">Select the offence</option>
-        {OFFENCE_LEVELS.filter((l) => !lvl || l.level === lvl.level).map((l) => (
-          <optgroup key={l.level} label={`Level ${l.level} · ${l.penalty[0]} suspension`}>
-            {l.offences.map((o) => (
-              <option key={o.code} value={o.code}>
-                {o.code} — {o.text}
-              </option>
-            ))}
-          </optgroup>
-        ))}
-        <option value={OTHER}>Other — not listed in the Code</option>
-      </select>
-
-      {(lvl || isOtherOffence) && (
-        <>
-          {isOtherOffence && (
-            <input
-              className="field-input"
-              style={{ marginTop: 8 }}
-              autoFocus
-              value={incident.offenceOther}
-              onChange={(e) => set({ offenceOther: e.target.value })}
-              placeholder="Name the offence, e.g. bringing the game into disrepute"
-            />
-          )}
-
-          {isOtherOffence ? (
-            <div className="cr-penalty">
-              <div>
-                <div className="cr-penalty-l">Not listed in Annexure A</div>
-                <div className="cr-penalty-v">
-                  Charge and penalty set by the LLC / Disciplinary Committee —{' '}
-                  <strong>4–40 playing days</strong> and/or a fine of up to <strong>R20,000</strong>
-                  .
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="cr-penalty">
-              <div>
-                <div className="cr-penalty-l">Mandatory suspension · Level {lvl.level}</div>
-                <div className="cr-penalty-v">
-                  1st <strong>{lvl.penalty[0]}</strong>
-                  <span className="cr-dot">·</span>2nd <strong>{lvl.penalty[1]}</strong>
-                  {lvl.penalty[2] !== '—' && (
-                    <>
-                      <span className="cr-dot">·</span>3rd <strong>{lvl.penalty[2]}</strong>
-                    </>
-                  )}
-                </div>
-              </div>
-              {captainDoubled && <Pill tone="coral">Captain · penalty doubled</Pill>}
-            </div>
-          )}
-          {isNonPlayer && !isOtherOffence && (
-            <div className="rp-hint">
-              Non-players: 4–40 playing days and/or a fine of up to R20,000 at the Disciplinary
-              Committee's discretion.
-            </div>
-          )}
-        </>
-      )}
-
-      <div className="field-grid-2" style={{ marginTop: 16 }}>
-        <div>
-          <label className="field-label">When did it happen?</label>
-          <input
-            className="field-input"
-            value={incident.when}
-            onChange={(e) => set({ when: e.target.value })}
-            placeholder="e.g. 2nd innings, over 34 · approx. 15:40"
-          />
-        </div>
-        <div>
-          <label className="field-label">Were the umpires informed?</label>
-          <YN value={incident.umpiresInformed} onChange={(v) => set({ umpiresInformed: v })} />
-        </div>
-      </div>
-
-      <label className="field-label" style={{ marginTop: 16 }}>
-        Description of incident <span className="req">*</span>
-      </label>
-      <textarea
-        className="field-textarea"
-        value={incident.description}
-        onChange={(e) => set({ description: e.target.value })}
-        placeholder="Factual account: what was said or done, to whom, and what followed"
-      />
-
-      <label className="field-label" style={{ marginTop: 16 }}>
-        Witnesses
-      </label>
-      <input
-        className="field-input"
-        value={incident.witnesses}
-        onChange={(e) => set({ witnesses: e.target.value })}
-        placeholder="Names of umpires, players or officials who saw the incident"
-      />
-    </div>
-  );
-}
-
 export function CaptainsReportView({
   club,
   allSeries = [],
@@ -787,18 +454,14 @@ export function CaptainsReportView({
   const [match, setMatch] = useState(blank);
   const [umpires, setUmpires] = useState([emptyUmpire(), emptyUmpire()]);
   const [general, setGeneral] = useState('');
-  const [misconduct, setMisconduct] = useState(false);
-  const [incidents, setIncidents] = useState([emptyIncident()]);
   const [confirmed, setConfirmed] = useState(false);
   const [submitted, setSubmitted] = useState(null);
   // Guide starts collapsed on phones, where five stacked descriptions push the form down.
   const [guideOpen] = useState(() => !window.matchMedia?.('(max-width: 640px)').matches);
 
   const setM = (patch) => setMatch((m) => ({ ...m, ...patch }));
-  const opposition = match.opponent;
   const home = match.side === 'Home' ? club.name : match.opponent;
   const away = match.side === 'Home' ? match.opponent : club.name;
-  const oppRoster = useMemo(() => oppositionRoster(match.opponentId), [match.opponentId]);
 
   function pickFixture(key) {
     const f = fixtures.find((x) => x.key === key);
@@ -830,10 +493,6 @@ export function CaptainsReportView({
     setM({ opponent: name, opponentId: hit?.id || '', fixtureKey: '' });
   }
 
-  const umpireNames = umpires
-    .map((u) => u.name.trim())
-    .filter(Boolean)
-    .join(', ');
   const umpireOptions = useMemo(() => {
     const recent = (memory.umpires || []).map((name) => ({ name, sub: 'Rated before' }));
     const panel = UMPIRE_PANEL.filter((n) => !memory.umpires?.includes(n)).map((name) => ({
@@ -846,42 +505,17 @@ export function CaptainsReportView({
     (name) => ({ name }),
   );
 
-  // Witnesses default to the match umpires — editable like everything else.
-  function enableMisconduct() {
-    setMisconduct(true);
-    setIncidents((all) => all.map((i) => (i.witnesses ? i : { ...i, witnesses: umpireNames })));
-  }
-
-  function openMisconduct() {
-    enableMisconduct();
-    setTimeout(
-      () =>
-        document
-          .getElementById('cr-misconduct')
-          ?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
-      50,
-    );
-  }
-
   const matchDone = !!(match.opponent.trim() && match.date && match.captain.trim());
-  const misconductDone = !misconduct || incidents.every(incidentComplete);
   const steps = [
     { label: 'Match details', done: matchDone },
     { label: 'Umpire 1 rated', done: umpireComplete(umpires[0]) },
     { label: 'Umpire 2 rated', done: umpireComplete(umpires[1]) },
-    {
-      label: misconduct
-        ? `Misconduct · ${incidents.length} ${incidents.length === 1 ? 'person' : 'people'}`
-        : 'No misconduct reported',
-      done: misconductDone,
-    },
     { label: 'Declaration', done: confirmed },
   ];
   const ready = steps.every((s) => s.done);
   const outstanding = steps.filter((s) => !s.done).length;
   const outstandingLabel = `${outstanding} section${outstanding === 1 ? '' : 's'} outstanding`;
   const progressLabel = `${steps.length - outstanding} of ${steps.length} complete`;
-  const deadline = misconductDeadline(match.date);
 
   function submit() {
     if (!ready) return toast?.('Complete the outstanding sections first', 'warn');
@@ -899,19 +533,13 @@ export function CaptainsReportView({
     setMemory(nextMemory);
     setSubmitted({ ref, at: new Date() });
     window.scrollTo({ top: 0, behavior: 'smooth' });
-    toast?.(
-      misconduct
-        ? `Report ${ref} submitted · misconduct referred to the union office`
-        : `Report ${ref} submitted to the union office`,
-    );
+    toast?.(`Report ${ref} submitted to the union office`);
   }
 
   function reset() {
     setMatch(blank(recall(club.id)));
     setUmpires([emptyUmpire(), emptyUmpire()]);
     setGeneral('');
-    setMisconduct(false);
-    setIncidents([emptyIncident()]);
     setConfirmed(false);
     setSubmitted(null);
   }
@@ -924,22 +552,10 @@ export function CaptainsReportView({
           Captain's <em>Report</em>
         </h1>
         <p className="ph-desc">
-          Complete at the conclusion of each match. Rate the on-field umpires and, where necessary,
-          report misconduct by the opposition under the Code of Behaviour.
+          Complete at the conclusion of each match: match details, ratings for both on-field umpires
+          and any general comments.
         </p>
       </div>
-      {!submitted && (
-        <div className="ph-actions">
-          <Btn
-            tone={misconduct ? 'ink' : 'outline'}
-            size="sm"
-            icon={Icon.Alert}
-            onClick={openMisconduct}
-          >
-            {misconduct ? 'Misconduct added' : 'Report misconduct'}
-          </Btn>
-        </div>
-      )}
     </div>
   );
 
@@ -975,21 +591,6 @@ export function CaptainsReportView({
                 </strong>
               </div>
             ))}
-            {misconduct ? (
-              incidents.map((inc, i) => (
-                <div key={inc.id} className="cr-summary-row">
-                  <span>{i === 0 ? 'Misconduct' : ''}</span>
-                  <strong>
-                    {inc.name} · {inc.offence === OTHER ? inc.offenceOther : inc.offence}
-                  </strong>
-                </div>
-              ))
-            ) : (
-              <div className="cr-summary-row">
-                <span>Misconduct</span>
-                <strong>None reported</strong>
-              </div>
-            )}
           </div>
           <div className="cr-done-actions">
             <Btn tone="outline" size="sm" icon={Icon.Download} onClick={() => window.print()}>
@@ -1144,69 +745,6 @@ export function CaptainsReportView({
               onChange={(e) => setGeneral(e.target.value)}
               placeholder="Optional"
             />
-          </div>
-
-          {/* Part 4 — Misconduct */}
-          <div id="cr-misconduct" className={`rp-section ${misconduct ? 'cr-mis-on' : ''}`}>
-            <SectionHead
-              n={4}
-              title="Misconduct"
-              sub={
-                misconduct
-                  ? `Alleged breaches of the Code of Behaviour by ${opposition || 'the opposition'}.`
-                  : 'Was there any misconduct by the opposition during this match?'
-              }
-              right={
-                misconduct ? (
-                  <Btn tone="ghost" size="sm" onClick={() => setMisconduct(false)}>
-                    No misconduct
-                  </Btn>
-                ) : (
-                  <Btn tone="ink" size="sm" icon={Icon.Alert} onClick={enableMisconduct}>
-                    Report misconduct
-                  </Btn>
-                )
-              }
-            />
-
-            {misconduct && (
-              <>
-                {deadline && (
-                  <div className="cr-notice">
-                    <Icon.Clock />
-                    <div>
-                      Misconduct reports must reach the union office by{' '}
-                      <strong>18h00 on {fmtDate(deadline)}</strong> — the third business day after
-                      the match (adjust for public holidays).
-                    </div>
-                  </div>
-                )}
-                <div className="cr-incidents">
-                  {incidents.map((inc, i) => (
-                    <IncidentCard
-                      key={inc.id}
-                      index={i}
-                      incident={inc}
-                      opposition={opposition}
-                      roster={oppRoster}
-                      canRemove={incidents.length > 1}
-                      onRemove={() => setIncidents((all) => all.filter((x) => x.id !== inc.id))}
-                      onChange={(fn) =>
-                        setIncidents((all) => all.map((x) => (x.id === inc.id ? fn(x) : x)))
-                      }
-                    />
-                  ))}
-                </div>
-                <Btn
-                  tone="outline"
-                  size="sm"
-                  icon={Icon.Plus}
-                  onClick={() => setIncidents((all) => [...all, emptyIncident(umpireNames)])}
-                >
-                  Add another player
-                </Btn>
-              </>
-            )}
           </div>
 
           {/* Declaration */}

@@ -145,7 +145,11 @@ export interface ScoutingEvent {
  * are present (a fresh clone, CI, deploys) the anonymised samples are used.
  */
 const local = Object.values(
-  import.meta.glob<{ default: ScoutingEvent }>('./scouting-local/*.ts', { eager: true }),
+  // Data modules only — never the local test files (they import vitest).
+  import.meta.glob<{ default: ScoutingEvent }>(
+    ['./scouting-local/*.ts', '!./scouting-local/*.test.ts'],
+    { eager: true },
+  ),
 )
   .map((m) => m.default)
   .filter(Boolean)

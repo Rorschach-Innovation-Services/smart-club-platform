@@ -1,10 +1,8 @@
 /* ─── Name sources for the Captain's Report pickers ───
  *
- * A rep can read their OWN club's players (GET /clubs/:id/players) but not another
- * club's — the API is club-scoped for POPIA. So the opposition's players / coaches /
- * officials aren't reachable yet. Until a names-only roster endpoint exists, local dev
- * (VITE_LOCAL_AUTH) fills the pickers with clearly-labelled sample names so the flow
- * can be demoed; everywhere else the picker falls back to typing the name.
+ * The captain picker suggests the rep's own registered players (GET /clubs/:id/players).
+ * With none registered, local dev (VITE_LOCAL_AUTH) suggests clearly-labelled sample
+ * names so the flow can be demoed; everywhere else the field is free text.
  */
 
 export const SAMPLE_ROSTERS = import.meta.env?.VITE_LOCAL_AUTH === '1';
@@ -95,9 +93,4 @@ export function ownRoster(club, players = []) {
     .sort((a, b) => a.name.localeCompare(b.name));
   if (real.length || !SAMPLE_ROSTERS) return { sample: false, players: real };
   return { sample: true, players: sampleRoster(club.id).players };
-}
-
-/** The opposition — only sample names until a names-only endpoint exists. */
-export function oppositionRoster(clubId) {
-  return SAMPLE_ROSTERS && clubId ? sampleRoster(clubId) : null;
 }
