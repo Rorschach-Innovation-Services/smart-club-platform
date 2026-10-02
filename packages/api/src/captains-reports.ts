@@ -680,8 +680,11 @@ export function captainsReportResultHook(deps: CaptainsReportDeps) {
   };
 }
 
-/** A stored result back in the wire shape the report opener reads. */
-function syncResultOf(r: StoredFixtureResult): SyncResult {
+/**
+ * A stored result back in the wire shape the report opener reads. The result item carries no
+ * player ref (POPIA); the captain's comes from the pending REPORTOPEN# marker.
+ */
+function syncResultOf(r: StoredFixtureResult, captainRef: string | null): SyncResult {
   return {
     homeScore: r.homeScore ?? null,
     awayScore: r.awayScore ?? null,
@@ -692,7 +695,7 @@ function syncResultOf(r: StoredFixtureResult): SyncResult {
     source: r.resultSource ?? 'manual',
     recordedAt: r.recordedAt!,
     scoringSide: r.scoringSide ?? null,
-    captainRef: r.captainRef ?? null,
+    captainRef,
     medicoachMatchUrl: r.medicoachMatchUrl ?? null,
   };
 }
@@ -741,7 +744,7 @@ export async function retryPendingReportOpens(
           seriesId: m.seriesId,
           fixtureId: m.fixtureId,
           ref: m.ref,
-          result: syncResultOf(stored),
+          result: syncResultOf(stored, m.captainRef ?? null),
           config,
         },
         deps,

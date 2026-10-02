@@ -195,10 +195,14 @@ number — effectively the ID number. So:
 
 - it is **never logged**: the puller prints counts and fixture refs only, SYNCLOG rows carry
   no player refs, and contract errors name field paths, not values;
-- the result's `captainRef` is stored on the `FIXRESULT#` item (Slice 2.3 needs it) but is
-  **never returned by any route**;
+- the result's `captainRef` is **never stored on the `FIXRESULT#` item** (the write strips
+  it, and a pull scrubs one an older item still carries). Reports resolve their recipient at
+  open time from the pulled result in memory; the ref is kept only on the `REPORTOPEN#`
+  marker while that opening is pending (so a retry can still address the captain) and goes
+  with the marker. It is never returned by any route;
 - `FIXRESULT#` and the `SYNC` partition are enumerated by tenant erasure (`FIXRESULT#` by
-  cohort clearing too).
+  cohort clearing too); club erasure (`eraseClubData`) deletes the club's captain's reports
+  and their `NOTIFY#` ledger rows.
 
 ## Consequences
 

@@ -1021,11 +1021,15 @@ export async function putFixtureResultIfNewer(
   tenant: string,
   result: StoredFixtureResult,
 ): Promise<boolean> {
+  // Never persist a player ref on the result (POPIA), whatever the caller passed.
+  const { captainRef: _playerRef, ...item } = result as StoredFixtureResult & {
+    captainRef?: unknown;
+  };
   try {
     await ddb.send(
       new PutCommand({
         TableName: TABLE,
-        Item: { ...result, ...fixtureResultKey(tenant, result.seriesId, result.fixtureId) },
+        Item: { ...item, ...fixtureResultKey(tenant, result.seriesId, result.fixtureId) },
         ConditionExpression: 'attribute_not_exists(pk) OR orderAt < :o',
         ExpressionAttributeValues: { ':o': result.orderAt },
       }),
@@ -1034,6 +1038,26 @@ export async function putFixtureResultIfNewer(
   } catch (err: unknown) {
     if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return false;
     throw err;
+  }
+}
+
+/** Scrub a player ref a pre-POPIA-fix result item may still carry (idempotent). */
+export async function removeFixtureResultCaptainRef(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: fixtureResultKey(tenant, seriesId, fixtureId),
+        UpdateExpression: 'REMOVE captainRef',
+        ConditionExpression: 'attribute_exists(pk)',
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
   }
 }
 
@@ -1798,6 +1822,21 @@ export async function releaseCaptainsReportNotify(
   } catch (err) {
     if (!isCcf(err)) throw err;
   }
+}
+
+/** One report's NOTIFY# ledger keys (every audience) — for club erasure. */
+async function listCaptainsReportNotifyKeys(
+  tenant: string,
+  reportId: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  const prefix = captainsReportNotifyKey(tenant, reportId, '');
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': prefix.pk, ':s': prefix.sk },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
 }
 
 /** Every key in the captain's-report partition (reports, counters, ledger) — for erasure. */
@@ -6415,6 +6454,14 @@ export async function eraseClubData(
   // Invite markers aren't in the gsi1 listing — enumerate + delete them explicitly
   // (they carry recipient contact in their stored results).
   for (const k of await listClubInviteKeys(tenant, club.id)) keys.push(k);
+
+  // Captain's reports filed for/by this club (they name its captain and rate umpires) and
+  // their NOTIFY# ledger rows (per report + recipient).
+  for (const r of await listCaptainsReports(tenant)) {
+    if (r.clubId !== club.id) continue;
+    keys.push(reportKeyOf(tenant, r));
+    keys.push(...(await listCaptainsReportNotifyKeys(tenant, r.id)));
+  }
 
   // Veterans affiliations WHERE THIS CLUB IS THE VETERANS CLUB (its affiliates). The pointing
   // player rows live in OTHER (primary) clubs; scrub their veteransClub/veteransClubId BEFORE

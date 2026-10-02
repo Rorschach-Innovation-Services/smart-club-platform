@@ -259,6 +259,18 @@ const completeBody = {
   umpires: [fullUmpire('u-ngubane', 'A.Ngubane'), fullUmpire('u-dlamini', 'S.Dlamini')],
 };
 
+/** How many stored items (any partition) contain `needle` anywhere. */
+async function tableItemsContaining(needle: string): Promise<number> {
+  const { DynamoDBClient, ScanCommand } = await import('@aws-sdk/client-dynamodb');
+  const c = new DynamoDBClient({
+    endpoint: process.env.DYNAMO_ENDPOINT,
+    region: 'localhost',
+    credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+  });
+  const items = (await c.send(new ScanCommand({ TableName: TABLE }))).Items ?? [];
+  return items.filter((i) => JSON.stringify(i).includes(needle)).length;
+}
+
 async function resetTable() {
   const { DynamoDBClient, ScanCommand, DeleteItemCommand } =
     await import('@aws-sdk/client-dynamodb');
@@ -826,6 +838,57 @@ describe('admin list', () => {
 });
 
 describe('erasure', () => {
+  test("eraseClubData removes the club's reports and their NOTIFY# ledger rows", async () => {
+    await seedCaptain();
+    page = liveResultPage('live');
+    await runPull();
+    const umz = (await repo.getClub('dolphins', 'umzinto'))!;
+    await repo.eraseClubData('dolphins', umz);
+    const left = await reportsOf();
+    assert.deepEqual(
+      left.map((r) => r.clubId),
+      ['african-warriors'],
+      "the other club's report stays",
+    );
+    assert.equal(await tableItemsContaining('~umzinto'), 0, 'no report or ledger row is left');
+    assert.ok((await tableItemsContaining('~african-warriors')) >= 2, 'report + its ledger');
+  });
+
+  test('a result item stored with a player ref (before the fix) is scrubbed on the next pull', async () => {
+    await repo.putFixtureResultIfNewer('dolphins', {
+      seriesId: 's-planb-premier-men-t20-g1',
+      fixtureId: 'f3',
+      ref: 'smartclub:dolphins:fixture:s-planb-premier-men-t20-g1:f3',
+      // Newer than the pulled result, so the pull below is a stale replay that stores nothing.
+      orderAt: '2099-01-01T00:00:00.000Z',
+      recordedAt: '2099-01-01T00:00:00.000Z',
+      summary: 'kept',
+      storedAt: '2099-01-01T00:00:00.000Z',
+    });
+    // Simulate the old item shape directly.
+    const { DynamoDBClient, UpdateItemCommand } = await import('@aws-sdk/client-dynamodb');
+    const c = new DynamoDBClient({
+      endpoint: process.env.DYNAMO_ENDPOINT,
+      region: 'localhost',
+      credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+    });
+    const { fixtureResultKey } = await import('../src/keys.js');
+    const k = fixtureResultKey('dolphins', 's-planb-premier-men-t20-g1', 'f3');
+    await c.send(
+      new UpdateItemCommand({
+        TableName: TABLE,
+        Key: { pk: { S: k.pk }, sk: { S: k.sk } },
+        UpdateExpression: 'SET captainRef = :r',
+        ExpressionAttributeValues: { ':r': { S: CAPTAIN_REF } },
+      }),
+    );
+    page = liveResultPage('live');
+    assert.equal((await runPull()).counts.resultsStale, 1);
+    const stored = await repo.getFixtureResult('dolphins', 's-planb-premier-men-t20-g1', 'f3');
+    assert.ok(!JSON.stringify(stored).includes(CAPTAIN_REF));
+    assert.equal(stored?.summary, 'kept');
+  });
+
   test('eraseTenantData removes reports, counters and the NOTIFY# ledger', async () => {
     await seedCaptain();
     page = liveResultPage('live');
@@ -879,8 +942,11 @@ describe('durable report opening (REPORTOPEN# markers)', () => {
     assert.equal(marker.ref, LIVE_REF);
     assert.equal(marker.attempts, 1);
     assert.match(String(marker.lastError), /LINK_SECRET/);
-    // The marker never carries the captain's player ref.
-    assert.ok(!JSON.stringify(marker).includes(CAPTAIN_KEY), 'no player ref on the marker');
+    // The player ref is kept ONLY on the pending marker (so the retry can still address the
+    // captain) — never on the stored result.
+    assert.equal(marker.captainRef, CAPTAIN_REF);
+    const result = await repo.getFixtureResult('dolphins', 's-planb-premier-men-t20-g1', 'f3');
+    assert.ok(!JSON.stringify(result).includes(CAPTAIN_REF), 'no player ref on FIXRESULT#');
 
     const { retryPendingReportOpens } = await import('../src/captains-reports.js');
     const retry = await retryPendingReportOpens('dolphins', { repo, ...sender });
@@ -888,6 +954,9 @@ describe('durable report opening (REPORTOPEN# markers)', () => {
     assert.equal(notices.length, 2, 'both sides notified exactly once on the retry');
     assert.deepEqual(notices.map((n) => n.recipientKind).sort(), ['captain', 'chair']);
     assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
+    // Once the reports opened, the player ref is stored nowhere at all.
+    assert.equal(await tableItemsContaining(CAPTAIN_REF), 0);
+    assert.ok(!logLines.join('\n').includes(CAPTAIN_KEY));
 
     // A further retry run (nothing pending) and a replayed page send nothing.
     await retryPendingReportOpens('dolphins', { repo, ...sender });

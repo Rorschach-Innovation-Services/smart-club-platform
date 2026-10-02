@@ -1079,8 +1079,8 @@ export interface RegistrationReview {
  * `resultClearedAt` is newer — so an out-of-order or replayed change can never win. A
  * cleared result keeps its item as a tombstone (`cleared: true`, no score fields).
  *
- * `captainRef` is a player ref = a hashed ID number: personal data. It is never returned by
- * any route and never logged; it exists for the captain's report recipient (Slice 2.3).
+ * No player ref is stored here (POPIA): a pulled result's `captainRef` lives only on the
+ * REPORTOPEN# marker while its captain's reports are pending (see `ReportOpenMarker`).
  */
 export interface StoredFixtureResult {
   seriesId: string;
@@ -1099,7 +1099,6 @@ export interface StoredFixtureResult {
   resultSource?: 'live' | 'manual' | 'import';
   recordedAt?: string;
   scoringSide?: 'home' | 'away' | null;
-  captainRef?: string | null;
   medicoachMatchUrl?: string | null;
   storedAt: string;
 }
@@ -1235,6 +1234,12 @@ export interface ReportOpenMarker {
   attempts: number;
   lastError?: string;
   lastAttemptAt?: string;
+  /**
+   * The result's captain player ref (a hashed ID number — PII), kept ONLY while the reports
+   * are pending so a retry can still address the captain. Deleted with the marker; never
+   * returned by any route, logged or written to SYNCLOG.
+   */
+  captainRef?: string | null;
 }
 
 // ── Captain's reports (ADR 0016, Slice 2) ──

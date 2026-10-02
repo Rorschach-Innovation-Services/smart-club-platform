@@ -330,9 +330,10 @@ describe('medicoach sync puller', () => {
     // No player ref ever leaves the API, admin or rep.
     assert.doesNotMatch(JSON.stringify(all), /:player:/);
     assert.doesNotMatch(JSON.stringify(await getSeries(REP)), /:player:/);
-    // …but it is kept on the stored item for Slice 2.3.
+    // …and it is never kept on the stored result item (POPIA).
     const stored = await repo.getFixtureResult('dolphins', 's-planb-premier-men-t20-g1', 'f3');
-    assert.match(String(stored?.captainRef), /^smartclub:dolphins:player:/);
+    assert.ok(stored);
+    assert.doesNotMatch(JSON.stringify(stored), /:player:/);
 
     // The same page again (a replay) changes nothing and never re-fires the hook.
     pages = [example('changes-live-result')];

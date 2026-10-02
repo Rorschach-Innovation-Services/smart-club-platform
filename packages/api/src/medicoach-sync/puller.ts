@@ -34,9 +34,12 @@
  * Dry-run: with `MedicoachSyncUrl` or `MedicoachSyncSecret` empty the puller logs the
  * request it would make and stops — no HTTP, no writes.
  *
- * PII: a result's `captainRef` is a player ref (a hashed ID number). It is stored on the
- * result item (the captain's-report hook resolves it to a roster row) and NEVER logged — nothing here prints a fixture change, only
- * counts and fixture refs.
+ * PII: a result's `captainRef` is a player ref (a hashed ID number). It is NOT stored on the
+ * result item: it is handed to the captain's-report hook in memory (resolved to a roster row
+ * at open time, then dropped) and kept only on the `REPORTOPEN#` marker while that opening is
+ * pending, so a retry can still address the captain; the marker is deleted once the reports
+ * opened (or the retries gave up). It is NEVER logged or written to SYNCLOG — nothing here
+ * prints a fixture change, only counts and fixture refs.
  */
 import { randomUUID } from 'node:crypto';
 import { isSlotRef } from '../../../engine/src/formats.js';
@@ -248,7 +251,8 @@ function resultItem(
     resultSource: r.source,
     recordedAt: r.recordedAt,
     scoringSide: r.scoringSide,
-    captainRef: r.captainRef,
+    // No captainRef: a player ref is never kept on the result (POPIA). It rides only on the
+    // REPORTOPEN# marker while the reports are pending.
     medicoachMatchUrl: r.medicoachMatchUrl,
     storedAt: now,
   };
@@ -414,7 +418,12 @@ export async function runMedicoachSync(
               recordedAt: change.result.recordedAt,
               createdAt: now().toISOString(),
               attempts: 0,
+              // The only place the player ref is kept, and only until the reports opened.
+              ...(change.result.captainRef ? { captainRef: change.result.captainRef } : {}),
             });
+          // A result stored before refs left the result item: scrub the old copy.
+          if (prior && 'captainRef' in prior)
+            await repo.removeFixtureResultCaptainRef(tenant, seriesId, fixtureId);
           const stored = await repo.putFixtureResultIfNewer(
             tenant,
             resultItem(seriesId, fixtureId, change.ref, change.result, now().toISOString()),
