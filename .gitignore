@@ -49,6 +49,9 @@ lions-affiliation-backup-*.json
 lions-affiliation-created-clubs.json
 lions-affiliation-created-clubs.*.json
 
+# import-lions-fixtures --confirm / --revert --confirm series snapshots.
+lions-fixtures-backup-*.json
+
 # generated cohort exports (contain PII)
 cohort-export-*.xlsx
 
