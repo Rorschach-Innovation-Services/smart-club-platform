@@ -12,6 +12,7 @@
     "export-cohort": "tsx src/export-cohort.ts",
     "export-medicoach": "tsx src/export-medicoach.ts",
     "import-planb": "tsx src/import-planb-fixtures.ts",
+    "import-umpire-appointments": "tsx src/import-umpire-appointments.ts",
     "configure-tenant-docs": "tsx src/configure-tenant-docs.ts",
     "import-titans-compliance": "tsx src/import-titans-compliance.ts",
     "import-titans-contacts": "tsx src/import-titans-contacts.ts",
