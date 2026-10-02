@@ -2296,9 +2296,9 @@ function isImportAuthoredReason(reason: string | undefined): boolean {
  * stored fixture the sheet no longer has) vs. what's purely INFORMATIONAL.
  *
  * Fixture ids are stable across re-imports (stabiliseFixtureIds matches rows on date +
- * unordered pair), so the comparison is by id. Date/time is still informational-only:
- * a matched row has the same date by construction, and a time change on a matched row
- * can't be told apart from an admin correction, so it is surfaced, never gated.
+ * unordered pair, then on the pair alone for a moved date), so the comparison is by id.
+ * Date/time is informational-only: a date or time change on a matched row can't be told
+ * apart from an admin (or medicoach) correction, so it is surfaced, never gated.
  *
  * `syncOwned` (tenant has `features.medicoachSync`): medicoach owns results, so a
  * `completed` status is the sync's, not an admin edit, and never gates. Sync-owned
@@ -2380,7 +2380,7 @@ function printIdStabilisation(r: IdStabilisation) {
   );
   if (r.removed.length) {
     console.log(
-      `  ✗ ${r.removed.length} stored fixture(s) not in the sheet — kept unless you pass --discard-edits:`,
+      `  ✗ ${r.removed.length} stored fixture(s) not in the sheet — the import will not write while they exist; --discard-edits writes anyway and DELETES them:`,
     );
     for (const line of r.removed) console.log(`     ${line}`);
   }
@@ -2403,7 +2403,8 @@ export function refuseSyncBreak(
   orphanRefs: string[],
   allowSyncBreak: boolean,
 ): boolean {
-  if (!syncEnabled(config)) return false;
+  // Nothing would orphan (e.g. --discard-edits over hand-set venues only): nothing to refuse.
+  if (!syncEnabled(config) || !orphanRefs.length) return false;
   if (allowSyncBreak) {
     console.warn(
       `\n⚠ --allow-sync-break: ${what} on a medicoach-synced tenant orphans ${orphanRefs.length} fixture ref(s):`,
@@ -2419,6 +2420,21 @@ export function refuseSyncBreak(
     '   Pass --allow-sync-break to proceed anyway (medicoach keeps the orphaned fixtures).',
   );
   return true;
+}
+
+/**
+ * What --discard-edits means on a medicoach-synced tenant, beyond orphaned refs: the sheet's
+ * date/time/venue overwrite whatever the fixture holds now — including a reschedule medicoach
+ * made and the sync applied — and every such difference is then queued as a smart-club edit
+ * and pushed back to medicoach. Null on a tenant without the sync.
+ */
+export function discardEditsSyncWarning(config: TenantConfig | null | undefined): string | null {
+  if (!syncEnabled(config)) return null;
+  return (
+    '\n⚠ --discard-edits on a medicoach-synced tenant: the sheet overwrites every fixture as it ' +
+    'stands now, including reschedules medicoach made (and the sync applied), and those sheet ' +
+    'values are then pushed back to medicoach as smart-club edits.'
+  );
 }
 
 async function backupExistingSeries(repo: RepoModule): Promise<string> {
@@ -3268,6 +3284,10 @@ async function runImport(args: Args) {
     );
     abort = true;
   }
+  if (args.discardEdits) {
+    const warning = discardEditsSyncWarning(config);
+    if (warning) console.warn(warning);
+  }
   if (
     args.discardEdits &&
     refuseSyncBreak(
@@ -3651,6 +3671,10 @@ async function runRelease(args: Args) {
       '\n✗ existing series carry admin edits — refusing to overwrite (pass --discard-edits to overwrite anyway).',
     );
     abort = true;
+  }
+  if (args.discardEdits) {
+    const warning = discardEditsSyncWarning(config);
+    if (warning) console.warn(warning);
   }
   if (
     args.discardEdits &&

@@ -12,7 +12,8 @@ import {
   type IdentityFixture,
 } from '../src/fixture-identity.js';
 
-const { stabiliseFixtureIds, parseArgs } = await import('../src/import-planb-fixtures.js');
+const { stabiliseFixtureIds, parseArgs, refuseSyncBreak, discardEditsSyncWarning } =
+  await import('../src/import-planb-fixtures.js');
 
 const row = (date: string, home: string, away: string, time?: string): IdentityFixture => ({
   date,
@@ -186,6 +187,30 @@ describe('stabiliseFixtureIds (importer)', () => {
       'r',
       'an explicit syncRef wins over the derived ref',
     );
+  });
+
+  test('--discard-edits is refused on a synced tenant only when refs would actually orphan', () => {
+    const synced = { features: { medicoachSync: true } } as never;
+    const err = console.error;
+    const warn = console.warn;
+    console.error = () => {};
+    console.warn = () => {};
+    try {
+      assert.equal(refuseSyncBreak(synced, '--discard-edits', [], false), false);
+      assert.equal(
+        refuseSyncBreak(synced, '--discard-edits', ['smartclub:d:fixture:s:f1'], false),
+        true,
+      );
+      assert.equal(
+        refuseSyncBreak({ features: {} } as never, '--discard-edits', ['r'], false),
+        false,
+      );
+    } finally {
+      console.error = err;
+      console.warn = warn;
+    }
+    assert.match(String(discardEditsSyncWarning(synced)), /overwrites .*medicoach.*pushed back/s);
+    assert.equal(discardEditsSyncWarning({ features: {} } as never), null);
   });
 
   test('--allow-sync-break parses', () => {
