@@ -33,6 +33,7 @@ import {
   JUNK_GROUND,
   DEFAULT_VENUE_ALIASES,
   venueAliasesFor,
+  isClashExempt,
 } from './venue-clash.js';
 import type { Series, Venue } from './types.js';
 
@@ -300,7 +301,7 @@ async function main() {
     const out: Booking[] = [];
     for (const s of allSeries) {
       for (const f of (s.fixtures as StoredFixture[]) ?? []) {
-        if (!f.date || f.status === 'cancelled') continue;
+        if (!f.date || isClashExempt(f)) continue;
         const ground = effectiveGround(s, f);
         if (!ground) continue;
         out.push({

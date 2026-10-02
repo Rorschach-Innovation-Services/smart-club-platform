@@ -40,6 +40,7 @@ import {
   JUNK_GROUND,
   DEFAULT_VENUE_ALIASES,
   venueAliasesFor,
+  isClashExempt,
 } from './venue-clash.js';
 import type { Club, Series, Venue } from './types.js';
 
@@ -262,7 +263,7 @@ function scanClashes(
   }> = [];
   for (const s of allSeries) {
     for (const f of (s.fixtures as StoredFixture[]) ?? []) {
-      if (!f.date || f.status === 'cancelled') continue;
+      if (!f.date || isClashExempt(f)) continue;
       const ground = effectiveGround(s, f, clubsById);
       if (!ground) continue;
       bookings.push({
@@ -305,7 +306,7 @@ function implicitHomeCount(clubId: string, allSeries: Series[]): number {
   let n = 0;
   for (const s of allSeries) {
     for (const f of (s.fixtures as StoredFixture[]) ?? []) {
-      if (!f.date || f.status === 'cancelled') continue;
+      if (!f.date || isClashExempt(f)) continue;
       if (f.venueOverride || f.venueName) continue; // explicit venue — doesn't follow the club record
       if (!f.home) continue;
       const homeClubId = s.participants
@@ -487,7 +488,7 @@ async function main() {
   const allocLedger = new GroundLedger(registryResolver(buildAllocVenues(), ALIASES));
   for (const s of allSeries) {
     for (const f of (s.fixtures as StoredFixture[]) ?? []) {
-      if (!f.date || f.status === 'cancelled') continue;
+      if (!f.date || isClashExempt(f)) continue;
       if (toMoveGids.has(`${s.id}/${f.id ?? '?'}`)) continue; // moved fixtures are booked below
       const ground = effectiveGround(s, f, allocClubsById);
       if (!ground) continue;
