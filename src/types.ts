@@ -96,7 +96,6 @@ export interface CaptainsReport {
   source: 'auto' | 'manual';
   fixtureRef?: string;
   matchDate: string;
-  deadline: string;
   side: 'home' | 'away';
   clubName: string;
   opponentName: string;
@@ -117,8 +116,6 @@ export interface CaptainsReport {
   flagged?: { reason: string; at: string };
   createdAt: string;
   updatedAt: string;
-  /** Derived on read (deadline passed while pending, or submitted after it). */
-  late: boolean;
 }
 /** The editable part of a report, as PUT/POST bodies carry it. */
 export interface CaptainsReportFields {

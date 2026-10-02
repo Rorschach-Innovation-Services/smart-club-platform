@@ -1,5 +1,5 @@
 /**
- * Union office "Captain's reports" page: status chips (late is the server-derived flag), the
+ * Union office "Captain's reports" page: status chips (no late status — there is no due date), the
  * low-ratings filter, and the read-only report view.
  */
 import { describe, it, expect } from 'vitest';
@@ -25,7 +25,6 @@ const report = (over: Partial<CaptainsReport>): CaptainsReport => ({
   status: 'pending',
   source: 'auto',
   matchDate: '2026-10-04',
-  deadline: '2026-10-07T16:00:00.000Z',
   side: 'home',
   clubName: 'Umzinto CC',
   opponentName: 'African Warriors',
@@ -37,7 +36,6 @@ const report = (over: Partial<CaptainsReport>): CaptainsReport => ({
   general: '',
   createdAt: '2026-10-04T15:00:00.000Z',
   updatedAt: '2026-10-04T15:00:00.000Z',
-  late: false,
   ...over,
 });
 
@@ -65,7 +63,6 @@ const REPORTS = [
     clubName: 'African Warriors',
     opponentName: 'Umzinto CC',
     recipient: { kind: 'chair', name: 'Awa Chair' },
-    late: true,
   }),
   report({
     clubId: 'c',
@@ -76,12 +73,14 @@ const REPORTS = [
 ];
 
 describe('AdminCaptainsReportsView', () => {
-  it('filters by status chip, late and low ratings', async () => {
+  it('filters by status chip and low ratings; there is no Late chip or due column', async () => {
     const user = userEvent.setup();
     renderWithProviders(<AdminCaptainsReportsView reports={REPORTS} />);
     const rows = () => screen.getAllByRole('row').slice(1);
     expect(rows()).toHaveLength(3);
-    await user.click(screen.getByRole('button', { name: /^Late/ }));
+    expect(screen.queryByRole('button', { name: /^Late/ })).toBeNull();
+    expect(screen.queryByRole('columnheader', { name: 'Due' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: /^Void/ }));
     expect(rows()).toHaveLength(1);
     expect(within(rows()[0]).getByText('Chair')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: /^All/ }));

@@ -56,7 +56,6 @@ const BUILDERS = [
       recipientName: 'Sanele Mthembu',
       clubName: 'Umzinto CC',
       match: 'Umzinto v African Warriors, Sun 4 Oct 2026',
-      deadline: '18h00 on Wed 7 Oct 2026',
     }),
   },
   {
@@ -121,7 +120,6 @@ describe('whatsapp URL buttons', () => {
       recipientName: 'A',
       clubName: 'B',
       match: 'C',
-      deadline: 'D',
     });
     for (const p of params) assert.doesNotMatch(p.text, /https?:\/\//);
   });

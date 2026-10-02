@@ -170,12 +170,12 @@ export const WHATSAPP_TEMPLATES = {
   captainsReportDue: {
     name: 'captains_report_due',
     lang: 'en',
-    paramCount: 4,
-    params: ['recipient name', 'club name', 'match (teams + date)', 'deadline'],
+    paramCount: 3,
+    params: ['recipient name', 'club name', 'match (teams + date)'],
     bodyText:
       'Hello {{1}},\n\n' +
-      "{{2}}'s captain's report for {{3}} is open. Please rate the umpires by {{4}}.\n\n" +
-      'Tap the button below to open the report. It closes once it is submitted.',
+      "{{2}}'s captain's report for {{3}} is open. Please rate the umpires.\n\n" +
+      'Tap the button below to open the report. The link works once and expires 7 days after the match.',
     status: 'pending',
     urlButton: {
       urlTemplate: 'https://platform.club.medicoach.co.za/r/{{1}}',

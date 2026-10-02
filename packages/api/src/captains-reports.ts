@@ -29,8 +29,6 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   CONCERN_AREAS,
   RATING_CRITERIA,
-  isReportLate,
-  reportDeadline,
   type AppointedUmpire,
   type ReportUmpireEntry,
 } from '../../engine/src/captainsReport.js';
@@ -40,6 +38,7 @@ import { chairContactOf } from './club-contacts.js';
 import { captainsReportLinkBase, captainsReportLinkSecret } from './env.js';
 import { hasFeature } from './features.js';
 import { toE164 } from './notify/e164.js';
+import { TENANT_UTC_OFFSET_MINUTES } from './tenant-time.js';
 import type {
   CaptainsReport,
   CaptainsReportRecipient,
@@ -52,10 +51,13 @@ import type { SyncResult } from './medicoach-sync-contract.js';
 
 type RepoModule = typeof import('./repo.js');
 
-/** Results for matches older than this never open reports (a late backfill, a re-pull). */
-export const MAX_REPORT_AGE_DAYS = 14;
-/** A link stays usable this long after the report's deadline (late reports are accepted). */
-export const LINK_GRACE_DAYS = 7;
+/**
+ * A result for a match older than this never opens reports (a late backfill, a re-pull):
+ * the link would already be dead. The club can still file from the portal at any time.
+ */
+export const MAX_REPORT_AGE_DAYS = 7;
+/** A link works until the end of this day after the match (23:59:59 SAST), unless used first. */
+export const LINK_VALID_DAYS = 7;
 /** REPORTOPEN# retries (the puller's own try included) before giving up with Sentry. */
 export const REPORT_OPEN_MAX_ATTEMPTS = 5;
 
@@ -141,9 +143,19 @@ export function verifyReportLinkToken(token: string, secret: string, nowMs: numb
   return { ok: true, payload: p };
 }
 
-/** The link for a report: `${base}/r/<token>`, expiring LINK_GRACE_DAYS after the deadline. */
+/**
+ * When a report link stops working: 23:59:59 SAST on the day LINK_VALID_DAYS after the match
+ * (epoch seconds). There is no due date — the link is simply single-use and short-lived.
+ */
+export function reportLinkExpiry(matchDate: string): number {
+  const endOfMatchDayUtc =
+    Date.parse(`${matchDate}T23:59:59Z`) - TENANT_UTC_OFFSET_MINUTES * 60_000;
+  return Math.floor((endOfMatchDayUtc + LINK_VALID_DAYS * DAY_MS) / 1000);
+}
+
+/** The link for a report: `${base}/r/<token>`, expiring per `reportLinkExpiry`. */
 export function reportLink(tenant: string, report: CaptainsReport, secret: string, base: string) {
-  const exp = Math.floor((Date.parse(report.deadline) + LINK_GRACE_DAYS * DAY_MS) / 1000);
+  const exp = reportLinkExpiry(report.matchDate);
   const token = signReportLinkToken(
     { t: tenant, r: report.id, m: report.recipient.memberId, e: exp },
     secret,
@@ -153,15 +165,18 @@ export function reportLink(tenant: string, report: CaptainsReport, secret: strin
 
 // ───────────────────────── Projections ─────────────────────────
 
-/** What a club member / link holder / admin sees: never the recipient's opaque memberId. */
-export type CaptainsReportView = Omit<CaptainsReport, 'recipient'> & {
+/**
+ * What a club member / link holder / admin sees: never the recipient's opaque memberId, and
+ * never the `deadline` reports opened before the due date was dropped still carry.
+ */
+export type CaptainsReportView = Omit<CaptainsReport, 'recipient' | 'deadline'> & {
   recipient: Omit<CaptainsReportRecipient, 'memberId'>;
-  late: boolean;
 };
 
-export function reportView(r: CaptainsReport, nowIso: string): CaptainsReportView {
+export function reportView(r: CaptainsReport, _nowIso?: string): CaptainsReportView {
   const { memberId: _m, ...recipient } = r.recipient;
-  return { ...r, recipient, late: isReportLate(r, nowIso) };
+  const { deadline: _d, ...rest } = r;
+  return { ...rest, recipient };
 }
 
 // ───────────────────────── Input parsing ─────────────────────────
@@ -288,7 +303,6 @@ export interface ReportNotice {
   clubName: string;
   matchLine: string;
   matchDateText: string;
-  deadlineText: string;
   orgName: string;
   token: string;
   url: string;
@@ -334,9 +348,6 @@ const fmtDay = (iso: string) =>
     year: 'numeric',
     timeZone: 'UTC',
   });
-
-/** "18h00 on Wed 7 Oct 2026" */
-export const deadlineText = (deadline: string) => `18h00 on ${fmtDay(deadline.slice(0, 10))}`;
 
 function sideName(series: Series, teamId: string, club: Club | null): string {
   return (
@@ -423,7 +434,6 @@ export async function openCaptainReports(
   if (Date.parse(today) - Date.parse(matchDate) > MAX_REPORT_AGE_DAYS * DAY_MS)
     return { ...out, skipped: 'too-old' };
 
-  const deadline = reportDeadline(matchDate)!;
   const officials = await repo.getFixtureOfficials(tenant, seriesId, fixtureId);
   const umpiresSnapshot: AppointedUmpire[] = (officials?.umpires ?? []).map((u) => ({
     umpireId: u.umpireId,
@@ -471,7 +481,6 @@ export async function openCaptainReports(
       source: 'auto',
       fixtureRef: event.ref,
       matchDate,
-      deadline,
       side: s.side,
       clubName: sideName(series, s.teamId, club),
       opponentName,
@@ -544,7 +553,6 @@ async function notifyReportOpened(
     clubName: report.clubName,
     matchLine: `${home} v ${away}`,
     matchDateText: fmtDay(report.matchDate),
-    deadlineText: deadlineText(report.deadline),
     orgName: orgCopy(config).name,
     token,
     url,
@@ -584,7 +592,6 @@ export async function sendReportNotice(n: ReportNotice): Promise<NoticeResult[]>
             clubName: n.clubName,
             matchLine: n.matchLine,
             matchDateText: n.matchDateText,
-            deadlineText: n.deadlineText,
             link: n.url,
             orgName: n.orgName,
           });
@@ -601,7 +608,6 @@ export async function sendReportNotice(n: ReportNotice): Promise<NoticeResult[]>
           recipientName: n.to.name,
           clubName: n.clubName,
           match: `${n.matchLine}, ${n.matchDateText}`,
-          deadline: n.deadlineText,
           token: n.token,
         });
         return { channel, status: 'sent' };
@@ -667,7 +673,7 @@ export interface ReportRetrySummary {
 /**
  * Retry every pending REPORTOPEN# marker for a tenant (each cron run and "Sync now"). The
  * marker's result is re-read from its FIXRESULT# item, so the usual rules apply unchanged
- * (import source, goLiveDate, the 14-day window). A marker whose result is gone, cleared, or
+ * (import source, goLiveDate, the 7-day window). A marker whose result is gone, cleared, or
  * older than the one it was written for (the store never happened) is simply dropped.
  * After REPORT_OPEN_MAX_ATTEMPTS failures the marker is dropped and Sentry told.
  */
@@ -757,7 +763,12 @@ export async function loadLinkedReport(
   const check = verifyReportLinkToken(token, secret, nowMs);
   if (!check.ok)
     return check.reason === 'expired'
-      ? { ok: false, status: 410, error: 'this link has expired' }
+      ? {
+          ok: false,
+          status: 410,
+          error:
+            'This link has expired. Your club chair can still file the report from the club portal.',
+        }
       : { ok: false, status: 404, error: 'not found' };
   const { t: tenant, r: reportId, m: memberId } = check.payload;
   const key = parseCaptainsReportId(reportId);

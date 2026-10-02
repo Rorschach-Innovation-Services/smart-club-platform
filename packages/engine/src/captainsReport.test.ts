@@ -1,15 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   appointedChoices,
-  easterSunday,
   emptyUmpireEntry,
   initialUmpireCards,
-  isReportLate,
   pickAppointed,
   pickSubstitute,
-  reportDeadline,
-  reportDeadlineDate,
-  saPublicHolidays,
   submissionProblems,
   umpireCardMode,
   umpireRatingAverages,
@@ -19,80 +14,6 @@ import {
 const NGUBANE = { umpireId: 'u-ngubane', name: 'A.Ngubane' };
 const DLAMINI = { umpireId: 'u-dlamini', name: 'S.Dlamini' };
 const allFives = { decisions: 5, pressure: 5, behaviour: 5, communication: 5, regulations: 5 };
-
-describe('SA public holidays', () => {
-  it('computes Easter Sunday', () => {
-    expect(easterSunday(2026)).toBe('2026-04-05');
-    expect(easterSunday(2027)).toBe('2027-03-28');
-  });
-
-  it('includes Good Friday and Family Day, and moves a Sunday holiday to Monday', () => {
-    const h = saPublicHolidays(2027);
-    expect(h.has('2027-03-26')).toBe(true); // Good Friday
-    expect(h.has('2027-03-29')).toBe(true); // Family Day
-    expect(h.has('2027-03-21')).toBe(true); // Human Rights Day (a Sunday)
-    expect(h.has('2027-03-22')).toBe(true); // …observed on the Monday
-  });
-
-  it('moves Christmas-on-a-Sunday past the Day of Goodwill (27 Dec 2022)', () => {
-    const h = saPublicHolidays(2022);
-    expect(h.has('2022-12-26')).toBe(true);
-    expect(h.has('2022-12-27')).toBe(true);
-  });
-});
-
-describe('reportDeadline — 18h00 on the 3rd business day after the match', () => {
-  it('a Saturday or Sunday match is due on the Wednesday', () => {
-    expect(reportDeadlineDate('2026-10-03')).toBe('2026-10-07');
-    expect(reportDeadlineDate('2026-10-04')).toBe('2026-10-07');
-  });
-
-  it('is 18h00 SAST (16h00 UTC)', () => {
-    expect(reportDeadline('2026-10-04')).toBe('2026-10-07T16:00:00.000Z');
-  });
-
-  it('skips the Day of Reconciliation (Wed 16 Dec 2026)', () => {
-    expect(reportDeadlineDate('2026-12-12')).toBe('2026-12-17');
-    expect(reportDeadlineDate('2026-12-14')).toBe('2026-12-18');
-  });
-
-  it('skips Christmas and the Day of Goodwill', () => {
-    expect(reportDeadlineDate('2026-12-23')).toBe('2026-12-29');
-  });
-
-  it('skips the Easter weekend 2027 and the observed Human Rights Day', () => {
-    // Sat 20 Mar: Mon 22 (observed holiday) is skipped → Tue 23, Wed 24, Thu 25.
-    expect(reportDeadlineDate('2027-03-20')).toBe('2027-03-25');
-    // Wed 24 Mar: Thu 25, then Good Friday, the weekend and Family Day → Tue 30, Wed 31.
-    expect(reportDeadlineDate('2027-03-24')).toBe('2027-03-31');
-  });
-
-  it('is null without a valid date', () => {
-    expect(reportDeadline('')).toBeNull();
-    expect(reportDeadline(undefined)).toBeNull();
-    expect(reportDeadline('04/10/2026')).toBeNull();
-  });
-});
-
-describe('isReportLate (derived on read)', () => {
-  const deadline = '2026-10-07T16:00:00.000Z';
-  it('a pending report is late only after the deadline', () => {
-    expect(isReportLate({ status: 'pending', deadline }, '2026-10-07T15:59:00.000Z')).toBe(false);
-    expect(isReportLate({ status: 'pending', deadline }, '2026-10-07T16:01:00.000Z')).toBe(true);
-  });
-  it('a submitted report is late when it was submitted after the deadline', () => {
-    const now = '2026-12-01T00:00:00.000Z';
-    expect(
-      isReportLate({ status: 'submitted', deadline, submittedAt: '2026-10-06T10:00:00Z' }, now),
-    ).toBe(false);
-    expect(
-      isReportLate({ status: 'submitted', deadline, submittedAt: '2026-10-08T10:00:00Z' }, now),
-    ).toBe(true);
-  });
-  it('a void report is never late', () => {
-    expect(isReportLate({ status: 'void', deadline }, '2027-01-01T00:00:00.000Z')).toBe(false);
-  });
-});
 
 describe('umpire cards from the appointment', () => {
   it('no appointment → two blank registry cards', () => {

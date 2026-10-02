@@ -793,8 +793,6 @@ export interface CaptainsReportDueEmailInput {
   matchLine: string;
   /** "Sun 4 Oct 2026" */
   matchDateText: string;
-  /** "18h00 on Wed 7 Oct 2026" */
-  deadlineText: string;
   /** The submit-once link. NEVER logged. */
   link: string;
   orgName: string;
@@ -806,9 +804,9 @@ export function captainsReportDueEmailContent(input: CaptainsReportDueEmailInput
   text: string;
   html: string;
 } {
-  const { recipientName, recipientKind, clubName, matchLine, matchDateText, deadlineText } = input;
+  const { recipientName, recipientKind, clubName, matchLine, matchDateText } = input;
   const greet = recipientName || 'there';
-  const subject = `Captain's report due: ${matchLine} (${matchDateText})`;
+  const subject = `Captain's report open: ${matchLine} (${matchDateText})`;
   const ask =
     recipientKind === 'captain'
       ? `Please rate the umpires from ${clubName}'s match ${matchLine} on ${matchDateText}.`
@@ -816,7 +814,7 @@ export function captainsReportDueEmailContent(input: CaptainsReportDueEmailInput
   const text =
     `Hi ${greet},\n\n${ask}\n\n` +
     `Open the report here (no sign-in needed):\n\n${input.link}\n\n` +
-    `It is due by ${deadlineText}. The link works until the report is submitted, then it closes.\n\n` +
+    `The link works once and expires 7 days after the match. After that, your club chair can still file the report from the club portal.\n\n` +
     `Thank you,\nThe ${input.orgName} office`;
   const e = escapeHtml;
   const html =
@@ -824,7 +822,7 @@ export function captainsReportDueEmailContent(input: CaptainsReportDueEmailInput
     `<p>Hi ${e(greet)},</p>` +
     `<p>${e(ask)}</p>` +
     `<p><a href="${e(input.link)}" style="color:#1D9E75;font-weight:600">Open the captain's report</a> (no sign-in needed)</p>` +
-    `<p>It is due by <strong>${e(deadlineText)}</strong>. The link works until the report is submitted, then it closes.</p>` +
+    `<p>The link works once and expires 7 days after the match. After that, your club chair can still file the report from the club portal.</p>` +
     `<p>Thank you,<br/>The ${e(input.orgName)} office</p>` +
     `</div>`;
   return { subject, text, html };

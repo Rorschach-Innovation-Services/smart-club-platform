@@ -1,8 +1,7 @@
 /* ─── Union office: Captain's reports ───
  *
- * Every report in the tenant: status (pending / submitted / late / void — "late" derived on
- * the server), who it went to, the appointed umpires, the deadline, and a low-ratings filter
- * (any criterion ≤ 2). A row opens the read-only, printable report.
+ * Every report in the tenant: status (pending / submitted / void), who it went to, the
+ * appointed umpires, and a low-ratings filter (any criterion ≤ 2). There is no due date. A row opens the read-only, printable report.
  */
 import { useMemo, useState } from 'react';
 import { Btn, Icon, Pill } from './atoms';
@@ -10,24 +9,21 @@ import {
   CaptainsReportReadOnly,
   CaptainsReportStatusPill,
   fmtDate,
-  fmtDeadline,
   matchLine,
 } from './CaptainsReport';
 import { avgRating, hasLowRating } from '../packages/engine/src/captainsReport';
 import type { CaptainsReport } from './types';
 
-type StatusFilter = 'all' | 'pending' | 'submitted' | 'late' | 'void';
+type StatusFilter = 'all' | 'pending' | 'submitted' | 'void';
 
 const STATUS_CHIPS: Array<{ key: StatusFilter; label: string }> = [
   { key: 'all', label: 'All' },
   { key: 'pending', label: 'Pending' },
   { key: 'submitted', label: 'Submitted' },
-  { key: 'late', label: 'Late' },
   { key: 'void', label: 'Void' },
 ];
 
-const matchesStatus = (r: CaptainsReport, f: StatusFilter) =>
-  f === 'all' ? true : f === 'late' ? r.late : r.status === f;
+const matchesStatus = (r: CaptainsReport, f: StatusFilter) => (f === 'all' ? true : r.status === f);
 
 const RECIPIENT_LABEL: Record<CaptainsReport['recipient']['kind'], string> = {
   captain: 'Captain',
@@ -66,8 +62,9 @@ export function AdminCaptainsReportsView({
             Captain's <em>reports</em>
           </h1>
           <p className="ph-desc">
-            Umpire ratings from each side's captain. Reports open when medicoach reports a result
-            and are due by 18h00 on the third business day after the match.
+            Umpire ratings from each side's captain. Reports open when medicoach reports a result;
+            the emailed link works for 7 days after the match, and clubs can file from their portal
+            at any time.
           </p>
         </div>
       </div>
@@ -153,7 +150,6 @@ export function AdminCaptainsReportsView({
                     <th>Report from</th>
                     <th>Sent to</th>
                     <th>Appointed umpires</th>
-                    <th>Due</th>
                     <th>Status</th>
                     <th>Ratings</th>
                     <th />
@@ -182,7 +178,6 @@ export function AdminCaptainsReportsView({
                             <span className="ump-none">None appointed</span>
                           )}
                         </td>
-                        <td>{fmtDeadline(r.deadline)}</td>
                         <td>
                           <CaptainsReportStatusPill report={r} />
                           {r.ref && <div className="ump-sub">{r.ref}</div>}

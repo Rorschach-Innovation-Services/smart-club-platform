@@ -215,7 +215,7 @@ import {
   ReportInputError,
   reportView,
 } from './captains-reports.js';
-import { reportDeadline, submissionProblems } from '../../engine/src/captainsReport.js';
+import { submissionProblems } from '../../engine/src/captainsReport.js';
 import { hasFeature, hasModule } from './features.js';
 import {
   resolveVertical,
@@ -4758,8 +4758,8 @@ app.post('/club/captains-reports', async (c) => {
   const sideIndex = clubIds.indexOf(clubId);
   if (sideIndex < 0) throw new HttpError(403, 'not your fixture');
   const matchDate = typeof fixture.date === 'string' ? fixture.date : '';
-  const deadline = reportDeadline(matchDate);
-  if (!deadline) throw new HttpError(400, 'the fixture has no date yet');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(matchDate))
+    throw new HttpError(400, 'the fixture has no date yet');
   const existing = await repo.getCaptainsReport(ra.tenant, seriesId, fixtureId, clubId);
   if (existing)
     throw new HttpError(409, 'a report already exists for this match', {
@@ -4781,7 +4781,6 @@ app.post('/club/captains-reports', async (c) => {
     status: 'pending',
     source: 'manual',
     matchDate,
-    deadline,
     side,
     clubName: own?.name ?? club?.name ?? clubId,
     opponentName: opp?.name ?? clubIds[1 - sideIndex] ?? 'TBC',
@@ -4810,7 +4809,7 @@ app.post('/club/captains-reports', async (c) => {
   return c.json(reportView(saved, now()), 201);
 });
 
-/** Admin: every report, filtered by derived status and match-date range. */
+/** Admin: every report, filtered by status and match-date range. */
 app.get('/captains-reports', requireAdmin, async (c) => {
   const ra = c.get('requestAuth')!;
   const status = c.req.query('status');
@@ -4822,7 +4821,6 @@ app.get('/captains-reports', requireAdmin, async (c) => {
     .map((r) => reportView(r, at))
     .filter((r) => {
       if (!status) return true;
-      if (status === 'late') return r.late;
       return r.status === status;
     })
     .sort((a, b) => b.matchDate.localeCompare(a.matchDate) || a.id.localeCompare(b.id));

@@ -51,7 +51,7 @@ const headers = (auth?: string) => ({
 const DAY = 24 * 3600 * 1000;
 const isoDay = (offsetDays: number) =>
   new Date(Date.now() + offsetDays * DAY).toISOString().slice(0, 10);
-/** Yesterday: always inside the 14-day window and before the deadline. */
+/** Yesterday: always inside the 7-day window, so the link is live. */
 const MATCH_DATE = isoDay(-1);
 const GO_LIVE = isoDay(-30);
 const CAPTAIN_KEY = '0'.repeat(64); // the example's captainRef natural key
@@ -372,15 +372,28 @@ describe('result → reports → notices', () => {
     assert.equal((await reportsOf()).length, 0);
   });
 
-  test('a match older than 14 days opens nothing', async () => {
+  test('a match older than 7 days opens nothing (its link would already be dead)', async () => {
     const old = (await repo.getSeries('dolphins', 's-planb-premier-men-t20-g1'))!;
     await repo.putSeries('dolphins', {
       ...old,
-      fixtures: [fx('f3', 'umzinto', 'african-warriors', { date: isoDay(-20) })],
+      fixtures: [fx('f3', 'umzinto', 'african-warriors', { date: isoDay(-8) })],
     } as Series);
     page = liveResultPage('live');
     await runPull();
     assert.equal((await reportsOf()).length, 0);
+  });
+
+  test('a match exactly 7 days ago still opens; no report carries a deadline', async () => {
+    const old = (await repo.getSeries('dolphins', 's-planb-premier-men-t20-g1'))!;
+    await repo.putSeries('dolphins', {
+      ...old,
+      fixtures: [fx('f3', 'umzinto', 'african-warriors', { date: isoDay(-7) })],
+    } as Series);
+    page = liveResultPage('live');
+    await runPull();
+    const reports = await reportsOf();
+    assert.equal(reports.length, 2);
+    for (const r of reports) assert.equal('deadline' in r, false);
   });
 
   test('a replay (re-pull of the same result) sends nothing again', async () => {
@@ -502,6 +515,45 @@ describe('the submit-once link', () => {
     ).toString('base64url');
     assert.equal((await app.request(`/captains-report-link/${forgedPayload}.${sig}`)).status, 404);
     assert.equal((await app.request('/captains-report-link/not-a-token')).status, 404);
+  });
+
+  test('the link expires at 23:59:59 SAST on the 7th day after the match', async () => {
+    const { reportLinkExpiry, signReportLinkToken, verifyReportLinkToken } =
+      await import('../src/captains-reports.js');
+    const exp = reportLinkExpiry('2026-10-04');
+    assert.equal(new Date(exp * 1000).toISOString(), '2026-10-11T21:59:59.000Z');
+    const token = signReportLinkToken({ t: 'dolphins', r: 'a~b~c', m: 'm', e: exp }, 'k');
+    assert.equal(verifyReportLinkToken(token, 'k', Date.parse('2026-10-11T21:59:59Z')).ok, true);
+    assert.deepEqual(verifyReportLinkToken(token, 'k', Date.parse('2026-10-11T22:00:00Z')), {
+      ok: false,
+      reason: 'expired',
+    });
+  });
+
+  test('an expired link answers 410 and points the chair at the portal', async () => {
+    page = liveResultPage('live');
+    await runPull();
+    const own = (await reportsOf()).find((r) => r.clubId === 'umzinto')!;
+    const { signReportLinkToken } = await import('../src/captains-reports.js');
+    const expired = signReportLinkToken(
+      {
+        t: 'dolphins',
+        r: own.id,
+        m: own.recipient.memberId,
+        e: Math.floor(Date.now() / 1000) - 60,
+      },
+      'local-dev-captains-report-link-secret', // env.ts LOCAL_AUTH fallback
+    );
+    const res = await app.request(`/captains-report-link/${expired}`);
+    assert.equal(res.status, 410);
+    assert.match(((await res.json()) as { error: string }).error, /club portal/);
+    // The portal still files it — there is no time limit there.
+    const filed = await app.request(`/club/captains-reports/${encodeURIComponent(own.id)}`, {
+      method: 'PUT',
+      headers: headers(REP_UMZINTO),
+      body: JSON.stringify({ ...completeBody, submit: true }),
+    });
+    assert.equal(filed.status, 200);
   });
 
   test('a portal submit kills the link (first submit wins)', async () => {
@@ -699,7 +751,7 @@ describe('a cleared result', () => {
 });
 
 describe('admin list', () => {
-  test('filters by status (incl. derived late) and date; reps are refused', async () => {
+  test('filters by status and date; no late status anywhere; reps are refused', async () => {
     await seedCaptain();
     page = liveResultPage('live');
     await runPull();
@@ -710,8 +762,13 @@ describe('admin list', () => {
       headers: headers(ADMIN),
     });
     assert.equal(((await pending.json()) as unknown[]).length, 2);
-    const late = await app.request('/captains-reports?status=late', { headers: headers(ADMIN) });
-    assert.equal(((await late.json()) as unknown[]).length, 0);
+    const listed = (await (
+      await app.request('/captains-reports', { headers: headers(ADMIN) })
+    ).json()) as Array<Record<string, unknown>>;
+    for (const r of listed) {
+      assert.equal('late' in r, false);
+      assert.equal('deadline' in r, false);
+    }
     const outOfRange = await app.request(`/captains-reports?to=${isoDay(-5)}`, {
       headers: headers(ADMIN),
     });
@@ -810,6 +867,33 @@ describe('durable report opening (REPORTOPEN# markers)', () => {
     assert.equal(gaveUp, 1);
     assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
     assert.equal(notices.length, 0);
+  });
+
+  test('a marker for a match now outside the 7-day window is dropped without opening', async () => {
+    page = liveResultPage('live');
+    await puller.runMedicoachSync('dolphins', 'cron', {
+      repo,
+      url: stubUrl,
+      secret: SECRET,
+      log: () => {},
+      captainsReports: failingDeps,
+    });
+    // The match turns out to be 8 days old by the time the retry runs.
+    const s = (await repo.getSeries('dolphins', 's-planb-premier-men-t20-g1'))!;
+    await repo.putSeries('dolphins', {
+      ...s,
+      fixtures: (s.fixtures as Array<Record<string, unknown>>).map((f) => ({
+        ...f,
+        date: isoDay(-8),
+      })),
+    } as Series);
+    for (const r of await reportsOf())
+      await repo.voidOrFlagCaptainsReport('dolphins', r, 'test reset');
+    const { retryPendingReportOpens } = await import('../src/captains-reports.js');
+    const retry = await retryPendingReportOpens('dolphins', { repo, ...sender });
+    assert.equal(retry.done, 1);
+    assert.equal(notices.length, 0);
+    assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
   });
 
   test('a marker whose result was cleared since is dropped without opening anything', async () => {

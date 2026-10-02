@@ -1244,8 +1244,9 @@ export interface CaptainsReportRecipient {
 /**
  * A captain's report: `CAPREPORT#<seriesId>#<fixtureId>#<clubId>`, one per fixture side.
  * Opened `pending` when medicoach reports a result (or created by hand from the portal),
- * `submitted` exactly once, `void` when the result is cleared before submission. "Late" is
- * derived on read (engine `isReportLate`), never stored.
+ * `submitted` exactly once, `void` when the result is cleared before submission. There is no
+ * due date: the link expires 7 days after the match and the club can file from the portal
+ * at any time.
  */
 export interface CaptainsReport {
   /** `<seriesId>~<fixtureId>~<clubId>` — URL-safe and deterministic. */
@@ -1258,8 +1259,8 @@ export interface CaptainsReport {
   /** The medicoach sync ref for the fixture (fixture refs carry no personal data). */
   fixtureRef?: string;
   matchDate: string;
-  /** ISO instant: 18h00 SAST on the 3rd business day after the match. */
-  deadline: string;
+  /** LEGACY: reports opened before the due date was dropped carry one; ignored, never served. */
+  deadline?: string;
   side: 'home' | 'away';
   clubName: string;
   opponentName: string;

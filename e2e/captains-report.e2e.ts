@@ -178,14 +178,16 @@ async function mintLink(clubId: string): Promise<string> {
     }),
   );
   const memberId = item.Item?.recipient?.M?.memberId?.S;
-  const deadline = item.Item?.deadline?.S;
   expect(memberId, 'the report has a recipient id').toBeTruthy();
   const payload = Buffer.from(
     JSON.stringify({
       t: TENANT,
       r: `${SERIES_ID}~f1~${clubId}`,
       m: memberId,
-      e: Math.floor((Date.parse(deadline!) + 7 * 24 * 3600 * 1000) / 1000),
+      // 23:59:59 SAST seven days after the match (captains-reports.ts reportLinkExpiry).
+      e: Math.floor(
+        (Date.parse(`${MATCH_DATE}T23:59:59Z`) - 2 * 3600 * 1000 + 7 * 24 * 3600 * 1000) / 1000,
+      ),
     }),
   ).toString('base64url');
   const sig = createHmac('sha256', LINK_SECRET)

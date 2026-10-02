@@ -301,25 +301,22 @@ export interface CaptainsReportDueWhatsAppInput {
   clubName: string;
   /** "Umzinto v African Warriors, Sun 4 Oct 2026" */
   match: string;
-  /** "18h00 on Wed 7 Oct 2026" */
-  deadline: string;
   /** The signed report token — the URL button's dynamic suffix. Never logged. */
   token: string;
 }
 
 /**
- * Build the four body params for `captains_report_due`, in order: {{1}} recipient name
- * (fallback 'there'), {{2}} club name, {{3}} match, {{4}} deadline. The link is NOT a body
+ * Build the three body params for `captains_report_due`, in order: {{1}} recipient name
+ * (fallback 'there'), {{2}} club name, {{3}} match. The link is NOT a body
  * param — it rides in the URL button (see `captainsReportDue.urlButton`).
  */
 export function captainsReportDueParams(
-  input: Pick<CaptainsReportDueWhatsAppInput, 'recipientName' | 'clubName' | 'match' | 'deadline'>,
+  input: Pick<CaptainsReportDueWhatsAppInput, 'recipientName' | 'clubName' | 'match'>,
 ): TemplateParam[] {
   return [
     { type: 'text', text: cleanParam(input.recipientName || 'there') },
     { type: 'text', text: cleanParam(input.clubName) },
     { type: 'text', text: cleanParam(input.match) },
-    { type: 'text', text: cleanParam(input.deadline) },
   ];
 }
 

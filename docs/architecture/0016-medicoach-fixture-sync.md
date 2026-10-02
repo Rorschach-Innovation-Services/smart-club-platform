@@ -91,9 +91,20 @@ importer's `putSeries`) would overwrite them or lose them to a version conflict.
   medicoach link — never captain data) and a fixture with a result reads as completed. For
   admins on a synced tenant it also marks `syncMapped` fixtures, where the console locks the
   manual "completed" status. Both keys are stripped from anything a client writes back.
-- A newly stored result (never a replay) calls the puller's `onResultStored` hook — a no-op
-  until captain's reports (Slice 2.3), which will skip `source: 'import'` results and matches
-  before `integrations.medicoach.goLiveDate` (operator-only config).
+- A newly stored result (never a replay) calls the puller's `onResultStored` hook, which
+  opens the captain's reports. It skips `source: 'import'` results, matches before
+  `integrations.medicoach.goLiveDate` (operator-only config) and matches more than 7 days
+  old. A corrected result (newer `recordedAt`, no clear) updates the summary on pending
+  reports and notifies nobody again.
+
+### Captain's reports have no due date
+
+The 3rd-business-day deadline came from the misconduct clause, which was removed, so there is
+no due date and no "late" status (old reports' stored `deadline` is ignored and never served).
+The emailed/WhatsApp link is single-submission: drafts are allowed, and the first submit
+(link or portal) closes it (410). It expires at 23:59:59 SAST on the 7th day after the
+match (410, pointing the chair at the club portal). Reports therefore only auto-open for
+matches up to 7 days old; the chair can file from the portal at any time.
 
 ### Audit
 

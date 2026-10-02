@@ -23,7 +23,6 @@ let seq = 0;
 const shell = (appointed: Array<{ umpireId: string; name: string }>): ReportShell => ({
   id: `s1~f${++seq}~umzinto`,
   matchDate: '2026-10-04',
-  deadline: '2026-10-07T16:00:00.000Z',
   side: 'home',
   clubName: 'Umzinto CC',
   opponentName: 'African Warriors',
@@ -35,7 +34,6 @@ const shell = (appointed: Array<{ umpireId: string; name: string }>): ReportShel
   umpires: [],
   general: '',
   declaration: false,
-  late: false,
 });
 
 const render = (appointed: Array<{ umpireId: string; name: string }>) => {

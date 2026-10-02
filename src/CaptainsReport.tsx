@@ -41,7 +41,6 @@ import {
   initialUmpireCards,
   pickAppointed,
   pickSubstitute,
-  reportDeadline,
   submissionProblems,
   umpireCardMode,
   umpireEntryComplete,
@@ -61,9 +60,6 @@ export const fmtDate = (iso?: string | null) =>
         year: 'numeric',
       })
     : '';
-
-export const fmtDeadline = (iso?: string | null) =>
-  iso ? `18h00, ${fmtDate(iso.slice(0, 10))}` : '';
 
 // Local YYYY-MM-DD (toISOString would shift SAST dates back a day via UTC).
 const localISO = (d: Date) =>
@@ -469,12 +465,6 @@ function MatchFacts({ report }: { report: ReportShell }) {
             <dd>{report.resultSummary}</dd>
           </div>
         )}
-        <div>
-          <dt>Due</dt>
-          <dd>
-            {fmtDeadline(report.deadline)} {report.late && <Pill tone="coral">Late</Pill>}
-          </dd>
-        </div>
       </dl>
     </div>
   );
@@ -485,7 +475,6 @@ export type ReportShell = Pick<
   CaptainsReport,
   | 'id'
   | 'matchDate'
-  | 'deadline'
   | 'side'
   | 'clubName'
   | 'opponentName'
@@ -497,7 +486,6 @@ export type ReportShell = Pick<
   | 'umpires'
   | 'general'
   | 'declaration'
-  | 'late'
 >;
 
 interface CaptainsReportFormProps {
@@ -776,11 +764,10 @@ export function CaptainsReportStatusPill({ report }: { report: CaptainsReport })
         <Pill tone="teal" dot>
           Submitted
         </Pill>{' '}
-        {report.late && <Pill tone="coral">Late</Pill>}{' '}
         {report.flagged && <Pill tone="coral">Result cleared</Pill>}
       </>
     );
-  return report.late ? <Pill tone="coral">Late</Pill> : <Pill tone="gold">Pending</Pill>;
+  return <Pill tone="gold">Pending</Pill>;
 }
 
 function SubmittedCard({ report, onBack }: { report: CaptainsReport; onBack?: () => void }) {
@@ -883,7 +870,6 @@ export function CaptainsReportView({
           seriesId: s.id,
           fixtureId: f.id,
           matchDate: f.date,
-          deadline: reportDeadline(f.date) ?? '',
           side: isHome ? 'home' : 'away',
           clubName: own.name || club.name,
           opponentName: opp.name || 'TBC',
@@ -898,7 +884,6 @@ export function CaptainsReportView({
           umpires: [],
           general: '',
           declaration: false,
-          late: false,
         });
       });
     }
@@ -959,8 +944,8 @@ export function CaptainsReportView({
         </h1>
         <p className="ph-desc">
           Rate the on-field umpires after each match. Reports open here when the result is in; the
-          captain also gets a link to fill it in. Due by 18h00 on the third business day after the
-          match.
+          captain also gets a link to fill it in, which works for 7 days after the match. You can
+          file here at any time.
         </p>
       </div>
     </div>
@@ -1057,7 +1042,7 @@ export function CaptainsReportView({
                   <span>
                     <strong>{matchLine(r)}</strong>
                     <span className="cr-section-sub">
-                      {fmtDate(r.matchDate)} · {r.competition} · due {fmtDeadline(r.deadline)}
+                      {fmtDate(r.matchDate)} · {r.competition}
                     </span>
                   </span>
                   <CaptainsReportStatusPill report={r} />
@@ -1162,7 +1147,9 @@ export function CaptainsReportLinkPage() {
     body = (
       <div className="cr-done">
         <div className="cr-done-title">This report is closed</div>
-        <div className="cr-done-sub">{query.error instanceof ApiError && query.error.message}.</div>
+        <div className="cr-done-sub">
+          {query.error instanceof ApiError && query.error.message.replace(/\.$/, '')}.
+        </div>
       </div>
     );
   else if (!data)
