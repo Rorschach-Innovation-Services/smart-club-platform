@@ -41,6 +41,9 @@ import type {
   DocIntakeCommitClubResult,
   RosterIntakeParseRequest,
   RosterIntakeParseResponse,
+  RosterDraftRow,
+  RosterSheetParseResult,
+  AgeGroupRaw,
   RosterIntakeCommitItem,
   RosterIntakeCommitResponse,
   StructureIntakeParseResponse,
@@ -334,11 +337,134 @@ export const sendClubFixtures = (
   });
 
 // ── Players (roster) ──
-// Players now self-register via the public link (see register* below). The in-portal chair
-// "Register player" form was retired, so its client wrappers (registerPlayer / id-doc
-// upload + mark) were removed; the backend routes remain for any future re-introduction.
+// Players self-register via the public link (see register* below) OR the chair registers them
+// in the portal (registerPlayer / the quick-add batch / the spreadsheet upload below). Every
+// chair path runs through the same clearance-aware core as the public link, so a player
+// already registered at another club opens a clearance rather than a silent duplicate.
 export const getPlayers = (clubId: string) =>
   request<PlayerRegistration[]>(`/clubs/${clubId}/players`);
+
+/**
+ * What a chair registration did. `created` — on the roster, active. `clearance-opened` — on the
+ * roster as clearance-pending; `clearance` names the source club. `review-opened` — the declared
+ * previous club is not on the system, so the union office was flagged to check it (the player is
+ * still registered). A duplicate or an already-open transfer is a plain 409 instead.
+ */
+export type ChairRegisterOutcome = 'created' | 'clearance-opened' | 'review-opened';
+export type RegisterPlayerResponse = PlayerRegistration & {
+  outcome: ChairRegisterOutcome;
+  clearance?: { id: string; fromClubId: string; fromClubName: string };
+};
+export const registerPlayer = (clubId: string, body: Record<string, unknown>) =>
+  request<RegisterPlayerResponse>(`/clubs/${clubId}/players`, { method: 'POST', body });
+// Post-create ID document: presign a PUT, upload via uploadToPresigned, then record the meta.
+export const getPlayerIdDocUploadUrl = (clubId: string, naturalKey: string, contentType: string) =>
+  request<{ uploadUrl: string; objectKey: string; contentType: string }>(
+    `/clubs/${clubId}/players/${encodeURIComponent(naturalKey)}/id-doc/upload-url`,
+    { method: 'POST', body: { contentType } },
+  );
+export const markPlayerIdDoc = (
+  clubId: string,
+  naturalKey: string,
+  meta: { objectKey: string; size: number; contentType?: string },
+) =>
+  request<PlayerRegistration>(`/clubs/${clubId}/players/${encodeURIComponent(naturalKey)}/id-doc`, {
+    method: 'PATCH',
+    body: meta,
+  });
+
+/** Per-row outcome of a bulk chair registration (quick-add batch or spreadsheet commit). */
+export type ChairBulkOutcome =
+  | 'created'
+  | 'clearance-opened'
+  | 'clearance-already-open'
+  | 'skipped-duplicate'
+  | 'error';
+export interface ChairBulkResult {
+  /** Position of the row in the request that produced it. */
+  index: number;
+  rowNumber?: number;
+  sheet?: string;
+  outcome: ChairBulkOutcome;
+  naturalKey?: string;
+  fromClubName?: string;
+  error?: string;
+}
+export interface ChairBulkResponse {
+  results: ChairBulkResult[];
+  summary: Record<ChairBulkOutcome, number>;
+  playerCount: number;
+}
+/** One quick-add row. SA ID rows derive dob server-side; passport rows need nationality + dob. */
+export interface ChairBatchRow {
+  firstName: string;
+  lastName: string;
+  idType?: 'sa-id' | 'passport';
+  idNumber: string;
+  nationality?: string;
+  dob?: string;
+  gender?: string;
+  race?: string;
+  team?: string;
+}
+/** At most CHAIR_BATCH_MAX_ROWS rows per call (the server 400s above it). */
+export const CHAIR_BATCH_MAX_ROWS = 25;
+export const registerPlayersBatch = (clubId: string, rows: ChairBatchRow[]) =>
+  request<ChairBulkResponse>(`/clubs/${clubId}/players/batch`, {
+    method: 'POST',
+    body: { rows },
+  });
+
+/** Why a parsed spreadsheet row won't simply be created (chair roster parse). */
+export type ChairRosterConflict =
+  | { type: 'in-club-duplicate' }
+  | {
+      type: 'cross-club';
+      clubId: string;
+      clubName: string;
+      /** 'active' → commit opens a clearance; 'clearance-pending' → a transfer is in flight. */
+      status: string;
+    };
+export type ChairRosterParseRow = RosterDraftRow & { conflict?: ChairRosterConflict };
+/** The operator parse's shape (RosterIntakeParseResponse, parseable branch) plus `conflict`. */
+export interface ChairRosterParseResponse {
+  parseable: true;
+  sheets: Array<Omit<RosterSheetParseResult, 'rows'> & { rows: ChairRosterParseRow[] }>;
+  dobOnlyCount: number;
+  juniorLeagueKeys: string[];
+  ageGroupRaws: AgeGroupRaw[];
+}
+export interface ChairRosterCommitItem {
+  rowNumber: number;
+  firstName: string;
+  lastName: string;
+  dob: string;
+  idNumber: string;
+  gender?: string;
+  race?: string;
+  team?: string;
+  sheet?: string;
+}
+/** At most this many items per commit call — the client drives chunks sequentially. */
+export const CHAIR_ROSTER_COMMIT_MAX_ROWS = 50;
+// The workbook rides as base64 JSON (the route accepts multipart too) — ≤ 2 MB by contract.
+export const parseClubRoster = async (
+  clubId: string,
+  file: File,
+  ageGroupMap?: Record<string, string>,
+) =>
+  request<ChairRosterParseResponse>(`/clubs/${clubId}/roster/parse`, {
+    method: 'POST',
+    body: {
+      dataBase64: await fileToBase64(file),
+      ...(ageGroupMap && Object.keys(ageGroupMap).length ? { ageGroupMap } : {}),
+    },
+  });
+export const commitClubRoster = (clubId: string, items: ChairRosterCommitItem[]) =>
+  request<ChairBulkResponse>(`/clubs/${clubId}/roster/commit`, {
+    method: 'POST',
+    body: { items },
+  });
 export const getPlayerIdDocViewUrl = (clubId: string, naturalKey: string) =>
   request<{ viewUrl: string }>(`/clubs/${clubId}/players/${naturalKey}/id-doc/view-url`, {
     method: 'POST',

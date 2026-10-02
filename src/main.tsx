@@ -1668,8 +1668,8 @@ function Shell({
   }
   // ── Player roster + clearances (club role) ──
   // Players self-register via the shared Registration link (RegLinkModal → public RegisterPage),
-  // which captures the full Union field set + ID document — no in-portal chair form.
-  // Destination club initiates a clearance request for a player at another club.
+  // or the chair registers them from the Players page (single form, quick-add grid, spreadsheet
+  // upload — see club-register.tsx, which owns those calls). Destination club initiates a clearance request for a player at another club.
   // busyClearanceId === 'new' disables the request form's submit so a double-click
   // can't fire two POSTs (which would race the duplicate-pending guard).
   function requestClearance({ fromClubId, idNumber, note }) {
@@ -2765,6 +2765,7 @@ function Shell({
             onAcceptVeteransRequest={acceptVeteransRequest}
             onDeclineVeteransRequest={declineVeteransRequest}
             busyVeteransId={busyVeteransId}
+            districts={allDistricts}
           />
         );
       }

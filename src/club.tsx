@@ -96,8 +96,16 @@ import {
   CountUp,
   cqiBand,
   scoreCQI,
+  Modal,
 } from './atoms';
 import { useQuery } from '@tanstack/react-query';
+import {
+  RegisterPlayerForm,
+  QuickAddPlayersGrid,
+  ClubRosterUpload,
+  REGISTER_MODE_TITLE,
+} from './club-register';
+import type { RegisterMode } from './club-register';
 import {
   getDocUploadUrl,
   uploadToPresigned,
@@ -5506,8 +5514,12 @@ export function ClubPlayersView({
   onAcceptVeteransRequest,
   onDeclineVeteransRequest,
   busyVeteransId,
+  // The tenant's district list for the chair's Register-player form (absent ⇒ the default list).
+  districts = undefined,
 }) {
   const [showLink, setShowLink] = useStateC(false);
+  // Which chair registration surface is open (single form / quick-add grid / spreadsheet).
+  const [registerMode, setRegisterMode] = useStateC<RegisterMode | null>(null);
   const [confirmDelete, setConfirmDelete] = useStateC(null); // the player pending confirmation
   const [selectedPlayer, setSelectedPlayer] = useStateC(null); // row-click detail modal
   const [busyNk, setBusyNk] = useStateC(null); // naturalKey of the row being deleted
@@ -5601,11 +5613,62 @@ export function ClubPlayersView({
           </p>
         </div>
         <div className="ph-actions">
+          <Btn tone="ink" size="sm" icon={Icon.Plus} onClick={() => setRegisterMode('single')}>
+            Register player
+          </Btn>
+          <Btn tone="outline" size="sm" icon={Icon.Users} onClick={() => setRegisterMode('quick')}>
+            Quick add
+          </Btn>
+          <Btn
+            tone="outline"
+            size="sm"
+            icon={Icon.Upload}
+            onClick={() => setRegisterMode('upload')}
+          >
+            Upload spreadsheet
+          </Btn>
           <Btn tone="teal" size="sm" icon={Icon.Mail} onClick={openLink}>
             Registration link
           </Btn>
         </div>
       </div>
+
+      {registerMode && (
+        <Modal
+          eyebrow={`Players · ${club.name}`}
+          title={REGISTER_MODE_TITLE[registerMode]}
+          maxWidth={registerMode === 'single' ? 820 : 1100}
+          dismissable={false}
+          onClose={() => setRegisterMode(null)}
+        >
+          {registerMode === 'single' ? (
+            <RegisterPlayerForm
+              club={club}
+              leagues={leagues}
+              districts={districts}
+              toast={toast}
+              onDone={() => setRegisterMode(null)}
+              onCancel={() => setRegisterMode(null)}
+            />
+          ) : registerMode === 'quick' ? (
+            <QuickAddPlayersGrid
+              club={club}
+              leagues={leagues}
+              toast={toast}
+              onDone={() => setRegisterMode(null)}
+              onCancel={() => setRegisterMode(null)}
+            />
+          ) : (
+            <ClubRosterUpload
+              club={club}
+              leagues={leagues}
+              toast={toast}
+              onDone={() => setRegisterMode(null)}
+              onCancel={() => setRegisterMode(null)}
+            />
+          )}
+        </Modal>
+      )}
 
       {showLink && (
         <RegLinkModal
@@ -5846,8 +5909,8 @@ export function ClubPlayersView({
                   colSpan={positionsMode ? 7 : 8}
                   style={{ padding: 28, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}
                 >
-                  No players registered yet — share the <strong>Registration link</strong> so
-                  players can register themselves.
+                  No players registered yet — <strong>Register</strong> them here, or share the{' '}
+                  <strong>Registration link</strong> so players can register themselves.
                 </td>
               </tr>
             )}
