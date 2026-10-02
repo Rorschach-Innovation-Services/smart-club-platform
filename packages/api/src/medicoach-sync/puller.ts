@@ -60,7 +60,12 @@ import {
   type SyncResult,
 } from '../medicoach-sync-contract.js';
 import type { Series, StoredFixtureResult, SyncLogEntry, TenantConfig } from '../types.js';
-import { applyInboundSchedule, wallClock, type ScheduleOutcome } from './schedule.js';
+import {
+  applyInboundSchedule,
+  wallClock,
+  type InboundApplyCache,
+  type ScheduleOutcome,
+} from './schedule.js';
 
 export { wallClock };
 
@@ -288,7 +293,13 @@ export async function runMedicoachSync(
           schedule: e.change.schedule,
           fields: e.fields,
         },
-        { repo, now, log, ...(deps.notifyConflict ? { notifyConflict: deps.notifyConflict } : {}) },
+        {
+          repo,
+          now,
+          log,
+          cache: pageCache,
+          ...(deps.notifyConflict ? { notifyConflict: deps.notifyConflict } : {}),
+        },
       ));
 
   const config = await repo.getTenantConfig(tenant);
@@ -318,8 +329,14 @@ export async function runMedicoachSync(
     return { ...summary, status: 'dry-run', wouldRequest: pq };
   }
 
+  // Per-page reads (ADR 0016): the tenant's series list is read once per page and shared by
+  // the ref index and every inbound apply; an apply patches the in-memory list with the
+  // series it wrote, so a full resync (~800 fixtures) costs a handful of list reads, not one
+  // per change. Only a slot fill (a separate write path) forces a re-list.
+  let pageCache: InboundApplyCache = { config };
   let index: Map<string, FixtureTarget> | null = null;
-  const loadIndex = async () => (index ??= buildRefIndex(tenant, await repo.listSeries(tenant)));
+  const loadIndex = async () =>
+    (index ??= buildRefIndex(tenant, (pageCache.series ??= await repo.listSeries(tenant))));
   const scheduleRefs: string[] = [];
   const staleRefs: string[] = [];
   let cursor = cursorBefore;
@@ -387,6 +404,9 @@ export async function runMedicoachSync(
         throw new MedicoachSyncError('medicoach answered for a different tenant');
       summary.pages++;
       summary.fixtures += data.fixtures.length;
+      // Fresh tenant-wide reads for every page (a page can follow minutes of admin edits).
+      pageCache = { config };
+      index = null;
 
       // Knockout slot fills, grouped per series so each series is written once per page.
       const slotFills = new Map<string, Map<string, { home?: string; away?: string }>>();
@@ -502,7 +522,9 @@ export async function runMedicoachSync(
 
       if (slotFills.size) {
         counts.slotsFilled += await applySlotFills(repo, tenant, slotFills);
-        index = null; // the series changed; re-read before the next lookup
+        // The series changed; re-read before the next lookup.
+        pageCache.series = undefined;
+        index = null;
       }
 
       // ── Schedule: most-recent-wins → clash gate → apply or hold (Slice 3) ──
@@ -525,7 +547,10 @@ export async function runMedicoachSync(
         });
         if (outcome === 'applied') {
           counts.scheduleApplied!++;
-          index = null; // the series changed; re-read before the next lookup
+          // The apply patched pageCache.series with what it wrote: rebuild the index from
+          // memory (a custom hook that wrote elsewhere gets a fresh list).
+          if (deps.onScheduleDiffers) pageCache.series = undefined;
+          index = null;
         } else if (outcome === 'stale') {
           counts.scheduleStale!++;
           staleRefs.push(change.ref);

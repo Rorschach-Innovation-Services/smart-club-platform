@@ -434,6 +434,69 @@ describe('Slice 3 — inbound schedule changes', () => {
   });
 });
 
+describe('Slice 3 — apply cost on a full resync', () => {
+  test('300 inbound changes in one page cost a bounded number of tenant-wide list reads', async () => {
+    const N = 300;
+    const SB = 's-planb-premier-men-t20-g7';
+    const day = (i: number) =>
+      new Date(Date.parse('2027-01-01T00:00:00Z') + i * 86_400_000).toISOString().slice(0, 10);
+    // One released series, one fixture per day (nothing can clash).
+    await repo.putSeries(
+      T,
+      series(
+        SB,
+        Array.from({ length: N }, (_, i) => fx(`f${i + 1}`, { date: day(i) })),
+      ),
+    );
+    pages = [
+      changesPage(
+        Array.from({ length: N }, (_, i) => ({
+          ref: REF(SB, `f${i + 1}`),
+          schedule: { scheduledTime: `${day(i)}T10:00:00+02:00` },
+        })),
+      ),
+    ];
+    const calls = { listSeries: 0, listClubs: 0, listVenues: 0, getTenantConfig: 0 };
+    const counted = {
+      ...repo,
+      listSeries: (...a: Parameters<typeof repo.listSeries>) => (
+        calls.listSeries++,
+        repo.listSeries(...a)
+      ),
+      listClubs: (...a: Parameters<typeof repo.listClubs>) => (
+        calls.listClubs++,
+        repo.listClubs(...a)
+      ),
+      listVenues: (...a: Parameters<typeof repo.listVenues>) => (
+        calls.listVenues++,
+        repo.listVenues(...a)
+      ),
+      getTenantConfig: (...a: Parameters<typeof repo.getTenantConfig>) => (
+        calls.getTenantConfig++,
+        repo.getTenantConfig(...a)
+      ),
+    } as typeof repo;
+    const started = Date.now();
+    const summary = await puller.runMedicoachSync(T, 'cron', {
+      repo: counted,
+      url: stubUrl,
+      secret: SECRET,
+      log: () => {},
+      onResultStored: async () => {},
+      notifyConflict: async () => {},
+    });
+    const ms = Date.now() - started;
+    assert.equal(summary.counts.scheduleApplied, N);
+    assert.equal((await fixtureOf(SB, `f${N}`)).time, '10:00');
+    assert.ok(calls.listSeries <= 2, `listSeries called ${calls.listSeries}×`);
+    assert.ok(calls.listClubs <= 1, `listClubs called ${calls.listClubs}×`);
+    assert.ok(calls.listVenues <= 1, `listVenues called ${calls.listVenues}×`);
+    assert.ok(calls.getTenantConfig <= 2, `getTenantConfig called ${calls.getTenantConfig}×`);
+    // Well under the cron's timeout even against a local table.
+    assert.ok(ms < 60_000, `took ${ms} ms`);
+  });
+});
+
 describe('Slice 3 — the admin conflict inbox', () => {
   const holdClash = async () => {
     pages = [

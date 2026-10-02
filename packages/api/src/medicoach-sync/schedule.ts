@@ -54,6 +54,7 @@ import {
 } from '../venue-clash.js';
 import { seriesIsSyncMapped } from './series-results.js';
 import type {
+  Club,
   PendingScheduleSync,
   ScheduleChangeOrigin,
   SchedulePushCounts,
@@ -634,8 +635,22 @@ export interface InboundScheduleInput {
   fields: string[];
 }
 
+/**
+ * Tenant-wide reads an inbound apply needs, loaded at most once per puller page and shared by
+ * every apply in it (a full resync can apply hundreds). `series` is patched in place with
+ * each written series, so later applies' clash gates see earlier ones without a re-list.
+ */
+export interface InboundApplyCache {
+  config?: TenantConfig | null;
+  venues?: Venue[];
+  series?: Series[];
+  clubs?: Club[];
+}
+
 export interface InboundScheduleDeps {
   repo: RepoModule;
+  /** Shared per-page reads (see InboundApplyCache); absent ⇒ a private one per call. */
+  cache?: InboundApplyCache;
   now?: () => Date;
   /** Emails the tenant's admins about a newly held conflict. Defaults to SES (dry-run offline). */
   notifyConflict?: (
@@ -661,8 +676,7 @@ export async function applyInboundSchedule(
   const { repo } = deps;
   const { tenant, seriesId, fixtureId, ref, schedule } = input;
   const { VersionConflictError } = repo;
-  let config: TenantConfig | null | undefined;
-  let venues: Venue[] | undefined;
+  const cache: InboundApplyCache = deps.cache ?? {};
   for (let attempt = 0; attempt < APPLY_ATTEMPTS; attempt++) {
     const series = await repo.getSeries(tenant, seriesId);
     const fixtures = (series?.fixtures as ScheduleFixture[] | undefined) ?? [];
@@ -672,8 +686,9 @@ export async function applyInboundSchedule(
     const ours = fixture.schedule?.changedAt;
     if (ours && !(Date.parse(schedule.changedAt) > Date.parse(ours))) return 'stale';
 
-    config ??= await repo.getTenantConfig(tenant);
-    venues ??= await repo.listVenues(tenant);
+    if (!('config' in cache)) cache.config = await repo.getTenantConfig(tenant);
+    const config = cache.config ?? null;
+    const venues = (cache.venues ??= await repo.listVenues(tenant));
     const aliases = venueAliasesFor(config);
     const built = buildInboundFixture(series, fixture, schedule, venues, aliases);
     if (!built.ok) {
@@ -693,10 +708,15 @@ export async function applyInboundSchedule(
     };
     const nextFixtures = fixtures.map((f, j) => (j === i ? next : f));
     if (series.released) {
-      const [allSeries, clubs] = await Promise.all([
-        repo.listSeries(tenant),
-        repo.listClubs(tenant),
+      const [listed, clubs] = await Promise.all([
+        cache.series ?? repo.listSeries(tenant),
+        cache.clubs ?? repo.listClubs(tenant),
       ]);
+      cache.series = listed;
+      cache.clubs = clubs;
+      // The subject as just point-read (its version is what the write checks), the rest
+      // from the shared list.
+      const allSeries = listed.map((s) => (s.id === series.id ? series : s));
       const clashes = introducedClashes(
         series,
         { ...series, fixtures: nextFixtures },
@@ -716,8 +736,9 @@ export async function applyInboundSchedule(
         return 'conflict';
       }
     }
+    let written: Series;
     try {
-      await repo.updateSeries(tenant, seriesId, {
+      written = await repo.updateSeries(tenant, seriesId, {
         fixtures: nextFixtures,
         version: series.version,
         ...(fixturesEditRecallsApproval(series) ? { approved: false, approvedAt: null } : {}),
@@ -726,6 +747,7 @@ export async function applyInboundSchedule(
       if (err instanceof VersionConflictError) continue;
       throw err;
     }
+    if (cache.series) cache.series = cache.series.map((s) => (s.id === written.id ? written : s));
     // A held proposal for this ref is now moot: the newer change applied cleanly.
     const held = await repo.getSyncConflict(tenant, ref);
     if (held && !(Date.parse(held.proposed.changedAt) > Date.parse(schedule.changedAt)))
