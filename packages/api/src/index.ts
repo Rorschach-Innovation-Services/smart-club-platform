@@ -144,6 +144,7 @@ import {
   type Channel,
   type SendResult,
 } from './notify/index.js';
+import { chairContactOf } from './notify/contacts.js';
 import { findTeamBusy, type TeamBusyHit } from './team-busy.js';
 import { isSlotRef } from '../../engine/src/formats.js';
 import {
@@ -1303,18 +1304,6 @@ async function findPlayerByIdNumber(
   const roster = await repo.listPlayers(tenant, clubId);
   const wanted = normalizeId(idNumber);
   return roster.find((p) => normalizeId(p.idNumber) === wanted) ?? null;
-}
-
-/**
- * The chair contact for a club's notices: the `exco.chair` sub-record (name/email/cell), falling
- * back to the flat `club.chair` name when exco has no chair name. `exco` is loosely typed here
- * (it also carries governance fields we never notify on) so we read only the three contact fields.
- */
-function chairContactOf(club: Club): { name: string; email?: string; cell?: string } {
-  const chair = (
-    club.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
-  )?.chair;
-  return { name: chair?.name || club.chair || '', email: chair?.email, cell: chair?.cell };
 }
 
 const CLEARANCE_NOTICES_PER_DAY = 3;
