@@ -256,9 +256,14 @@ describe('players', () => {
     });
   });
 
-  test('a player at a two-side club gets no guessed side (counted as ambiguous)', () => {
-    assert.deepEqual(byKey.get('nk-glen')!.teamRefs, []);
+  test('a player at a two-side club is placed on every side (still counted as ambiguous)', () => {
+    assert.deepEqual(byKey.get('nk-glen')!.teamRefs, [
+      refs.team(T, 'premier', 'tm_g1'),
+      refs.team(T, 'premier', 'tm_g2'),
+    ]);
     assert.equal(summary.players.ambiguousSide, 2);
+    assert.equal(summary.players.placement.allSidesOfAmbiguous, 2);
+    assert.equal(summary.players.noTeam, 0);
   });
 
   test('--include-inactive-players keeps one row per naturalKey, preferring the active one', () => {

@@ -1,0 +1,379 @@
+{
+  "schema": "medicoach-bundle",
+  "version": 1,
+  "tenant": "acme",
+  "generatedAt": "2026-10-02T00:00:00.000Z",
+  "host": {
+    "name": "Acme Union",
+    "slugHint": "acme-union"
+  },
+  "institutions": [
+    {
+      "externalRef": "smartclub:acme:club:multi",
+      "sourceId": "multi",
+      "name": "Multi CC",
+      "district": "North",
+      "ground": {
+        "venue": "Multi CC Oval"
+      },
+      "slugHint": "multi-cc"
+    },
+    {
+      "externalRef": "smartclub:acme:club:nolg",
+      "sourceId": "nolg",
+      "name": "No League CC",
+      "district": "North",
+      "ground": {
+        "venue": "No League CC Oval"
+      },
+      "slugHint": "no-league-cc"
+    },
+    {
+      "externalRef": "smartclub:acme:club:solo",
+      "sourceId": "solo",
+      "name": "Solo CC",
+      "district": "North",
+      "ground": {
+        "venue": "Solo CC Oval"
+      },
+      "slugHint": "solo-cc"
+    },
+    {
+      "externalRef": "smartclub:acme:club:twin",
+      "sourceId": "twin",
+      "name": "Twin CC",
+      "district": "North",
+      "ground": {
+        "venue": "Twin CC Oval"
+      },
+      "slugHint": "twin-cc"
+    },
+    {
+      "externalRef": "smartclub:acme:club:vets-club",
+      "sourceId": "vets-club",
+      "name": "Vets Club",
+      "district": "North",
+      "ground": {
+        "venue": "Vets Club Oval"
+      },
+      "slugHint": "vets-club"
+    }
+  ],
+  "teams": [
+    {
+      "externalRef": "smartclub:acme:team:premier:solo",
+      "institutionRef": "smartclub:acme:club:solo",
+      "sourceTeamId": "solo",
+      "name": "Solo CC",
+      "leagueKey": "premier",
+      "venue": "Solo CC Oval"
+    },
+    {
+      "externalRef": "smartclub:acme:team:premier:tm_twin_1",
+      "institutionRef": "smartclub:acme:club:twin",
+      "sourceTeamId": "tm_twin_1",
+      "name": "Twin A",
+      "leagueKey": "premier",
+      "venue": "Twin CC Oval"
+    },
+    {
+      "externalRef": "smartclub:acme:team:premier:tm_twin_2",
+      "institutionRef": "smartclub:acme:club:twin",
+      "sourceTeamId": "tm_twin_2",
+      "name": "Twin B",
+      "leagueKey": "premier",
+      "venue": "Twin CC Oval"
+    },
+    {
+      "externalRef": "smartclub:acme:team:premier:multi",
+      "institutionRef": "smartclub:acme:club:multi",
+      "sourceTeamId": "multi",
+      "name": "Multi CC",
+      "leagueKey": "premier",
+      "venue": "Multi CC Oval"
+    },
+    {
+      "externalRef": "smartclub:acme:team:promotion:multi",
+      "institutionRef": "smartclub:acme:club:multi",
+      "sourceTeamId": "multi",
+      "name": "Multi CC",
+      "leagueKey": "promotion",
+      "venue": "Multi CC Oval"
+    },
+    {
+      "externalRef": "smartclub:acme:team:veterans-premier:vets-club",
+      "institutionRef": "smartclub:acme:club:vets-club",
+      "sourceTeamId": "vets-club",
+      "name": "Vets Club",
+      "leagueKey": "veterans-premier",
+      "venue": "Vets Club Oval"
+    }
+  ],
+  "people": {
+    "staff": [
+      {
+        "externalRef": "smartclub:acme:staff:d4f07319887696507c6a1838",
+        "name": "Nola Chair",
+        "assignments": [
+          {
+            "institutionRef": "smartclub:acme:club:nolg",
+            "kind": "chair"
+          }
+        ],
+        "email": "nola@example.com"
+      }
+    ],
+    "players": [
+      {
+        "externalRef": "smartclub:acme:player:nk-multi",
+        "institutionRef": "smartclub:acme:club:multi",
+        "firstName": "P",
+        "lastName": "nk-multi",
+        "dob": "1990-01-01",
+        "isMinor": false,
+        "sourceStatus": "active",
+        "teamRefs": []
+      },
+      {
+        "externalRef": "smartclub:acme:player:nk-multi-2",
+        "institutionRef": "smartclub:acme:club:multi",
+        "firstName": "P",
+        "lastName": "nk-multi-2",
+        "dob": "1990-01-01",
+        "isMinor": false,
+        "sourceStatus": "active",
+        "teamRefs": []
+      },
+      {
+        "externalRef": "smartclub:acme:player:nk-multi-promo",
+        "institutionRef": "smartclub:acme:club:multi",
+        "firstName": "P",
+        "lastName": "nk-multi-promo",
+        "dob": "1990-01-01",
+        "isMinor": false,
+        "sourceStatus": "active",
+        "teamRefs": ["smartclub:acme:team:promotion:multi"]
+      },
+      {
+        "externalRef": "smartclub:acme:player:nk-nolg",
+        "institutionRef": "smartclub:acme:club:nolg",
+        "firstName": "P",
+        "lastName": "nk-nolg",
+        "dob": "1990-01-01",
+        "isMinor": false,
+        "sourceStatus": "active",
+        "teamRefs": []
+      },
+      {
+        "externalRef": "smartclub:acme:player:nk-nolg-vet",
+        "institutionRef": "smartclub:acme:club:nolg",
+        "firstName": "P",
+        "lastName": "nk-nolg-vet",
+        "dob": "1990-01-01",
+        "isMinor": false,
+        "sourceStatus": "active",
+        "teamRefs": ["smartclub:acme:team:veterans-premier:vets-club"],
+        "veteransInstitutionRef": "smartclub:acme:club:vets-club"
+      },
+      {
+        "externalRef": "smartclub:acme:player:nk-solo",
+        "institutionRef": "smartclub:acme:club:solo",
+        "firstName": "P",
+        "lastName": "nk-solo",
+        "dob": "1990-01-01",
+        "isMinor": false,
+        "sourceStatus": "active",
+        "teamRefs": ["smartclub:acme:team:premier:solo"]
+      },
+      {
+        "externalRef": "smartclub:acme:player:nk-twin",
+        "institutionRef": "smartclub:acme:club:twin",
+        "firstName": "P",
+        "lastName": "nk-twin",
+        "dob": "1990-01-01",
+        "isMinor": false,
+        "sourceStatus": "active",
+        "teamRefs": []
+      },
+      {
+        "externalRef": "smartclub:acme:player:nk-twin-u19",
+        "institutionRef": "smartclub:acme:club:twin",
+        "firstName": "P",
+        "lastName": "nk-twin-u19",
+        "dob": "1990-01-01",
+        "isMinor": false,
+        "sourceStatus": "active",
+        "teamRefs": []
+      },
+      {
+        "externalRef": "smartclub:acme:player:nk-twin-vet",
+        "institutionRef": "smartclub:acme:club:twin",
+        "firstName": "P",
+        "lastName": "nk-twin-vet",
+        "dob": "1990-01-01",
+        "isMinor": false,
+        "sourceStatus": "active",
+        "teamRefs": ["smartclub:acme:team:veterans-premier:vets-club"],
+        "veteransInstitutionRef": "smartclub:acme:club:vets-club"
+      },
+      {
+        "externalRef": "smartclub:acme:player:nk-vets",
+        "institutionRef": "smartclub:acme:club:vets-club",
+        "firstName": "P",
+        "lastName": "nk-vets",
+        "dob": "1990-01-01",
+        "isMinor": false,
+        "sourceStatus": "active",
+        "teamRefs": ["smartclub:acme:team:veterans-premier:vets-club"]
+      }
+    ]
+  },
+  "leagues": [
+    {
+      "externalRef": "smartclub:acme:league:premier",
+      "key": "premier",
+      "label": "Premier League",
+      "group": "Senior",
+      "district": "All districts",
+      "season": {
+        "externalRef": "smartclub:acme:season:premier:derived-2026-27",
+        "name": "2026/27",
+        "startDate": "2026-10-03",
+        "endDate": "2026-10-03",
+        "source": "fixtures"
+      },
+      "teamRefs": [
+        "smartclub:acme:team:premier:solo",
+        "smartclub:acme:team:premier:tm_twin_1",
+        "smartclub:acme:team:premier:tm_twin_2",
+        "smartclub:acme:team:premier:multi"
+      ],
+      "competitions": [
+        {
+          "externalRef": "smartclub:acme:competition:premier:t20",
+          "stream": "t20",
+          "name": "T20",
+          "formatSource": "inferred",
+          "format": {
+            "type": "league",
+            "rounds": 1,
+            "extraPhases": [],
+            "teamsPerGroup": 4
+          },
+          "cricketMatchFormat": "T20",
+          "maxOvers": 20,
+          "groups": [
+            {
+              "name": "Group 1",
+              "sourceName": "Group 1",
+              "order": 0,
+              "teamRefs": [
+                "smartclub:acme:team:premier:solo",
+                "smartclub:acme:team:premier:tm_twin_1",
+                "smartclub:acme:team:premier:tm_twin_2",
+                "smartclub:acme:team:premier:multi"
+              ]
+            }
+          ],
+          "fixtures": [
+            {
+              "externalRef": "smartclub:acme:fixture:s-premier-1:f1",
+              "round": 1,
+              "phase": 1,
+              "stage": "Group stage",
+              "groupName": "Group 1",
+              "scheduledTime": "2026-10-03T13:00:00+02:00",
+              "venue": "Solo CC Oval",
+              "sourceStatus": null,
+              "status": "scheduled",
+              "homeTeamRef": "smartclub:acme:team:premier:solo",
+              "awayTeamRef": "smartclub:acme:team:premier:tm_twin_1"
+            },
+            {
+              "externalRef": "smartclub:acme:fixture:s-premier-1:f2",
+              "round": 1,
+              "phase": 1,
+              "stage": "Group stage",
+              "groupName": "Group 1",
+              "scheduledTime": "2026-10-03T13:00:00+02:00",
+              "venue": "Twin CC Oval",
+              "sourceStatus": null,
+              "status": "scheduled",
+              "homeTeamRef": "smartclub:acme:team:premier:tm_twin_2",
+              "awayTeamRef": "smartclub:acme:team:premier:multi"
+            }
+          ]
+        }
+      ],
+      "relegation": {
+        "swaps": [],
+        "positionRelegations": [],
+        "targetLeagueRefs": []
+      }
+    },
+    {
+      "externalRef": "smartclub:acme:league:promotion",
+      "key": "promotion",
+      "label": "Promotion League",
+      "group": "Senior",
+      "district": "All districts",
+      "season": {
+        "externalRef": "smartclub:acme:season:promotion:cal",
+        "name": "2026/27",
+        "startDate": "2026-09-01",
+        "endDate": "2027-03-31",
+        "source": "tenant-latest-calendar"
+      },
+      "teamRefs": ["smartclub:acme:team:promotion:multi"],
+      "competitions": [],
+      "relegation": {
+        "swaps": [],
+        "positionRelegations": [],
+        "targetLeagueRefs": []
+      }
+    },
+    {
+      "externalRef": "smartclub:acme:league:veterans-premier",
+      "key": "veterans-premier",
+      "label": "Veterans Premier",
+      "group": "Veterans",
+      "district": "All districts",
+      "season": {
+        "externalRef": "smartclub:acme:season:veterans-premier:cal",
+        "name": "2026/27",
+        "startDate": "2026-09-01",
+        "endDate": "2027-03-31",
+        "source": "tenant-latest-calendar"
+      },
+      "teamRefs": ["smartclub:acme:team:veterans-premier:vets-club"],
+      "competitions": [],
+      "relegation": {
+        "swaps": [],
+        "positionRelegations": [],
+        "targetLeagueRefs": []
+      }
+    }
+  ],
+  "meta": {
+    "confirmations": [],
+    "excludedLeagues": []
+  },
+  "counts": {
+    "institutions": 5,
+    "teams": 6,
+    "staff": 1,
+    "staffAssignments": 1,
+    "players": 10,
+    "playerTeamMemberships": 5,
+    "leagues": 3,
+    "seasons": 3,
+    "leagueTeams": 6,
+    "competitions": 1,
+    "groups": 1,
+    "groupMemberships": 4,
+    "fixtures": 2,
+    "placeholderFixtures": 0,
+    "swaps": 0,
+    "positionRelegations": 0
+  }
+}

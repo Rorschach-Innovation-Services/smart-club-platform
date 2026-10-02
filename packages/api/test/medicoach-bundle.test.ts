@@ -116,6 +116,33 @@ describe('MedicoachBundle v1 schema', () => {
     );
   });
 
+  test('a club squad (no leagueKey) is valid; leagueKey is otherwise required', () => {
+    const b = sample();
+    const squad = {
+      externalRef: refs.squadTeam(T, 'ukzn'),
+      institutionRef: refs.institution(T, 'ukzn'),
+      sourceTeamId: 'ukzn',
+      name: 'UKZN Squad',
+      clubSquad: true as const,
+    };
+    b.teams.push(squad);
+    b.counts = computeCounts(b);
+    assert.deepEqual(issues(b), []);
+
+    const withLeague = structuredClone(b);
+    withLeague.teams.at(-1)!.leagueKey = 'premier';
+    assert.ok(issues(withLeague).some((m) => m.includes('a club squad has no leagueKey')));
+
+    const noLeague = structuredClone(b);
+    delete noLeague.teams[0].leagueKey;
+    assert.ok(issues(noLeague).some((m) => m.includes('leagueKey is required unless clubSquad')));
+
+    const inLeague = structuredClone(b);
+    inLeague.leagues[0].teamRefs.push(squad.externalRef);
+    inLeague.counts = computeCounts(inLeague);
+    assert.ok(issues(inLeague).some((m) => m.includes('cannot be a league team')));
+  });
+
   test('a ref that resolves to nothing is rejected', () => {
     const b = sample();
     b.leagues[0].competitions[0].fixtures[0].homeTeamRef = refs.team(T, 'premier', 'ghost');

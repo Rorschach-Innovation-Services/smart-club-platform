@@ -147,6 +147,15 @@ function printSummary(summary: ExportSummary, counts: Record<string, number>): v
   line('with a team', p.withTeam);
   line('without a team', p.noTeam);
   line('ambiguous multi-side club', p.ambiguousSide);
+  line('placed: single side', p.placement.singleSide);
+  line('placed: veterans side only', p.placement.veteransOnly);
+  line('placed: every side (multi-side club)', p.placement.allSidesOfAmbiguous);
+  line('placed: club squad', p.placement.clubSquad);
+  line('… no registered league', p.clubSquadReasons.noRegisteredLeague);
+  line('… several candidate leagues', p.clubSquadReasons.multipleCandidateLeagues);
+  line('… league not exported', p.clubSquadReasons.leagueNotExported);
+  line('… club has no side in league', p.clubSquadReasons.noSideInLeague);
+  line('club squad teams', p.squadTeams);
 
   const v = summary.veterans;
   console.log('\nVeterans roster coverage');
