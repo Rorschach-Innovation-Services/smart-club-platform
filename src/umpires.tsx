@@ -10,7 +10,11 @@ import {
   normaliseUmpireAlias,
   type UmpireBooking,
 } from '../packages/engine/src/umpires';
-import type { Club, FixtureOfficials, Series, Umpire } from './types';
+import type { CaptainsReport, Club, FixtureOfficials, Series, Umpire } from './types';
+import {
+  umpireRatingAverages,
+  type UmpireRatingSummary,
+} from '../packages/engine/src/captainsReport';
 
 /** The minimal fixture shape these helpers read (`Series.fixtures` is `unknown[]`). */
 interface FixtureLike {
@@ -377,12 +381,37 @@ export interface AdminUmpiresViewProps {
   onCreate: (body: Partial<Umpire>) => Promise<unknown>;
   onPatch: (id: string, body: Partial<Umpire>) => Promise<unknown>;
   onMerge: (sourceId: string, targetId: string) => Promise<unknown>;
+  /** Captain's reports — rating averages are computed here, in the browser (ADR 0004). */
+  reports?: CaptainsReport[];
+}
+
+/**
+ * Rating averages per umpire, with a merged entry's ratings counted under the umpire it was
+ * merged into (reports keep the id that was rated at the time).
+ */
+export function ratingSummaries(
+  reports: CaptainsReport[],
+  umpires: Umpire[],
+): Map<string, UmpireRatingSummary> {
+  const target = new Map(umpires.filter((u) => u.mergedInto).map((u) => [u.id, u.mergedInto!]));
+  const resolve = (id: string) => {
+    let cur = id;
+    for (let i = 0; i < 5 && target.has(cur); i++) cur = target.get(cur)!;
+    return cur;
+  };
+  return umpireRatingAverages(
+    reports.map((r) => ({
+      status: r.status,
+      umpires: r.umpires.map((u) => (u.umpireId ? { ...u, umpireId: resolve(u.umpireId) } : u)),
+    })),
+  );
 }
 
 export function AdminUmpiresView({
   umpires,
   allSeries,
   loading,
+  reports = [],
   onCreate,
   onPatch,
   onMerge,
@@ -394,6 +423,7 @@ export function AdminUmpiresView({
   const [merging, setMerging] = useState<{ id: string; targetId: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const counts = useMemo(() => appointmentCounts(allSeries), [allSeries]);
+  const ratings = useMemo(() => ratingSummaries(reports, umpires), [reports, umpires]);
   const active = umpires.filter((u) => u.active);
   const inactive = umpires.filter((u) => !u.active);
   const list = (filter === 'active' ? active : filter === 'inactive' ? inactive : umpires)
@@ -613,14 +643,29 @@ export function AdminUmpiresView({
                     )}
                   </td>
                   <td style={{ textAlign: 'right' }}>{counts.get(u.id) ?? 0}</td>
-                  {/* Rating averages arrive with captain's reports (umpire ratings). */}
+                  {/* Averages over submitted captain's reports (computed in the browser). */}
                   <td>
-                    <span
-                      className="ump-none"
-                      title="Averages appear once captain's reports rate umpires"
-                    >
-                      Ratings coming soon
-                    </span>
+                    {(() => {
+                      const r = ratings.get(u.id);
+                      if (!r) return <span className="ump-none">No ratings yet</span>;
+                      return (
+                        <span
+                          title={`Average of ${r.reports} captain's report${r.reports === 1 ? '' : 's'}`}
+                        >
+                          <strong>{r.average.toFixed(1)}</strong> / 5
+                          <span className="ump-sub">
+                            {' '}
+                            · {r.reports} report{r.reports === 1 ? '' : 's'}
+                          </span>
+                          {r.lowReports > 0 && (
+                            <>
+                              {' '}
+                              <Pill tone="coral">{r.lowReports} low</Pill>
+                            </>
+                          )}
+                        </span>
+                      );
+                    })()}
                   </td>
                   <td>
                     {u.active ? (

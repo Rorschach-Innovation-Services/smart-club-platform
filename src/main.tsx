@@ -105,6 +105,8 @@ import {
 } from './club';
 import { Onboarding } from './onboarding';
 import { AdminUmpiresView } from './umpires';
+import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
+import { AdminCaptainsReportsView } from './AdminCaptainsReports';
 import { useModule, useSeasonLabel, useVertical } from './branding';
 
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
@@ -347,7 +349,10 @@ function AppRoutes() {
   // (which may resolve to no tenant, or the wrong one) and themes itself from the
   // certificate's own tenant. So neither the host's /tenant theme nor its 404 screen applies.
   const { pathname } = useLocation();
-  const onVerify = pathname === '/verify' || pathname.startsWith('/verify/');
+  // The captain's-report link page (/r/<token>) is tenant-independent the same way: the token
+  // names its tenant, and the page themes itself from the report's tenant.
+  const onVerify =
+    pathname === '/verify' || pathname.startsWith('/verify/') || pathname.startsWith('/r/');
 
   // Tenant branding/config (public). Apply theme as soon as it loads.
   // retry the tenant config: it carries the league/district catalogue the authed app
@@ -379,6 +384,8 @@ function AppRoutes() {
       {/* Public transfer-certificate check — the target of the certificate's QR code. */}
       <Route path="/verify" element={<VerifyCertificatePage />} />
       <Route path="/verify/:serial" element={<VerifyCertificatePage />} />
+      {/* Public submit-once captain's report link (the token is the capability). */}
+      <Route path="/r/:token" element={<CaptainsReportLinkPage />} />
       <Route
         path="/*"
         element={
@@ -1326,12 +1333,21 @@ function Shell({
   // ── Umpire allocation (admin) ──
   // The registry with contacts; appointments ride on GET /series as each fixture's
   // `officials`, so saving one refetches the series list rather than a separate query.
+  // Admins get the full registry; club members (cricket) the names-only list the captain's
+  // report's "a different umpire stood" picker offers.
   const umpiresQuery = useQuery({
     queryKey: qk.umpires(),
     queryFn: api.getUmpires,
-    enabled: role === 'admin',
+    enabled: role === 'admin' || vertical.sport === 'cricket',
   });
   const allUmpires = umpiresQuery.data ?? [];
+  // Captain's reports (union office view + the Umpires page's rating averages).
+  const captainsReportsQuery = useQuery({
+    queryKey: qk.captainsReports(),
+    queryFn: () => api.getCaptainsReports(),
+    enabled: role === 'admin' && vertical.sport === 'cricket',
+  });
+  const allCaptainsReports = captainsReportsQuery.data ?? [];
   function saveOfficials(seriesId: string, fixtureId: string, umpireIds: string[]) {
     return withToast(
       () => api.putFixtureOfficials(seriesId, fixtureId, umpireIds),
@@ -2351,6 +2367,16 @@ function Shell({
       icon: Icon.Whistle,
       num: allUmpires.filter((u) => u.active).length || undefined,
     },
+    ...(vertical.sport === 'cricket'
+      ? [
+          {
+            v: 'captains_reports',
+            label: "Captain's reports",
+            icon: Icon.Form,
+            num: allCaptainsReports.filter((r) => r.status === 'pending').length || undefined,
+          },
+        ]
+      : []),
     ...(clearancesOn
       ? [
           {
@@ -2465,6 +2491,10 @@ function Shell({
             dot: hasReleased ? 'teal' : affiliationSubmitted(activeClub) ? 'gold' : 'muted',
             num: hasReleased ? 'NEW' : undefined,
           },
+          // Post-match umpire ratings (the union's Captain's Report on Umpires).
+          ...(vertical.sport === 'cricket'
+            ? [{ v: 'captains-report', label: "Captain's Report", icon: Icon.Whistle }]
+            : []),
           { v: '_help', label: 'Need Help?', icon: Icon.Mail, action: () => setShowHelp(true) },
         ].sort((a, b) => a.label.localeCompare(b.label))
       : [];
@@ -2695,6 +2725,14 @@ function Shell({
             onCreate={createUmpire}
             onPatch={patchUmpire}
             onMerge={mergeUmpire}
+            reports={allCaptainsReports}
+          />
+        );
+      if (view === 'captains_reports' && vertical.sport === 'cricket')
+        return (
+          <AdminCaptainsReportsView
+            reports={allCaptainsReports}
+            loading={captainsReportsQuery.isLoading}
           />
         );
       if (view === 'clearances')
@@ -2823,6 +2861,19 @@ function Shell({
             onAcceptVeteransRequest={acceptVeteransRequest}
             onDeclineVeteransRequest={declineVeteransRequest}
             busyVeteransId={busyVeteransId}
+          />
+        );
+      }
+      if (view === 'captains-report' && vertical.sport === 'cricket') {
+        return (
+          <CaptainsReportView
+            club={activeClub}
+            allSeries={allSeries}
+            clubs={clubs}
+            players={players}
+            directory={clubDirectory}
+            umpires={allUmpires}
+            toast={toastShow}
           />
         );
       }

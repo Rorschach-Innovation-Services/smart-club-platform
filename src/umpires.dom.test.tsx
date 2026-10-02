@@ -8,7 +8,7 @@ import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-utils';
 import { AdminUmpiresView, UmpireCell, doubleBookingIndex } from './umpires';
-import type { Club, Series, Umpire } from './types';
+import type { CaptainsReport, Club, Series, Umpire } from './types';
 
 const ump = (id: string, displayName: string, over: Partial<Umpire> = {}): Umpire => ({
   id,
@@ -169,7 +169,7 @@ describe('doubleBookingIndex', () => {
 });
 
 describe('AdminUmpiresView', () => {
-  const setup = () => {
+  const setup = (reports: CaptainsReport[] = []) => {
     const onCreate = vi.fn().mockResolvedValue(undefined);
     const onPatch = vi.fn().mockResolvedValue(undefined);
     const onMerge = vi.fn().mockResolvedValue(undefined);
@@ -181,18 +181,51 @@ describe('AdminUmpiresView', () => {
         onCreate={onCreate}
         onPatch={onPatch}
         onMerge={onMerge}
+        reports={reports}
       />,
     );
     return { onCreate, onPatch, onMerge, user };
   };
   const rowOf = (name: string) => screen.getByText(name).closest('tr') as HTMLElement;
 
-  it('lists active umpires with contacts, appointment counts and a ratings placeholder', async () => {
+  it('lists active umpires with contacts and appointment counts; no ratings yet', async () => {
     setup();
     expect(within(rowOf('A.Ngubane')).getByText('0820000001')).toBeTruthy();
     expect(within(rowOf('S.Gasa')).getByText('1')).toBeTruthy();
-    expect(screen.getAllByText(/ratings coming soon/i).length).toBe(3);
+    expect(screen.getAllByText(/no ratings yet/i).length).toBe(3);
     expect(screen.queryByText('Old Name')).toBeNull();
+  });
+
+  it('averages submitted captain’s reports per umpire, merged entries under their target', () => {
+    const rated = (umpireId: string, score: number) => ({
+      umpireId,
+      name: umpireId,
+      ratings: {
+        decisions: score,
+        pressure: score,
+        behaviour: score,
+        communication: score,
+        regulations: score,
+      },
+      concerns: {},
+      otherConcern: '',
+      comments: '',
+    });
+    const report = (status: CaptainsReport['status'], umpires: ReturnType<typeof rated>[]) =>
+      ({ id: `r-${Math.random()}`, status, umpires }) as unknown as CaptainsReport;
+    setup([
+      report('submitted', [rated('u-a-ngubane', 4)]),
+      report('submitted', [rated('u-a-ngubane', 2)]),
+      // Rated under the old id before the merge → counts for S.Gasa.
+      report('submitted', [rated('u-old', 5)]),
+      report('pending', [rated('u-b-tyali', 1)]),
+    ]);
+    const ngubane = rowOf('A.Ngubane');
+    expect(within(ngubane).getByText('3.0')).toBeTruthy();
+    expect(within(ngubane).getByText(/2 reports/)).toBeTruthy();
+    expect(within(ngubane).getByText('1 low')).toBeTruthy();
+    expect(within(rowOf('S.Gasa')).getByText('5.0')).toBeTruthy();
+    expect(within(rowOf('B.Tyali')).getByText(/no ratings yet/i)).toBeTruthy();
   });
 
   it('searches, and shows merged entries under Inactive', async () => {

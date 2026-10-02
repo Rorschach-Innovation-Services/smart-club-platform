@@ -34,6 +34,10 @@ export const qk = {
   seasonRuns: () => ['season-runs', t()],
   venues: () => ['venues', t()],
   umpires: () => ['umpires', t()],
+  captainsReports: () => ['captains-reports', t()],
+  clubCaptainsReports: (clubId: string) => ['club-captains-reports', t(), clubId],
+  // Global: the token names its own tenant.
+  linkedCaptainsReport: (token: string) => ['captains-report-link', token],
   tenantConfig: () => ['tenant-config', t()],
   users: () => ['users', t()],
   players: (clubId: string) => ['players', t(), clubId],

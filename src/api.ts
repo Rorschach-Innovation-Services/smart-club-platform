@@ -32,6 +32,9 @@ import type {
   Venue,
   Umpire,
   FixtureOfficials,
+  CaptainsReport,
+  CaptainsReportFields,
+  LinkedCaptainsReport,
   SendResult,
   LogoUploadPost,
   TutorialUploadGrant,
@@ -610,6 +613,36 @@ export const putFixtureOfficials = (seriesId: string, fixtureId: string, umpireI
     `/series/${encodeURIComponent(seriesId)}/fixtures/${encodeURIComponent(fixtureId)}/officials`,
     { method: 'PUT', body: { umpires: umpireIds.map((umpireId) => ({ umpireId })) } },
   );
+
+// ── Captain's reports (ADR 0016) ──
+// Club routes are own-club only. `submit: true` files the report (first submit wins → 409);
+// without it the body is saved as a draft.
+const reportPath = (id: string) => `/club/captains-reports/${encodeURIComponent(id)}`;
+export const getClubCaptainsReports = (clubId: string) =>
+  request<CaptainsReport[]>('/club/captains-reports', { query: { clubId } });
+export const putClubCaptainsReport = (
+  id: string,
+  body: CaptainsReportFields & { submit?: boolean },
+) => request<CaptainsReport>(reportPath(id), { method: 'PUT', body });
+export const createClubCaptainsReport = (
+  body: CaptainsReportFields & { seriesId: string; fixtureId: string; clubId: string },
+) => request<CaptainsReport>('/club/captains-reports', { method: 'POST', body });
+export const getCaptainsReports = (query: { status?: string; from?: string; to?: string } = {}) =>
+  request<CaptainsReport[]>('/captains-reports', { query });
+// The public submit-once link: no auth, the token is the capability.
+export const getLinkedCaptainsReport = (token: string) =>
+  request<LinkedCaptainsReport>(`/captains-report-link/${encodeURIComponent(token)}`, {
+    auth: false,
+  });
+export const putLinkedCaptainsReport = (
+  token: string,
+  body: CaptainsReportFields & { submit?: boolean },
+) =>
+  request<LinkedCaptainsReport>(`/captains-report-link/${encodeURIComponent(token)}`, {
+    method: 'PUT',
+    body,
+    auth: false,
+  });
 
 // ── Venues (ADR 0008 phase 2) ──
 // The master ground list fixture allocation draws on. Admin-managed: ground availability

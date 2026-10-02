@@ -80,6 +80,59 @@ export type {
   OfficialRef,
   FixtureOfficials,
 } from '../packages/engine/src/umpires';
+// Captain's reports — the rating rules/shapes live in the engine; the stored report view is
+// what the API's club/admin/link routes return (recipient's opaque id stripped, late derived).
+export type { ReportUmpireEntry, AppointedUmpire } from '../packages/engine/src/captainsReport';
+import type {
+  ReportUmpireEntry as _ReportUmpireEntry,
+  AppointedUmpire as _AppointedUmpire,
+} from '../packages/engine/src/captainsReport';
+export interface CaptainsReport {
+  id: string;
+  seriesId: string;
+  fixtureId: string;
+  clubId: string;
+  status: 'pending' | 'submitted' | 'void';
+  source: 'auto' | 'manual';
+  fixtureRef?: string;
+  matchDate: string;
+  deadline: string;
+  side: 'home' | 'away';
+  clubName: string;
+  opponentName: string;
+  competition: string;
+  venue?: string;
+  resultSummary?: string | null;
+  umpiresSnapshot: _AppointedUmpire[];
+  recipient: { kind: 'captain' | 'chair' | 'portal'; name: string };
+  captainName: string;
+  umpires: _ReportUmpireEntry[];
+  general: string;
+  declaration?: boolean;
+  ref?: string;
+  submittedBy?: string;
+  submittedVia?: 'portal' | 'link';
+  submittedAt?: string;
+  voidedAt?: string;
+  flagged?: { reason: string; at: string };
+  createdAt: string;
+  updatedAt: string;
+  /** Derived on read (deadline passed while pending, or submitted after it). */
+  late: boolean;
+}
+/** The editable part of a report, as PUT/POST bodies carry it. */
+export interface CaptainsReportFields {
+  captainName: string;
+  umpires: _ReportUmpireEntry[];
+  general: string;
+  declaration: boolean;
+}
+/** GET /captains-report-link/:token — one report, the registry names, the tenant's look. */
+export interface LinkedCaptainsReport {
+  report: CaptainsReport;
+  registry: { id: string; displayName: string }[];
+  tenantBranding: { name: string; logoUrl: string; colors: Record<string, string> };
+}
 
 export type Role = 'admin' | 'rep' | 'operator';
 
