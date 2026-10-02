@@ -315,6 +315,8 @@ test('the league admin console hides the disabled modules and rolls up two phase
     'Clearances',
     'Registration Reviews',
     'Veterans Requests',
+    'Umpires',
+    "Captain's reports",
   ])
     expect(labels, `${hidden} is not in the football admin nav`).not.toContain(hidden);
   expect(labels).toContain('All Schools');
@@ -373,6 +375,8 @@ test('a cricket tenant in the same run keeps its cricket nav, labels and registr
     'Clearances',
     'Registration Reviews',
     'Veterans Requests',
+    'Umpires',
+    "Captain's reports",
   ])
     expect(adminNav, `${item} is in the cricket admin nav`).toContain(item);
   await expect(

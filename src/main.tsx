@@ -2364,14 +2364,15 @@ function Shell({
     { v: 'leagues', label: 'Leagues', icon: Icon.Shield, num: allLeagues.length },
     { v: 'insights', label: 'Insights', icon: Icon.Chart },
     { v: 'fixtures', label: 'Fixtures & Venues', icon: Icon.Field, dot: 'teal' },
-    {
-      v: 'umpires',
-      label: 'Umpires',
-      icon: Icon.Whistle,
-      num: allUmpires.filter((u) => u.active).length || undefined,
-    },
+    // Umpires and captain's reports are cricket modules (the union's umpire panel).
     ...(vertical.sport === 'cricket'
       ? [
+          {
+            v: 'umpires',
+            label: 'Umpires',
+            icon: Icon.Whistle,
+            num: allUmpires.filter((u) => u.active).length || undefined,
+          },
           {
             v: 'captains_reports',
             label: "Captain's reports",
@@ -2720,7 +2721,7 @@ function Shell({
             onCreateUmpire={(displayName) => createUmpire({ displayName })}
           />
         );
-      if (view === 'umpires')
+      if (view === 'umpires' && vertical.sport === 'cricket')
         return (
           <AdminUmpiresView
             umpires={allUmpires}

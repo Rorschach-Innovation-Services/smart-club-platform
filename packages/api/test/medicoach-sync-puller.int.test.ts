@@ -287,6 +287,18 @@ describe('medicoach sync puller', () => {
     assert.equal(requests.length, 0);
   });
 
+  test('GET /series joins no results once the sync is off (the FIXRESULT# read is skipped)', async () => {
+    await seed();
+    pages = [example('changes-live-result')];
+    await run();
+    assert.ok(fixtureOf(await getSeries(), 's-planb-premier-men-t20-g1', 'f3').result);
+    const cfg = (await repo.getTenantConfig('dolphins'))!;
+    await repo.putTenantConfig({ ...cfg, features: {} } as TenantConfig);
+    const all = await getSeries();
+    assert.equal(fixtureOf(all, 's-planb-premier-men-t20-g1', 'f3').result, undefined);
+    assert.equal(fixtureOf(all, 's-planb-premier-men-t20-g1', 'f3').syncMapped, undefined);
+  });
+
   test('quiet run (cursor unchanged, no fixtures): signed request, zero writes', async () => {
     await repo.putSyncCursor('dolphins', 'c-41');
     pages = [quiet('c-41')];

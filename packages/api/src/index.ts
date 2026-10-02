@@ -3813,20 +3813,24 @@ app.get('/series', async (c) => {
   // Medicoach-owned results (ADR 0016) live in their own FIXRESULT# items and are joined
   // onto each fixture as a response-only `result` (scores + medicoach link, never captain
   // data); a fixture with a result reads as completed.
-  const [all, results] = await Promise.all([
+  // Officials live in their own per-fixture items; join them on the way out. One Query for
+  // the registry (so a renamed/merged umpire shows its new name) and — only when the tenant
+  // has umpires at all (they are never deleted, so none ⇒ no appointments) — one for the
+  // appointments. The FIXRESULT# query runs only with the medicoach sync on: a tenant
+  // without it has no results to join.
+  const [all, config, umpires] = await Promise.all([
     repo.listSeries(ra.tenant),
-    repo.listFixtureResults(ra.tenant),
+    repo.getTenantConfig(ra.tenant),
+    repo.listUmpires(ra.tenant),
+  ]);
+  const [results, officialRows] = await Promise.all([
+    hasFeature(config, 'medicoachSync') ? repo.listFixtureResults(ra.tenant) : [],
+    umpires.length ? repo.listFixtureOfficials(ra.tenant) : [],
   ]);
   // Admins get the raw list (drafts, unreleased venues/times, approval state). Everyone
   // else sees the club-facing projection: released + activated series only, with any
   // withheld fields stripped (ADR 0011). Release filtering used to be client-only, which
   // leaked every draft and all fields to reps.
-  // Officials live in their own per-fixture items; join them on the way out. One Query for
-  // the appointments + one for the registry (so a renamed/merged umpire shows its new name).
-  const [officialRows, umpires] = await Promise.all([
-    repo.listFixtureOfficials(ra.tenant),
-    repo.listUmpires(ra.tenant),
-  ]);
   const officials = indexOfficials(officialRows);
   const namesById = new Map(umpires.map((u) => [u.id, u.displayName]));
   if (ra.membership.role === 'admin') {
@@ -3834,7 +3838,6 @@ app.get('/series', async (c) => {
     // the manual "completed" status there (and only there). Resolved exactly as the outbox
     // and the generate gate resolve it (`seriesMappedForSync`): a season-run series carries
     // no `leagueKey`, so its run's league decides. Each run is read at most once.
-    const config = await repo.getTenantConfig(ra.tenant);
     const runs = new Map<string, ReturnType<typeof repo.getSeasonRun>>();
     const runRepo = {
       getSeasonRun: (t: string, runId: string) => {
