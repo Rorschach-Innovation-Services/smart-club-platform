@@ -694,6 +694,174 @@ describe('Slice 4 — the outbox', () => {
   });
 });
 
+// ── Withheld venue/time never reaches medicoach (ADR 0011 × 0016) ──
+describe('Slice 4 — a withheld series is held until reveal', () => {
+  const SW = 's-planb-premier-men-t20-g3';
+  const seedWithheld = (withheld: Series['withheld']) =>
+    repo.putSeries(
+      T,
+      series(SW, [fx('f1'), fx('f2', { home: 'c', away: 'd', time: '13:30' })], { withheld }),
+    );
+  const status = async () =>
+    (await (
+      await app.request('/integrations/medicoach/status', { headers: headers() })
+    ).json()) as {
+      outbox: {
+        count: number;
+        held: Array<{ ref: string; proposed: string }>;
+        failures: unknown[];
+      };
+    };
+  const reveal = async (fields: string[]) => {
+    const s = (await repo.getSeries(T, SW))!;
+    return app.request(`/series/${SW}`, {
+      method: 'PATCH',
+      headers: headers(),
+      body: JSON.stringify({ reveal: fields, version: s.version }),
+    });
+  };
+
+  test('an edit on a withheld series is held, not sent; other series are unaffected', async () => {
+    await seedWithheld({ venue: true });
+    const res = await patchFixture(SW, 'f1', {
+      time: '10:00',
+      venueId: 'v-lahee',
+      venueName: 'Lahee Park',
+    });
+    assert.equal(res.status, 200);
+    assert.equal((await patchFixture(S1, 'f1', { time: '11:00' })).status, 200);
+    const byRef = new Map((await repo.listPendingSync(T)).map((r) => [r.ref, r]));
+    assert.equal(byRef.get(REF(SW, 'f1'))?.heldUntilReveal, true);
+    assert.equal(byRef.get(REF(S1, 'f1'))?.heldUntilReveal, undefined);
+
+    const out = await flush();
+    assert.equal(out.held, 1);
+    assert.equal(out.counts.sent, 1);
+    assert.equal(pushes.length, 1);
+    assert.deepEqual(
+      pushes[0].body.changes.map((c) => c.ref),
+      [REF(S1, 'f1')],
+    );
+    assert.ok(!JSON.stringify(pushes).includes('Lahee'), 'the withheld venue never left');
+    const [left] = await repo.listPendingSync(T);
+    assert.equal(left.ref, REF(SW, 'f1'));
+    assert.equal(left.heldUntilReveal, true);
+    assert.equal(left.attempts, 0);
+
+    const st = await status();
+    assert.equal(st.outbox.count, 1);
+    assert.deepEqual(
+      st.outbox.held.map((h) => h.ref),
+      [REF(SW, 'f1')],
+    );
+    assert.deepEqual(st.outbox.failures, []);
+
+    // Another run while still withheld: still nothing goes out.
+    await flush();
+    assert.equal(pushes.length, 1);
+  });
+
+  test('revealing the last withheld field sends every fixture with its real schedule', async () => {
+    await seedWithheld({ venue: true, time: true });
+    await patchFixture(SW, 'f1', { time: '10:00', venueId: 'v-lahee', venueName: 'Lahee Park' });
+
+    // Venue revealed, time still withheld: the series is still held back.
+    assert.equal((await reveal(['venue'])).status, 200);
+    await flush();
+    assert.equal(pushes.length, 0);
+    assert.equal((await repo.listPendingSync(T)).length, 1);
+
+    assert.equal((await reveal(['time'])).status, 200);
+    const rows = (await repo.listPendingSync(T)).sort((a, b) => a.ref.localeCompare(b.ref));
+    assert.deepEqual(
+      rows.map((r) => [r.ref, r.heldUntilReveal, r.schedule.scheduledTime, r.schedule.venue]),
+      [
+        [REF(SW, 'f1'), undefined, '2026-10-04T10:00:00+02:00', 'Lahee Park'],
+        [REF(SW, 'f2'), undefined, '2026-10-04T13:30:00+02:00', 'Kingsmead Oval'],
+      ],
+    );
+    // Stamped on the fixtures in the reveal write (most-recent-wins on the next pull).
+    const f2 = await fixtureOf(SW, 'f2');
+    assert.equal((f2.schedule as { changedAt: string }).changedAt, rows[1].schedule.changedAt);
+    const stored = (await repo.getSeries(T, SW))!;
+    assert.equal(stored.withheld, undefined);
+    assert.ok(stored.revealedAt?.time);
+
+    const out = await flush();
+    assert.equal(out.held, 0);
+    assert.equal(out.counts.applied, 2);
+    const sent = new Map(pushes[0].body.changes.map((c) => [c.ref, c.schedule]));
+    assert.equal(sent.get(REF(SW, 'f1'))?.venue, 'Lahee Park');
+    assert.equal(sent.get(REF(SW, 'f1'))?.scheduledTime, '2026-10-04T10:00:00+02:00');
+    assert.equal(sent.get(REF(SW, 'f1'))?.timeTbc, false);
+    assert.deepEqual(await repo.listPendingSync(T), []);
+  });
+
+  test('the flush decides against the live series: withheld after the enqueue holds, cleared sends', async () => {
+    await patchFixture(S1, 'f1', { time: '10:00' });
+    await repo.updateSeries(T, S1, { withheld: { time: true } });
+    const out = await flush();
+    assert.equal(out.held, 1);
+    assert.equal(pushes.length, 0);
+    assert.equal((await repo.listPendingSync(T))[0].heldUntilReveal, true);
+
+    await repo.updateSeries(T, S1, { withheld: undefined });
+    const next = await flush();
+    assert.equal(next.held, 0);
+    assert.equal(next.counts.applied, 1);
+    assert.equal(pushes[0].body.changes[0].schedule.scheduledTime, '2026-10-04T10:00:00+02:00');
+  });
+
+  test('a pulled medicoach change still applies to a withheld series', async () => {
+    await seedWithheld({ venue: true });
+    pages = [changesPage([{ ref: REF(SW, 'f1'), schedule: { venue: 'Lahee Park' } }])];
+    const summary = await pull();
+    assert.equal(summary.counts.scheduleApplied, 1);
+    assert.equal((await fixtureOf(SW, 'f1')).venueName, 'Lahee Park');
+    assert.deepEqual(await repo.listPendingSync(T), []);
+  });
+});
+
+// ── GET /series `syncMapped` resolves the league like the outbox does ──
+describe('GET /series syncMapped', () => {
+  test("a season-run series takes its run's league; an unmapped run league is not marked", async () => {
+    for (const [run, leagueKey] of [
+      ['run-mapped', 'premier'],
+      ['run-demo', 'demo'],
+    ])
+      await repo.putSeasonRun(T, {
+        id: run,
+        leagueKey,
+        seasonLabel: 'S',
+        stages: [],
+        version: 1,
+      } as unknown as SeasonRun);
+    for (const run of ['run-mapped', 'run-demo']) {
+      const s = series(`s-${run}-g1`, [fx('f1')], { seasonRunId: run } as Partial<Series>);
+      delete (s as { leagueKey?: string }).leagueKey;
+      await repo.putSeries(T, s);
+    }
+    const res = await app.request('/series', { headers: headers() });
+    assert.equal(res.status, 200);
+    const list = (await res.json()) as Array<{
+      id: string;
+      fixtures: Array<{ syncMapped?: true }>;
+    }>;
+    const mapped = (id: string) => list.find((s) => s.id === id)!.fixtures[0].syncMapped;
+    assert.equal(mapped('s-run-mapped-g1'), true);
+    assert.equal(mapped('s-run-demo-g1'), undefined);
+    assert.equal(mapped(S1), true, 'a series with its own leagueKey is still mapped');
+
+    // The outbox agrees: an edit on the season-run series is queued.
+    await patchFixture('s-run-mapped-g1', 'f1', { time: '10:00' });
+    await patchFixture('s-run-demo-g1', 'f1', { time: '10:00' });
+    assert.deepEqual(
+      (await repo.listPendingSync(T)).map((r) => r.ref),
+      [REF('s-run-mapped-g1', 'f1')],
+    );
+  });
+});
+
 // ── Stage generate / rebase on synced released series ──
 describe('Slice 4 — generate and rebase refuse to orphan synced refs', () => {
   const LEAGUE = 'gen-league';

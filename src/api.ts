@@ -662,6 +662,14 @@ export interface MedicoachSyncStatus {
   logs?: MedicoachSyncLog[];
   outbox?: {
     count: number;
+    /** Kept back while the series withholds venue/time from clubs; sent once revealed. */
+    held?: Array<{
+      ref: string;
+      seriesId: string;
+      fixtureId: string;
+      enqueuedAt: string;
+      proposed: string;
+    }>;
     failures: Array<{
       ref: string;
       seriesId: string;

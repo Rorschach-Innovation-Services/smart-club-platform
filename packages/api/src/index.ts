@@ -70,8 +70,10 @@ import {
   fixtureSchedule,
   fixturesEditRecallsApproval,
   recordScheduleDiff,
+  requeueRevealedSeries,
   sameMatch,
   seriesMappedForSync,
+  seriesWithholdsSchedule,
   type ScheduleFixture,
 } from './medicoach-sync/schedule.js';
 import { captainsReportLinkSecret, medicoachSyncSecret, medicoachSyncUrl } from './env.js';
@@ -3828,15 +3830,30 @@ app.get('/series', async (c) => {
   const namesById = new Map(umpires.map((u) => [u.id, u.displayName]));
   if (ra.membership.role === 'admin') {
     // `syncMapped` marks the fixtures whose result medicoach owns, so the console locks
-    // the manual "completed" status there (and only there).
+    // the manual "completed" status there (and only there). Resolved exactly as the outbox
+    // and the generate gate resolve it (`seriesMappedForSync`): a season-run series carries
+    // no `leagueKey`, so its run's league decides. Each run is read at most once.
     const config = await repo.getTenantConfig(ra.tenant);
+    const runs = new Map<string, ReturnType<typeof repo.getSeasonRun>>();
+    const runRepo = {
+      getSeasonRun: (t: string, runId: string) => {
+        if (!runs.has(runId)) runs.set(runId, repo.getSeasonRun(t, runId));
+        return runs.get(runId)!;
+      },
+    };
+    const mapped = new Set<string>();
+    await Promise.all(
+      all.map(async (s) => {
+        if (await seriesMappedForSync(runRepo, ra.tenant, s, config)) mapped.add(s.id);
+      }),
+    );
     return c.json(
       joinFixtureResults(
         all.map((s) =>
           joinOfficials(s, officials, namesById, { include: () => true, audit: true }),
         ),
         results,
-        (s) => seriesIsSyncMapped(ra.tenant, s, config),
+        (s) => mapped.has(s.id),
       ),
     );
   }
@@ -4033,16 +4050,29 @@ async function applySeriesPatch(
     // keys riding along on the patch (fixtures, approved, name…) are a client bug, not part
     // of the reveal intent, so they are ignored rather than persisted through this action.
     const revealWithheld = Object.keys(withheld).length ? withheld : undefined;
+    // Medicoach sync (ADR 0016): fixtures of a withheld series were held back from medicoach's
+    // public match centre. Once nothing is withheld any more, every fixture is stamped and
+    // re-queued with its real schedule — in the same write, version-checked against the
+    // series the stamps were computed from, so a concurrent edit is a plain 409.
+    const requeue = await requeueRevealedSeries(repo, tenant, {
+      ...current,
+      withheld: revealWithheld,
+    });
+    let revealed: Series;
     try {
-      return await repo.updateSeries(tenant, id, {
+      revealed = await repo.updateSeries(tenant, id, {
         withheld: revealWithheld,
         revealedAt,
-        version: patch.version,
+        ...(requeue.fixtures
+          ? { fixtures: requeue.fixtures, version: patch.version ?? current.version }
+          : { version: patch.version }),
       });
     } catch (err) {
       if (err instanceof VersionConflictError) throw new HttpError(409, 'series changed; refetch');
       throw err;
     }
+    await requeue.enqueue();
+    return revealed;
   }
 
   // ── Version pre-check before ANY clash gate ──
@@ -4275,8 +4305,20 @@ app.get('/integrations/medicoach/status', async (c) => {
     logs,
     outbox: {
       count: pending.length,
+      // Rows kept back because their series still withholds venue/time (ADR 0011): they go
+      // out when the series is revealed, never before.
+      held: pending
+        .filter((p) => p.heldUntilReveal)
+        .sort((a, b) => a.enqueuedAt.localeCompare(b.enqueuedAt))
+        .map((p) => ({
+          ref: p.ref,
+          seriesId: p.seriesId,
+          fixtureId: p.fixtureId,
+          enqueuedAt: p.enqueuedAt,
+          proposed: describeSchedule(p.schedule),
+        })),
       failures: pending
-        .filter((p) => p.attempts > 0)
+        .filter((p) => p.attempts > 0 && !p.heldUntilReveal)
         .sort((a, b) => a.enqueuedAt.localeCompare(b.enqueuedAt))
         .map((p) => ({
           ref: p.ref,
@@ -4412,6 +4454,7 @@ app.post('/integrations/medicoach/conflicts/discard', async (c) => {
         origin: 'admin',
         enqueuedAt: at,
         attempts: 0,
+        ...(seriesWithholdsSchedule(series) ? { heldUntilReveal: true } : {}),
       });
     break;
   }

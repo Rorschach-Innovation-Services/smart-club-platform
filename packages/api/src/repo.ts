@@ -1147,6 +1147,32 @@ export async function deletePendingSyncIfUnchanged(
   }
 }
 
+/**
+ * Mark (or clear) THIS snapshot as held until the series' withheld venue/time is revealed
+ * (ADR 0011 × 0016). A row that moved on (a newer snapshot) or is gone is left alone.
+ */
+export async function setPendingSyncHeld(
+  tenant: string,
+  ref: string,
+  changedAt: string,
+  held: boolean,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingSyncKey(tenant, ref),
+        UpdateExpression: held ? 'SET heldUntilReveal = :t' : 'REMOVE heldUntilReveal',
+        ConditionExpression: 'attribute_exists(pk) AND #sch.changedAt = :c',
+        ExpressionAttributeNames: { '#sch': 'schedule' },
+        ExpressionAttributeValues: { ':c': changedAt, ...(held ? { ':t': true } : {}) },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
 /** Record a failed push of THIS snapshot (attempts + 1, lastError); a newer row is left alone. */
 export async function markPendingSyncFailed(
   tenant: string,

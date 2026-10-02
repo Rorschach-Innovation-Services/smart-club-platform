@@ -23,6 +23,14 @@
  * pulls. `applied|stale|unchanged|unmapped` delete the row; `error` or a failed request keep
  * it with an attempt count. A `stale` answer means medicoach holds a newer edit — the pull
  * brings it back. The inbound apply (origin `medicoach`) never enqueues, so nothing echoes.
+ *
+ * Withheld venue/time (ADR 0011): medicoach's match centre is public and the v1 contract
+ * carries no withheld flags, so a fixture of a series that currently withholds venue and/or
+ * time is never pushed. Its row is kept as `heldUntilReveal` (flagged at enqueue, and
+ * re-checked against the live series on every flush), and the reveal that clears the last
+ * withheld field re-queues every fixture of the series with its real schedule
+ * (`requeueRevealedSeries`). Inbound changes still apply to a withheld series — they leak
+ * nothing. The initial migration bundle carries its own `venueWithheld`/`timeWithheld`.
  */
 import { randomUUID } from 'node:crypto';
 import { isSlotRef } from '../../../engine/src/formats.js';
@@ -155,6 +163,14 @@ export function fixturesEditRecallsApproval(current: Pick<Series, 'released'>): 
 /* ─────────────────────────── Outbound: diff + outbox ─────────────────────────── */
 
 /**
+ * True while the series hides venue and/or time from clubs (ADR 0011). Its fixtures'
+ * schedules must not reach medicoach's public match centre until it is fully revealed.
+ */
+export function seriesWithholdsSchedule(series: Pick<Series, 'withheld'> | null | undefined) {
+  return series?.withheld?.venue === true || series?.withheld?.time === true;
+}
+
+/**
  * `seriesIsSyncMapped` with the league resolved the way the medicoach exporter resolves it:
  * a season-run series carries no `leagueKey` of its own, so its run's league decides.
  */
@@ -207,6 +223,7 @@ export async function recordScheduleDiff(
   const config = opts.config !== undefined ? opts.config : await repo.getTenantConfig(tenant);
   if (!(await seriesMappedForSync(repo, tenant, after, config))) return NO_DIFF;
   const nowIso = (opts.now?.() ?? new Date()).toISOString();
+  const held = seriesWithholdsSchedule(after);
   const prior = new Map<string, ScheduleFixture>();
   for (const f of (before.fixtures as ScheduleFixture[]) ?? []) if (f?.id) prior.set(f.id, f);
 
@@ -224,12 +241,57 @@ export async function recordScheduleDiff(
       origin,
       enqueuedAt: nowIso,
       attempts: 0,
+      ...(held ? { heldUntilReveal: true } : {}),
     });
     return next;
   });
   if (!rows.length) return NO_DIFF;
   return {
     refs: rows.map((r) => r.ref),
+    enqueue: async () => {
+      for (const r of rows) await repo.putPendingSync(tenant, r);
+      return rows.length;
+    },
+  };
+}
+
+/**
+ * The reveal that clears a series' LAST withheld field (ADR 0011) makes its real schedule
+ * public, so medicoach must now get it: every fixture of a sync-mapped series is stamped
+ * `schedule.changedAt = now` (returned for the caller to write in the same update as the
+ * reveal) and, via `enqueue()` once that write landed, queued with its real schedule —
+ * overwriting any row held while the series was withheld. A no-op (`fixtures` undefined)
+ * for a series still withholding a field, an unmapped series or a tenant without the sync.
+ */
+export async function requeueRevealedSeries(
+  repo: Pick<RepoModule, 'getTenantConfig' | 'putPendingSync' | 'getSeasonRun'>,
+  tenant: string,
+  revealed: Series,
+  opts: { config?: TenantConfig | null; now?: () => Date } = {},
+): Promise<{ fixtures?: ScheduleFixture[]; enqueue(): Promise<number> }> {
+  const none = { enqueue: async () => 0 };
+  if (seriesWithholdsSchedule(revealed) || !Array.isArray(revealed.fixtures)) return none;
+  const config = opts.config !== undefined ? opts.config : await repo.getTenantConfig(tenant);
+  if (!(await seriesMappedForSync(repo, tenant, revealed, config))) return none;
+  const nowIso = (opts.now?.() ?? new Date()).toISOString();
+  const rows: PendingScheduleSync[] = [];
+  const fixtures = (revealed.fixtures as ScheduleFixture[]).map((f) => {
+    if (!f?.id) return f;
+    const next: ScheduleFixture = { ...f, schedule: { ...(f.schedule ?? {}), changedAt: nowIso } };
+    rows.push({
+      ref: fixtureSyncRef(tenant, String(revealed.id), next),
+      seriesId: String(revealed.id),
+      fixtureId: String(f.id),
+      schedule: fixtureSchedule(revealed, next, nowIso),
+      origin: 'admin',
+      enqueuedAt: nowIso,
+      attempts: 0,
+    });
+    return next;
+  });
+  if (!rows.length) return none;
+  return {
+    fixtures,
     enqueue: async () => {
       for (const r of rows) await repo.putPendingSync(tenant, r);
       return rows.length;
@@ -249,6 +311,8 @@ export interface FlushDeps {
 export interface FlushSummary {
   status: 'empty' | 'ok' | 'dry-run';
   pending: number;
+  /** Rows not sent because their series still withholds venue/time (ADR 0011). */
+  held: number;
   counts: SchedulePushCounts;
 }
 
@@ -276,17 +340,37 @@ export async function flushScheduleOutbox(
   const now = deps.now ?? (() => new Date());
   const doFetch = deps.fetch ?? fetch;
   const counts = zeroPush();
-  const rows = (await repo.listPendingSync(tenant)).sort((a, b) =>
+  const all = (await repo.listPendingSync(tenant)).sort((a, b) =>
     a.enqueuedAt.localeCompare(b.enqueuedAt),
   );
-  if (!rows.length) return { status: 'empty', pending: 0, counts };
+  if (!all.length) return { status: 'empty', pending: 0, held: 0, counts };
+
+  // Withheld venue/time never leaves smart club (ADR 0011): decided against the series as it
+  // stands NOW, not the flag the row was enqueued with, so a release-with-withheld after the
+  // enqueue still holds it and a reveal by any path releases it.
+  const withholds = new Map<string, boolean>();
+  const rows: PendingScheduleSync[] = [];
+  let held = 0;
+  for (const row of all) {
+    if (!withholds.has(row.seriesId))
+      withholds.set(
+        row.seriesId,
+        seriesWithholdsSchedule(await repo.getSeries(tenant, row.seriesId)),
+      );
+    const hold = withholds.get(row.seriesId)!;
+    if (hold) held++;
+    else rows.push(row);
+    if (hold !== (row.heldUntilReveal === true))
+      await repo.setPendingSyncHeld(tenant, row.ref, row.schedule.changedAt, hold);
+  }
+  if (!rows.length) return { status: 'empty', pending: all.length, held, counts };
   if (!deps.url || !deps.secret) {
     log(
       `[medicoach-sync dry-run] ${tenant}: would POST ${rows.length} schedule change(s) to ` +
         `${deps.url || '<MedicoachSyncUrl unset>'}${SCHEDULE_PATH}` +
         `${deps.secret ? '' : ' (MedicoachSyncSecret unset)'} — no request made`,
     );
-    return { status: 'dry-run', pending: rows.length, counts };
+    return { status: 'dry-run', pending: all.length, held, counts };
   }
 
   const failRow = async (row: PendingScheduleSync, error: string) => {
@@ -385,7 +469,7 @@ export async function flushScheduleOutbox(
       },
       push: counts,
     });
-  return { status: 'ok', pending: rows.length, counts };
+  return { status: 'ok', pending: all.length, held, counts };
 }
 
 /* ─────────────────────────── Inbound: apply or hold ─────────────────────────── */

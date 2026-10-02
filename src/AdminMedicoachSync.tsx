@@ -94,6 +94,7 @@ export function AdminMedicoachSyncView({
   const lastPull = data?.logs?.find((l) => l.kind !== 'push');
   const conflicts = data?.conflicts ?? [];
   const failures = data?.outbox?.failures ?? [];
+  const held = data?.outbox?.held ?? [];
 
   return (
     <div>
@@ -151,7 +152,12 @@ export function AdminMedicoachSyncView({
               <div className="mcs-stat-label">Waiting to send</div>
               <div className="mcs-stat-value">{data.outbox?.count ?? 0}</div>
               <div className="ump-sub">
-                {failures.length ? `${failures.length} failed, retrying` : 'all healthy'}
+                {[
+                  failures.length ? `${failures.length} failed, retrying` : '',
+                  held.length ? `${held.length} held until reveal` : '',
+                ]
+                  .filter(Boolean)
+                  .join(' · ') || 'all healthy'}
               </div>
             </div>
             <div className="mcs-stat">
@@ -274,6 +280,43 @@ export function AdminMedicoachSyncView({
                         <td>
                           {f.lastError ?? '—'}
                           <div className="ump-sub">{fmtWhen(f.lastAttemptAt)}</div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+
+          {held.length > 0 && (
+            <>
+              <h2 className="mcs-heading">Held until reveal</h2>
+              <div className="cr-section-sub">
+                These series still hide the venue or kick-off time from clubs, so their changes stay
+                here until you reveal them. Medicoach's match centre is public.
+              </div>
+              <div className="tbl-w" style={{ marginTop: 10 }}>
+                <table className="tbl" data-testid="mcs-outbox-held">
+                  <thead>
+                    <tr>
+                      <th>Fixture</th>
+                      <th>Schedule</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {held.map((h) => (
+                      <tr key={h.ref}>
+                        <td>
+                          {h.seriesId} · {h.fixtureId}
+                        </td>
+                        <td>
+                          {h.proposed}
+                          <div className="ump-sub">queued {fmtWhen(h.enqueuedAt)}</div>
+                        </td>
+                        <td>
+                          <Pill tone="gold">held until reveal</Pill>
                         </td>
                       </tr>
                     ))}

@@ -154,6 +154,13 @@ side's `changedAt`; smart club keeps its own as the fixture's `schedule.changedA
   delete the row (only if it still holds the snapshot sent); `error` and request failures keep
   it with `attempts` and `lastError`. `stale` means medicoach's newer edit wins; the pull brings
   it back.
+- **Withheld venue/time (ADR 0011).** Medicoach's match centre is public and the v1 contract
+  has no withheld flags, so a row whose series currently withholds venue and/or time is never
+  sent. It is kept as `heldUntilReveal` (flagged at enqueue and re-checked against the live
+  series on every flush) and shown on the admin page as "held until reveal". The reveal that
+  clears the last withheld field stamps every fixture of a mapped series and re-queues it with
+  its real schedule. Inbound changes still apply to a withheld series (they leak nothing). The
+  initial migration bundle carries `venueWithheld`/`timeWithheld` on its own.
 - **Generate/rebase guard.** On a sync tenant, regenerating a stage, or rebasing a run whose
   changed stages have released synced series, answers 409 `sync_resync_required` with the
   refs that would be orphaned, unless the caller passes `allowResync: true` (then the 200

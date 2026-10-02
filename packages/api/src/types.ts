@@ -1186,6 +1186,12 @@ export interface PendingScheduleSync {
   attempts: number;
   lastError?: string;
   lastAttemptAt?: string;
+  /**
+   * The series withholds venue and/or time from clubs (ADR 0011), so this snapshot must not
+   * reach medicoach's public match centre yet: the flush skips it until the series is fully
+   * revealed (the reveal re-queues the series with its real schedule).
+   */
+  heldUntilReveal?: boolean;
 }
 
 /** Who changed a fixture's schedule. `medicoach` = the Slice 3 inbound apply (never echoed). */
