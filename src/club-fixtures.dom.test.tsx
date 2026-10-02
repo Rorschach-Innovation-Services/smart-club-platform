@@ -127,7 +127,7 @@ describe('ClubFixturesView — withheld venue and time', () => {
     expect(queryAllByText(/time to be confirmed/i).length).toBeGreaterThan(0);
     expect(queryAllByText(/kingsmead stadium/i)).toHaveLength(0);
 
-    // Distance / Travel-cost columns are gone entirely, not just blanked.
+    // The Distance column is gone entirely, not just blanked; the fuel column never renders.
     expect(queryByText('Distance')).toBeNull();
     expect(queryByText('Travel cost')).toBeNull();
 
@@ -141,11 +141,13 @@ describe('ClubFixturesView — withheld venue and time', () => {
   });
 
   it('shows every field when nothing is withheld (regression guard)', () => {
-    const { queryAllByText, getByText } = renderView(series());
+    const { queryAllByText, queryByText, getByText } = renderView(series());
 
     expect(queryAllByText(/kingsmead stadium/i).length).toBeGreaterThan(0);
     expect(getByText('Distance')).toBeTruthy();
-    expect(getByText('Travel cost')).toBeTruthy();
+    // Fuel / rand travel costs are no longer shown anywhere — distance only.
+    expect(queryByText('Travel cost')).toBeNull();
+    expect(queryByText('Season fuel')).toBeNull();
     expect(queryAllByText(/\d+\s*km/i).length).toBeGreaterThan(0);
     expect(queryAllByText(/venue to be confirmed/i)).toHaveLength(0);
     expect(queryAllByText(/time to be confirmed/i)).toHaveLength(0);

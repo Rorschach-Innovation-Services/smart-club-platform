@@ -1864,11 +1864,6 @@
     letter-spacing:-0.01em;
   }
   .fix-row-dist .unit{font-size:9.5px;font-weight:600;color:var(--muted);margin-left:2px}
-  .fix-row-cost{
-    font-family:'Montserrat',sans-serif;font-weight:800;font-size:13px;letter-spacing:-0.01em;
-    color:var(--green);
-  }
-  .fix-row-cost .cur{font-size:10px;font-weight:700;color:var(--green-mid);margin-right:2px}
   .fix-totals{
     background:var(--paper);
     padding:16px 24px;
@@ -1879,7 +1874,6 @@
   .fix-totals-item{display:flex;flex-direction:column;gap:2px;align-items:flex-end}
   .fix-totals-l{font-size:9.5px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);font-weight:700;font-family:'Montserrat',sans-serif}
   .fix-totals-n{font-family:'Montserrat',sans-serif;font-size:16px;font-weight:800;color:var(--ink);letter-spacing:-0.02em}
-  .fix-totals-n.green{color:var(--green)}
 
   /* Fixture status badges + action buttons */
   .fix-status{
@@ -2047,7 +2041,7 @@
   .club-fix-empty-meta strong{color:var(--ink);font-weight:700;margin-left:2px}
 
   .club-fix-kpis{
-    display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px;
+    display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px;
     animation:fadeUp .42s cubic-bezier(0.16,1,0.3,1) both;
   }
   .club-fix-kpi{
@@ -2056,10 +2050,6 @@
     transition:transform .25s ease, box-shadow .25s ease;
   }
   .club-fix-kpi:hover{transform:translateY(-2px);box-shadow:0 12px 28px rgba(10,15,20,0.08)}
-  .club-fix-kpi.green{background:var(--ink);color:#fff;border-color:var(--ink)}
-  .club-fix-kpi.green .club-fix-kpi-l{color:rgba(255,255,255,0.6)}
-  .club-fix-kpi.green .club-fix-kpi-n{color:var(--green-bright)}
-  .club-fix-kpi.green .club-fix-kpi-meta{color:rgba(255,255,255,0.55)}
   .club-fix-kpi-l{
     font-family:'Montserrat',sans-serif;font-size:10px;font-weight:700;
     letter-spacing:0.14em;text-transform:uppercase;color:var(--muted-2);margin-bottom:8px;

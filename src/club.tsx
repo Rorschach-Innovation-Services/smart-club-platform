@@ -4797,7 +4797,7 @@ export function ClubFixturesView({
           <div className="club-fix-empty-title">Awaiting release from the {copy.office}</div>
           <div className="club-fix-empty-sub">
             Once the {fixTerms.union} office signs off on the {seasonLabel} fixture list, every
-            match you're playing — round, date, opponent, venue and travel costs — will populate
+            match you're playing — round, date, opponent, venue and travel distance — will populate
             here automatically. It appears here the moment it goes live.
           </div>
           <div className="club-fix-empty-meta">
@@ -4809,7 +4809,7 @@ export function ClubFixturesView({
   }
 
   // A partial travel total is worse than none: if ANY of this club's series is still
-  // withholding venues, the km/fuel tiles and the footnote can't be truthful, so they
+  // withholding venues, the km tile and the footnote can't be truthful, so they
   // stand down until every ground is public. `anyWithheld` (venue OR time) drives the
   // share-with-players hint further down.
   const anyVenueWithheld = myReleased.some(venueWithheld);
@@ -4819,8 +4819,7 @@ export function ClubFixturesView({
   let totalMatches = 0,
     homeMatches = 0,
     awayMatches = 0,
-    totalKm = 0,
-    totalCost = 0;
+    totalKm = 0;
   let nextFixture = null;
   const todayISO = new Date().toISOString().slice(0, 10);
 
@@ -4852,7 +4851,6 @@ export function ClubFixturesView({
         );
         const mineLeg = isHome ? c.home : c.away;
         totalKm += mineLeg.roundTripKm;
-        totalCost += mineLeg.fuelR;
       }
       // Same tiebreak as the table sort below (~4471): untimed sorts before timed on
       // the same date, so a double-header's earlier-in-the-list fixture is the one
@@ -4979,27 +4977,6 @@ export function ClubFixturesView({
               : 'round-trip across all away games'}
           </div>
         </div>
-        <div className="club-fix-kpi green">
-          <div className="club-fix-kpi-l">Season fuel</div>
-          <div className="club-fix-kpi-n">
-            {anyVenueWithheld ? (
-              <span style={{ color: 'var(--muted)' }}>—</span>
-            ) : (
-              <>R {Math.round(totalCost).toLocaleString()}</>
-            )}
-          </div>
-          <div className="club-fix-kpi-meta">
-            {anyVenueWithheld ? (
-              'shown once venues are confirmed'
-            ) : (
-              <>
-                est · {myReleased[0]?.carsPerAwayTrip || travel.carsPerAwayTrip} cars × R{' '}
-                {myReleased[0]?.costPerKm || travel.costPerKm}
-                /km
-              </>
-            )}
-          </div>
-        </div>
       </div>
 
       {/* Next match countdown */}
@@ -5082,7 +5059,7 @@ export function ClubFixturesView({
             // use times (most of them) stay silent rather than noisy.
             const seriesHasTimes = s.fixtures.some((f) => !!formatTime(f.time));
             // Withheld state for THIS series (ADR 0011): drives the Venue text, the
-            // presence of the Distance/Travel-cost columns, the suburb sub-line and the
+            // presence of the Distance column, the suburb sub-line and the
             // time cell. Read from the series flag, never inferred from missing fields.
             const hideVenue = venueWithheld(s);
             const hideTime = timeWithheld(s);
@@ -5133,7 +5110,6 @@ export function ClubFixturesView({
                         <th>H/A</th>
                         <th>Venue</th>
                         {!hideVenue && <th style={{ textAlign: 'right' }}>Distance</th>}
-                        {!hideVenue && <th style={{ textAlign: 'right' }}>Travel cost</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -5152,11 +5128,10 @@ export function ClubFixturesView({
                         const venueName = venueNameFor(f, isHome, homeSide, opp, s);
                         // THIS club's journey, not the fixture's total. `fixtureCost`
                         // sums both sides' legs when the ground is pinned — right for a
-                        // union's series total, wrong on a screen a club budgets fuel
+                        // union's series total, wrong on a screen a club plans travel
                         // from. And a HOME fixture allocation has moved to a neutral
                         // ground is a real trip, so it is no longer skipped.
-                        let dist = null,
-                          cost = null;
+                        let dist = null;
                         const costHome = isHome ? club : opp;
                         const costAway = isHome ? opp : club;
                         if (!hideVenue && costHome?.ground && costAway?.ground) {
@@ -5173,7 +5148,6 @@ export function ClubFixturesView({
                           const myLeg = isHome ? c.home : c.away;
                           if (myLeg.roundTripKm > 0) {
                             dist = myLeg.roundTripKm;
-                            cost = myLeg.fuelR;
                           }
                         }
                         return (
@@ -5322,28 +5296,6 @@ export function ClubFixturesView({
                                 )}
                               </td>
                             )}
-                            {!hideVenue && (
-                              <td
-                                style={{
-                                  textAlign: 'right',
-                                  fontFamily: "'Montserrat',sans-serif",
-                                }}
-                              >
-                                {cost !== null ? (
-                                  <span
-                                    style={{
-                                      fontWeight: 800,
-                                      color: 'var(--green)',
-                                      fontSize: 13,
-                                    }}
-                                  >
-                                    R {Math.round(cost).toLocaleString()}
-                                  </span>
-                                ) : (
-                                  <span style={{ color: 'var(--muted-2)' }}>—</span>
-                                )}
-                              </td>
-                            )}
                           </tr>
                         );
                       })}
@@ -5360,9 +5312,8 @@ export function ClubFixturesView({
           figures it explains are themselves standing down until grounds are public. */}
       {!anyVenueWithheld && (
         <div className="club-fix-foot">
-          Travel cost is estimated at R {myReleased[0]?.costPerKm || travel.costPerKm}/km ×{' '}
-          {myReleased[0]?.carsPerAwayTrip || travel.carsPerAwayTrip} cars per away trip — published
-          with the fixture release. Adjustments to schedule require a {copy.office} sign-off.
+          Distances are round-trip estimates from club home grounds — published with the fixture
+          release. Adjustments to schedule require a {copy.office} sign-off.
         </div>
       )}
 

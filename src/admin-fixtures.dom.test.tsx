@@ -879,7 +879,7 @@ describe('the season viewer — every schedule on screen, downloads inside it', 
     const dialog = await openViewer(user);
 
     // Default tab = active series (Division 2): its first fixture is Spartan v Tongaat at
-    // Spartan Park, with '—' for distance/travel (the test clubs have no geo).
+    // Spartan Park, with '—' for distance (the test clubs have no geo).
     const schedule = () => within(dialog).getAllByRole('table')[1];
     SCHEDULE_COLS.forEach((col) => {
       expect(within(schedule()).getAllByText(col).length).toBeGreaterThan(0);
@@ -890,7 +890,7 @@ describe('the season viewer — every schedule on screen, downloads inside it', 
     expect(homeRow).toBeTruthy();
     expect(within(homeRow).getByText('Spartan Park')).toBeTruthy();
     expect(within(homeRow).getByText('Tongaat CC')).toBeTruthy();
-    expect(within(homeRow).getAllByText('—').length).toBe(2);
+    expect(within(homeRow).getAllByText('—').length).toBe(1);
 
     // Switch to the Premier tab — Ilembe v Tongaat replaces the Division 2 rows.
     await user.click(within(dialog).getByRole('button', { name: /emcu premier/i }));
