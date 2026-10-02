@@ -49,7 +49,7 @@ import {
 } from './data';
 import { labelByKey, leagueOptionsForDistrict } from '../packages/engine/src/leagues';
 import { useModule, useVertical } from './branding';
-import { Btn, Icon, Pill } from './atoms';
+import { Btn, Icon, Pill, ScrollX } from './atoms';
 import { qk } from './query';
 import {
   applyRosterDecision,
@@ -889,149 +889,159 @@ export function QuickAddPlayersGrid({
         from that club.
       </p>
       <div className="tbl-w">
-        <table className="tbl">
-          <thead>
-            <tr>
-              <th>First name</th>
-              <th>Surname</th>
-              <th>ID type</th>
-              <th>ID / passport no.</th>
-              <th>DOB (passport)</th>
-              <th>Nationality (passport)</th>
-              <th>Gender</th>
-              <th>Team</th>
-              <th>Result</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => {
-              const locked = rowIsSettled(r) || busy;
-              const problem = !rowIsBlank(r) && !rowIsSettled(r) ? gridRowProblem(r) : '';
-              const passport = r.idType === 'passport';
-              return (
-                <tr key={r.key}>
-                  <td>
-                    <input
-                      className="field-input"
-                      aria-label={`Row ${i + 1} first name`}
-                      value={r.firstName}
-                      disabled={locked}
-                      onChange={(e) => patch(r.key, { firstName: e.target.value })}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      className="field-input"
-                      aria-label={`Row ${i + 1} surname`}
-                      value={r.lastName}
-                      disabled={locked}
-                      onChange={(e) => patch(r.key, { lastName: e.target.value })}
-                    />
-                  </td>
-                  <td>
-                    <select
-                      className="field-select"
-                      aria-label={`Row ${i + 1} ID type`}
-                      value={r.idType}
-                      disabled={locked}
-                      onChange={(e) =>
-                        patch(r.key, {
-                          idType: e.target.value as GridRow['idType'],
-                          idNumber: '',
-                          dob: '',
-                          nationality: '',
-                        })
-                      }
-                    >
-                      <option value="sa-id">SA ID</option>
-                      <option value="passport">Passport</option>
-                    </select>
-                  </td>
-                  <td>
-                    <input
-                      className="field-input"
-                      aria-label={`Row ${i + 1} ID number`}
-                      value={r.idNumber}
-                      disabled={locked}
-                      inputMode={passport ? undefined : 'numeric'}
-                      onChange={(e) =>
-                        patch(r.key, {
-                          idNumber: passport
-                            ? e.target.value
-                            : e.target.value.replace(/\D/g, '').slice(0, 13),
-                        })
-                      }
-                      style={{ fontVariantNumeric: 'tabular-nums' }}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      className="field-input"
-                      type="date"
-                      aria-label={`Row ${i + 1} date of birth`}
-                      value={r.dob}
-                      disabled={locked || !passport}
-                      onChange={(e) => patch(r.key, { dob: e.target.value })}
-                    />
-                  </td>
-                  <td>
-                    <select
-                      className="field-select"
-                      aria-label={`Row ${i + 1} nationality`}
-                      value={r.nationality}
-                      disabled={locked || !passport}
-                      onChange={(e) => patch(r.key, { nationality: e.target.value })}
-                    >
-                      <option value="">—</option>
-                      {NATIONALITIES.map((n) => (
-                        <option key={n}>{n}</option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>
-                    <select
-                      className="field-select"
-                      aria-label={`Row ${i + 1} gender`}
-                      value={r.gender}
-                      disabled={locked}
-                      onChange={(e) => patch(r.key, { gender: e.target.value })}
-                    >
-                      <option value="">—</option>
-                      {GENDERS.map((g) => (
-                        <option key={g}>{g}</option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>
-                    <select
-                      className="field-select"
-                      aria-label={`Row ${i + 1} team`}
-                      value={r.team}
-                      disabled={locked}
-                      onChange={(e) => patch(r.key, { team: e.target.value })}
-                    >
-                      <option value="">—</option>
-                      {teamOptions.map((l) => (
-                        <option key={l.key} value={l.key}>
-                          {l.label || l.key}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>
-                    {r.result ? (
-                      <BulkOutcomePill result={r.result} />
-                    ) : problem ? (
-                      <span className="rost-sub" style={{ color: 'var(--coral)' }}>
-                        {problem}
-                      </span>
-                    ) : null}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <ScrollX label="Quick-add players">
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>First name</th>
+                <th>Surname</th>
+                <th>ID type</th>
+                <th>ID / passport no.</th>
+                <th>DOB (passport)</th>
+                <th>Nationality (passport)</th>
+                <th>Gender</th>
+                <th>Team</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => {
+                const locked = rowIsSettled(r) || busy;
+                const problem = !rowIsBlank(r) && !rowIsSettled(r) ? gridRowProblem(r) : '';
+                const passport = r.idType === 'passport';
+                return (
+                  <tr key={r.key}>
+                    <td>
+                      <input
+                        className="field-input"
+                        aria-label={`Row ${i + 1} first name`}
+                        value={r.firstName}
+                        disabled={locked}
+                        style={{ width: 110 }}
+                        onChange={(e) => patch(r.key, { firstName: e.target.value })}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="field-input"
+                        aria-label={`Row ${i + 1} surname`}
+                        value={r.lastName}
+                        disabled={locked}
+                        style={{ width: 110 }}
+                        onChange={(e) => patch(r.key, { lastName: e.target.value })}
+                      />
+                    </td>
+                    <td>
+                      <select
+                        className="field-select"
+                        aria-label={`Row ${i + 1} ID type`}
+                        value={r.idType}
+                        disabled={locked}
+                        style={{ width: 92 }}
+                        onChange={(e) =>
+                          patch(r.key, {
+                            idType: e.target.value as GridRow['idType'],
+                            idNumber: '',
+                            dob: '',
+                            nationality: '',
+                          })
+                        }
+                      >
+                        <option value="sa-id">SA ID</option>
+                        <option value="passport">Passport</option>
+                      </select>
+                    </td>
+                    <td>
+                      <input
+                        className="field-input"
+                        aria-label={`Row ${i + 1} ID number`}
+                        value={r.idNumber}
+                        disabled={locked}
+                        inputMode={passport ? undefined : 'numeric'}
+                        onChange={(e) =>
+                          patch(r.key, {
+                            idNumber: passport
+                              ? e.target.value
+                              : e.target.value.replace(/\D/g, '').slice(0, 13),
+                          })
+                        }
+                        // Wide enough to show all 13 digits of an RSA ID while typing.
+                        style={{ fontVariantNumeric: 'tabular-nums', width: 160 }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="field-input"
+                        type="date"
+                        aria-label={`Row ${i + 1} date of birth`}
+                        style={{ width: 140 }}
+                        value={r.dob}
+                        disabled={locked || !passport}
+                        onChange={(e) => patch(r.key, { dob: e.target.value })}
+                      />
+                    </td>
+                    <td>
+                      <select
+                        className="field-select"
+                        aria-label={`Row ${i + 1} nationality`}
+                        style={{ width: 110 }}
+                        value={r.nationality}
+                        disabled={locked || !passport}
+                        onChange={(e) => patch(r.key, { nationality: e.target.value })}
+                      >
+                        <option value="">—</option>
+                        {NATIONALITIES.map((n) => (
+                          <option key={n}>{n}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        className="field-select"
+                        aria-label={`Row ${i + 1} gender`}
+                        style={{ width: 80 }}
+                        value={r.gender}
+                        disabled={locked}
+                        onChange={(e) => patch(r.key, { gender: e.target.value })}
+                      >
+                        <option value="">—</option>
+                        {GENDERS.map((g) => (
+                          <option key={g}>{g}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        className="field-select"
+                        aria-label={`Row ${i + 1} team`}
+                        style={{ width: 120 }}
+                        value={r.team}
+                        disabled={locked}
+                        onChange={(e) => patch(r.key, { team: e.target.value })}
+                      >
+                        <option value="">—</option>
+                        {teamOptions.map((l) => (
+                          <option key={l.key} value={l.key}>
+                            {l.label || l.key}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      {r.result ? (
+                        <BulkOutcomePill result={r.result} />
+                      ) : problem ? (
+                        <span className="rost-sub" style={{ color: 'var(--coral)' }}>
+                          {problem}
+                        </span>
+                      ) : null}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </ScrollX>
       </div>
       <div style={{ marginTop: 10 }}>
         <Btn
