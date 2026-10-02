@@ -163,6 +163,8 @@ export type DocFormat =
   | 'xls'
   | 'xlsx'
   | 'ods'
+  | 'ppt'
+  | 'pptx'
   | 'jpg'
   | 'jpeg'
   | 'png';
