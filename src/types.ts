@@ -694,6 +694,35 @@ export type VeteransAffiliatePublic = Omit<VeteransAffiliation, 'naturalKey'>;
 
 export type VeteransRequestStatus = 'pending' | 'accepted' | 'declined' | 'withdrawn';
 
+/** One umpire's ratings in a captain's report. MIRRORS the API's `CaptainReportUmpire`. */
+export interface CaptainReportUmpire {
+  name: string;
+  /** decisions · pressure · behaviour · communication · regulations → 1..5 (5 best) */
+  ratings: Record<string, number>;
+  concerns: string[];
+  otherConcern?: string;
+  comments?: string;
+}
+
+/** A captain's post-match report. MIRRORS the API's `CaptainReport`. */
+export interface CaptainReport {
+  id: string;
+  ref: string;
+  clubId: string;
+  clubName: string;
+  fixtureKey?: string;
+  date: string;
+  side: 'Home' | 'Away';
+  opponent: string;
+  competition?: string;
+  venue?: string;
+  captain: string;
+  umpires: CaptainReportUmpire[];
+  general?: string;
+  submittedAt: string;
+  submittedBy: string;
+}
+
 /**
  * MIRRORS the API's `VeteransRequestPublic` (packages/api/src/types.ts) — a veterans
  * squad-selection request (ADR 0013) as any HTTP response returns it. Inbound items

@@ -161,6 +161,7 @@ import type {
   PlayerRegistration,
   VeteransAffiliatePublic,
   VeteransRequest,
+  CaptainReport,
   VeteransRequestPublic,
   VeteransCandidate,
   PlayerClearance,
@@ -2904,6 +2905,101 @@ app.get('/clubs/:id/veterans-requests', async (c) => {
     inbound,
     outbound: outbound.map(publicVeteransRequest),
   });
+});
+
+/* ─── Captain's post-match reports ─── */
+
+const CR_CRITERIA = ['decisions', 'pressure', 'behaviour', 'communication', 'regulations'];
+const CR_CONCERNS = ['lbw', 'wkCatches', 'batPad', 'noBallWide', 'conditions', 'other'];
+
+/** Validate + normalise a submitted report body (throws 400 with a specific message). */
+function parseCaptainReport(body: Record<string, unknown>) {
+  const str = (v: unknown, field: string, max: number, required = false) => {
+    if (v === undefined || v === null || v === '') {
+      if (required) throw new HttpError(400, `${field} is required`);
+      return undefined;
+    }
+    if (typeof v !== 'string' || v.length > max)
+      throw new HttpError(400, `${field} must be a string of at most ${max} characters`);
+    return v.trim();
+  };
+  const date = str(body.date, 'date', 10, true)!;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new HttpError(400, 'date must be YYYY-MM-DD');
+  if (body.side !== 'Home' && body.side !== 'Away')
+    throw new HttpError(400, 'side must be Home or Away');
+  if (!Array.isArray(body.umpires) || body.umpires.length !== 2)
+    throw new HttpError(400, 'umpires must list both on-field umpires');
+  const umpires = body.umpires.map((u: Record<string, unknown>, i: number) => {
+    const ratings: Record<string, number> = {};
+    const r = (u?.ratings ?? {}) as Record<string, unknown>;
+    for (const k of CR_CRITERIA) {
+      const v = r[k];
+      if (!Number.isInteger(v) || (v as number) < 1 || (v as number) > 5)
+        throw new HttpError(400, `umpire ${i + 1}: ${k} must be rated 1–5`);
+      ratings[k] = v as number;
+    }
+    const concerns = Array.isArray(u?.concerns)
+      ? (u.concerns as unknown[]).filter((c): c is string => CR_CONCERNS.includes(c as string))
+      : [];
+    return {
+      name: str(u?.name, `umpire ${i + 1} name`, 120, true)!,
+      ratings,
+      concerns,
+      ...(str(u?.otherConcern, 'otherConcern', 300)
+        ? { otherConcern: str(u?.otherConcern, 'otherConcern', 300) }
+        : {}),
+      ...(str(u?.comments, 'comments', 2000)
+        ? { comments: str(u?.comments, 'comments', 2000) }
+        : {}),
+    };
+  });
+  return {
+    date,
+    side: body.side as 'Home' | 'Away',
+    opponent: str(body.opponent, 'opponent', 120, true)!,
+    captain: str(body.captain, 'captain', 120, true)!,
+    fixtureKey: str(body.fixtureKey, 'fixtureKey', 200),
+    competition: str(body.competition, 'competition', 160),
+    venue: str(body.venue, 'venue', 160),
+    general: str(body.general, 'general', 4000),
+    umpires,
+  };
+}
+
+/** A club submits a captain's report (its own club only). */
+app.post('/clubs/:id/captain-reports', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const clubId = c.req.param('id');
+  assertClubAccess(ra, clubId);
+  const club = await repo.getClub(ra.tenant, clubId);
+  if (!club) throw new HttpError(404, 'club not found');
+  const parsed = parseCaptainReport(await c.req.json<Record<string, unknown>>());
+  const submittedAt = now();
+  const report: CaptainReport = {
+    id: randomUUID(),
+    ref: `CR-${submittedAt.slice(0, 4)}-${randomUUID().slice(0, 6).toUpperCase()}`,
+    clubId,
+    clubName: club.name,
+    ...Object.fromEntries(Object.entries(parsed).filter(([, v]) => v !== undefined)),
+    submittedAt,
+    submittedBy: ra.email,
+  } as CaptainReport;
+  await repo.createCaptainReport(ra.tenant, report);
+  return c.json(report, 201);
+});
+
+/** A club's own captain's reports, newest first. */
+app.get('/clubs/:id/captain-reports', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const clubId = c.req.param('id');
+  assertClubAccess(ra, clubId);
+  return c.json(await repo.listCaptainReportsForClub(ra.tenant, clubId));
+});
+
+/** Every club's captain's reports (union admin), newest first. */
+app.get('/admin/captain-reports', async (c) => {
+  const ra = c.get('requestAuth')!;
+  return c.json(await repo.listAllCaptainReports(ra.tenant));
 });
 
 /** The PRIMARY club accepts a request — writes the affiliation, then flips the request. */
