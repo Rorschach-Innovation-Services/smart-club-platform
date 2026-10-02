@@ -152,6 +152,13 @@ side's `changedAt`; smart club keeps its own as the fixture's `schedule.changedA
   new mapped series) is not pushed either — the v1 contract has no create — but is reported
   as "new fixture not in medicoach (needs bundle top-up)" on the CLI/log and in a
   `new-fixtures` SYNCLOG row the admin page lists.
+- **Bulk CLIs write against what they read.** `import-planb`, `resolve-venue-clashes`,
+  `normalise-venue-names` and `merge-duplicate-venues` build a working copy from one read of
+  the series, so they write through `writeSeriesFromSnapshot` (`medicoach-sync/cli-write.ts`):
+  a Put conditional on the version that read saw, with the schedule diff taken from that read
+  (the CLI's own change), never from a fresh re-read. A series edited in between (an admin, a
+  medicoach apply) is skipped and the run exits 1 asking for a re-run. The runbook
+  (`docs/runbooks/planb-fixtures-import.md`) says to pause the cron's rule for the window.
 - **Flush.** Each cron run and "Sync now" first flushes the outbox in batches of ≤100 to
   `POST /integrations/smartclub/schedule` (signed; dry run with the secret empty), then pulls,
   then retries pending captain's reports (`REPORTOPEN#`). `applied|stale|unchanged|unmapped`

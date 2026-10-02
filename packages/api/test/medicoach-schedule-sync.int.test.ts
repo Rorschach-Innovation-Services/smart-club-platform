@@ -708,15 +708,18 @@ describe('Slice 4 — moved dates keep their ref; new fixtures are reported', ()
     // The sheet still says 4 Oct: the importer's id stabilisation + write path.
     const { stabiliseFixtureIds } = await import('../src/import-planb-fixtures.js');
     const existing = (await repo.getSeries(T, S1))!;
-    const sheetRows = [fx('f1'), fx('f2', { home: 'c', away: 'd', time: '13:30' })].map(
-      (f, i) => ({ ...f, id: `f${i + 1}` }),
-    );
+    const sheetRows = [fx('f1'), fx('f2', { home: 'c', away: 'd', time: '13:30' })].map((f, i) => ({
+      ...f,
+      id: `f${i + 1}`,
+    }));
     // Row order swapped so a row-order id would be wrong.
     const incoming = [sheetRows[1], sheetRows[0]].map((f, i) => ({ ...f, id: `f${i + 1}` }));
     const reimported = { ...structuredClone(existing), fixtures: incoming } as Series;
-    const ids = stabiliseFixtureIds(T, [{ series: reimported, fixtures: incoming } as never], [
-      existing,
-    ]);
+    const ids = stabiliseFixtureIds(
+      T,
+      [{ series: reimported, fixtures: incoming } as never],
+      [existing],
+    );
     assert.deepEqual(ids.removedRefs, []);
     assert.deepEqual(
       incoming.map((f) => `${f.id} ${f.home}v${f.away} ${f.date}`),
@@ -772,6 +775,67 @@ describe('Slice 4 — moved dates keep their ref; new fixtures are reported', ()
     const again = await repo.listSyncLogs(T);
     assert.deepEqual(again[0].newFixtureRefs, [REF(S1, 'f4')]);
     assert.deepEqual(await repo.listPendingSync(T), []);
+  });
+});
+
+// ── Bulk CLIs write version-checked against the series they read (ADR 0016) ──
+describe('Slice 4 — bulk CLI writes never overwrite a newer series', () => {
+  test('a series edited after the CLI read it is skipped with a re-run message; a clean one writes', async () => {
+    const { writeSeriesFromSnapshot } = await import('../src/medicoach-sync/cli-write.js');
+    // The CLI reads every series and works on copies (as resolve-venue-clashes does).
+    const read = (await repo.listSeries(T)).find((x) => x.id === S1)!;
+    const original = structuredClone(read);
+    // Meanwhile an admin moves f1.
+    assert.equal((await patchFixture(S1, 'f1', { time: '15:00' })).status, 200);
+    // The CLI's change: f2 to Lahee Park.
+    (read.fixtures as Array<Record<string, unknown>>)[1].venueId = 'v-lahee';
+    (read.fixtures as Array<Record<string, unknown>>)[1].venueName = 'Lahee Park';
+    const errors: string[] = [];
+    const outcome = await writeSeriesFromSnapshot(repo, T, original, read, {
+      error: (l) => errors.push(l),
+    });
+    assert.equal(outcome, 'drifted');
+    assert.match(errors.join('\n'), /changed since this run read it.*NOT written.*Re-run/);
+    assert.equal((await fixtureOf(S1, 'f1')).time, '15:00', "the admin's edit survives");
+    assert.equal((await fixtureOf(S1, 'f2')).venueName, 'Kingsmead Oval');
+    assert.deepEqual(
+      (await repo.listPendingSync(T)).map((r) => [r.ref, r.origin]),
+      [[REF(S1, 'f1'), 'admin']],
+      'only the admin edit is queued; the stale f1 is never pushed back',
+    );
+
+    // Re-run from the current series: only the CLI's own change is diffed and queued.
+    const fresh = (await repo.listSeries(T)).find((x) => x.id === S1)!;
+    const base = structuredClone(fresh);
+    (fresh.fixtures as Array<Record<string, unknown>>)[1].venueId = 'v-lahee';
+    (fresh.fixtures as Array<Record<string, unknown>>)[1].venueName = 'Lahee Park';
+    assert.equal(await writeSeriesFromSnapshot(repo, T, base, fresh), 'written');
+    assert.equal((await fixtureOf(S1, 'f1')).time, '15:00');
+    assert.equal((await fixtureOf(S1, 'f2')).venueName, 'Lahee Park');
+    assert.equal((await repo.getSeries(T, S1))!.version, base.version + 1);
+    const cli = (await repo.listPendingSync(T)).filter((r) => r.origin === 'cli');
+    assert.deepEqual(
+      cli.map((r) => r.ref),
+      [REF(S1, 'f2')],
+    );
+  });
+
+  test('a new series the CLI meant to create is not written over one that appeared meanwhile', async () => {
+    const { writeSeriesFromSnapshot } = await import('../src/medicoach-sync/cli-write.js');
+    const SN = 's-planb-premier-men-t20-g9';
+    await repo.putSeries(T, series(SN, [fx('f1')]));
+    const errors: string[] = [];
+    const outcome = await writeSeriesFromSnapshot(
+      repo,
+      T,
+      null,
+      series(SN, [fx('f1', { time: '17:00' })]),
+      {
+        error: (l) => errors.push(l),
+      },
+    );
+    assert.equal(outcome, 'drifted');
+    assert.equal((await fixtureOf(SN, 'f1')).time, '09:00');
   });
 });
 

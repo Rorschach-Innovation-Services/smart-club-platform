@@ -56,7 +56,7 @@ import { pathToFileURL } from 'node:url';
 import type { Series, Venue, VenueStatus, Club, TenantConfig } from './types.js';
 import { hasFeature } from './features.js';
 import { fixtureSyncRef, reconcileFixtureIds } from './fixture-identity.js';
-import { recordScheduleDiff } from './medicoach-sync/schedule.js';
+import { writeSeriesFromSnapshot } from './medicoach-sync/cli-write.js';
 
 type SeriesParticipant = NonNullable<Series['participants']>[number];
 type RepoModule = typeof import('./repo.js');
@@ -2826,6 +2826,9 @@ async function runImport(args: Args) {
     repo.listVenues(TENANT),
     repo.listSeries(TENANT),
   ]);
+  // The stored series exactly as this run read them: every write below is conditional on
+  // their version, and the medicoach schedule diff runs from them (ADR 0016).
+  const readById = new Map(existingSeries.map((x) => [String(x.id), structuredClone(x)]));
   const byNorm = buildClubIndex(clubs);
   const clubsById = new Map(clubs.map((c) => [c.id, c]));
   const byNormVenue = buildVenueIndex(venues);
@@ -3308,9 +3311,12 @@ async function runImport(args: Args) {
   }
 
   const backupPath = await backupExistingSeries(repo);
+  let drifted = 0;
   for (const b of built) {
     const s = b.series;
-    const existing = await repo.getSeries(TENANT, s.id);
+    // The series as this run read it (not a fresh read): its version guards the write, so a
+    // series edited since (an admin, a medicoach apply) is skipped, never overwritten.
+    const existing = readById.get(String(s.id));
     if (existing) {
       s.approved = existing.approved ?? s.approved;
       s.approvedAt = existing.approvedAt ?? null;
@@ -3320,16 +3326,23 @@ async function runImport(args: Args) {
       // silently un-withhold venues/times a released series is still holding back.
       s.withheld = existing.withheld;
       s.revealedAt = existing.revealedAt;
-      s.version = (Number(existing.version) || 1) + 1;
     }
-    // Medicoach sync (Slice 4): stamp + queue every mapped fixture whose schedule changed.
-    const scheduleSync = await recordScheduleDiff(repo, TENANT, existing, s, 'cli');
-    await repo.putSeries(TENANT, s);
-    await scheduleSync.enqueue();
+    // Version-checked against this run's read; stamps + queues every mapped fixture whose
+    // schedule this run changed (diff original-read → written, ADR 0016).
+    if ((await writeSeriesFromSnapshot(repo, TENANT, existing, s)) === 'drifted') {
+      drifted++;
+      continue;
+    }
     const withheldNote =
       existing && s.withheld ? ` (withheld: ${Object.keys(s.withheld).join(',')})` : '';
     console.log(
       `wrote ${s.id}  v${s.version}${existing ? ' (overwrote, lifecycle preserved)' : ''}${withheldNote}`,
+    );
+  }
+  if (drifted) {
+    process.exitCode = 1;
+    console.error(
+      `\n✗ ${drifted} series changed since this run read them and were NOT written — re-run the import.`,
     );
   }
   if (!args.noClubSync) {
@@ -3414,6 +3427,9 @@ async function runRelease(args: Args) {
     repo.listVenues(TENANT),
     repo.listSeries(TENANT),
   ]);
+  // The stored series exactly as this run read them: every write below is conditional on
+  // their version, and the medicoach schedule diff runs from them (ADR 0016).
+  const readById = new Map(existingSeries.map((x) => [String(x.id), structuredClone(x)]));
   const byNorm = buildClubIndex(clubs);
   const clubsById = new Map(clubs.map((c) => [c.id, c]));
   const byNormVenue = buildVenueIndex(venues);
@@ -3678,9 +3694,12 @@ async function runRelease(args: Args) {
     console.log(`created venue ${collegiansToCreate.id} (${collegiansToCreate.name})`);
   }
   const backupPath = await backupExistingSeries(repo);
+  let drifted = 0;
   for (const b of built) {
     const s = b.series;
-    const existing = await repo.getSeries(TENANT, s.id);
+    // The series as this run read it (not a fresh read): its version guards the write, so a
+    // series edited since (an admin, a medicoach apply) is skipped, never overwritten.
+    const existing = readById.get(String(s.id));
     if (existing) {
       s.approved = existing.approved ?? s.approved;
       s.approvedAt = existing.approvedAt ?? null;
@@ -3688,16 +3707,23 @@ async function runRelease(args: Args) {
       s.releasedAt = existing.releasedAt ?? null;
       s.withheld = existing.withheld;
       s.revealedAt = existing.revealedAt;
-      s.version = (Number(existing.version) || 1) + 1;
     }
-    // Medicoach sync (Slice 4): stamp + queue every mapped fixture whose schedule changed.
-    const scheduleSync = await recordScheduleDiff(repo, TENANT, existing, s, 'cli');
-    await repo.putSeries(TENANT, s);
-    await scheduleSync.enqueue();
+    // Version-checked against this run's read; stamps + queues every mapped fixture whose
+    // schedule this run changed (diff original-read → written, ADR 0016).
+    if ((await writeSeriesFromSnapshot(repo, TENANT, existing, s)) === 'drifted') {
+      drifted++;
+      continue;
+    }
     const withheldNote =
       existing && s.withheld ? ` (withheld: ${Object.keys(s.withheld).join(',')})` : '';
     console.log(
       `wrote ${s.id}  v${s.version}${existing ? ' (overwrote, lifecycle preserved)' : ''}${withheldNote}`,
+    );
+  }
+  if (drifted) {
+    process.exitCode = 1;
+    console.error(
+      `\n✗ ${drifted} series changed since this run read them and were NOT written — re-run the import.`,
     );
   }
   if (!args.noClubSync) {

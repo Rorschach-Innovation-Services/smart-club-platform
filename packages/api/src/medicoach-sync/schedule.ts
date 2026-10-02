@@ -428,7 +428,8 @@ export async function flushScheduleOutbox(
     if (hold !== (row.heldUntilReveal === true))
       await repo.setPendingSyncHeld(tenant, row.ref, row.schedule.changedAt, hold);
   }
-  if (dropped) log(`[medicoach-sync] ${tenant}: dropped ${dropped} outbox row(s) of deleted series`);
+  if (dropped)
+    log(`[medicoach-sync] ${tenant}: dropped ${dropped} outbox row(s) of deleted series`);
   if (!rows.length) return { status: 'empty', pending: all.length - dropped, held, counts };
   if (!deps.url || !deps.secret) {
     log(

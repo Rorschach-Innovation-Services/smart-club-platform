@@ -36,7 +36,7 @@ import {
   isClashExempt,
 } from './venue-clash.js';
 import type { Series, Venue } from './types.js';
-import { recordScheduleDiff } from './medicoach-sync/schedule.js';
+import { writeSeriesFromSnapshot } from './medicoach-sync/cli-write.js';
 
 const TENANT = 'dolphins';
 
@@ -239,6 +239,10 @@ async function main() {
     repo.listSeries(TENANT),
     repo.listClubs(TENANT),
   ]);
+
+  // The series exactly as this run read them: the version every write is conditional on, and
+  // the baseline of the medicoach schedule diff (the working copies below are mutated).
+  const originalById = new Map(allSeries.map((x) => [String(x.id), structuredClone(x)]));
 
   const clubsById = new Map(clubs.map((c) => [c.id, c]));
   const byNorm = buildVenueIndex(venues);
@@ -572,15 +576,19 @@ async function main() {
   await writeFile(backupPath, JSON.stringify(backup, null, 2));
   console.log(`\nBackup written: ${backupPath} (${backup.series.length} series)`);
 
-  const storedById = new Map(freshSeries.filter(Boolean).map((x) => [String(x!.id), x!]));
+  let drifted = 0;
   for (const id of dirtySeriesIds) {
     const s = allSeries.find((x) => String(x.id) === id)!;
-    s.version = (Number(s.version) || 1) + 1;
-    // Medicoach sync (Slice 4): stamp + queue every mapped fixture whose schedule changed.
-    const scheduleSync = await recordScheduleDiff(repo, TENANT, storedById.get(id), s, 'cli');
-    await repo.putSeries(TENANT, s);
-    await scheduleSync.enqueue();
+    // Version-checked against this run's read; diff original-read → written (ADR 0016).
+    if ((await writeSeriesFromSnapshot(repo, TENANT, originalById.get(id), s)) === 'drifted') {
+      drifted++;
+      continue;
+    }
     console.log(`wrote series ${s.id} v${s.version}`);
+  }
+  if (drifted) {
+    process.exitCode = 1;
+    console.error(`\n${drifted} series changed while this ran and were NOT written — re-run.`);
   }
   console.log('Done.');
 }

@@ -906,6 +906,46 @@ export async function putSeries(tenant: string, series: Series): Promise<Series>
   return series;
 }
 
+/**
+ * Replace a series ONLY while the stored item is still at `expectedVersion` — the version a
+ * CLI read when it built its working copy (`null` ⇒ the series must not exist yet;
+ * `undefined` ⇒ a legacy item stored without a version). Throws
+ * VersionConflictError when the series drifted (an admin edit, a medicoach apply) since that
+ * read, so a bulk CLI can never overwrite a newer write with a stale snapshot.
+ */
+export async function putSeriesIfVersion(
+  tenant: string,
+  series: Series,
+  expectedVersion: number | null | undefined,
+): Promise<Series> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...seriesKey(tenant, series.id),
+          ...seriesGsi1(tenant, series.startDate),
+          ...series,
+          version: series.version ?? 1,
+        },
+        ...(expectedVersion === null
+          ? { ConditionExpression: 'attribute_not_exists(pk)' }
+          : expectedVersion === undefined
+            ? { ConditionExpression: 'attribute_exists(pk) AND attribute_not_exists(version)' }
+            : {
+                ConditionExpression: 'version = :v',
+                ExpressionAttributeValues: { ':v': expectedVersion },
+              }),
+      }),
+    );
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException')
+      throw new VersionConflictError();
+    throw err;
+  }
+  return series;
+}
+
 /** Version-checked replace of a series (fixtures embedded). 409 on conflict. */
 export async function updateSeries(
   tenant: string,
