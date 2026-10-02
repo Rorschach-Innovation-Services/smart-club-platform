@@ -1465,6 +1465,13 @@ export function FixtureTable({
                       }
                       return seriesHasTimes ? <div className="fix-row-time">Time TBC</div> : null;
                     })()}
+                    {/* A postponed fixture keeps its first schedule in `originalDate` (ADR 0015);
+                        `date` is already the new one. */}
+                    {status === 'postponed' && f.originalDate && f.originalDate !== f.date && (
+                      <div className="fix-row-time">
+                        was <s>{formatWeekdayDay(f.originalDate)}</s>
+                      </div>
+                    )}
                   </td>
                   <td>
                     <div className="fix-row-team">

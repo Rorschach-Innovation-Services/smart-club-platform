@@ -107,6 +107,13 @@ import {
 } from './club-register';
 import type { RegisterMode } from './club-register';
 import {
+  PostponementsPanel,
+  RequestPostponementModal,
+  PostponedNote,
+  openRequestFor,
+} from './club-postponements';
+import type { ClubPostponements } from './api';
+import {
   getDocUploadUrl,
   uploadToPresigned,
   getClubDirectory,
@@ -4661,6 +4668,9 @@ export function ClubFixturesView({
   onSendFixtures,
   // The tenant's travel-cost defaults (competitionDefaults.travel); a series' own win.
   travel = { costPerKm: DEFAULT_COST_PER_KM, carsPerAwayTrip: DEFAULT_CARS },
+  // This club's postponement requests (ADR 0015). Absent ⇒ no inbox and no Postpone action
+  // (a caller that doesn't wire them, e.g. a test, sees the plain schedule).
+  postponements = undefined,
 }: {
   club;
   allSeries;
@@ -4668,6 +4678,7 @@ export function ClubFixturesView({
   toast;
   onSendFixtures;
   travel?: { costPerKm: number; carsPerAwayTrip: number };
+  postponements?: ClubPostponements;
 }) {
   const copy = useCopy();
   const clubBy = (id) => clubs.find((c) => c.id === id);
@@ -4783,6 +4794,8 @@ export function ClubFixturesView({
   const fixTerms = fixVertical.terms;
   const seasonLabel = useSeasonLabel();
   const [sharing, setSharing] = useStateC(false);
+  // The fixture a Postpone click opened the request modal for.
+  const [postponeFor, setPostponeFor] = useStateC<{ series; fixture } | null>(null);
   const playerCount = club.players || 0;
 
   // Broadcast the released schedule to the club's registered players. The schedule is
@@ -4999,6 +5012,16 @@ export function ClubFixturesView({
         </div>
       </div>
 
+      {postponements && (
+        <PostponementsPanel
+          club={club}
+          postponements={postponements}
+          allSeries={myReleased}
+          clubs={clubs}
+          toast={toast}
+        />
+      )}
+
       {/* Hero KPI band */}
       <div className="club-fix-kpis">
         <div className="club-fix-kpi">
@@ -5188,6 +5211,7 @@ export function ClubFixturesView({
                         <th>Venue</th>
                         {!hideVenue && <th style={{ textAlign: 'right' }}>Distance</th>}
                         {!hideVenue && <th style={{ textAlign: 'right' }}>Travel cost</th>}
+                        {postponements && <th style={{ width: 150 }}></th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -5296,6 +5320,7 @@ export function ClubFixturesView({
                                   </div>
                                 );
                               })()}
+                              <PostponedNote fixture={f} />
                             </td>
                             <td>
                               {/* Fixed three-column grid — home | vs | away — so the "vs"
@@ -5398,6 +5423,23 @@ export function ClubFixturesView({
                                 )}
                               </td>
                             )}
+                            {postponements && (
+                              <td style={{ textAlign: 'right', paddingRight: 14 }}>
+                                {openRequestFor(postponements, s.id, f.id) ? (
+                                  <Pill tone="gold" dot>
+                                    Postponement open
+                                  </Pill>
+                                ) : f.date >= today && f.status !== 'cancelled' ? (
+                                  <Btn
+                                    tone="ghost"
+                                    size="sm"
+                                    onClick={() => setPostponeFor({ series: s, fixture: f })}
+                                  >
+                                    Postpone
+                                  </Btn>
+                                ) : null}
+                              </td>
+                            )}
                           </tr>
                         );
                       })}
@@ -5419,6 +5461,26 @@ export function ClubFixturesView({
           with the fixture release. Adjustments to schedule require a {copy.office} sign-off.
         </div>
       )}
+
+      {postponeFor &&
+        (() => {
+          const { series: ps, fixture: pf } = postponeFor;
+          const mineHere = new Set(teamIdsForClub(ps, club.id));
+          const homeName = resolveTeam(ps, pf.home, clubBy).name;
+          const awayName = resolveTeam(ps, pf.away, clubBy).name;
+          return (
+            <RequestPostponementModal
+              club={club}
+              series={ps}
+              fixture={pf}
+              homeName={homeName}
+              awayName={awayName}
+              opponentName={mineHere.has(pf.home) ? awayName : homeName}
+              toast={toast}
+              onClose={() => setPostponeFor(null)}
+            />
+          );
+        })()}
 
       {/* Share-with-players modal — portaled for the same transformed-ancestor
           reason as the certificate-removal confirm. */}

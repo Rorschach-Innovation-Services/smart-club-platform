@@ -60,6 +60,7 @@ import type {
   ClubSignupLink,
   ClubSignupInfo,
   ClubSignupResult,
+  PostponementRequest,
 } from './types';
 
 /**
@@ -647,6 +648,97 @@ export const checkSeriesClashes = (id: string, candidates: unknown[]) =>
     `/series/${id}/clash-check`,
     { method: 'POST', body: { candidates } },
   );
+// ── Fixture postponements (ADR 0015) ──
+// A chair asks to move a released fixture; the other club counters / accepts / declines; an
+// accepted date applies to the fixture immediately. 409 codes the UI branches on (ApiError.code):
+// postponement_exists, fixture_cancelled, fixture_past, version_conflict, not_your_turn,
+// postponement_closed, fixture_changed, venue_clash (details: clashes + teamBusy).
+export interface ClubPostponements {
+  /** This club is the OPPOSING side (asked to agree). */
+  inbound: PostponementRequest[];
+  /** This club opened the request. */
+  outbound: PostponementRequest[];
+}
+export const getPostponements = (clubId: string) =>
+  request<ClubPostponements>(`/clubs/${clubId}/postponements`);
+export const createPostponement = (
+  clubId: string,
+  body: {
+    seriesId: string;
+    fixtureId: string;
+    proposedDate: string;
+    proposedTime?: string;
+    reason?: string;
+  },
+) => request<PostponementRequest>(`/clubs/${clubId}/postponements`, { method: 'POST', body });
+export const counterPostponement = (
+  clubId: string,
+  reqId: string,
+  body: { proposedDate: string; proposedTime?: string; note?: string; version?: number },
+) =>
+  request<PostponementRequest>(`/clubs/${clubId}/postponements/${reqId}/counter`, {
+    method: 'POST',
+    body,
+  });
+export const acceptPostponement = (clubId: string, reqId: string, version?: number) =>
+  request<PostponementRequest>(`/clubs/${clubId}/postponements/${reqId}/accept`, {
+    method: 'POST',
+    body: { version },
+  });
+export const withdrawPostponement = (clubId: string, reqId: string, version?: number) =>
+  request<PostponementRequest>(`/clubs/${clubId}/postponements/${reqId}/withdraw`, {
+    method: 'POST',
+    body: { version },
+  });
+export const declinePostponement = (
+  clubId: string,
+  reqId: string,
+  body: { declineReason?: string; version?: number },
+) =>
+  request<PostponementRequest>(`/clubs/${clubId}/postponements/${reqId}/decline`, {
+    method: 'POST',
+    body,
+  });
+export const acknowledgePostponement = (clubId: string, reqId: string, version?: number) =>
+  request<PostponementRequest>(`/clubs/${clubId}/postponements/${reqId}/acknowledge`, {
+    method: 'POST',
+    body: { version },
+  });
+/** Coarse, rep-safe busy signals for a candidate move — never the clashing fixture itself. */
+export interface ClashHint {
+  groundBusy: boolean;
+  homeTeamBusy: boolean;
+  awayTeamBusy: boolean;
+}
+export const getClashHints = (
+  clubId: string,
+  candidates: Array<{ seriesId: string; fixtureId: string; date: string; time?: string }>,
+) =>
+  request<{ results: ClashHint[] }>(`/clubs/${clubId}/clash-hints`, {
+    method: 'POST',
+    body: { candidates },
+  });
+// Admin (union office): every request in the tenant, newest first, optionally status-filtered.
+export const getAllPostponements = (status?: PostponementRequest['status']) =>
+  request<PostponementRequest[]>('/admin/postponements', { query: { status } });
+// Admin ruling: set the final date (+ optional time / venue). A clash 409 carries
+// details.clashes (full Clash[]) for ClashPanel.
+export const overridePostponement = (
+  reqId: string,
+  body: {
+    date: string;
+    time?: string;
+    venueId?: string;
+    venueName?: string;
+    note?: string;
+    version?: number;
+  },
+) =>
+  request<PostponementRequest>(`/admin/postponements/${reqId}/override`, {
+    method: 'POST',
+    body,
+  });
+
 export const duplicateSeriesReq = (id: string) =>
   request<Series>(`/series/${id}/duplicate`, { method: 'POST' });
 

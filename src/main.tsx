@@ -102,6 +102,7 @@ import {
   ClubClearancesView,
   ClubVeteransSquadView,
 } from './club';
+import { AdminPostponements, postponementAttentionCount } from './club-postponements';
 import { Onboarding } from './onboarding';
 import { useModule, useSeasonLabel, useVertical } from './branding';
 
@@ -1282,6 +1283,18 @@ function Shell({
     queryFn: () => api.getVeteransRequests(clubId),
     enabled: role === 'club' && !!clubId && veteransOn,
   });
+  // Fixture postponements (ADR 0015): the club's inbound + outbound requests (Fixtures inbox +
+  // nav badge) and the admin's tenant-wide list (nav badge; the view reads the same key).
+  const postponementsQuery = useQuery({
+    queryKey: qk.postponements(clubId),
+    queryFn: () => api.getPostponements(clubId),
+    enabled: role === 'club' && !!clubId,
+  });
+  const allPostponementsQuery = useQuery({
+    queryKey: qk.allPostponements(),
+    queryFn: () => api.getAllPostponements(),
+    enabled: role === 'admin',
+  });
   const allClearancesQuery = useQuery({
     queryKey: qk.allClearances(),
     queryFn: api.getAllClearances,
@@ -2265,6 +2278,12 @@ function Shell({
   // Registration-review badge: admin sees every open review (off-system alerts) cohort-wide.
   const adminOpenReviews = allReviews.filter((r) => r.status === 'open').length;
   const adminPendingVetRequests = allVeteransRequests.filter((r) => r.status === 'pending').length;
+  // Postponements: the admin badge counts open negotiations; the club badge counts requests
+  // awaiting this club's answer plus union rulings it hasn't acknowledged.
+  const adminOpenPostponements = (allPostponementsQuery.data ?? []).filter(
+    (r) => r.status === 'open',
+  ).length;
+  const myPostponementAttention = postponementAttentionCount(postponementsQuery.data, clubId);
 
   // Nav items are listed in their natural journey order here, then sorted alphabetically
   // by label for display (see the `.sort` below) — same for clubNav.
@@ -2306,6 +2325,13 @@ function Shell({
     { v: 'leagues', label: 'Leagues', icon: Icon.Shield, num: allLeagues.length },
     { v: 'insights', label: 'Insights', icon: Icon.Chart },
     { v: 'fixtures', label: 'Fixtures & Venues', icon: Icon.Field, dot: 'teal' },
+    {
+      v: 'postponements',
+      label: 'Postponements',
+      icon: Icon.Clock,
+      num: adminOpenPostponements || undefined,
+      dot: adminOpenPostponements ? 'gold' : 'teal',
+    },
     ...(clearancesOn
       ? [
           {
@@ -2417,8 +2443,15 @@ function Shell({
             v: 'fixtures',
             label: 'Fixtures',
             icon: Icon.Field,
-            dot: hasReleased ? 'teal' : affiliationSubmitted(activeClub) ? 'gold' : 'muted',
-            num: hasReleased ? 'NEW' : undefined,
+            // A postponement awaiting this club's answer outranks the "NEW" release badge.
+            dot: myPostponementAttention
+              ? 'gold'
+              : hasReleased
+                ? 'teal'
+                : affiliationSubmitted(activeClub)
+                  ? 'gold'
+                  : 'muted',
+            num: myPostponementAttention || (hasReleased ? 'NEW' : undefined),
           },
           { v: '_help', label: 'Need Help?', icon: Icon.Mail, action: () => setShowHelp(true) },
         ].sort((a, b) => a.label.localeCompare(b.label))
@@ -2673,6 +2706,8 @@ function Shell({
             busyAction={busyVetReqAction}
           />
         );
+      if (view === 'postponements')
+        return <AdminPostponements allSeries={allSeries} clubs={clubs} toast={toastShow} />;
       if (view === 'team')
         return (
           <AdminTeamAccessView
@@ -2748,6 +2783,7 @@ function Shell({
             toast={toastShow}
             onSendFixtures={sendFixtures}
             travel={travel}
+            postponements={postponementsQuery.data}
           />
         );
       }
