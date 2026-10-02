@@ -778,3 +778,219 @@ export async function sendVeteransRequestResolvedEmail(
   );
   return { messageId: res.MessageId ?? '' };
 }
+
+// ───────────────────────── Fixture postponement negotiation (ADR 0015) ─────────────────────────
+//
+// Email-only, link-free (the chair may hold no portal login), like the veterans notices. Each
+// builder is pure (no SES, no env) and exported so tests can assert the rendered copy. The CALLER
+// decides what may appear: a kick-off time or ground withheld from clubs (ADR 0011) is simply not
+// passed in, so these builders can never leak one.
+
+/** "Sat 2026-11-07" / "Sat 2026-11-07 at 13:00" — weekday + ISO date keeps the copy unambiguous. */
+function postponementWhen(date: string, time?: string): string {
+  const ms = Date.parse(`${date}T00:00:00Z`);
+  const weekday = Number.isNaN(ms)
+    ? ''
+    : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(ms).getUTCDay()] + ' ';
+  return `${weekday}${date}${time ? ` at ${time}` : ''}`;
+}
+
+/** Shared text + html shell for every postponement notice. `lines` are labelled extras. */
+function postponementNotice(
+  chairName: string,
+  body: string,
+  lines: Array<[label: string, value: string | undefined]>,
+  closing?: string,
+): { text: string; html: string } {
+  const greetName = chairName || 'there';
+  const shown = lines.filter((l): l is [string, string] => !!l[1]);
+  const extraText = shown.map(([k, v]) => `\n\n${k}: ${v}`).join('');
+  const closingText = closing ? `\n\n${closing}` : '';
+  const text =
+    `Hello ${greetName},\n\n` +
+    `${body}${extraText}${closingText}\n\n` +
+    `If you have any questions, please contact your union office.\n\n` +
+    `Thank you,\nThe union office`;
+  const extraHtml = shown
+    .map(([k, v]) => `<p><strong>${escapeHtml(k)}:</strong> ${escapeHtml(v)}</p>`)
+    .join('');
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hello ${escapeHtml(greetName)},</p>` +
+    `<p>${escapeHtml(body)}</p>` +
+    `${extraHtml}` +
+    (closing ? `<p>${escapeHtml(closing)}</p>` : '') +
+    `<p>If you have any questions, please contact your union office.</p>` +
+    `<p>Thank you,<br/>The union office</p>` +
+    `</div>`;
+  return { text, html };
+}
+
+export interface PostponementOpenedEmailInput {
+  chairName: string;
+  requestingClubName: string;
+  /** "Home v Away · Series name". */
+  fixtureLabel: string;
+  originalDate: string;
+  originalTime?: string;
+  proposedDate: string;
+  proposedTime?: string;
+  reason?: string;
+}
+
+/** To the OPPOSING chair: the other club asks to move the fixture to a new date. */
+export function postponementOpenedEmailContent(input: PostponementOpenedEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = `Postponement request — ${input.fixtureLabel}`;
+  const body =
+    `${input.requestingClubName} has asked to postpone ${input.fixtureLabel}, scheduled for ` +
+    `${postponementWhen(input.originalDate, input.originalTime)}, to ` +
+    `${postponementWhen(input.proposedDate, input.proposedTime)}. Please respond in your club ` +
+    `portal — accept the new date, propose another, or decline.`;
+  return {
+    subject,
+    ...postponementNotice(input.chairName, body, [
+      [`Reason from ${input.requestingClubName}`, input.reason],
+    ]),
+  };
+}
+
+export interface PostponementCounteredEmailInput {
+  chairName: string;
+  counteringClubName: string;
+  fixtureLabel: string;
+  originalDate: string;
+  originalTime?: string;
+  proposedDate: string;
+  proposedTime?: string;
+  note?: string;
+}
+
+/** To the OTHER chair: a side has proposed a different new date. */
+export function postponementCounteredEmailContent(input: PostponementCounteredEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = `New date proposed — ${input.fixtureLabel}`;
+  const body =
+    `${input.counteringClubName} has proposed ${postponementWhen(input.proposedDate, input.proposedTime)} ` +
+    `for ${input.fixtureLabel} (originally ${postponementWhen(input.originalDate, input.originalTime)}). ` +
+    `Please respond in your club portal — accept it, or propose another date.`;
+  return {
+    subject,
+    ...postponementNotice(input.chairName, body, [
+      [`Note from ${input.counteringClubName}`, input.note],
+    ]),
+  };
+}
+
+export interface PostponementAgreedEmailInput {
+  chairName: string;
+  fixtureLabel: string;
+  originalDate: string;
+  originalTime?: string;
+  newDate: string;
+  newTime?: string;
+}
+
+/** To BOTH chairs: the clubs agreed and the fixture has moved. */
+export function postponementAgreedEmailContent(input: PostponementAgreedEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = `Fixture postponed — ${input.fixtureLabel}`;
+  const body =
+    `Both clubs have agreed: ${input.fixtureLabel}, originally ` +
+    `${postponementWhen(input.originalDate, input.originalTime)}, is now on ` +
+    `${postponementWhen(input.newDate, input.newTime)}. The fixture list has been updated.`;
+  return { subject, ...postponementNotice(input.chairName, body, []) };
+}
+
+export interface PostponementAdminFinalEmailInput {
+  chairName: string;
+  fixtureLabel: string;
+  originalDate: string;
+  originalTime?: string;
+  newDate: string;
+  newTime?: string;
+  /** Only when the ground is visible to clubs. */
+  venueName?: string;
+}
+
+/** To BOTH chairs: the union office has set the final date — acknowledge in the portal. */
+export function postponementAdminFinalEmailContent(input: PostponementAdminFinalEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = `Fixture rescheduled by the union office — ${input.fixtureLabel}`;
+  const body =
+    `The union office has set the final date for ${input.fixtureLabel} (originally ` +
+    `${postponementWhen(input.originalDate, input.originalTime)}): it is now on ` +
+    `${postponementWhen(input.newDate, input.newTime)}. The fixture list has been updated.`;
+  return {
+    subject,
+    ...postponementNotice(
+      input.chairName,
+      body,
+      [['Venue', input.venueName]],
+      'Please acknowledge this ruling in your club portal.',
+    ),
+  };
+}
+
+export interface PostponementDeclinedEmailInput {
+  chairName: string;
+  /** The club that declined (opposing) or withdrew (requesting). */
+  actingClubName: string;
+  fixtureLabel: string;
+  originalDate: string;
+  originalTime?: string;
+  outcome: 'declined' | 'withdrawn';
+  reason?: string;
+}
+
+/** To the COUNTERPART chair: the request was declined / withdrawn; the fixture stays as it was. */
+export function postponementDeclinedEmailContent(input: PostponementDeclinedEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const subject = `Postponement ${input.outcome} — ${input.fixtureLabel}`;
+  const verb = input.outcome === 'declined' ? 'declined the request' : 'withdrawn its request';
+  const body =
+    `${input.actingClubName} has ${verb} to postpone ${input.fixtureLabel}. The fixture stays on ` +
+    `${postponementWhen(input.originalDate, input.originalTime)}.`;
+  return { subject, ...postponementNotice(input.chairName, body, [['Reason', input.reason]]) };
+}
+
+/** Send one rendered postponement notice. Same dry-run gate as the other senders. */
+export async function sendPostponementEmail(
+  to: string,
+  content: { subject: string; text: string; html: string },
+  label: string,
+): Promise<{ messageId: string }> {
+  if (EMAIL_DRY_RUN) {
+    console.log(`[notify:email dry-run] would send ${label} notice to ${to}: ${content.subject}`);
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [to] },
+      Message: {
+        Subject: { Data: content.subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: content.html, Charset: 'UTF-8' },
+          Text: { Data: content.text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}

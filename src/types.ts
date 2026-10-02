@@ -564,7 +564,14 @@ export interface ClubCommEvent {
     // two stop drifting (packages/api/src/types.ts).
     | 'veterans-request'
     | 'veterans-request-accepted'
-    | 'veterans-request-declined';
+    | 'veterans-request-declined'
+    // Fixture postponement negotiation (ADR 0015) — kept in sync with the API union.
+    | 'postponement-request'
+    | 'postponement-counter'
+    | 'postponement-agreed'
+    | 'postponement-admin-final'
+    | 'postponement-declined'
+    | 'postponement-withdrawn';
   summary?: string;
 }
 
@@ -727,6 +734,54 @@ export interface VeteransRequestPublic {
   resolvedVia?: 'portal' | 'admin';
   declineReason?: string;
   /** TTL (epoch seconds): set on a terminal row so it self-expires after 90 days. */
+  expiresAt?: number;
+  version: number;
+}
+
+/**
+ * MIRRORS the API's `PostponementProposal` (packages/api/src/types.ts) — one proposed new date
+ * in a fixture postponement negotiation (ADR 0015). `time` only while the fixture's kick-off is
+ * revealed; `venueId`/`venueName` only on an admin override.
+ */
+export interface PostponementProposal {
+  by: 'requesting' | 'opposing' | 'admin';
+  date: string;
+  time?: string;
+  venueId?: string;
+  venueName?: string;
+  note?: string;
+  at: string;
+  byUser: string;
+}
+
+export type PostponementStatus = 'open' | 'applied' | 'admin-final' | 'declined' | 'withdrawn';
+
+/**
+ * MIRRORS the API's `PostponementRequest` — a fixture postponement request (ADR 0015) as the
+ * club and admin routes return it. Club-facing responses strip withheld time/venue fields
+ * (ADR 0011) from the snapshot and proposals.
+ */
+export interface PostponementRequest {
+  id: string;
+  seriesId: string;
+  fixtureId: string;
+  requestingClubId: string;
+  opposingClubId: string;
+  originalDate: string;
+  originalTime?: string;
+  reason?: string;
+  /** Every proposal in order; the LAST one is the current proposal. */
+  proposals: PostponementProposal[];
+  awaiting: 'requesting' | 'opposing' | 'none';
+  status: PostponementStatus;
+  /** clubId → acknowledgement of an admin-final ruling. */
+  acknowledgements?: Record<string, { at: string; byUser: string }>;
+  requestedAt: string;
+  requestedBy: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolvedVia?: 'portal' | 'admin';
+  declineReason?: string;
   expiresAt?: number;
   version: number;
 }

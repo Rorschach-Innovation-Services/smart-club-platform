@@ -1906,6 +1906,10 @@ interface StoredFixture {
   venueId?: string;
   venueLocked?: boolean;
   venueReason?: string;
+  /** Postponement bookkeeping (ADR 0015) — read only to describe a postponed fixture; never a
+   * gate on its own (see diffAdminEdits). */
+  originalDate?: string;
+  postponementId?: string;
 }
 
 /** The id every stored series carries a slug from, or undefined for a foreign id
@@ -2434,8 +2438,13 @@ function isImportAuthoredReason(reason: string | undefined): boolean {
  * dates and adds times across the whole sheet, and fixture ids (`f1..fN`) are
  * regenerated from row order every run — an id-based date comparison has no way to
  * distinguish "this import corrected the date" from "an admin corrected the date", so
- * it can't safely gate a write. Surface it for the operator to read, not to block on. */
-function diffAdminEdits(
+ * it can't safely gate a write. Surface it for the operator to read, not to block on.
+ *
+ * A `postponed` fixture (ADR 0015 — moved by chair agreement or an admin ruling) is a date
+ * change, so it follows the same rule: informational, never genuine. Its bookkeeping fields
+ * (`originalDate`, `postponementId`) are not compared at all — the note just names the move so
+ * the operator knows a re-import resets it to the sheet's date. */
+export function diffAdminEdits(
   existing: Series,
   incoming: Series,
 ): { genuine: string[]; informational: string[] } {
@@ -2445,7 +2454,11 @@ function diffAdminEdits(
   const incomingFixtures = (incoming.fixtures as StoredFixture[]) ?? [];
   const incomingById = new Map(incomingFixtures.map((f) => [f.id, f]));
   for (const f of existingFixtures) {
-    if (f.status && f.status !== 'scheduled')
+    if (f.status === 'postponed')
+      informational.push(
+        `${existing.id}: fixture ${f.id} is postponed (originally ${f.originalDate ?? 'unknown'}, now ${f.date ?? 'undated'}) — a re-import resets it to the sheet date`,
+      );
+    else if (f.status && f.status !== 'scheduled')
       genuine.push(`${existing.id}: fixture ${f.id} has status "${f.status}"`);
     const handSetVenue = f.venueOverride || f.venueId || f.venueLocked;
     if (handSetVenue && !isImportAuthoredReason(f.venueReason))

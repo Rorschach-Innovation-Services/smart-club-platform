@@ -71,6 +71,7 @@ import {
   formatClash,
   formatClashForHumans,
   venueAliasesFor,
+  type Clash,
 } from './venue-clash.js';
 import {
   normaliseWithheld,
@@ -137,9 +138,14 @@ import {
   sendClearanceReopenedNotice,
   sendVeteransRequestNotice,
   sendVeteransRequestResolvedNotice,
+  notifyPostponementOpened,
+  notifyPostponementCountered,
+  notifyPostponementResolved,
   type Channel,
   type SendResult,
 } from './notify/index.js';
+import { findTeamBusy, type TeamBusyHit } from './team-busy.js';
+import { isSlotRef } from '../../engine/src/formats.js';
 import {
   clubFixturedInVeterans,
   veteransLeagueKeysForClub,
@@ -170,6 +176,8 @@ import type {
   VeteransRequest,
   VeteransRequestPublic,
   VeteransCandidate,
+  PostponementProposal,
+  PostponementRequest,
   PlayerClearance,
   AdminClearanceView,
   CertificateMeta,
@@ -4498,6 +4506,1059 @@ app.post('/series/:id/clash-check', requireAdmin, async (c) => {
     );
     const introduced = clashes.filter((cl) => !before.has(clashKey(cl, aliases)));
     return { clashes, introduced };
+  });
+  return c.json({ results });
+});
+
+// ───────────────────────── Fixture postponements (ADR 0015) ─────────────────────────
+//
+// A chair asks to move a released fixture; the clubs negotiate by counter-proposal; the agreed
+// date auto-applies to the fixture through `applySeriesPatch` (the same version + in-season clash
+// gates an admin edit passes). The union admin may override with a final date/time/venue at any
+// point — even after a chair agreement applied — and the chairs acknowledge it.
+
+const POSTPONEMENT_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const POSTPONEMENT_TEXT_MAX = 500;
+/** Accept re-reads + re-checks + re-patches at most this many times on a series version race. */
+const POSTPONEMENT_APPLY_ATTEMPTS = 3;
+
+/** The embedded fixture fields the postponement flow reads/writes (fixtures are untyped). */
+interface PostponableFixture {
+  id?: string;
+  round?: number;
+  date?: string;
+  time?: string;
+  home?: string;
+  away?: string;
+  status?: string;
+  originalDate?: string;
+  postponementId?: string;
+  [key: string]: unknown;
+}
+
+const fixturesOf = (series: Series): PostponableFixture[] =>
+  (series.fixtures as PostponableFixture[]) ?? [];
+
+/** The club behind a fixture side: the participants snapshot, else (legacy) the id IS a clubId.
+ * A knockout slot reference (`win:f3`) has no club yet. */
+function clubIdForSide(series: Series, teamId: string | undefined): string | undefined {
+  if (!teamId || isSlotRef(teamId)) return undefined;
+  const parts = series.participants;
+  if (Array.isArray(parts) && parts.length) return parts.find((p) => p.teamId === teamId)?.clubId;
+  return teamId;
+}
+
+function postponementHttpError(
+  status: number,
+  code: string,
+  message: string,
+  extra: Record<string, unknown> = {},
+): HttpError {
+  return new HttpError(status, message, { code, ...extra });
+}
+
+/** Map the postponement repo errors to HTTP codes (throws; never returns). */
+function throwPostponementError(err: unknown): never {
+  if (err instanceof VersionConflictError)
+    throw postponementHttpError(409, 'version_conflict', 'postponement request changed; refetch');
+  if (err instanceof repo.PostponementTurnError)
+    throw postponementHttpError(409, 'not_your_turn', err.message);
+  if (err instanceof repo.PostponementClosedError)
+    throw postponementHttpError(409, 'postponement_closed', err.message);
+  if (err instanceof repo.PostponementNotFoundError)
+    throw new HttpError(404, 'postponement request not found');
+  throw err;
+}
+
+/** Optional free text (reason / note / decline reason): a string of at most 500 characters. */
+function optionalPostponementText(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string' || value.length > POSTPONEMENT_TEXT_MAX)
+    throw new HttpError(400, `${field} must be a string of at most 500 characters`);
+  return value.trim() || undefined;
+}
+
+/**
+ * Validate a chair's proposed new date (+ optional kick-off). The date must be a real
+ * YYYY-MM-DD strictly after the tenant's today. A time is accepted only while the series reveals
+ * kick-off times to clubs (ADR 0011) — while withheld, chairs negotiate the date alone and the
+ * fixture keeps its (hidden) time.
+ */
+function parsePostponementProposal(
+  body: { proposedDate?: unknown; proposedTime?: unknown },
+  opts: { timeRevealed: boolean; today: string },
+): { date: string; time?: string } {
+  if (!isValidIsoDate(body.proposedDate))
+    throw new HttpError(400, 'proposedDate must be a valid YYYY-MM-DD date');
+  if (body.proposedDate <= opts.today)
+    throw new HttpError(400, 'proposedDate must be in the future');
+  const time = body.proposedTime;
+  if (time === undefined || time === null || time === '') return { date: body.proposedDate };
+  if (typeof time !== 'string' || !POSTPONEMENT_TIME_RE.test(time))
+    throw new HttpError(400, 'proposedTime must be HH:MM');
+  if (!opts.timeRevealed)
+    throw new HttpError(
+      400,
+      'kick-off times for this fixture have not been released yet — propose a date only',
+    );
+  return { date: body.proposedDate, time };
+}
+
+/**
+ * A request as a CLUB may see it: the time snapshot + proposal times are dropped while the series
+ * withholds kick-off times, and admin venue fields while it withholds venues (ADR 0011). A series
+ * the club can no longer see at all (recalled / deleted) strips both.
+ */
+function projectPostponementForClub(
+  r: PostponementRequest,
+  series: Series | null,
+  today: string,
+): PostponementRequest {
+  const visible = series ? projectSeriesForClub(series, today) : null;
+  const hideTime = !visible || isWithheld(visible, 'time');
+  const hideVenue = !visible || isWithheld(visible, 'venue');
+  if (!hideTime && !hideVenue) return r;
+  const out: PostponementRequest = {
+    ...r,
+    proposals: (r.proposals ?? []).map((p) => {
+      const q: PostponementProposal = { ...p };
+      if (hideTime) delete q.time;
+      if (hideVenue) {
+        delete q.venueId;
+        delete q.venueName;
+      }
+      return q;
+    }),
+  };
+  if (hideTime) delete out.originalTime;
+  return out;
+}
+
+/** Project a batch of requests for a club, reading each referenced series once. */
+async function projectPostponementsForClub(
+  tenant: string,
+  requests: PostponementRequest[],
+): Promise<PostponementRequest[]> {
+  const today = tenantToday();
+  const ids = [...new Set(requests.map((r) => r.seriesId))];
+  const seriesById = new Map(
+    await Promise.all(ids.map(async (id) => [id, await repo.getSeries(tenant, id)] as const)),
+  );
+  return requests.map((r) =>
+    projectPostponementForClub(r, seriesById.get(r.seriesId) ?? null, today),
+  );
+}
+
+/**
+ * Resolve a request for the acting club and say which side it is on. The canonical lives under
+ * the OPPOSING club; the requesting club holds the mirror, which names where the canonical is.
+ * The canonical is always returned (it is the source of truth).
+ */
+async function loadPostponementForClub(
+  tenant: string,
+  clubId: string,
+  reqId: string,
+): Promise<{ request: PostponementRequest; side: 'requesting' | 'opposing' }> {
+  const canonical = await repo.getPostponement(tenant, clubId, reqId);
+  if (canonical) return { request: canonical, side: 'opposing' };
+  const mirror = await repo.getOutboundPostponement(tenant, clubId, reqId);
+  if (!mirror) throw new HttpError(404, 'postponement request not found');
+  const request = await repo.getPostponement(tenant, mirror.opposingClubId, reqId);
+  if (!request) throw new HttpError(404, 'postponement request not found');
+  return { request, side: 'requesting' };
+}
+
+type PostponementNoticeKind =
+  | 'postponement-request'
+  | 'postponement-counter'
+  | 'postponement-agreed'
+  | 'postponement-admin-final'
+  | 'postponement-declined'
+  | 'postponement-withdrawn';
+
+/**
+ * Best-effort chair notices for a postponement transition. Email only, never throws — a notify
+ * fault must not fail the write that already committed. Copy only carries a kick-off time / venue
+ * the series reveals to clubs (ADR 0011). Each recipient club's results append to THAT club's comm
+ * log with a version-suffixed idempotency key.
+ */
+async function notifyPostponement(
+  tenant: string,
+  request: PostponementRequest,
+  kind: PostponementNoticeKind,
+  by: string,
+  recipients: Array<'requesting' | 'opposing'>,
+): Promise<void> {
+  try {
+    const [series, requestingClub, opposingClub] = await Promise.all([
+      repo.getSeries(tenant, request.seriesId),
+      repo.getClub(tenant, request.requestingClubId),
+      repo.getClub(tenant, request.opposingClubId),
+    ]);
+    const clubsById = new Map(
+      [requestingClub, opposingClub].filter((cl): cl is Club => !!cl).map((cl) => [cl.id, cl]),
+    );
+    const visible = series ? projectSeriesForClub(series, tenantToday()) : null;
+    const showTime = !!visible && !isWithheld(visible, 'time');
+    const showVenue = !!visible && !isWithheld(visible, 'venue');
+    const fixture = series ? fixturesOf(series).find((f) => f.id === request.fixtureId) : undefined;
+    const fixtureLabel =
+      series && fixture
+        ? `${resolveTeam(series, fixture.home ?? '', clubsById).name} v ${resolveTeam(series, fixture.away ?? '', clubsById).name} · ${series.name}`
+        : 'your fixture';
+    const t = (time: string | undefined) => (showTime ? time : undefined);
+    const current = request.proposals[request.proposals.length - 1];
+    const base = {
+      fixtureLabel,
+      originalDate: request.originalDate,
+      originalTime: t(request.originalTime),
+    };
+    const nameOf = (side: 'requesting' | 'opposing') =>
+      (side === 'requesting' ? requestingClub : opposingClub)?.name ?? 'The other club';
+    for (const side of recipients) {
+      const club = side === 'requesting' ? requestingClub : opposingClub;
+      if (!club) continue;
+      const chair = chairContactOf(club);
+      let results: SendResult[];
+      if (kind === 'postponement-request') {
+        ({ results } = await notifyPostponementOpened({
+          chair,
+          ...base,
+          requestingClubName: nameOf('requesting'),
+          proposedDate: current.date,
+          proposedTime: t(current.time),
+          ...(request.reason ? { reason: request.reason } : {}),
+        }));
+      } else if (kind === 'postponement-counter') {
+        ({ results } = await notifyPostponementCountered({
+          chair,
+          ...base,
+          counteringClubName: nameOf(current.by === 'requesting' ? 'requesting' : 'opposing'),
+          proposedDate: current.date,
+          proposedTime: t(current.time),
+          ...(current.note ? { note: current.note } : {}),
+        }));
+      } else if (kind === 'postponement-agreed' || kind === 'postponement-admin-final') {
+        // The fixture was re-read AFTER the apply, so its time is the one now in force (a
+        // proposal without a time kept the existing kick-off).
+        const newTime = t(fixture?.time ?? current.time);
+        ({ results } =
+          kind === 'postponement-agreed'
+            ? await notifyPostponementResolved({
+                chair,
+                outcome: 'agreed',
+                ...base,
+                newDate: current.date,
+                newTime,
+              })
+            : await notifyPostponementResolved({
+                chair,
+                outcome: 'admin-final',
+                ...base,
+                newDate: current.date,
+                newTime,
+                ...(showVenue && current.venueName ? { venueName: current.venueName } : {}),
+              }));
+      } else {
+        const outcome = kind === 'postponement-declined' ? 'declined' : 'withdrawn';
+        ({ results } = await notifyPostponementResolved({
+          chair,
+          outcome,
+          ...base,
+          actingClubName: nameOf(outcome === 'declined' ? 'opposing' : 'requesting'),
+          ...(request.declineReason ? { reason: request.declineReason } : {}),
+        }));
+      }
+      await repo.appendClubCommEvents(
+        tenant,
+        club.id,
+        results.map((r) => ({
+          id: randomUUID(),
+          channel: r.channel,
+          ...(r.to ? { to: r.to } : {}),
+          status: r.status,
+          ...(r.messageId ? { messageId: r.messageId } : {}),
+          ...(r.error ? { error: r.error } : {}),
+          at: now(),
+          by,
+          idempotencyKey: `postpone-${request.id}-${kind}-v${request.version}-email`,
+          kind,
+        })),
+      );
+    }
+  } catch (err) {
+    console.error(`postponement ${kind} notice failed`, err);
+  }
+}
+
+/**
+ * The fixture as a postponement leaves it: new date (and time, when the proposal names one),
+ * `status: 'postponed'`, the request id, and `originalDate` written ONLY IF ABSENT — a fixture
+ * moved twice keeps pointing at its first schedule. Venue fields only on an admin ruling: a
+ * registry venue sets the allocation (id/name/coords) and clears any free-text override; a
+ * free-text ground clears the allocation and becomes the override — the same projection the
+ * admin fixture editor writes.
+ */
+function postponedFixture(
+  fixture: PostponableFixture,
+  requestId: string,
+  move: { date: string; time?: string; venue?: Venue; venueName?: string },
+): PostponableFixture {
+  const next: PostponableFixture = {
+    ...fixture,
+    date: move.date,
+    ...(move.time ? { time: move.time } : {}),
+    status: 'postponed',
+    originalDate: fixture.originalDate ?? fixture.date,
+    postponementId: requestId,
+  };
+  if (move.venue) {
+    next.venueId = move.venue.id;
+    next.venueName = move.venue.name;
+    next.venueLat = move.venue.lat;
+    next.venueLon = move.venue.lon;
+    next.venueOverride = '';
+  } else if (move.venueName) {
+    next.venueId = undefined;
+    next.venueName = '';
+    next.venueLat = undefined;
+    next.venueLon = undefined;
+    next.venueOverride = move.venueName;
+  }
+  return next;
+}
+
+/** True when the fixture already carries this request's agreed move (a prior accept's patch
+ * landed but its terminalize did not) — accept then skips the patch and just terminalizes. */
+function fixtureCarriesPostponement(
+  fixture: PostponableFixture,
+  requestId: string,
+  proposal: PostponementProposal,
+): boolean {
+  return (
+    fixture.postponementId === requestId &&
+    fixture.status === 'postponed' &&
+    fixture.date === proposal.date &&
+    (proposal.time === undefined || fixture.time === proposal.time)
+  );
+}
+
+/** A team-busy hit as the 409 body reports it: which side, plus the booking it collides with. */
+interface TeamBusyConflict {
+  side: 'home' | 'away';
+  team: string;
+  date: string;
+  /** Absent in a club-facing body when the colliding series is not visible to clubs. */
+  with?: { seriesId: string; seriesName?: string; fixtureId: string };
+}
+
+/**
+ * The accept path's pre-apply checks for one moved fixture: introduced GROUND clashes (the same
+ * subset rule + clash identity as the in-season gate and `clash-check`, restricted to clashes the
+ * moved fixture is party to) and TEAM-BUSY (either side already plays that day/slot in any
+ * released series — something no ground gate catches). Returns the raw findings; the caller
+ * decides how much of them a club may see.
+ */
+async function postponementConflicts(
+  tenant: string,
+  series: Series,
+  moved: PostponableFixture,
+): Promise<{ clashes: Clash[]; teamBusy: TeamBusyConflict[]; allSeries: Series[] }> {
+  const [allSeries, clubs, venues, aliases] = await Promise.all([
+    repo.listSeries(tenant),
+    repo.listClubs(tenant),
+    repo.listVenues(tenant),
+    repo.getTenantConfig(tenant).then(venueAliasesFor),
+  ]);
+  const subject = {
+    ...series,
+    fixtures: fixturesOf(series).map((f) => (f.id === moved.id ? moved : f)),
+  } as Series;
+  const before = new Set(
+    findClashes(series, allSeries, clubs, venues, aliases).map((cl) => clashKey(cl, aliases)),
+  );
+  const clashes = findClashes(subject, allSeries, clubs, venues, aliases)
+    .filter(
+      (cl) =>
+        cl.fixtureId === moved.id ||
+        (cl.with.seriesId === series.id && cl.with.fixtureId === moved.id),
+    )
+    .filter((cl) => !before.has(clashKey(cl, aliases)));
+  const released = allSeries.filter((s) => s.released === true);
+  const busy = findTeamBusy(
+    released,
+    { seriesId: series.id, fixtureId: moved.id ?? '', home: moved.home, away: moved.away },
+    moved.date!,
+    moved.time,
+  );
+  const clubsById = new Map(clubs.map((cl) => [cl.id, cl]));
+  const seriesById = new Map(allSeries.map((s) => [s.id, s]));
+  const teamBusy: TeamBusyConflict[] = (
+    [
+      ['home', busy.home],
+      ['away', busy.away],
+    ] as Array<['home' | 'away', TeamBusyHit | undefined]>
+  )
+    .filter((entry): entry is ['home' | 'away', TeamBusyHit] => !!entry[1])
+    .map(([side, hit]) => ({
+      side,
+      team: resolveTeam(series, hit.teamId, clubsById).name,
+      date: hit.date,
+      with: {
+        seriesId: hit.seriesId,
+        seriesName: seriesById.get(hit.seriesId)?.name,
+        fixtureId: hit.fixtureId,
+      },
+    }));
+  return { clashes, teamBusy, allSeries };
+}
+
+/**
+ * What a CLUB may see of a ground clash: the date, and the other fixture only when its series is
+ * visible to clubs; the ground only when neither side's venue is withheld; the time only when the
+ * moved fixture's series reveals times. A clash against a draft / withheld booking still refuses
+ * the move (the gate must hold) but names nothing the club cannot already see (ADR 0011).
+ */
+function clashesForClub(
+  clashes: Clash[],
+  series: Series,
+  allSeries: Series[],
+): Array<
+  Pick<Clash, 'fixtureId' | 'date'> & {
+    time?: string;
+    ground?: string;
+    with?: Clash['with'];
+  }
+> {
+  const today = tenantToday();
+  const visibleById = new Map(
+    allSeries
+      .map((s) => projectSeriesForClub(s, today))
+      .filter((s): s is Series => s !== null)
+      .map((s) => [s.id, s]),
+  );
+  const ownVenueShown = !isWithheld(series, 'venue');
+  const ownTimeShown = !isWithheld(series, 'time');
+  return clashes.map((cl) => {
+    const other = visibleById.get(cl.with.seriesId);
+    const otherVenueShown = !!other && !isWithheld(other, 'venue');
+    return {
+      fixtureId: cl.fixtureId,
+      date: cl.date,
+      ...(ownTimeShown && cl.time ? { time: cl.time } : {}),
+      ...(ownVenueShown && otherVenueShown ? { ground: cl.ground } : {}),
+      ...(other ? { with: cl.with } : {}),
+    };
+  });
+}
+
+/** Team-busy conflicts as a CLUB may see them: the colliding booking only when its series is
+ * visible to clubs (a released-but-not-yet-active series stays unnamed). */
+function teamBusyForClub(teamBusy: TeamBusyConflict[], allSeries: Series[]): TeamBusyConflict[] {
+  const today = tenantToday();
+  const visible = new Set(
+    allSeries.filter((s) => projectSeriesForClub(s, today) !== null).map((s) => s.id),
+  );
+  return teamBusy.map((t) => {
+    if (t.with && visible.has(t.with.seriesId)) return t;
+    const { with: _hidden, ...rest } = t;
+    return rest;
+  });
+}
+
+/** `applySeriesPatch`'s plain concurrency 409 (as opposed to its structured clash 409). */
+const isSeriesVersionConflict = (err: unknown): boolean =>
+  err instanceof HttpError &&
+  err.status === 409 &&
+  err.details?.code === undefined &&
+  err.message === 'series changed; refetch';
+
+/**
+ * Apply a chair-agreed proposal to its fixture. Every attempt re-reads the series and re-runs
+ * the full check chain before patching — never a stale patch:
+ *  1. series still released + visible, fixture still present;
+ *  2. idempotency: the fixture already carries this move → done (terminalize only);
+ *  3. baseline: the fixture's date (and time, when it was snapshotted) still match the request's
+ *     snapshot — else an admin edit / re-import superseded the request → 409 `fixture_changed`;
+ *  4. introduced ground clash or team-busy → 409 `venue_clash` (the request stays open);
+ *  5. patch via `applySeriesPatch` pinned to the version read in (1). A version 409 loops back to
+ *     (1); a clash 409 from its own gate is re-shaped for the club and thrown.
+ */
+async function applyAgreedPostponement(
+  tenant: string,
+  request: PostponementRequest,
+  proposal: PostponementProposal,
+  actor: string,
+  opts: { forClub: boolean },
+): Promise<void> {
+  for (let attempt = 0; attempt < POSTPONEMENT_APPLY_ATTEMPTS; attempt++) {
+    const series = await repo.getSeries(tenant, request.seriesId);
+    if (!series || !projectSeriesForClub(series, tenantToday()))
+      throw postponementHttpError(
+        409,
+        'fixture_changed',
+        'this fixture is no longer published — withdraw the request or ask the union office',
+      );
+    const fixture = fixturesOf(series).find((f) => f.id === request.fixtureId);
+    if (!fixture)
+      throw postponementHttpError(
+        409,
+        'fixture_changed',
+        'this fixture no longer exists — withdraw the request or ask the union office',
+      );
+    if (fixtureCarriesPostponement(fixture, request.id, proposal)) return;
+    if (
+      fixture.date !== request.originalDate ||
+      (request.originalTime !== undefined && fixture.time !== request.originalTime)
+    )
+      throw postponementHttpError(
+        409,
+        'fixture_changed',
+        'the fixture was rescheduled since this request opened — withdraw it and open a new one',
+      );
+    const moved = postponedFixture(fixture, request.id, {
+      date: proposal.date,
+      ...(proposal.time ? { time: proposal.time } : {}),
+    });
+    const { clashes, teamBusy, allSeries } = await postponementConflicts(tenant, series, moved);
+    if (clashes.length || teamBusy.length)
+      throw postponementHttpError(
+        409,
+        'venue_clash',
+        'that date clashes with another fixture — propose a different date, or ask the union office',
+        opts.forClub
+          ? {
+              clashes: clashesForClub(clashes, series, allSeries),
+              teamBusy: teamBusyForClub(teamBusy, allSeries),
+            }
+          : { clashes, teamBusy },
+      );
+    try {
+      await applySeriesPatch(
+        tenant,
+        series.id,
+        {
+          fixtures: fixturesOf(series).map((f) => (f.id === moved.id ? moved : f)),
+          version: series.version,
+        },
+        actor,
+      );
+      return;
+    } catch (err) {
+      if (isSeriesVersionConflict(err)) continue;
+      if (err instanceof HttpError && err.details?.code === 'venue_clash' && opts.forClub) {
+        throw postponementHttpError(409, 'venue_clash', err.message, {
+          clashes: clashesForClub(
+            (err.details.clashes as Clash[]) ?? [],
+            series,
+            await repo.listSeries(tenant),
+          ),
+          teamBusy: [],
+        });
+      }
+      throw err;
+    }
+  }
+  throw postponementHttpError(
+    409,
+    'version_conflict',
+    'the fixture list kept changing while applying the new date — try again',
+  );
+}
+
+/**
+ * Open a postponement request. The requesting club must play in the fixture; the opposing club
+ * is DERIVED from the fixture (never taken from the body). The series must be released and
+ * active for clubs; the fixture must not be cancelled or already played. One open request per
+ * fixture — checked in both clubs' partitions (409 `postponement_exists`).
+ */
+app.post('/clubs/:id/postponements', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const clubId = c.req.param('id');
+  assertClubAccess(ra, clubId);
+  const body = await c.req.json<{
+    seriesId?: unknown;
+    fixtureId?: unknown;
+    proposedDate?: unknown;
+    proposedTime?: unknown;
+    reason?: unknown;
+  }>();
+  if (typeof body.seriesId !== 'string' || !body.seriesId)
+    throw new HttpError(400, 'seriesId is required');
+  if (typeof body.fixtureId !== 'string' || !body.fixtureId)
+    throw new HttpError(400, 'fixtureId is required');
+  const reason = optionalPostponementText(body.reason, 'reason');
+  const today = tenantToday();
+  const series = await repo.getSeries(ra.tenant, body.seriesId);
+  // Unreleased / not-yet-active series 404 exactly like a missing one — no existence leak.
+  if (!series || !projectSeriesForClub(series, today))
+    throw new HttpError(404, 'fixture not found');
+  const fixture = fixturesOf(series).find((f) => f.id === body.fixtureId);
+  if (!fixture) throw new HttpError(404, 'fixture not found');
+  const homeClubId = clubIdForSide(series, fixture.home);
+  const awayClubId = clubIdForSide(series, fixture.away);
+  if (homeClubId !== clubId && awayClubId !== clubId)
+    throw new HttpError(403, 'your club does not play in this fixture');
+  const opposingClubId = homeClubId === clubId ? awayClubId : homeClubId;
+  if (!opposingClubId || opposingClubId === clubId)
+    throw new HttpError(400, 'this fixture has no opposing club to agree a new date with');
+  if (fixture.status === 'cancelled')
+    throw postponementHttpError(409, 'fixture_cancelled', 'this fixture has been cancelled');
+  if (!fixture.date || fixture.date < today)
+    throw postponementHttpError(409, 'fixture_past', 'only an upcoming fixture can be postponed');
+  const timeRevealed = !isWithheld(series, 'time');
+  const proposed = parsePostponementProposal(body, { timeRevealed, today });
+  if (proposed.date === fixture.date && (proposed.time ?? fixture.time) === fixture.time)
+    throw new HttpError(400, 'the proposed date is the fixture’s current date');
+
+  const [mine, theirs] = await Promise.all([
+    repo.listPostponementsForClub(ra.tenant, clubId),
+    repo.listPostponementsForClub(ra.tenant, opposingClubId),
+  ]);
+  const open = [...mine.inbound, ...mine.outbound, ...theirs.inbound, ...theirs.outbound].some(
+    (r) => r.status === 'open' && r.seriesId === series.id && r.fixtureId === fixture.id,
+  );
+  if (open)
+    throw postponementHttpError(
+      409,
+      'postponement_exists',
+      'a postponement request for this fixture is already open',
+    );
+
+  const at = now();
+  const request: PostponementRequest = {
+    id: randomUUID(),
+    seriesId: series.id,
+    fixtureId: body.fixtureId,
+    requestingClubId: clubId,
+    opposingClubId,
+    originalDate: fixture.date,
+    // Snapshot the kick-off only while it is visible to clubs — the request is club-facing.
+    ...(timeRevealed && fixture.time ? { originalTime: fixture.time } : {}),
+    ...(reason ? { reason } : {}),
+    proposals: [
+      {
+        by: 'requesting',
+        date: proposed.date,
+        ...(proposed.time ? { time: proposed.time } : {}),
+        at,
+        byUser: ra.email,
+      },
+    ],
+    awaiting: 'opposing',
+    status: 'open',
+    requestedAt: at,
+    requestedBy: ra.email,
+    version: 0,
+  };
+  await repo.createPostponementRequest(ra.tenant, request);
+  await notifyPostponement(ra.tenant, request, 'postponement-request', ra.email, ['opposing']);
+  return c.json(projectPostponementForClub(request, series, today), 201);
+});
+
+/** A club's postponement requests: inbound (canonical — it is opposing) + outbound (mirror). */
+app.get('/clubs/:id/postponements', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const { inbound, outbound } = await repo.listPostponementsForClub(ra.tenant, id);
+  const [inboundOut, outboundOut] = await Promise.all([
+    projectPostponementsForClub(ra.tenant, inbound),
+    projectPostponementsForClub(ra.tenant, outbound),
+  ]);
+  return c.json({ inbound: inboundOut, outbound: outboundOut });
+});
+
+/** The awaited side proposes a different date (409 `not_your_turn` / `version_conflict`). */
+app.post('/clubs/:id/postponements/:reqId/counter', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const reqId = c.req.param('reqId');
+  assertClubAccess(ra, id);
+  const body = await c.req.json<{
+    proposedDate?: unknown;
+    proposedTime?: unknown;
+    note?: unknown;
+    version?: number;
+  }>();
+  const note = optionalPostponementText(body.note, 'note');
+  const { request, side } = await loadPostponementForClub(ra.tenant, id, reqId);
+  if (request.status !== 'open')
+    throw postponementHttpError(
+      409,
+      'postponement_closed',
+      'postponement request is no longer open',
+    );
+  if (request.awaiting !== side)
+    throw postponementHttpError(409, 'not_your_turn', 'it is not your turn to respond');
+  const today = tenantToday();
+  const series = await repo.getSeries(ra.tenant, request.seriesId);
+  const proposed = parsePostponementProposal(body, {
+    timeRevealed: !!series && !isWithheld(series, 'time'),
+    today,
+  });
+  try {
+    const updated = await repo.counterPostponement(ra.tenant, request.opposingClubId, reqId, {
+      side,
+      proposal: {
+        by: side,
+        date: proposed.date,
+        ...(proposed.time ? { time: proposed.time } : {}),
+        ...(note ? { note } : {}),
+        at: now(),
+        byUser: ra.email,
+      },
+      expectedVersion: body.version,
+    });
+    await notifyPostponement(ra.tenant, updated, 'postponement-counter', ra.email, [
+      side === 'requesting' ? 'opposing' : 'requesting',
+    ]);
+    return c.json(projectPostponementForClub(updated, series, today));
+  } catch (err) {
+    throwPostponementError(err);
+  }
+});
+
+/**
+ * The awaited side accepts the proposal on the table: the new date applies to the fixture
+ * (`applyAgreedPostponement` — baseline, clash and team-busy checks, then `applySeriesPatch`) and
+ * the request becomes `applied`. A clash keeps the request OPEN (409 `venue_clash`).
+ */
+app.post('/clubs/:id/postponements/:reqId/accept', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const reqId = c.req.param('reqId');
+  assertClubAccess(ra, id);
+  const body = await c.req.json<{ version?: number }>().catch(() => ({}) as { version?: number });
+  const { request, side } = await loadPostponementForClub(ra.tenant, id, reqId);
+  if (request.status !== 'open')
+    throw postponementHttpError(
+      409,
+      'postponement_closed',
+      'postponement request is no longer open',
+    );
+  if (request.awaiting !== side)
+    throw postponementHttpError(409, 'not_your_turn', 'it is not your turn to respond');
+  // Pin the caller's view BEFORE touching the fixture: accepting a proposal the caller never saw
+  // (the other side countered meanwhile) must not move the match.
+  if (body.version !== undefined && body.version !== request.version)
+    throw postponementHttpError(409, 'version_conflict', 'postponement request changed; refetch');
+  const proposal = request.proposals[request.proposals.length - 1];
+  await applyAgreedPostponement(ra.tenant, request, proposal, ra.email, { forClub: true });
+  try {
+    const updated = await repo.resolvePostponement(ra.tenant, request.opposingClubId, reqId, {
+      status: 'applied',
+      at: now(),
+      by: ra.email,
+      via: ra.membership.role === 'admin' ? 'admin' : 'portal',
+      expectedVersion: request.version,
+    });
+    await notifyPostponement(ra.tenant, updated, 'postponement-agreed', ra.email, [
+      'requesting',
+      'opposing',
+    ]);
+    return c.json(
+      projectPostponementForClub(
+        updated,
+        await repo.getSeries(ra.tenant, updated.seriesId),
+        tenantToday(),
+      ),
+    );
+  } catch (err) {
+    throwPostponementError(err);
+  }
+});
+
+/** Terminal decline (opposing side) / withdraw (requesting side); notifies the counterpart. */
+async function closePostponement(
+  c: Context<HonoEnv>,
+  outcome: 'declined' | 'withdrawn',
+): Promise<Response> {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id')!;
+  const reqId = c.req.param('reqId')!;
+  assertClubAccess(ra, id);
+  const body = await c.req
+    .json<{ declineReason?: unknown; version?: number }>()
+    .catch(() => ({}) as { declineReason?: unknown; version?: number });
+  const declineReason =
+    outcome === 'declined'
+      ? optionalPostponementText(body.declineReason, 'declineReason')
+      : undefined;
+  const { request, side } = await loadPostponementForClub(ra.tenant, id, reqId);
+  const allowed = outcome === 'declined' ? 'opposing' : 'requesting';
+  if (side !== allowed)
+    throw new HttpError(
+      403,
+      outcome === 'declined'
+        ? 'only the club asked to agree can decline a postponement'
+        : 'only the club that opened a postponement can withdraw it',
+    );
+  if (request.status !== 'open')
+    throw postponementHttpError(
+      409,
+      'postponement_closed',
+      'postponement request is no longer open',
+    );
+  try {
+    const updated = await repo.resolvePostponement(ra.tenant, request.opposingClubId, reqId, {
+      status: outcome,
+      at: now(),
+      by: ra.email,
+      via: ra.membership.role === 'admin' ? 'admin' : 'portal',
+      ...(declineReason ? { declineReason } : {}),
+      expectedVersion: body.version,
+    });
+    await notifyPostponement(
+      ra.tenant,
+      updated,
+      outcome === 'declined' ? 'postponement-declined' : 'postponement-withdrawn',
+      ra.email,
+      [outcome === 'declined' ? 'requesting' : 'opposing'],
+    );
+    return c.json(
+      projectPostponementForClub(
+        updated,
+        await repo.getSeries(ra.tenant, updated.seriesId),
+        tenantToday(),
+      ),
+    );
+  } catch (err) {
+    throwPostponementError(err);
+  }
+}
+
+app.post('/clubs/:id/postponements/:reqId/withdraw', (c) => closePostponement(c, 'withdrawn'));
+app.post('/clubs/:id/postponements/:reqId/decline', (c) => closePostponement(c, 'declined'));
+
+/** Either club records its acknowledgement of an admin-final ruling (idempotent per club). */
+app.post('/clubs/:id/postponements/:reqId/acknowledge', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const reqId = c.req.param('reqId');
+  assertClubAccess(ra, id);
+  const body = await c.req.json<{ version?: number }>().catch(() => ({}) as { version?: number });
+  const { request } = await loadPostponementForClub(ra.tenant, id, reqId);
+  try {
+    const updated = await repo.acknowledgePostponement(ra.tenant, request.opposingClubId, reqId, {
+      clubId: id,
+      at: now(),
+      by: ra.email,
+      expectedVersion: body.version,
+    });
+    return c.json(
+      projectPostponementForClub(
+        updated,
+        await repo.getSeries(ra.tenant, updated.seriesId),
+        tenantToday(),
+      ),
+    );
+  } catch (err) {
+    throwPostponementError(err);
+  }
+});
+
+const POSTPONEMENT_STATUSES: PostponementRequest['status'][] = [
+  'open',
+  'applied',
+  'admin-final',
+  'declined',
+  'withdrawn',
+];
+
+/** Every postponement request in the tenant (newest first), optionally `?status=` filtered. */
+app.get('/admin/postponements', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const status = c.req.query('status');
+  if (
+    status !== undefined &&
+    !POSTPONEMENT_STATUSES.includes(status as PostponementRequest['status'])
+  )
+    throw new HttpError(400, `status must be one of ${POSTPONEMENT_STATUSES.join(', ')}`);
+  const all = await repo.listPostponementsForTenant(tenant);
+  return c.json(
+    all
+      .filter((r) => !status || r.status === status)
+      .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt)),
+  );
+});
+
+/**
+ * The union office sets the final date (+ optional time / venue) for a request's fixture —
+ * whether the request is open, already applied by chair agreement, previously ruled on, or was
+ * declined. Applied through `applySeriesPatch` (the standard version + in-season clash gate; its
+ * 409 with the full `clashes` list surfaces to the admin as-is). The request becomes
+ * `admin-final` with the ruling appended as a `by: 'admin'` proposal; both chairs are notified and
+ * asked to acknowledge. `originalDate` on the fixture is only-if-absent, so it keeps pointing at
+ * the original schedule however many times the match moves.
+ */
+app.post('/admin/postponements/:reqId/override', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const reqId = c.req.param('reqId');
+  const body = await c.req.json<{
+    date?: unknown;
+    time?: unknown;
+    venueId?: unknown;
+    venueName?: unknown;
+    note?: unknown;
+    version?: number;
+  }>();
+  if (!isValidIsoDate(body.date)) throw new HttpError(400, 'date must be a valid YYYY-MM-DD date');
+  const date = body.date;
+  let time: string | undefined;
+  if (body.time !== undefined && body.time !== null && body.time !== '') {
+    if (typeof body.time !== 'string' || !POSTPONEMENT_TIME_RE.test(body.time))
+      throw new HttpError(400, 'time must be HH:MM');
+    time = body.time;
+  }
+  let venue: Venue | undefined;
+  if (body.venueId !== undefined && body.venueId !== null && body.venueId !== '') {
+    if (typeof body.venueId !== 'string') throw new HttpError(400, 'venueId must be a string');
+    venue = (await repo.listVenues(ra.tenant)).find((v) => v.id === body.venueId);
+    if (!venue) throw new HttpError(400, 'venueId does not name a venue in the ground list');
+  }
+  let venueName: string | undefined;
+  if (!venue && body.venueName !== undefined && body.venueName !== null && body.venueName !== '') {
+    if (typeof body.venueName !== 'string' || body.venueName.trim().length > 120)
+      throw new HttpError(400, 'venueName must be a string of at most 120 characters');
+    venueName = body.venueName.trim() || undefined;
+  }
+  const note = optionalPostponementText(body.note, 'note');
+
+  const request = (await repo.listPostponementsForTenant(ra.tenant)).find((r) => r.id === reqId);
+  if (!request) throw new HttpError(404, 'postponement request not found');
+  if (request.status === 'withdrawn')
+    throw postponementHttpError(
+      409,
+      'postponement_closed',
+      'a withdrawn request cannot be ruled on',
+    );
+  if (body.version !== undefined && body.version !== request.version)
+    throw postponementHttpError(409, 'version_conflict', 'postponement request changed; refetch');
+  const series = await repo.getSeries(ra.tenant, request.seriesId);
+  if (!series) throw postponementHttpError(409, 'fixture_changed', 'the series no longer exists');
+  const fixture = fixturesOf(series).find((f) => f.id === request.fixtureId);
+  if (!fixture) throw postponementHttpError(409, 'fixture_changed', 'the fixture no longer exists');
+  const moved = postponedFixture(fixture, request.id, {
+    date,
+    ...(time ? { time } : {}),
+    ...(venue ? { venue } : {}),
+    ...(venueName ? { venueName } : {}),
+  });
+  await applySeriesPatch(
+    ra.tenant,
+    series.id,
+    {
+      fixtures: fixturesOf(series).map((f) => (f.id === moved.id ? moved : f)),
+      version: series.version,
+    },
+    ra.email,
+  );
+  try {
+    const updated = await repo.resolvePostponement(ra.tenant, request.opposingClubId, reqId, {
+      status: 'admin-final',
+      at: now(),
+      by: ra.email,
+      via: 'admin',
+      proposal: {
+        by: 'admin',
+        date,
+        ...(time ? { time } : {}),
+        ...(venue ? { venueId: venue.id, venueName: venue.name } : {}),
+        ...(venueName ? { venueName } : {}),
+        ...(note ? { note } : {}),
+        at: now(),
+        byUser: ra.email,
+      },
+      fromStatuses: ['open', 'applied', 'admin-final', 'declined'],
+      expectedVersion: request.version,
+    });
+    await notifyPostponement(ra.tenant, updated, 'postponement-admin-final', ra.email, [
+      'requesting',
+      'opposing',
+    ]);
+    return c.json(updated);
+  } catch (err) {
+    throwPostponementError(err);
+  }
+});
+
+/**
+ * Rep-safe clash hints for the postponement date picker: per candidate move
+ * `{ seriesId, fixtureId, date, time? }` (1–20, the club's OWN fixtures in series it can see), three
+ * COARSE booleans — never the clashing fixture, ground or time:
+ *  - `groundBusy`: the fixture's ground is already booked at that date/slot. Computed ONLY over
+ *    fixtures whose venue is revealed to clubs: a busy signal derived from a withheld-venue fixture
+ *    would leak pre-reveal occupancy (ADR 0011), so withheld-venue series never book the ledger, and
+ *    a candidate in a withheld-venue series reports `false` (its own ground is not known to the
+ *    club).
+ *  - `homeTeamBusy` / `awayTeamBusy`: that side already plays that day (slot) in any series the club
+ *    can see — dates are never withheld. Withheld kick-off times are stripped first, so such
+ *    bookings own the whole day (conservative, and no hidden time leaks through slot matching).
+ * Everything is computed from the club-facing projection of released + active series only: drafts,
+ * unreleased series and future `activateFrom` series never influence a hint.
+ */
+app.post('/clubs/:id/clash-hints', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const clubId = c.req.param('id');
+  assertClubAccess(ra, clubId);
+  const body = (await c.req.json()) as { candidates?: unknown };
+  const candidates = body.candidates;
+  if (!Array.isArray(candidates) || candidates.length < 1 || candidates.length > 20)
+    throw new HttpError(400, 'candidates must be an array of 1–20 moves');
+  for (const cand of candidates) {
+    const rec = (cand ?? {}) as Record<string, unknown>;
+    if (typeof rec.seriesId !== 'string' || typeof rec.fixtureId !== 'string')
+      throw new HttpError(400, 'each candidate needs a string seriesId and fixtureId');
+    if (!isValidIsoDate(rec.date))
+      throw new HttpError(400, 'each candidate needs a valid YYYY-MM-DD date');
+    if (rec.time != null && (typeof rec.time !== 'string' || !POSTPONEMENT_TIME_RE.test(rec.time)))
+      throw new HttpError(400, 'candidate time must be HH:MM');
+  }
+  const today = tenantToday();
+  const [allSeries, clubs, venues, aliases] = await Promise.all([
+    repo.listSeries(ra.tenant),
+    repo.listClubs(ra.tenant),
+    repo.listVenues(ra.tenant),
+    repo.getTenantConfig(ra.tenant).then(venueAliasesFor),
+  ]);
+  const visible = allSeries
+    .map((s) => projectSeriesForClub(s, today))
+    .filter((s): s is Series => s !== null);
+  const visibleById = new Map(visible.map((s) => [s.id, s]));
+  const venueRevealed = visible.filter((s) => !isWithheld(s, 'venue'));
+  const results = (
+    candidates as Array<{ seriesId: string; fixtureId: string; date: string; time?: string }>
+  ).map((cand) => {
+    const s = visibleById.get(cand.seriesId);
+    const f = s ? fixturesOf(s).find((x) => x.id === cand.fixtureId) : undefined;
+    // Same 404 for missing, unreleased and not-yet-active — no existence leak.
+    if (!s || !f) throw new HttpError(404, 'fixture not found');
+    if (clubIdForSide(s, f.home) !== clubId && clubIdForSide(s, f.away) !== clubId)
+      throw new HttpError(403, 'your club does not play in this fixture');
+    // Same semantics as a proposal: no time keeps the fixture's current kick-off. A withheld time
+    // is never part of the question (the projection already dropped the fixture's own).
+    const time = isWithheld(s, 'time') ? undefined : (cand.time ?? f.time);
+    const moved: PostponableFixture = { ...f, date: cand.date };
+    if (time) moved.time = time;
+    else delete moved.time;
+    let groundBusy = false;
+    if (!isWithheld(s, 'venue')) {
+      const subject = {
+        ...s,
+        fixtures: fixturesOf(s).map((x) => (x.id === f.id ? moved : x)),
+      } as Series;
+      groundBusy = findClashes(subject, venueRevealed, clubs, venues, aliases).some(
+        (cl) => cl.fixtureId === f.id || (cl.with.seriesId === s.id && cl.with.fixtureId === f.id),
+      );
+    }
+    const busy = findTeamBusy(
+      visible,
+      { seriesId: s.id, fixtureId: f.id ?? '', home: f.home, away: f.away },
+      cand.date,
+      time,
+    );
+    return { groundBusy, homeTeamBusy: !!busy.home, awayTeamBusy: !!busy.away };
   });
   return c.json({ results });
 });

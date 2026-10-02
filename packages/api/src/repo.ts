@@ -47,6 +47,12 @@ import {
   outboundVeteransRequestsListKey,
   veteransRequestGsi1,
   veteransRequestsListGsi1pk,
+  postponementKey,
+  outboundPostponementKey,
+  postponementsListKey,
+  outboundPostponementsListKey,
+  postponementGsi1,
+  postponementsListGsi1pk,
   clearanceKey,
   inboundClearanceKey,
   clearancesListKey,
@@ -88,6 +94,8 @@ import type {
   PlayerStatus,
   VeteransAffiliation,
   VeteransRequest,
+  PostponementProposal,
+  PostponementRequest,
   PlayerClearance,
   CertificateMeta,
   CertificateRecord,
@@ -2015,6 +2023,349 @@ async function syncVeteransAffiliation(
       }),
     nk,
   );
+}
+
+// ── Fixture postponement requests (ADR 0015) ──
+//
+// A negotiation between the two clubs of a released fixture: the requesting club proposes a new
+// date, the sides counter until one accepts, and the route applies the agreed date to the fixture
+// through `applySeriesPatch`. Two rows, mirroring veterans requests — a canonical under the
+// OPPOSING club (gsi1 for the admin listing) and a mirror under the REQUESTING club (no gsi1).
+// Unlike veterans requests, EVERY transition rewrites both rows in ONE transaction conditioned on
+// the canonical, so the requesting club's view can never go stale on a partial failure.
+
+/** Raised when the canonical postponement request row cannot be found (→ 404). */
+export class PostponementNotFoundError extends Error {
+  constructor(message = 'postponement request not found') {
+    super(message);
+    this.name = 'PostponementNotFoundError';
+  }
+}
+
+/** Raised when a counter/accept arrives from the side that is NOT awaited (→ 409 not_your_turn). */
+export class PostponementTurnError extends Error {
+  constructor(message = 'it is not your turn to respond to this postponement') {
+    super(message);
+    this.name = 'PostponementTurnError';
+  }
+}
+
+/** Raised when a transition targets a request whose status no longer permits it (→ 409). */
+export class PostponementClosedError extends Error {
+  constructor(message = 'postponement request is no longer open') {
+    super(message);
+    this.name = 'PostponementClosedError';
+  }
+}
+
+/** The canonical (opposing club, gsi1) + mirror (requesting club, no gsi1) put items. */
+function postponementItems(tenant: string, r: PostponementRequest) {
+  return {
+    canonical: {
+      ...postponementKey(tenant, r.opposingClubId, r.id),
+      ...postponementGsi1(tenant, r.requestedAt),
+      ...r,
+    },
+    mirror: {
+      ...outboundPostponementKey(tenant, r.requestingClubId, r.id),
+      ...r,
+    },
+  };
+}
+
+/** Terminal postponement rows self-expire 90 days after resolution (epoch seconds). */
+function postponementExpiresAt(at: string): number {
+  const ms = Date.parse(at);
+  const base = Number.isNaN(ms) ? Date.now() : ms;
+  return Math.floor(base / 1000) + REQUEST_TTL_DAYS * 24 * 60 * 60;
+}
+
+/**
+ * Open a postponement request: write the canonical + mirror atomically. The canonical put's
+ * attribute_not_exists stops a replayed id from double-writing; the route's own open-request check
+ * is the per-fixture duplicate gate. The dynalite (offline/test) path has no TransactWriteItems →
+ * sequential fallback, as createVeteransRequest.
+ */
+export async function createPostponementRequest(
+  tenant: string,
+  r: PostponementRequest,
+): Promise<void> {
+  const { canonical, mirror } = postponementItems(tenant, r);
+  if (localEndpoint) {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: canonical,
+        ConditionExpression: 'attribute_not_exists(sk)',
+      }),
+    );
+    await ddb.send(new PutCommand({ TableName: TABLE, Item: mirror }));
+    return;
+  }
+  await ddb.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Put: {
+            TableName: TABLE,
+            Item: canonical,
+            ConditionExpression: 'attribute_not_exists(sk)',
+          },
+        },
+        { Put: { TableName: TABLE, Item: mirror } },
+      ],
+    }),
+  );
+}
+
+/** The canonical request (under the opposing club). */
+export async function getPostponement(
+  tenant: string,
+  opposingClubId: string,
+  id: string,
+): Promise<PostponementRequest | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: postponementKey(tenant, opposingClubId, id) }),
+  );
+  return stripKeys<PostponementRequest>(res.Item);
+}
+
+/** The mirror request (under the requesting club). */
+export async function getOutboundPostponement(
+  tenant: string,
+  requestingClubId: string,
+  id: string,
+): Promise<PostponementRequest | null> {
+  const res = await ddb.send(
+    new GetCommand({
+      TableName: TABLE,
+      Key: outboundPostponementKey(tenant, requestingClubId, id),
+    }),
+  );
+  return stripKeys<PostponementRequest>(res.Item);
+}
+
+/**
+ * A club's postponement requests, both directions, each from its OWN partition: `inbound` are the
+ * canonical rows (the club is opposing), `outbound` the mirrors (the club opened them).
+ */
+export async function listPostponementsForClub(
+  tenant: string,
+  clubId: string,
+): Promise<{ inbound: PostponementRequest[]; outbound: PostponementRequest[] }> {
+  const query = (pk: string, skPrefix: string) =>
+    queryAll({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+      ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    });
+  const inboundKey = postponementsListKey(tenant, clubId);
+  const outboundKey = outboundPostponementsListKey(tenant, clubId);
+  const [inbound, outbound] = await Promise.all([
+    query(inboundKey.pk, inboundKey.skPrefix),
+    query(outboundKey.pk, outboundKey.skPrefix),
+  ]);
+  return {
+    inbound: inbound.map((i) => stripKeys<PostponementRequest>(i)!),
+    outbound: outbound.map((i) => stripKeys<PostponementRequest>(i)!),
+  };
+}
+
+/** Every postponement request in the tenant (admin console) — one row per request via the gsi1. */
+export async function listPostponementsForTenant(tenant: string): Promise<PostponementRequest[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    IndexName: 'gsi1',
+    KeyConditionExpression: 'gsi1pk = :p',
+    ExpressionAttributeValues: { ':p': postponementsListGsi1pk(tenant) },
+  });
+  return items.map((i) => stripKeys<PostponementRequest>(i)!);
+}
+
+/**
+ * Write a transition: whole-item Put of the canonical (conditioned on its stored `version`, its
+ * `status` being one of `fromStatuses`, and — for a turn-based move — its `awaiting` side) plus the
+ * mirror, in ONE transaction. Both puts require the row to exist so a request erased mid-flight is
+ * never resurrected as a phantom. Dynalite has no TransactWriteItems → the same sequential fallback
+ * as create (conditional canonical first, then the mirror). A lost condition → VersionConflictError.
+ */
+async function writePostponementTransition(
+  tenant: string,
+  next: PostponementRequest,
+  cond: {
+    expectedVersion: number;
+    fromStatuses: PostponementRequest['status'][];
+    awaiting?: string;
+  },
+): Promise<void> {
+  const { canonical, mirror } = postponementItems(tenant, next);
+  const values: Record<string, unknown> = { ':v': cond.expectedVersion };
+  const statusKeys = cond.fromStatuses.map((s, i) => {
+    values[`:s${i}`] = s;
+    return `:s${i}`;
+  });
+  let condition = `attribute_exists(sk) AND version = :v AND #st IN (${statusKeys.join(', ')})`;
+  if (cond.awaiting) {
+    condition += ' AND awaiting = :aw';
+    values[':aw'] = cond.awaiting;
+  }
+  const canonicalPut = {
+    TableName: TABLE,
+    Item: canonical,
+    ConditionExpression: condition,
+    ExpressionAttributeNames: { '#st': 'status' },
+    ExpressionAttributeValues: values,
+  };
+  const mirrorPut = {
+    TableName: TABLE,
+    Item: mirror,
+    ConditionExpression: 'attribute_exists(sk)',
+  };
+  if (localEndpoint) {
+    try {
+      await ddb.send(new PutCommand(canonicalPut));
+    } catch (err) {
+      if (isCcf(err)) throw new VersionConflictError();
+      throw err;
+    }
+    await ddb.send(new PutCommand(mirrorPut));
+    return;
+  }
+  try {
+    await ddb.send(
+      new TransactWriteCommand({ TransactItems: [{ Put: canonicalPut }, { Put: mirrorPut }] }),
+    );
+  } catch (err: unknown) {
+    const name = (err as { name?: string }).name;
+    if (name === 'TransactionCanceledException') {
+      const reasons = (err as { CancellationReasons?: Array<{ Code?: string }> })
+        .CancellationReasons;
+      // The canonical lost its OCC guard → a concurrent transition won. A cancellation for any
+      // other reason (throttling, a missing mirror, TransactionConflict) is not a lost race —
+      // surface it rather than masking it as a version conflict.
+      if (reasons?.[0]?.Code === 'ConditionalCheckFailed') throw new VersionConflictError();
+    }
+    throw err;
+  }
+}
+
+/** Read the canonical and check the caller's expected version (when supplied) up front. */
+async function loadPostponementForWrite(
+  tenant: string,
+  opposingClubId: string,
+  id: string,
+  expectedVersion: number | undefined,
+): Promise<PostponementRequest> {
+  const current = await getPostponement(tenant, opposingClubId, id);
+  if (!current) throw new PostponementNotFoundError();
+  if (expectedVersion !== undefined && expectedVersion !== current.version)
+    throw new VersionConflictError();
+  return current;
+}
+
+/**
+ * Counter-propose: only the AWAITED side may move, and only while `open`. Appends the proposal and
+ * flips `awaiting` to the other side. Conditioned on `status = open AND version AND awaiting`.
+ */
+export async function counterPostponement(
+  tenant: string,
+  opposingClubId: string,
+  id: string,
+  opts: {
+    side: 'requesting' | 'opposing';
+    proposal: PostponementProposal;
+    expectedVersion?: number;
+  },
+): Promise<PostponementRequest> {
+  const current = await loadPostponementForWrite(tenant, opposingClubId, id, opts.expectedVersion);
+  if (current.status !== 'open') throw new PostponementClosedError();
+  if (current.awaiting !== opts.side) throw new PostponementTurnError();
+  const next: PostponementRequest = {
+    ...current,
+    proposals: [...(current.proposals ?? []), opts.proposal],
+    awaiting: opts.side === 'requesting' ? 'opposing' : 'requesting',
+    version: current.version + 1,
+  };
+  await writePostponementTransition(tenant, next, {
+    expectedVersion: current.version,
+    fromStatuses: ['open'],
+    awaiting: opts.side,
+  });
+  return next;
+}
+
+/**
+ * Terminal transition (`applied` | `admin-final` | `declined` | `withdrawn`). Conditioned on the
+ * stored status being one of `fromStatuses` (default: `open` only — an admin override passes the
+ * wider set it may overrule) and the version. Sets `awaiting: none`, the resolution audit and the
+ * 90-day TTL. An admin ruling may append its own `proposal` and always resets `acknowledgements`
+ * (each new ruling needs fresh acknowledgement from both chairs).
+ */
+export async function resolvePostponement(
+  tenant: string,
+  opposingClubId: string,
+  id: string,
+  opts: {
+    status: 'applied' | 'admin-final' | 'declined' | 'withdrawn';
+    at: string;
+    by: string;
+    via: 'portal' | 'admin';
+    declineReason?: string;
+    proposal?: PostponementProposal;
+    fromStatuses?: PostponementRequest['status'][];
+    expectedVersion?: number;
+  },
+): Promise<PostponementRequest> {
+  const fromStatuses = opts.fromStatuses ?? ['open'];
+  const current = await loadPostponementForWrite(tenant, opposingClubId, id, opts.expectedVersion);
+  if (!fromStatuses.includes(current.status)) throw new PostponementClosedError();
+  const next: PostponementRequest = {
+    ...current,
+    ...(opts.proposal ? { proposals: [...(current.proposals ?? []), opts.proposal] } : {}),
+    awaiting: 'none',
+    status: opts.status,
+    resolvedAt: opts.at,
+    resolvedBy: opts.by,
+    resolvedVia: opts.via,
+    ...(opts.declineReason ? { declineReason: opts.declineReason } : {}),
+    expiresAt: postponementExpiresAt(opts.at),
+    version: current.version + 1,
+  };
+  if (opts.status === 'admin-final') next.acknowledgements = {};
+  await writePostponementTransition(tenant, next, {
+    expectedVersion: current.version,
+    fromStatuses,
+  });
+  return next;
+}
+
+/**
+ * A chair acknowledges an admin-final ruling for their club. Idempotent: a club that already
+ * acknowledged gets the current row back unchanged. Conditioned on `status = admin-final` + version.
+ */
+export async function acknowledgePostponement(
+  tenant: string,
+  opposingClubId: string,
+  id: string,
+  opts: { clubId: string; at: string; by: string; expectedVersion?: number },
+): Promise<PostponementRequest> {
+  const current = await loadPostponementForWrite(tenant, opposingClubId, id, opts.expectedVersion);
+  if (current.status !== 'admin-final')
+    throw new PostponementClosedError('only an admin ruling can be acknowledged');
+  if (current.acknowledgements?.[opts.clubId]) return current;
+  const next: PostponementRequest = {
+    ...current,
+    acknowledgements: {
+      ...(current.acknowledgements ?? {}),
+      [opts.clubId]: { at: opts.at, byUser: opts.by },
+    },
+    version: current.version + 1,
+  };
+  await writePostponementTransition(tenant, next, {
+    expectedVersion: current.version,
+    fromStatuses: ['admin-final'],
+  });
+  return next;
 }
 
 // ── Player clearances (inter-club transfers) ──
@@ -5258,6 +5609,12 @@ export async function eraseTenantData(tenant: string): Promise<number> {
     for (const r of await listOutboundVeteransRequests(tenant, club.id)) {
       keys.push(outboundVeteransRequestKey(tenant, club.id, r.id));
     }
+    // Postponement requests (ADR 0015): canonical POSTPONE# under the opposing club + mirror
+    // OUTBOUND_POSTPONE# under the requesting club, neither in the gsi1/META listing.
+    const postponements = await listPostponementsForClub(tenant, club.id);
+    for (const r of postponements.inbound) keys.push(postponementKey(tenant, club.id, r.id));
+    for (const r of postponements.outbound)
+      keys.push(outboundPostponementKey(tenant, club.id, r.id));
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
   // Season runs are cohort data like series; leaving them behind would strand a
@@ -5327,6 +5684,11 @@ export async function clearCohort(tenant: string): Promise<number> {
     for (const r of await listOutboundVeteransRequests(tenant, club.id)) {
       keys.push(outboundVeteransRequestKey(tenant, club.id, r.id));
     }
+    // Postponement requests (ADR 0015): canonical + mirror — enumerate both prefixes per club.
+    const postponements = await listPostponementsForClub(tenant, club.id);
+    for (const r of postponements.inbound) keys.push(postponementKey(tenant, club.id, r.id));
+    for (const r of postponements.outbound)
+      keys.push(outboundPostponementKey(tenant, club.id, r.id));
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
   for (const r of await listSeasonRuns(tenant)) keys.push(seasonRunKey(tenant, r.id));
@@ -5516,6 +5878,16 @@ export async function eraseClubData(
   for (const r of await listOutboundVeteransRequests(tenant, club.id)) {
     keys.push(outboundVeteransRequestKey(tenant, club.id, r.id));
     keys.push(veteransRequestKey(tenant, r.primaryClubId, r.id));
+  }
+  // Postponement requests (ADR 0015) likewise span two partitions — delete each counterpart row.
+  const postponements = await listPostponementsForClub(tenant, club.id);
+  for (const r of postponements.inbound) {
+    keys.push(postponementKey(tenant, club.id, r.id));
+    keys.push(outboundPostponementKey(tenant, r.requestingClubId, r.id));
+  }
+  for (const r of postponements.outbound) {
+    keys.push(outboundPostponementKey(tenant, club.id, r.id));
+    keys.push(postponementKey(tenant, r.opposingClubId, r.id));
   }
 
   await batchDelete(uniqueKeys(keys));

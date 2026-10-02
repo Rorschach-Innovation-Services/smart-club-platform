@@ -16,7 +16,8 @@ export type EntityType =
   | 'CLEARANCE'
   | 'REGREVIEW'
   | 'VETAFFIL'
-  | 'VETREQ';
+  | 'VETREQ'
+  | 'POSTPONE';
 
 const tenantPrefix = (tenant: string) => `TENANT#${tenant}`;
 
@@ -219,6 +220,48 @@ export const veteransRequestGsi1 = (tenant: string, requestedAt: string) => ({
 
 /** gsi1pk used to query every veterans request in a tenant (admin console). */
 export const veteransRequestsListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#VETREQ`;
+
+/**
+ * A fixture POSTPONEMENT request (ADR 0015). Stored as two items, mirroring the veterans-request
+ * layout:
+ *  - CANONICAL, under the OPPOSING club (the one asked to agree): carries the gsi1 entry
+ *    (admin-wide listing).
+ *  - MIRROR, under the REQUESTING club (`OUTBOUND_POSTPONE#`): NO gsi1, so the admin lists each
+ *    request once.
+ * Every transition rewrites BOTH rows in one transaction conditioned on the canonical, so the
+ * requesting club's view never goes stale. Neither row has a META listing, so tenant/cohort/club
+ * erasure enumerates both prefixes.
+ */
+export const postponementKey = (tenant: string, opposingClubId: string, id: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${opposingClubId}`,
+  sk: `POSTPONE#${id}`,
+});
+
+export const outboundPostponementKey = (tenant: string, requestingClubId: string, id: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${requestingClubId}`,
+  sk: `OUTBOUND_POSTPONE#${id}`,
+});
+
+/** pk + sk-prefix to query the postponement requests a club was asked to agree (it is opposing). */
+export const postponementsListKey = (tenant: string, opposingClubId: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${opposingClubId}`,
+  skPrefix: 'POSTPONE#',
+});
+
+/** pk + sk-prefix to query the postponement requests a club opened (it is requesting). */
+export const outboundPostponementsListKey = (tenant: string, requestingClubId: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${requestingClubId}`,
+  skPrefix: 'OUTBOUND_POSTPONE#',
+});
+
+/** gsi1 attributes that make the canonical postponement request listable tenant-wide (admin). */
+export const postponementGsi1 = (tenant: string, requestedAt: string) => ({
+  gsi1pk: `${tenantPrefix(tenant)}#TYPE#POSTPONE`,
+  gsi1sk: requestedAt,
+});
+
+/** gsi1pk used to query every postponement request in a tenant (admin console). */
+export const postponementsListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#POSTPONE`;
 
 /**
  * Player clearance (inter-club transfer). Stored as two items:

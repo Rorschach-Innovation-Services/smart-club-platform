@@ -13,6 +13,11 @@ import {
   type RegLinkEmailInput,
   veteransRequestEmailContent,
   veteransRequestResolvedEmailContent,
+  postponementOpenedEmailContent,
+  postponementCounteredEmailContent,
+  postponementAgreedEmailContent,
+  postponementAdminFinalEmailContent,
+  postponementDeclinedEmailContent,
 } from '../src/notify/email.js';
 import { orgCopy } from '../src/branding.js';
 
@@ -166,5 +171,80 @@ describe('veteransRequestResolvedEmailContent (ADR 0013)', () => {
     assert.match(text, /Glenwood CC has declined the request to register Alex Player/);
     assert.match(text, /Reason: not eligible <this> year/);
     assert.match(html, /not eligible &lt;this&gt; year/);
+  });
+});
+
+describe('postponement notices (ADR 0015)', () => {
+  const fixtureLabel = 'Glenwood CC v Northlands CC · Premier League';
+
+  test('opened: names both dates, the reason, and escapes HTML', () => {
+    const { subject, text, html } = postponementOpenedEmailContent({
+      chairName: 'Pat',
+      requestingClubName: 'Glenwood CC',
+      fixtureLabel,
+      originalDate: '2026-11-07',
+      originalTime: '10:00',
+      proposedDate: '2026-11-14',
+      reason: 'Ground <flooded>',
+    });
+    assert.equal(subject, `Postponement request — ${fixtureLabel}`);
+    assert.match(text, /^Hello Pat,/);
+    assert.match(text, /scheduled for Sat 2026-11-07 at 10:00, to Sat 2026-11-14\./);
+    assert.match(text, /Reason from Glenwood CC: Ground <flooded>/);
+    assert.match(html, /Ground &lt;flooded&gt;/);
+  });
+
+  test('a time that is not passed in never appears (withheld times stay hidden)', () => {
+    const { text } = postponementCounteredEmailContent({
+      chairName: '',
+      counteringClubName: 'Northlands CC',
+      fixtureLabel,
+      originalDate: '2026-11-07',
+      proposedDate: '2026-11-21',
+    });
+    assert.match(text, /^Hello there,/);
+    assert.doesNotMatch(text, / at \d\d:\d\d/);
+  });
+
+  test('agreed / admin-final / declined / withdrawn copy', () => {
+    assert.match(
+      postponementAgreedEmailContent({
+        chairName: 'Pat',
+        fixtureLabel,
+        originalDate: '2026-11-07',
+        newDate: '2026-11-14',
+        newTime: '13:00',
+      }).text,
+      /is now on Sat 2026-11-14 at 13:00/,
+    );
+    const ruling = postponementAdminFinalEmailContent({
+      chairName: 'Pat',
+      fixtureLabel,
+      originalDate: '2026-11-07',
+      newDate: '2026-11-28',
+      venueName: 'Kings Park',
+    });
+    assert.match(ruling.text, /Venue: Kings Park/);
+    assert.match(ruling.text, /Please acknowledge this ruling in your club portal\./);
+    assert.match(
+      postponementDeclinedEmailContent({
+        chairName: 'Pat',
+        actingClubName: 'Northlands CC',
+        fixtureLabel,
+        originalDate: '2026-11-07',
+        outcome: 'declined',
+      }).text,
+      /Northlands CC has declined the request to postpone .*stays on Sat 2026-11-07\./,
+    );
+    assert.equal(
+      postponementDeclinedEmailContent({
+        chairName: 'Pat',
+        actingClubName: 'Glenwood CC',
+        fixtureLabel,
+        originalDate: '2026-11-07',
+        outcome: 'withdrawn',
+      }).subject,
+      `Postponement withdrawn — ${fixtureLabel}`,
+    );
   });
 });

@@ -500,7 +500,18 @@ export interface ClubCommEvent {
     // club (both clubs when the union office resolves as an override). Email-only, uncapped.
     | 'veterans-request'
     | 'veterans-request-accepted'
-    | 'veterans-request-declined';
+    | 'veterans-request-declined'
+    // Fixture postponement negotiation (ADR 0015). `postponement-request` is the opposing
+    // chair's heads-up when a request opens; `postponement-counter` the other chair's when a
+    // side counter-proposes; `postponement-agreed` / `postponement-admin-final` are recorded on
+    // BOTH clubs when the new date applies (chair agreement / union override);
+    // `postponement-declined` / `postponement-withdrawn` on the counterpart club. Email-only.
+    | 'postponement-request'
+    | 'postponement-counter'
+    | 'postponement-agreed'
+    | 'postponement-admin-final'
+    | 'postponement-declined'
+    | 'postponement-withdrawn';
   /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
   summary?: string;
 }
@@ -759,6 +770,69 @@ export interface VeteransRequest {
  * natural key on its roster GET), so they ship with `playerNaturalKey` intact.
  */
 export type VeteransRequestPublic = Omit<VeteransRequest, 'playerNaturalKey'>;
+
+/**
+ * One proposed new date in a fixture postponement negotiation (ADR 0015). `by` names the side
+ * that proposed it. `time` is carried only while the fixture's kick-off time is revealed to
+ * clubs (ADR 0011); a proposal without `time` keeps the fixture's current kick-off. `venueId` /
+ * `venueName` are set by an admin override only — chairs negotiate the date, not the ground.
+ */
+export interface PostponementProposal {
+  by: 'requesting' | 'opposing' | 'admin';
+  date: string;
+  time?: string;
+  /** Admin only. */
+  venueId?: string;
+  /** Admin only. */
+  venueName?: string;
+  note?: string;
+  at: string;
+  byUser: string;
+}
+
+/** Lifecycle of a postponement request (ADR 0015). `applied` / `admin-final` moved the fixture. */
+export type PostponementStatus = 'open' | 'applied' | 'admin-final' | 'declined' | 'withdrawn';
+
+/**
+ * A fixture postponement request (ADR 0015): one club asks to move a released fixture to a new
+ * date; the clubs negotiate by counter-proposal and the agreed date auto-applies to the fixture.
+ * The union admin may override with a final date/time/venue at any point (even after a chair
+ * agreement applied), which the chairs then acknowledge.
+ *
+ * Stored as a CANONICAL row under the OPPOSING club (`POSTPONE#<id>`, gsi1 for the admin listing)
+ * + a MIRROR under the REQUESTING club (`OUTBOUND_POSTPONE#<id>`, no gsi1). Every transition
+ * rewrites both rows in one transaction conditioned on the canonical, so the two never drift.
+ */
+export interface PostponementRequest {
+  id: string;
+  seriesId: string;
+  fixtureId: string;
+  /** The club that opened the request — partition owner of the mirror row. */
+  requestingClubId: string;
+  /** The fixture's other club — partition owner of the canonical row. Derived server-side. */
+  opposingClubId: string;
+  /** Snapshot of the fixture's date when the request opened — the accept-time baseline. */
+  originalDate: string;
+  /** Snapshot of the kick-off time at open; absent when the time was withheld (or unset). */
+  originalTime?: string;
+  reason?: string;
+  /** Every proposal in order; the LAST one is the current proposal on the table. */
+  proposals: PostponementProposal[];
+  /** Whose move it is while `open`; `none` once terminal. */
+  awaiting: 'requesting' | 'opposing' | 'none';
+  status: PostponementStatus;
+  /** clubId → acknowledgement of an admin-final ruling. Reset on every new admin ruling. */
+  acknowledgements?: Record<string, { at: string; byUser: string }>;
+  requestedAt: string;
+  requestedBy: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolvedVia?: 'portal' | 'admin';
+  declineReason?: string;
+  /** TTL (epoch seconds): set on a terminal row so it self-expires after 90 days. */
+  expiresAt?: number;
+  version: number;
+}
 
 /**
  * The finder response row (GET /clubs/:id/veterans-candidates): everything a requesting club may

@@ -16,8 +16,22 @@ import {
   sendClearanceReopenedDestEmail,
   sendVeteransRequestEmail,
   sendVeteransRequestResolvedEmail,
+  sendPostponementEmail,
+  postponementOpenedEmailContent,
+  postponementCounteredEmailContent,
+  postponementAgreedEmailContent,
+  postponementAdminFinalEmailContent,
+  postponementDeclinedEmailContent,
 } from './email.js';
-import type { TutorialLink, RegLinkOrgCopy } from './email.js';
+import type {
+  TutorialLink,
+  RegLinkOrgCopy,
+  PostponementOpenedEmailInput,
+  PostponementCounteredEmailInput,
+  PostponementAgreedEmailInput,
+  PostponementAdminFinalEmailInput,
+  PostponementDeclinedEmailInput,
+} from './email.js';
 import {
   sendStaffInviteWhatsApp,
   sendFixturesWhatsApp,
@@ -714,4 +728,96 @@ export async function sendVeteransRequestResolvedNotice(args: {
   } catch (err) {
     return { results: [{ channel: 'email', status: 'failed', to: email, error: errMessage(err) }] };
   }
+}
+
+// ───────────────────── Fixture postponement negotiation (ADR 0015) ─────────────────────
+//
+// Email only, same reasoning as the veterans notices (low volume, no WhatsApp template / billed
+// Meta conversation per request). Each function is called once per recipient chair; the caller
+// owns the club lookup, the `{ both }` fan-out on agree/admin-final and the comm-log append.
+// Non-throwing: a bad/blank chair email becomes a `skipped`/`failed` result.
+
+type PostponementChair = { name?: string; email?: string; cell?: string };
+
+async function sendChairPostponementNotice(
+  chair: PostponementChair,
+  render: (chairName: string) => { subject: string; text: string; html: string },
+  label: string,
+): Promise<{ results: SendResult[] }> {
+  const email = (chair.email ?? '').trim();
+  if (!EMAIL_RE.test(email)) {
+    return {
+      results: [
+        {
+          channel: 'email',
+          status: 'skipped',
+          ...(email ? { to: email } : {}),
+          error: 'no valid chair email on file',
+        },
+      ],
+    };
+  }
+  try {
+    const { messageId } = await sendPostponementEmail(
+      email,
+      render((chair.name ?? '').trim()),
+      label,
+    );
+    return { results: [{ channel: 'email', status: 'sent', to: email, messageId }] };
+  } catch (err) {
+    return { results: [{ channel: 'email', status: 'failed', to: email, error: errMessage(err) }] };
+  }
+}
+
+/** Notify the OPPOSING club chairman that the other club asked to postpone their fixture. */
+export function notifyPostponementOpened(
+  args: { chair: PostponementChair } & Omit<PostponementOpenedEmailInput, 'chairName'>,
+): Promise<{ results: SendResult[] }> {
+  const { chair, ...rest } = args;
+  return sendChairPostponementNotice(
+    chair,
+    (chairName) => postponementOpenedEmailContent({ ...rest, chairName }),
+    'postponement-request',
+  );
+}
+
+/** Notify the OTHER club chairman that a side counter-proposed a new date. */
+export function notifyPostponementCountered(
+  args: { chair: PostponementChair } & Omit<PostponementCounteredEmailInput, 'chairName'>,
+): Promise<{ results: SendResult[] }> {
+  const { chair, ...rest } = args;
+  return sendChairPostponementNotice(
+    chair,
+    (chairName) => postponementCounteredEmailContent({ ...rest, chairName }),
+    'postponement-counter',
+  );
+}
+
+/** The resolution notice inputs, discriminated by outcome. */
+export type PostponementResolvedNotice =
+  | ({ outcome: 'agreed' } & Omit<PostponementAgreedEmailInput, 'chairName'>)
+  | ({ outcome: 'admin-final' } & Omit<PostponementAdminFinalEmailInput, 'chairName'>)
+  | Omit<PostponementDeclinedEmailInput, 'chairName'>;
+
+/**
+ * Notify a club chairman that a postponement resolved: `agreed` (fixture moved by chair
+ * agreement) / `admin-final` (union ruling, acknowledge CTA) go to BOTH chairs; `declined` /
+ * `withdrawn` to the counterpart.
+ */
+export function notifyPostponementResolved(
+  args: { chair: PostponementChair } & PostponementResolvedNotice,
+): Promise<{ results: SendResult[] }> {
+  const { chair, ...notice } = args;
+  const render = (chairName: string) => {
+    if (notice.outcome === 'agreed') {
+      const { outcome: _o, ...input } = notice;
+      return postponementAgreedEmailContent({ ...input, chairName });
+    }
+    if (notice.outcome === 'admin-final') {
+      const { outcome: _o, ...input } = notice;
+      return postponementAdminFinalEmailContent({ ...input, chairName });
+    }
+    return postponementDeclinedEmailContent({ ...notice, chairName });
+  };
+  return sendChairPostponementNotice(chair, render, `postponement-${notice.outcome}`);
 }
