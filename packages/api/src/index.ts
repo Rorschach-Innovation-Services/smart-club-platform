@@ -55,6 +55,13 @@ import {
   type HonoEnv,
 } from './auth.js';
 import * as repo from './repo.js';
+import {
+  joinFixtureResults,
+  seriesIsSyncMapped,
+  stripResponseOnlyFixtureFields,
+} from './medicoach-sync/series-results.js';
+import { MedicoachSyncError, runMedicoachSync } from './medicoach-sync/puller.js';
+import { medicoachSyncSecret, medicoachSyncUrl } from './env.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
 import { clubIdFromName } from './club-id.js';
 import {
@@ -1817,6 +1824,7 @@ app.use('/venues', authenticate, requireTenantMembership);
 app.use('/tenant/config', authenticate, requireTenantMembership);
 app.use('/tenant/support', authenticate, requireTenantMembership);
 app.use('/admin/*', authenticate, requireTenantMembership, requireAdmin);
+app.use('/integrations/*', authenticate, requireTenantMembership, requireAdmin);
 // Platform operator portal — tenant-INDEPENDENT (no requireTenantMembership /
 // host resolution): the '*'/operator membership itself is the authorization.
 app.use('/platform/*', authenticate, requirePlatformOperator);
@@ -3768,12 +3776,25 @@ async function seriesScheduleCalendars(
 
 app.get('/series', async (c) => {
   const ra = c.get('requestAuth')!;
-  const all = await repo.listSeries(ra.tenant);
+  // Medicoach-owned results (ADR 0016) live in their own FIXRESULT# items and are joined
+  // onto each fixture as a response-only `result` (scores + medicoach link, never captain
+  // data); a fixture with a result reads as completed.
+  const [all, results] = await Promise.all([
+    repo.listSeries(ra.tenant),
+    repo.listFixtureResults(ra.tenant),
+  ]);
   // Admins get the raw list (drafts, unreleased venues/times, approval state). Everyone
   // else sees the club-facing projection: released + activated series only, with any
   // withheld fields stripped (ADR 0011). Release filtering used to be client-only, which
   // leaked every draft and all fields to reps.
-  if (ra.membership.role === 'admin') return c.json(all);
+  if (ra.membership.role === 'admin') {
+    // `syncMapped` marks the fixtures whose result medicoach owns, so the console locks
+    // the manual "completed" status there (and only there).
+    const config = await repo.getTenantConfig(ra.tenant);
+    return c.json(
+      joinFixtureResults(all, results, (s) => seriesIsSyncMapped(ra.tenant, s, config)),
+    );
+  }
   const today = tenantToday();
   // Legacy series (created before the `participants` snapshot existed) carry no team
   // identity, so a rep's client — which can't call the admin-only GET /clubs — renders
@@ -3782,10 +3803,13 @@ app.get('/series', async (c) => {
   // has the snapshot and is left untouched. Clubs are loaded once per request.
   const clubsById = new Map((await repo.listClubs(ra.tenant)).map((cl) => [cl.id, cl]));
   return c.json(
-    all
-      .map((s) => projectSeriesForClub(s, today))
-      .filter((s): s is Series => s !== null)
-      .map((s) => withLegacyParticipants(s, clubsById)),
+    joinFixtureResults(
+      all
+        .map((s) => projectSeriesForClub(s, today))
+        .filter((s): s is Series => s !== null)
+        .map((s) => withLegacyParticipants(s, clubsById)),
+      results,
+    ),
   );
 });
 
@@ -3816,6 +3840,9 @@ async function createSeries(
   // already written the earlier series.
   if (typeof series?.startDate !== 'string' || !series.startDate.trim())
     throw new HttpError(400, 'a series needs a start date');
+  // GET /series' response-only fixture keys (a joined result, `syncMapped`) never persist.
+  if (series.fixtures !== undefined)
+    series.fixtures = stripResponseOnlyFixtureFields(series.fixtures) as unknown[];
   // A POST must never overwrite an existing series. `putSeries` is an unconditional Put
   // and this body is built fresh with `released: false`, `releasedAt: null`, `version: 1`
   // — so a POST landing on a live id would recall a schedule clubs and players have
@@ -3883,6 +3910,10 @@ async function applySeriesPatch(
 ): Promise<Series> {
   const current = await repo.getSeries(tenant, id);
   if (!current) throw new HttpError(404, 'series not found');
+  // A whole-series PATCH echoes GET /series' response-only fixture keys (the joined
+  // medicoach result, `syncMapped`); they never belong in the series item (ADR 0016).
+  if (patch.fixtures !== undefined)
+    patch.fixtures = stripResponseOnlyFixtureFields(patch.fixtures) as unknown[];
   // Same gsi1-sort-key guard as POST. `updateSeries` rewrites `gsi1sk` from the patched
   // `startDate` on every write, so a blank one here is the identical DynamoDB failure,
   // with the identical property that dynalite won't catch it.
@@ -4124,6 +4155,30 @@ function inSeasonClashRefusal(
  * subject changes each time. That is fine at today's tenant sizes; revisit if a tenant's
  * fixture count makes 20 rebuilds per pre-check felt.
  */
+/**
+ * Admin "Sync now" (ADR 0016): run the medicoach puller for the caller's tenant right away,
+ * instead of waiting for the 15-minute cron. Same code path as the cron; returns the run
+ * summary (counts only — never a pulled payload). 409 when the tenant has no sync; 502 when
+ * medicoach can't be reached or answers outside the contract. With the sync secrets unset
+ * the run is a dry run (`status: 'dry-run'`, nothing requested).
+ */
+app.post('/integrations/medicoach/sync-now', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  try {
+    const summary = await runMedicoachSync(tenant, 'manual', {
+      repo,
+      url: medicoachSyncUrl(),
+      secret: medicoachSyncSecret(),
+    });
+    if (summary.status === 'disabled')
+      throw new HttpError(409, 'the medicoach sync is not enabled for this tenant');
+    return c.json(summary);
+  } catch (err) {
+    if (err instanceof MedicoachSyncError) throw new HttpError(502, err.message);
+    throw err;
+  }
+});
+
 app.post('/series/:id/clash-check', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   const id = c.req.param('id');
@@ -5016,6 +5071,13 @@ app.post('/series/:id/duplicate', requireAdmin, async (c) => {
   // original, not the clone. Reset the sign-off state so the copy can't start approved.
   delete copy.withheld;
   delete copy.revealedAt;
+  // The copy's fixtures are new matches: an explicit sync ref (a recipe knockout) and the
+  // sync's slot bookkeeping belong to the original, or two fixtures would claim one ref.
+  copy.fixtures = ((orig.fixtures as Array<Record<string, unknown>>) ?? []).map((f) => {
+    if (!f || typeof f !== 'object') return f;
+    const { syncRef: _ref, slots: _slots, schedule: _schedule, ...rest } = f;
+    return rest;
+  });
   await repo.putSeries(tenant, copy);
   return c.json(copy, 201);
 });
@@ -5629,6 +5691,7 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { orgContact?: unknown }).orgContact;
   delete (patch as { sport?: unknown }).sport;
   delete (patch as { seasonLabel?: unknown }).seasonLabel;
+  delete (patch as { integrations?: unknown }).integrations;
   const next = await applyTenantConfigPatch(tenant, patch, { preserveOperatorBindings: true });
   return c.json(next);
 });
@@ -6045,6 +6108,28 @@ function keepStoredCompetitions(incoming: League[], stored: League[]): League[] 
  * below are best-effort, not atomic: a concurrent tenant-admin league write can
  * land between the reads and the final Put (same accepted window as branding).
  */
+/**
+ * `integrations` on PUT /platform/tenants/:slug (operator-only). Only
+ * `medicoach.goLiveDate` exists: YYYY-MM-DD, or ''/null to clear it.
+ */
+function validateIntegrations(value: unknown): TenantConfig['integrations'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new HttpError(400, 'integrations must be an object');
+  const medicoach = (value as { medicoach?: unknown }).medicoach;
+  if (medicoach === undefined || medicoach === null) return {};
+  if (typeof medicoach !== 'object' || Array.isArray(medicoach))
+    throw new HttpError(400, 'integrations.medicoach must be an object');
+  const goLive = (medicoach as { goLiveDate?: unknown }).goLiveDate;
+  if (goLive === undefined || goLive === null || goLive === '') return { medicoach: {} };
+  if (
+    typeof goLive !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(goLive) ||
+    Number.isNaN(Date.parse(`${goLive}T00:00:00Z`))
+  )
+    throw new HttpError(400, 'integrations.medicoach.goLiveDate must be a date (YYYY-MM-DD)');
+  return { medicoach: { goLiveDate: goLive } };
+}
+
 app.put('/platform/tenants/:slug', async (c) => {
   const slug = c.req.param('slug');
   const body = await c.req.json<Partial<TenantConfig>>();
@@ -6191,6 +6276,7 @@ app.put('/platform/tenants/:slug', async (c) => {
     patch.clearanceCertTemplate = validateCertTemplate(body.clearanceCertTemplate);
   }
   if (body.orgContact !== undefined) patch.orgContact = validateOrgContact(body.orgContact);
+  if (body.integrations !== undefined) patch.integrations = validateIntegrations(body.integrations);
   // Calendars, structures and the league setups binding them go through the shared
   // operator write (validation, version minting, referrer guards, calendar-edit warnings).
   if (body.calendars !== undefined) patch.calendars = body.calendars;

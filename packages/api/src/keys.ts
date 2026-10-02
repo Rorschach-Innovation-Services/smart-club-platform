@@ -353,5 +353,45 @@ export const operatorGsi1 = (email: string) => ({
 
 export const OPERATORS_GSI1PK = 'PLATFORM#OPERATORS';
 
+/**
+ * A medicoach-owned fixture RESULT (ADR 0016), one item per fixture. Deliberately NOT inside
+ * the series item: results arrive from the sync puller at any moment, and a whole-series
+ * admin PATCH (or an importer's putSeries) would otherwise overwrite them or lose them to a
+ * version conflict. All of a tenant's results share one partition so GET /series joins them
+ * with a single Query. The item may hold a captain's player ref (a hashed ID number), so it
+ * is personal data: never served raw, and erased explicitly (eraseTenantData/clearCohort).
+ */
+export const fixtureResultKey = (tenant: string, seriesId: string, fixtureId: string) => ({
+  pk: `${tenantPrefix(tenant)}#FIXRESULT`,
+  sk: `FIXRESULT#${seriesId}#${fixtureId}`,
+});
+
+/** pk + sk-prefix to query every result in a tenant. */
+export const fixtureResultsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#FIXRESULT`,
+  skPrefix: 'FIXRESULT#',
+});
+
+/** The medicoach sync puller's cursor (the last `nextCursor` it fully processed). */
+export const syncCursorKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `SYNCCURSOR#${tenant}`,
+});
+
+/** One audit row per notable sync run: counts and outcomes only, never player refs. */
+export const syncLogKey = (tenant: string, iso: string, id: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `SYNCLOG#${iso}#${id}`,
+});
+
+/** pk + sk-prefix to query a tenant's sync audit rows (newest last). */
+export const syncLogsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'SYNCLOG#',
+});
+
+/** pk of the whole SYNC partition (cursor + logs), for erasure. */
+export const syncPartitionPk = (tenant: string) => `${tenantPrefix(tenant)}#SYNC`;
+
 /** Prefix used to erase an entire tenant's non-user items. */
 export const tenantErasurePrefix = (tenant: string) => `${tenantPrefix(tenant)}#`;

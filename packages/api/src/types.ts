@@ -316,9 +316,19 @@ export interface TenantConfig {
    * Per-tenant feature flags, read via hasFeature() (features.ts) so each flag
    * carries its own default. Known flags: 'whatsappInvites' (default TRUE —
    * shared WABA templates are dolphins-flavored, so new clients launch
-   * email-only), 'selfServeBranding' (reserved, default false).
+   * email-only), 'selfServeBranding' (reserved, default false), 'medicoachSync' (default
+   * false — the medicoach fixture/result sync puller runs for this tenant, ADR 0016).
    */
   features?: Record<string, boolean>;
+  /**
+   * Third-party integration settings. Operator-only (ADR 0006): PUT /tenant/config strips
+   * it, only PUT /platform/tenants/:slug writes it.
+   *  - medicoach.goLiveDate (YYYY-MM-DD): results for matches before this date never open
+   *    captain's reports (Slice 2.3); stored now, read by the result hook.
+   */
+  integrations?: {
+    medicoach?: { goLiveDate?: string };
+  };
   /**
    * Operator "setup complete" milestone (D6) — informational only (the client is
    * publicly live from creation and every setting stays editable). Present ⇒ an
@@ -1049,4 +1059,72 @@ export interface RegistrationReview {
   resolvedAt?: string;
   resolvedBy?: string;
   version: number;
+}
+
+/**
+ * A medicoach-owned fixture result (ADR 0016), stored as its own FIXRESULT# item per fixture
+ * so a whole-series PATCH can never overwrite or drop it. Written ONLY by the sync puller.
+ *
+ * Ordering: `orderAt` is the newest of `recordedAt` / `clearedAt` ever applied. A pulled
+ * result is stored only when its `recordedAt` is newer, a clear only when its
+ * `resultClearedAt` is newer — so an out-of-order or replayed change can never win. A
+ * cleared result keeps its item as a tombstone (`cleared: true`, no score fields).
+ *
+ * `captainRef` is a player ref = a hashed ID number: personal data. It is never returned by
+ * any route and never logged; it exists for the captain's report recipient (Slice 2.3).
+ */
+export interface StoredFixtureResult {
+  seriesId: string;
+  fixtureId: string;
+  /** The fixture ref medicoach sent (fixture refs carry no personal data). */
+  ref: string;
+  orderAt: string;
+  cleared?: boolean;
+  clearedAt?: string;
+  homeScore?: string | null;
+  awayScore?: string | null;
+  summary?: string | null;
+  winner?: 'home' | 'away' | 'tie' | 'none' | null;
+  method?: string | null;
+  noResult?: boolean;
+  resultSource?: 'live' | 'manual' | 'import';
+  recordedAt?: string;
+  scoringSide?: 'home' | 'away' | null;
+  captainRef?: string | null;
+  medicoachMatchUrl?: string | null;
+  storedAt: string;
+}
+
+/** The read-only result joined onto a fixture in GET /series (no captain/player data). */
+export interface FixtureResultView {
+  homeScore: string | null;
+  awayScore: string | null;
+  summary: string | null;
+  winner: 'home' | 'away' | 'tie' | 'none' | null;
+  method: string | null;
+  noResult: boolean;
+  source: 'live' | 'manual' | 'import';
+  recordedAt: string;
+  medicoachMatchUrl: string | null;
+}
+
+/** One SYNCLOG# audit row: counts and outcomes only — never player refs. */
+export interface SyncLogEntry {
+  id: string;
+  at: string;
+  trigger: 'cron' | 'manual';
+  outcome: 'ok' | 'error';
+  pages: number;
+  fixtures: number;
+  counts: {
+    resultsStored: number;
+    resultsStale: number;
+    resultsCleared: number;
+    unmapped: number;
+    slotsFilled: number;
+    scheduleDiffers: number;
+  };
+  /** Fixture refs whose medicoach schedule differs from smart club's (not applied yet). */
+  scheduleDiffersRefs?: string[];
+  error?: string;
 }

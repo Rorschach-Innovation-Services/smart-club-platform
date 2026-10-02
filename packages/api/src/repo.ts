@@ -71,6 +71,12 @@ import {
   operatorMarkerKey,
   operatorGsi1,
   OPERATORS_GSI1PK,
+  fixtureResultKey,
+  fixtureResultsListKey,
+  syncCursorKey,
+  syncLogKey,
+  syncLogsListKey,
+  syncPartitionPk,
 } from './keys.js';
 import { PLATFORM_TENANT } from './types.js';
 import type {
@@ -96,6 +102,8 @@ import type {
   RejectSnapshot,
   RegistrationReview,
   RegistrationReviewResolution,
+  StoredFixtureResult,
+  SyncLogEntry,
 } from './types.js';
 
 import { tableName } from './env.js';
@@ -914,6 +922,127 @@ export async function updateSeries(
 
 export async function deleteSeries(tenant: string, seriesId: string): Promise<void> {
   await ddb.send(new DeleteCommand({ TableName: TABLE, Key: seriesKey(tenant, seriesId) }));
+}
+
+// ── Medicoach sync: fixture results, cursor, audit log (ADR 0016) ──
+
+/** Every stored result (tombstones included) for a tenant — one Query on one partition. */
+export async function listFixtureResults(tenant: string): Promise<StoredFixtureResult[]> {
+  const { pk, skPrefix } = fixtureResultsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<StoredFixtureResult>(i)!);
+}
+
+export async function getFixtureResult(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<StoredFixtureResult | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: fixtureResultKey(tenant, seriesId, fixtureId) }),
+  );
+  return stripKeys<StoredFixtureResult>(res.Item);
+}
+
+/**
+ * Write a result (or a clear tombstone) ONLY if its `orderAt` is strictly newer than the
+ * stored one — the conditional Put is the ordering guarantee, so two concurrent pulls (cron
+ * + "Sync now") can never let an older change win. Returns false when the stored item is
+ * as new or newer (a replay or an out-of-order change), which is not an error.
+ */
+export async function putFixtureResultIfNewer(
+  tenant: string,
+  result: StoredFixtureResult,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...result, ...fixtureResultKey(tenant, result.seriesId, result.fixtureId) },
+        ConditionExpression: 'attribute_not_exists(pk) OR orderAt < :o',
+        ExpressionAttributeValues: { ':o': result.orderAt },
+      }),
+    );
+    return true;
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
+async function listFixtureResultKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
+  const { pk, skPrefix } = fixtureResultsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+/** The puller's cursor, or null before the first pull (⇒ a full resync). */
+export async function getSyncCursor(tenant: string): Promise<string | null> {
+  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: syncCursorKey(tenant) }));
+  const cursor = res.Item?.cursor;
+  return typeof cursor === 'string' ? cursor : null;
+}
+
+export async function putSyncCursor(tenant: string, cursor: string): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...syncCursorKey(tenant), cursor, updatedAt: new Date().toISOString() },
+    }),
+  );
+}
+
+/** SYNCLOG# rows self-expire after this long (DynamoDB TTL on `expiresAt`). */
+const SYNC_LOG_TTL_SECONDS = 90 * 24 * 3600;
+
+export async function putSyncLog(tenant: string, entry: SyncLogEntry): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...entry,
+        ...syncLogKey(tenant, entry.at, entry.id),
+        expiresAt: Math.floor(Date.parse(entry.at) / 1000) + SYNC_LOG_TTL_SECONDS,
+      },
+    }),
+  );
+}
+
+/** A tenant's sync audit rows, newest first. */
+export async function listSyncLogs(tenant: string, limit = 50): Promise<SyncLogEntry[]> {
+  const { pk, skPrefix } = syncLogsListKey(tenant);
+  const res = await ddb.send(
+    new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+      ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+      ScanIndexForward: false,
+      Limit: limit,
+    }),
+  );
+  return (res.Items ?? []).map((i) => {
+    const { expiresAt: _ttl, ...rest } = stripKeys<SyncLogEntry & { expiresAt?: number }>(i)!;
+    return rest;
+  });
+}
+
+async function listSyncPartitionKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p',
+    ExpressionAttributeValues: { ':p': syncPartitionPk(tenant) },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
 }
 
 // ── Season runs (ADR 0008) ──
@@ -5269,6 +5398,10 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   // the same exposure — miss them and a deleted tenant's ground list survives.
   for (const k of await listExportLogKeys(tenant)) keys.push(k);
   for (const k of await listVenueKeys(tenant)) keys.push(k);
+  // Medicoach sync (ADR 0016): results (may hold a captain's player ref — PII) and the
+  // SYNC partition (cursor + audit rows) have no gsi1/META listing; enumerate them.
+  for (const k of await listFixtureResultKeys(tenant)) keys.push(k);
+  for (const k of await listSyncPartitionKeys(tenant)) keys.push(k);
 
   const unique = uniqueKeys(keys);
   await batchDelete(unique);
@@ -5330,6 +5463,8 @@ export async function clearCohort(tenant: string): Promise<number> {
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
   for (const r of await listSeasonRuns(tenant)) keys.push(seasonRunKey(tenant, r.id));
+  // Results belong to the series being cleared (and may hold a player ref — PII).
+  for (const k of await listFixtureResultKeys(tenant)) keys.push(k);
 
   // Safety: never delete the tenant config or any user record.
   for (const k of keys) {

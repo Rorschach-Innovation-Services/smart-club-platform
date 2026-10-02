@@ -208,6 +208,48 @@ type SelectedPlayerState = PlayerRegistration & { clubName?: string };
    Only the operator-facing moves get a pill — a plain allocated ground or a Union T20
    slot is the normal case and gets none. Prefixes match what the allocator/import write
    (see packages/engine/src/venues.ts and packages/api/src/import-planb-fixtures.ts). */
+/**
+ * A fixture's display status. A medicoach result (joined onto the fixture by GET /series,
+ * ADR 0016) makes it completed whatever the stored status says.
+ */
+function fixtureStatus(f: { status?: string; result?: unknown }): string {
+  return f.result ? 'completed' : f.status || 'scheduled';
+}
+
+interface FixtureResultView {
+  homeScore: string | null;
+  awayScore: string | null;
+  summary: string | null;
+  noResult: boolean;
+  medicoachMatchUrl: string | null;
+}
+
+/** Read-only medicoach result under a fixture's status pill: score, summary, link. */
+function FixtureResult({ result }: { result: FixtureResultView }) {
+  const score =
+    result.homeScore || result.awayScore
+      ? `${result.homeScore ?? '–'} v ${result.awayScore ?? '–'}`
+      : null;
+  return (
+    <div className="fix-row-result" aria-label="Result from medicoach">
+      {score && <div className="fix-row-result-score">{score}</div>}
+      {(result.summary || result.noResult) && (
+        <div className="fix-row-result-summary">{result.summary || 'No result'}</div>
+      )}
+      {result.medicoachMatchUrl && (
+        <a
+          className="fix-row-result-link"
+          href={result.medicoachMatchUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          View in medicoach
+        </a>
+      )}
+    </div>
+  );
+}
+
 function venueReasonPill(reason?: string, status?: string): string | null {
   if (!reason || status === 'home') return null;
   if (reason.startsWith(VENUE_REASON_PREFIX.movedToAvoid)) return 'moved';
@@ -1244,15 +1286,14 @@ export function FixtureTable({
     totalKm += r.c.roundTripKm;
     totalCost += r.c.fuelR;
   });
-  const rows =
-    filter === 'all' ? allRows : allRows.filter((r) => (r.f.status || 'scheduled') === filter);
+  const rows = filter === 'all' ? allRows : allRows.filter((r) => fixtureStatus(r.f) === filter);
 
   const statusCounts = {
     all: allRows.length,
-    scheduled: allRows.filter((r) => (r.f.status || 'scheduled') === 'scheduled').length,
-    completed: allRows.filter((r) => r.f.status === 'completed').length,
-    postponed: allRows.filter((r) => r.f.status === 'postponed').length,
-    cancelled: allRows.filter((r) => r.f.status === 'cancelled').length,
+    scheduled: allRows.filter((r) => fixtureStatus(r.f) === 'scheduled').length,
+    completed: allRows.filter((r) => fixtureStatus(r.f) === 'completed').length,
+    postponed: allRows.filter((r) => fixtureStatus(r.f) === 'postponed').length,
+    cancelled: allRows.filter((r) => fixtureStatus(r.f) === 'cancelled').length,
   };
 
   return (
@@ -1436,7 +1477,7 @@ export function FixtureTable({
                   />
                 );
               }
-              const status = f.status || 'scheduled';
+              const status = fixtureStatus(f);
               return (
                 <tr
                   key={f.id}
@@ -1448,7 +1489,9 @@ export function FixtureTable({
                     <span className="fix-row-rd">R{f.round}</span>
                   </td>
                   <td>
-                    <span className="fix-row-date">{formatWeekdayDay(f.date)}</span>
+                    <span className="fix-row-date">
+                      {f.dateTbc ? 'Date TBC' : formatWeekdayDay(f.date)}
+                    </span>
                     {/* Shown only when the schedule set a start time (double-headers,
                         morning/afternoon slots) — most series have neither. "Time TBC"
                         below only appears when the series itself uses times elsewhere;
@@ -1533,6 +1576,7 @@ export function FixtureTable({
                   </td>
                   <td>
                     <span className={`fix-status ${status}`}>{status}</span>
+                    {f.result && <FixtureResult result={f.result} />}
                   </td>
                   <td>
                     <div className="fix-row-actions">
@@ -2192,7 +2236,11 @@ function EditFixtureRow({
               onChange={(e) => u('status', e.target.value)}
             >
               <option value="scheduled">Scheduled</option>
-              <option value="completed">Completed</option>
+              {/* Medicoach owns the result of a synced fixture (ADR 0016) — it turns
+                  completed when the result arrives, never by hand. */}
+              <option value="completed" disabled={fixture.syncMapped === true}>
+                {fixture.syncMapped ? 'Completed (set by medicoach)' : 'Completed'}
+              </option>
               <option value="postponed">Postponed</option>
               <option value="cancelled">Cancelled</option>
             </select>

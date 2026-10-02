@@ -257,6 +257,15 @@ export default $config({
     const candidateHandleSecret = new sst.Secret('CandidateHandleSecret', '');
     const whatsappAccessToken = new sst.Secret('WhatsappAccessToken', '');
     const whatsappPhoneNumberId = new sst.Secret('WhatsappPhoneNumberId', '');
+    // ── Medicoach fixture/result sync (ADR 0016) ── Smart club PULLS from medicoach. The URL
+    // is the medicoach API base (e.g. https://api.medicoach.co.za); the secret is the shared
+    // HMAC key (== medicoach's SmartClubSyncSecret). Both default to '' and an empty value is
+    // the DRY-RUN switch: the puller logs the request it would make and calls nothing. Set
+    // them only after a dry-run weekend:
+    //   sst secret set MedicoachSyncUrl https://… --stage <stage>
+    //   sst secret set MedicoachSyncSecret $(openssl rand -hex 32) --stage <stage>
+    const medicoachSyncUrl = new sst.Secret('MedicoachSyncUrl', '');
+    const medicoachSyncSecret = new sst.Secret('MedicoachSyncSecret', '');
     // Template NAMES/languages are NOT secrets — they live in the code registry
     // packages/api/src/notify/whatsapp-templates.ts. A template name only changes when
     // the template is created/renamed in Meta (a code change, since the sender's param
@@ -474,6 +483,9 @@ export default $config({
         candidateHandleSecret,
         whatsappAccessToken,
         whatsappPhoneNumberId,
+        // POST /integrations/medicoach/sync-now runs the puller in the API Lambda.
+        medicoachSyncUrl,
+        medicoachSyncSecret,
       ],
       // SES isn't covered by `link` (it's not an SST resource), so grant it directly.
       // SES authorizes by verified identity, not resource ARN, hence resources: ['*'].
@@ -535,6 +547,9 @@ export default $config({
         CANDIDATE_HANDLE_SECRET: candidateHandleSecret.value,
         WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
         WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+        // Medicoach sync (ADR 0016) — empty ⇒ the "Sync now" route dry-runs.
+        MEDICOACH_SYNC_URL: medicoachSyncUrl.value,
+        MEDICOACH_SYNC_SECRET: medicoachSyncSecret.value,
         // Template names/languages come from the code registry (whatsapp-templates.ts),
         // not the Lambda env — see the note by the secrets above.
         // Force dry-run regardless of secrets (set NOTIFY_DRY_RUN=1 in the deploy env)
@@ -558,6 +573,27 @@ export default $config({
       // esbuild can't see — without this they silently miss the bundle and the first
       // issuance fails. Lands at <function root>/certificates/fonts (see render-common.ts).
       copyFiles: [{ from: 'packages/api/src/certificates/fonts', to: 'certificates/fonts' }],
+    });
+
+    // ── Medicoach sync puller (ADR 0016) ── One cron, every 15 minutes, all day (user
+    // decision: worst-case 15 min delay at ~672 runs a week). It pulls changed fixtures for
+    // every tenant with `features.medicoachSync`; a quiet run is a handful of small reads.
+    // Dry-runs (logs only) while the MedicoachSync* secrets are empty.
+    new sst.aws.Cron('MedicoachSyncPuller', {
+      schedule: 'rate(15 minutes)',
+      function: {
+        handler: 'packages/api/src/medicoach-sync/cron.handler',
+        link: [table, medicoachSyncUrl, medicoachSyncSecret],
+        timeout: '5 minutes',
+        environment: {
+          TABLE_NAME: table.name,
+          STAGE: $app.stage,
+          SENTRY_DSN: sentryDsnApi.value,
+          SENTRY_RELEASE: sentryRelease,
+          MEDICOACH_SYNC_URL: medicoachSyncUrl.value,
+          MEDICOACH_SYNC_SECRET: medicoachSyncSecret.value,
+        },
+      },
     });
 
     return {

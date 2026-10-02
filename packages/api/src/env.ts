@@ -57,3 +57,22 @@ export function candidateHandleSecret(): string {
     'CANDIDATE_HANDLE_SECRET not set (run: sst secret set CandidateHandleSecret <hex> --stage <stage>)',
   );
 }
+
+/**
+ * Medicoach fixture-sync endpoint + shared HMAC secret (ADR 0016). Lambda: env vars set in
+ * sst.config.ts from the `MedicoachSyncUrl` / `MedicoachSyncSecret` secrets; CLI under
+ * `sst shell`: the linked secret resources. Both default to '' — and an empty value is the
+ * DRY-RUN switch (the puller logs what it would request and makes no HTTP call), so the
+ * stack deploys and the cron runs harmlessly before the secrets are set.
+ */
+export function medicoachSyncUrl(): string {
+  return (
+    process.env.MEDICOACH_SYNC_URL ??
+    fromSstResource('MedicoachSyncUrl', 'value') ??
+    ''
+  ).replace(/\/+$/, '');
+}
+
+export function medicoachSyncSecret(): string {
+  return process.env.MEDICOACH_SYNC_SECRET ?? fromSstResource('MedicoachSyncSecret', 'value') ?? '';
+}
