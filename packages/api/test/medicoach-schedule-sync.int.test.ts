@@ -1220,6 +1220,33 @@ describe('Slice 4 — generate and rebase refuse to orphan synced refs', () => {
     ]);
   });
 
+  test('generate keeps sync-owned fields on same-id same-match fixtures', async () => {
+    await seedRun();
+    const s = (await repo.getSeries(T, SID))!;
+    const fixtures = structuredClone(s.fixtures) as Array<Record<string, unknown>>;
+    fixtures[1].syncRef = 'smartclub:dolphins:fixture:recipe:gen-league:t20:sf1';
+    fixtures[1].schedule = { changedAt: '2026-09-20T10:00:00.000Z' };
+    await repo.putSeries(T, { ...s, fixtures, version: s.version + 1 });
+    const run = (await repo.getSeasonRun(T, RUN))!;
+    const ok = await generate({
+      version: run.version,
+      confirmReleasedOverwrite: true,
+      allowResync: true,
+    });
+    assert.equal(ok.status, 200);
+    const after = (await repo.getSeries(T, SID))!.fixtures as Array<Record<string, unknown>>;
+    const f2 = after.find((f) => f.id === fixtures[1].id)!;
+    assert.equal(f2.home, fixtures[1].home, 'the same match');
+    assert.equal(f2.syncRef, 'smartclub:dolphins:fixture:recipe:gen-league:t20:sf1');
+    assert.ok(
+      Date.parse((f2.schedule as { changedAt: string }).changedAt) >=
+        Date.parse('2026-09-20T10:00:00.000Z'),
+    );
+    // The re-paired f1 (a different match now) carries nothing over.
+    const f1 = after.find((f) => f.id === 'f1')!;
+    assert.equal(f1.syncRef, undefined);
+  });
+
   test('rebase: 409 when the changed stage has synced released series; allowResync lists every ref', async () => {
     await seedRun();
     const run = (await repo.getSeasonRun(T, RUN))!;

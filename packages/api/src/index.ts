@@ -63,7 +63,7 @@ import {
 } from './medicoach-sync/series-results.js';
 import { MedicoachSyncError } from './medicoach-sync/puller.js';
 import { runTenantSync } from './medicoach-sync/run.js';
-import { fixtureSyncRef } from './fixture-identity.js';
+import { carrySyncOwnedFields, fixtureSyncRef } from './fixture-identity.js';
 import {
   buildInboundFixture,
   describeSchedule,
@@ -5483,7 +5483,24 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
   // whether they are published, never a name the admin chose, and never the stored format
   // (seriesType/maxOvers) — except when a rebase marked the stage `formatChanged`, which is
   // the rebase's version-review consent to adopt the new structure's name/overs.
-  const overwriteOf = (series: Series): Partial<Series> => {
+  // A regenerated fixture with the same id AND the same match keeps its sync-owned fields
+  // (`syncRef`, `schedule.changedAt`) from the stored one, exactly as the importers carry them
+  // (ADR 0016) — dropping them would re-point a recipe ref or let an older medicoach change win.
+  const withSyncFields = (series: Series, stored: Series | null | undefined): Series => {
+    if (!stored || !Array.isArray(series.fixtures)) return series;
+    const prior = new Map<string, ScheduleFixture>();
+    for (const f of (stored.fixtures as ScheduleFixture[] | undefined) ?? [])
+      if (f?.id) prior.set(f.id, f);
+    return {
+      ...series,
+      fixtures: (series.fixtures as ScheduleFixture[]).map((f) => {
+        const old = f?.id ? prior.get(f.id) : undefined;
+        return old && sameMatch(old, f) ? carrySyncOwnedFields(old, { ...f }) : f;
+      }),
+    };
+  };
+  const overwriteOf = (generated: Series, stored: Series): Partial<Series> => {
+    const series = withSyncFields(generated, stored);
     const {
       released: _r,
       releasedAt: _ra,
@@ -5511,7 +5528,7 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     for (const [i, series] of result.series.entries()) {
       const stored = existing[i];
       const subject = stored
-        ? ({ ...stored, ...overwriteOf(series), id: series.id } as Series)
+        ? ({ ...stored, ...overwriteOf(series, stored), id: series.id } as Series)
         : series;
       if (stored?.released) {
         const refusal = inSeasonClashRefusal(stored, subject, ledger, allClubs, venues, aliases);
@@ -5536,7 +5553,7 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
         await applySeriesPatch(
           tenant,
           series.id,
-          { ...overwriteOf(series), version: stored.version },
+          { ...overwriteOf(series, stored), version: stored.version },
           actor,
           runCalendar,
           'generate',
