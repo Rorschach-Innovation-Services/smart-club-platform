@@ -266,6 +266,11 @@ export default $config({
     //   sst secret set MedicoachSyncSecret $(openssl rand -hex 32) --stage <stage>
     const medicoachSyncUrl = new sst.Secret('MedicoachSyncUrl', '');
     const medicoachSyncSecret = new sst.Secret('MedicoachSyncSecret', '');
+    // Captain's-report submit-once link HMAC key (ADR 0016, Slice 2). Defaulted to '' like
+    // CandidateHandleSecret; env.ts:captainsReportLinkSecret() FAILS CLOSED on empty off-local,
+    // so no link is minted (and no report notice sent) until it is set:
+    //   sst secret set CaptainsReportLinkSecret $(openssl rand -hex 32) --stage <stage>
+    const captainsReportLinkSecret = new sst.Secret('CaptainsReportLinkSecret', '');
     // Template NAMES/languages are NOT secrets — they live in the code registry
     // packages/api/src/notify/whatsapp-templates.ts. A template name only changes when
     // the template is created/renamed in Meta (a code change, since the sender's param
@@ -464,6 +469,15 @@ export default $config({
       },
     });
 
+    // Captain's-report links point at the PLATFORM host in prod (the /r/<token> page is
+    // tenant-independent, like /verify, and the WhatsApp template's URL button is registered
+    // against it); other stages use their own CloudFront URL.
+    const captainsReportLinkBaseUrl = isProd
+      ? wildcardEnabled
+        ? `https://platform${WILDCARD_WEB_SUFFIX}`
+        : `https://${primaryVanity.webHost}`
+      : web.url;
+
     // Declared AFTER the web StaticSite: non-prod VERIFY_BASE_URL is `web.url`. No cycle — the
     // site depends only on the gateway's url, never on this route's function.
     api.route('$default', {
@@ -486,6 +500,7 @@ export default $config({
         // POST /integrations/medicoach/sync-now runs the puller in the API Lambda.
         medicoachSyncUrl,
         medicoachSyncSecret,
+        captainsReportLinkSecret,
       ],
       // SES isn't covered by `link` (it's not an SST resource), so grant it directly.
       // SES authorizes by verified identity, not resource ARN, hence resources: ['*'].
@@ -567,6 +582,10 @@ export default $config({
             ? `https://platform${WILDCARD_WEB_SUFFIX}`
             : `https://${primaryVanity.webHost}`
           : web.url,
+        // Captain's-report links (`${base}/r/<token>`) — tenant-independent page on the
+        // platform host, like /verify (see captainsReportLinkBase).
+        CAPTAINS_REPORT_LINK_SECRET: captainsReportLinkSecret.value,
+        CAPTAINS_REPORT_LINK_BASE_URL: captainsReportLinkBaseUrl,
       },
       nodejs: { install: ['aws-jwt-verify'] },
       // The certificate renderer's EB Garamond TTFs are read from disk at runtime, which
@@ -583,7 +602,17 @@ export default $config({
       schedule: 'rate(15 minutes)',
       function: {
         handler: 'packages/api/src/medicoach-sync/cron.handler',
-        link: [table, medicoachSyncUrl, medicoachSyncSecret],
+        link: [
+          table,
+          medicoachSyncUrl,
+          medicoachSyncSecret,
+          fromEmail,
+          whatsappAccessToken,
+          whatsappPhoneNumberId,
+          captainsReportLinkSecret,
+        ],
+        // A stored result opens captain's reports and emails the link (SES, eu-west-1).
+        permissions: [{ actions: ['ses:SendEmail', 'ses:SendRawEmail'], resources: ['*'] }],
         timeout: '5 minutes',
         environment: {
           TABLE_NAME: table.name,
@@ -592,6 +621,14 @@ export default $config({
           SENTRY_RELEASE: sentryRelease,
           MEDICOACH_SYNC_URL: medicoachSyncUrl.value,
           MEDICOACH_SYNC_SECRET: medicoachSyncSecret.value,
+          // Captain's-report notices (same dry-run rules as the API: empty secrets ⇒ log only).
+          SES_REGION: 'eu-west-1',
+          FROM_EMAIL: fromEmail.value,
+          WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
+          WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+          NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
+          CAPTAINS_REPORT_LINK_SECRET: captainsReportLinkSecret.value,
+          CAPTAINS_REPORT_LINK_BASE_URL: captainsReportLinkBaseUrl,
         },
       },
     });

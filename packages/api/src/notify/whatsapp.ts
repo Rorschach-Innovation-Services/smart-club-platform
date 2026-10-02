@@ -60,6 +60,19 @@ function cleanParam(value: string, max = 100): string {
 type TemplateParam = { type: 'text'; text: string };
 
 /**
+ * The Cloud API component for a URL button's dynamic suffix: button index 0, one text
+ * parameter. Exported so the arity test can assert the shape.
+ */
+export function urlButtonComponent(suffix: string) {
+  return {
+    type: 'button',
+    sub_type: 'url',
+    index: '0',
+    parameters: [{ type: 'text', text: suffix }],
+  };
+}
+
+/**
  * POST a pre-approved template message to the Cloud API with rate-limit retry.
  * Shared by the staff-invite and fixtures senders so the auth/retry/dry-run
  * handling lives in exactly one place.
@@ -70,7 +83,11 @@ async function sendTemplate(
   templateLang: string,
   params: TemplateParam[],
   dryRunLabel: string,
+  /** The dynamic suffix of the template's URL button (index 0), if it has one. Never logged. */
+  urlButtonSuffix?: string,
 ): Promise<{ messageId: string }> {
+  const components: Array<Record<string, unknown>> = [{ type: 'body', parameters: params }];
+  if (urlButtonSuffix !== undefined) components.push(urlButtonComponent(urlButtonSuffix));
   const payload = {
     messaging_product: 'whatsapp',
     to,
@@ -78,7 +95,7 @@ async function sendTemplate(
     template: {
       name: templateName,
       language: { code: templateLang },
-      components: [{ type: 'body', parameters: params }],
+      components,
     },
   };
 
@@ -275,5 +292,48 @@ export async function sendClearanceWhatsApp(
     lang,
     clearanceParams(input),
     `clearance notice for ${fromClubName}`,
+  );
+}
+
+export interface CaptainsReportDueWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  recipientName: string;
+  clubName: string;
+  /** "Umzinto v African Warriors, Sun 4 Oct 2026" */
+  match: string;
+  /** "18h00 on Wed 7 Oct 2026" */
+  deadline: string;
+  /** The signed report token — the URL button's dynamic suffix. Never logged. */
+  token: string;
+}
+
+/**
+ * Build the four body params for `captains_report_due`, in order: {{1}} recipient name
+ * (fallback 'there'), {{2}} club name, {{3}} match, {{4}} deadline. The link is NOT a body
+ * param — it rides in the URL button (see `captainsReportDue.urlButton`).
+ */
+export function captainsReportDueParams(
+  input: Pick<CaptainsReportDueWhatsAppInput, 'recipientName' | 'clubName' | 'match' | 'deadline'>,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.recipientName || 'there') },
+    { type: 'text', text: cleanParam(input.clubName) },
+    { type: 'text', text: cleanParam(input.match) },
+    { type: 'text', text: cleanParam(input.deadline) },
+  ];
+}
+
+/** Captain's report link over WhatsApp (URL button with the token as its suffix). */
+export async function sendCaptainsReportDueWhatsApp(
+  input: CaptainsReportDueWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const { name, lang } = WHATSAPP_TEMPLATES.captainsReportDue;
+  return sendTemplate(
+    input.to,
+    name,
+    lang,
+    captainsReportDueParams(input),
+    `captain's report link for ${input.clubName}`,
+    input.token,
   );
 }

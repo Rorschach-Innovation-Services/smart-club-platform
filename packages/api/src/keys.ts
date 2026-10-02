@@ -427,5 +427,44 @@ export const syncLogsListKey = (tenant: string) => ({
 /** pk of the whole SYNC partition (cursor + logs), for erasure. */
 export const syncPartitionPk = (tenant: string) => `${tenantPrefix(tenant)}#SYNC`;
 
+/**
+ * Captain's reports: one partition per tenant holding every report
+ * (`CAPREPORT#<seriesId>#<fixtureId>#<clubId>`), the `CR-YYYY-NNNN` counters and the NOTIFY#
+ * send ledger. No gsi1/META listing — tenant erasure and cohort clear enumerate the whole
+ * partition (`captainsReportPartitionPk`).
+ */
+export const captainsReportPartitionPk = (tenant: string) => `${tenantPrefix(tenant)}#CAPREPORT`;
+
+export const captainsReportKey = (
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  clubId: string,
+) => ({
+  pk: captainsReportPartitionPk(tenant),
+  sk: `CAPREPORT#${seriesId}#${fixtureId}#${clubId}`,
+});
+
+/** pk + sk-prefix to query every captain's report in a tenant. */
+export const captainsReportsListKey = (tenant: string) => ({
+  pk: captainsReportPartitionPk(tenant),
+  skPrefix: 'CAPREPORT#',
+});
+
+/** The atomic per-tenant, per-year `CR-YYYY-NNNN` counter. */
+export const captainsReportCounterKey = (tenant: string, year: string) => ({
+  pk: captainsReportPartitionPk(tenant),
+  sk: `COUNTER#CR#${year}`,
+});
+
+/**
+ * One NOTIFY# ledger row per (report, audience): claimed with `attribute_not_exists` before a
+ * send, so a replayed result or a retried run never notifies twice.
+ */
+export const captainsReportNotifyKey = (tenant: string, reportId: string, audience: string) => ({
+  pk: captainsReportPartitionPk(tenant),
+  sk: `NOTIFY#capreport#${reportId}#${audience}`,
+});
+
 /** Prefix used to erase an entire tenant's non-user items. */
 export const tenantErasurePrefix = (tenant: string) => `${tenantPrefix(tenant)}#`;

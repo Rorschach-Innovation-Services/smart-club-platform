@@ -82,6 +82,11 @@ import {
   umpiresListGsi1pk,
   fixtureOfficialsKey,
   fixtureOfficialsListKey,
+  captainsReportKey,
+  captainsReportsListKey,
+  captainsReportCounterKey,
+  captainsReportNotifyKey,
+  captainsReportPartitionPk,
 } from './keys.js';
 import { PLATFORM_TENANT } from './types.js';
 import type {
@@ -112,6 +117,7 @@ import type {
   Umpire,
   FixtureOfficials,
   FixtureOfficialsRecord,
+  CaptainsReport,
 } from './types.js';
 
 import { tableName } from './env.js';
@@ -1179,6 +1185,342 @@ async function listUmpireAndOfficialsKeys(
     fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId),
   );
   return [...umpires, ...officials];
+}
+
+// ── Captain's reports (ADR 0016, Slice 2) ──
+// One tenant partition: the reports, the CR-YYYY-NNNN counters and the NOTIFY# ledger.
+
+/** A report write refused because the report is not in the state the caller expected. */
+export class CaptainsReportStateError extends Error {
+  constructor(message = "captain's report is no longer open") {
+    super(message);
+    this.name = 'CaptainsReportStateError';
+  }
+}
+
+const reportKeyOf = (
+  tenant: string,
+  r: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+) => captainsReportKey(tenant, r.seriesId, r.fixtureId, r.clubId);
+
+export async function getCaptainsReport(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  clubId: string,
+): Promise<CaptainsReport | null> {
+  const res = await ddb.send(
+    new GetCommand({
+      TableName: TABLE,
+      Key: captainsReportKey(tenant, seriesId, fixtureId, clubId),
+    }),
+  );
+  return stripKeys<CaptainsReport>(res.Item);
+}
+
+/** Every report in the tenant (a few per fixture weekend — one Query on one partition). */
+export async function listCaptainsReports(tenant: string): Promise<CaptainsReport[]> {
+  const { pk, skPrefix } = captainsReportsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<CaptainsReport>(i)!);
+}
+
+/** Both sides' reports for one fixture (the trailing `#` keeps f1 from matching f10). */
+export async function listCaptainsReportsForFixture(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<CaptainsReport[]> {
+  const { pk, skPrefix } = captainsReportsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': `${skPrefix}${seriesId}#${fixtureId}#` },
+  });
+  return items.map((i) => stripKeys<CaptainsReport>(i)!);
+}
+
+/**
+ * Store a NEW report, or re-open a VOID one (a result cleared and then re-recorded). Returns
+ * false when a pending or submitted report already exists — opening is idempotent per
+ * fixture + club.
+ */
+export async function openCaptainsReportIfAbsent(
+  tenant: string,
+  report: CaptainsReport,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...report, ...reportKeyOf(tenant, report) },
+        ConditionExpression: 'attribute_not_exists(pk) OR #s = :void',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':void': 'void' },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** Create a report a club files by hand; refuses (false) if one exists for that side. */
+export async function createCaptainsReport(
+  tenant: string,
+  report: CaptainsReport,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: { ...report, ...reportKeyOf(tenant, report) },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** The editable fields of a report (what a draft save or a submit writes). */
+export type CaptainsReportFields = Pick<
+  CaptainsReport,
+  'captainName' | 'umpires' | 'general' | 'declaration'
+>;
+
+/**
+ * Save a draft. Only a PENDING report takes it — and when `memberId` is given (the link
+ * path), only while the report is still addressed to that recipient.
+ */
+export async function saveCaptainsReportDraft(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  fields: CaptainsReportFields,
+  opts: { memberId?: string } = {},
+): Promise<CaptainsReport> {
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression:
+          'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, updatedAt = :at',
+        ConditionExpression:
+          'attribute_exists(pk) AND #s = :pending' +
+          (opts.memberId ? ' AND recipient.memberId = :m' : ''),
+        ExpressionAttributeNames: { '#s': 'status', '#gen': 'general' },
+        ExpressionAttributeValues: {
+          ':c': fields.captainName,
+          ':u': fields.umpires,
+          ':g': fields.general,
+          ':d': !!fields.declaration,
+          ':at': new Date().toISOString(),
+          ':pending': 'pending',
+          ...(opts.memberId ? { ':m': opts.memberId } : {}),
+        },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<CaptainsReport>(res.Attributes)!;
+  } catch (err) {
+    if (isCcf(err)) throw new CaptainsReportStateError();
+    throw err;
+  }
+}
+
+/** The next `CR-YYYY-NNNN` for a tenant/year — an atomic ADD on the counter item. */
+export async function nextCaptainsReportRef(tenant: string, year: string): Promise<string> {
+  const res = await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: captainsReportCounterKey(tenant, year),
+      UpdateExpression: 'ADD n :one',
+      ExpressionAttributeValues: { ':one': 1 },
+      ReturnValues: 'UPDATED_NEW',
+    }),
+  );
+  const n = Number(res.Attributes?.n ?? 0);
+  return `CR-${year}-${String(n).padStart(4, '0')}`;
+}
+
+/**
+ * Submit a report — FIRST SUBMIT WINS. The conditional update only succeeds while the report
+ * is pending (and, on the link path, still addressed to `memberId`); a second submit, from the
+ * portal or the link, gets CaptainsReportStateError.
+ */
+export async function submitCaptainsReport(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  fields: CaptainsReportFields,
+  meta: { ref: string; submittedBy: string; via: 'portal' | 'link'; memberId?: string },
+): Promise<CaptainsReport> {
+  const at = new Date().toISOString();
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression:
+          'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, #s = :submitted, ' +
+          '#ref = :ref, submittedBy = :by, submittedVia = :via, submittedAt = :at, updatedAt = :at',
+        ConditionExpression:
+          'attribute_exists(pk) AND #s = :pending' +
+          (meta.memberId ? ' AND recipient.memberId = :m' : ''),
+        ExpressionAttributeNames: { '#s': 'status', '#ref': 'ref', '#gen': 'general' },
+        ExpressionAttributeValues: {
+          ':c': fields.captainName,
+          ':u': fields.umpires,
+          ':g': fields.general,
+          ':d': !!fields.declaration,
+          ':submitted': 'submitted',
+          ':pending': 'pending',
+          ':ref': meta.ref,
+          ':by': meta.submittedBy,
+          ':via': meta.via,
+          ':at': at,
+          ...(meta.memberId ? { ':m': meta.memberId } : {}),
+        },
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return stripKeys<CaptainsReport>(res.Attributes)!;
+  } catch (err) {
+    if (isCcf(err)) throw new CaptainsReportStateError("captain's report already submitted");
+    throw err;
+  }
+}
+
+/**
+ * A fixture's result was cleared: a PENDING report becomes void (its link dies with it); a
+ * SUBMITTED one is kept and flagged for the admin. Returns what happened.
+ */
+export async function voidOrFlagCaptainsReport(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  reason: string,
+): Promise<'voided' | 'flagged' | 'none'> {
+  const at = new Date().toISOString();
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: 'SET #s = :void, voidedAt = :at, updatedAt = :at',
+        ConditionExpression: 'attribute_exists(pk) AND #s = :pending',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':void': 'void', ':pending': 'pending', ':at': at },
+      }),
+    );
+    return 'voided';
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: 'SET flagged = :f, updatedAt = :at',
+        ConditionExpression: 'attribute_exists(pk) AND #s = :submitted',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':submitted': 'submitted', ':f': { reason, at }, ':at': at },
+      }),
+    );
+    return 'flagged';
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+  return 'none';
+}
+
+/** NOTIFY# rows outlive the reports' 14-day opening window comfortably, then self-expire. */
+const NOTIFY_LEDGER_TTL_SECONDS = 120 * 24 * 3600;
+
+/**
+ * Claim the right to notify `audience` about a report. True ⇒ the caller sends; false ⇒ a
+ * send was already claimed (a replay, a retried run) and nothing must go out again.
+ */
+export async function claimCaptainsReportNotify(
+  tenant: string,
+  reportId: string,
+  audience: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...captainsReportNotifyKey(tenant, reportId, audience),
+          status: 'in_progress',
+          startedAt: new Date().toISOString(),
+          expiresAt: Math.floor(Date.now() / 1000) + NOTIFY_LEDGER_TTL_SECONDS,
+        },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** Record a claimed send's per-channel outcome (status only — no addresses). */
+export async function completeCaptainsReportNotify(
+  tenant: string,
+  reportId: string,
+  audience: string,
+  results: Array<{ channel: string; status: string; error?: string }>,
+): Promise<void> {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: captainsReportNotifyKey(tenant, reportId, audience),
+      UpdateExpression: 'SET #s = :done, #res = :r, completedAt = :at',
+      ExpressionAttributeNames: { '#s': 'status', '#res': 'results' },
+      ExpressionAttributeValues: {
+        ':done': 'completed',
+        ':r': results,
+        ':at': new Date().toISOString(),
+      },
+    }),
+  );
+}
+
+/** Every key in the captain's-report partition (reports, counters, ledger) — for erasure. */
+async function listCaptainsReportPartitionKeys(
+  tenant: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p',
+    ExpressionAttributeValues: { ':p': captainsReportPartitionPk(tenant) },
+    ProjectionExpression: 'pk, sk',
+  });
+  return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+/** One veterans affiliation (VETAFFIL#) by veterans club + the player's natural key. */
+export async function getVeteransAffiliation(
+  tenant: string,
+  vetsClubId: string,
+  naturalKey: string,
+): Promise<VeteransAffiliation | null> {
+  const res = await ddb.send(
+    new GetCommand({
+      TableName: TABLE,
+      Key: veteransAffiliationKey(tenant, vetsClubId, naturalKey),
+    }),
+  );
+  return stripKeys<VeteransAffiliation>(res.Item);
 }
 
 // ── Season runs (ADR 0008) ──
@@ -5541,6 +5883,9 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   // Umpires carry contact details; officials are per-fixture rows. Neither is in a club
   // partition or the series listing, so enumerate both explicitly.
   for (const k of await listUmpireAndOfficialsKeys(tenant)) keys.push(k);
+  // Captain's reports carry names and ratings; the partition also holds the counters and the
+  // NOTIFY# ledger. No gsi1/META listing — enumerate the partition.
+  for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
 
   const unique = uniqueKeys(keys);
   await batchDelete(unique);
@@ -5610,6 +5955,9 @@ export async function clearCohort(tenant: string): Promise<number> {
   // not cohort data, so it stays.
   for (const o of await listFixtureOfficials(tenant))
     keys.push(fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId));
+
+  // Captain's reports hang off the fixtures being cleared (reports, counters, ledger).
+  for (const k of await listCaptainsReportPartitionKeys(tenant)) keys.push(k);
 
   // Safety: never delete the tenant config or any user record.
   for (const k of keys) {

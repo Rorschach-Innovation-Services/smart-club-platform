@@ -71,6 +71,8 @@ export type {
   FixtureOfficials,
   FixtureOfficialsRecord,
 } from '../../engine/src/umpires.js';
+export type { ReportUmpireEntry, AppointedUmpire } from '../../engine/src/captainsReport.js';
+import type { ReportUmpireEntry, AppointedUmpire } from '../../engine/src/captainsReport.js';
 
 export type Role = 'admin' | 'rep' | 'operator';
 
@@ -1134,4 +1136,64 @@ export interface SyncLogEntry {
   /** Fixture refs whose medicoach schedule differs from smart club's (not applied yet). */
   scheduleDiffersRefs?: string[];
   error?: string;
+}
+
+// ── Captain's reports (ADR 0016, Slice 2) ──
+
+export type CaptainsReportStatus = 'pending' | 'submitted' | 'void';
+
+/**
+ * Who the report link went to. `memberId` is an OPAQUE random id minted when the report
+ * opened (never a player's natural key — that is a hashed ID number); the submit-once link is
+ * bound to it, so re-addressing a report kills the old link. `kind: 'portal'` marks a report
+ * a club filed by hand from the portal (no link was sent).
+ */
+export interface CaptainsReportRecipient {
+  kind: 'captain' | 'chair' | 'portal';
+  memberId: string;
+  name: string;
+}
+
+/**
+ * A captain's report: `CAPREPORT#<seriesId>#<fixtureId>#<clubId>`, one per fixture side.
+ * Opened `pending` when medicoach reports a result (or created by hand from the portal),
+ * `submitted` exactly once, `void` when the result is cleared before submission. "Late" is
+ * derived on read (engine `isReportLate`), never stored.
+ */
+export interface CaptainsReport {
+  /** `<seriesId>~<fixtureId>~<clubId>` — URL-safe and deterministic. */
+  id: string;
+  seriesId: string;
+  fixtureId: string;
+  clubId: string;
+  status: CaptainsReportStatus;
+  source: 'auto' | 'manual';
+  /** The medicoach sync ref for the fixture (fixture refs carry no personal data). */
+  fixtureRef?: string;
+  matchDate: string;
+  /** ISO instant: 18h00 SAST on the 3rd business day after the match. */
+  deadline: string;
+  side: 'home' | 'away';
+  clubName: string;
+  opponentName: string;
+  competition: string;
+  venue?: string;
+  resultSummary?: string | null;
+  /** The appointed umpires when the report opened (FIXOFFICIALS#). */
+  umpiresSnapshot: AppointedUmpire[];
+  recipient: CaptainsReportRecipient;
+  captainName: string;
+  umpires: ReportUmpireEntry[];
+  general: string;
+  declaration?: boolean;
+  /** `CR-YYYY-NNNN`, assigned from the per-tenant counter at submission. */
+  ref?: string;
+  submittedBy?: string;
+  submittedVia?: 'portal' | 'link';
+  submittedAt?: string;
+  voidedAt?: string;
+  /** Set when the result behind a SUBMITTED report was cleared — the admin should look. */
+  flagged?: { reason: string; at: string };
+  createdAt: string;
+  updatedAt: string;
 }

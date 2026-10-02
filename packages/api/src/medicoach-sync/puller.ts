@@ -11,8 +11,8 @@
  * What a pulled fixture change does today:
  *   - result      → FIXRESULT#<seriesId>#<fixtureId>, only if `recordedAt` is newer than the
  *                   stored item; a `resultClearedAt` newer than it leaves a tombstone. A NEW
- *                   store calls `onResultStored` (a no-op until Slice 2.3 opens captain's
- *                   reports) — a replay never does.
+ *                   store calls `onResultStored` (opens captain's reports) — a replay
+ *                   never does; a newly stored clear calls `onResultCleared` (voids them).
  *   - teams       → a knockout slot (`pos:`/`win:` placeholder) takes the resolved team when
  *                   the team ref names one of that series' own team ids (version-checked).
  *   - schedule    → compared only; a difference is counted + listed in SYNCLOG and handed to
@@ -26,11 +26,16 @@
  * request it would make and stops — no HTTP, no writes.
  *
  * PII: a result's `captainRef` is a player ref (a hashed ID number). It is stored on the
- * result item for Slice 2.3 and NEVER logged — nothing here prints a fixture change, only
+ * result item (the captain's-report hook resolves it to a roster row) and NEVER logged — nothing here prints a fixture change, only
  * counts and fixture refs.
  */
 import { randomUUID } from 'node:crypto';
 import { isSlotRef } from '../../../engine/src/formats.js';
+import {
+  captainsReportClearedHook,
+  captainsReportResultHook,
+  type CaptainsReportDeps,
+} from '../captains-reports.js';
 import { hasFeature } from '../features.js';
 import { fixtureSyncRef } from '../fixture-identity.js';
 import {
@@ -68,13 +73,12 @@ export interface ResultStoredEvent {
   config: TenantConfig;
 }
 
-/**
- * The post-result hook. Slice 2.3 replaces this with `openCaptainReports` (skipped for
- * `source: 'import'`, matches before `integrations.medicoach.goLiveDate`, and old matches).
- * Called ONLY when a result is newly stored — never for a replay or a stale change.
- */
-export async function onResultStored(_event: ResultStoredEvent): Promise<void> {
-  // Intentionally a no-op until captain's reports exist (Slice 2.3).
+/** Passed to `onResultCleared` when a clear tombstone is newly stored for a fixture. */
+export interface ResultClearedEvent {
+  tenant: string;
+  seriesId: string;
+  fixtureId: string;
+  ref: string;
 }
 
 /** A fixture whose medicoach schedule differs from smart club's. */
@@ -100,7 +104,12 @@ export interface PullerDeps {
   secret: string;
   fetch?: typeof fetch;
   now?: () => Date;
+  /** Defaults to opening captain's reports (captains-reports.ts) — never throws. */
   onResultStored?: (event: ResultStoredEvent) => Promise<void>;
+  /** Defaults to voiding pending captain's reports / flagging submitted ones. */
+  onResultCleared?: (event: ResultClearedEvent) => Promise<void>;
+  /** Overrides for the default captain's-report hooks (tests inject a capturing sender). */
+  captainsReports?: Omit<CaptainsReportDeps, 'repo'>;
   onScheduleDiffers?: (event: ScheduleDiffersEvent) => Promise<void>;
   log?: (line: string) => void;
 }
@@ -252,7 +261,10 @@ export async function runMedicoachSync(
   const log = deps.log ?? ((line: string) => console.log(line));
   const now = deps.now ?? (() => new Date());
   const doFetch = deps.fetch ?? fetch;
-  const resultHook = deps.onResultStored ?? onResultStored;
+  const resultHook =
+    deps.onResultStored ?? captainsReportResultHook({ repo, now, ...(deps.captainsReports ?? {}) });
+  const clearedHook =
+    deps.onResultCleared ?? captainsReportClearedHook({ repo, ...(deps.captainsReports ?? {}) });
   const scheduleHook = deps.onScheduleDiffers ?? recordScheduleDiffers;
 
   const config = await repo.getTenantConfig(tenant);
@@ -393,8 +405,10 @@ export async function runMedicoachSync(
             clearedAt: change.resultClearedAt,
             storedAt: now().toISOString(),
           });
-          if (cleared) counts.resultsCleared++;
-          else counts.resultsStale++;
+          if (cleared) {
+            counts.resultsCleared++;
+            await clearedHook({ tenant, seriesId, fixtureId, ref: change.ref });
+          } else counts.resultsStale++;
         }
 
         // ── Knockout teams (medicoach-owned once resolved) ──

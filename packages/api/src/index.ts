@@ -53,6 +53,7 @@ import {
   resolveTenant,
   HttpError,
   type HonoEnv,
+  type RequestAuth,
 } from './auth.js';
 import * as repo from './repo.js';
 import {
@@ -61,7 +62,7 @@ import {
   stripResponseOnlyFixtureFields,
 } from './medicoach-sync/series-results.js';
 import { MedicoachSyncError, runMedicoachSync } from './medicoach-sync/puller.js';
-import { medicoachSyncSecret, medicoachSyncUrl } from './env.js';
+import { captainsReportLinkSecret, medicoachSyncSecret, medicoachSyncUrl } from './env.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
 import { clubIdFromName } from './club-id.js';
 import {
@@ -158,6 +159,7 @@ import {
   isVeteransLeagueKey,
 } from './veterans.js';
 import type {
+  CaptainsReport,
   Club,
   ClubCommEvent,
   ClubSpec,
@@ -188,6 +190,17 @@ import type {
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
 import { orgCopy } from './branding.js';
+import { chairContactOf } from './club-contacts.js';
+import {
+  captainsReportId,
+  checkUmpireIds,
+  loadLinkedReport,
+  parseCaptainsReportId,
+  parseReportFields,
+  ReportInputError,
+  reportView,
+} from './captains-reports.js';
+import { reportDeadline, submissionProblems } from '../../engine/src/captainsReport.js';
 import { hasFeature, hasModule } from './features.js';
 import {
   resolveVertical,
@@ -1365,18 +1378,6 @@ async function findPlayerByIdNumber(
   return roster.find((p) => normalizeId(p.idNumber) === wanted) ?? null;
 }
 
-/**
- * The chair contact for a club's notices: the `exco.chair` sub-record (name/email/cell), falling
- * back to the flat `club.chair` name when exco has no chair name. `exco` is loosely typed here
- * (it also carries governance fields we never notify on) so we read only the three contact fields.
- */
-function chairContactOf(club: Club): { name: string; email?: string; cell?: string } {
-  const chair = (
-    club.exco as Record<string, { email?: string; cell?: string; name?: string }> | undefined
-  )?.chair;
-  return { name: chair?.name || club.chair || '', email: chair?.email, cell: chair?.cell };
-}
-
 const CLEARANCE_NOTICES_PER_DAY = 3;
 /**
  * Best-effort heads-up to the FROM-club chairman that a clearance now awaits the club's
@@ -1834,6 +1835,8 @@ app.use('/venues/*', authenticate, requireTenantMembership);
 app.use('/venues', authenticate, requireTenantMembership);
 app.use('/umpires/*', authenticate, requireTenantMembership);
 app.use('/umpires', authenticate, requireTenantMembership);
+app.use('/club/*', authenticate, requireTenantMembership);
+app.use('/captains-reports', authenticate, requireTenantMembership);
 app.use('/tenant/config', authenticate, requireTenantMembership);
 app.use('/tenant/support', authenticate, requireTenantMembership);
 app.use('/admin/*', authenticate, requireTenantMembership, requireAdmin);
@@ -4441,6 +4444,253 @@ app.post('/umpires/:id/merge', requireAdmin, async (c) => {
   await repo.putUmpire(ra.tenant, mergedTarget);
   await repo.putUmpire(ra.tenant, retiredSource);
   return c.json({ target: mergedTarget, source: retiredSource, repointed });
+});
+
+/* ─── Captain's reports (ADR 0016, Slice 2) ───
+   Reports open automatically when medicoach reports a result (medicoach-sync/puller.ts →
+   captains-reports.ts). Clubs read and file their OWN reports here; the recipient may instead
+   use the submit-once link (`/captains-report-link/:token`, public). First submit wins. The
+   union office reads every report through `GET /captains-reports` (admin). */
+
+/** A report's editable fields from a request body, with the umpire ids checked. */
+async function reportFieldsFrom(
+  tenant: string,
+  report: CaptainsReport,
+  raw: unknown,
+): Promise<{ fields: repo.CaptainsReportFields; submit: boolean }> {
+  try {
+    const parsed = parseReportFields(raw);
+    const umpires = await checkUmpireIds(repo, tenant, report, parsed.umpires);
+    const submit = (raw as { submit?: unknown }).submit === true;
+    if (submit) {
+      const problems = submissionProblems({ ...parsed, umpires });
+      if (problems.length) throw new HttpError(400, problems[0], { problems });
+    }
+    return { fields: { ...parsed, umpires }, submit };
+  } catch (err) {
+    if (err instanceof ReportInputError) throw new HttpError(400, err.message);
+    throw err;
+  }
+}
+
+/** Save a draft or submit (first submit wins → 409 for the loser). */
+async function writeReport(
+  tenant: string,
+  report: CaptainsReport,
+  fields: repo.CaptainsReportFields,
+  submit: boolean,
+  meta: { submittedBy: string; via: 'portal' | 'link'; memberId?: string },
+): Promise<CaptainsReport> {
+  try {
+    if (!submit) return await repo.saveCaptainsReportDraft(tenant, report, fields, meta);
+    if (report.status !== 'pending')
+      throw new repo.CaptainsReportStateError("captain's report already submitted");
+    const ref = await repo.nextCaptainsReportRef(tenant, report.matchDate.slice(0, 4));
+    return await repo.submitCaptainsReport(tenant, report, fields, { ref, ...meta });
+  } catch (err) {
+    if (err instanceof repo.CaptainsReportStateError)
+      throw new HttpError(409, err.message, { code: 'report_closed' });
+    throw err;
+  }
+}
+
+/** A club-route report by id, after the caller's club access is checked. */
+async function clubReport(ra: RequestAuth, id: string): Promise<CaptainsReport> {
+  const key = parseCaptainsReportId(id);
+  if (!key) throw new HttpError(404, 'report not found');
+  assertClubAccess(ra, key.clubId);
+  const report = await repo.getCaptainsReport(ra.tenant, key.seriesId, key.fixtureId, key.clubId);
+  if (!report) throw new HttpError(404, 'report not found');
+  return report;
+}
+
+app.get('/club/captains-reports', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const clubId = c.req.query('clubId') ?? ra.membership.clubIds[0];
+  if (!clubId) throw new HttpError(400, 'clubId is required');
+  assertClubAccess(ra, clubId);
+  const at = now();
+  const reports = (await repo.listCaptainsReports(ra.tenant))
+    .filter((r) => r.clubId === clubId)
+    .sort((a, b) => b.matchDate.localeCompare(a.matchDate))
+    .map((r) => reportView(r, at));
+  return c.json(reports);
+});
+
+app.get('/club/captains-reports/:id', async (c) => {
+  const ra = c.get('requestAuth')!;
+  return c.json(reportView(await clubReport(ra, c.req.param('id')), now()));
+});
+
+app.put('/club/captains-reports/:id', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const report = await clubReport(ra, c.req.param('id'));
+  const { fields, submit } = await reportFieldsFrom(
+    ra.tenant,
+    report,
+    await c.req.json().catch(() => null),
+  );
+  const saved = await writeReport(ra.tenant, report, fields, submit, {
+    submittedBy: ra.email ?? 'portal',
+    via: 'portal',
+  });
+  return c.json(reportView(saved, now()));
+});
+
+/**
+ * File a report by hand for one of the club's fixtures that has no report yet (e.g. a match
+ * medicoach didn't score). Creates and submits in one go; 409 when a report already exists
+ * (the portal then opens that one).
+ */
+app.post('/club/captains-reports', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const body = ((await c.req.json().catch(() => null)) ?? {}) as Record<string, unknown>;
+  const seriesId = typeof body.seriesId === 'string' ? body.seriesId : '';
+  const fixtureId = typeof body.fixtureId === 'string' ? body.fixtureId : '';
+  const clubId = typeof body.clubId === 'string' ? body.clubId : '';
+  if (!seriesId || !fixtureId || !clubId)
+    throw new HttpError(400, 'seriesId, fixtureId and clubId are required');
+  assertClubAccess(ra, clubId);
+  const stored = await repo.getSeries(ra.tenant, seriesId);
+  // Reps see only released series (and released fields); file against what they can see.
+  const series =
+    stored &&
+    (ra.membership.role === 'admin' ? stored : projectSeriesForClub(stored, tenantToday()));
+  const fixture = (series?.fixtures as Array<Record<string, unknown>> | undefined)?.find(
+    (f) => f?.id === fixtureId,
+  );
+  if (!series || !fixture) throw new HttpError(404, 'fixture not found');
+  const clubIds = fixtureClubIds(series, fixture);
+  const sideIndex = clubIds.indexOf(clubId);
+  if (sideIndex < 0) throw new HttpError(403, 'not your fixture');
+  const matchDate = typeof fixture.date === 'string' ? fixture.date : '';
+  const deadline = reportDeadline(matchDate);
+  if (!deadline) throw new HttpError(400, 'the fixture has no date yet');
+  const existing = await repo.getCaptainsReport(ra.tenant, seriesId, fixtureId, clubId);
+  if (existing)
+    throw new HttpError(409, 'a report already exists for this match', {
+      code: 'report_exists',
+      id: existing.id,
+    });
+  const officials = await repo.getFixtureOfficials(ra.tenant, seriesId, fixtureId);
+  const side = sideIndex === 0 ? 'home' : 'away';
+  const byTeam = new Map((series.participants ?? []).map((p) => [p.teamId, p]));
+  const own = byTeam.get(String(fixture[side]));
+  const opp = byTeam.get(String(fixture[side === 'home' ? 'away' : 'home']));
+  const club = await repo.getClub(ra.tenant, clubId);
+  const at = now();
+  const report: CaptainsReport = {
+    id: captainsReportId(seriesId, fixtureId, clubId),
+    seriesId,
+    fixtureId,
+    clubId,
+    status: 'pending',
+    source: 'manual',
+    matchDate,
+    deadline,
+    side,
+    clubName: own?.name ?? club?.name ?? clubId,
+    opponentName: opp?.name ?? clubIds[1 - sideIndex] ?? 'TBC',
+    competition: series.name ?? '',
+    umpiresSnapshot: (officials?.umpires ?? []).map((u) => ({
+      umpireId: u.umpireId,
+      name: u.name,
+    })),
+    recipient: { kind: 'portal', memberId: randomUUID(), name: ra.email ?? '' },
+    captainName: '',
+    umpires: [],
+    general: '',
+    createdAt: at,
+    updatedAt: at,
+  };
+  const { fields } = await reportFieldsFrom(ra.tenant, report, { ...body, submit: true });
+  if (!(await repo.createCaptainsReport(ra.tenant, report)))
+    throw new HttpError(409, 'a report already exists for this match', {
+      code: 'report_exists',
+      id: report.id,
+    });
+  const saved = await writeReport(ra.tenant, report, fields, true, {
+    submittedBy: ra.email ?? 'portal',
+    via: 'portal',
+  });
+  return c.json(reportView(saved, now()), 201);
+});
+
+/** Admin: every report, filtered by derived status and match-date range. */
+app.get('/captains-reports', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const status = c.req.query('status');
+  const from = c.req.query('from');
+  const to = c.req.query('to');
+  const at = now();
+  const reports = (await repo.listCaptainsReports(ra.tenant))
+    .filter((r) => (!from || r.matchDate >= from) && (!to || r.matchDate <= to))
+    .map((r) => reportView(r, at))
+    .filter((r) => {
+      if (!status) return true;
+      if (status === 'late') return r.late;
+      return r.status === status;
+    })
+    .sort((a, b) => b.matchDate.localeCompare(a.matchDate) || a.id.localeCompare(b.id));
+  return c.json(reports);
+});
+
+/**
+ * Public submit-once link. The token is the capability (HMAC over tenant + report + recipient +
+ * expiry); it serves THAT report only and no roster data — the registry umpire names are the
+ * only list it carries (for "a different umpire stood"). Invalid → 404; expired, submitted,
+ * void or re-addressed → 410. The response is never cached and never leaks the URL onward.
+ */
+async function linkedReportOr410(c: Context<HonoEnv>) {
+  c.header('Cache-Control', 'no-store');
+  c.header('Referrer-Policy', 'no-referrer');
+  const found = await loadLinkedReport(
+    repo,
+    c.req.param('token') ?? '',
+    Date.now(),
+    captainsReportLinkSecret(),
+  );
+  if (!found.ok) throw new HttpError(found.status, found.error);
+  return found;
+}
+
+async function linkPayload(tenant: string, report: CaptainsReport) {
+  const [cfg, umpires] = await Promise.all([
+    repo.getTenantConfig(tenant),
+    repo.listUmpires(tenant),
+  ]);
+  return {
+    report: reportView(report, now()),
+    registry: umpires
+      .filter((u) => u.active)
+      .map((u) => ({ id: u.id, displayName: u.displayName }))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName)),
+    tenantBranding: {
+      name: cfg ? orgCopy(cfg).name : tenant,
+      logoUrl: cfg?.branding?.logoUrl ?? '',
+      colors: cfg?.branding?.colors ?? {},
+    },
+  };
+}
+
+app.get('/captains-report-link/:token', async (c) => {
+  const { tenant, report } = await linkedReportOr410(c);
+  return c.json(await linkPayload(tenant, report));
+});
+
+app.put('/captains-report-link/:token', async (c) => {
+  const { tenant, report, memberId } = await linkedReportOr410(c);
+  const { fields, submit } = await reportFieldsFrom(
+    tenant,
+    report,
+    await c.req.json().catch(() => null),
+  );
+  const saved = await writeReport(tenant, report, fields, submit, {
+    submittedBy: `link:${report.recipient.kind}`,
+    via: 'link',
+    memberId,
+  });
+  return c.json(await linkPayload(tenant, saved));
 });
 
 /* ─── Season runs (ADR 0008) ───

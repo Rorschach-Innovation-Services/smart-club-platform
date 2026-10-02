@@ -10,8 +10,14 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { staffInviteParams, regLinkParams, fixturesParams, clearanceParams } =
-  await import('../src/notify/whatsapp.js');
+const {
+  staffInviteParams,
+  regLinkParams,
+  fixturesParams,
+  clearanceParams,
+  captainsReportDueParams,
+  urlButtonComponent,
+} = await import('../src/notify/whatsapp.js');
 const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
 
 const LINK = 'https://club.example.com/sign-in';
@@ -42,6 +48,15 @@ const BUILDERS = [
       playerName: 'A Player',
       clubName: 'Adelaar CC',
       season: '2026-27',
+    }),
+  },
+  {
+    key: 'captainsReportDue' as const,
+    params: captainsReportDueParams({
+      recipientName: 'Sanele Mthembu',
+      clubName: 'Umzinto CC',
+      match: 'Umzinto v African Warriors, Sun 4 Oct 2026',
+      deadline: '18h00 on Wed 7 Oct 2026',
     }),
   },
   {
@@ -79,4 +94,35 @@ describe('whatsapp template arity', () => {
       assert.equal(def.params.length, def.paramCount);
     });
   }
+});
+
+describe('whatsapp URL buttons', () => {
+  test('every template with a URL button registers exactly one {{1}} suffix at the end', () => {
+    for (const def of Object.values(WHATSAPP_TEMPLATES)) {
+      const button = (def as { urlButton?: { urlTemplate: string } }).urlButton;
+      if (!button) continue;
+      assert.match(button.urlTemplate, /^https:\/\/[^{}]+\{\{1\}\}$/);
+    }
+  });
+
+  test('the captains_report_due button carries the token as its single suffix param', () => {
+    assert.ok(WHATSAPP_TEMPLATES.captainsReportDue.urlButton);
+    const c = urlButtonComponent('tok.sig');
+    assert.deepEqual(c, {
+      type: 'button',
+      sub_type: 'url',
+      index: '0',
+      parameters: [{ type: 'text', text: 'tok.sig' }],
+    });
+  });
+
+  test('the report link never rides in the body params', () => {
+    const params = captainsReportDueParams({
+      recipientName: 'A',
+      clubName: 'B',
+      match: 'C',
+      deadline: 'D',
+    });
+    for (const p of params) assert.doesNotMatch(p.text, /https?:\/\//);
+  });
 });

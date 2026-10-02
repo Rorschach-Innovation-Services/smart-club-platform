@@ -11,6 +11,21 @@
  */
 import * as Sentry from '@sentry/react';
 
+/**
+ * A captain's-report link token (`/r/<token>`, `/captains-report-link/<token>`) is a bearer
+ * capability: replace it with `[token]` anywhere an event or breadcrumb carries it (page URL,
+ * fetch breadcrumbs, the `api_path` tag). Exported for tests.
+ */
+export function scrubReportTokens(value: string): string {
+  return value.replace(/(\/(?:captains-report-link|r)\/)[^/?#\s"']+/g, '$1[token]');
+}
+
+function scrub<T>(value: T): T {
+  const json = JSON.stringify(value);
+  const scrubbed = scrubReportTokens(json);
+  return scrubbed === json ? value : (JSON.parse(scrubbed) as T);
+}
+
 if (import.meta.env.VITE_SENTRY_DSN) {
   Sentry.init({
     dsn: import.meta.env.VITE_SENTRY_DSN,
@@ -23,6 +38,8 @@ if (import.meta.env.VITE_SENTRY_DSN) {
     // navigation/unmount, or a media load interrupted (seen on /tutorials in prod).
     // Deliberate cancellation, not a defect; never worth an alert.
     ignoreErrors: [/^AbortError\b/, /The operation was aborted/i],
+    beforeSend: (event) => scrub(event),
+    beforeBreadcrumb: (crumb) => scrub(crumb),
   });
 }
 

@@ -778,3 +778,82 @@ export async function sendVeteransRequestResolvedEmail(
   );
   return { messageId: res.MessageId ?? '' };
 }
+
+// ───────────────────────── Captain's report due ─────────────────────────
+
+export interface CaptainsReportDueEmailInput {
+  to: string;
+  /** Club chair cc'd when the captain is the recipient. */
+  cc?: string;
+  recipientName: string;
+  /** 'captain' → "you captained"; 'chair' → "please complete or forward". */
+  recipientKind: 'captain' | 'chair';
+  clubName: string;
+  /** "Umzinto v African Warriors" */
+  matchLine: string;
+  /** "Sun 4 Oct 2026" */
+  matchDateText: string;
+  /** "18h00 on Wed 7 Oct 2026" */
+  deadlineText: string;
+  /** The submit-once link. NEVER logged. */
+  link: string;
+  orgName: string;
+}
+
+/** Build the captain's-report-due email. Pure — exported so tests can assert the copy. */
+export function captainsReportDueEmailContent(input: CaptainsReportDueEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const { recipientName, recipientKind, clubName, matchLine, matchDateText, deadlineText } = input;
+  const greet = recipientName || 'there';
+  const subject = `Captain's report due: ${matchLine} (${matchDateText})`;
+  const ask =
+    recipientKind === 'captain'
+      ? `Please rate the umpires from ${clubName}'s match ${matchLine} on ${matchDateText}.`
+      : `${clubName}'s captain's report for ${matchLine} on ${matchDateText} is open. Please complete it, or forward this email to the match captain.`;
+  const text =
+    `Hi ${greet},\n\n${ask}\n\n` +
+    `Open the report here (no sign-in needed):\n\n${input.link}\n\n` +
+    `It is due by ${deadlineText}. The link works until the report is submitted, then it closes.\n\n` +
+    `Thank you,\nThe ${input.orgName} office`;
+  const e = escapeHtml;
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hi ${e(greet)},</p>` +
+    `<p>${e(ask)}</p>` +
+    `<p><a href="${e(input.link)}" style="color:#1D9E75;font-weight:600">Open the captain's report</a> (no sign-in needed)</p>` +
+    `<p>It is due by <strong>${e(deadlineText)}</strong>. The link works until the report is submitted, then it closes.</p>` +
+    `<p>Thank you,<br/>The ${e(input.orgName)} office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Send the captain's-report-due email (the link rides in the body; never logged). */
+export async function sendCaptainsReportDueEmail(
+  input: CaptainsReportDueEmailInput,
+): Promise<{ messageId: string }> {
+  const { subject, text, html } = captainsReportDueEmailContent(input);
+  if (EMAIL_DRY_RUN) {
+    console.log(
+      `[notify:email dry-run] would send captain's report link to ${input.to}` +
+        `${input.cc ? ` (cc ${input.cc})` : ''} for ${input.clubName}`,
+    );
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [input.to], ...(input.cc ? { CcAddresses: [input.cc] } : {}) },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}

@@ -76,3 +76,29 @@ export function medicoachSyncUrl(): string {
 export function medicoachSyncSecret(): string {
   return process.env.MEDICOACH_SYNC_SECRET ?? fromSstResource('MedicoachSyncSecret', 'value') ?? '';
 }
+
+/**
+ * The HMAC key for captain's-report submit-once links (ADR 0016, Slice 2). A link token is
+ * `payload.HMAC(secret, payload)`, so an empty key would make every link forgeable: FAIL
+ * CLOSED exactly like `candidateHandleSecret` — only the offline/local stack (LOCAL_AUTH=1,
+ * never set in AWS) gets a fixed dev constant. Set before deploy:
+ *   sst secret set CaptainsReportLinkSecret $(openssl rand -hex 32) --stage <stage>
+ */
+export function captainsReportLinkSecret(): string {
+  const v =
+    process.env.CAPTAINS_REPORT_LINK_SECRET ?? fromSstResource('CaptainsReportLinkSecret', 'value');
+  if (v) return v;
+  if (process.env.LOCAL_AUTH === '1') return 'local-dev-captains-report-link-secret';
+  throw new Error(
+    'CAPTAINS_REPORT_LINK_SECRET not set (run: sst secret set CaptainsReportLinkSecret <hex> --stage <stage>)',
+  );
+}
+
+/**
+ * Where a captain's-report link points: `${base}/r/<token>`. The page is tenant-independent
+ * (the token names the tenant), so prod uses the PLATFORM host — the same one the WhatsApp
+ * template's URL button is registered with — and other stages their own web URL.
+ */
+export function captainsReportLinkBase(): string {
+  return (process.env.CAPTAINS_REPORT_LINK_BASE_URL || 'http://localhost:5173').replace(/\/+$/, '');
+}

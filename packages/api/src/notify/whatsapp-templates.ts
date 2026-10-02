@@ -55,6 +55,12 @@ export type WhatsAppTemplateDefinition = {
   /** The registered body text (or, for pending/unverified, a reconstruction). */
   bodyText: string;
   status: 'registered' | 'unverified' | 'pending';
+  /**
+   * A URL button with a dynamic suffix (Meta "Visit website" button, URL ending in `{{1}}`).
+   * `urlTemplate` is the URL as registered in Meta; the sender supplies the ONE suffix value
+   * (button index 0). Absent ⇒ a body-only template.
+   */
+  urlButton?: { urlTemplate: string; suffix: string };
 };
 
 export const WHATSAPP_TEMPLATES = {
@@ -145,6 +151,36 @@ export const WHATSAPP_TEMPLATES = {
       'Check your email for the full schedule.\n\n' +
       'If you have any questions, please contact your club.',
     status: 'unverified',
+  },
+
+  /**
+   * Captain's report due (ADR 0016, Slice 2): the submit-once report link to the match
+   * captain, or to the club chair when the captain can't be reached. The link is a URL
+   * BUTTON with a dynamic suffix (the signed report token), NOT a URL in the body — Meta
+   * scrutinises body URLs, and the token must not sit in the message text.
+   *
+   * The button URL is fixed per template in Meta, so it points at the PLATFORM host (the
+   * `/r/<token>` page is tenant-independent, like `/verify`): every tenant shares one
+   * template. Non-prod stages send the same button — they normally dry-run anyway.
+   *
+   * NOT YET CREATED IN META. `bodyText` is RECONSTRUCTED from the parameter order (the arity
+   * contract). Until it is approved a real send fails on the missing template and the email
+   * (always sent) carries the link.
+   */
+  captainsReportDue: {
+    name: 'captains_report_due',
+    lang: 'en',
+    paramCount: 4,
+    params: ['recipient name', 'club name', 'match (teams + date)', 'deadline'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      "{{2}}'s captain's report for {{3}} is open. Please rate the umpires by {{4}}.\n\n" +
+      'Tap the button below to open the report. It closes once it is submitted.',
+    status: 'pending',
+    urlButton: {
+      urlTemplate: 'https://platform.club.medicoach.co.za/r/{{1}}',
+      suffix: 'signed report token',
+    },
   },
 } as const satisfies Record<string, WhatsAppTemplateDefinition>;
 
