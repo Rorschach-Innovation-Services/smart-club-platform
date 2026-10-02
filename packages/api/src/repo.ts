@@ -1776,6 +1776,30 @@ export async function completeCaptainsReportNotify(
   );
 }
 
+/**
+ * Release a claimed send that reached nobody (every channel failed), so the REPORTOPEN#
+ * retry can claim it again. Only an `in_progress` claim is released — a completed one stays.
+ */
+export async function releaseCaptainsReportNotify(
+  tenant: string,
+  reportId: string,
+  audience: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: captainsReportNotifyKey(tenant, reportId, audience),
+        ConditionExpression: '#s = :p',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':p': 'in_progress' },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
 /** Every key in the captain's-report partition (reports, counters, ledger) — for erasure. */
 async function listCaptainsReportPartitionKeys(
   tenant: string,

@@ -895,6 +895,60 @@ describe('durable report opening (REPORTOPEN# markers)', () => {
     assert.equal(notices.length, 2);
   });
 
+  test('a notice that failed on every channel is retried (claim released); a partial success is done', async () => {
+    await seedCaptain();
+    page = liveResultPage('live');
+    let attempts = 0;
+    // Every channel fails for the African Warriors chair; the captain's email gets through
+    // while WhatsApp fails (partial success = done).
+    const flaky = {
+      log: () => {},
+      sendNotice: async (n: Notice) => {
+        attempts++;
+        return n.channels.map((channel) => ({
+          channel,
+          status:
+            n.recipientKind === 'captain' && channel === 'email'
+              ? ('sent' as const)
+              : ('failed' as const),
+          error: 'SES throttled',
+        }));
+      },
+    };
+    const summary = await puller.runMedicoachSync('dolphins', 'cron', {
+      repo,
+      url: stubUrl,
+      secret: SECRET,
+      log: () => {},
+      captainsReports: flaky,
+    });
+    assert.equal(summary.status, 'ok');
+    assert.equal(attempts, 2, 'both sides were tried before the failure was raised');
+    const [marker] = await repo.listReportOpenMarkers('dolphins');
+    assert.equal(marker?.ref, LIVE_REF);
+    const { NOTICE_FAILED_ERROR, retryPendingReportOpens } =
+      await import('../src/captains-reports.js');
+    assert.ok(marker.lastError?.startsWith(NOTICE_FAILED_ERROR));
+    assert.ok(!String(marker.lastError).includes('@'), 'no address in the stored error');
+
+    const status = (await (
+      await app.request('/integrations/medicoach/status', { headers: headers(ADMIN) })
+    ).json()) as { noticesFailed?: number; pendingReports?: number };
+    assert.equal(status.noticesFailed, 1);
+
+    // The next run re-sends ONLY the notice that reached nobody.
+    const retry = await retryPendingReportOpens('dolphins', { repo, ...sender });
+    assert.deepEqual(retry, { retried: 1, done: 1, failed: 0, gaveUp: 0 });
+    assert.deepEqual(
+      notices.map((n) => n.recipientKind),
+      ['chair'],
+    );
+    assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
+    await retryPendingReportOpens('dolphins', { repo, ...sender });
+    await runPull();
+    assert.equal(notices.length, 1, 'nothing is sent twice');
+  });
+
   test('gives up after the attempt limit and drops the marker', async () => {
     page = liveResultPage('live');
     await puller.runMedicoachSync('dolphins', 'cron', {

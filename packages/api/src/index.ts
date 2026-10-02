@@ -212,6 +212,7 @@ import {
   captainsReportId,
   checkUmpireIds,
   loadLinkedReport,
+  NOTICE_FAILED_ERROR,
   parseCaptainsReportId,
   parseReportFields,
   ReportInputError,
@@ -4356,6 +4357,8 @@ app.get('/integrations/medicoach/status', async (c) => {
       .sort((a, b) => b.detectedAt.localeCompare(a.detectedAt))
       .map((x) => conflictView(x)),
     pendingReports: markers.length,
+    // Report notices that reached nobody (every channel failed) and are waiting on a retry.
+    noticesFailed: markers.filter((m) => m.lastError?.startsWith(NOTICE_FAILED_ERROR)).length,
   });
 });
 

@@ -97,6 +97,14 @@ importer's `putSeries`) would overwrite them or lose them to a version conflict.
   `integrations.medicoach.goLiveDate` (operator-only config) and matches more than 7 days
   old. A corrected result (newer `recordedAt`, no clear) updates the summary on pending
   reports and notifies nobody again.
+- **Delivery** — the store writes a `REPORTOPEN#<ref>` marker first and deletes it once the
+  reports opened and were notified; a failure leaves it for the next run (at most
+  `REPORT_OPEN_MAX_ATTEMPTS`, then Sentry). The `NOTIFY#` ledger is claimed per report AND
+  recipient (`recipient#<memberId>`), so a report voided by a clear and re-opened by a
+  re-recorded result notifies its new recipient once, and a replay never re-sends. A notice
+  that reached nobody (every channel tried failed) releases its claim and is retried; one
+  delivered channel is done. The admin sync page shows "notices failed" for retries waiting
+  on that.
 
 ### Captain's reports have no due date
 

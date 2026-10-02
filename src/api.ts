@@ -685,6 +685,8 @@ export interface MedicoachSyncStatus {
   };
   conflicts?: MedicoachSyncConflict[];
   pendingReports?: number;
+  /** Captain's-report notices that failed on every channel and are waiting on a retry. */
+  noticesFailed?: number;
 }
 export const getMedicoachSyncStatus = () =>
   request<MedicoachSyncStatus>('/integrations/medicoach/status');

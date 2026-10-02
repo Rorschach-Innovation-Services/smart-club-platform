@@ -23,7 +23,10 @@
  *
  * A newly stored result is first marked `REPORTOPEN#<ref>`; the marker is deleted once the
  * hook succeeded, so a report/notify failure is retried by the next run
- * (`retryPendingReportOpens`) instead of being lost — a replay never re-fires the hook.
+ * (`retryPendingReportOpens`, up to REPORT_OPEN_MAX_ATTEMPTS) instead of being lost — a
+ * replay never re-fires the hook. A notice counts as failed only when it reached nobody
+ * (every channel tried failed): its NOTIFY# claim is released and the hook throws, so the
+ * retry re-sends it. One channel delivered is done; a delivered notice is never re-sent.
  *
  * Idempotent per fixture: re-applying the same page changes nothing, so a full resync
  * (no cursor) is always safe.

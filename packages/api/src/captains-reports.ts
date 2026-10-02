@@ -16,10 +16,12 @@
  * reports and notifies nobody again; submitted reports are never touched.
  *
  * Durability: the puller writes a `REPORTOPEN#<ref>` marker with every newly stored result and
- * deletes it once the reports opened + notified. A failure leaves it for
+ * deletes it once the reports opened + notified. A failure — including a notice that failed
+ * on every channel it tried (its NOTIFY# claim is released) — leaves it for
  * `retryPendingReportOpens` (every cron run and "Sync now"); after REPORT_OPEN_MAX_ATTEMPTS it
  * gives up and reports to Sentry. Re-opening is idempotent (per fixture + club), and the
- * NOTIFY# ledger claim guarantees nothing is ever sent twice.
+ * NOTIFY# ledger claim (per report + recipient) guarantees a delivered notice is never sent
+ * twice. A partial success (one channel delivered) is done.
  *
  * PII: a `captainRef` is a player ref — an unsalted hash of an SA ID number. It is resolved to
  * a roster row here and then dropped: it is never stored on the report, never put in a token
@@ -60,6 +62,11 @@ export const MAX_REPORT_AGE_DAYS = 7;
 export const LINK_VALID_DAYS = 7;
 /** REPORTOPEN# retries (the puller's own try included) before giving up with Sentry. */
 export const REPORT_OPEN_MAX_ATTEMPTS = 5;
+/**
+ * The REPORTOPEN# `lastError` prefix of a notice that failed on EVERY channel it tried (the
+ * admin sync page counts these as "notices failed"). Carries no address or channel error.
+ */
+export const NOTICE_FAILED_ERROR = 'report notice failed on every channel';
 
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 const DAY_MS = 24 * 3600 * 1000;
@@ -453,6 +460,7 @@ export async function openCaptainReports(
   for (const s of sides) if (s) clubs.set(s.clubId, await repo.getClub(tenant, s.clubId));
 
   const nowIso = now().toISOString();
+  const failedNotices: string[] = [];
   for (const s of sides) {
     if (!s) continue;
     const club = clubs.get(s.clubId);
@@ -501,28 +509,46 @@ export async function openCaptainReports(
       const existing = await repo.getCaptainsReport(tenant, seriesId, fixtureId, club.id);
       if (!existing || existing.status !== 'pending' || existing.source !== 'auto') continue;
       const toCaptain = existing.recipient.kind === 'captain' && captain;
-      if (
-        await notifyReportOpened(
-          deps,
-          tenant,
-          config,
-          existing,
-          toCaptain ? captain : chair,
-          toCaptain ? chair : null,
-        )
-      )
-        out.notified.push(existing.id);
+      const sent = await notifyReportOpened(
+        deps,
+        tenant,
+        config,
+        existing,
+        toCaptain ? captain : chair,
+        toCaptain ? chair : null,
+      );
+      if (sent === 'sent') out.notified.push(existing.id);
+      else if (sent === 'failed') failedNotices.push(existing.id);
       continue;
     }
     out.opened.push(report.id);
 
-    if (await notifyReportOpened(deps, tenant, config, report, contact, captain ? chair : null))
-      out.notified.push(report.id);
+    const sent = await notifyReportOpened(
+      deps,
+      tenant,
+      config,
+      report,
+      contact,
+      captain ? chair : null,
+    );
+    if (sent === 'sent') out.notified.push(report.id);
+    else if (sent === 'failed') failedNotices.push(report.id);
   }
+  // A notice that reached nobody (every channel tried failed) released its ledger claim;
+  // throwing keeps the REPORTOPEN# marker, so the next run re-sends it (bounded by
+  // REPORT_OPEN_MAX_ATTEMPTS). Both sides were handled first, so one side's failure never
+  // stops the other side's report from opening.
+  if (failedNotices.length)
+    throw new Error(`${NOTICE_FAILED_ERROR} (${failedNotices.length} report(s))`);
   return out;
 }
 
-/** Claim the NOTIFY# ledger row, then send. False when the send was already claimed. */
+/**
+ * Claim the NOTIFY# ledger row, then send. 'already' when the send was already claimed;
+ * 'failed' when no channel delivered and at least one FAILED (not merely skipped for want of
+ * a contact) — the claim is then released so a retry can send again. A partial success (one
+ * channel sent) is done.
+ */
 async function notifyReportOpened(
   deps: CaptainsReportDeps,
   tenant: string,
@@ -530,7 +556,7 @@ async function notifyReportOpened(
   report: CaptainsReport,
   contact: { name: string; email?: string; cell?: string },
   ccChair: { email?: string } | null,
-): Promise<boolean> {
+): Promise<'sent' | 'already' | 'failed'> {
   const { repo } = deps;
   // Everything that can throw BEFORE a send is resolved before the ledger claim, so a
   // failure (e.g. the link secret unset) leaves the claim free for the REPORTOPEN# retry.
@@ -541,7 +567,7 @@ async function notifyReportOpened(
   // voided by a cleared result and re-opened by a re-recorded one gets a new memberId (a new
   // link) and must be notified again, while a replay of the same opening never is.
   const audience = `recipient#${report.recipient.memberId}`;
-  if (!(await repo.claimCaptainsReportNotify(tenant, report.id, audience))) return false;
+  if (!(await repo.claimCaptainsReportNotify(tenant, report.id, audience))) return 'already';
   const home = report.side === 'home' ? report.clubName : report.opponentName;
   const away = report.side === 'home' ? report.opponentName : report.clubName;
   const cc =
@@ -573,8 +599,12 @@ async function notifyReportOpened(
       error: err instanceof Error ? err.message : 'send failed',
     }));
   }
+  if (!results.some((r) => r.status === 'sent') && results.some((r) => r.status === 'failed')) {
+    await repo.releaseCaptainsReportNotify(tenant, report.id, audience);
+    return 'failed';
+  }
   await repo.completeCaptainsReportNotify(tenant, report.id, audience, results);
-  return true;
+  return 'sent';
 }
 
 /** The default sender: SES email (+ cc) and the `captains_report_due` WhatsApp template. */

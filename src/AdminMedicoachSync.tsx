@@ -173,9 +173,12 @@ export function AdminMedicoachSyncView({
               <div className="mcs-stat-label">Held for review</div>
               <div className="mcs-stat-value">{conflicts.length}</div>
               <div className="ump-sub">
-                {data.pendingReports
-                  ? `${data.pendingReports} captain's report(s) retrying`
-                  : 'medicoach changes'}
+                {[
+                  data.pendingReports ? `${data.pendingReports} captain's report(s) retrying` : '',
+                  data.noticesFailed ? `${data.noticesFailed} notices failed` : '',
+                ]
+                  .filter(Boolean)
+                  .join(' · ') || 'medicoach changes'}
               </div>
             </div>
           </div>
