@@ -43,6 +43,12 @@ tuskers-import-backup-*.json
 tuskers-import-created-clubs.json
 tuskers-import-created-clubs.*.json
 
+# import-lions-affiliation --confirm backups (club records incl. officer contacts — PII) and
+# its created-clubs revert manifests (legacy unsuffixed + stage-scoped .<stage>.json).
+lions-affiliation-backup-*.json
+lions-affiliation-created-clubs.json
+lions-affiliation-created-clubs.*.json
+
 # generated cohort exports (contain PII)
 cohort-export-*.xlsx
 
