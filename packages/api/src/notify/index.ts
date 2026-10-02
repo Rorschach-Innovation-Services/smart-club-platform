@@ -22,6 +22,8 @@ import {
   postponementAgreedEmailContent,
   postponementAdminFinalEmailContent,
   postponementDeclinedEmailContent,
+  fixtureReminderEmailContent,
+  sendFixtureReminderEmail,
 } from './email.js';
 import type {
   TutorialLink,
@@ -31,12 +33,14 @@ import type {
   PostponementAgreedEmailInput,
   PostponementAdminFinalEmailInput,
   PostponementDeclinedEmailInput,
+  FixtureReminderLine,
 } from './email.js';
 import {
   sendStaffInviteWhatsApp,
   sendFixturesWhatsApp,
   sendRegLinkWhatsApp,
   sendClearanceWhatsApp,
+  sendFixtureReminderWhatsApp,
   toE164,
 } from './whatsapp.js';
 
@@ -820,4 +824,92 @@ export function notifyPostponementResolved(
     return postponementDeclinedEmailContent({ ...notice, chairName });
   };
   return sendChairPostponementNotice(chair, render, `postponement-${notice.outcome}`);
+}
+
+// ───────────────────── Scheduled fixture reminders (FixtureReminders cron) ─────────────────────
+//
+// One reminder per (club, match date) to the club chair, over the channels the caller passes —
+// the cron has already applied the tenant's channel config, the whatsappInvites flag and the
+// template-registered gate. Non-throwing per channel, like every orchestrator here: a bad/blank
+// contact becomes a `skipped` result and a provider fault a `failed` one, so one channel can never
+// sink the other and the caller always has a full set of results to record.
+
+/** Remind a club chair of the club's fixtures on one date. */
+export async function sendFixtureReminder(args: {
+  chair: { name?: string; email?: string; cell?: string };
+  clubName: string;
+  /** "Sat 2026-11-07". */
+  dateLabel: string;
+  /** Already projected for the club: no withheld time/venue. */
+  fixtures: FixtureReminderLine[];
+  /** Tenant portal origin; required by the WhatsApp template ({{4}}), optional in the email. */
+  portalLink?: string;
+  channels: Channel[];
+}): Promise<{ results: SendResult[] }> {
+  const { chair, clubName, dateLabel, fixtures, portalLink, channels } = args;
+  const chairName = (chair.name ?? '').trim();
+
+  const email = async (): Promise<SendResult> => {
+    const to = (chair.email ?? '').trim();
+    if (!EMAIL_RE.test(to)) {
+      return {
+        channel: 'email',
+        status: 'skipped',
+        ...(to ? { to } : {}),
+        error: 'no valid chair email on file',
+      };
+    }
+    try {
+      const { messageId } = await sendFixtureReminderEmail(
+        to,
+        fixtureReminderEmailContent({
+          chairName,
+          clubName,
+          dateLabel,
+          fixtures,
+          ...(portalLink ? { portalLink } : {}),
+        }),
+      );
+      return { channel: 'email', status: 'sent', to, messageId };
+    } catch (err) {
+      return { channel: 'email', status: 'failed', to, error: errMessage(err) };
+    }
+  };
+
+  const whatsapp = async (): Promise<SendResult> => {
+    const cell = (chair.cell ?? '').trim();
+    const e164 = toE164(cell);
+    if (!e164) {
+      return {
+        channel: 'whatsapp',
+        status: 'skipped',
+        ...(cell ? { to: cell } : {}),
+        error: 'no valid chair cell on file',
+      };
+    }
+    if (!portalLink) {
+      // The template's {{4}} is the portal link and Meta rejects an empty param.
+      return {
+        channel: 'whatsapp',
+        status: 'skipped',
+        to: e164,
+        error: 'no portal link for this tenant',
+      };
+    }
+    try {
+      const { messageId } = await sendFixtureReminderWhatsApp({
+        to: e164,
+        chairName,
+        clubName,
+        dateLabel,
+        portalLink,
+      });
+      return { channel: 'whatsapp', status: 'sent', to: e164, messageId };
+    } catch (err) {
+      return { channel: 'whatsapp', status: 'failed', to: e164, error: errMessage(err) };
+    }
+  };
+
+  const results = await Promise.all(channels.map((ch) => (ch === 'email' ? email() : whatsapp())));
+  return { results };
 }

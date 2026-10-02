@@ -687,6 +687,12 @@ export async function appendClubCommEvents(
   return stripKeys<Club>(res.Attributes) as Club;
 }
 
+/**
+ * What an INVITE#-keyspace idempotency marker guards. `fixture-reminder` is the FixtureReminders
+ * cron's once-per-(club, match date) marker (key `fixture-reminder:<targetDate>`).
+ */
+export type InviteSendKind = 'invite' | 'fixtures' | 'staff-invite' | 'fixture-reminder';
+
 /** Outcome of a duplicate idempotency claim: prior results + whether the first attempt is still running. */
 export interface InviteSendReplay {
   pending: boolean;
@@ -710,7 +716,7 @@ export async function claimInviteSend(
   clubId: string,
   idempotencyKey: string,
   channels: string[],
-  kind: 'invite' | 'fixtures' | 'staff-invite' = 'invite',
+  kind: InviteSendKind = 'invite',
 ): Promise<InviteSendReplay | null> {
   const startedAt = new Date().toISOString();
   // TTL (epoch seconds): the marker only needs to outlive a lost-response retry window,
@@ -745,7 +751,7 @@ export async function claimInviteSend(
         | undefined;
       // The invite/fixtures markers share the INVITE# keyspace; `kind` disambiguates them.
       // A key reused across kinds must never replay the wrong send's results — refuse it.
-      const priorKind = (item?.kind as 'invite' | 'fixtures' | 'staff-invite') ?? 'invite';
+      const priorKind = (item?.kind as InviteSendKind) ?? 'invite';
       if (priorKind !== kind) {
         throw new Error(
           `idempotency key ${idempotencyKey} already used for a ${priorKind} send (got ${kind})`,

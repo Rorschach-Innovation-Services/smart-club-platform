@@ -969,6 +969,90 @@ export function postponementDeclinedEmailContent(input: PostponementDeclinedEmai
   return { subject, ...postponementNotice(input.chairName, body, [['Reason', input.reason]]) };
 }
 
+// ───────────────────────── Scheduled fixture reminders (FixtureReminders cron) ─────────────────────────
+//
+// Pure builder, same contract as the postponement notices: the CALLER decides what may appear. A
+// kick-off time or ground the series withholds from clubs (ADR 0011) is never passed in — the cron
+// reads fixtures through projectSeriesForClub — so this builder cannot leak one.
+
+/** One match on the reminder's date, from the reminded club's point of view. */
+export interface FixtureReminderLine {
+  seriesName: string;
+  /** The club's own side (a multi-team club fields several). */
+  sideName: string;
+  opponentName: string;
+  isHome: boolean;
+  /** Only when the series reveals kick-off times to clubs. */
+  time?: string;
+  /** Only when the series reveals grounds to clubs. */
+  venue?: string;
+}
+
+export interface FixtureReminderEmailInput {
+  chairName: string;
+  clubName: string;
+  /** "Sat 2026-11-07". */
+  dateLabel: string;
+  fixtures: FixtureReminderLine[];
+  /** The tenant's portal origin; omitted when the tenant has no canonical web origin. */
+  portalLink?: string;
+}
+
+/** Human date label for a reminder: weekday + ISO date ("Sat 2026-11-07"). */
+export function fixtureReminderDateLabel(date: string): string {
+  return postponementWhen(date);
+}
+
+/** The reminder email to a club chair: every match the club plays on one date. */
+export function fixtureReminderEmailContent(input: FixtureReminderEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const greetName = input.chairName || 'there';
+  const n = input.fixtures.length;
+  const subject = `Fixture reminder — ${input.clubName} · ${input.dateLabel}`;
+  const intro = `A reminder that ${input.clubName} has ${n === 1 ? 'a fixture' : `${n} fixtures`} on ${input.dateLabel}:`;
+  const lineText = (f: FixtureReminderLine) =>
+    [
+      f.seriesName,
+      `${f.sideName} vs ${f.opponentName} (${f.isHome ? 'Home' : 'Away'})`,
+      ...(f.time ? [f.time] : []),
+      ...(f.venue ? [f.venue] : []),
+    ].join(' · ');
+  const portalText = input.portalLink
+    ? `See the full fixture details in your club portal: ${input.portalLink}`
+    : 'See the full fixture details in your club portal.';
+  const text =
+    `Hello ${greetName},\n\n` +
+    `${intro}\n\n` +
+    input.fixtures.map((f) => `  • ${lineText(f)}`).join('\n') +
+    `\n\n${portalText}\n\n` +
+    `If you have any questions, please contact your union office.\n\n` +
+    `Thank you,\nThe union office`;
+  const portalHtml = input.portalLink
+    ? `See the full fixture details in your club portal: <a href="${escapeHtml(input.portalLink)}">${escapeHtml(input.portalLink)}</a>`
+    : 'See the full fixture details in your club portal.';
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>Hello ${escapeHtml(greetName)},</p>` +
+    `<p>${escapeHtml(intro)}</p>` +
+    `<ul>${input.fixtures.map((f) => `<li>${escapeHtml(lineText(f))}</li>`).join('')}</ul>` +
+    `<p>${portalHtml}</p>` +
+    `<p>If you have any questions, please contact your union office.</p>` +
+    `<p>Thank you,<br/>The union office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Send one rendered fixture reminder. Same dry-run gate as the other senders. */
+export function sendFixtureReminderEmail(
+  to: string,
+  content: { subject: string; text: string; html: string },
+): Promise<{ messageId: string }> {
+  return sendPostponementEmail(to, content, 'fixture-reminder');
+}
+
 /** Send one rendered postponement notice. Same dry-run gate as the other senders. */
 export async function sendPostponementEmail(
   to: string,

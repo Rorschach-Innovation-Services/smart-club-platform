@@ -5359,6 +5359,7 @@ export function AdminClubDetail({
                   'veterans-request-accepted': 'Veterans request accepted notice',
                   'veterans-request-declined': 'Veterans request declined notice',
                   fixtures: 'Fixtures shared with players',
+                  'fixture-reminder': 'Fixture reminder',
                 };
                 const sendItems = (club.commLog || []).map((e) => {
                   const isFixtures = e.kind === 'fixtures';

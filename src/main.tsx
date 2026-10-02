@@ -2716,6 +2716,7 @@ function Shell({
             requiredDocs={requiredDocs}
             onRenameClub={(name) => updateClub({ name })}
             onSaveExco={saveExco}
+            onSetRemindersOptIn={(remindersOptIn) => updateClub({ remindersOptIn })}
           />
         );
       if (view === 'cqi')
@@ -3039,7 +3040,8 @@ function Shell({
             setShowOnboarding(false);
             toastShow('Welcome, ' + activeClub.chair.split(' ')[0] + " · let's get started");
             // Persist just the reminders opt-in (a non-affiliation field, so it's never
-            // locked). No scheduled reminders yet — this only stops dropping the choice.
+            // locked). The FixtureReminders cron reads it (only an explicit false opts out);
+            // the club-home toggle edits it afterwards.
             // Best-effort: a stale-version 409 here just means the flag didn't persist, so
             // log it (don't swallow) rather than surfacing an error toast over the welcome.
             if (contact && !!contact.notify !== !!activeClub.remindersOptIn) {

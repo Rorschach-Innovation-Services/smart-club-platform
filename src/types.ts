@@ -274,6 +274,20 @@ export interface TenantConfig {
   clearanceCertTemplate?: ClearanceCertTemplate;
   /** Union contact details for the certificate footer. Operator-only; missing fields omitted. */
   orgContact?: OrgContact;
+  /**
+   * Scheduled fixture reminders to club chairs. Operator-only (PUT /platform/tenants/:slug);
+   * not projected by GET /tenant/config, so only the operator portal sees it.
+   */
+  fixtureReminders?: FixtureRemindersConfig;
+}
+
+export type FixtureReminderChannel = 'email' | 'whatsapp';
+
+/** Mirror of the API's FixtureRemindersConfig (leadDays 1..30, ≤4 entries). */
+export interface FixtureRemindersConfig {
+  enabled: boolean;
+  leadDays: number[];
+  channels: FixtureReminderChannel[];
 }
 
 export type ClearanceCertTemplate = 'classic' | 'confirmation';
@@ -507,6 +521,7 @@ export interface Club {
   previousName?: string;
   notes?: ClubNote[];
   commLog?: ClubCommEvent[];
+  /** Chair's reminders choice. Absent counts as opted in; only `false` stops fixture reminders. */
   remindersOptIn?: boolean;
   playerRegLink?: { token: string; createdAt: string };
   /** Marks a club loaded from the demo snapshot; gates illustrative-only UI. */
@@ -571,7 +586,9 @@ export interface ClubCommEvent {
     | 'postponement-agreed'
     | 'postponement-admin-final'
     | 'postponement-declined'
-    | 'postponement-withdrawn';
+    | 'postponement-withdrawn'
+    // Scheduled fixture reminder to the chair (FixtureReminders cron).
+    | 'fixture-reminder';
   summary?: string;
 }
 

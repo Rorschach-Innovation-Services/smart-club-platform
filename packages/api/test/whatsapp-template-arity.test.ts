@@ -10,7 +10,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { staffInviteParams, regLinkParams, fixturesParams, clearanceParams } =
+const { staffInviteParams, regLinkParams, fixturesParams, clearanceParams, fixtureReminderParams } =
   await import('../src/notify/whatsapp.js');
 const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
 
@@ -51,6 +51,15 @@ const BUILDERS = [
       fromClubName: 'Adelaar CC',
       playerName: 'A Player',
       toClubName: 'Centurion Kavaliers',
+    }),
+  },
+  {
+    key: 'fixtureReminder' as const,
+    params: fixtureReminderParams({
+      chairName: 'Thandi Nkosi',
+      clubName: 'Adelaar CC',
+      dateLabel: 'Sat 2026-11-07',
+      portalLink: LINK,
     }),
   },
 ];

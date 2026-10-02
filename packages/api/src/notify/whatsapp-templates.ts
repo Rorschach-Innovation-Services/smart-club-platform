@@ -40,7 +40,9 @@
  *   "pending"    — NOT yet created/approved in Meta. The sender exists; a real send
  *      is rejected on the missing template until it is created under this name.
  * `status` is documentation, not a runtime gate — nothing here can verify Meta's
- * state, and the send path fails open (attempts the send) for every entry.
+ * state, and the send path fails open (attempts the send) for every entry. The one
+ * exception is `fixtureReminder`: the FixtureReminders cron reads its status and skips
+ * WhatsApp until it is "registered" (see that entry).
  */
 
 export type WhatsAppTemplateDefinition = {
@@ -145,6 +147,31 @@ export const WHATSAPP_TEMPLATES = {
       'Check your email for the full schedule.\n\n' +
       'If you have any questions, please contact your club.',
     status: 'unverified',
+  },
+
+  /**
+   * Scheduled fixture reminder to a club chair (the FixtureReminders cron), sent N days
+   * before a match day. Body-only Utility template; the fixture detail (opponents, and the
+   * kick-off/ground only when revealed) rides in the email and the portal, never here, so
+   * the template can't leak a withheld time or venue.
+   *
+   * NOT YET CREATED IN META. `bodyText` is RECONSTRUCTED from the parameter order (the
+   * arity contract). Unlike the other entries, this status IS read at runtime: the cron
+   * skips the WhatsApp channel unless it is "registered" (a daily cron across every tenant
+   * would otherwise fail the same send on every run until approval). Register per
+   * docs/runbooks/whatsapp-templates.md, then flip to "registered".
+   */
+  fixtureReminder: {
+    name: 'fixture_reminder',
+    lang: 'en',
+    paramCount: 4,
+    params: ['chair name', 'club name', 'fixture date', 'portal link'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      'A reminder that {{2}} has fixtures on {{3}}. ' +
+      'See the match details in your club portal: {{4}}\n\n' +
+      'If you have any questions, please contact your union office.',
+    status: 'pending',
   },
 } as const satisfies Record<string, WhatsAppTemplateDefinition>;
 

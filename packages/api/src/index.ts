@@ -211,6 +211,7 @@ import {
 import { normaliseSerial } from './certificates/serial.js';
 import { activeVerifyKeys, certSigner, type VerifyKey } from './certificates/signer.js';
 import { validateCertTemplate, validateOrgContact } from './certificates/config.js';
+import { validateFixtureReminders } from './fixture-reminders-config.js';
 import { TENANT_UTC_OFFSET_MINUTES } from './tenant-time.js';
 
 // Strict date-only parsing for calendar validation — dayjs's lenient default would roll
@@ -6994,6 +6995,7 @@ app.put('/tenant/config', requireAdmin, async (c) => {
   delete (patch as { requiredDocs?: unknown }).requiredDocs;
   delete (patch as { clearanceCertTemplate?: unknown }).clearanceCertTemplate;
   delete (patch as { orgContact?: unknown }).orgContact;
+  delete (patch as { fixtureReminders?: unknown }).fixtureReminders;
   delete (patch as { sport?: unknown }).sport;
   delete (patch as { seasonLabel?: unknown }).seasonLabel;
   const next = await applyTenantConfigPatch(tenant, patch, { preserveOperatorBindings: true });
@@ -7558,6 +7560,10 @@ app.put('/platform/tenants/:slug', async (c) => {
     patch.clearanceCertTemplate = validateCertTemplate(body.clearanceCertTemplate);
   }
   if (body.orgContact !== undefined) patch.orgContact = validateOrgContact(body.orgContact);
+  // Whole-key write (the card sends the full object); normalised: leadDays deduped + sorted.
+  if (body.fixtureReminders !== undefined) {
+    patch.fixtureReminders = validateFixtureReminders(body.fixtureReminders);
+  }
   // Calendars, structures and the league setups binding them go through the shared
   // operator write (validation, version minting, referrer guards, calendar-edit warnings).
   if (body.calendars !== undefined) patch.calendars = body.calendars;

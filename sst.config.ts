@@ -560,6 +560,38 @@ export default $config({
       copyFiles: [{ from: 'packages/api/src/certificates/fonts', to: 'certificates/fonts' }],
     });
 
+    // ── Fixture reminders cron ── daily 05:00 UTC = 07:00 SAST. Reminds club chairs of upcoming
+    // fixtures for every tenant whose operator enabled `fixtureReminders`. Mirrors the API
+    // function's link + env for exactly what the reminder path touches (DynamoDB, SES, Meta,
+    // Sentry, the canonical-origin map for the portal link) — deliberately NOT the Cognito /
+    // uploads / KMS / candidate-handle grants, which this job never uses (least privilege).
+    new sst.aws.Cron('FixtureReminders', {
+      schedule: 'cron(0 5 * * ? *)',
+      function: {
+        handler: 'packages/api/src/crons/fixture-reminders.handler',
+        link: [table, fromEmail, whatsappAccessToken, whatsappPhoneNumberId],
+        // Same SES grant as the API (SES authorizes by verified identity, not resource ARN).
+        permissions: [{ actions: ['ses:SendEmail', 'ses:SendRawEmail'], resources: ['*'] }],
+        // Sequential sends across every tenant/club, each with provider backoff retries.
+        timeout: '5 minutes',
+        environment: {
+          TABLE_NAME: table.name,
+          STAGE: $app.stage,
+          SENTRY_DSN: sentryDsnApi.value,
+          SENTRY_RELEASE: sentryRelease,
+          // canonicalWebOrigin() (the reminder's portal link) reads these three.
+          WEB_ORIGIN_MAP: JSON.stringify(isProd ? webOriginMap(VANITY) : {}),
+          WILDCARD_ENABLED: wildcardEnabled ? '1' : '',
+          WILDCARD_WEB_SUFFIX: isProd ? WILDCARD_WEB_SUFFIX : '',
+          SES_REGION: 'eu-west-1',
+          FROM_EMAIL: fromEmail.value,
+          WHATSAPP_ACCESS_TOKEN: whatsappAccessToken.value,
+          WHATSAPP_PHONE_NUMBER_ID: whatsappPhoneNumberId.value,
+          NOTIFY_DRY_RUN: process.env.NOTIFY_DRY_RUN ?? '',
+        },
+      },
+    });
+
     return {
       url: web.url,
       api: api.url,

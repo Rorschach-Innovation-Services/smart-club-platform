@@ -277,3 +277,46 @@ export async function sendClearanceWhatsApp(
     `clearance notice for ${fromClubName}`,
   );
 }
+
+export interface FixtureReminderWhatsAppInput {
+  to: string; // already E.164 (see toE164)
+  chairName: string;
+  clubName: string;
+  /** Human date label, e.g. "Sat 2026-11-07". */
+  dateLabel: string;
+  portalLink: string;
+}
+
+/**
+ * Build the four positional body params for `fixture_reminder`, in order: {{1}} chair name
+ * (fallback 'there'), {{2}} club name, {{3}} fixture date, {{4}} portal link. Exported so the
+ * param order/count can be asserted against the registry directly.
+ */
+export function fixtureReminderParams(
+  input: Pick<FixtureReminderWhatsAppInput, 'chairName' | 'clubName' | 'dateLabel' | 'portalLink'>,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.chairName || 'there') },
+    { type: 'text', text: cleanParam(input.clubName) },
+    { type: 'text', text: cleanParam(input.dateLabel) },
+    { type: 'text', text: input.portalLink },
+  ];
+}
+
+/**
+ * Scheduled fixture reminder to a club chair. Uses the `fixtureReminder` registry entry. The
+ * caller (the FixtureReminders cron) only reaches this once that entry is "registered".
+ */
+export async function sendFixtureReminderWhatsApp(
+  input: FixtureReminderWhatsAppInput,
+): Promise<{ messageId: string }> {
+  const { to, clubName } = input;
+  const { name, lang } = WHATSAPP_TEMPLATES.fixtureReminder;
+  return sendTemplate(
+    to,
+    name,
+    lang,
+    fixtureReminderParams(input),
+    `fixture reminder for ${clubName}`,
+  );
+}

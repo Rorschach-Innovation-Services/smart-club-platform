@@ -8,6 +8,7 @@ import {
 } from 'react';
 import type { ReactNode, ChangeEvent, CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
+import { RemindersOptInToggle } from './club-reminders';
 import {
   PlayerFilterBar,
   FilterResultCount,
@@ -528,6 +529,7 @@ export function ClubHome({
   requiredDocs = DEFAULT_REQUIRED_DOCS,
   onRenameClub,
   onSaveExco = undefined,
+  onSetRemindersOptIn = undefined,
 }) {
   const [showNameEdit, setShowNameEdit] = useStateC(false);
   const [showExcoForm, setShowExcoForm] = useStateC(false);
@@ -925,6 +927,14 @@ export function ClubHome({
         <GovernanceCard
           club={club}
           onEditLeadership={canEditLeadership ? () => setShowExcoForm(true) : undefined}
+          footer={
+            onSetRemindersOptIn && (
+              <RemindersOptInToggle
+                optedIn={club.remindersOptIn !== false}
+                onChange={onSetRemindersOptIn}
+              />
+            )
+          }
         />
       </div>
 
@@ -948,7 +958,7 @@ export function ClubHome({
 }
 
 /* ─── Club Home: chairman governance + venues + coaches summary ─── */
-function GovernanceCard({ club, onEditLeadership = undefined }) {
+function GovernanceCard({ club, onEditLeadership = undefined, footer = undefined }) {
   const vertical = useVertical();
   const chair = club.exco?.chair || {};
   const age = ageFromSaId(chair.idNumber);
@@ -1024,6 +1034,7 @@ function GovernanceCard({ club, onEditLeadership = undefined }) {
           </div>
         ))}
       </div>
+      {footer}
     </Card>
   );
 }

@@ -140,3 +140,54 @@ real recipient until the token/phone-id secrets and (for WhatsApp) an approved t
   notify, so only the destination club is messaged on a resolution — that is by design.
 - Watch the comm log for `failed` WhatsApp rows after wiring a real token: they carry Meta's
   error code/message and usually mean the template name/language or a body param is off.
+
+---
+
+## Appendix — `fixture_reminder` (scheduled fixture reminders) — NOT YET REGISTERED
+
+The FixtureReminders cron (`packages/api/src/crons/fixture-reminders.ts`, daily 07:00 SAST)
+reminds club chairs of upcoming fixtures for tenants whose operator enabled **Fixture
+reminders** in the operator portal. Email works as soon as it deploys. WhatsApp needs this
+template created in Meta first.
+
+| Template purpose | Registry name (code) | Sent to    | When                                            |
+| ---------------- | -------------------- | ---------- | ----------------------------------------------- |
+| Fixture reminder | `fixture_reminder`   | club chair | N days before a match day (operator `leadDays`) |
+
+**Runtime gate:** this is the one template whose registry `status` is read at runtime. The cron
+**skips WhatsApp entirely** while the `fixtureReminder` entry in
+`packages/api/src/notify/whatsapp-templates.ts` is anything other than `'registered'`. It does not
+attempt the send and wait for Meta to reject it, because that would fail the same send for every
+tenant on every run. WhatsApp also needs the tenant's channels to include it and the
+`whatsappInvites` feature on.
+
+Body variables (Utility, English `en`, body-only, no buttons):
+
+| Var     | Value                               |
+| ------- | ----------------------------------- |
+| `{{1}}` | chair name (falls back to "there")  |
+| `{{2}}` | club name                           |
+| `{{3}}` | fixture date, e.g. `Sat 2026-11-07` |
+| `{{4}}` | portal link (tenant web origin)     |
+
+Proposed body (reconstructed from the parameter order, so check it against what Meta approves):
+
+```
+Hello {{1}},
+
+A reminder that {{2}} has fixtures on {{3}}. See the match details in your club portal: {{4}}
+
+If you have any questions, please contact your union office.
+```
+
+The template deliberately carries no opponent, kick-off time or ground. Those go in the email
+and the portal, which both respect withheld fields (ADR 0011).
+
+To activate:
+
+1. Create `fixture_reminder` in WhatsApp Manager (medicoach WABA) with the body above and wait for
+   approval. If Meta rejects the URL variable, drop `{{4}}`. That means changing `paramCount`/
+   `params` in the registry and `fixtureReminderParams` in `whatsapp.ts`; the arity test will flag
+   anything you miss.
+2. Change the `fixtureReminder` entry's `status` from `'pending'` to `'registered'` and deploy.
+   No secret is involved.

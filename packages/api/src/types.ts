@@ -345,6 +345,24 @@ export interface TenantConfig {
    * Operator-only: PUT /tenant/config strips it.
    */
   orgContact?: OrgContact;
+  /**
+   * Scheduled fixture reminders to club chairs (the FixtureReminders cron). Absent or
+   * `enabled: false` ⇒ no reminders for this tenant. `leadDays` (1..30, ≤4 entries, deduped
+   * + sorted on write) are the days-before-match a reminder goes out. Operator-only:
+   * PUT /tenant/config strips it, only PUT /platform/tenants/:slug writes it (validated by
+   * validateFixtureReminders), and GET /tenant/config does not project it.
+   */
+  fixtureReminders?: FixtureRemindersConfig;
+}
+
+/** Channels a fixture reminder may go out on. */
+export type FixtureReminderChannel = 'email' | 'whatsapp';
+
+/** Per-tenant fixture-reminder settings (see TenantConfig.fixtureReminders). */
+export interface FixtureRemindersConfig {
+  enabled: boolean;
+  leadDays: number[];
+  channels: FixtureReminderChannel[];
 }
 
 /** Stored club record. Catalogue-derived fields stay client-side. */
@@ -424,7 +442,13 @@ export interface Club {
   notes?: { id: string; text: string; author: string; at: string }[];
   /** Real onboarding-invite send events (email/WhatsApp), appended via list_append. */
   commLog?: ClubCommEvent[];
-  /** Whether the chair opted into deadline reminders during onboarding (no cron yet). */
+  /**
+   * The chair's reminders choice: set by the onboarding modal and the club-home toggle.
+   * The FixtureReminders cron skips a club only when this is explicitly `false` — absent
+   * counts as opted in, because CLI-imported clubs never pass through the onboarding modal
+   * and would otherwise silently never get reminders (the tenant's `fixtureReminders.enabled`
+   * is the master switch).
+   */
   remindersOptIn?: boolean;
   playerRegLink?: { token: string; createdAt: string };
   /** Marks a club loaded from the demo snapshot; gates illustrative-only UI (e.g. seeded comm-log events). */
@@ -511,7 +535,10 @@ export interface ClubCommEvent {
     | 'postponement-agreed'
     | 'postponement-admin-final'
     | 'postponement-declined'
-    | 'postponement-withdrawn';
+    | 'postponement-withdrawn'
+    // Scheduled fixture reminder to the chair (FixtureReminders cron), one row per channel,
+    // idempotency-keyed `fixture-reminder-<targetDate>-<channel>`.
+    | 'fixture-reminder';
   /** Aggregate, PII-free outcome for a broadcast send, e.g. "8 sent · 2 skipped" (sent · skipped · failed; zero parts omitted). */
   summary?: string;
 }

@@ -18,6 +18,8 @@ import {
   postponementAgreedEmailContent,
   postponementAdminFinalEmailContent,
   postponementDeclinedEmailContent,
+  fixtureReminderEmailContent,
+  fixtureReminderDateLabel,
 } from '../src/notify/email.js';
 import { orgCopy } from '../src/branding.js';
 
@@ -246,5 +248,67 @@ describe('postponement notices (ADR 0015)', () => {
       }).subject,
       `Postponement withdrawn — ${fixtureLabel}`,
     );
+  });
+});
+
+describe('fixture reminder email', () => {
+  const base = {
+    chairName: 'Sam',
+    clubName: 'Glenwood CC',
+    dateLabel: fixtureReminderDateLabel('2026-11-07'),
+  };
+
+  test('date label carries the weekday', () => {
+    assert.equal(fixtureReminderDateLabel('2026-11-07'), 'Sat 2026-11-07');
+  });
+
+  test('lists each fixture with opponent, home/away, revealed time and venue, and the portal link', () => {
+    const { subject, text, html } = fixtureReminderEmailContent({
+      ...base,
+      portalLink: 'https://glenwood.example.com',
+      fixtures: [
+        {
+          seriesName: 'Premier League',
+          sideName: 'Glenwood CC',
+          opponentName: 'Northlands <CC>',
+          isHome: true,
+          time: '10:00',
+          venue: 'Glenwood Oval',
+        },
+        {
+          seriesName: 'Reserve League',
+          sideName: 'Glenwood B',
+          opponentName: 'Crusaders',
+          isHome: false,
+        },
+      ],
+    });
+    assert.equal(subject, 'Fixture reminder — Glenwood CC · Sat 2026-11-07');
+    assert.match(text, /Hello Sam/);
+    assert.match(text, /has 2 fixtures on Sat 2026-11-07/);
+    assert.match(
+      text,
+      /Premier League · Glenwood CC vs Northlands <CC> \(Home\) · 10:00 · Glenwood Oval/,
+    );
+    assert.match(text, /Reserve League · Glenwood B vs Crusaders \(Away\)\n/);
+    assert.match(text, /club portal: https:\/\/glenwood\.example\.com/);
+    // HTML escapes user-supplied names and links the portal.
+    assert.match(html, /Northlands &lt;CC&gt;/);
+    assert.doesNotMatch(html, /Northlands <CC>/);
+    assert.match(html, /<a href="https:\/\/glenwood\.example\.com">/);
+  });
+
+  test('a time or venue that is not passed in never appears, and no link when the tenant has none', () => {
+    const { text, html } = fixtureReminderEmailContent({
+      ...base,
+      fixtures: [
+        { seriesName: 'Premier League', sideName: 'Glenwood CC', opponentName: 'X', isHome: true },
+      ],
+    });
+    assert.match(text, /has a fixture on/);
+    assert.match(text, /Premier League · Glenwood CC vs X \(Home\)\n/);
+    assert.doesNotMatch(text, /\d{2}:\d{2}/);
+    assert.match(text, /details in your club portal\./);
+    assert.doesNotMatch(html, /<a /);
   });
 });

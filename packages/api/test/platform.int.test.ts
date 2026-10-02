@@ -494,6 +494,48 @@ describe('tenant create → list → get → patch', () => {
     assert.equal(dupes.status, 409);
   });
 
+  test('fixtureReminders: operator writes it normalised; tenant admins cannot write or read it', async () => {
+    const put = (body: unknown) =>
+      app.request('/platform/tenants/dolphins', {
+        method: 'PUT',
+        headers: platformHeaders(OPERATOR),
+        body: JSON.stringify({ fixtureReminders: body }),
+      });
+    const ok = await put({ enabled: true, leadDays: [3, 1, 3], channels: ['whatsapp', 'email'] });
+    assert.equal(ok.status, 200);
+    const expected = { enabled: true, leadDays: [1, 3], channels: ['email', 'whatsapp'] };
+    assert.deepEqual((await repo.getTenantConfig('dolphins'))?.fixtureReminders, expected);
+
+    for (const bad of [
+      { enabled: true, leadDays: [0], channels: ['email'] },
+      { enabled: true, leadDays: [31], channels: ['email'] },
+      { enabled: true, leadDays: [1.5], channels: ['email'] },
+      { enabled: true, leadDays: [1, 2, 3, 4, 5], channels: ['email'] },
+      { enabled: true, leadDays: [1], channels: ['sms'] },
+      { enabled: true, leadDays: [1], channels: [] },
+      { enabled: 'yes', leadDays: [1], channels: ['email'] },
+      { enabled: true, leadDays: [1], channels: ['email'], extra: 1 },
+      [],
+    ]) {
+      assert.equal((await put(bad)).status, 400, JSON.stringify(bad));
+    }
+
+    // A tenant admin's PUT /tenant/config silently drops it (operator-only, ADR 0006)...
+    const adminPut = await app.request('/tenant/config', {
+      method: 'PUT',
+      headers: tenantHeaders(DOLPHINS_ADMIN, 'dolphins'),
+      body: JSON.stringify({ fixtureReminders: { enabled: false, leadDays: [], channels: [] } }),
+    });
+    assert.equal(adminPut.status, 200);
+    assert.deepEqual((await repo.getTenantConfig('dolphins'))?.fixtureReminders, expected);
+    // ...and GET /tenant/config does not project it.
+    const read = await app.request('/tenant/config', {
+      headers: tenantHeaders(DOLPHINS_ADMIN, 'dolphins'),
+    });
+    assert.equal(read.status, 200);
+    assert.equal('fixtureReminders' in ((await read.json()) as object), false);
+  });
+
   test('PUT /platform/tenants/:slug on unknown tenant → 404', async () => {
     const res = await app.request('/platform/tenants/ghost', {
       method: 'PUT',
