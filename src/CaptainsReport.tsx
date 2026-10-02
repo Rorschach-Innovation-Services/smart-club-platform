@@ -4,7 +4,7 @@ import { useState, useMemo, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { Icon, Btn, Pill, YN, Choice } from './atoms';
 import { ownRoster, oppositionRoster } from './captainsReportRoster';
-import { teamIdsForClub, resolveTeam } from './data';
+import { clubFixtures, localISO } from './season';
 
 // Part One guidance from the union's Captain's Report on Umpires form.
 const RATING_GUIDE = [
@@ -161,7 +161,8 @@ const UMPIRE_PANEL = [
 ];
 
 // Per-club memory of the last report (captain, competition, recent umpires) so the
-// next one starts prefilled. Browser-local and best-effort: storage can be unavailable.
+// next one starts prefilled, plus the fixtures filed from this browser (`filed`), which
+// the season dashboard reads to show which matches still need a report. Browser-local and best-effort: storage can be unavailable.
 const memoryKey = (clubId) => `captains-report:${clubId}`;
 function recall(clubId) {
   try {
@@ -170,6 +171,9 @@ function recall(clubId) {
     return {};
   }
 }
+/** Fixture keys a report was filed for on this device (best-effort, browser-local). */
+export const filedFixtureKeys = (clubId: string): string[] => recall(clubId).filed || [];
+
 function remember(clubId, data) {
   try {
     localStorage.setItem(memoryKey(clubId), JSON.stringify(data));
@@ -229,10 +233,6 @@ const fmtDate = (iso) =>
         year: 'numeric',
       })
     : '';
-
-// Local YYYY-MM-DD (toISOString would shift SAST dates back a day via UTC).
-const localISO = (d) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 // Clause 4.1 — report due by 18h00 on the third business day after the match.
 // Weekends are skipped; public holidays aren't modelled (flagged in the copy).
@@ -732,34 +732,16 @@ export function CaptainsReportView({
 
   // This club's fixtures from released series — most recent first, so the match
   // just played is at the top of the picker.
-  // A multi-team club plays under `tm_…` team ids, so match on its resolved team set and
-  // resolve the opponent through the series participants (name, club, ground).
-  const fixtures = useMemo(() => {
-    const clubBy = (id) => clubs.find((c) => c.id === id) || directory.find((c) => c.id === id);
-    const out = [];
-    allSeries
-      .filter((s) => s.released && Array.isArray(s.fixtures))
-      .forEach((s) => {
-        const mine = teamIdsForClub(s, club.id);
-        s.fixtures.forEach((f, i) => {
-          const isHome = mine.includes(f.home);
-          if (!isHome && !mine.includes(f.away)) return;
-          const opp = resolveTeam(s, isHome ? f.away : f.home, clubBy);
-          if (opp.pending) return; // knockout slot ("Winner of …") — no opponent yet
-          const venue = isHome ? resolveTeam(s, f.home, clubBy).ground?.venue : opp.ground?.venue;
-          out.push({
-            key: `${s.id}:${f.id ?? i}`,
-            date: f.date,
-            series: s.name,
-            isHome,
-            oppClubId: opp.clubId || '',
-            oppName: opp.name,
-            venue: venue || '',
-          });
-        });
-      });
-    return out.filter((f) => f.date).sort((a, b) => b.date.localeCompare(a.date));
-  }, [allSeries, club.id, clubs, directory]);
+  // Shared with the season dashboards (team-id aware, same venue rules as Fixtures).
+  const fixtures = useMemo(
+    () =>
+      clubFixtures(
+        allSeries,
+        club.id,
+        (id) => clubs.find((c) => c.id === id) || directory.find((c) => c.id === id),
+      ),
+    [allSeries, club.id, clubs, directory],
+  );
 
   const clubLeagues = (club.leagues || [])
     .map((k) => allLeagues.find((l) => l.key === k)?.label)
@@ -782,7 +764,13 @@ export function CaptainsReportView({
   // report's captain/competition, then the club profile. Every field stays editable.
   const blank = (mem = memory) => {
     const today = localISO(new Date());
-    const latest = fixtures.find((f) => f.date <= today) || fixtures[fixtures.length - 1];
+    // A dashboard "File report" link names the fixture (?fixture=…); otherwise take the
+    // latest one played (or the next one, pre-season).
+    const asked = new URLSearchParams(window.location.search).get('fixture');
+    const latest =
+      fixtures.find((f) => f.key === asked) ||
+      fixtures.find((f) => f.date <= today) ||
+      fixtures[fixtures.length - 1];
     const base = {
       fixtureKey: '',
       side: 'Home',
@@ -903,6 +891,9 @@ export function CaptainsReportView({
       captain: match.captain.trim(),
       competition: match.competition.trim(),
       umpires: [...new Set([...names, ...(memory.umpires || [])])].slice(0, 12),
+      filed: [
+        ...new Set([...(match.fixtureKey ? [match.fixtureKey] : []), ...(memory.filed || [])]),
+      ].slice(0, 200),
     };
     remember(club.id, nextMemory);
     setMemory(nextMemory);

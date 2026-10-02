@@ -64,3 +64,6 @@ people-cases.json
 results.json
 results-bad.json
 results-phase1.json
+
+# Real scouting datasets (minors, confidential selection data) — never commit
+src/scouting-local/

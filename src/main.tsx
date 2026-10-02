@@ -104,6 +104,14 @@ import {
 } from './club';
 import { Onboarding } from './onboarding';
 import { CaptainsReportView } from './CaptainsReport';
+import {
+  SeasonSwitch,
+  AdminSeasonDashboard,
+  ClubSeasonHome,
+  seasonState,
+} from './season-dashboards';
+import { releasedFixtures, clubFixtures } from './season';
+import { AdminScoutingPage } from './scouting-page';
 import { useModule, useSeasonLabel, useVertical } from './branding';
 
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
@@ -2306,6 +2314,8 @@ function Shell({
       : []),
     { v: 'leagues', label: 'Leagues', icon: Icon.Shield, num: allLeagues.length },
     { v: 'insights', label: 'Insights', icon: Icon.Chart },
+    // Talent ID from ball-by-ball league/tournament datasets (cricket only for now).
+    ...(vertical.sport === 'cricket' ? [{ v: 'scouting', label: 'Scouting', icon: Icon.Eye }] : []),
     { v: 'fixtures', label: 'Fixtures & Venues', icon: Icon.Field, dot: 'teal' },
     ...(clearancesOn
       ? [
@@ -2438,23 +2448,52 @@ function Shell({
   function renderMain() {
     if (role === 'admin') {
       const gotoList = () => gotoAdminView('clubs_list');
-      if (view === 'dashboard')
+      if (view === 'scouting' && vertical.sport === 'cricket')
+        return <AdminScoutingPage orgName={orgName} />;
+      if (view === 'dashboard') {
+        // Pre-season (cohort setup) until the first released fixture date, then the
+        // in-season dashboard — with a toggle to flip between the two.
+        const season = seasonState(
+          releasedFixtures(allSeries, (id) => clubs.find((c) => c.id === id)),
+        );
         return (
-          <AdminDashboard
-            clubs={clubs}
-            gotoClub={setActiveClub}
-            gotoList={gotoList}
-            gotoAdminView={gotoAdminView}
-            onInviteAdmin={() => gotoAdminView('team')}
-            onShareLink={openShareLink}
-            toast={toastShow}
-            submissionDeadline={submissionDeadline}
-            onUpdateDeadline={setSubmissionDeadline}
-            support={branding?.copy?.support}
-            onUpdateSupport={setSupportContact}
-            requiredDocs={requiredDocs}
+          <SeasonSwitch
+            scope="admin"
+            started={season.started}
+            firstDate={season.firstDate}
+            season={
+              <AdminSeasonDashboard
+                orgName={orgName}
+                clubs={clubs}
+                allSeries={allSeries}
+                allClearances={allClearances}
+                requiredDocs={requiredDocs}
+                complianceOn={complianceOn}
+                clearancesOn={clearancesOn}
+                scoutingOn={vertical.sport === 'cricket'}
+                gotoClub={setActiveClub}
+                gotoAdminView={gotoAdminView}
+              />
+            }
+            setup={
+              <AdminDashboard
+                clubs={clubs}
+                gotoClub={setActiveClub}
+                gotoList={gotoList}
+                gotoAdminView={gotoAdminView}
+                onInviteAdmin={() => gotoAdminView('team')}
+                onShareLink={openShareLink}
+                toast={toastShow}
+                submissionDeadline={submissionDeadline}
+                onUpdateDeadline={setSubmissionDeadline}
+                support={branding?.copy?.support}
+                onUpdateSupport={setSupportContact}
+                requiredDocs={requiredDocs}
+              />
+            }
           />
         );
+      }
       if (view === 'clubs_list')
         return (
           <AdminClubsList
@@ -2709,8 +2748,8 @@ function Shell({
           />
         );
     } else {
-      if (view === 'home' || view === 'affiliation' || view === 'documents')
-        return (
+      if (view === 'home' || view === 'affiliation' || view === 'documents') {
+        const clubHome = (
           <ClubHome
             club={activeClub}
             goto={gotoClubView}
@@ -2723,6 +2762,40 @@ function Shell({
             onSaveExco={saveExco}
           />
         );
+        // Affiliation/Documents open as modals over the setup home, so only Home switches.
+        if (view !== 'home') return clubHome;
+        const clubBy = (id) =>
+          clubs.find((c) => c.id === id) || clubDirectory.find((c) => c.id === id);
+        const season = seasonState(clubFixtures(allSeries, activeClub.id, clubBy));
+        return (
+          <SeasonSwitch
+            scope={`club:${activeClub.id}`}
+            started={season.started}
+            firstDate={season.firstDate}
+            setup={clubHome}
+            season={
+              <ClubSeasonHome
+                club={activeClub}
+                allSeries={allSeries}
+                clubs={clubs}
+                directory={clubDirectory}
+                players={players}
+                clearances={clearances}
+                requiredDocs={requiredDocs}
+                complianceOn={complianceOn}
+                clearancesOn={clearancesOn}
+                reportsOn={vertical.sport === 'cricket'}
+                goto={gotoClubView}
+                onFileReport={(key) =>
+                  navigate(
+                    `/club/${activeClub.id}/captains-report?fixture=${encodeURIComponent(key)}`,
+                  )
+                }
+              />
+            }
+          />
+        );
+      }
       if (view === 'cqi')
         return (
           <CQIView
