@@ -695,7 +695,7 @@ describe('Slice 4 — the outbox', () => {
 });
 
 // ── Withheld venue/time never reaches medicoach (ADR 0011 × 0016) ──
-describe('Slice 4 — a withheld series is held until reveal', () => {
+describe('Slice 4 — a draft or withheld series is held until released/revealed', () => {
   const SW = 's-planb-premier-men-t20-g3';
   const seedWithheld = (withheld: Series['withheld']) =>
     repo.putSeries(
@@ -810,6 +810,92 @@ describe('Slice 4 — a withheld series is held until reveal', () => {
     assert.equal(next.held, 0);
     assert.equal(next.counts.applied, 1);
     assert.equal(pushes[0].body.changes[0].schedule.scheduledTime, '2026-10-04T10:00:00+02:00');
+  });
+
+  // A draft series of its own (dates clear of S1/S2 so the release gate finds no clash).
+  const SD = 's-planb-premier-men-t20-g4';
+  const seedDraft = () =>
+    repo.putSeries(
+      T,
+      series(
+        SD,
+        [
+          fx('f1', { date: '2026-11-01' }),
+          fx('f2', { date: '2026-11-01', home: 'c', away: 'd', time: '13:30' }),
+        ],
+        { released: false, releasedAt: undefined },
+      ),
+    );
+  const patchSeries = async (id: string, body: Record<string, unknown>) => {
+    const s = (await repo.getSeries(T, id))!;
+    return app.request(`/series/${id}`, {
+      method: 'PATCH',
+      headers: headers(),
+      body: JSON.stringify({ version: s.version, ...body }),
+    });
+  };
+
+  test('a draft edit is held; the release (nothing withheld) sends every fixture', async () => {
+    await seedDraft();
+    assert.equal((await patchFixture(SD, 'f1', { time: '10:00' })).status, 200);
+    const [row] = await repo.listPendingSync(T);
+    assert.equal(row.ref, REF(SD, 'f1'));
+    assert.equal(row.heldUntilReveal, true);
+    const out = await flush();
+    assert.equal(out.held, 1);
+    assert.equal(pushes.length, 0, 'a draft schedule never leaves smart club');
+
+    // The draft edit recalled the approval; approve, then release with nothing withheld.
+    assert.equal((await patchSeries(SD, { approved: true })).status, 200);
+    assert.equal((await patchSeries(SD, { released: true })).status, 200);
+    const rows = (await repo.listPendingSync(T)).sort((a, b) => a.ref.localeCompare(b.ref));
+    assert.deepEqual(
+      rows.map((r) => [r.ref, r.heldUntilReveal, r.schedule.scheduledTime]),
+      [
+        [REF(SD, 'f1'), undefined, '2026-11-01T10:00:00+02:00'],
+        [REF(SD, 'f2'), undefined, '2026-11-01T13:30:00+02:00'],
+      ],
+    );
+    const f2 = await fixtureOf(SD, 'f2');
+    assert.equal((f2.schedule as { changedAt: string }).changedAt, rows[1].schedule.changedAt);
+    const sent = await flush();
+    assert.equal(sent.held, 0);
+    assert.equal(sent.counts.applied, 2);
+    assert.deepEqual(await repo.listPendingSync(T), []);
+  });
+
+  test('released with venue withheld, edited, then recalled: the flush sends nothing', async () => {
+    await seedDraft();
+    const rel = await patchSeries(SD, { released: true, withheld: { venue: true } });
+    assert.equal(rel.status, 200);
+    assert.deepEqual(await repo.listPendingSync(T), [], 'a withheld release queues nothing');
+    assert.equal(
+      (await patchFixture(SD, 'f1', { venueId: 'v-lahee', venueName: 'Lahee Park' })).status,
+      200,
+    );
+    assert.equal((await repo.listPendingSync(T))[0].heldUntilReveal, true);
+
+    assert.equal((await patchSeries(SD, { released: false })).status, 200);
+    const out = await flush();
+    assert.equal(out.held, 1);
+    assert.equal(pushes.length, 0);
+    assert.equal((await repo.listPendingSync(T))[0].heldUntilReveal, true);
+
+    // The recall CLI's path (a direct repo write) holds just the same.
+    await repo.updateSeries(T, SD, { released: true, withheld: undefined });
+    await repo.updateSeries(T, SD, { released: false, releasedAt: null });
+    await flush();
+    assert.equal(pushes.length, 0);
+    assert.ok(!JSON.stringify(pushes).includes('Lahee'));
+  });
+
+  test('an outbox row whose series was deleted is dropped, never pushed', async () => {
+    await patchFixture(S1, 'f1', { time: '10:00' });
+    await repo.deleteSeries(T, S1);
+    const out = await flush();
+    assert.equal(out.pending, 0);
+    assert.equal(pushes.length, 0);
+    assert.deepEqual(await repo.listPendingSync(T), []);
   });
 
   test('a pulled medicoach change still applies to a withheld series', async () => {

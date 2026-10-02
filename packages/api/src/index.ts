@@ -73,7 +73,7 @@ import {
   requeueRevealedSeries,
   sameMatch,
   seriesMappedForSync,
-  seriesWithholdsSchedule,
+  seriesHoldsSchedule,
   type ScheduleFixture,
 } from './medicoach-sync/schedule.js';
 import { captainsReportLinkSecret, medicoachSyncSecret, medicoachSyncUrl } from './env.js';
@@ -4202,6 +4202,22 @@ async function applySeriesPatch(
     scheduleSync = await recordScheduleDiff(repo, tenant, current, after, origin);
     patch.fixtures = after.fixtures;
   }
+  // A draft's schedule was held back from medicoach (ADR 0016); the release of a series that
+  // withholds nothing makes it public, so every fixture is stamped and queued with its real
+  // schedule in this same (version-checked) write. A release WITH withholding stays held
+  // until the reveal of the last field (the reveal branch above).
+  if (patch.released === true && !current.released) {
+    const requeue = await requeueRevealedSeries(repo, tenant, {
+      ...current,
+      ...patch,
+      id,
+    } as Series);
+    if (requeue.fixtures) {
+      patch.fixtures = requeue.fixtures;
+      patch.version ??= current.version;
+      scheduleSync = { refs: [], enqueue: requeue.enqueue };
+    }
+  }
   let written: Series;
   try {
     written = await repo.updateSeries(tenant, id, patch);
@@ -4305,8 +4321,8 @@ app.get('/integrations/medicoach/status', async (c) => {
     logs,
     outbox: {
       count: pending.length,
-      // Rows kept back because their series still withholds venue/time (ADR 0011): they go
-      // out when the series is revealed, never before.
+      // Rows kept back because their series is a draft or still withholds venue/time
+      // (ADR 0011): they go out when the series is released/revealed, never before.
       held: pending
         .filter((p) => p.heldUntilReveal)
         .sort((a, b) => a.enqueuedAt.localeCompare(b.enqueuedAt))
@@ -4454,7 +4470,7 @@ app.post('/integrations/medicoach/conflicts/discard', async (c) => {
         origin: 'admin',
         enqueuedAt: at,
         attempts: 0,
-        ...(seriesWithholdsSchedule(series) ? { heldUntilReveal: true } : {}),
+        ...(seriesHoldsSchedule(series) ? { heldUntilReveal: true } : {}),
       });
     break;
   }

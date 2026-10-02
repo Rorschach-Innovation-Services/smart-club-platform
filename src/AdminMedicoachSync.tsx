@@ -154,7 +154,7 @@ export function AdminMedicoachSyncView({
               <div className="ump-sub">
                 {[
                   failures.length ? `${failures.length} failed, retrying` : '',
-                  held.length ? `${held.length} held until reveal` : '',
+                  held.length ? `${held.length} held until released/revealed` : '',
                 ]
                   .filter(Boolean)
                   .join(' · ') || 'all healthy'}
@@ -291,10 +291,11 @@ export function AdminMedicoachSyncView({
 
           {held.length > 0 && (
             <>
-              <h2 className="mcs-heading">Held until reveal</h2>
+              <h2 className="mcs-heading">Held until released/revealed</h2>
               <div className="cr-section-sub">
-                These series still hide the venue or kick-off time from clubs, so their changes stay
-                here until you reveal them. Medicoach's match centre is public.
+                These series are still drafts, or still hide the venue or kick-off time from clubs,
+                so their changes stay here until you release or reveal them. Medicoach's match
+                centre is public.
               </div>
               <div className="tbl-w" style={{ marginTop: 10 }}>
                 <table className="tbl" data-testid="mcs-outbox-held">
@@ -316,7 +317,7 @@ export function AdminMedicoachSyncView({
                           <div className="ump-sub">queued {fmtWhen(h.enqueuedAt)}</div>
                         </td>
                         <td>
-                          <Pill tone="gold">held until reveal</Pill>
+                          <Pill tone="gold">held until released/revealed</Pill>
                         </td>
                       </tr>
                     ))}

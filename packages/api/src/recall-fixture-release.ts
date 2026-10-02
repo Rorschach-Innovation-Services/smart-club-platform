@@ -80,7 +80,8 @@ async function main() {
   for (const s of toRecall) {
     // Medicoach sync (Slice 4): a recall changes release state, never a fixture's schedule,
     // so the shared diff finds nothing to queue — called anyway so every series write in the
-    // CLIs goes through the one helper.
+    // CLIs goes through the one helper. Rows already queued for this series stay held: the
+    // flush re-checks the live series and never pushes a draft (`seriesHoldsSchedule`).
     const scheduleSync = await recordScheduleDiff(
       repo,
       TENANT,

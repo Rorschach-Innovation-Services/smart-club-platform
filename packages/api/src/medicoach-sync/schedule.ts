@@ -24,12 +24,13 @@
  * it with an attempt count. A `stale` answer means medicoach holds a newer edit — the pull
  * brings it back. The inbound apply (origin `medicoach`) never enqueues, so nothing echoes.
  *
- * Withheld venue/time (ADR 0011): medicoach's match centre is public and the v1 contract
- * carries no withheld flags, so a fixture of a series that currently withholds venue and/or
- * time is never pushed. Its row is kept as `heldUntilReveal` (flagged at enqueue, and
- * re-checked against the live series on every flush), and the reveal that clears the last
+ * Drafts and withheld venue/time (ADR 0011): medicoach's match centre is public and the v1
+ * contract carries no draft or withheld flags, so a fixture of a series that is not released
+ * (a draft, or recalled) or currently withholds venue and/or time is never pushed. Its row is
+ * kept as `heldUntilReveal` (flagged at enqueue, and re-checked against the live series on
+ * every flush), and the release (nothing withheld) or the reveal that clears the last
  * withheld field re-queues every fixture of the series with its real schedule
- * (`requeueRevealedSeries`). Inbound changes still apply to a withheld series — they leak
+ * (`requeueRevealedSeries`). A row whose series was deleted is dropped, never pushed. Inbound changes still apply to a withheld series — they leak
  * nothing. The initial migration bundle carries its own `venueWithheld`/`timeWithheld`.
  */
 import { randomUUID } from 'node:crypto';
@@ -171,6 +172,18 @@ export function seriesWithholdsSchedule(series: Pick<Series, 'withheld'> | null 
 }
 
 /**
+ * True while a series' schedule must not reach medicoach's public match centre: it is a
+ * draft (never released, or recalled) or it withholds venue and/or time (ADR 0011). Its
+ * outbox rows are kept as `heldUntilReveal` until the release (nothing withheld) or the
+ * reveal of the last withheld field re-queues the series (`requeueRevealedSeries`).
+ */
+export function seriesHoldsSchedule(
+  series: Pick<Series, 'withheld' | 'released'> | null | undefined,
+): boolean {
+  return !series || !series.released || seriesWithholdsSchedule(series);
+}
+
+/**
  * `seriesIsSyncMapped` with the league resolved the way the medicoach exporter resolves it:
  * a season-run series carries no `leagueKey` of its own, so its run's league decides.
  */
@@ -223,7 +236,7 @@ export async function recordScheduleDiff(
   const config = opts.config !== undefined ? opts.config : await repo.getTenantConfig(tenant);
   if (!(await seriesMappedForSync(repo, tenant, after, config))) return NO_DIFF;
   const nowIso = (opts.now?.() ?? new Date()).toISOString();
-  const held = seriesWithholdsSchedule(after);
+  const held = seriesHoldsSchedule(after);
   const prior = new Map<string, ScheduleFixture>();
   for (const f of (before.fixtures as ScheduleFixture[]) ?? []) if (f?.id) prior.set(f.id, f);
 
@@ -256,12 +269,14 @@ export async function recordScheduleDiff(
 }
 
 /**
- * The reveal that clears a series' LAST withheld field (ADR 0011) makes its real schedule
- * public, so medicoach must now get it: every fixture of a sync-mapped series is stamped
- * `schedule.changedAt = now` (returned for the caller to write in the same update as the
- * reveal) and, via `enqueue()` once that write landed, queued with its real schedule —
- * overwriting any row held while the series was withheld. A no-op (`fixtures` undefined)
- * for a series still withholding a field, an unmapped series or a tenant without the sync.
+ * The write that makes a series' real schedule public — the release (false→true) of a series
+ * withholding nothing, or the reveal that clears its LAST withheld field (ADR 0011) — means
+ * medicoach must now get it: every fixture of a sync-mapped series is stamped
+ * `schedule.changedAt = now` (returned for the caller to write in the same update) and, via
+ * `enqueue()` once that write landed, queued with its real schedule — overwriting any row
+ * held while the series was a draft or withheld. A no-op (`fixtures` undefined) for a series
+ * that still holds its schedule (`seriesHoldsSchedule`: draft or withholding a field), an
+ * unmapped series or a tenant without the sync.
  */
 export async function requeueRevealedSeries(
   repo: Pick<RepoModule, 'getTenantConfig' | 'putPendingSync' | 'getSeasonRun'>,
@@ -270,7 +285,7 @@ export async function requeueRevealedSeries(
   opts: { config?: TenantConfig | null; now?: () => Date } = {},
 ): Promise<{ fixtures?: ScheduleFixture[]; enqueue(): Promise<number> }> {
   const none = { enqueue: async () => 0 };
-  if (seriesWithholdsSchedule(revealed) || !Array.isArray(revealed.fixtures)) return none;
+  if (seriesHoldsSchedule(revealed) || !Array.isArray(revealed.fixtures)) return none;
   const config = opts.config !== undefined ? opts.config : await repo.getTenantConfig(tenant);
   if (!(await seriesMappedForSync(repo, tenant, revealed, config))) return none;
   const nowIso = (opts.now?.() ?? new Date()).toISOString();
@@ -345,32 +360,38 @@ export async function flushScheduleOutbox(
   );
   if (!all.length) return { status: 'empty', pending: 0, held: 0, counts };
 
-  // Withheld venue/time never leaves smart club (ADR 0011): decided against the series as it
-  // stands NOW, not the flag the row was enqueued with, so a release-with-withheld after the
-  // enqueue still holds it and a reveal by any path releases it.
-  const withholds = new Map<string, boolean>();
+  // A draft (never released, or recalled) or withheld venue/time never leaves smart club
+  // (ADR 0011): decided against the series as it stands NOW, not the flag the row was
+  // enqueued with, so a recall or a release-with-withheld after the enqueue still holds it and
+  // a release/reveal by any path releases it. A row whose series no longer exists is dropped:
+  // there is nothing left to say about it, and pushing it would leak a deleted draft.
+  const live = new Map<string, Series | null>();
   const rows: PendingScheduleSync[] = [];
   let held = 0;
+  let dropped = 0;
   for (const row of all) {
-    if (!withholds.has(row.seriesId))
-      withholds.set(
-        row.seriesId,
-        seriesWithholdsSchedule(await repo.getSeries(tenant, row.seriesId)),
-      );
-    const hold = withholds.get(row.seriesId)!;
+    if (!live.has(row.seriesId)) live.set(row.seriesId, await repo.getSeries(tenant, row.seriesId));
+    const series = live.get(row.seriesId)!;
+    if (!series) {
+      await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt);
+      dropped++;
+      continue;
+    }
+    const hold = seriesHoldsSchedule(series);
     if (hold) held++;
     else rows.push(row);
     if (hold !== (row.heldUntilReveal === true))
       await repo.setPendingSyncHeld(tenant, row.ref, row.schedule.changedAt, hold);
   }
-  if (!rows.length) return { status: 'empty', pending: all.length, held, counts };
+  if (dropped) log(`[medicoach-sync] ${tenant}: dropped ${dropped} outbox row(s) of deleted series`);
+  if (!rows.length) return { status: 'empty', pending: all.length - dropped, held, counts };
   if (!deps.url || !deps.secret) {
     log(
       `[medicoach-sync dry-run] ${tenant}: would POST ${rows.length} schedule change(s) to ` +
         `${deps.url || '<MedicoachSyncUrl unset>'}${SCHEDULE_PATH}` +
         `${deps.secret ? '' : ' (MedicoachSyncSecret unset)'} — no request made`,
     );
-    return { status: 'dry-run', pending: all.length, held, counts };
+    return { status: 'dry-run', pending: all.length - dropped, held, counts };
   }
 
   const failRow = async (row: PendingScheduleSync, error: string) => {
@@ -469,7 +490,7 @@ export async function flushScheduleOutbox(
       },
       push: counts,
     });
-  return { status: 'ok', pending: all.length, held, counts };
+  return { status: 'ok', pending: all.length - dropped, held, counts };
 }
 
 /* ─────────────────────────── Inbound: apply or hold ─────────────────────────── */
