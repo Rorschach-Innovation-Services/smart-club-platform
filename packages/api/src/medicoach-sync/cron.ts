@@ -1,7 +1,8 @@
 /**
- * Cron entry point for the medicoach sync puller (ADR 0016): one `sst.aws.Cron` at
- * `rate(15 minutes)`, all day. Runs the puller for every tenant with
- * `features.medicoachSync`, one after another; a failing tenant never stops the others.
+ * Cron entry point for the medicoach sync (ADR 0016): one `sst.aws.Cron` at
+ * `rate(15 minutes)`, all day. For every tenant with `features.medicoachSync`, one after
+ * another: flush the schedule outbox, pull, retry pending captain's reports (`runTenantSync`).
+ * A failing tenant never stops the others.
  *
  * With the `MedicoachSyncUrl`/`MedicoachSyncSecret` secrets empty every run is a dry run
  * (it logs the request it would make). That is the planned first prod weekend.
@@ -11,7 +12,8 @@ import { Sentry } from '../instrument.js';
 import * as repo from '../repo.js';
 import { hasFeature } from '../features.js';
 import { medicoachSyncSecret, medicoachSyncUrl } from '../env.js';
-import { runMedicoachSync, type SyncRunSummary } from './puller.js';
+import type { SyncRunSummary } from './puller.js';
+import { runTenantSync } from './run.js';
 
 /** Run the puller for every sync-enabled tenant. Exported for tests and local runs. */
 export async function runAllTenants(): Promise<SyncRunSummary[]> {
@@ -22,7 +24,7 @@ export async function runAllTenants(): Promise<SyncRunSummary[]> {
   const failures: string[] = [];
   for (const t of tenants) {
     try {
-      const summary = await runMedicoachSync(t.tenant, 'cron', { repo, url, secret });
+      const summary = await runTenantSync(t.tenant, 'cron', { repo, url, secret });
       out.push(summary);
       console.log(
         `[medicoach-sync] ${t.tenant}: ${summary.status} pages=${summary.pages} fixtures=${summary.fixtures} ${JSON.stringify(summary.counts)}`,

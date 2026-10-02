@@ -1,7 +1,7 @@
 # ADR 0016 — Medicoach fixture sync: smart club pulls, each side owns its fields
 
-**Status:** Accepted (October 2026). Slices 0 and 2.1 built; schedule apply (Slice 3) and
-the outbound push (Slice 4) follow on the same contract.
+**Status:** Accepted (October 2026). Slices 0–4 built: results, captain's reports, inbound
+schedule apply (Slice 3) and the outbound schedule push (Slice 4).
 
 ## Context
 
@@ -109,8 +109,44 @@ Nothing the sync cannot place is guessed at:
 - a team ref outside the slot's series is ignored;
 - a response that fails the v1 schema stops the run without advancing the cursor (the error
   names the failing field paths only, never values);
-- inbound schedule changes are recorded, not applied, until Slice 3 adds the clash gate and
-  the `SYNCCONFLICT#` admin inbox.
+- an inbound schedule change whose venue does not resolve, or that the clash gate refuses, is
+  held as `SYNCCONFLICT#` for the admin (see below), never applied.
+
+### Schedule both ways (Slices 3 and 4)
+
+Schedule (date, time, venue, postponed, cancelled, plus `dateTbc`) is most-recent-wins on each
+side's `changedAt`; smart club keeps its own as the fixture's `schedule.changedAt`
+(`medicoach-sync/schedule.ts`).
+
+- **Inbound.** After a page's results and knockout slot fills, every fixture whose medicoach
+  schedule differs and is newer is applied with the gates an admin edit passes: the
+  in-season subset clash gate on a released series (`introducedClashes`, shared with
+  PATCH /series), the approval recall on a draft, a version-checked write retried 3 times.
+  Release and withheld state are never touched. A venue is resolved by `groundKey` against
+  the tenant's ground list. An unresolved venue or a refused clash writes
+  `SYNCCONFLICT#<ref>` instead (latest proposal per ref) and emails the tenant admins once
+  per proposal. An older change is dropped and listed in SYNCLOG (`scheduleStaleRefs`).
+- **Admin inbox** (console "Medicoach sync", shown only with the feature on): Apply writes the
+  proposal through `applySeriesPatch` (the clash gate runs again; still clashing ⇒ 409);
+  Discard re-stamps the fixture and queues smart club's schedule, so the proposal can never
+  win later. "Edit fixture" opens the fixtures page.
+- **Outbound.** Every write that changes a mapped fixture's schedule — PATCH /series, stage
+  generate, and the series CLIs (import-planb, shift-fixture-dates, recall-fixture-release,
+  resolve-venue-clashes, normalise-venue-names, merge-duplicate-venues) — goes through
+  `recordScheduleDiff`: it stamps `schedule.changedAt = now` in the same write and, once the
+  write landed, collapses the snapshot onto `PENDINGSYNC#<ref>`. Origin `medicoach` (the
+  inbound apply) is skipped, so nothing echoes. A fixture whose id now names a different
+  match is never pushed.
+- **Flush.** Each cron run and "Sync now" first flushes the outbox in batches of ≤100 to
+  `POST /integrations/smartclub/schedule` (signed; dry run with the secret empty), then pulls,
+  then retries pending captain's reports (`REPORTOPEN#`). `applied|stale|unchanged|unmapped`
+  delete the row (only if it still holds the snapshot sent); `error` and request failures keep
+  it with `attempts` and `lastError`. `stale` means medicoach's newer edit wins; the pull brings
+  it back.
+- **Generate/rebase guard.** On a sync tenant, regenerating a stage, or rebasing a run whose
+  changed stages have released synced series, answers 409 `sync_resync_required` with the
+  refs that would be orphaned, unless the caller passes `allowResync: true` (then the 200
+  lists `orphanedRefs`).
 
 ### PII
 
@@ -129,7 +165,7 @@ number — effectively the ID number. So:
 - One more Lambda (the cron) and one Query per `GET /series` (the tenant's result partition).
 - A fixture's identity is now a contract: anything that rewrites fixtures (importers, CLIs,
   season-run rebase) must keep ids or knowingly orphan refs. Rebase and generate on synced
-  released stages get the same guard in Slice 4.
+  released stages need `allowResync` (Slice 4).
 - Promotion Women's (excluded from the export) keeps a manual "completed" status; every
   exported league's results come only from medicoach.
 - Push (smart club → medicoach schedule changes, Slice 4) reuses the same contract, secret

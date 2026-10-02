@@ -320,3 +320,26 @@ export function findReleaseClashes(
 ): string[] {
   return findClashes(subject, allSeries, clubs, venues, aliases).map(formatClash);
 }
+
+/**
+ * The in-season gate's SUBSET rule as data: the clashes `subject` (what a released series
+ * would become) carries whose pair-on-ground identity (`clashKey`) is absent from `current`'s
+ * own clash set. Empty ⇒ the write is allowed. Shared by PATCH /series (`inSeasonClashRefusal`
+ * wraps it into the 409) and the medicoach schedule apply (Slice 3), so the two gates can
+ * never disagree.
+ */
+export function introducedClashes(
+  current: Series,
+  subject: Series,
+  allSeries: Series[],
+  clubs: Club[],
+  venues: Venue[],
+  aliases: Record<string, string> = DEFAULT_VENUE_ALIASES,
+): Clash[] {
+  const before = new Set(
+    findClashes(current, allSeries, clubs, venues, aliases).map((c) => clashKey(c, aliases)),
+  );
+  return findClashes(subject, allSeries, clubs, venues, aliases).filter(
+    (c) => !before.has(clashKey(c, aliases)),
+  );
+}

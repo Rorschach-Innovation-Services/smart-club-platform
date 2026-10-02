@@ -857,3 +857,72 @@ export async function sendCaptainsReportDueEmail(
   );
   return { messageId: res.MessageId ?? '' };
 }
+
+export interface SyncConflictEmailInput {
+  to: string;
+  orgName: string;
+  /** "Umzinto v African Warriors" */
+  matchLine: string;
+  seriesName: string;
+  reason: 'venue-unresolved' | 'clash';
+  /** The clash lines, or the venue that did not resolve. */
+  detail: string[];
+  /** "2026-10-11 13:30 · Toti Oval 1" */
+  proposed: string;
+}
+
+/** Build the "medicoach change held for review" email. Pure — exported for tests. */
+export function syncConflictEmailContent(input: SyncConflictEmailInput): {
+  subject: string;
+  text: string;
+  html: string;
+} {
+  const why =
+    input.reason === 'clash'
+      ? 'It would double-book a ground, so it was not applied.'
+      : 'Its venue does not match any ground in your venue list, so it was not applied.';
+  const subject = `Fixture change from medicoach needs review: ${input.matchLine}`;
+  const text =
+    `A schedule change made in medicoach for ${input.matchLine} (${input.seriesName}) is waiting for review.\n\n` +
+    `Proposed: ${input.proposed}\n${why}\n\n` +
+    input.detail.map((d) => `- ${d}`).join('\n') +
+    `\n\nOpen the admin console, go to Medicoach sync, and apply, discard or edit the fixture.\n\n` +
+    `The ${input.orgName} office`;
+  const e = escapeHtml;
+  const html =
+    `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
+    `<p>A schedule change made in medicoach for <strong>${e(input.matchLine)}</strong> (${e(input.seriesName)}) is waiting for review.</p>` +
+    `<p>Proposed: <strong>${e(input.proposed)}</strong><br/>${e(why)}</p>` +
+    `<ul>${input.detail.map((d) => `<li>${e(d)}</li>`).join('')}</ul>` +
+    `<p>Open the admin console, go to <strong>Medicoach sync</strong>, and apply, discard or edit the fixture.</p>` +
+    `<p>The ${e(input.orgName)} office</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+/** Email one admin about a held medicoach schedule change. */
+export async function sendSyncConflictEmail(
+  input: SyncConflictEmailInput,
+): Promise<{ messageId: string }> {
+  const { subject, text, html } = syncConflictEmailContent(input);
+  if (EMAIL_DRY_RUN) {
+    console.log(
+      `[notify:email dry-run] would send sync-conflict notice to ${input.to} for ${input.matchLine}`,
+    );
+    return { messageId: `dry-run-${randomUUID()}` };
+  }
+  const res = await ses!.send(
+    new SendEmailCommand({
+      Source: FROM_EMAIL!,
+      Destination: { ToAddresses: [input.to] },
+      Message: {
+        Subject: { Data: subject, Charset: 'UTF-8' },
+        Body: {
+          Html: { Data: html, Charset: 'UTF-8' },
+          Text: { Data: text, Charset: 'UTF-8' },
+        },
+      },
+    }),
+  );
+  return { messageId: res.MessageId ?? '' };
+}

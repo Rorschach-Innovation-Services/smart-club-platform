@@ -77,6 +77,12 @@ import {
   syncLogKey,
   syncLogsListKey,
   syncPartitionPk,
+  syncConflictKey,
+  syncConflictsListKey,
+  pendingSyncKey,
+  pendingSyncListKey,
+  reportOpenKey,
+  reportOpenListKey,
   umpireKey,
   umpireGsi1,
   umpiresListGsi1pk,
@@ -114,6 +120,9 @@ import type {
   RegistrationReviewResolution,
   StoredFixtureResult,
   SyncLogEntry,
+  SyncConflict,
+  PendingScheduleSync,
+  ReportOpenMarker,
   Umpire,
   FixtureOfficials,
   FixtureOfficialsRecord,
@@ -1006,6 +1015,17 @@ export async function getSyncCursor(tenant: string): Promise<string | null> {
   return typeof cursor === 'string' ? cursor : null;
 }
 
+/** The cursor with its last-moved time (admin sync page). */
+export async function getSyncCursorRow(
+  tenant: string,
+): Promise<{ cursor: string; updatedAt?: string } | null> {
+  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: syncCursorKey(tenant) }));
+  const cursor = res.Item?.cursor;
+  if (typeof cursor !== 'string') return null;
+  const updatedAt = res.Item?.updatedAt;
+  return { cursor, ...(typeof updatedAt === 'string' ? { updatedAt } : {}) };
+}
+
 export async function putSyncCursor(tenant: string, cursor: string): Promise<void> {
   await ddb.send(
     new PutCommand({
@@ -1047,6 +1067,155 @@ export async function listSyncLogs(tenant: string, limit = 50): Promise<SyncLogE
     const { expiresAt: _ttl, ...rest } = stripKeys<SyncLogEntry & { expiresAt?: number }>(i)!;
     return rest;
   });
+}
+
+// ── Medicoach sync: conflicts, outbox, report-open markers (ADR 0016, Slices 3–4) ──
+// All three live in the tenant's SYNC partition, so erasure and cohort clearing (which
+// enumerate that partition) already remove them.
+
+export async function getSyncConflict(tenant: string, ref: string): Promise<SyncConflict | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: syncConflictKey(tenant, ref) }),
+  );
+  return stripKeys<SyncConflict>(res.Item);
+}
+
+export async function putSyncConflict(tenant: string, conflict: SyncConflict): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...conflict, ...syncConflictKey(tenant, conflict.ref) },
+    }),
+  );
+}
+
+export async function listSyncConflicts(tenant: string): Promise<SyncConflict[]> {
+  const { pk, skPrefix } = syncConflictsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<SyncConflict>(i)!);
+}
+
+export async function deleteSyncConflict(tenant: string, ref: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: syncConflictKey(tenant, ref) }));
+}
+
+/** Enqueue (or collapse onto) a fixture's outbox row: the latest snapshot wins. */
+export async function putPendingSync(tenant: string, row: PendingScheduleSync): Promise<void> {
+  await ddb.send(
+    new PutCommand({ TableName: TABLE, Item: { ...row, ...pendingSyncKey(tenant, row.ref) } }),
+  );
+}
+
+export async function listPendingSync(tenant: string): Promise<PendingScheduleSync[]> {
+  const { pk, skPrefix } = pendingSyncListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<PendingScheduleSync>(i)!);
+}
+
+/**
+ * Delete an outbox row ONLY while it still holds the snapshot that was sent (`changedAt`):
+ * an edit enqueued while the push was in flight overwrote the row and must still go out.
+ * Returns false when the row moved on (or is gone).
+ */
+export async function deletePendingSyncIfUnchanged(
+  tenant: string,
+  ref: string,
+  changedAt: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new DeleteCommand({
+        TableName: TABLE,
+        Key: pendingSyncKey(tenant, ref),
+        ConditionExpression: '#sch.changedAt = :c',
+        ExpressionAttributeNames: { '#sch': 'schedule' },
+        ExpressionAttributeValues: { ':c': changedAt },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
+    throw err;
+  }
+}
+
+/** Record a failed push of THIS snapshot (attempts + 1, lastError); a newer row is left alone. */
+export async function markPendingSyncFailed(
+  tenant: string,
+  ref: string,
+  changedAt: string,
+  error: string,
+  at: string,
+): Promise<void> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: pendingSyncKey(tenant, ref),
+        UpdateExpression:
+          'SET attempts = if_not_exists(attempts, :zero) + :one, lastError = :e, lastAttemptAt = :at',
+        ConditionExpression: 'attribute_exists(pk) AND #sch.changedAt = :c',
+        ExpressionAttributeNames: { '#sch': 'schedule' },
+        ExpressionAttributeValues: {
+          ':zero': 0,
+          ':one': 1,
+          ':e': error.slice(0, 300),
+          ':at': at,
+          ':c': changedAt,
+        },
+      }),
+    );
+  } catch (err) {
+    if (!isCcf(err)) throw err;
+  }
+}
+
+export async function putReportOpenMarker(tenant: string, marker: ReportOpenMarker): Promise<void> {
+  await ddb.send(
+    new PutCommand({ TableName: TABLE, Item: { ...marker, ...reportOpenKey(tenant, marker.ref) } }),
+  );
+}
+
+export async function listReportOpenMarkers(tenant: string): Promise<ReportOpenMarker[]> {
+  const { pk, skPrefix } = reportOpenListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<ReportOpenMarker>(i)!);
+}
+
+export async function deleteReportOpenMarker(tenant: string, ref: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: reportOpenKey(tenant, ref) }));
+}
+
+/** One failed attempt to open/notify a marker's reports. */
+export async function markReportOpenFailed(
+  tenant: string,
+  ref: string,
+  error: string,
+  at: string,
+): Promise<number> {
+  const res = await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: reportOpenKey(tenant, ref),
+      UpdateExpression:
+        'SET attempts = if_not_exists(attempts, :zero) + :one, lastError = :e, lastAttemptAt = :at',
+      ExpressionAttributeValues: { ':zero': 0, ':one': 1, ':e': error.slice(0, 300), ':at': at },
+      ReturnValues: 'UPDATED_NEW',
+    }),
+  );
+  return Number(res.Attributes?.attempts ?? 0);
 }
 
 async function listSyncPartitionKeys(tenant: string): Promise<Array<{ pk: string; sk: string }>> {
@@ -1394,6 +1563,37 @@ export async function submitCaptainsReport(
     return stripKeys<CaptainsReport>(res.Attributes)!;
   } catch (err) {
     if (isCcf(err)) throw new CaptainsReportStateError("captain's report already submitted");
+    throw err;
+  }
+}
+
+/**
+ * A corrected result: a still-PENDING report takes the new summary. Submitted and void
+ * reports are left exactly as they are (false).
+ */
+export async function updatePendingCaptainsReportSummary(
+  tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
+  resultSummary: string | null,
+): Promise<boolean> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: reportKeyOf(tenant, key),
+        UpdateExpression: 'SET resultSummary = :r, updatedAt = :at',
+        ConditionExpression: 'attribute_exists(pk) AND #s = :pending',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: {
+          ':r': resultSummary,
+          ':pending': 'pending',
+          ':at': new Date().toISOString(),
+        },
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (isCcf(err)) return false;
     throw err;
   }
 }

@@ -15,9 +15,15 @@
  *                   never does; a newly stored clear calls `onResultCleared` (voids them).
  *   - teams       → a knockout slot (`pos:`/`win:` placeholder) takes the resolved team when
  *                   the team ref names one of that series' own team ids (version-checked).
- *   - schedule    → compared only; a difference is counted + listed in SYNCLOG and handed to
- *                   the pluggable `onScheduleDiffers` (Slice 3 applies it; today: record).
+ *   - schedule    → a difference is counted + listed in SYNCLOG and handed to
+ *                   `onScheduleDiffers` — by default `applyInboundSchedule` (Slice 3,
+ *                   schedule.ts): most-recent-wins, then the clash gate, then apply or hold
+ *                   as SYNCCONFLICT#.
  *   - unknown ref → counted as "unmapped" (no ref values logged).
+ *
+ * A newly stored result is first marked `REPORTOPEN#<ref>`; the marker is deleted once the
+ * hook succeeded, so a report/notify failure is retried by the next run
+ * (`retryPendingReportOpens`) instead of being lost — a replay never re-fires the hook.
  *
  * Idempotent per fixture: re-applying the same page changes nothing, so a full resync
  * (no cursor) is always safe.
@@ -47,8 +53,10 @@ import {
   type FixtureChange,
   type SyncResult,
 } from '../medicoach-sync-contract.js';
-import { TENANT_UTC_OFFSET_MINUTES } from '../tenant-time.js';
 import type { Series, StoredFixtureResult, SyncLogEntry, TenantConfig } from '../types.js';
+import { applyInboundSchedule, wallClock, type ScheduleOutcome } from './schedule.js';
+
+export { wallClock };
 
 type RepoModule = typeof import('../repo.js');
 
@@ -92,10 +100,7 @@ export interface ScheduleDiffersEvent {
   fields: string[];
 }
 
-/**
- * The schedule handler slot. Slice 3 plugs in "most-recent-wins → clash gate → apply or
- * SYNCCONFLICT#". Today schedule changes are only recorded (SYNCLOG), never applied.
- */
+/** A record-only schedule handler (counts the difference, applies nothing). */
 export async function recordScheduleDiffers(_event: ScheduleDiffersEvent): Promise<void> {}
 
 export interface PullerDeps {
@@ -110,7 +115,10 @@ export interface PullerDeps {
   onResultCleared?: (event: ResultClearedEvent) => Promise<void>;
   /** Overrides for the default captain's-report hooks (tests inject a capturing sender). */
   captainsReports?: Omit<CaptainsReportDeps, 'repo'>;
-  onScheduleDiffers?: (event: ScheduleDiffersEvent) => Promise<void>;
+  /** Defaults to `applyInboundSchedule` (Slice 3). A void return counts as recorded only. */
+  onScheduleDiffers?: (event: ScheduleDiffersEvent) => Promise<ScheduleOutcome | void>;
+  /** Overrides the conflict email of the default schedule handler (tests capture it). */
+  notifyConflict?: import('./schedule.js').InboundScheduleDeps['notifyConflict'];
   log?: (line: string) => void;
 }
 
@@ -142,6 +150,9 @@ const zeroCounts = (): SyncLogEntry['counts'] => ({
   unmapped: 0,
   slotsFilled: 0,
   scheduleDiffers: 0,
+  scheduleApplied: 0,
+  scheduleStale: 0,
+  scheduleConflicts: 0,
 });
 
 /** Where one ref lands in smart club. */
@@ -177,13 +188,6 @@ export function buildRefIndex(tenant: string, all: Series[]): Map<string, Fixtur
     }
   }
   return index;
-}
-
-/** A medicoach instant → the tenant's wall-clock date + HH:MM (SAST, no DST). */
-export function wallClock(iso: string): { date: string; time: string } {
-  const local = new Date(Date.parse(iso) + TENANT_UTC_OFFSET_MINUTES * 60_000);
-  const s = local.toISOString();
-  return { date: s.slice(0, 10), time: s.slice(11, 16) };
 }
 
 const venueKey = (v: string | null | undefined) =>
@@ -265,7 +269,20 @@ export async function runMedicoachSync(
     deps.onResultStored ?? captainsReportResultHook({ repo, now, ...(deps.captainsReports ?? {}) });
   const clearedHook =
     deps.onResultCleared ?? captainsReportClearedHook({ repo, ...(deps.captainsReports ?? {}) });
-  const scheduleHook = deps.onScheduleDiffers ?? recordScheduleDiffers;
+  const scheduleHook =
+    deps.onScheduleDiffers ??
+    ((e: ScheduleDiffersEvent) =>
+      applyInboundSchedule(
+        {
+          tenant: e.tenant,
+          seriesId: e.seriesId,
+          fixtureId: e.fixtureId,
+          ref: e.ref,
+          schedule: e.change.schedule,
+          fields: e.fields,
+        },
+        { repo, now, log, ...(deps.notifyConflict ? { notifyConflict: deps.notifyConflict } : {}) },
+      ));
 
   const config = await repo.getTenantConfig(tenant);
   const counts = zeroCounts();
@@ -297,6 +314,7 @@ export async function runMedicoachSync(
   let index: Map<string, FixtureTarget> | null = null;
   const loadIndex = async () => (index ??= buildRefIndex(tenant, await repo.listSeries(tenant)));
   const scheduleRefs: string[] = [];
+  const staleRefs: string[] = [];
   let cursor = cursorBefore;
 
   const record = async (outcome: 'ok' | 'error', error?: string) => {
@@ -304,6 +322,7 @@ export async function runMedicoachSync(
       outcome === 'error' ||
       counts.resultsStored + counts.resultsCleared + counts.unmapped > 0 ||
       counts.slotsFilled + counts.scheduleDiffers > 0;
+    // (scheduleApplied/Stale/Conflicts only ever move together with scheduleDiffers.)
     if (!notable) return;
     await repo.putSyncLog(tenant, {
       id: randomUUID(),
@@ -316,6 +335,7 @@ export async function runMedicoachSync(
       ...(scheduleRefs.length
         ? { scheduleDiffersRefs: scheduleRefs.slice(0, MAX_LOGGED_REFS) }
         : {}),
+      ...(staleRefs.length ? { scheduleStaleRefs: staleRefs.slice(0, MAX_LOGGED_REFS) } : {}),
       ...(error ? { error } : {}),
     });
   };
@@ -363,6 +383,7 @@ export async function runMedicoachSync(
 
       // Knockout slot fills, grouped per series so each series is written once per page.
       const slotFills = new Map<string, Map<string, { home?: string; away?: string }>>();
+      const scheduleQueue: FixtureChange[] = [];
       for (const change of data.fixtures) {
         const parsedRef = parseFixtureRef(change.ref);
         const target =
@@ -379,22 +400,52 @@ export async function runMedicoachSync(
         // ── Result ──
         if (change.result) {
           const prior = await repo.getFixtureResult(tenant, seriesId, fixtureId);
+          // Only a result that can be newer gets a marker (a replay writes nothing extra).
+          const mayStore =
+            !prior || Date.parse(change.result.recordedAt) > Date.parse(prior.orderAt);
+          if (mayStore)
+            await repo.putReportOpenMarker(tenant, {
+              ref: change.ref,
+              seriesId,
+              fixtureId,
+              recordedAt: change.result.recordedAt,
+              createdAt: now().toISOString(),
+              attempts: 0,
+            });
           const stored = await repo.putFixtureResultIfNewer(
             tenant,
             resultItem(seriesId, fixtureId, change.ref, change.result, now().toISOString()),
           );
           if (stored) {
             counts.resultsStored++;
-            await resultHook({
-              tenant,
-              seriesId,
-              fixtureId,
-              ref: change.ref,
-              result: change.result,
-              first: !prior || prior.cleared === true,
-              config,
-            });
-          } else counts.resultsStale++;
+            try {
+              await resultHook({
+                tenant,
+                seriesId,
+                fixtureId,
+                ref: change.ref,
+                result: change.result,
+                first: !prior || prior.cleared === true,
+                config,
+              });
+              await repo.deleteReportOpenMarker(tenant, change.ref);
+            } catch (err) {
+              // The result is stored; the marker keeps the report opening for the next run.
+              // Never fails the sync run (ids only — no payload is logged).
+              await repo.markReportOpenFailed(
+                tenant,
+                change.ref,
+                err instanceof Error ? err.message : 'report hook failed',
+                now().toISOString(),
+              );
+              log(
+                `[medicoach-sync] ${tenant}: captain's reports for ${seriesId}/${fixtureId} will be retried`,
+              );
+            }
+          } else {
+            counts.resultsStale++;
+            if (mayStore) await repo.deleteReportOpenMarker(tenant, change.ref);
+          }
         } else if (change.resultClearedAt) {
           const cleared = await repo.putFixtureResultIfNewer(tenant, {
             seriesId,
@@ -434,18 +485,39 @@ export async function runMedicoachSync(
           slotFills.set(seriesId, perSeries);
         }
 
-        // ── Schedule: compare + record only (Slice 3 applies) ──
-        const fields = scheduleDifferences(target.series, target.fixture, change);
-        if (fields.length) {
-          counts.scheduleDiffers++;
-          scheduleRefs.push(change.ref);
-          await scheduleHook({ tenant, seriesId, fixtureId, ref: change.ref, change, fields });
-        }
+        scheduleQueue.push(change);
       }
 
       if (slotFills.size) {
         counts.slotsFilled += await applySlotFills(repo, tenant, slotFills);
-        index = null; // the series changed; re-read before the next page
+        index = null; // the series changed; re-read before the next lookup
+      }
+
+      // ── Schedule: most-recent-wins → clash gate → apply or hold (Slice 3) ──
+      // After the slot fills, so a knockout's ground (its home side's) is judged on the
+      // teams medicoach just resolved, not on the placeholder.
+      for (const change of scheduleQueue.splice(0)) {
+        const target = (await loadIndex()).get(change.ref);
+        if (!target) continue;
+        const fields = scheduleDifferences(target.series, target.fixture, change);
+        if (!fields.length) continue;
+        counts.scheduleDiffers++;
+        scheduleRefs.push(change.ref);
+        const outcome = await scheduleHook({
+          tenant,
+          seriesId: String(target.series.id),
+          fixtureId: target.fixture.id,
+          ref: change.ref,
+          change,
+          fields,
+        });
+        if (outcome === 'applied') {
+          counts.scheduleApplied!++;
+          index = null; // the series changed; re-read before the next lookup
+        } else if (outcome === 'stale') {
+          counts.scheduleStale!++;
+          staleRefs.push(change.ref);
+        } else if (outcome === 'conflict') counts.scheduleConflicts!++;
       }
 
       if (data.nextCursor !== cursor) {

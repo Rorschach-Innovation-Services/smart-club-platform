@@ -11,7 +11,15 @@
  * recipient + expiry) by email and WhatsApp; the chair is cc'd on the captain's email. The club
  * can also file from the portal. The FIRST submit wins; the link then answers 410.
  *
- * A cleared result voids pending reports (their links die) and flags submitted ones.
+ * A cleared result voids pending reports (their links die) and flags submitted ones. A
+ * CORRECTED result (newer recordedAt, no clear) updates `resultSummary` on still-pending
+ * reports and notifies nobody again; submitted reports are never touched.
+ *
+ * Durability: the puller writes a `REPORTOPEN#<ref>` marker with every newly stored result and
+ * deletes it once the reports opened + notified. A failure leaves it for
+ * `retryPendingReportOpens` (every cron run and "Sync now"); after REPORT_OPEN_MAX_ATTEMPTS it
+ * gives up and reports to Sentry. Re-opening is idempotent (per fixture + club), and the
+ * NOTIFY# ledger claim guarantees nothing is ever sent twice.
  *
  * PII: a `captainRef` is a player ref — an unsalted hash of an SA ID number. It is resolved to
  * a roster row here and then dropped: it is never stored on the report, never put in a token
@@ -37,6 +45,7 @@ import type {
   CaptainsReportRecipient,
   Club,
   Series,
+  StoredFixtureResult,
   TenantConfig,
 } from './types.js';
 import type { SyncResult } from './medicoach-sync-contract.js';
@@ -47,6 +56,8 @@ type RepoModule = typeof import('./repo.js');
 export const MAX_REPORT_AGE_DAYS = 14;
 /** A link stays usable this long after the report's deadline (late reports are accepted). */
 export const LINK_GRACE_DAYS = 7;
+/** REPORTOPEN# retries (the puller's own try included) before giving up with Sentry. */
+export const REPORT_OPEN_MAX_ATTEMPTS = 5;
 
 const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/;
 const DAY_MS = 24 * 3600 * 1000;
@@ -390,6 +401,14 @@ export async function openCaptainReports(
   const { tenant, seriesId, fixtureId, result, config } = event;
 
   if (result.source === 'import') return { ...out, skipped: 'import' };
+
+  // A corrected result (same fixture, newer recordedAt): pending reports take the new
+  // summary. Done before the go-live/age rules — they decide whether reports OPEN, not
+  // whether an open one shows the right score. Nobody is notified again.
+  for (const r of await repo.listCaptainsReportsForFixture(tenant, seriesId, fixtureId))
+    if (r.status === 'pending' && (r.resultSummary ?? null) !== (result.summary ?? null))
+      await repo.updatePendingCaptainsReportSummary(tenant, r, result.summary ?? null);
+
   const goLive = config.integrations?.medicoach?.goLiveDate;
   if (!goLive) return { ...out, skipped: 'no-go-live' };
 
@@ -467,7 +486,25 @@ export async function openCaptainReports(
       createdAt: nowIso,
       updatedAt: nowIso,
     };
-    if (!(await repo.openCaptainsReportIfAbsent(tenant, report))) continue;
+    if (!(await repo.openCaptainsReportIfAbsent(tenant, report))) {
+      // Already open. A retry (REPORTOPEN#) after a failed notify must still notify — the
+      // NOTIFY# ledger claim makes this a no-op when the first send was already claimed.
+      const existing = await repo.getCaptainsReport(tenant, seriesId, fixtureId, club.id);
+      if (!existing || existing.status !== 'pending' || existing.source !== 'auto') continue;
+      const toCaptain = existing.recipient.kind === 'captain' && captain;
+      if (
+        await notifyReportOpened(
+          deps,
+          tenant,
+          config,
+          existing,
+          toCaptain ? captain : chair,
+          toCaptain ? chair : null,
+        )
+      )
+        out.notified.push(existing.id);
+      continue;
+    }
     out.opened.push(report.id);
 
     if (await notifyReportOpened(deps, tenant, config, report, contact, captain ? chair : null))
@@ -486,10 +523,12 @@ async function notifyReportOpened(
   ccChair: { email?: string } | null,
 ): Promise<boolean> {
   const { repo } = deps;
-  if (!(await repo.claimCaptainsReportNotify(tenant, report.id, 'recipient'))) return false;
+  // Everything that can throw BEFORE a send is resolved before the ledger claim, so a
+  // failure (e.g. the link secret unset) leaves the claim free for the REPORTOPEN# retry.
   const secret = (deps.linkSecret ?? captainsReportLinkSecret)();
   const base = (deps.linkBase ?? captainsReportLinkBase)();
   const { token, url } = reportLink(tenant, report, secret, base);
+  if (!(await repo.claimCaptainsReportNotify(tenant, report.id, 'recipient'))) return false;
   const home = report.side === 'home' ? report.clubName : report.opponentName;
   const away = report.side === 'home' ? report.opponentName : report.clubName;
   const cc =
@@ -574,8 +613,9 @@ export async function sendReportNotice(n: ReportNotice): Promise<NoticeResult[]>
 }
 
 /**
- * The puller's result hook: open reports, never throw (a notify/report fault must not fail
- * the sync run that already stored the result). Logs ids and counts only.
+ * The puller's result hook: open reports. A failure is logged and RETHROWN — the puller
+ * catches it (the sync run never fails on it) and keeps the REPORTOPEN# marker, so the next
+ * run retries. Logs ids and counts only.
  */
 export function captainsReportResultHook(deps: CaptainsReportDeps) {
   const log = deps.log ?? ((line: string) => console.log(line));
@@ -593,12 +633,102 @@ export function captainsReportResultHook(deps: CaptainsReportDeps) {
       console.error(
         `[captains-report] ${event.tenant} ${event.seriesId}/${event.fixtureId}: open failed — ${
           err instanceof Error ? err.name : 'error'
-        }`,
+        } (will retry)`,
       );
-      const { Sentry } = await import('./instrument.js');
-      Sentry.captureException(err, { tags: { tenant: event.tenant, job: 'captains-report' } });
+      throw err;
     }
   };
+}
+
+/** A stored result back in the wire shape the report opener reads. */
+function syncResultOf(r: StoredFixtureResult): SyncResult {
+  return {
+    homeScore: r.homeScore ?? null,
+    awayScore: r.awayScore ?? null,
+    summary: r.summary ?? null,
+    winner: r.winner ?? null,
+    method: (r.method as SyncResult['method']) ?? null,
+    noResult: r.noResult === true,
+    source: r.resultSource ?? 'manual',
+    recordedAt: r.recordedAt!,
+    scoringSide: r.scoringSide ?? null,
+    captainRef: r.captainRef ?? null,
+    medicoachMatchUrl: r.medicoachMatchUrl ?? null,
+  };
+}
+
+export interface ReportRetrySummary {
+  retried: number;
+  done: number;
+  failed: number;
+  gaveUp: number;
+}
+
+/**
+ * Retry every pending REPORTOPEN# marker for a tenant (each cron run and "Sync now"). The
+ * marker's result is re-read from its FIXRESULT# item, so the usual rules apply unchanged
+ * (import source, goLiveDate, the 14-day window). A marker whose result is gone, cleared, or
+ * older than the one it was written for (the store never happened) is simply dropped.
+ * After REPORT_OPEN_MAX_ATTEMPTS failures the marker is dropped and Sentry told.
+ */
+export async function retryPendingReportOpens(
+  tenant: string,
+  deps: CaptainsReportDeps,
+): Promise<ReportRetrySummary> {
+  const { repo } = deps;
+  const now = deps.now ?? (() => new Date());
+  const out: ReportRetrySummary = { retried: 0, done: 0, failed: 0, gaveUp: 0 };
+  const markers = await repo.listReportOpenMarkers(tenant);
+  if (!markers.length) return out;
+  const config = await repo.getTenantConfig(tenant);
+  for (const m of markers) {
+    const stored = await repo.getFixtureResult(tenant, m.seriesId, m.fixtureId);
+    if (
+      !config ||
+      !stored ||
+      stored.cleared ||
+      !stored.recordedAt ||
+      Date.parse(stored.recordedAt) < Date.parse(m.recordedAt)
+    ) {
+      await repo.deleteReportOpenMarker(tenant, m.ref);
+      continue;
+    }
+    out.retried++;
+    try {
+      await openCaptainReports(
+        {
+          tenant,
+          seriesId: m.seriesId,
+          fixtureId: m.fixtureId,
+          ref: m.ref,
+          result: syncResultOf(stored),
+          config,
+        },
+        deps,
+      );
+      await repo.deleteReportOpenMarker(tenant, m.ref);
+      out.done++;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'report open failed';
+      const attempts = await repo.markReportOpenFailed(tenant, m.ref, message, now().toISOString());
+      if (attempts >= REPORT_OPEN_MAX_ATTEMPTS) {
+        out.gaveUp++;
+        await repo.deleteReportOpenMarker(tenant, m.ref);
+        console.error(
+          `[captains-report] ${tenant} ${m.seriesId}/${m.fixtureId}: gave up after ${attempts} attempts`,
+        );
+        const { Sentry } = await import('./instrument.js');
+        Sentry.captureException(
+          new Error(`captain's reports could not be opened after ${attempts} attempts`),
+          {
+            tags: { tenant, job: 'captains-report' },
+            extra: { seriesId: m.seriesId, fixtureId: m.fixtureId, lastError: message },
+          },
+        );
+      } else out.failed++;
+    }
+  }
+  return out;
 }
 
 /** The puller's cleared-result hook: void pending reports, flag submitted ones. */

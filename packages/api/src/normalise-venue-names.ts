@@ -43,6 +43,7 @@ import {
   isClashExempt,
 } from './venue-clash.js';
 import type { Club, Series, Venue } from './types.js';
+import { recordScheduleDiff } from './medicoach-sync/schedule.js';
 
 const TENANT = 'dolphins';
 
@@ -691,10 +692,14 @@ async function main() {
   );
 
   // Series first (so a venue rename/delete never races ahead of the fixtures pointing at it).
+  const storedById = new Map(freshSeries.filter(Boolean).map((x) => [String(x!.id), x!]));
   for (const id of dirtySeriesIds) {
     const s = allSeries.find((x) => String(x.id) === id)!;
     s.version = (Number(s.version) || 1) + 1;
+    // Medicoach sync (Slice 4): stamp + queue every mapped fixture whose venue changed.
+    const scheduleSync = await recordScheduleDiff(repo, TENANT, storedById.get(id), s, 'cli');
     await repo.putSeries(TENANT, s);
+    await scheduleSync.enqueue();
     console.log(`wrote series ${s.id} v${s.version}`);
   }
   for (const id of dirtyVenueIds) {

@@ -35,6 +35,7 @@ export const qk = {
   venues: () => ['venues', t()],
   umpires: () => ['umpires', t()],
   captainsReports: () => ['captains-reports', t()],
+  medicoachSync: () => ['medicoach-sync', t()],
   clubCaptainsReports: (clubId: string) => ['club-captains-reports', t(), clubId],
   // Global: the token names its own tenant.
   linkedCaptainsReport: (token: string) => ['captains-report-link', token],

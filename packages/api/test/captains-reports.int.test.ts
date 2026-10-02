@@ -742,3 +742,137 @@ describe('erasure', () => {
     assert.equal(left.length, 0);
   });
 });
+
+describe('durable report opening (REPORTOPEN# markers)', () => {
+  const sender = {
+    sendNotice: async (n: Notice) => {
+      notices.push(n);
+      return n.channels.map((channel) => ({ channel, status: 'sent' as const }));
+    },
+    log: (l: string) => logLines.push(l),
+  };
+  const failingDeps = {
+    ...sender,
+    linkSecret: () => {
+      throw new Error('CAPTAINS_REPORT_LINK_SECRET not set');
+    },
+  };
+  const LIVE_REF = 'smartclub:dolphins:fixture:s-planb-premier-men-t20-g1:f3';
+
+  test('a notify failure after the result is stored is retried by the next run, once', async () => {
+    await seedCaptain();
+    page = liveResultPage('live');
+    const summary = await puller.runMedicoachSync('dolphins', 'cron', {
+      repo,
+      url: stubUrl,
+      secret: SECRET,
+      log: (l) => logLines.push(l),
+      captainsReports: failingDeps,
+    });
+    // The result is stored and the run succeeded — the failure is deferred, not fatal.
+    assert.equal(summary.status, 'ok');
+    assert.equal(summary.counts.resultsStored, 1);
+    assert.equal(notices.length, 0);
+    const [marker] = await repo.listReportOpenMarkers('dolphins');
+    assert.equal(marker.ref, LIVE_REF);
+    assert.equal(marker.attempts, 1);
+    assert.match(String(marker.lastError), /LINK_SECRET/);
+    // The marker never carries the captain's player ref.
+    assert.ok(!JSON.stringify(marker).includes(CAPTAIN_KEY), 'no player ref on the marker');
+
+    const { retryPendingReportOpens } = await import('../src/captains-reports.js');
+    const retry = await retryPendingReportOpens('dolphins', { repo, ...sender });
+    assert.deepEqual(retry, { retried: 1, done: 1, failed: 0, gaveUp: 0 });
+    assert.equal(notices.length, 2, 'both sides notified exactly once on the retry');
+    assert.deepEqual(notices.map((n) => n.recipientKind).sort(), ['captain', 'chair']);
+    assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
+
+    // A further retry run (nothing pending) and a replayed page send nothing.
+    await retryPendingReportOpens('dolphins', { repo, ...sender });
+    await runPull();
+    assert.equal(notices.length, 2);
+  });
+
+  test('gives up after the attempt limit and drops the marker', async () => {
+    page = liveResultPage('live');
+    await puller.runMedicoachSync('dolphins', 'cron', {
+      repo,
+      url: stubUrl,
+      secret: SECRET,
+      log: () => {},
+      captainsReports: failingDeps,
+    });
+    const { retryPendingReportOpens, REPORT_OPEN_MAX_ATTEMPTS } =
+      await import('../src/captains-reports.js');
+    let gaveUp = 0;
+    for (let i = 1; i < REPORT_OPEN_MAX_ATTEMPTS; i++)
+      gaveUp += (await retryPendingReportOpens('dolphins', { repo, ...failingDeps })).gaveUp;
+    assert.equal(gaveUp, 1);
+    assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
+    assert.equal(notices.length, 0);
+  });
+
+  test('a marker whose result was cleared since is dropped without opening anything', async () => {
+    page = liveResultPage('live');
+    await puller.runMedicoachSync('dolphins', 'cron', {
+      repo,
+      url: stubUrl,
+      secret: SECRET,
+      log: () => {},
+      captainsReports: failingDeps,
+    });
+    await repo.putFixtureResultIfNewer('dolphins', {
+      seriesId: 's-planb-premier-men-t20-g1',
+      fixtureId: 'f3',
+      ref: LIVE_REF,
+      // Later than the example's recordedAt whatever today is.
+      orderAt: '2099-01-01T00:00:00.000Z',
+      cleared: true,
+      clearedAt: '2099-01-01T00:00:00.000Z',
+      storedAt: new Date().toISOString(),
+    });
+    const { retryPendingReportOpens } = await import('../src/captains-reports.js');
+    const retry = await retryPendingReportOpens('dolphins', { repo, ...sender });
+    assert.equal(retry.retried, 0);
+    assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
+    assert.equal(notices.length, 0);
+  });
+});
+
+describe('a corrected result (newer recordedAt, no clear)', () => {
+  test('pending reports take the new summary; submitted ones are untouched; nobody is re-notified', async () => {
+    await seedCaptain();
+    page = liveResultPage('live');
+    await runPull();
+    assert.equal(notices.length, 2);
+    const [first, second] = await reportsOf();
+    // One side files before the correction arrives.
+    await repo.submitCaptainsReport('dolphins', first, completeBody, {
+      ref: 'CR-2026-0001',
+      submittedBy: 'rep@test',
+      via: 'portal',
+    });
+
+    const corrected = liveResultPage('live');
+    corrected.nextCursor = new Date().toISOString();
+    corrected.fixtures[0].result.recordedAt = new Date(
+      Date.parse(corrected.fixtures[0].result.recordedAt) + 3600_000,
+    ).toISOString();
+    corrected.fixtures[0].result.summary = 'Umzinto won by 25 runs';
+    corrected.fixtures[0].result.homeScore = '186/6 (20)';
+    page = corrected;
+    const summary = await runPull();
+    assert.equal(summary.counts.resultsStored, 1);
+
+    const after = await reportsOf();
+    const submitted = after.find((r) => r.id === first.id)!;
+    const pending = after.find((r) => r.id === second.id)!;
+    assert.equal(submitted.status, 'submitted');
+    assert.equal(submitted.resultSummary, 'Umzinto won by 23 runs');
+    assert.equal(pending.status, 'pending');
+    assert.equal(pending.resultSummary, 'Umzinto won by 25 runs');
+    assert.equal(pending.recipient.memberId, second.recipient.memberId, 'same link, not re-opened');
+    assert.equal(notices.length, 2, 'no second notice');
+    assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
+  });
+});

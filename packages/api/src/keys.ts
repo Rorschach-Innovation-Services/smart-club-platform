@@ -424,8 +424,53 @@ export const syncLogsListKey = (tenant: string) => ({
   skPrefix: 'SYNCLOG#',
 });
 
-/** pk of the whole SYNC partition (cursor + logs), for erasure. */
+/** pk of the whole SYNC partition (cursor, logs, conflicts, outbox, report markers), for
+ * erasure and cohort clearing. */
 export const syncPartitionPk = (tenant: string) => `${tenantPrefix(tenant)}#SYNC`;
+
+/**
+ * An inbound medicoach schedule change held for admin review (Slice 3): its venue did not
+ * resolve, or the in-season clash gate would refuse it. One row per fixture ref — the latest
+ * proposal wins.
+ */
+export const syncConflictKey = (tenant: string, ref: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `SYNCCONFLICT#${ref}`,
+});
+
+export const syncConflictsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'SYNCCONFLICT#',
+});
+
+/**
+ * The outbox (Slice 4): one row per fixture ref holding the LATEST smart-club schedule to
+ * push to medicoach. Several edits before the next flush collapse onto the one row.
+ */
+export const pendingSyncKey = (tenant: string, ref: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `PENDINGSYNC#${ref}`,
+});
+
+export const pendingSyncListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'PENDINGSYNC#',
+});
+
+/**
+ * A stored result whose captain's reports still have to be opened + notified. Written in the
+ * same step as the result and deleted once that succeeded, so a failure is retried by the
+ * next run instead of being lost (the puller never re-fires the hook for a replay).
+ */
+export const reportOpenKey = (tenant: string, ref: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  sk: `REPORTOPEN#${ref}`,
+});
+
+export const reportOpenListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#SYNC`,
+  skPrefix: 'REPORTOPEN#',
+});
 
 /**
  * Captain's reports: one partition per tenant holding every report

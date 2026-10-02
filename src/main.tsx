@@ -107,7 +107,8 @@ import { Onboarding } from './onboarding';
 import { AdminUmpiresView } from './umpires';
 import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
 import { AdminCaptainsReportsView } from './AdminCaptainsReports';
-import { useModule, useSeasonLabel, useVertical } from './branding';
+import { AdminMedicoachSyncView } from './AdminMedicoachSync';
+import { useFeature, useModule, useSeasonLabel, useVertical } from './branding';
 
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
 const TENANT_SLUG = resolveTenantSlug();
@@ -1217,6 +1218,8 @@ function Shell({
   const veteransOn = useModule('veterans');
   const cqiOn = useModule('cqi');
   const complianceOn = useModule('compliance');
+  // Medicoach fixture/result sync (ADR 0016): the admin "Medicoach sync" page.
+  const medicoachSyncOn = useFeature('medicoachSync');
   const clearancesOn = useModule('clearances');
 
   // ── Derive clubId from URL ──
@@ -2406,6 +2409,7 @@ function Shell({
           },
         ]
       : []),
+    ...(medicoachSyncOn ? [{ v: 'medicoach_sync', label: 'Medicoach sync', icon: Icon.Live }] : []),
     { v: 'team', label: 'Team & Access', icon: Icon.Users, num: users.length || undefined },
   ].sort((a, b) => a.label.localeCompare(b.label));
 
@@ -2726,6 +2730,13 @@ function Shell({
             onPatch={patchUmpire}
             onMerge={mergeUmpire}
             reports={allCaptainsReports}
+          />
+        );
+      if (view === 'medicoach_sync' && medicoachSyncOn)
+        return (
+          <AdminMedicoachSyncView
+            onEditFixture={() => gotoAdminView('fixtures')}
+            onToast={(message, tone) => toastShow(message, tone)}
           />
         );
       if (view === 'captains_reports' && vertical.sport === 'cricket')

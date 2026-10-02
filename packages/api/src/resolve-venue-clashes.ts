@@ -36,6 +36,7 @@ import {
   isClashExempt,
 } from './venue-clash.js';
 import type { Series, Venue } from './types.js';
+import { recordScheduleDiff } from './medicoach-sync/schedule.js';
 
 const TENANT = 'dolphins';
 
@@ -571,10 +572,14 @@ async function main() {
   await writeFile(backupPath, JSON.stringify(backup, null, 2));
   console.log(`\nBackup written: ${backupPath} (${backup.series.length} series)`);
 
+  const storedById = new Map(freshSeries.filter(Boolean).map((x) => [String(x!.id), x!]));
   for (const id of dirtySeriesIds) {
     const s = allSeries.find((x) => String(x.id) === id)!;
     s.version = (Number(s.version) || 1) + 1;
+    // Medicoach sync (Slice 4): stamp + queue every mapped fixture whose schedule changed.
+    const scheduleSync = await recordScheduleDiff(repo, TENANT, storedById.get(id), s, 'cli');
     await repo.putSeries(TENANT, s);
+    await scheduleSync.enqueue();
     console.log(`wrote series ${s.id} v${s.version}`);
   }
   console.log('Done.');

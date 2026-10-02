@@ -56,6 +56,7 @@ import { pathToFileURL } from 'node:url';
 import type { Series, Venue, VenueStatus, Club, TenantConfig } from './types.js';
 import { hasFeature } from './features.js';
 import { fixtureSyncRef, reconcileFixtureIds } from './fixture-identity.js';
+import { recordScheduleDiff } from './medicoach-sync/schedule.js';
 
 type SeriesParticipant = NonNullable<Series['participants']>[number];
 type RepoModule = typeof import('./repo.js');
@@ -3321,7 +3322,10 @@ async function runImport(args: Args) {
       s.revealedAt = existing.revealedAt;
       s.version = (Number(existing.version) || 1) + 1;
     }
+    // Medicoach sync (Slice 4): stamp + queue every mapped fixture whose schedule changed.
+    const scheduleSync = await recordScheduleDiff(repo, TENANT, existing, s, 'cli');
     await repo.putSeries(TENANT, s);
+    await scheduleSync.enqueue();
     const withheldNote =
       existing && s.withheld ? ` (withheld: ${Object.keys(s.withheld).join(',')})` : '';
     console.log(
@@ -3686,7 +3690,10 @@ async function runRelease(args: Args) {
       s.revealedAt = existing.revealedAt;
       s.version = (Number(existing.version) || 1) + 1;
     }
+    // Medicoach sync (Slice 4): stamp + queue every mapped fixture whose schedule changed.
+    const scheduleSync = await recordScheduleDiff(repo, TENANT, existing, s, 'cli');
     await repo.putSeries(TENANT, s);
+    await scheduleSync.enqueue();
     const withheldNote =
       existing && s.withheld ? ` (withheld: ${Object.keys(s.withheld).join(',')})` : '';
     console.log(

@@ -565,12 +565,16 @@ export const rebaseSeasonRun = (
 export interface GenerateStageRequest {
   version: number;
   confirmReleasedOverwrite?: true;
+  /** Medicoach sync: consent to orphan the synced refs of released series (operator call). */
+  allowResync?: true;
 }
 export interface GenerateStageResponse {
   run: SeasonRun;
   series: Series[];
   /** Caveats on a generate that still succeeded, e.g. a pool pairing drawn as a seeded bracket. */
   warnings?: string[];
+  /** With `allowResync`: the medicoach fixture refs this regenerate orphaned. */
+  orphanedRefs?: string[];
 }
 /** The generate would replace released series and the caller did not confirm it. */
 export class ReleasedOverwriteError extends ApiError {
@@ -613,6 +617,81 @@ export const putFixtureOfficials = (seriesId: string, fixtureId: string, umpireI
     `/series/${encodeURIComponent(seriesId)}/fixtures/${encodeURIComponent(fixtureId)}/officials`,
     { method: 'PUT', body: { umpires: umpireIds.map((umpireId) => ({ umpireId })) } },
   );
+
+// ── Medicoach sync (ADR 0016) ── admin only; visible when `features.medicoachSync` is on.
+export interface MedicoachSyncSchedule {
+  scheduledTime: string | null;
+  timeTbc: boolean;
+  dateTbc: boolean;
+  venue: string | null;
+  postponed: boolean;
+  cancelled: boolean;
+  changedAt: string;
+}
+export interface MedicoachSyncConflict {
+  ref: string;
+  seriesId: string;
+  fixtureId: string;
+  seriesName?: string;
+  matchLine?: string;
+  current: { date?: string; time?: string; venue?: string; status?: string; dateTbc?: boolean };
+  proposed: MedicoachSyncSchedule;
+  proposedText: string;
+  fields: string[];
+  reason: 'venue-unresolved' | 'clash';
+  detail: string[];
+  detectedAt: string;
+  notifiedAt?: string;
+}
+export interface MedicoachSyncLog {
+  id: string;
+  at: string;
+  trigger: 'cron' | 'manual';
+  kind?: 'pull' | 'push';
+  outcome: 'ok' | 'error';
+  pages: number;
+  fixtures: number;
+  counts: Record<string, number | undefined>;
+  push?: Record<string, number>;
+  error?: string;
+}
+export interface MedicoachSyncStatus {
+  enabled: boolean;
+  dryRun?: boolean;
+  cursor?: { cursor: string; updatedAt?: string } | null;
+  logs?: MedicoachSyncLog[];
+  outbox?: {
+    count: number;
+    failures: Array<{
+      ref: string;
+      seriesId: string;
+      fixtureId: string;
+      attempts: number;
+      lastError: string | null;
+      lastAttemptAt: string | null;
+      enqueuedAt: string;
+      proposed: string;
+    }>;
+  };
+  conflicts?: MedicoachSyncConflict[];
+  pendingReports?: number;
+}
+export const getMedicoachSyncStatus = () =>
+  request<MedicoachSyncStatus>('/integrations/medicoach/status');
+export const medicoachSyncNow = () =>
+  request<{ status: string; counts?: Record<string, number> }>('/integrations/medicoach/sync-now', {
+    method: 'POST',
+  });
+export const applyMedicoachConflict = (ref: string) =>
+  request<{ status: string }>('/integrations/medicoach/conflicts/apply', {
+    method: 'POST',
+    body: { ref },
+  });
+export const discardMedicoachConflict = (ref: string) =>
+  request<{ status: string }>('/integrations/medicoach/conflicts/discard', {
+    method: 'POST',
+    body: { ref },
+  });
 
 // ── Captain's reports (ADR 0016) ──
 // Club routes are own-club only. `submit: true` files the report (first submit wins → 409);

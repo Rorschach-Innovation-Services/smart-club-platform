@@ -1132,10 +1132,97 @@ export interface SyncLogEntry {
     unmapped: number;
     slotsFilled: number;
     scheduleDiffers: number;
+    /** Inbound schedule changes applied (medicoach newer). Absent on pre-Slice-3 rows. */
+    scheduleApplied?: number;
+    /** Inbound schedule changes dropped because smart club's change is newer. */
+    scheduleStale?: number;
+    /** Inbound schedule changes held as SYNCCONFLICT# for admin review. */
+    scheduleConflicts?: number;
   };
-  /** Fixture refs whose medicoach schedule differs from smart club's (not applied yet). */
+  /** Fixture refs whose medicoach schedule differs from smart club's. */
   scheduleDiffersRefs?: string[];
+  /** Refs whose inbound schedule was dropped as older than smart club's (most-recent-wins). */
+  scheduleStaleRefs?: string[];
+  /** `push` rows record an outbox flush (Slice 4); absent ⇒ a pull. */
+  kind?: 'pull' | 'push';
+  /** Outbox flush outcome counts (push rows only). */
+  push?: SchedulePushCounts;
   error?: string;
+}
+
+/** What one outbox flush did (Slice 4). */
+export interface SchedulePushCounts {
+  sent: number;
+  applied: number;
+  stale: number;
+  unchanged: number;
+  unmapped: number;
+  errors: number;
+}
+
+/** A smart-club fixture schedule in the wire shape (`SyncSchedule`, contract v1). */
+export interface SyncScheduleSnapshot {
+  scheduledTime: string | null;
+  timeTbc: boolean;
+  dateTbc: boolean;
+  venue: string | null;
+  postponed: boolean;
+  cancelled: boolean;
+  changedAt: string;
+}
+
+/**
+ * PENDINGSYNC#<ref> — the latest smart-club schedule for one mapped fixture, waiting to be
+ * pushed to medicoach. Collapsed per ref (a newer edit overwrites the row and resets the
+ * attempt count); deleted only when medicoach answers a success status for THIS snapshot.
+ */
+export interface PendingScheduleSync {
+  ref: string;
+  seriesId: string;
+  fixtureId: string;
+  schedule: SyncScheduleSnapshot;
+  origin: ScheduleChangeOrigin;
+  enqueuedAt: string;
+  attempts: number;
+  lastError?: string;
+  lastAttemptAt?: string;
+}
+
+/** Who changed a fixture's schedule. `medicoach` = the Slice 3 inbound apply (never echoed). */
+export type ScheduleChangeOrigin = 'admin' | 'generate' | 'cli' | 'medicoach';
+
+/**
+ * SYNCCONFLICT#<ref> — a medicoach schedule change held for admin review instead of applied.
+ * The latest proposal per ref wins; `notifiedAt` records the one admin email per proposal.
+ */
+export interface SyncConflict {
+  ref: string;
+  seriesId: string;
+  fixtureId: string;
+  /** Display context for the inbox (names, never refs of people). */
+  seriesName?: string;
+  matchLine?: string;
+  current: { date?: string; time?: string; venue?: string; status?: string; dateTbc?: boolean };
+  proposed: SyncScheduleSnapshot;
+  fields: string[];
+  reason: 'venue-unresolved' | 'clash';
+  /** Human lines: the clashes, or the venue name that did not resolve. */
+  detail: string[];
+  detectedAt: string;
+  notifiedAt?: string;
+}
+
+/** REPORTOPEN#<ref> — captain's reports still to open + notify for a stored result. */
+export interface ReportOpenMarker {
+  ref: string;
+  seriesId: string;
+  fixtureId: string;
+  /** The stored result's recordedAt this marker was written for. */
+  recordedAt: string;
+  createdAt: string;
+  attempts: number;
+  lastError?: string;
+  lastAttemptAt?: string;
 }
 
 // ── Captain's reports (ADR 0016, Slice 2) ──

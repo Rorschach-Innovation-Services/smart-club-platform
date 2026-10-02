@@ -418,9 +418,10 @@ describe('medicoach sync puller', () => {
     assert.doesNotMatch(raw, /:player:/);
   });
 
-  test('knockout teams fill the slot fixture; schedule differences are only recorded', async () => {
+  test('knockout teams fill the slot fixture; a record-only schedule handler applies nothing', async () => {
     pages = [example('changes-knockout-reschedule')];
-    const summary = await run();
+    // Slice 3's real handler is covered in medicoach-schedule-sync.int.test.ts.
+    const summary = await run({ onScheduleDiffers: puller.recordScheduleDiffers });
     assert.equal(summary.counts.slotsFilled, 2);
     assert.equal(summary.counts.scheduleDiffers, 2);
     const ko = (await repo.getSeries('dolphins', 's-mc-ko-premier-t20'))!;
@@ -432,7 +433,7 @@ describe('medicoach sync puller', () => {
       away: 'pos:s-planb-premier-men-t20-2:1',
     });
     assert.equal(ko.version, 2, 'one version-checked write');
-    // The schedule itself is untouched (Slice 3 applies schedule changes).
+    // The schedule itself is untouched (the record-only handler applies nothing).
     assert.equal(f1.date, '2026-11-22');
     assert.equal(f1.dateTbc, true);
     const vets = (await repo.getSeries('dolphins', 's-planb-veterans-premier-t20-1'))!;
@@ -493,13 +494,13 @@ describe('medicoach sync puller', () => {
     );
     assert.deepEqual(await snapshot(), before);
     assert.equal(hookCalls.length, hooksBefore);
-    // Only the cursor (it moved from '0') and the schedule-differs audit row are written.
+    // Only the cursor (it moved from '0'): the first run already applied the schedule
+    // changes, so nothing differs and no audit row is notable.
     assert.deepEqual(writes.sort(), [
       'putFixtureResultIfNewer',
       'putFixtureResultIfNewer',
       'putFixtureResultIfNewer',
       'putSyncCursor',
-      'putSyncLog',
     ]);
   });
 

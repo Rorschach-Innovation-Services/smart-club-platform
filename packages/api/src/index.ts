@@ -61,7 +61,19 @@ import {
   seriesIsSyncMapped,
   stripResponseOnlyFixtureFields,
 } from './medicoach-sync/series-results.js';
-import { MedicoachSyncError, runMedicoachSync } from './medicoach-sync/puller.js';
+import { MedicoachSyncError } from './medicoach-sync/puller.js';
+import { runTenantSync } from './medicoach-sync/run.js';
+import { fixtureSyncRef } from './fixture-identity.js';
+import {
+  buildInboundFixture,
+  describeSchedule,
+  fixtureSchedule,
+  fixturesEditRecallsApproval,
+  recordScheduleDiff,
+  sameMatch,
+  seriesMappedForSync,
+  type ScheduleFixture,
+} from './medicoach-sync/schedule.js';
 import { captainsReportLinkSecret, medicoachSyncSecret, medicoachSyncUrl } from './env.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
 import { clubIdFromName } from './club-id.js';
@@ -77,6 +89,7 @@ import {
   clashKey,
   formatClash,
   formatClashForHumans,
+  introducedClashes,
   venueAliasesFor,
 } from './venue-clash.js';
 import {
@@ -187,6 +200,8 @@ import type {
   AdminClearanceView,
   CertificateMeta,
   WithheldField,
+  ScheduleChangeOrigin,
+  SyncConflict,
 } from './types.js';
 import { teamIdsForClub, resolveTeam } from './teams.js';
 import { orgCopy } from './branding.js';
@@ -3950,6 +3965,8 @@ async function applySeriesPatch(
   patch: SeriesPatch,
   _actor: string,
   runCalendar?: RunCalendarOverride,
+  /** Who is changing the schedule — stamped + queued for medicoach unless `medicoach`. */
+  origin: ScheduleChangeOrigin = 'admin',
 ): Promise<Series> {
   const current = await repo.getSeries(tenant, id);
   if (!current) throw new HttpError(404, 'series not found');
@@ -4073,7 +4090,7 @@ async function applySeriesPatch(
   // release); a live series keeps its state so in-season edits still reach clubs.
   if (typeof patch.approved === 'boolean') {
     patch.approvedAt = patch.approved ? now() : null;
-  } else if (patch.fixtures !== undefined && !current.released) {
+  } else if (patch.fixtures !== undefined && fixturesEditRecallsApproval(current)) {
     patch.approved = false;
     patch.approvedAt = null;
   }
@@ -4147,12 +4164,23 @@ async function applySeriesPatch(
   if (patch.released === true && !current.released) patch.releasedAt = now();
   else if (patch.released === false) patch.releasedAt = null;
   else delete patch.releasedAt;
+  // Medicoach sync (ADR 0016, Slice 4): a fixture whose schedule this write changes gets
+  // `schedule.changedAt = now` in the same write, and its outbox row once the write landed.
+  let scheduleSync: Awaited<ReturnType<typeof recordScheduleDiff>> | undefined;
+  if (patch.fixtures !== undefined) {
+    const after = { ...current, ...patch, id } as Series;
+    scheduleSync = await recordScheduleDiff(repo, tenant, current, after, origin);
+    patch.fixtures = after.fixtures;
+  }
+  let written: Series;
   try {
-    return await repo.updateSeries(tenant, id, patch);
+    written = await repo.updateSeries(tenant, id, patch);
   } catch (err) {
     if (err instanceof VersionConflictError) throw new HttpError(409, 'series changed; refetch');
     throw err;
   }
+  await scheduleSync?.enqueue();
+  return written;
 }
 
 /**
@@ -4170,11 +4198,7 @@ function inSeasonClashRefusal(
   venues: Venue[],
   aliases: Record<string, string>,
 ): HttpError | undefined {
-  const before = new Set(
-    findClashes(current, allSeries, clubs, venues, aliases).map((c) => clashKey(c, aliases)),
-  );
-  const after = findClashes(subject, allSeries, clubs, venues, aliases);
-  const introduced = after.filter((c) => !before.has(clashKey(c, aliases)));
+  const introduced = introducedClashes(current, subject, allSeries, clubs, venues, aliases);
   if (!introduced.length) return undefined;
   const shown = introduced.slice(0, 3).map(formatClashForHumans).join('; ');
   return new HttpError(
@@ -4211,7 +4235,8 @@ function inSeasonClashRefusal(
 app.post('/integrations/medicoach/sync-now', async (c) => {
   const { tenant } = c.get('requestAuth')!;
   try {
-    const summary = await runMedicoachSync(tenant, 'manual', {
+    // Outbox first, then the pull, then pending captain's reports — the cron's sequence.
+    const summary = await runTenantSync(tenant, 'manual', {
       repo,
       url: medicoachSyncUrl(),
       secret: medicoachSyncSecret(),
@@ -4223,6 +4248,175 @@ app.post('/integrations/medicoach/sync-now', async (c) => {
     if (err instanceof MedicoachSyncError) throw new HttpError(502, err.message);
     throw err;
   }
+});
+
+/**
+ * Admin "Medicoach sync" page data (ADR 0016): whether the sync is on (and a dry run), the
+ * pull cursor, recent SYNCLOG# rows (pull and push), the PENDINGSYNC# outbox (count + rows
+ * that failed, with their last error) and the SYNCCONFLICT# inbox. Counts, fixture refs and
+ * schedules only — no player data lives in any of these rows.
+ */
+app.get('/integrations/medicoach/status', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const config = await repo.getTenantConfig(tenant);
+  const enabled = hasFeature(config, 'medicoachSync');
+  if (!enabled) return c.json({ enabled: false });
+  const [cursor, logs, pending, conflicts, markers] = await Promise.all([
+    repo.getSyncCursorRow(tenant),
+    repo.listSyncLogs(tenant, 20),
+    repo.listPendingSync(tenant),
+    repo.listSyncConflicts(tenant),
+    repo.listReportOpenMarkers(tenant),
+  ]);
+  return c.json({
+    enabled: true,
+    dryRun: !medicoachSyncUrl() || !medicoachSyncSecret(),
+    cursor,
+    logs,
+    outbox: {
+      count: pending.length,
+      failures: pending
+        .filter((p) => p.attempts > 0)
+        .sort((a, b) => a.enqueuedAt.localeCompare(b.enqueuedAt))
+        .map((p) => ({
+          ref: p.ref,
+          seriesId: p.seriesId,
+          fixtureId: p.fixtureId,
+          attempts: p.attempts,
+          lastError: p.lastError ?? null,
+          lastAttemptAt: p.lastAttemptAt ?? null,
+          enqueuedAt: p.enqueuedAt,
+          proposed: describeSchedule(p.schedule),
+        })),
+    },
+    conflicts: conflicts
+      .sort((a, b) => b.detectedAt.localeCompare(a.detectedAt))
+      .map((x) => conflictView(x)),
+    pendingReports: markers.length,
+  });
+});
+
+/** A conflict as the inbox shows it: the stored row plus readable proposed text. */
+function conflictView(x: SyncConflict) {
+  return { ...x, proposedText: describeSchedule(x.proposed) };
+}
+
+app.get('/integrations/medicoach/conflicts', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const conflicts = await repo.listSyncConflicts(tenant);
+  return c.json(
+    conflicts.sort((a, b) => b.detectedAt.localeCompare(a.detectedAt)).map(conflictView),
+  );
+});
+
+/** The `ref` of a conflict action body (refs carry `:`, so they ride in the body). */
+async function conflictRefOf(c: Context<HonoEnv>): Promise<string> {
+  const body = await c.req.json<{ ref?: unknown }>().catch(() => ({}) as { ref?: unknown });
+  if (typeof body?.ref !== 'string' || !body.ref) throw new HttpError(400, 'ref is required');
+  return body.ref;
+}
+
+/**
+ * Apply a held medicoach schedule change as an ADMIN EDIT: the proposal is written through
+ * `applySeriesPatch`, so the clash gate runs again (409 `venue_clash` when it still clashes),
+ * a draft's approval is recalled, and the change is stamped + queued back to medicoach like
+ * any admin edit (medicoach answers `unchanged`). A venue that still doesn't resolve is 409
+ * `venue_unresolved`. The conflict row is deleted once applied.
+ */
+app.post('/integrations/medicoach/conflicts/apply', async (c) => {
+  const { tenant, email } = c.get('requestAuth')!;
+  const ref = await conflictRefOf(c);
+  const conflict = await repo.getSyncConflict(tenant, ref);
+  if (!conflict) throw new HttpError(404, 'conflict not found');
+  const [config, venues] = await Promise.all([
+    repo.getTenantConfig(tenant),
+    repo.listVenues(tenant),
+  ]);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const series = await repo.getSeries(tenant, conflict.seriesId);
+    const fixtures = (series?.fixtures as ScheduleFixture[] | undefined) ?? [];
+    const i = fixtures.findIndex((f) => f?.id === conflict.fixtureId);
+    if (!series || i < 0)
+      throw new HttpError(404, 'that fixture no longer exists; discard the conflict');
+    const built = buildInboundFixture(
+      series,
+      fixtures[i],
+      conflict.proposed,
+      venues,
+      venueAliasesFor(config),
+    );
+    if (!built.ok)
+      throw new HttpError(409, built.detail.join('; '), {
+        code: 'venue_unresolved',
+        detail: built.detail,
+      });
+    if (!built.changed.length) {
+      await repo.deleteSyncConflict(tenant, ref);
+      return c.json({ status: 'unchanged' });
+    }
+    const next = fixtures.map((f, j) => (j === i ? built.fixture : f));
+    try {
+      const written = await applySeriesPatch(
+        tenant,
+        series.id,
+        { fixtures: next, version: series.version },
+        email ?? 'unknown',
+      );
+      await repo.deleteSyncConflict(tenant, ref);
+      return c.json({ status: 'applied', series: written });
+    } catch (err) {
+      // A concurrent edit: re-read and rebuild. Anything structured (a clash) is the answer.
+      if (err instanceof HttpError && err.status === 409 && !err.details) continue;
+      throw err;
+    }
+  }
+  throw new HttpError(409, 'series changed; refetch');
+});
+
+/**
+ * Discard a held change: smart club's schedule stands. The fixture's `schedule.changedAt` is
+ * re-stamped and its current schedule queued for medicoach, so medicoach takes smart club's
+ * version on the next push and the discarded proposal (now older) can never be re-applied.
+ */
+app.post('/integrations/medicoach/conflicts/discard', async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const ref = await conflictRefOf(c);
+  const conflict = await repo.getSyncConflict(tenant, ref);
+  if (!conflict) throw new HttpError(404, 'conflict not found');
+  const config = await repo.getTenantConfig(tenant);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const series = await repo.getSeries(tenant, conflict.seriesId);
+    const fixtures = (series?.fixtures as ScheduleFixture[] | undefined) ?? [];
+    const i = fixtures.findIndex((f) => f?.id === conflict.fixtureId);
+    if (!series || i < 0) break;
+    const at = now();
+    const stamped: ScheduleFixture = {
+      ...fixtures[i],
+      schedule: { ...(fixtures[i].schedule ?? {}), changedAt: at },
+    };
+    try {
+      await repo.updateSeries(tenant, series.id, {
+        fixtures: fixtures.map((f, j) => (j === i ? stamped : f)),
+        version: series.version,
+      });
+    } catch (err) {
+      if (err instanceof VersionConflictError) continue;
+      throw err;
+    }
+    if (await seriesMappedForSync(repo, tenant, series, config))
+      await repo.putPendingSync(tenant, {
+        ref,
+        seriesId: series.id,
+        fixtureId: conflict.fixtureId,
+        schedule: fixtureSchedule(series, stamped, at),
+        origin: 'admin',
+        enqueuedAt: at,
+        attempts: 0,
+      });
+    break;
+  }
+  await repo.deleteSyncConflict(tenant, ref);
+  return c.json({ status: 'discarded' });
 });
 
 app.post('/series/:id/clash-check', requireAdmin, async (c) => {
@@ -5036,6 +5230,58 @@ async function applySeasonRunPatch(
 interface GenerateStageBody {
   version?: unknown;
   confirmReleasedOverwrite?: unknown;
+  /** Medicoach sync: consent to orphan synced refs of released series (see syncResyncGate). */
+  allowResync?: unknown;
+}
+
+/**
+ * Medicoach sync guard for stage generate/rebase (ADR 0016, Slice 4): a fixture's id is half
+ * of its sync ref, and regenerating a RELEASED series that medicoach mirrors re-mints ids and
+ * re-pairs fixtures — every ref whose fixture disappears or now names a different match is
+ * orphaned in medicoach. So on a sync tenant such a write is refused (409
+ * `sync_resync_required`, naming the series and the refs) unless the caller passes
+ * `allowResync: true`; the 200 then lists the orphaned refs. `next` (generate) is what each
+ * series would become; absent (rebase), every ref of the affected series is at stake.
+ */
+function syncResyncGate(
+  tenant: string,
+  config: TenantConfig | null,
+  /** The run's league: season-run series carry no `leagueKey` of their own. */
+  leagueKey: string,
+  stored: Series[],
+  next: Map<string, Series> | null,
+  allowResync: unknown,
+  action: 'regenerate' | 'rebase',
+): string[] | null {
+  const synced = stored.filter(
+    (s) =>
+      s.released &&
+      seriesIsSyncMapped(tenant, { ...s, leagueKey: s.leagueKey ?? leagueKey }, config) &&
+      Array.isArray(s.fixtures) &&
+      s.fixtures.length > 0,
+  );
+  if (!synced.length) return null;
+  const orphanedRefs = synced.flatMap((s) => {
+    const after = next?.get(s.id);
+    const nextById = new Map(
+      ((after?.fixtures as ScheduleFixture[] | undefined) ?? []).map((f) => [f?.id, f]),
+    );
+    return (s.fixtures as ScheduleFixture[])
+      .filter((f) => f?.id)
+      .filter((f) => {
+        if (!next) return true;
+        const g = nextById.get(f.id);
+        return !g || !sameMatch(f, g);
+      })
+      .map((f) => fixtureSyncRef(tenant, s.id, f));
+  });
+  if (allowResync !== true)
+    throw new HttpError(
+      409,
+      `${synced.length} released series in this stage ${synced.length === 1 ? 'is' : 'are'} synced with medicoach — a ${action} would orphan ${orphanedRefs.length} fixture ref(s) there. Ask your operator; it needs allowResync.`,
+      { code: 'sync_resync_required', seriesIds: synced.map((s) => s.id), orphanedRefs },
+    );
+  return orphanedRefs;
 }
 
 /**
@@ -5094,6 +5340,8 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     throw new HttpError(400, 'generate needs the season run version you read');
   if (body.confirmReleasedOverwrite !== undefined && body.confirmReleasedOverwrite !== true)
     throw new HttpError(400, 'confirmReleasedOverwrite must be true when present');
+  if (body.allowResync !== undefined && body.allowResync !== true)
+    throw new HttpError(400, 'allowResync must be true when present');
 
   const run = await repo.getSeasonRun(tenant, id);
   if (!run) throw new HttpError(404, 'season run not found');
@@ -5156,6 +5404,15 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
       `${released.length} of this stage's series ${released.length === 1 ? 'has' : 'have'} been released — confirm to replace the published fixtures`,
       { code: 'released_overwrite', seriesIds: released },
     );
+  const orphanedRefs = syncResyncGate(
+    tenant,
+    config,
+    run.leagueKey,
+    existing.filter((s): s is Series => !!s),
+    new Map(result.series.map((s) => [s.id, s])),
+    body.allowResync,
+    'regenerate',
+  );
 
   // What an existing series is PATCHed with: regenerating changes the fixtures, never
   // whether they are published, never a name the admin chose, and never the stored format
@@ -5217,6 +5474,7 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
           { ...overwriteOf(series), version: stored.version },
           actor,
           runCalendar,
+          'generate',
         ),
       );
       writtenIds.push(series.id);
@@ -5249,6 +5507,7 @@ app.post('/season-runs/:id/stages/:specId/generate', requireAdmin, async (c) => 
     run: nextRun,
     series: written,
     ...(result.warnings?.length ? { warnings: result.warnings } : {}),
+    ...(orphanedRefs ? { orphanedRefs } : {}),
   });
 });
 
@@ -5311,6 +5570,7 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
     structureId?: unknown;
     structureVersion?: unknown;
     version?: unknown;
+    allowResync?: unknown;
   }>();
   if (typeof body?.structureId !== 'string' || !body.structureId)
     throw new HttpError(400, 'rebase needs the id of the structure you reviewed');
@@ -5318,6 +5578,8 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
     throw new HttpError(400, 'rebase needs the structure version you reviewed');
   if (!Number.isInteger(body?.version))
     throw new HttpError(400, 'rebase needs the season run version you read');
+  if (body.allowResync !== undefined && body.allowResync !== true)
+    throw new HttpError(400, 'allowResync must be true when present');
   const current = await repo.getSeasonRun(tenant, id);
   if (!current) throw new HttpError(404, 'season run not found');
   // Checked up front, not only by the conditional write below: the no-op return further
@@ -5388,6 +5650,46 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
     ? kept.map((run) => ({ ...run, formatChanged: true }))
     : kept;
 
+  // Medicoach sync guard: the stages this rebase resets (spec removed or changed, or the
+  // root format changed) lose their groups/format, so their released synced series will be
+  // regenerated — refused without allowResync (syncResyncGate).
+  let orphanedRefs: string[] | null = null;
+  if (hasFeature(config, 'medicoachSync')) {
+    const affected = new Set(
+      (current.stages ?? [])
+        .filter((run) => {
+          if (!run) return false;
+          const next = live.stages.find((s) => s.id === run.specId);
+          const prev = oldSpecs.get(run.specId);
+          return (
+            !next || rootFormatChanged || !prev || stableStringify(prev) !== stableStringify(next)
+          );
+        })
+        .map((run) => run.specId),
+    );
+    if (affected.size) {
+      const seriesIds = new Set(
+        (current.stages ?? [])
+          .filter((run) => run && affected.has(run.specId))
+          .flatMap((run) => (run.groups ?? []).map((g) => g.seriesId).filter(Boolean)),
+      );
+      const stageSeries = (await repo.listSeries(tenant)).filter(
+        (s) =>
+          seriesIds.has(s.id) ||
+          (s.seasonRunId === current.id && !!s.stageSpecId && affected.has(s.stageSpecId)),
+      );
+      orphanedRefs = syncResyncGate(
+        tenant,
+        config,
+        current.leagueKey,
+        stageSeries,
+        null,
+        body.allowResync,
+        'rebase',
+      );
+    }
+  }
+
   const hasRun = new Set(kept.map((run) => run.specId));
   const added: StageRun[] = live.stages
     .filter((s) => !oldSpecs.has(s.id) && !hasRun.has(s.id))
@@ -5417,7 +5719,11 @@ app.post('/season-runs/:id/rebase', requireAdmin, async (c) => {
       ...freeze,
     });
     // Same additive shape as PUT /platform/tenants: `warnings` only when non-empty.
-    return c.json(warnings.length > 0 ? { ...next, warnings } : next);
+    return c.json({
+      ...next,
+      ...(warnings.length > 0 ? { warnings } : {}),
+      ...(orphanedRefs ? { orphanedRefs } : {}),
+    });
   } catch (err) {
     if (err instanceof VersionConflictError)
       throw new HttpError(409, 'season run changed; refetch');

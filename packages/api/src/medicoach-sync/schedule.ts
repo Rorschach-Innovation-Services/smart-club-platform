@@ -1,0 +1,691 @@
+/**
+ * Medicoach ↔ smart club SCHEDULE sync (ADR 0016, Slices 3 and 4).
+ *
+ * Schedule = date, time, venue, postponed, cancelled (+ the `dateTbc` placeholder flag). Both
+ * sides edit it; the most recent change wins, ordered by each side's `changedAt`. Smart club
+ * keeps its own on the fixture as `schedule.changedAt` (a sync-owned field every rewrite
+ * carries over, see fixture-identity.ts).
+ *
+ * Inbound (Slice 3, `applyInboundSchedule`): the puller hands every pulled fixture whose
+ * schedule differs. When medicoach's `changedAt` is newer the change is applied through the
+ * same gates an admin edit of the series passes — the in-season subset clash gate on a
+ * released series (`introducedClashes`, shared with PATCH /series), the approval recall on a
+ * draft — with a version-checked write retried up to 3 times. Release/withheld state is never
+ * touched. A venue that does not resolve against the tenant's ground list, or a change the
+ * clash gate refuses, is NOT applied: it is held as `SYNCCONFLICT#<ref>` (latest proposal per
+ * ref) and the tenant's admins get one email per proposal. There is no override flag.
+ *
+ * Outbound (Slice 4, `recordScheduleDiff` + `flushScheduleOutbox`): every smart-club write
+ * that changes a mapped fixture's schedule (admin PATCH, stage generate, the series CLIs)
+ * stamps `schedule.changedAt = now` on the fixture and, once the series write succeeded,
+ * collapses the latest snapshot onto `PENDINGSYNC#<ref>`. The 15-minute cron (and "Sync now")
+ * flushes the outbox in batches of ≤100 to `POST /integrations/smartclub/schedule` before it
+ * pulls. `applied|stale|unchanged|unmapped` delete the row; `error` or a failed request keep
+ * it with an attempt count. A `stale` answer means medicoach holds a newer edit — the pull
+ * brings it back. The inbound apply (origin `medicoach`) never enqueues, so nothing echoes.
+ */
+import { randomUUID } from 'node:crypto';
+import { isSlotRef } from '../../../engine/src/formats.js';
+import { fixtureSyncRef } from '../fixture-identity.js';
+import {
+  MEDICOACH_SYNC_VERSION,
+  SCHEDULE_PATH,
+  SCHEDULE_PUSH_MAX,
+  SchedulePushResponseSchema,
+  SyncScheduleSchema,
+  signRequest,
+  type SyncSchedule,
+} from '../medicoach-sync-contract.js';
+import { TENANT_UTC_OFFSET_MINUTES } from '../tenant-time.js';
+import {
+  formatClashForHumans,
+  groundKey,
+  introducedClashes,
+  venueAliasesFor,
+} from '../venue-clash.js';
+import { seriesIsSyncMapped } from './series-results.js';
+import type {
+  PendingScheduleSync,
+  ScheduleChangeOrigin,
+  SchedulePushCounts,
+  Series,
+  SyncConflict,
+  SyncScheduleSnapshot,
+  TenantConfig,
+  Venue,
+} from '../types.js';
+
+type RepoModule = typeof import('../repo.js');
+
+/** Inbound apply attempts on a version conflict (a concurrent admin edit). */
+const APPLY_ATTEMPTS = 3;
+const HTTP_TIMEOUT_MS = 10_000;
+
+/** The schedule-relevant slice of a stored series fixture; everything else rides along. */
+export interface ScheduleFixture {
+  id?: string;
+  date?: string;
+  time?: string;
+  home?: string;
+  away?: string;
+  status?: string;
+  dateTbc?: boolean;
+  venueId?: string;
+  venueName?: string;
+  venueOverride?: string;
+  venueLat?: number;
+  venueLon?: number;
+  venueLocked?: boolean;
+  syncRef?: string;
+  schedule?: { changedAt?: string };
+  [key: string]: unknown;
+}
+
+/* ─────────────────────────── Time + venue mapping ─────────────────────────── */
+
+/** "+02:00" for the tenant's fixed wall-clock offset (SAST, no DST). */
+const OFFSET = (() => {
+  const m = TENANT_UTC_OFFSET_MINUTES;
+  const a = Math.abs(m);
+  return `${m >= 0 ? '+' : '-'}${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;
+})();
+
+/** A medicoach instant → the tenant's wall-clock date + HH:MM (Africa/Johannesburg). */
+export function wallClock(iso: string): { date: string; time: string } {
+  const local = new Date(Date.parse(iso) + TENANT_UTC_OFFSET_MINUTES * 60_000);
+  const s = local.toISOString();
+  return { date: s.slice(0, 10), time: s.slice(11, 16) };
+}
+
+/** A fixture's ground as clubs see it: explicit venue, else the home side's ground. */
+export function effectiveVenue(series: Series, f: ScheduleFixture): string | null {
+  const homeVenue = series.participants?.find((p) => p.teamId === f.home)?.venue;
+  return f.venueOverride || f.venueName || homeVenue || null;
+}
+
+const statusFlag = (status: string | undefined) =>
+  status === 'cancelled' || status === 'postponed' ? status : '';
+
+/** The fields whose change is a schedule change (and nothing else is). */
+function scheduleKey(series: Series, f: ScheduleFixture): string {
+  return JSON.stringify([
+    f.date ?? '',
+    f.time ?? '',
+    f.dateTbc === true,
+    statusFlag(f.status),
+    (effectiveVenue(series, f) ?? '').trim().toLowerCase().replace(/\s+/g, ' '),
+  ]);
+}
+
+/** A smart-club fixture's schedule in the wire shape (contract v1 `SyncSchedule`). */
+export function fixtureSchedule(
+  series: Series,
+  f: ScheduleFixture,
+  changedAt: string,
+): SyncScheduleSnapshot {
+  const time = typeof f.time === 'string' && /^\d{2}:\d{2}$/.test(f.time) ? f.time : '';
+  return {
+    scheduledTime: f.date ? `${f.date}T${time || '00:00'}:00${OFFSET}` : null,
+    timeTbc: !time,
+    dateTbc: f.dateTbc === true || !f.date,
+    venue: effectiveVenue(series, f),
+    postponed: f.status === 'postponed',
+    cancelled: f.status === 'cancelled',
+    changedAt,
+  };
+}
+
+/** Same match before and after an edit: the same unordered pair, or a knockout slot filled. */
+export function sameMatch(a: ScheduleFixture, b: ScheduleFixture): boolean {
+  const pair = (f: ScheduleFixture) =>
+    [String(f.home ?? ''), String(f.away ?? '')].sort().join('|');
+  if (pair(a) === pair(b)) return true;
+  return [a.home, a.away].some((side) => typeof side === 'string' && isSlotRef(side));
+}
+
+/**
+ * Editing a DRAFT series' fixtures recalls its approval (it must be re-approved before
+ * release); a released series keeps its state so in-season edits still reach clubs. The one
+ * rule PATCH /series and the medicoach apply both follow.
+ */
+export function fixturesEditRecallsApproval(current: Pick<Series, 'released'>): boolean {
+  return !current.released;
+}
+
+/* ─────────────────────────── Outbound: diff + outbox ─────────────────────────── */
+
+/**
+ * `seriesIsSyncMapped` with the league resolved the way the medicoach exporter resolves it:
+ * a season-run series carries no `leagueKey` of its own, so its run's league decides.
+ */
+export async function seriesMappedForSync(
+  repo: Pick<RepoModule, 'getSeasonRun'>,
+  tenant: string,
+  series: Series,
+  config: TenantConfig | null | undefined,
+): Promise<boolean> {
+  if (typeof series.leagueKey === 'string' && series.leagueKey)
+    return seriesIsSyncMapped(tenant, series, config);
+  const runId = (series as { seasonRunId?: string }).seasonRunId;
+  if (!runId || !seriesIsSyncMapped(tenant, { id: series.id, leagueKey: 'x' }, config))
+    return seriesIsSyncMapped(tenant, series, config);
+  const run = await repo.getSeasonRun(tenant, runId);
+  return seriesIsSyncMapped(tenant, { ...series, leagueKey: run?.leagueKey }, config);
+}
+
+export interface ScheduleDiffHandle {
+  /** Refs whose schedule this write changes (already stamped on `after.fixtures`). */
+  refs: string[];
+  /** Write the PENDINGSYNC# rows — call only AFTER the series write succeeded. */
+  enqueue(): Promise<number>;
+}
+
+const NO_DIFF: ScheduleDiffHandle = { refs: [], enqueue: async () => 0 };
+
+/**
+ * The one helper every smart-club series write calls (Slice 4). Compares `before` and
+ * `after` fixture by fixture (same id, same match); for each whose schedule changed it
+ * REPLACES the fixture in `after.fixtures` with a copy stamped `schedule.changedAt = now`,
+ * and returns a handle whose `enqueue()` writes the outbox rows once the caller's series
+ * write has succeeded (an outbox row for a write that then failed would push a schedule that
+ * never happened).
+ *
+ * A no-op for origin `medicoach` (the inbound apply — nothing echoes), for a tenant without
+ * `features.medicoachSync`, for a series medicoach does not own (`seriesIsSyncMapped`), for a
+ * brand-new series (no `before`), and for fixtures that are new or now a different match
+ * (their ref no longer means what medicoach has).
+ */
+export async function recordScheduleDiff(
+  repo: Pick<RepoModule, 'getTenantConfig' | 'putPendingSync' | 'getSeasonRun'>,
+  tenant: string,
+  before: Series | null | undefined,
+  after: Series,
+  origin: ScheduleChangeOrigin,
+  opts: { config?: TenantConfig | null; now?: () => Date } = {},
+): Promise<ScheduleDiffHandle> {
+  if (origin === 'medicoach' || !before || !Array.isArray(after.fixtures)) return NO_DIFF;
+  const config = opts.config !== undefined ? opts.config : await repo.getTenantConfig(tenant);
+  if (!(await seriesMappedForSync(repo, tenant, after, config))) return NO_DIFF;
+  const nowIso = (opts.now?.() ?? new Date()).toISOString();
+  const prior = new Map<string, ScheduleFixture>();
+  for (const f of (before.fixtures as ScheduleFixture[]) ?? []) if (f?.id) prior.set(f.id, f);
+
+  const rows: PendingScheduleSync[] = [];
+  after.fixtures = (after.fixtures as ScheduleFixture[]).map((f) => {
+    const old = f?.id ? prior.get(f.id) : undefined;
+    if (!old || !sameMatch(old, f)) return f;
+    if (scheduleKey(before, old) === scheduleKey(after, f)) return f;
+    const next: ScheduleFixture = { ...f, schedule: { ...(f.schedule ?? {}), changedAt: nowIso } };
+    rows.push({
+      ref: fixtureSyncRef(tenant, String(after.id), next),
+      seriesId: String(after.id),
+      fixtureId: String(f.id),
+      schedule: fixtureSchedule(after, next, nowIso),
+      origin,
+      enqueuedAt: nowIso,
+      attempts: 0,
+    });
+    return next;
+  });
+  if (!rows.length) return NO_DIFF;
+  return {
+    refs: rows.map((r) => r.ref),
+    enqueue: async () => {
+      for (const r of rows) await repo.putPendingSync(tenant, r);
+      return rows.length;
+    },
+  };
+}
+
+export interface FlushDeps {
+  repo: RepoModule;
+  url: string;
+  secret: string;
+  fetch?: typeof fetch;
+  now?: () => Date;
+  log?: (line: string) => void;
+}
+
+export interface FlushSummary {
+  status: 'empty' | 'ok' | 'dry-run';
+  pending: number;
+  counts: SchedulePushCounts;
+}
+
+const zeroPush = (): SchedulePushCounts => ({
+  sent: 0,
+  applied: 0,
+  stale: 0,
+  unchanged: 0,
+  unmapped: 0,
+  errors: 0,
+});
+
+/**
+ * Push the tenant's outbox to medicoach (Slice 4). Never throws for a medicoach failure: a
+ * failed batch keeps its rows (attempts + 1, lastError) for the next run, and the pull still
+ * runs. Dry run (URL or secret empty): logs what it would send, sends nothing.
+ */
+export async function flushScheduleOutbox(
+  tenant: string,
+  trigger: 'cron' | 'manual',
+  deps: FlushDeps,
+): Promise<FlushSummary> {
+  const { repo } = deps;
+  const log = deps.log ?? ((line: string) => console.log(line));
+  const now = deps.now ?? (() => new Date());
+  const doFetch = deps.fetch ?? fetch;
+  const counts = zeroPush();
+  const rows = (await repo.listPendingSync(tenant)).sort((a, b) =>
+    a.enqueuedAt.localeCompare(b.enqueuedAt),
+  );
+  if (!rows.length) return { status: 'empty', pending: 0, counts };
+  if (!deps.url || !deps.secret) {
+    log(
+      `[medicoach-sync dry-run] ${tenant}: would POST ${rows.length} schedule change(s) to ` +
+        `${deps.url || '<MedicoachSyncUrl unset>'}${SCHEDULE_PATH}` +
+        `${deps.secret ? '' : ' (MedicoachSyncSecret unset)'} — no request made`,
+    );
+    return { status: 'dry-run', pending: rows.length, counts };
+  }
+
+  const failRow = async (row: PendingScheduleSync, error: string) => {
+    counts.errors++;
+    await repo.markPendingSyncFailed(
+      tenant,
+      row.ref,
+      row.schedule.changedAt,
+      error,
+      now().toISOString(),
+    );
+  };
+
+  // A row whose snapshot no longer fits the contract can never be sent; keep it visible.
+  const sendable: PendingScheduleSync[] = [];
+  for (const row of rows) {
+    if (SyncScheduleSchema.safeParse(row.schedule).success) sendable.push(row);
+    else await failRow(row, 'the stored schedule does not fit the v1 contract');
+  }
+
+  for (let i = 0; i < sendable.length; i += SCHEDULE_PUSH_MAX) {
+    const batch = sendable.slice(i, i + SCHEDULE_PUSH_MAX);
+    const body = JSON.stringify({
+      version: MEDICOACH_SYNC_VERSION,
+      tenant,
+      changes: batch.map((r) => ({ ref: r.ref, schedule: r.schedule })),
+    });
+    counts.sent += batch.length;
+    let results: Map<string, { status: string; message?: string }>;
+    try {
+      let res: Response;
+      try {
+        res = await doFetch(`${deps.url}${SCHEDULE_PATH}`, {
+          method: 'POST',
+          headers: {
+            accept: 'application/json',
+            'content-type': 'application/json',
+            ...signRequest({
+              secret: deps.secret,
+              method: 'POST',
+              pathAndQuery: SCHEDULE_PATH,
+              body,
+            }),
+          },
+          body,
+          signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+        });
+      } catch (err) {
+        throw new Error(
+          `medicoach unreachable: ${err instanceof Error ? err.name : 'request failed'}`,
+        );
+      }
+      if (!res.ok) throw new Error(`medicoach answered HTTP ${res.status}`);
+      let parsed: unknown;
+      try {
+        parsed = await res.json();
+      } catch {
+        throw new Error('medicoach answered with a body that is not JSON');
+      }
+      const ok = SchedulePushResponseSchema.safeParse(parsed);
+      if (!ok.success) throw new Error('medicoach response failed the v1 contract');
+      results = new Map(ok.data.results.map((r) => [r.ref, r]));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'push failed';
+      log(`[medicoach-sync] ${tenant}: schedule push failed — ${message}`);
+      for (const row of batch) await failRow(row, message);
+      continue;
+    }
+    for (const row of batch) {
+      const r = results.get(row.ref);
+      if (!r) await failRow(row, 'medicoach returned no result for this fixture');
+      else if (r.status === 'error') await failRow(row, r.message || 'medicoach reported an error');
+      else {
+        counts[r.status as 'applied' | 'stale' | 'unchanged' | 'unmapped']++;
+        await repo.deletePendingSyncIfUnchanged(tenant, row.ref, row.schedule.changedAt);
+      }
+    }
+  }
+
+  if (counts.sent || counts.errors)
+    await repo.putSyncLog(tenant, {
+      id: randomUUID(),
+      at: now().toISOString(),
+      trigger,
+      kind: 'push',
+      outcome: counts.errors ? 'error' : 'ok',
+      pages: 0,
+      fixtures: counts.sent,
+      counts: {
+        resultsStored: 0,
+        resultsStale: 0,
+        resultsCleared: 0,
+        unmapped: 0,
+        slotsFilled: 0,
+        scheduleDiffers: 0,
+      },
+      push: counts,
+    });
+  return { status: 'ok', pending: rows.length, counts };
+}
+
+/* ─────────────────────────── Inbound: apply or hold ─────────────────────────── */
+
+export type InboundBuild =
+  | { ok: true; fixture: ScheduleFixture; changed: string[] }
+  | { ok: false; reason: 'venue-unresolved'; detail: string[] };
+
+/**
+ * The fixture as it becomes under `schedule` (pure). dateTbc → the placeholder flag (the
+ * stored date is kept as the placeholder); scheduledTime → date/time in Africa/Johannesburg;
+ * timeTbc → no time; postponed/cancelled → status (neither ⇒ a postponed/cancelled fixture
+ * returns to scheduled); venue → the tenant ground it resolves to by normalised name, else
+ * `venue-unresolved`. A venue that names the ground the fixture already plays at is no
+ * change. `schedule.changedAt` is NOT set here.
+ */
+export function buildInboundFixture(
+  series: Series,
+  fixture: ScheduleFixture,
+  schedule: Pick<
+    SyncSchedule,
+    'scheduledTime' | 'timeTbc' | 'dateTbc' | 'venue' | 'postponed' | 'cancelled'
+  >,
+  venues: Venue[],
+  aliases: Record<string, string>,
+): InboundBuild {
+  const next: ScheduleFixture = { ...fixture };
+  const changed: string[] = [];
+  if (schedule.dateTbc) {
+    if (!fixture.dateTbc) {
+      next.dateTbc = true;
+      changed.push('dateTbc');
+    }
+  } else {
+    if (fixture.dateTbc) {
+      delete next.dateTbc;
+      changed.push('dateTbc');
+    }
+    if (schedule.scheduledTime) {
+      const { date, time } = wallClock(schedule.scheduledTime);
+      if (date !== fixture.date) {
+        next.date = date;
+        changed.push('date');
+      }
+      const t = schedule.timeTbc ? '' : time;
+      if (t !== (fixture.time ?? '')) {
+        if (t) next.time = t;
+        else delete next.time;
+        changed.push('time');
+      }
+    }
+  }
+  const theirs = schedule.cancelled ? 'cancelled' : schedule.postponed ? 'postponed' : '';
+  const ours = fixture.status ?? 'scheduled';
+  if (theirs && theirs !== ours) {
+    next.status = theirs;
+    changed.push('status');
+  } else if (!theirs && statusFlag(ours)) {
+    next.status = 'scheduled';
+    changed.push('status');
+  }
+  const wanted = schedule.venue?.trim();
+  if (wanted) {
+    const current = effectiveVenue(series, fixture);
+    const key = groundKey(wanted, aliases);
+    if (!current || groundKey(current, aliases) !== key) {
+      const venue = venues.find((v) => groundKey(v.name, aliases) === key);
+      if (!venue)
+        return {
+          ok: false,
+          reason: 'venue-unresolved',
+          detail: [`"${wanted}" does not match any ground in the venue list`],
+        };
+      // Same shape as the importers' registry match (import-planb setVenue).
+      next.venueId = venue.id;
+      next.venueName = venue.name;
+      next.venueLat = Number.isFinite(venue.lat) ? venue.lat : undefined;
+      next.venueLon = Number.isFinite(venue.lon) ? venue.lon : undefined;
+      next.venueOverride = undefined;
+      next.venueLocked = true;
+      changed.push('venue');
+    }
+  }
+  return { ok: true, fixture: next, changed };
+}
+
+export type ScheduleOutcome = 'applied' | 'stale' | 'conflict' | 'unchanged' | 'missing';
+
+export interface InboundScheduleInput {
+  tenant: string;
+  seriesId: string;
+  fixtureId: string;
+  ref: string;
+  schedule: SyncSchedule;
+  fields: string[];
+}
+
+export interface InboundScheduleDeps {
+  repo: RepoModule;
+  now?: () => Date;
+  /** Emails the tenant's admins about a newly held conflict. Defaults to SES (dry-run offline). */
+  notifyConflict?: (
+    tenant: string,
+    conflict: SyncConflict,
+    config: TenantConfig | null,
+  ) => Promise<void>;
+  log?: (line: string) => void;
+}
+
+/**
+ * Slice 3: apply one pulled schedule change, or hold it. Most-recent-wins first (a change no
+ * newer than the fixture's `schedule.changedAt` is `stale`), then the venue, then — on a
+ * released series — the in-season clash gate. The write is version-checked and retried up to
+ * 3 times against a concurrent admin edit; a clean apply supersedes any conflict held for
+ * the ref. Throws only for a repo failure or a fourth version conflict (the puller then
+ * leaves the cursor where it was, so the change is retried).
+ */
+export async function applyInboundSchedule(
+  input: InboundScheduleInput,
+  deps: InboundScheduleDeps,
+): Promise<ScheduleOutcome> {
+  const { repo } = deps;
+  const { tenant, seriesId, fixtureId, ref, schedule } = input;
+  const { VersionConflictError } = repo;
+  let config: TenantConfig | null | undefined;
+  let venues: Venue[] | undefined;
+  for (let attempt = 0; attempt < APPLY_ATTEMPTS; attempt++) {
+    const series = await repo.getSeries(tenant, seriesId);
+    const fixtures = (series?.fixtures as ScheduleFixture[] | undefined) ?? [];
+    const i = fixtures.findIndex((f) => f?.id === fixtureId);
+    if (!series || i < 0) return 'missing';
+    const fixture = fixtures[i];
+    const ours = fixture.schedule?.changedAt;
+    if (ours && !(Date.parse(schedule.changedAt) > Date.parse(ours))) return 'stale';
+
+    config ??= await repo.getTenantConfig(tenant);
+    venues ??= await repo.listVenues(tenant);
+    const aliases = venueAliasesFor(config);
+    const built = buildInboundFixture(series, fixture, schedule, venues, aliases);
+    if (!built.ok) {
+      await holdConflict(deps, config, {
+        series,
+        fixture,
+        input,
+        reason: built.reason,
+        detail: built.detail,
+      });
+      return 'conflict';
+    }
+    if (!built.changed.length) return 'unchanged';
+    const next: ScheduleFixture = {
+      ...built.fixture,
+      schedule: { ...(fixture.schedule ?? {}), changedAt: schedule.changedAt },
+    };
+    const nextFixtures = fixtures.map((f, j) => (j === i ? next : f));
+    if (series.released) {
+      const [allSeries, clubs] = await Promise.all([
+        repo.listSeries(tenant),
+        repo.listClubs(tenant),
+      ]);
+      const clashes = introducedClashes(
+        series,
+        { ...series, fixtures: nextFixtures },
+        allSeries,
+        clubs,
+        venues,
+        aliases,
+      );
+      if (clashes.length) {
+        await holdConflict(deps, config, {
+          series,
+          fixture,
+          input,
+          reason: 'clash',
+          detail: clashes.slice(0, 5).map(formatClashForHumans),
+        });
+        return 'conflict';
+      }
+    }
+    try {
+      await repo.updateSeries(tenant, seriesId, {
+        fixtures: nextFixtures,
+        version: series.version,
+        ...(fixturesEditRecallsApproval(series) ? { approved: false, approvedAt: null } : {}),
+      });
+    } catch (err) {
+      if (err instanceof VersionConflictError) continue;
+      throw err;
+    }
+    // A held proposal for this ref is now moot: the newer change applied cleanly.
+    const held = await repo.getSyncConflict(tenant, ref);
+    if (held && !(Date.parse(held.proposed.changedAt) > Date.parse(schedule.changedAt)))
+      await repo.deleteSyncConflict(tenant, ref);
+    return 'applied';
+  }
+  throw new Error(
+    `series ${seriesId} kept changing; schedule apply gave up after ${APPLY_ATTEMPTS} attempts`,
+  );
+}
+
+/** A readable "Home v Away" for a fixture (participant names, else the raw side). */
+function matchLineOf(series: Series, f: ScheduleFixture): string {
+  const name = (side: string | undefined) =>
+    series.participants?.find((p) => p.teamId === side)?.name ?? side ?? '?';
+  return `${name(f.home)} v ${name(f.away)}`;
+}
+
+/**
+ * Write (or keep) the SYNCCONFLICT# row for a refused change. Latest proposal wins per ref:
+ * an older proposal than the one held is ignored, the same proposal again (a replayed page)
+ * changes nothing and sends nothing. Each NEW proposal emails the admins once.
+ */
+async function holdConflict(
+  deps: InboundScheduleDeps,
+  config: TenantConfig | null,
+  args: {
+    series: Series;
+    fixture: ScheduleFixture;
+    input: InboundScheduleInput;
+    reason: SyncConflict['reason'];
+    detail: string[];
+  },
+): Promise<void> {
+  const { repo } = deps;
+  const { series, fixture, input } = args;
+  const now = deps.now ?? (() => new Date());
+  const held = await repo.getSyncConflict(input.tenant, input.ref);
+  if (held && Date.parse(held.proposed.changedAt) >= Date.parse(input.schedule.changedAt)) return;
+  const conflict: SyncConflict = {
+    ref: input.ref,
+    seriesId: input.seriesId,
+    fixtureId: input.fixtureId,
+    ...(series.name ? { seriesName: series.name } : {}),
+    matchLine: matchLineOf(series, fixture),
+    current: {
+      ...(fixture.date ? { date: fixture.date } : {}),
+      ...(fixture.time ? { time: fixture.time } : {}),
+      ...(effectiveVenue(series, fixture) ? { venue: effectiveVenue(series, fixture)! } : {}),
+      status: fixture.status ?? 'scheduled',
+      ...(fixture.dateTbc ? { dateTbc: true } : {}),
+    },
+    proposed: { ...input.schedule },
+    fields: input.fields,
+    reason: args.reason,
+    detail: args.detail,
+    detectedAt: now().toISOString(),
+  };
+  await repo.putSyncConflict(input.tenant, conflict);
+  const log = deps.log ?? ((line: string) => console.log(line));
+  log(
+    `[medicoach-sync] ${input.tenant}: schedule change held for review (${args.reason}) ${input.ref}`,
+  );
+  try {
+    await (deps.notifyConflict ?? notifyConflictByEmail(repo))(input.tenant, conflict, config);
+    await repo.putSyncConflict(input.tenant, { ...conflict, notifiedAt: now().toISOString() });
+  } catch (err) {
+    // The conflict is held and visible in the admin inbox either way; a failed email is
+    // logged, never allowed to fail the sync run.
+    console.error(
+      `[medicoach-sync] ${input.tenant}: conflict email failed — ${err instanceof Error ? err.message : 'error'}`,
+    );
+  }
+}
+
+/** Human text of a proposed schedule for the inbox and the email. */
+export function describeSchedule(s: SyncScheduleSnapshot | SyncSchedule): string {
+  const parts: string[] = [];
+  if (s.dateTbc) parts.push('date TBC');
+  else if (s.scheduledTime) {
+    const { date, time } = wallClock(s.scheduledTime);
+    parts.push(s.timeTbc ? date : `${date} ${time}`);
+  }
+  if (s.venue) parts.push(s.venue);
+  if (s.cancelled) parts.push('cancelled');
+  else if (s.postponed) parts.push('postponed');
+  return parts.join(' · ') || '(no schedule)';
+}
+
+/** The default conflict notice: one email to each tenant admin (SES; dry-run offline). */
+export function notifyConflictByEmail(repo: RepoModule) {
+  return async (tenant: string, conflict: SyncConflict, config: TenantConfig | null) => {
+    const { sendSyncConflictEmail } = await import('../notify/email.js');
+    const { orgCopy } = await import('../branding.js');
+    const users = await repo.listTenantUsers(tenant);
+    const emails = new Set<string>();
+    for (const u of users) {
+      const profile = await repo.getUser(u.sub);
+      if (profile?.memberships.some((m) => m.tenantId === tenant && m.role === 'admin') && u.email)
+        emails.add(u.email);
+    }
+    const orgName = config ? orgCopy(config).name : tenant;
+    for (const to of emails)
+      await sendSyncConflictEmail({
+        to,
+        orgName,
+        matchLine: conflict.matchLine ?? conflict.ref,
+        seriesName: conflict.seriesName ?? conflict.seriesId,
+        reason: conflict.reason,
+        detail: conflict.detail,
+        proposed: describeSchedule(conflict.proposed),
+      });
+  };
+}
