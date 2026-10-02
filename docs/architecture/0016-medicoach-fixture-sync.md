@@ -105,6 +105,14 @@ importer's `putSeries`) would overwrite them or lose them to a version conflict.
   that reached nobody (every channel tried failed) releases its claim and is retried; one
   delivered channel is done. The admin sync page shows "notices failed" for retries waiting
   on that.
+- **WhatsApp link host** — the `captains_report_due` template's URL button has the PROD host
+  baked in by Meta's approval (only the token suffix is dynamic), so a link sent from a
+  non-prod stage would open on prod. Accepted: non-prod stages run notices dry
+  (`NOTIFY_DRY_RUN` / no WhatsApp secrets), so none is sent there; email links use the
+  stage's own host.
+- **Filing by hand** — a club files from the portal only for a match already played (a
+  future-dated fixture is 400 `match_in_future`). The `CR-<year>-NNNN` number is allocated
+  after the first-submit-wins write landed, so a losing or failed submit never burns one.
 
 ### Captain's reports have no due date
 
