@@ -73,6 +73,13 @@ export type {
   Weekday,
 };
 export { TEAM_ID_PREFIX } from '../packages/engine/src/types';
+// Umpire allocation shapes — shared with the API through the engine, not hand-ported.
+export type {
+  Umpire,
+  UmpirePublic,
+  OfficialRef,
+  FixtureOfficials,
+} from '../packages/engine/src/umpires';
 
 export type Role = 'admin' | 'rep' | 'operator';
 

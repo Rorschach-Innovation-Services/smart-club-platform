@@ -93,6 +93,7 @@ import type {
   SeasonRun,
   Series,
   Clash,
+  Umpire,
   Venue,
   WithheldField,
 } from './types';
@@ -133,6 +134,7 @@ import { PlayerDetailModal } from './PlayerDetailModal';
 import { RegLinkModal } from './RegLinkModal';
 import { ReleaseDialog } from './ReleaseDialog';
 import { ClashPanel } from './ClashPanel';
+import { UmpireCell, doubleBookingIndex } from './umpires';
 import { ClubNameModal } from './ClubNameModal';
 import {
   Icon,
@@ -285,6 +287,12 @@ interface AdminFixturesProps {
   onRebaseSeasonRun?;
   onFetchSeasonRun?;
   onGenerateStageSeries?;
+  /** The umpire registry (admin view, contacts included). Absent ⇒ Umpires column read-only. */
+  umpires?: Umpire[];
+  /** Appoint a fixture's umpires (own call — never the series PATCH). */
+  onSaveOfficials?: (seriesId: string, fixtureId: string, umpireIds: string[]) => Promise<unknown>;
+  /** Add an umpire from the picker's "add umpire" option. */
+  onCreateUmpire?: (displayName: string) => Promise<Umpire>;
 }
 
 // Export row shape shared by the per-series and whole-season exports — the same
@@ -446,6 +454,9 @@ export function AdminFixtures({
   onRebaseSeasonRun,
   onFetchSeasonRun,
   onGenerateStageSeries,
+  umpires = [],
+  onSaveOfficials,
+  onCreateUmpire,
 }: AdminFixturesProps) {
   const vt = useVertical().terms;
   const copy = useCopy();
@@ -783,6 +794,10 @@ export function AdminFixtures({
               allSeasonRuns={allSeasonRuns}
               onAllocateVenues={onAllocateVenues}
               onCheckClashes={onCheckClashes}
+              allSeries={allSeries}
+              umpires={umpires}
+              onSaveOfficials={onSaveOfficials}
+              onCreateUmpire={onCreateUmpire}
             />
           )}
         </>
@@ -1114,11 +1129,33 @@ export function FixtureTable({
   allSeasonRuns = [] as SeasonRun[],
   onAllocateVenues,
   onCheckClashes,
+  // Umpire allocation: every series (for the cross-series double-booking warning), the
+  // registry, and the officials write. Without them the column renders names read-only.
+  allSeries = undefined as Series[] | undefined,
+  umpires = [] as Umpire[],
+  onSaveOfficials = undefined as
+    | ((seriesId: string, fixtureId: string, umpireIds: string[]) => Promise<unknown>)
+    | undefined,
+  onCreateUmpire = undefined as ((displayName: string) => Promise<Umpire>) | undefined,
 }) {
   const vt = useVertical().terms;
   const copy = useCopy();
   const showOvers = useVertical().sport === 'cricket';
   const clubBy = (id) => clubs.find((c) => c.id === id);
+  const umpirePool: Series[] = useMemoA(
+    () => (allSeries?.some((s) => s.id === series.id) ? allSeries : [...(allSeries ?? []), series]),
+    [allSeries, series],
+  );
+  // One pass over every appointment: which fixtures put an umpire at two grounds at once.
+  const umpireWarnings = useMemoA(
+    () =>
+      doubleBookingIndex(
+        umpirePool,
+        clubs,
+        (id) => umpires.find((u) => u.id === id)?.displayName ?? id,
+      ),
+    [umpirePool, clubs, umpires],
+  );
   // Resolve a fixture id → team for this series (participant snapshot, else clubId).
   const teamBy = (id) => resolveTeam(series, id, clubBy);
   const [editingId, setEditingId] = useStateA<string | null>(null);
@@ -1403,6 +1440,7 @@ export function FixtureTable({
               <th>Away (visitors)</th>
               <th style={{ width: 90, textAlign: 'right' }}>Distance</th>
               <th style={{ width: 110, textAlign: 'right' }}>Travel</th>
+              <th style={{ width: 170 }}>Umpires</th>
               <th style={{ width: 110 }}>Status</th>
               <th style={{ width: 80 }}></th>
             </tr>
@@ -1532,6 +1570,18 @@ export function FixtureTable({
                     )}
                   </td>
                   <td>
+                    <UmpireCell
+                      series={series}
+                      fixture={f}
+                      allSeries={umpirePool}
+                      clubs={clubs}
+                      umpires={umpires}
+                      warnings={umpireWarnings.get(`${series.id}#${f.id}`)}
+                      onSave={onSaveOfficials}
+                      onCreate={onCreateUmpire}
+                    />
+                  </td>
+                  <td>
                     <span className={`fix-status ${status}`}>{status}</span>
                   </td>
                   <td>
@@ -1573,7 +1623,7 @@ export function FixtureTable({
             {rows.length === 0 && (
               <tr>
                 <td
-                  colSpan={9}
+                  colSpan={10}
                   style={{
                     padding: '28px',
                     textAlign: 'center',
@@ -1974,7 +2024,7 @@ function EditFixtureRow({
 
   return (
     <tr className="fix-edit-tr">
-      <td colSpan={9}>
+      <td colSpan={10}>
         <div className="fix-edit-grid">
           <div className="fix-edit-field">
             <label htmlFor={`${uid}-round`}>Round</label>

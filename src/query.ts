@@ -33,6 +33,7 @@ export const qk = {
   series: () => ['series', t()],
   seasonRuns: () => ['season-runs', t()],
   venues: () => ['venues', t()],
+  umpires: () => ['umpires', t()],
   tenantConfig: () => ['tenant-config', t()],
   users: () => ['users', t()],
   players: (clubId: string) => ['players', t(), clubId],

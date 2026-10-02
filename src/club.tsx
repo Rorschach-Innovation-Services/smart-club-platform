@@ -5305,6 +5305,17 @@ export function ClubFixturesView({
                                   {opp.ground.suburb}
                                 </div>
                               )}
+                              {/* Appointed umpires. The server only sends them for this
+                                  club's own fixtures once the venue is public, and the
+                                  hideVenue guard keeps the same rule on screen. */}
+                              {!hideVenue && f.officials?.umpires?.length > 0 && (
+                                <div
+                                  className="club-fix-umpires"
+                                  style={{ fontSize: 10.5, color: 'var(--muted)', marginTop: 2 }}
+                                >
+                                  Umpires: {f.officials.umpires.map((u) => u.name).join(', ')}
+                                </div>
+                              )}
                             </td>
                             {!hideVenue && (
                               <td
