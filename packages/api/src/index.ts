@@ -3227,15 +3227,57 @@ app.post('/clubs/:id/clearances/:cid/certificate/view-url', async (c) => {
   return c.json(await certificateViewUrl(c, ra.tenant, clearance));
 });
 
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * Merge an incoming exco roster over the stored one, per role: a role object merges over
+ * the stored role (so fields the client doesn't send — e.g. the chair's idNumber / term
+ * dates — survive); a role sent as `null` is removed entirely (POPIA erasure of a departed
+ * office bearer); anything else (the additionalMembers array) replaces; absent keys keep
+ * the stored value.
+ */
+function mergeExco(
+  stored: Record<string, unknown> | undefined,
+  incoming: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...(stored ?? {}) };
+  for (const [k, v] of Object.entries(incoming)) {
+    if (v === null) delete merged[k];
+    else if (isPlainObject(v)) {
+      const prev = merged[k];
+      merged[k] = { ...(isPlainObject(prev) ? prev : {}), ...v };
+    } else merged[k] = v;
+  }
+  return merged;
+}
+
 /** Save the exec committee; also flips docs.exco true when it is a form-satisfied doc. */
 app.post('/clubs/:id/exco', async (c) => {
   const ra = c.get('requestAuth')!;
   const id = c.req.param('id');
   assertClubAccess(ra, id);
-  const exco = await c.req.json<Record<string, unknown>>();
+  const incoming = await c.req.json<unknown>();
+  if (!isPlainObject(incoming)) throw new HttpError(400, 'exco must be an object');
   const cfg = await repo.getTenantConfig(ra.tenant);
   const current = await repo.getClub(ra.tenant, id);
   if (!current) throw new HttpError(404, 'club not found');
+  const roles = resolveVertical(cfg).leadershipRoles;
+  for (const r of roles) {
+    const v = incoming[r.key];
+    if (v !== undefined && v !== null && !isPlainObject(v)) {
+      throw new HttpError(400, `exco.${r.key} must be an object or null`);
+    }
+  }
+  const exco = mergeExco(current.exco as Record<string, unknown> | undefined, incoming);
+  // Required office bearers are enforced on the COMBINED stored+incoming roster, here only:
+  // the general club PATCH stays only-when-supplied so legacy clubs aren't re-blocked.
+  for (const r of roles.filter((role) => role.required)) {
+    const m = exco[r.key];
+    const ok =
+      isPlainObject(m) && ['name', 'cell', 'email'].every((f) => String(m[f] ?? '').trim() !== '');
+    if (!ok) throw new HttpError(400, `${r.label} name, cell and email are required`);
+  }
   // The docs.exco flip is gated on the catalogue defining exco as a FORM doc — key
   // presence alone is not enough: a tenant whose catalogue has no exco entry (or a
   // file-based committee doc under another key) must not have a form save silently

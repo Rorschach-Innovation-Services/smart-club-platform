@@ -936,7 +936,7 @@ export function ClubHome({
           onSave={(members: Record<string, any>) => {
             onSaveExco(members);
             setShowExcoForm(false);
-            const count = Object.values(members).filter((m: any) => m.name).length;
+            const count = Object.values(members).filter((m: any) => m?.name).length;
             toast(
               `${vertical.terms.Exco} updated · ${count} member${count === 1 ? '' : 's'} on record`,
             );
@@ -956,12 +956,15 @@ function GovernanceCard({ club, onEditLeadership = undefined }) {
   const ground = club.ground || {};
   const coaches = Array.isArray(club.coaches) ? club.coaches.filter((c) => c && c.name) : [];
   const expCount = (bucket) => coaches.filter((c) => c.yearsExperience === bucket).length;
+  // Chair age / term derive from the cricket-only governance capture (ID number, term end);
+  // other verticals don't collect them, so the rows would only ever read '—'.
   const rows = [
-    [
-      vertical.sport === 'cricket' ? 'Chairman age' : `${vertical.terms.Chair} age`,
-      age != null ? `${age} yrs` : '—',
-    ],
-    ['Term remaining', term.label || '—'],
+    ...(vertical.sport === 'cricket'
+      ? [
+          ['Chairman age', age != null ? `${age} yrs` : '—'],
+          ['Term remaining', term.label || '—'],
+        ]
+      : []),
     ['Primary venue', ground.venue || '—'],
     ['Secondary venue', ground.secondaryVenue || '—'],
     // Optional; shown only when the club recorded it (cricket clubs typically leave it unset).
@@ -1078,6 +1081,9 @@ export function AffiliationForm({
   const copy = useCopy();
   const vertical = useVertical();
   const terms = vertical.terms;
+  // The chair's ID number and term dates are a cricket-only governance capture; the school
+  // vertical neither collects nor shows them (stored values are left untouched).
+  const collectsChairGovernance = vertical.sport === 'cricket';
   const seasonLabel = useSeasonLabel();
   const [data, setData] = useStateC(() => {
     // Pre-fill exco from club.exco (single source of truth shared with the exco roster doc)
@@ -1427,11 +1433,18 @@ export function AffiliationForm({
       race: data[p + 'Race'],
     });
     return {
+      // Spread the stored chair first: this payload replaces `exco` wholesale on PATCH, so
+      // governance fields the form doesn't collect (or no longer collects) must ride through.
       chair: {
+        ...(club.exco?.chair ?? {}),
         ...pick('chair'),
-        idNumber: data.chairIdNumber.trim(),
-        termStart: data.chairTermStart,
-        termEnd: data.chairTermEnd,
+        ...(collectsChairGovernance
+          ? {
+              idNumber: data.chairIdNumber.trim(),
+              termStart: data.chairTermStart,
+              termEnd: data.chairTermEnd,
+            }
+          : {}),
       },
       sec: pick('sec'),
       tre: pick('tre'),
@@ -1966,7 +1979,7 @@ export function AffiliationForm({
                         </select>
                       </div>
                     </div>
-                    {role.prefix === 'chair' && (
+                    {role.prefix === 'chair' && collectsChairGovernance && (
                       <div className="field-grid-3" style={{ marginTop: 8 }}>
                         <div className="field" style={{ marginBottom: 0 }}>
                           <div className="field-label">ID Number</div>
@@ -2895,18 +2908,28 @@ export function AffiliationForm({
                     icon={Icon.Check}
                     onClick={() => {
                       // Reject malformed SA-IDs before they reach the API (which also guards).
-                      const chairId = data.chairIdNumber.trim();
+                      // Only verticals that collect the chair's ID number (cricket) can hit this.
+                      const chairId = collectsChairGovernance ? data.chairIdNumber.trim() : '';
                       if (chairId && !dobFromSaId(chairId)) {
                         toast(`${terms.Chair} ID number isn't a valid 13-digit RSA ID`, 'warn');
                         setStep(2);
                         return;
                       }
-                      // Chair contact is captured on Step 2, not Step 1's Continue gate, so
-                      // enforce it here. Checked before the reason guard so a user missing both
-                      // fixes Step 2 in one pass. New affiliations only — legacy corrections aren't
-                      // re-blocked (mirrors the reason guard below).
-                      if (!submitted && (!data.chairName || !data.chairCell || !data.chairEmail)) {
-                        toast(`Add the ${terms.chair}’s name, cell and email`, 'warn');
+                      // Office-bearer contacts are captured on Step 2, not Step 1's Continue
+                      // gate, so enforce every role the vertical marks required here. New
+                      // affiliations only — legacy corrections aren't re-blocked.
+                      const missingRole = submitted
+                        ? undefined
+                        : vertical.leadershipRoles.find(
+                            (r) =>
+                              r.required &&
+                              ['Name', 'Cell', 'Email'].some(
+                                (f) => !String(data[r.key + f] ?? '').trim(),
+                              ),
+                          );
+                      if (missingRole) {
+                        const who = missingRole.key === 'chair' ? terms.chair : missingRole.label;
+                        toast(`Add the ${who}’s name, cell and email`, 'warn');
                         setStep(2);
                         return;
                       }
@@ -3063,12 +3086,14 @@ function ExcoFormModal({ club, onClose, onSave, eyebrow = 'Compliance Template' 
           race: s.race || '',
         };
       } else {
+        // Unrecorded roles start blank (the chair's name seeds from the club record) so the
+        // required-role gate can't be satisfied by placeholder contact details.
         init[r.key] = {
-          name: r.key === 'chair' ? club.chair : '',
-          cell: r.key === 'chair' ? '083 786 4098' : '',
-          email: r.key === 'chair' ? 'chair@' + club.id + '.co.za' : '',
-          gender: r.key === 'chair' ? 'Male' : '',
-          race: r.key === 'chair' ? 'Indian' : '',
+          name: r.key === 'chair' ? club.chair || '' : '',
+          cell: '',
+          email: '',
+          gender: '',
+          race: '',
         };
       }
     });
@@ -3419,10 +3444,20 @@ function ExcoFormModal({ club, onClose, onSave, eyebrow = 'Compliance Template' 
               tone="teal"
               icon={Icon.Check}
               disabled={!requiredFilled}
-              onClick={() =>
-                requiredFilled &&
-                onSave({ ...members, additionalMembers: additionalMembers.filter((m) => m.name) })
-              }
+              onClick={() => {
+                if (!requiredFilled) return;
+                // The server merges each role over the stored one; a role left fully blank is
+                // sent as null so a departed office bearer's record is cleared (POPIA erasure).
+                const roles = {};
+                FIXED_EXCO_ROLES.forEach((r) => {
+                  const m = members[r.key];
+                  const blank = ['name', 'cell', 'email', 'gender', 'race'].every(
+                    (f) => !String(m?.[f] ?? '').trim(),
+                  );
+                  roles[r.key] = blank ? null : m;
+                });
+                onSave({ ...roles, additionalMembers: additionalMembers.filter((m) => m.name) });
+              }}
             >
               Submit roster
             </Btn>
@@ -4136,7 +4171,7 @@ export function DocumentsView({
           onSave={(members: Record<string, any>) => {
             onSaveExco(members);
             setShowExcoForm(false);
-            const count = Object.values(members).filter((m: any) => m.name).length;
+            const count = Object.values(members).filter((m: any) => m?.name).length;
             toast(
               `Exco roster ${club.docs.exco ? 'updated' : 'submitted'} · ${count} bearer${count === 1 ? '' : 's'}`,
             );

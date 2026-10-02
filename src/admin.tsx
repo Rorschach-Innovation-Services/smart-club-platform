@@ -4224,7 +4224,8 @@ export function nextChairContact(
    chair changes later. Mirrors EditSupportContactModal's EMAIL_RE validation so
    an invalid address can't be saved into a broken mailto:. */
 export function ChairContactModal({ club, onClose, onSave, toast }) {
-  const vt = useVertical().terms;
+  const vertical = useVertical();
+  const vt = vertical.terms;
   const seed = club.exco?.chair || {};
   const [name, setName] = useStateA(seed.name || club.chair || '');
   const [email, setEmail] = useStateA(seed.email || '');
@@ -4294,8 +4295,9 @@ export function ChairContactModal({ club, onClose, onSave, toast }) {
             />
             {nameChanged && (
               <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6, lineHeight: 1.5 }}>
-                Term dates and ID details of the previous {vt.chair} will be cleared; the {vt.club}
-                completes them on its affiliation form.
+                {vertical.sport === 'cricket'
+                  ? `Term dates and ID details of the previous ${vt.chair} will be cleared; the ${vt.club} completes them on its affiliation form.`
+                  : `The previous ${vt.chair}'s other details will be cleared; the ${vt.club} completes them on its affiliation form.`}
               </div>
             )}
           </div>
@@ -6114,7 +6116,8 @@ function AffiliationViewModal({ club, allLeagues, onClose }) {
                       <Row label="Cell" value={m.cell} />
                       <Row label="Gender" value={m.gender} />
                       <Row label="Race" value={m.race} />
-                      {key === 'chair' && (
+                      {/* ID / term are a cricket-only capture; schools never collect them. */}
+                      {key === 'chair' && vertical.sport === 'cricket' && (
                         <>
                           <Row label="ID number" value={m.idNumber} />
                           <Row

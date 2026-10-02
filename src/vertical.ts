@@ -104,7 +104,7 @@ const FOOTBALL: VerticalProfile = {
     { key: 'chair', label: 'Principal', required: true },
     { key: 'sec', label: 'Director of Sport', required: true },
     { key: 'tre', label: 'Director of Football', required: true },
-    { key: 'vc', label: 'Director of Academics', required: false },
+    { key: 'vc', label: 'Director of Academics', required: true },
   ],
   playerProfile: 'positions',
   positions: [
