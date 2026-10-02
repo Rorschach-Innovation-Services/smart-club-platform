@@ -7,9 +7,9 @@
  * folder names. Every raw spelling seen in any of those sources is listed as an alias so
  * the affiliation, compliance and fixtures importers all resolve names through ONE table.
  *
- * Later sections (DOC_RULES / FILE_OVERRIDES for the compliance importer, ROSTER_SOURCES /
- * SKIP_ROSTER for the roster importer) are appended below the identity section in later
- * phases — the same single-map-file layout as tuskers-import-map.ts.
+ * Later sections: DOC_RULES / FILE_OVERRIDES for the compliance importer (Phase 3, at the
+ * bottom of this file); ROSTER_SOURCES / SKIP_ROSTER for the roster importer (Phase 6) —
+ * the same single-map-file layout as tuskers-import-map.ts.
  *
  * WHY A SEPARATE MAP FILE: every lions importer's `--parse-only` mode must run under plain
  * `npx tsx` (no `sst shell`, no AWS creds), and this table must be testable in isolation.
@@ -632,3 +632,254 @@ export const AFFILIATION_LEAGUE_KEYS: Record<string, string> = {
   'LADIES DEV LEAGUE': 'ladies-development',
   'LADIES PROMOTION': 'ladies-promotion',
 };
+
+// ───────────────────────── Compliance pack: doc classification ─────────────────────────
+//
+// Consumed by import-lions-compliance.ts and exercised directly by
+// test/lions-compliance.test.ts. The pack is the CLEANED copy built in Phase 0
+// (Downloads/Lions/prepared/compliance/): 28 club folders, `_root-unique/` (the 7 loose root
+// files that were not byte-duplicates of a folder file), and `<club>/extracted/` holding the
+// attachments and bodies pulled out of the .msg emails. Every file was opened (text layer,
+// or rendered page images for scans) before these rules and overrides were written. Never
+// derive anything from a filename YEAR — Lenasia's "AGM Miutes - September 2004" is a
+// typo for 2024.
+
+/** The pack's folder of loose root files: no club of its own, so every file in it must be
+ * an explicit FILE_OVERRIDES reassignment or skip (DOC_RULES never run there). */
+export const ROOT_UNIQUE_FOLDER = '_root-unique';
+
+/**
+ * CLUB_MAP folders deliberately left out of the doc pass. Orange Farm's folder is empty in
+ * the source pack (and absent from the cleaned copy) — the club itself is created by the
+ * affiliation import (amendment 10); here it is simply not expected to carry docs.
+ */
+export const DOC_PASS_EXCLUDED_FOLDERS = new Set(['Orange Farm']);
+
+/** The clubs this import attaches documents to: every CLUB_MAP club with a pack folder,
+ * minus DOC_PASS_EXCLUDED_FOLDERS. Each must end up with at least one classified doc. */
+export const DOC_CLUBS: ClubMapEntry[] = CLUB_MAP.filter(
+  (c) => c.folder !== null && !DOC_PASS_EXCLUDED_FOLDERS.has(c.folder),
+);
+
+const clubIdOfFolder = (folder: string): string => {
+  const hit = CLUB_MAP.find((c) => c.folder === folder);
+  if (!hit) throw new Error(`lions-import-map: no CLUB_MAP entry for folder "${folder}"`);
+  return hit.id;
+};
+
+/** Every doc key of the `lions` catalogue (configure-tenant-docs.ts) — asserted against the
+ * live tenant catalogue at dry-run. memberDatabase and clubLogo get no file from this pack
+ * (rosters are Phase 6; no club sent a logo). */
+export const LIONS_DOC_KEYS = [
+  'constitution',
+  'agmMinutes',
+  'financials',
+  'committee',
+  'memberDatabase',
+  'chairmansReport',
+  'bankConfirmation',
+  'orgRegistration',
+  'beeCert',
+  'clubLogo',
+  'clubRecords',
+];
+
+/** Doc keys that store more than one file, mirrored from the `lions` catalogue. Asserted in
+ * both directions against the live catalogue at dry-run. */
+export const MULTI_FILE_DOC_KEYS = new Set(['agmMinutes', 'financials', 'clubRecords']);
+
+/** Ordered [regex, docKey] pairs over the FILENAME — first match wins, case-insensitive. */
+export const DOC_RULES: Array<[RegExp, string]> = [
+  // "consti" (not "constitution") also covers Sopranos' "Constituition.pdf".
+  [/consti/i, 'constitution'],
+  // Chairman's report, and club annual reports (Wanderers, Randburg's RCC_Annual_Report_…).
+  [/chairman|annual[\s_]*report/i, 'chairmansReport'],
+  // No word boundaries: "Minutes_AGM_Khosa", "2024AGMApproved", "AGMNOTICE2025". Notices,
+  // agendas and invitations travel with the minutes. "miute"/"minuite" are pack typos.
+  [/agm|annual\s*general|minut|miute|agenda/i, 'agmMinutes'],
+  [/\bb-?b?bee\b|\bbee\b/i, 'beeCert'],
+  // NPO / CIPC / CoR39 (Randfontein's company registration), "Club Verification - NPO"
+  // (Old Vaal's NPO attestation), "Non profit registration" (Old Parks).
+  [/\bnpo|cipc|cor\s*39|registration|club\s*verification|non\s*profit/i, 'orgRegistration'],
+  // Executive / office-bearer / officials lists. "contact details" is Old Vaal's memo of
+  // its office-bearers with their contact details.
+  [/exec|office\s*bearers|committee|officials|contact\s*details/i, 'committee'],
+  // Bank-stamped account confirmations: "bank letter", "Bank confromation letter" (sic),
+  // SBSA_ConfirmationLetter, Nedbank "ProofOfAccounts", ABSA "Account Confirmation".
+  [/bank|proof\s*of\s*accounts?|confirmation\s*letter|account\s*confirmation/i, 'bankConfirmation'],
+  // Financial statements, AFS, trial balances (NWU's GLSummaryReport), cash-flows, and the
+  // FNB "GOLD BUSINESS ACCOUNT nnn" monthly BANK STATEMENTS — statements are financial
+  // evidence (CGL asked for "AFS or bank statements"), not the single bank-confirmation
+  // letter, and a club often sent several of them.
+  [
+    /financ|\bafs\b|\bfs\b|income\s*statement|balance\s*sheet|cash\s*flow|gl\s*summary|treasurer|gold[\s_]*business[\s_]*account/i,
+    'financials',
+  ],
+];
+
+/**
+ * Relative-path (forward slashes) patterns for files that are known and deliberately NOT
+ * imported, with the reason printed in the parse report. Checked after FILE_OVERRIDES and
+ * before DOC_RULES.
+ */
+export const SKIP_RULES: Array<[RegExp, string]> = [
+  [/\/_inline-email-images\//, 'inline email signature/banner image (reference only)'],
+  [/ - email body\.txt$/i, 'extracted email body (reference only, not a document)'],
+  [
+    /\.msg$/i,
+    'Outlook .msg container — its attachments were extracted to <club>/extracted/ and import from there',
+  ],
+  [
+    /\.pages$/i,
+    'Apple Pages file — not uploadable; export it to PDF from Pages.app and drop the PDF in the same folder (see the Azaadville FILE_OVERRIDES note)',
+  ],
+];
+
+/**
+ * A FILE_OVERRIDES value: `{ skip: reason }` (known, deliberately not imported), a docKey
+ * (force that key, in the folder's own club), or `{ club, docKey }` — a REASSIGNMENT to
+ * another club (`club` is a CLUB_MAP id). Every `_root-unique/` file needs one of these.
+ */
+export type FileOverride = { skip: string } | string | { club: string; docKey: string };
+
+/**
+ * Exact relative-path overrides. Every decision here was made from the file's CONTENT.
+ */
+export const FILE_OVERRIDES: Record<string, FileOverride> = {
+  // ── _root-unique/: the 7 loose root files that were not byte-duplicates ──
+  // Same text (pdftotext diff is empty) as "Delfos Cricket Club/Delfos Finance 2023_24.pdf"
+  // — a second Excel export of the same workbook (Jul 2025 vs Dec 2024), so different bytes
+  // and content-hash dedupe can't collapse it. The folder copy imports.
+  '_root-unique/Delfos Finance 2023_24.pdf': {
+    skip: 'text-identical re-export of "Delfos Cricket Club/Delfos Finance 2023_24.pdf" (the folder copy imports)',
+  },
+  // Central Gauteng Lions BLIND Cricket's 2021 Disability Awareness Month proposal to CGL
+  // — not a compliance document, and CGLBC is not a club in this pack.
+  '_root-unique/IMG-20250708-WA0133.jpg': {
+    skip: 'CGL Blind Cricket 2021 Disability Awareness Month letter — not a club compliance document',
+  },
+  // Randfontein Cricket Club's signed "Socio-economic Development — confirmation letter for
+  // qualifying contributions" (CGL monthly grant), 1 Jul 2025. Not a B-BBEE certificate.
+  '_root-unique/IMG-20250708-WA0134.jpg': {
+    club: clubIdOfFolder('Randfontein CC'),
+    docKey: 'clubRecords',
+  },
+  // A 2024-25 exec-list draft; superseded by the 24 June register (see Lenasia below).
+  '_root-unique/LCC Executive Members 2024- 25 - CGL.docx': {
+    skip: 'superseded Lenasia exec-list draft — the 24 June 2025 register is the committee file',
+  },
+  // Old Parktonians' 2025/26 cricket committee (chair Ryan Wessels, club manager etc.).
+  '_root-unique/New Cricket Committee 2025.2026 season.xlsx': {
+    club: clubIdOfFolder('The Old Parktonian'),
+    docKey: 'committee',
+  },
+  // The two Lenasia .msg containers are caught by the .msg SKIP_RULE.
+
+  // ── Lenasia CC: three versions of the 2024-25 exec list (different bytes, same list);
+  // the club's later email "Re: Updated List - LCC Exec" (10 Jul 2025 18:20) sends the
+  // "latest LCC Executive List" — the 24 June 2025 meeting register — which is authoritative.
+  'Lenasia CC/extracted/LCC Executive Members - 24 June Meeting 25 Register.pdf': 'committee',
+  'Lenasia CC/LCC Executive Members 2024- 25 - CGL.docx': {
+    skip: 'superseded Lenasia exec-list draft — the 24 June 2025 register is the committee file',
+  },
+  'Lenasia CC/extracted/LCC Executive Members 2024- 25 - CGL.docx': {
+    skip: 'superseded Lenasia exec-list draft (email attachment) — the 24 June 2025 register is the committee file',
+  },
+
+  // ── Azaadville folder: the .msg email inside it is from Ajit Gandabhai of AZAD SWARAJ
+  // Sporting Club (its 25 May 2025 AGM elected President Keyur Chauhan; the body says
+  // "Cash flow attached" = Azad Swaraj's CASHFLOW.2023.4.pdf). Its attachment is Azad
+  // Swaraj's officials list, filed under the wrong club. ──
+  'Azaadville/extracted/LIST.OFFICIALS.25MAY25.pdf': {
+    club: clubIdOfFolder('Azad Swaraj'),
+    docKey: 'committee',
+  },
+  // Page-1 QuickLook thumbnail of the .pages minutes — a partial document.
+  'Azaadville/extracted/ACC AGM Minutes (from pages) - page 1 preview only.jpg': {
+    skip: 'page-1 preview image of the .pages AGM minutes — partial document; import the full PDF export instead',
+  },
+  // PENDING: when the user exports "ACC AGM Minutes .pages" to PDF from Pages.app and drops
+  // it in Azaadville/, it imports as agmMinutes — the DOC_RULES agm rule matches it under any
+  // name containing "AGM Minutes". Pinned here for the expected export name (an override
+  // for an absent file is inert).
+  'Azaadville/ACC AGM Minutes .pdf': 'agmMinutes',
+  // Scan, no text layer: "Constitution of Azaadville Cricket Club, 01 March 2019", 6 pages.
+  'Azaadville/Scanned Documents-8.pdf': 'constitution',
+
+  // ── Opaque filenames, identified from content ──
+  // TymeBank "Proof of account" for Alexandra cricket club, 1 Oct 2024.
+  'Alexandra CC/9447ca2ee9c949959ffd2026ea09e891_printpdf.pdf': 'bankConfirmation',
+  // "Constitution of Calypso Old Maristonians" (amended to the 2018 AGM).
+  'Calypso CC/Calypso.pdf': 'constitution',
+  // FNB electronic-stamp ACCOUNT CONFIRMATION LETTER for DALIKAY CRICKET CLUB, 26 Nov 2024.
+  'Dalikay CC/15.59596043.090226e8f0d1bee7 (2).pdf': 'bankConfirmation',
+  // WhatsApp-shared scan (renamed .pdf in Phase 0): Dalikay Cricket Club constitution, 2013.
+  'Dalikay CC/DOC-20240508-WA0012.pdf': 'constitution',
+  // Scan, no text layer: "Diepsloot Cricket Club 'DCC' Constitution", 8 pages, signed 2018.
+  'Diepsloot CC/Diepsloot.pdf': 'constitution',
+  // FNB ACCOUNT CONFIRMATION LETTER for DURBAN OLD BOYS CRICKET CLUB, 22 Nov 2024.
+  'Durban Old Boys/62924552195-confirmation.pdf': 'bankConfirmation',
+  // Standard Bank "Confirmation of Bank account" for OLD PARKTONIAN SPORTS CLUB, 24 Mar 2025.
+  'The Old Parktonian/doc01432820250324132615.pdf': 'bankConfirmation',
+  // FNB Gold Business Account monthly STATEMENTS (Nov 2024, Jul 2025) for Sopranos.
+  'Sopranos/62054946242_20241123.pdf': 'financials',
+  'Sopranos/62054946242_20250717.pdf': 'financials',
+  // ABSA stamped transaction history (Jun–Jul 2025) for RANDFONTEIN KRIEKET KLUB.
+  'Randfontein CC/RANDFONTEIN KRIEKET KLUB_2025-06-01_2025-07-08_stamped.pdf': 'financials',
+  // Scanned 4-page bundle: Standard Bank 60-day statement + Standard Bank "Confirmation of
+  // Bank account" (11 Jul 2025) + the 13 Jul 2025 AGM attendance register. Filed as the
+  // club's (newest) bank confirmation.
+  'Kagiso CC/Document 10.pdf': 'bankConfirmation',
+  // Phone photo of Kagiso's EARLIER Standard Bank confirmation letter (9 Dec 2024) —
+  // superseded by the Jul 2025 letter above, and bankConfirmation holds one file.
+  'Kagiso CC/IMG_20241209_110929_resized_20241209_112849728.jpg': 'clubRecords',
+  // Editable .docx of the same constitution as "…Constitution 2 - Coach Nicky.pdf" (the
+  // word-level diff is only the PBO number line and the signature-table layout); the pdf
+  // is the rendered copy and constitution holds one file.
+  'Kagiso CC/Kagiso Cricket Club Constitution 2.docx': {
+    skip: 'editable .docx of the same constitution as "Kagiso Cricket Club Constitution 2 - Coach Nicky.pdf" (the pdf imports)',
+  },
+  // CIPC COR14.3 registration certificate for JCC Hope Village NPC (25 Jan 2023).
+  'Joburg CC/JCC HOPE VILLAGE CIPC DOCUMENTS.pdf': 'orgRegistration',
+  // The CIPC incorporation filing (directors/incorporators with ID numbers, 28 Nov 2022) —
+  // supporting paperwork; orgRegistration holds one file (the certificate above).
+  'Joburg CC/JCC HOPE VILLAGE - NEW COMPANY REG DOCUMENTS_-signed.pdf': 'clubRecords',
+  // 15-page scanned bundle: 7 Jul 2025 AGM minutes (first), 2023/24 income & expenditure,
+  // SARS PBO tax-exemption letter, the club constitution, and the exec list. A file lands
+  // under one key — filed as the AGM minutes it opens with (see the runbook: the admin can
+  // mark constitution/committee compliant from the same file).
+  'Dobsonville Cricket Club/DCC COMPLIANCE DOCUMENTS 2.pdf': 'agmMinutes',
+
+  // ── Pinned for clarity (DOC_RULES would place these the same way) ──
+  // Old Parks' financials arrived as a .pptx; the Phase 0 PDF conversion previews inline,
+  // and the original deck is kept as an additional financials file (source of record).
+  'The Old Parktonian/Old Parks finances for 2024 and 2025_cln (converted from pptx).pdf':
+    'financials',
+  'The Old Parktonian/Old Parks finances for 2024 and 2025_cln.pptx': 'financials',
+};
+
+export type ClassifyResult =
+  /** `club` is set only when a FILE_OVERRIDES reassignment moves the file to a club other
+   * than its folder's. */
+  | { kind: 'doc'; docKey: string; club?: string }
+  | { kind: 'skip'; reason: string }
+  | { kind: 'unclassified' };
+
+/**
+ * Classify one compliance-pack file by its relative path (folder/…/filename). Order:
+ * FILE_OVERRIDES → SKIP_RULES → DOC_RULES (DOC_RULES never run in ROOT_UNIQUE_FOLDER).
+ */
+export function classifyFile(relPath: string, filename: string): ClassifyResult {
+  const override = FILE_OVERRIDES[relPath];
+  if (typeof override === 'string') return { kind: 'doc', docKey: override };
+  if (override && 'skip' in override) return { kind: 'skip', reason: override.skip };
+  if (override) return { kind: 'doc', docKey: override.docKey, club: override.club };
+  for (const [re, reason] of SKIP_RULES) {
+    if (re.test(relPath)) return { kind: 'skip', reason };
+  }
+  if (relPath.split('/')[0] === ROOT_UNIQUE_FOLDER) return { kind: 'unclassified' };
+  for (const [re, docKey] of DOC_RULES) {
+    if (re.test(filename)) return { kind: 'doc', docKey };
+  }
+  return { kind: 'unclassified' };
+}

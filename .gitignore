@@ -52,6 +52,12 @@ lions-affiliation-created-clubs.*.json
 # import-lions-fixtures --confirm / --revert --confirm series snapshots.
 lions-fixtures-backup-*.json
 
+# import-lions-compliance --confirm club snapshots and its created-clubs revert manifests
+# (legacy unsuffixed + stage-scoped .<stage>.json).
+lions-import-backup-*.json
+lions-import-created-clubs.json
+lions-import-created-clubs.*.json
+
 # generated cohort exports (contain PII)
 cohort-export-*.xlsx
 
