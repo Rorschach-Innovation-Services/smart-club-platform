@@ -103,6 +103,7 @@ import {
   ClubVeteransSquadView,
 } from './club';
 import { Onboarding } from './onboarding';
+import { CaptainsReportView } from './CaptainsReport';
 import { useModule, useSeasonLabel, useVertical } from './branding';
 
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
@@ -2420,6 +2421,10 @@ function Shell({
             dot: hasReleased ? 'teal' : affiliationSubmitted(activeClub) ? 'gold' : 'muted',
             num: hasReleased ? 'NEW' : undefined,
           },
+          // Post-match umpire ratings + misconduct under the cricket Code of Behaviour.
+          ...(vertical.sport === 'cricket'
+            ? [{ v: 'captains-report', label: "Captain's Report", icon: Icon.Whistle }]
+            : []),
           { v: '_help', label: 'Need Help?', icon: Icon.Mail, action: () => setShowHelp(true) },
         ].sort((a, b) => a.label.localeCompare(b.label))
       : [];
@@ -2764,6 +2769,19 @@ function Shell({
             onAcceptVeteransRequest={acceptVeteransRequest}
             onDeclineVeteransRequest={declineVeteransRequest}
             busyVeteransId={busyVeteransId}
+          />
+        );
+      }
+      if (view === 'captains-report' && vertical.sport === 'cricket') {
+        return (
+          <CaptainsReportView
+            club={activeClub}
+            allSeries={allSeries}
+            clubs={clubs}
+            players={players}
+            directory={clubDirectory}
+            allLeagues={allLeagues}
+            toast={toastShow}
           />
         );
       }
