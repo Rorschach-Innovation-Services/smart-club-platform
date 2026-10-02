@@ -16,7 +16,8 @@ export type EntityType =
   | 'CLEARANCE'
   | 'REGREVIEW'
   | 'VETAFFIL'
-  | 'VETREQ';
+  | 'VETREQ'
+  | 'UMPIRE';
 
 const tenantPrefix = (tenant: string) => `TENANT#${tenant}`;
 
@@ -141,6 +142,39 @@ export const venueKey = (tenant: string, venueId: string) => ({
 export const venuesListKey = (tenant: string) => ({
   pk: tenantPrefix(tenant),
   skPrefix: 'VENUE#',
+});
+
+/**
+ * An umpire in the tenant's registry. Own partition + `META`, listed through gsi1 like
+ * clubs. Holds contact details (phone/email), so tenant erasure enumerates it explicitly.
+ */
+export const umpireKey = (tenant: string, umpireId: string) => ({
+  pk: `${tenantPrefix(tenant)}#UMPIRE#${umpireId}`,
+  sk: 'META',
+});
+
+export const umpireGsi1 = (tenant: string, displayName: string) => ({
+  gsi1pk: `${tenantPrefix(tenant)}#TYPE#UMPIRE`,
+  gsi1sk: displayName || ' ',
+});
+
+export const umpiresListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#UMPIRE`;
+
+/**
+ * The officials appointed to ONE fixture. Deliberately NOT inside the Series item: an
+ * officials write must never contend with (or be lost to) a whole-series PATCH, reset
+ * approval or run a clash gate. Every fixture's item shares one tenant partition so
+ * `GET /series` joins them all with a single Query (a few hundred small rows per season).
+ */
+export const fixtureOfficialsKey = (tenant: string, seriesId: string, fixtureId: string) => ({
+  pk: `${tenantPrefix(tenant)}#OFFICIALS`,
+  sk: `FIXOFFICIALS#${seriesId}#${fixtureId}`,
+});
+
+/** pk + sk-prefix to query every fixture's officials in a tenant. */
+export const fixtureOfficialsListKey = (tenant: string) => ({
+  pk: `${tenantPrefix(tenant)}#OFFICIALS`,
+  skPrefix: 'FIXOFFICIALS#',
 });
 
 /** A player registration, partitioned under its club; naturalKey gives dedup. */
