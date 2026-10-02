@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "results": [
+    { "ref": "smartclub:dolphins:fixture:s-planb-premier-men-t20-g1:f5", "status": "applied" },
+    { "ref": "smartclub:dolphins:fixture:s-planb-promotion-men-t20-g1:f9", "status": "stale", "message": "medicoach scheduleChangedAt is newer" }
+  ]
+}
