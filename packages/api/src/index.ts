@@ -53,6 +53,7 @@ import {
   resolveTenant,
   HttpError,
   type HonoEnv,
+  type RequestAuth,
 } from './auth.js';
 import * as repo from './repo.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
@@ -116,6 +117,12 @@ import {
 } from './catalogue.js';
 import ExcelJS from 'exceljs';
 import { parseRosterSheet, findCrossClubDuplicates } from './roster-parse.js';
+import {
+  registerPlayerForClub,
+  resolveDeclaredPreviousClubId,
+  buildCrossClubIndex,
+  type RegisterPlayerOutcome,
+} from './register-player.js';
 import { luhnValid, normalizeGender, normalizeRace } from './roster-normalize.js';
 import { parseStructureWorkbookAllSheets } from './structure-parse.js';
 import { deriveTeamPlanCounts } from './team-plan.js';
@@ -831,19 +838,17 @@ app.post('/register/:clubId', async (c) => {
   // hostile value can't carry payloads or break a WhatsApp template parameter.
   body.firstName = body.firstName!.replace(/\s+/g, ' ').trim().slice(0, 60);
   body.lastName = body.lastName!.replace(/\s+/g, ' ').trim().slice(0, 60);
-  const naturalKey = playerNaturalKey({ ...body, dob });
-  const player: PlayerRegistration = {
-    naturalKey,
-    clubId: destClubId,
+  // The stored row's identity/provenance fields (naturalKey, dob, isMinor, idType, idNumber,
+  // status, registeredVia, version, consentAt, createdAt) are stamped by registerPlayerForClub.
+  const fields: Partial<PlayerRegistration> = {
     firstName: body.firstName,
     lastName: body.lastName,
     dob,
     cell: body.cell,
     email: body.email,
-    isMinor,
     guardianName: body.guardianName,
     idType: body.idType ?? 'sa-id',
-    idNumber: normalizeId(body.idNumber),
+    idNumber: body.idNumber,
     nationality: body.nationality,
     race: body.race,
     gender: body.gender,
@@ -868,34 +873,21 @@ app.post('/register/:clubId', async (c) => {
       contentType: idDocMeta.contentType,
       uploadedAt: now(),
     },
-    status: 'active',
-    registeredVia: 'link',
-    version: 0,
-    consentAt: now(),
-    createdAt: now(),
   };
 
-  let lastClubId = typeof body.lastClubId === 'string' ? body.lastClubId.trim() : '';
-  // An EXACT on-system club name typed into "Other" is the same declaration as picking that
-  // club from the list, and must take the same path — resolved HERE, before anything keys on
-  // lastClubId, so the previous==current guard, the source-club cap, and the clearance
-  // decision all see one flow. Left as free text it would register as a fresh signing with no
-  // clearance AND no off-system alert (exact matches deliberately don't alert), which was the
-  // one way a declared transfer could still slip through silently. Same normalised-name idiom
-  // as the signup collision check; near-name variants stay free text and alert as before.
-  if (!lastClubId && typeof body.lastClub === 'string') {
-    const typed = body.lastClub.trim();
-    if (typed && typed !== '—') {
-      const nameKey = typed.toLowerCase();
-      const match = (await repo.listClubs(resolved.tenant)).find(
-        (cl) => cl.name.trim().toLowerCase() === nameKey,
-      );
-      if (match) lastClubId = match.id;
-    }
-  }
+  // An EXACT on-system club name typed into "Other" is promoted to lastClubId HERE, before
+  // anything keys on it, so the previous==current guard, the source-club cap, and the
+  // clearance decision all see one flow (see resolveDeclaredPreviousClubId). Left as free text
+  // it would register as a fresh signing with no clearance AND no off-system alert, which was
+  // the one way a declared transfer could still slip through silently.
+  const lastClubId = await resolveDeclaredPreviousClubId(
+    resolved.tenant,
+    body.lastClubId,
+    body.lastClub,
+  );
   // The previous club can't be the current club — a transfer to the club you're leaving is
   // meaningless — UNLESS both are the LINK club, which is a legitimate re-registration at the
-  // same club (handled without a clearance in createSelfRegistration). So only reject
+  // same club (handled without a clearance in registerPlayerForClub). So only reject
   // previous == current when the current club isn't the link club.
   if (lastClubId && lastClubId === destClubId && destClubId !== clubId) {
     throw new HttpError(400, 'previous club cannot be your current club');
@@ -952,47 +944,47 @@ app.post('/register/:clubId', async (c) => {
 
   // ── Register into the chosen club ── (the link club, or a DIFFERENT joining club the player
   // picked on the form). Opens a registration-origin clearance to the previous club when the
-  // player is found there; otherwise a plain active row on the chosen club's roster.
+  // player is found there; otherwise a plain active row on the chosen club's roster (plus a
+  // best-effort off-system review when a free-text "Other" club survived promotion — by
+  // construction NOT an exact on-system match, so it deserves the alert).
+  let result: RegisterPlayerOutcome;
   try {
-    const { clearanceFromName } = await createSelfRegistration(
-      resolved.tenant,
-      player,
-      destClub,
+    result = await registerPlayerForClub(resolved.tenant, destClub, fields, {
+      registeredVia: 'link',
+      tenantConfig: cfg,
       lastClubId,
-      directoryClubs(cfg),
-      cfg,
-    );
-    if (clearanceFromName) {
-      // CHARGE the source club's quota only now, having actually put a clearance in its queue.
-      // Best-effort: the clearance is already committed, so a counter failure must not turn a
-      // successful registration into an error — worst case the cap is briefly under-counted.
-      if (namedSourceOnSystem) {
-        await repo
-          .bumpClubSourceCounter(resolved.tenant, lastClubId, now(), CLUB_SOURCE_PER_HOUR)
-          .catch((err) => console.error('source-club counter bump failed', err));
-      }
-      return c.json({ ok: true, clearance: { fromClubName: clearanceFromName } }, 201);
-    }
+      typedPreviousClub: typeof body.lastClub === 'string' ? body.lastClub : undefined,
+      linkClub: { id: clubId, name: regClub.name },
+      directory: directoryClubs(cfg),
+      notifyClearanceOpened,
+    });
   } catch (err: unknown) {
-    // Deliberately ONE message for every conflict shape: an anonymous caller must not be
-    // able to distinguish "registered at the destination" from "mid-clearance at the
-    // source" and use this endpoint as a status oracle.
-    if (
-      err instanceof repo.PlayerExistsAtDestinationError ||
-      err instanceof repo.DuplicatePendingClearanceError ||
-      (err as { name?: string }).name === 'ConditionalCheckFailedException'
-    ) {
-      throw new HttpError(409, 'already registered or a transfer is already in progress');
-    }
     if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
     throw err;
   }
+  // Deliberately ONE message for every conflict shape: an anonymous caller must not be
+  // able to distinguish "registered at the destination" from "mid-clearance at the
+  // source" and use this endpoint as a status oracle.
+  if (result.outcome === 'duplicate' || result.outcome === 'clearance-already-open') {
+    throw new HttpError(409, 'already registered or a transfer is already in progress');
+  }
+  if (result.outcome === 'clearance-opened') {
+    // CHARGE the source club's quota only now, having actually put a clearance in its queue.
+    // Best-effort: the clearance is already committed, so a counter failure must not turn a
+    // successful registration into an error — worst case the cap is briefly under-counted.
+    if (namedSourceOnSystem) {
+      await repo
+        .bumpClubSourceCounter(resolved.tenant, lastClubId, now(), CLUB_SOURCE_PER_HOUR)
+        .catch((err) => console.error('source-club counter bump failed', err));
+    }
+    return c.json({ ok: true, clearance: { fromClubName: result.clearance.fromClubName } }, 201);
+  }
 
-  // Plain-active outcome (no clearance was opened — createSelfRegistration returned no
-  // clearanceFromName above): the player row is live on the joining club's roster now, so
-  // materialize the veterans affiliation (write-on-activation). Clearance-pending outcomes
-  // returned earlier — their record is written when the clearance resolves (see repo hooks).
-  // Best-effort, exactly like the off-system alert below: the registration already committed.
+  // Plain-active outcome (no clearance was opened): the player row is live on the joining
+  // club's roster now, so materialize the veterans affiliation (write-on-activation).
+  // Clearance-pending outcomes returned above — their record is written when the clearance
+  // resolves (see repo hooks). Best-effort: the registration already committed.
+  const player = result.player;
   if (player.veteransClubId) {
     try {
       await repo.putVeteransAffiliation(resolved.tenant, {
@@ -1006,48 +998,6 @@ app.post('/register/:clubId', async (c) => {
       });
     } catch (err) {
       console.warn('failed to write veterans affiliation', err);
-    }
-  }
-
-  // Off-system previous club: the player named a club not on the system ("Other" free
-  // text), so no clearance could be opened. The row is already active on the JOINING club's
-  // roster (the link club, or a different club the player picked); flag it (best-effort) so
-  // admins can see which club was typed. Excludes the '—' first-registration sentinel so clean
-  // first registrations never raise an alert.
-  //
-  // No on-system re-check here: an exact on-system name was already promoted to lastClubId
-  // before registration (and took the clearance path above), so surviving free text is by
-  // construction NOT an exact match — a genuinely off-system club, or a near-name variant of
-  // an on-system one, and both deserve the alert.
-  // Registration reviews ride the clearances module: with it off there is no transfer
-  // oversight, so no alert either.
-  const typedOther =
-    clearancesOn &&
-    !lastClubId &&
-    body.lastClub &&
-    body.lastClub.trim() &&
-    body.lastClub.trim() !== '—'
-      ? body.lastClub.trim()
-      : undefined;
-  if (typedOther) {
-    try {
-      await repo.createRegistrationReview(resolved.tenant, {
-        id: randomUUID(),
-        kind: 'off-system-alert',
-        playerNaturalKey: naturalKey,
-        playerName: `${player.firstName} ${player.lastName}`,
-        idNumber: player.idNumber,
-        destClubId,
-        destClubName: destClub.name,
-        linkClubId: clubId,
-        linkClubName: regClub.name,
-        typedPreviousClub: typedOther,
-        createdAt: now(),
-        status: 'open',
-        version: 0,
-      });
-    } catch (err) {
-      console.warn('failed to create off-system registration alert', err);
     }
   }
   return c.json({ ok: true }, 201);
@@ -1563,217 +1513,6 @@ async function notifyClearanceReopened(
   } catch (err) {
     console.error('clearance reopened notice failed', err);
   }
-}
-
-/**
- * Materialize a self-registration onto the destination roster (`player.clubId` must already be
- * the destination). Before creating anything it looks up where this exact person is ALREADY
- * registered across the union (by naturalKey), so a transfer routes to their REAL current club —
- * not merely the club they typed — and the same person can never be active at two clubs at once:
- *
- *  - Active elsewhere → create the row 'clearance-pending' + a registration-origin clearance FROM
- *    that club (which — or the union office — must approve before the player goes active). If the
- *    club they NAMED isn't where they're actually registered, the clearance is still routed to the
- *    real club, with a `note` recording the mismatch for whoever reviews it.
- *  - Mid-transfer elsewhere (already 'clearance-pending') → DuplicatePendingClearanceError, so the
- *    caller returns the collapsed 409 rather than opening a competing clearance.
- *  - Not registered anywhere else, named an on-system club → 'clearance-pending' row + a
- *    registration-origin clearance from that club, even though it has no roster record of them:
- *    a club still digitising its squad is indistinguishable from one the player never played for,
- *    and the clearance is what settles fees/misconduct either way. That club approves in its own
- *    portal, or the union office overrides.
- *  - Not registered anywhere else, named a DIRECTORY club (operator-entered `knownClubs`, not on
- *    the system) → the same, additionally flagged fromClubDirectory. The union office
- *    override-approves it or reallocates it to the real club once that club registers.
- *  - Not registered anywhere else, no previous club → a plain active row (first registration).
- *
- * Used by the public register route whether the player registers into the link club or a different
- * joining club. Repo errors (dedup/dest conflicts) propagate to the caller, which maps them.
- * Returns the opened clearance's source-club name, if any.
- */
-async function createSelfRegistration(
-  tenant: string,
-  player: PlayerRegistration,
-  destClub: Club,
-  lastClubId: string,
-  directory: DirectoryClub[],
-  tenantConfig: TenantConfig | null,
-): Promise<{ clearanceFromName?: string }> {
-  // Re-registration at the SAME club (previous == the club being joined): record the history name;
-  // there is nothing to transfer. Falls through to a plain active row (or the guards below).
-  if (lastClubId && lastClubId === player.clubId) {
-    player.lastClub = destClub.name;
-  }
-
-  // Where is this exact person already registered elsewhere in the union? This — not the
-  // self-typed previous club — decides the transfer, so a wrong/duplicate/deleted pick can't
-  // mis-route the clearance or leave the player active at two clubs.
-  const elsewhere = await repo.findPlayerAcrossClubs(tenant, player.naturalKey, player.clubId);
-  const activeSources = elsewhere.filter((e) => e.status === 'active');
-
-  // Mid-transfer check runs FIRST, before the active-source branch: a person can be BOTH
-  // clearance-pending at one club and active at another (their previous club rosters them
-  // while a transfer is open, which is routine while clubs are still digitising). Letting the
-  // active branch win there opens a SECOND clearance from the same source club, and both can
-  // then resolve — the first deletes the source row, the second finds it already gone and,
-  // being registration-origin, activates its destination anyway. That lands one person active
-  // at two clubs. Refusing the registration outright is what this function already documents.
-  //
-  // With the clearances module OFF there is no transfer to compete with, so the no-touch flow
-  // runs BEFORE that guard: a row left clearance-pending when the module was switched off must
-  // not 409 the player forever — it is just another prior registration (noted, never modified).
-  if (!hasModule(tenantConfig, 'clearances')) {
-    const priorSources = elsewhere.filter(
-      (e) => e.status === 'active' || e.status === 'clearance-pending',
-    );
-    return registerWithoutClearance(tenant, player, lastClubId, directory, priorSources);
-  }
-
-  if (elsewhere.some((e) => e.status === 'clearance-pending')) {
-    // Already mid-transfer under this identity — don't open a competing clearance or a second row.
-    throw new repo.DuplicatePendingClearanceError();
-  }
-
-  if (activeSources.length > 0) {
-    // Route to the club they NAMED only if that's genuinely where they are; otherwise auto-route
-    // to their real current club and flag the mismatch on the clearance note.
-    const named = activeSources.find((s) => s.clubId === lastClubId);
-    const source = named ?? activeSources[0];
-    player.lastClub = source.clubName;
-    let note: string | undefined;
-    if (!named) {
-      const namedClub = lastClubId ? await repo.getClub(tenant, lastClubId) : null;
-      const namedDirectory = namedClub ? undefined : directory.find((e) => e.id === lastClubId);
-      note = lastClubId
-        ? namedClub
-          ? `Auto-routed: player named "${namedClub.name}" as previous club, but is registered at ${source.clubName}.`
-          : namedDirectory
-            ? `Auto-routed: player named "${namedDirectory.name}" (not yet on the system) as previous club, but is registered at ${source.clubName}.`
-            : `Auto-routed: the named previous club is not on the system; player is registered at ${source.clubName}.`
-        : `Auto-routed to ${source.clubName}, where the player is registered (no previous club was named).`;
-    }
-    player.status = 'clearance-pending';
-    const clearance: PlayerClearance = {
-      id: randomUUID(),
-      playerNaturalKey: player.naturalKey,
-      playerName: `${player.firstName} ${player.lastName}`,
-      idNumber: player.idNumber,
-      team: player.team,
-      fromClubId: source.clubId,
-      toClubId: player.clubId,
-      fromClubName: source.clubName,
-      toClubName: destClub.name,
-      // requestedAt feeds the admin-list gsi1 sort key — required even though no rep initiated
-      // this (requestedBy stays absent; origin says who did).
-      requestedAt: now(),
-      origin: 'registration',
-      note,
-      feesCleared: false,
-      misconductCleared: false,
-      status: 'pending',
-      clubApprovedAt: null,
-      adminOverrideAt: null,
-      version: 0,
-    };
-    await repo.createPlayerWithClearance(tenant, player, clearance);
-    // Best-effort chairman heads-up (never throws). The source club record isn't loaded on
-    // this branch — findPlayerAcrossClubs returns roster rows — so fetch it just for the
-    // notice; a read fault only costs the notice, never the committed registration.
-    const sourceClub = await repo.getClub(tenant, source.clubId).catch(() => null);
-    if (sourceClub) {
-      await notifyClearanceOpened(tenant, tenantConfig, sourceClub, clearance, 'registration');
-    }
-    return { clearanceFromName: source.clubName };
-  }
-
-  // Not registered anywhere else, but the player DECLARED a previous club: open a pending
-  // clearance to it regardless of whether that club has them on its roster here. Roster
-  // absence is not evidence the transfer isn't real — a club still digitising its squad
-  // looks identical to one the player never played for, and the fees/misconduct obligation
-  // the clearance exists to settle is owed in the real world either way. Two source shapes,
-  // both sourceless (no player row to flip):
-  //   - a real ON-SYSTEM club → it approves in its own portal, or the Union office overrides;
-  //   - a DIRECTORY club (operator-entered, not on the system) → flagged fromClubDirectory so
-  //     the Union office can approve it or reallocate it once the club registers.
-  // The real-club lookup runs FIRST so a club that claimed a directory slug between the
-  // form's GET and this POST is treated as the on-system club it now is.
-  if (lastClubId && lastClubId !== player.clubId) {
-    const sourceClub = await repo.getClub(tenant, lastClubId);
-    const dirEntry = sourceClub ? undefined : directory.find((e) => e.id === lastClubId);
-    if (!sourceClub && !dirEntry) {
-      // The entry vanished (operator removed/renamed it) between GET and POST. The
-      // player has already uploaded an ID document at this point — guide, don't baffle.
-      throw new HttpError(400, 'that previous club is no longer listed — please re-select it');
-    }
-    const fromClubName = sourceClub ? sourceClub.name : dirEntry!.name;
-    player.status = 'clearance-pending';
-    player.lastClub = fromClubName;
-    const clearance: PlayerClearance = {
-      id: randomUUID(),
-      playerNaturalKey: player.naturalKey,
-      playerName: `${player.firstName} ${player.lastName}`,
-      idNumber: player.idNumber,
-      team: player.team,
-      fromClubId: lastClubId,
-      toClubId: player.clubId,
-      fromClubName,
-      toClubName: destClub.name,
-      requestedAt: now(),
-      origin: 'registration',
-      ...(sourceClub ? {} : { fromClubDirectory: true }),
-      note: sourceClub
-        ? `${fromClubName} has no roster record of this player. If they did play there, ${fromClubName} can approve the clearance as usual. If they did not, the Union office can reallocate it to the club they actually left — declining is deliberately not an option, since it would permanently flag a legitimately registered player.`
-        : `"${fromClubName}" is not yet on the system — the Union office can approve this clearance, or reallocate it once the club registers.`,
-      feesCleared: false,
-      misconductCleared: false,
-      status: 'pending',
-      clubApprovedAt: null,
-      adminOverrideAt: null,
-      version: 0,
-    };
-    await repo.createPlayerWithSourcelessClearance(tenant, player, clearance);
-    // Chairman heads-up only for an ON-SYSTEM source: a directory entry has no club
-    // record and no chairman on file — the union office resolves those.
-    if (sourceClub) {
-      await notifyClearanceOpened(tenant, tenantConfig, sourceClub, clearance, 'registration');
-    }
-    return { clearanceFromName: fromClubName };
-  }
-  player.status = 'active';
-  await repo.createPlayer(tenant, player);
-  return {};
-}
-
-/**
- * createSelfRegistration for a tenant with the clearances module OFF (no transfer tracking):
- * the registration always lands active at the joining club and no clearance, review or
- * clearance notice is ever created.
- *  - Registered at another club (active, or a clearance-pending row left over from when the
- *    module was on) → the new row carries a transferNote "Previously registered at <club>" and
- *    records that club as `lastClub`. The other club's roster is NEVER touched: this route is
- *    unauthenticated, so letting it deactivate a row at a club the caller doesn't control would
- *    turn a leaked link + an ID number into a roster takeover. Admins resolve the duplicate.
- *  - A declared previous club with no roster record → recorded as history (`lastClub`) only.
- */
-async function registerWithoutClearance(
-  tenant: string,
-  player: PlayerRegistration,
-  lastClubId: string,
-  directory: DirectoryClub[],
-  priorSources: Array<{ clubId: string; clubName: string }>,
-): Promise<{ clearanceFromName?: string }> {
-  player.status = 'active';
-  if (priorSources.length > 0) {
-    player.lastClub = priorSources[0].clubName;
-    player.transferNote = `Previously registered at ${priorSources.map((s) => s.clubName).join(', ')}.`;
-  } else if (lastClubId && lastClubId !== player.clubId) {
-    const named =
-      (await repo.getClub(tenant, lastClubId))?.name ??
-      directory.find((e) => e.id === lastClubId)?.name;
-    if (named) player.lastClub = named;
-  }
-  await repo.createPlayer(tenant, player);
-  return {};
 }
 
 // ───────────────────── Authenticated routes ─────────────────────
@@ -2304,9 +2043,14 @@ app.get('/clubs/:id/players', async (c) => {
 
 /**
  * Register a player directly from the club portal (chair-filled Union form). Unlike the
- * public token link, this is authenticated + club-scoped. Shares the naturalKey dedup with
- * the public path so a person can't be registered twice. Required fields mirror the Union
- * form; `dob` is derived from the 13-digit RSA ID.
+ * public token link, this is authenticated + club-scoped. Runs through the SAME
+ * clearance-aware core as the public link (registerPlayerForClub, registeredVia 'portal'), so
+ * a player already registered at another club opens a clearance from that club, a declared
+ * previous club (`lastClubId`, or an exact on-system name typed into `lastClub`) opens a
+ * sourceless one, and a free-text off-system club raises a registration review. Required
+ * fields mirror the Union form (this route's contract, unchanged); `dob` is derived from the
+ * 13-digit RSA ID. Responds with the stored row plus `outcome` (and `clearance` when one was
+ * opened). An identity already on this roster → 409; one mid-transfer → 409.
  */
 app.post('/clubs/:id/players', async (c) => {
   const ra = c.get('requestAuth')!;
@@ -2316,7 +2060,7 @@ app.post('/clubs/:id/players', async (c) => {
   const cfg = await repo.getTenantConfig(ra.tenant);
   const club = await repo.getClub(ra.tenant, id);
   if (!club) throw new HttpError(404, 'club not found');
-  const body = await c.req.json<Partial<PlayerRegistration>>();
+  const body = await c.req.json<Partial<PlayerRegistration> & { lastClubId?: string }>();
   const required: Array<keyof PlayerRegistration> = [
     'firstName',
     'lastName',
@@ -2354,19 +2098,15 @@ app.post('/clubs/:id/players', async (c) => {
   const veteransClub = hasModule(cfg, 'veterans')
     ? await resolveVeteransClub(ra.tenant, body.veteransClubId, id)
     : undefined;
-  const naturalKey = playerNaturalKey({ ...body, dob });
-  const player: PlayerRegistration = {
-    naturalKey,
-    clubId: id,
+  const fields: Partial<PlayerRegistration> = {
     firstName: body.firstName!,
     lastName: body.lastName!,
     dob,
     cell: body.cell,
     email: body.email,
-    isMinor,
     guardianName: body.guardianName,
     idType: body.idType ?? 'sa-id',
-    idNumber: normalizeId(body.idNumber),
+    idNumber: body.idNumber,
     nationality: body.nationality,
     race: body.race,
     gender: body.gender,
@@ -2385,27 +2125,37 @@ app.post('/clubs/:id/players', async (c) => {
     isAllRounder: body.isAllRounder ?? false,
     isWk: body.isWk ?? false,
     ...(position ? { position } : {}),
-    status: 'active',
-    registeredBy: ra.email,
-    registeredVia: 'portal',
-    version: 0,
-    consentAt: now(),
-    createdAt: now(),
   };
+  const lastClubId = await resolveDeclaredPreviousClubId(ra.tenant, body.lastClubId, body.lastClub);
+  let result: RegisterPlayerOutcome;
   try {
-    await repo.createPlayer(ra.tenant, player);
+    result = await registerPlayerForClub(ra.tenant, club, fields, {
+      registeredVia: 'portal',
+      registeredBy: ra.email,
+      tenantConfig: cfg,
+      lastClubId,
+      typedPreviousClub: typeof body.lastClub === 'string' ? body.lastClub : undefined,
+      linkClub: { id, name: club.name },
+      directory: directoryClubs(cfg),
+      notifyClearanceOpened,
+    });
   } catch (err: unknown) {
-    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
-      throw new HttpError(409, 'a player with these details is already registered for this club');
-    }
+    if (err instanceof repo.DestinationClubGoneError) throw new HttpError(409, err.message);
     throw err;
   }
-  // Portal-created rows are active immediately, so materialize the affiliation now
-  // (write-on-activation). Best-effort — the registration already committed.
-  if (veteransClub) {
+  if (result.outcome === 'duplicate') {
+    throw new HttpError(409, 'a player with these details is already registered for this club');
+  }
+  if (result.outcome === 'clearance-already-open') {
+    throw new HttpError(409, 'a clearance for this player is already in progress');
+  }
+  const player = result.player;
+  // Only an ACTIVE row materializes the veterans affiliation now (write-on-activation); a
+  // clearance-pending row gets it when the clearance resolves (repo hooks). Best-effort.
+  if (veteransClub && result.outcome !== 'clearance-opened') {
     try {
       await repo.putVeteransAffiliation(ra.tenant, {
-        naturalKey,
+        naturalKey: player.naturalKey,
         playerName: `${player.firstName} ${player.lastName}`,
         veteransClubId: veteransClub.id,
         primaryClubId: id,
@@ -2417,7 +2167,532 @@ app.post('/clubs/:id/players', async (c) => {
       console.warn('failed to write veterans affiliation', err);
     }
   }
-  return c.json(player, 201);
+  return c.json(
+    {
+      ...player,
+      outcome: result.outcome,
+      ...(result.outcome === 'clearance-opened'
+        ? {
+            clearance: {
+              id: result.clearance.id,
+              fromClubId: result.clearance.fromClubId,
+              fromClubName: result.clearance.fromClubName,
+            },
+          }
+        : {}),
+    },
+    201,
+  );
+});
+
+// ───────────────────── Chair bulk registration (quick-add + spreadsheet) ─────────────────────
+//
+// Both bulk routes run every row through registerPlayerForClub, so a bulk-added player who is
+// registered at another club opens a clearance exactly as a single registration would.
+//
+// REQUIRED-FIELD CONTRACT (deliberately relaxed vs. the single form): a bulk row needs only the
+// identity minimum (first + last name, and a Luhn-valid 13-digit RSA ID — or, quick-add only, a
+// passport/visa number + nationality + date of birth). Cell, nationality (for SA IDs),
+// district, race, team and guardian name are NOT required — the same relaxation the operator
+// roster intake applies, because a club's historical register structurally lacks them; the
+// chair completes them per player afterwards. Supplied gender/race/team values are still
+// validated against the canonical sets / tenant leagues.
+//
+// Per-row outcomes, never a whole-request abort for one bad row: created | clearance-opened |
+// clearance-already-open | skipped-duplicate | error. Re-sending rows is idempotent (an
+// identity already on the roster → skipped-duplicate; one whose transfer an earlier request
+// opened → clearance-already-open). The club's playerCount is reconciled ONCE per request.
+
+/** Max rows per quick-add batch request. */
+const CHAIR_BATCH_MAX_ROWS = 25;
+/** Max rows per spreadsheet-commit request. The client drives ≤50-row chunks sequentially: per
+ *  row is a cross-club read + a write + possibly a clearance TransactWrite + a notice, so one
+ *  500-row synchronous call would blow the API Gateway timeout. */
+const CHAIR_ROSTER_COMMIT_MAX_ROWS = 50;
+
+type ChairBulkOutcome =
+  | 'created'
+  | 'clearance-opened'
+  | 'clearance-already-open'
+  | 'skipped-duplicate'
+  | 'error';
+
+interface ChairBulkResult {
+  index: number;
+  rowNumber?: number;
+  sheet?: string;
+  outcome: ChairBulkOutcome;
+  naturalKey?: string;
+  /** The club the opened (or already-open) clearance comes from, when known. */
+  fromClubName?: string;
+  error?: string;
+}
+
+/** A bulk row ready for the core (`fields`) or already rejected by validation (`error`). */
+interface ChairBulkRow {
+  index: number;
+  rowNumber?: number;
+  sheet?: string;
+  fields?: Partial<PlayerRegistration>;
+  error?: string;
+}
+
+/** League keys a player may register into — never a fixtures-only entry (see assertPlayerTeam). */
+function playerLeagueKeys(cfg: TenantConfig | null): Set<string> {
+  return new Set((cfg?.leagues ?? []).filter((l) => !isFixturesOnlyLeague(l)).map((l) => l.key));
+}
+
+/**
+ * Run validated bulk rows through registerPlayerForClub sequentially (deterministic order — an
+ * in-request duplicate resolves to skipped-duplicate on the later row), with one cross-club
+ * index prefetched for the whole request, then reconcile the club's playerCount once.
+ */
+async function registerChairRows(
+  ra: RequestAuth,
+  club: Club,
+  cfg: TenantConfig | null,
+  rows: ChairBulkRow[],
+): Promise<{ results: ChairBulkResult[]; playerCount: number }> {
+  const results: ChairBulkResult[] = [];
+  const toRegister = rows.filter((r) => r.fields);
+  const crossClubIndex = toRegister.length
+    ? await buildCrossClubIndex(ra.tenant, await repo.listClubs(ra.tenant), club.id)
+    : undefined;
+  for (const row of rows) {
+    const base = {
+      index: row.index,
+      ...(row.rowNumber !== undefined ? { rowNumber: row.rowNumber } : {}),
+      ...(row.sheet ? { sheet: row.sheet } : {}),
+    };
+    if (!row.fields) {
+      results.push({ ...base, outcome: 'error', error: row.error ?? 'invalid row' });
+      continue;
+    }
+    try {
+      // eslint-disable-next-line no-await-in-loop -- one row at a time, in submitted order
+      const r = await registerPlayerForClub(ra.tenant, club, row.fields, {
+        registeredVia: 'portal',
+        registeredBy: ra.email,
+        tenantConfig: cfg,
+        notifyClearanceOpened,
+        prefetch: { crossClubIndex },
+      });
+      const naturalKey = r.player.naturalKey;
+      if (r.outcome === 'clearance-opened') {
+        results.push({
+          ...base,
+          outcome: 'clearance-opened',
+          naturalKey,
+          fromClubName: r.clearance.fromClubName,
+        });
+      } else if (r.outcome === 'clearance-already-open') {
+        results.push({ ...base, outcome: 'clearance-already-open', naturalKey });
+      } else if (r.outcome === 'duplicate') {
+        results.push({ ...base, outcome: 'skipped-duplicate', naturalKey });
+      } else {
+        results.push({ ...base, outcome: 'created', naturalKey });
+      }
+    } catch (err) {
+      if (err instanceof HttpError && err.status < 500) {
+        results.push({ ...base, outcome: 'error', error: err.message });
+      } else {
+        console.error(`chair bulk registration: row ${row.index} failed`, err);
+        results.push({ ...base, outcome: 'error', error: 'registration failed — please retry' });
+      }
+    }
+  }
+  const { actual } = await repo.reconcilePlayerCount(ra.tenant, club.id);
+  return { results, playerCount: actual };
+}
+
+function summarizeChairResults(results: ChairBulkResult[]): Record<ChairBulkOutcome, number> {
+  const summary: Record<ChairBulkOutcome, number> = {
+    created: 0,
+    'clearance-opened': 0,
+    'clearance-already-open': 0,
+    'skipped-duplicate': 0,
+    error: 0,
+  };
+  for (const r of results) summary[r.outcome]++;
+  return summary;
+}
+
+interface ChairBatchItem {
+  firstName?: string;
+  lastName?: string;
+  idType?: 'sa-id' | 'passport';
+  idNumber?: string;
+  nationality?: string;
+  dob?: string;
+  gender?: string;
+  race?: string;
+  team?: string;
+}
+
+/** Validate one quick-add row; returns the core's input fields or an error string. */
+function validateChairBatchItem(
+  item: ChairBatchItem,
+  leagueKeys: Set<string>,
+): { fields: Partial<PlayerRegistration> } | { error: string } {
+  if (!item || typeof item !== 'object') return { error: 'row must be an object' };
+  const firstName = typeof item.firstName === 'string' ? collapseName(item.firstName) : '';
+  const lastName = typeof item.lastName === 'string' ? collapseName(item.lastName) : '';
+  if (!firstName || !lastName) return { error: 'firstName and lastName are required' };
+  if (firstName.length > 80 || lastName.length > 80) {
+    return { error: 'names must be 80 characters or fewer' };
+  }
+  const idType = item.idType === 'passport' ? 'passport' : 'sa-id';
+  const idNumber = typeof item.idNumber === 'string' ? normalizeId(item.idNumber) : '';
+  if (!idNumber) return { error: 'an ID number (or passport number) is required' };
+  let dob: string;
+  if (idType === 'sa-id') {
+    const derived = dobFromSaId(idNumber);
+    if (!derived || !luhnValid(idNumber)) return { error: 'ID number is not a valid RSA ID' };
+    dob = derived;
+  } else {
+    const nationality = typeof item.nationality === 'string' ? item.nationality.trim() : '';
+    if (!nationality) return { error: 'nationality is required for a passport player' };
+    const resolvedDob = resolvePlayerDob({ idType, idNumber, dob: item.dob });
+    if (!resolvedDob || !isValidIsoDate(resolvedDob)) {
+      return { error: 'a valid date of birth is required for a passport player' };
+    }
+    dob = resolvedDob;
+  }
+  const gender =
+    item.gender !== undefined && item.gender !== ''
+      ? normalizeGender(item.gender).value
+      : undefined;
+  if (item.gender !== undefined && item.gender !== '' && !gender) {
+    return { error: `unrecognised gender "${item.gender}"` };
+  }
+  const race =
+    item.race !== undefined && item.race !== '' ? normalizeRace(item.race).value : undefined;
+  if (item.race !== undefined && item.race !== '' && !race) {
+    return { error: `unrecognised race "${item.race}"` };
+  }
+  if (item.team !== undefined && item.team !== '' && !leagueKeys.has(item.team)) {
+    return { error: `unknown team/league "${item.team}"` };
+  }
+  return {
+    fields: {
+      firstName,
+      lastName,
+      idType,
+      idNumber,
+      dob,
+      ...(idType === 'passport' ? { nationality: item.nationality!.trim() } : {}),
+      ...(gender ? { gender } : {}),
+      ...(race ? { race } : {}),
+      ...(item.team ? { team: item.team } : {}),
+    },
+  };
+}
+
+/** Collapse whitespace runs in a typed name (same normalisation the public form applies). */
+function collapseName(raw: string): string {
+  return raw.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * POST /clubs/:id/players/batch — the chair's quick-add grid: up to CHAIR_BATCH_MAX_ROWS rows
+ * `{ rows: [{ firstName, lastName, idNumber | (idType:'passport', idNumber, nationality, dob),
+ * gender?, race?, team? }] }`, each through the clearance-aware core. Responds 200 with per-row
+ * `results` (in submitted order, `index` = position), a `summary` by outcome, and the club's
+ * reconciled `playerCount`. See the bulk-contract comment above for the relaxed required set.
+ */
+app.post('/clubs/:id/players/batch', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  const club = await repo.getClub(ra.tenant, id);
+  if (!club) throw new HttpError(404, 'club not found');
+  const body = await c.req
+    .json<{ rows?: ChairBatchItem[] }>()
+    .catch(() => ({}) as { rows?: ChairBatchItem[] });
+  if (!Array.isArray(body.rows) || body.rows.length === 0) {
+    throw new HttpError(400, 'rows must be a non-empty array');
+  }
+  if (body.rows.length > CHAIR_BATCH_MAX_ROWS) {
+    throw new HttpError(400, `no more than ${CHAIR_BATCH_MAX_ROWS} rows per request`);
+  }
+  const leagueKeys = playerLeagueKeys(cfg);
+  const rows: ChairBulkRow[] = body.rows.map((item, index) => {
+    const v = validateChairBatchItem(item, leagueKeys);
+    return 'error' in v ? { index, error: v.error } : { index, fields: v.fields };
+  });
+  const { results, playerCount } = await registerChairRows(ra, club, cfg, rows);
+  return c.json({ results, summary: summarizeChairResults(results), playerCount }, 200, {
+    'Cache-Control': 'no-store',
+  });
+});
+
+/** Byte cap on a chair-uploaded roster workbook (a 500-row sheet is ~50 KB). */
+const CHAIR_ROSTER_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Read the uploaded workbook from a chair roster-parse request. Primary transport is
+ * multipart/form-data (`file` = the .xlsx, optional `ageGroupMap` = a JSON string); the JSON
+ * `{ dataBase64, ageGroupMap? }` transport the structure-intake route uses is accepted too.
+ */
+async function readChairRosterUpload(
+  c: Context<HonoEnv>,
+): Promise<{ bytes: Buffer; ageGroupMap: Record<string, string> }> {
+  const tooBig = () =>
+    new HttpError(400, `workbook exceeds the ${CHAIR_ROSTER_MAX_BYTES / (1024 * 1024)}MB limit`);
+  const parseMap = (raw: unknown): Record<string, string> => {
+    let value = raw;
+    if (typeof raw === 'string') {
+      try {
+        value = JSON.parse(raw);
+      } catch {
+        throw new HttpError(400, 'ageGroupMap must be a JSON object');
+      }
+    }
+    if (value == null) return {};
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      throw new HttpError(400, 'ageGroupMap must be a JSON object');
+    }
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof v === 'string') out[k] = v;
+    }
+    return out;
+  };
+  const contentType = c.req.header('content-type') ?? '';
+  if (contentType.includes('multipart/form-data')) {
+    const form = await c.req.parseBody().catch(() => {
+      throw new HttpError(400, 'unable to read the upload');
+    });
+    const file = form['file'];
+    if (!file || typeof file === 'string') throw new HttpError(400, 'file is required');
+    if (file.size > CHAIR_ROSTER_MAX_BYTES) throw tooBig();
+    return {
+      bytes: Buffer.from(await file.arrayBuffer()),
+      ageGroupMap: parseMap(form['ageGroupMap']),
+    };
+  }
+  const body = await c.req
+    .json<{ dataBase64?: string; ageGroupMap?: unknown }>()
+    .catch(() => ({}) as { dataBase64?: string; ageGroupMap?: unknown });
+  const dataBase64 = typeof body.dataBase64 === 'string' ? body.dataBase64 : '';
+  if (!dataBase64) throw new HttpError(400, 'file is required');
+  if (dataBase64.length > Math.ceil((CHAIR_ROSTER_MAX_BYTES * 4) / 3)) throw tooBig();
+  return { bytes: Buffer.from(dataBase64, 'base64'), ageGroupMap: parseMap(body.ageGroupMap) };
+}
+
+/** Why a parsed row will not simply be created — drives the review table's conflict column. */
+type ChairRosterConflict =
+  | { type: 'in-club-duplicate' }
+  | {
+      type: 'cross-club';
+      clubId: string;
+      clubName: string;
+      /** 'active' → committing opens a clearance from this club; 'clearance-pending' → a
+       *  transfer is already in flight (commit reports clearance-already-open). */
+      status: PlayerRegistration['status'];
+    };
+
+/**
+ * POST /clubs/:id/roster/parse — the chair's spreadsheet upload, parsed into draft rows for a
+ * review step (nothing is written). Same parser as the operator roster intake
+ * (parseRosterSheet), with the club FORCED to `:id` and junior league keys derived from the
+ * tenant's own leagues; strict on identity (a row with no valid RSA ID is an exception, never
+ * a dob-only row — the registration core's identity minimum) and a BLANK age-group cell on a
+ * sheet with an Age Group column is a senior/team-less row rather than an exception (the
+ * downloadable template carries that column for everyone). Every row is annotated with
+ * `conflict` — already on this roster ("skipped"), or registered at another club ("will open
+ * a clearance from X") — so the chair sees it before committing, unlike the operator flow's
+ * silent skip. Response shape mirrors the operator parse (RosterIntakeParseResponse) plus
+ * `conflict` per row. Carries PII — `Cache-Control: no-store`.
+ */
+app.post('/clubs/:id/roster/parse', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  const club = await repo.getClub(ra.tenant, id);
+  if (!club) throw new HttpError(404, 'club not found');
+  const { bytes, ageGroupMap: requestedMap } = await readChairRosterUpload(c);
+  if (isLegacyXlsBuffer(bytes)) {
+    throw new HttpError(400, 'legacy .xls workbook — save it as .xlsx and upload it again');
+  }
+  const wb = new ExcelJS.Workbook();
+  try {
+    // See the roster-intake parse route for why this cast is needed.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wb.xlsx.load(bytes as any);
+  } catch {
+    throw new HttpError(400, 'unable to read the workbook — check the file is a valid .xlsx');
+  }
+
+  const juniorLeagueKeys = juniorLeagueKeysFor(cfg ?? ({} as TenantConfig));
+  const ageGroupMap: Record<string, string> = {};
+  for (const [raw, key] of Object.entries(requestedMap)) {
+    if (juniorLeagueKeys.has(key)) ageGroupMap[raw] = key;
+  }
+  const runNow = now();
+  const ageGroupRawsByRaw = new Map<string, string | null>();
+  const parsed = wb.worksheets.map((ws) => ({
+    ws,
+    result: parseRosterSheet(ws, id, runNow, {
+      allowMissingId: false,
+      allowBlankAgeGroup: true,
+      juniorLeagueKeys,
+      ageGroupMap,
+    }),
+  }));
+
+  // Conflict annotation: this club's own roster (one query) + every other club's roster
+  // indexed once (buildCrossClubIndex) — never a per-row × per-club read.
+  const anyRows = parsed.some((p) => p.result && p.result.rows.length > 0);
+  const ownKeys = anyRows
+    ? new Set((await repo.listPlayers(ra.tenant, id)).map((p) => p.naturalKey))
+    : new Set<string>();
+  const crossClubIndex = anyRows
+    ? await buildCrossClubIndex(ra.tenant, await repo.listClubs(ra.tenant), id)
+    : new Map();
+  const conflictFor = (naturalKey: string): ChairRosterConflict | undefined => {
+    if (ownKeys.has(naturalKey)) return { type: 'in-club-duplicate' };
+    const hits = (crossClubIndex.get(naturalKey) ?? []) as Array<{
+      clubId: string;
+      clubName: string;
+      status: PlayerRegistration['status'];
+    }>;
+    if (!hits.length) return undefined;
+    const hit =
+      hits.find((h) => h.status === 'clearance-pending') ??
+      hits.find((h) => h.status === 'active') ??
+      hits[0];
+    return { type: 'cross-club', clubId: hit.clubId, clubName: hit.clubName, status: hit.status };
+  };
+
+  const sheets = parsed.map(({ ws, result }) => {
+    if (!result) {
+      return {
+        name: ws.name,
+        skipped: true,
+        hasIdColumn: false,
+        totalDataRows: 0,
+        rows: [],
+        exceptions: [],
+        unknownGenderRaw: [],
+        unknownRaceRaw: [],
+      };
+    }
+    for (const { raw, leagueKey } of result.ageGroupRaws) {
+      const existing = ageGroupRawsByRaw.get(raw);
+      if (existing === undefined || (existing === null && leagueKey !== null)) {
+        ageGroupRawsByRaw.set(raw, leagueKey);
+      }
+    }
+    return {
+      name: ws.name,
+      skipped: false,
+      hasIdColumn: result.hasIdColumn,
+      totalDataRows: result.totalDataRows,
+      rows: result.rows.map((r) => {
+        const conflict = conflictFor(r.player.naturalKey);
+        return {
+          rowNumber: r.rowNumber,
+          firstName: r.player.firstName,
+          lastName: r.player.lastName,
+          dob: r.player.dob,
+          ...(r.player.idNumber ? { idNumber: r.player.idNumber } : {}),
+          missingId: r.missingId,
+          ...(r.player.gender ? { gender: r.player.gender } : {}),
+          ...(r.player.race ? { race: r.player.race } : {}),
+          ...(r.player.team ? { team: r.player.team } : {}),
+          ...(conflict ? { conflict } : {}),
+        };
+      }),
+      exceptions: result.exceptions,
+      unknownGenderRaw: [...new Set(result.unknownGenderRaw)],
+      unknownRaceRaw: [...new Set(result.unknownRaceRaw)],
+    };
+  });
+
+  return c.json(
+    {
+      parseable: true,
+      sheets,
+      dobOnlyCount: 0,
+      juniorLeagueKeys: [...juniorLeagueKeys],
+      ageGroupRaws: [...ageGroupRawsByRaw].map(([raw, leagueKey]) => ({ raw, leagueKey })),
+    },
+    200,
+    { 'Cache-Control': 'no-store' },
+  );
+});
+
+interface ChairRosterCommitItem extends RosterIntakeCommitItem {
+  sheet?: string;
+}
+
+/**
+ * POST /clubs/:id/roster/commit — commit ONE chunk (≤ CHAIR_ROSTER_COMMIT_MAX_ROWS) of reviewed
+ * spreadsheet rows `{ items: [{ rowNumber, firstName, lastName, dob, idNumber, gender?, race?,
+ * team?, sheet? }] }` into `:id` (any item clubId is ignored — the club is forced). The client
+ * drives chunks sequentially with a progress bar, so a dropped connection loses at most one
+ * chunk, and a re-commit is idempotent (skipped-duplicate / clearance-already-open, never a
+ * 409). Each row is validated exactly like the operator intake (validateRosterIntakeItem) plus
+ * the identity minimum (an RSA ID is required), then registered through the clearance-aware
+ * core with a prefetched cross-club index — so, unlike the operator intake, a player already
+ * registered at another club DOES open a clearance. Per-row results + summary + the club's
+ * reconciled playerCount (once per chunk). See the bulk-contract comment above for the relaxed
+ * required set. Carries PII — `Cache-Control: no-store`.
+ */
+app.post('/clubs/:id/roster/commit', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  assertClubAccess(ra, id);
+  const cfg = await repo.getTenantConfig(ra.tenant);
+  const club = await repo.getClub(ra.tenant, id);
+  if (!club) throw new HttpError(404, 'club not found');
+  const body = await c.req
+    .json<{ items?: ChairRosterCommitItem[] }>()
+    .catch(() => ({}) as { items?: ChairRosterCommitItem[] });
+  if (!Array.isArray(body.items) || body.items.length === 0) {
+    throw new HttpError(400, 'items must be a non-empty array');
+  }
+  if (body.items.length > CHAIR_ROSTER_COMMIT_MAX_ROWS) {
+    throw new HttpError(
+      400,
+      `no more than ${CHAIR_ROSTER_COMMIT_MAX_ROWS} items per request — send the rows in chunks`,
+    );
+  }
+  const leagueKeys = playerLeagueKeys(cfg);
+  const clubIds = new Set([id]);
+  const rows: ChairBulkRow[] = body.items.map((raw, index) => {
+    const item: ChairRosterCommitItem = raw && typeof raw === 'object' ? raw : {};
+    const base = {
+      index,
+      ...(typeof item.rowNumber === 'number' ? { rowNumber: item.rowNumber } : {}),
+      ...(typeof item.sheet === 'string' && item.sheet ? { sheet: item.sheet } : {}),
+    };
+    const err = validateRosterIntakeItem({ ...item, clubId: id }, clubIds, leagueKeys, index);
+    if (err) return { ...base, error: err };
+    if (!item.idNumber) return { ...base, error: `item ${index}: idNumber is required` };
+    const gender = item.gender !== undefined ? normalizeGender(item.gender).value : undefined;
+    const race = item.race !== undefined ? normalizeRace(item.race).value : undefined;
+    return {
+      ...base,
+      fields: {
+        firstName: item.firstName!.trim(),
+        lastName: item.lastName!.trim(),
+        dob: item.dob!,
+        idType: 'sa-id',
+        idNumber: item.idNumber,
+        ...(gender ? { gender } : {}),
+        ...(race ? { race } : {}),
+        ...(item.team ? { team: item.team } : {}),
+      },
+    };
+  });
+  const { results, playerCount } = await registerChairRows(ra, club, cfg, rows);
+  return c.json({ results, summary: summarizeChairResults(results), playerCount }, 200, {
+    'Cache-Control': 'no-store',
+  });
 });
 
 /** Mint a presigned PUT for a player's ID document (image or PDF). */
