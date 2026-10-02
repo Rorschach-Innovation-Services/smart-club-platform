@@ -4553,8 +4553,11 @@ app.post('/series/:id/clash-check', requireAdmin, async (c) => {
 app.delete('/series/:id', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   await repo.deleteSeries(tenant, c.req.param('id'));
-  // Its fixtures' umpire appointments go with it.
+  // Its fixtures' umpire appointments go with it, and so does its medicoach-sync state
+  // (results, outbox rows, held conflicts, report markers); pending captain's reports are
+  // voided (ADR 0016).
   await repo.deleteFixtureOfficialsForSeries(tenant, c.req.param('id'));
+  await repo.deleteSeriesSyncState(tenant, c.req.param('id'));
   return c.json({ ok: true });
 });
 

@@ -807,6 +807,75 @@ describe('a cleared then re-recorded result', () => {
   });
 });
 
+describe('DELETE /series', () => {
+  test("removes the series' sync state and voids its pending reports; other series keep theirs", async () => {
+    await seedCaptain();
+    page = liveResultPage('live');
+    await runPull();
+    const SID = 's-planb-premier-men-t20-g1';
+    const OTHER = 's-planb-premier-men-t20-g2';
+    const snap = {
+      scheduledTime: '2026-10-04T09:00:00+02:00',
+      timeTbc: false,
+      dateTbc: false,
+      venue: 'Kingsmead Oval',
+      postponed: false,
+      cancelled: false,
+      changedAt: '2026-10-02T10:00:00.000Z',
+    };
+    for (const [seriesId, fixtureId] of [
+      [SID, 'f3'],
+      [OTHER, 'f1'],
+    ]) {
+      const ref = `smartclub:dolphins:fixture:${seriesId}:${fixtureId}`;
+      await repo.putPendingSync('dolphins', {
+        ref,
+        seriesId,
+        fixtureId,
+        schedule: snap,
+        origin: 'admin',
+        enqueuedAt: snap.changedAt,
+        attempts: 0,
+      });
+      await repo.putSyncConflict('dolphins', {
+        ref,
+        seriesId,
+        fixtureId,
+        current: { status: 'scheduled' },
+        proposed: snap,
+        fields: ['time'],
+        reason: 'clash',
+        detail: [],
+        detectedAt: snap.changedAt,
+      } as never);
+    }
+    await repo.putReportOpenMarker('dolphins', {
+      ref: `smartclub:dolphins:fixture:${SID}:f3`,
+      seriesId: SID,
+      fixtureId: 'f3',
+      recordedAt: snap.changedAt,
+      createdAt: snap.changedAt,
+      attempts: 1,
+    });
+
+    const res = await app.request(`/series/${SID}`, { method: 'DELETE', headers: headers(ADMIN) });
+    assert.equal(res.status, 200);
+    assert.equal(await repo.getFixtureResult('dolphins', SID, 'f3'), null);
+    assert.deepEqual(
+      (await repo.listPendingSync('dolphins')).map((p) => p.seriesId),
+      [OTHER],
+    );
+    assert.deepEqual(
+      (await repo.listSyncConflicts('dolphins')).map((x) => x.seriesId),
+      [OTHER],
+    );
+    assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
+    const reports = (await reportsOf()).filter((r) => r.seriesId === SID);
+    assert.equal(reports.length, 2);
+    assert.ok(reports.every((r) => r.status === 'void'));
+  });
+});
+
 describe('admin list', () => {
   test('filters by status and date; no late status anywhere; reps are refused', async () => {
     await seedCaptain();

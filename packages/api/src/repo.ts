@@ -1847,6 +1847,45 @@ async function listCaptainsReportNotifyKeys(
   return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
 }
 
+/**
+ * A deleted series' medicoach-sync state (ADR 0016): its FIXRESULT# results, the outbox rows
+ * (PENDINGSYNC#), held conflicts (SYNCCONFLICT#) and report-open markers (REPORTOPEN#) of its
+ * fixtures are deleted, and its still-PENDING captain's reports are voided (their links die;
+ * submitted ones are kept as filed). Idempotent.
+ */
+export async function deleteSeriesSyncState(
+  tenant: string,
+  seriesId: string,
+): Promise<{ deleted: number; voided: number }> {
+  const results = fixtureResultsListKey(tenant);
+  const keys = (
+    await queryAll({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+      ExpressionAttributeValues: {
+        ':p': results.pk,
+        ':s': `${results.skPrefix}${seriesId}#`,
+      },
+      ProjectionExpression: 'pk, sk',
+    })
+  ).map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+  const [pending, conflicts, markers, reports] = await Promise.all([
+    listPendingSync(tenant),
+    listSyncConflicts(tenant),
+    listReportOpenMarkers(tenant),
+    listCaptainsReports(tenant),
+  ]);
+  for (const p of pending) if (p.seriesId === seriesId) keys.push(pendingSyncKey(tenant, p.ref));
+  for (const x of conflicts) if (x.seriesId === seriesId) keys.push(syncConflictKey(tenant, x.ref));
+  for (const m of markers) if (m.seriesId === seriesId) keys.push(reportOpenKey(tenant, m.ref));
+  if (keys.length) await batchDelete(uniqueKeys(keys));
+  let voided = 0;
+  for (const r of reports)
+    if (r.seriesId === seriesId && r.status === 'pending')
+      if ((await voidOrFlagCaptainsReport(tenant, r, 'series deleted')) === 'voided') voided++;
+  return { deleted: keys.length, voided };
+}
+
 /** Every key in the captain's-report partition (reports, counters, ledger) — for erasure. */
 async function listCaptainsReportPartitionKeys(
   tenant: string,
