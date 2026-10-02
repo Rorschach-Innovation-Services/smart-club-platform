@@ -423,6 +423,83 @@ describe('Slice 3 — inbound schedule changes', () => {
     assert.deepEqual(latest, [MC_LATER]);
   });
 
+  test('a conflict email that failed is retried when the same proposal is replayed, then never again', async () => {
+    pages = [changesPage([{ ref: REF(S1, 'f1'), schedule: { venue: 'Somewhere Unknown' } }])];
+    let fail = true;
+    const sent: SyncConflict[] = [];
+    const run = () =>
+      puller.runMedicoachSync(T, 'cron', {
+        repo,
+        url: stubUrl,
+        secret: SECRET,
+        log: () => {},
+        onResultStored: async () => {},
+        notifyConflict: async (_t, c) => {
+          if (fail) throw new Error('SES down');
+          sent.push(c);
+        },
+      });
+    const err = console.error;
+    console.error = () => {};
+    try {
+      await run();
+    } finally {
+      console.error = err;
+    }
+    assert.equal((await repo.getSyncConflict(T, REF(S1, 'f1')))!.notifiedAt, undefined);
+    fail = false;
+    await run(); // the same proposal again
+    assert.equal(sent.length, 1, 'the missed email goes out on the replay');
+    assert.ok((await repo.getSyncConflict(T, REF(S1, 'f1')))!.notifiedAt);
+    await run();
+    assert.equal(sent.length, 1, 'and only once');
+  });
+
+  test('conflict emails go to tenant admins, never to platform operators', async () => {
+    const users = [
+      { sub: 'u-admin', email: 'admin@club.test', memberships: [{ tenantId: T, role: 'admin' }] },
+      {
+        sub: 'u-op',
+        email: 'op@platform.test',
+        memberships: [
+          { tenantId: '*', role: 'operator' },
+          { tenantId: T, role: 'admin' },
+        ],
+      },
+      { sub: 'u-rep', email: 'rep@club.test', memberships: [{ tenantId: T, role: 'rep' }] },
+    ];
+    for (const u of users) await repo.putUser({ ...u, onboardingSeen: {} } as never);
+    const to: string[] = [];
+    await schedule.notifyConflictByEmail(repo, {
+      send: async (m) => {
+        to.push(m.to);
+      },
+    })(
+      T,
+      {
+        ref: REF(S1, 'f1'),
+        seriesId: S1,
+        fixtureId: 'f1',
+        current: { status: 'scheduled' },
+        proposed: {
+          scheduledTime: null,
+          timeTbc: true,
+          dateTbc: true,
+          venue: null,
+          postponed: false,
+          cancelled: false,
+          changedAt: MC_AT,
+        },
+        fields: ['venue'],
+        reason: 'venue-unresolved',
+        detail: [],
+        detectedAt: MC_AT,
+      } as SyncConflict,
+      await repo.getTenantConfig(T),
+    );
+    assert.deepEqual(to, ['admin@club.test']);
+  });
+
   test('a venue that matches no ground is held as a conflict', async () => {
     pages = [changesPage([{ ref: REF(S1, 'f1'), schedule: { venue: 'Somewhere Unknown' } }])];
     const summary = await pull();

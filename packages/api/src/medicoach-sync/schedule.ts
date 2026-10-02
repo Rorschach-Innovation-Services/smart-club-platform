@@ -770,7 +770,8 @@ function matchLineOf(series: Series, f: ScheduleFixture): string {
 /**
  * Write (or keep) the SYNCCONFLICT# row for a refused change. Latest proposal wins per ref:
  * an older proposal than the one held is ignored, the same proposal again (a replayed page)
- * changes nothing and sends nothing. Each NEW proposal emails the admins once.
+ * changes nothing — except that a held proposal whose email never went out (`notifiedAt`
+ * unset: the send failed) retries the email. Each proposal emails the admins once.
  */
 async function holdConflict(
   deps: InboundScheduleDeps,
@@ -787,7 +788,12 @@ async function holdConflict(
   const { series, fixture, input } = args;
   const now = deps.now ?? (() => new Date());
   const held = await repo.getSyncConflict(input.tenant, input.ref);
-  if (held && Date.parse(held.proposed.changedAt) >= Date.parse(input.schedule.changedAt)) return;
+  if (held && Date.parse(held.proposed.changedAt) > Date.parse(input.schedule.changedAt)) return;
+  if (held && Date.parse(held.proposed.changedAt) === Date.parse(input.schedule.changedAt)) {
+    // The same proposal replayed: nothing to write; retry the email only if it never went out.
+    if (!held.notifiedAt) await emailConflict(deps, input.tenant, config, held);
+    return;
+  }
   const conflict: SyncConflict = {
     ref: input.ref,
     seriesId: input.seriesId,
@@ -812,14 +818,27 @@ async function holdConflict(
   log(
     `[medicoach-sync] ${input.tenant}: schedule change held for review (${args.reason}) ${input.ref}`,
   );
+  await emailConflict(deps, input.tenant, config, conflict);
+}
+
+/** Email the admins about a held conflict and stamp `notifiedAt`; a failure is only logged. */
+async function emailConflict(
+  deps: InboundScheduleDeps,
+  tenant: string,
+  config: TenantConfig | null,
+  conflict: SyncConflict,
+): Promise<void> {
+  const { repo } = deps;
+  const now = deps.now ?? (() => new Date());
   try {
-    await (deps.notifyConflict ?? notifyConflictByEmail(repo))(input.tenant, conflict, config);
-    await repo.putSyncConflict(input.tenant, { ...conflict, notifiedAt: now().toISOString() });
+    await (deps.notifyConflict ?? notifyConflictByEmail(repo))(tenant, conflict, config);
+    await repo.putSyncConflict(tenant, { ...conflict, notifiedAt: now().toISOString() });
   } catch (err) {
     // The conflict is held and visible in the admin inbox either way; a failed email is
-    // logged, never allowed to fail the sync run.
+    // logged (the next replay of the same proposal retries it), never allowed to fail the
+    // sync run.
     console.error(
-      `[medicoach-sync] ${input.tenant}: conflict email failed — ${err instanceof Error ? err.message : 'error'}`,
+      `[medicoach-sync] ${tenant}: conflict email failed — ${err instanceof Error ? err.message : 'error'}`,
     );
   }
 }
@@ -838,17 +857,33 @@ export function describeSchedule(s: SyncScheduleSnapshot | SyncSchedule): string
   return parts.join(' · ') || '(no schedule)';
 }
 
-/** The default conflict notice: one email to each tenant admin (SES; dry-run offline). */
-export function notifyConflictByEmail(repo: RepoModule) {
+/**
+ * The default conflict notice: one email to each tenant admin (SES; dry-run offline). Platform
+ * operators are left out even when they hold an admin membership (operator auto-admin): they
+ * see the inbox in the console and would otherwise get every tenant's conflicts.
+ */
+export function notifyConflictByEmail(
+  repo: RepoModule,
+  opts: {
+    send?: (
+      input: Parameters<(typeof import('../notify/email.js'))['sendSyncConflictEmail']>[0],
+    ) => Promise<unknown>;
+  } = {},
+) {
   return async (tenant: string, conflict: SyncConflict, config: TenantConfig | null) => {
-    const { sendSyncConflictEmail } = await import('../notify/email.js');
+    const sendSyncConflictEmail =
+      opts.send ?? (await import('../notify/email.js')).sendSyncConflictEmail;
     const { orgCopy } = await import('../branding.js');
+    const { PLATFORM_TENANT } = await import('../types.js');
     const users = await repo.listTenantUsers(tenant);
     const emails = new Set<string>();
     for (const u of users) {
       const profile = await repo.getUser(u.sub);
-      if (profile?.memberships.some((m) => m.tenantId === tenant && m.role === 'admin') && u.email)
-        emails.add(u.email);
+      const isAdmin = profile?.memberships.some((m) => m.tenantId === tenant && m.role === 'admin');
+      const isOperator = profile?.memberships.some(
+        (m) => m.tenantId === PLATFORM_TENANT && m.role === 'operator',
+      );
+      if (isAdmin && !isOperator && u.email) emails.add(u.email);
     }
     const orgName = config ? orgCopy(config).name : tenant;
     for (const to of emails)

@@ -145,7 +145,8 @@ side's `changedAt`; smart club keeps its own as the fixture's `schedule.changedA
   Release and withheld state are never touched. A venue is resolved by `groundKey` against
   the tenant's ground list. An unresolved venue or a refused clash writes
   `SYNCCONFLICT#<ref>` instead (latest proposal per ref) and emails the tenant admins once
-  per proposal. An older change is dropped and listed in SYNCLOG (`scheduleStaleRefs`).
+  per proposal (platform operators are left out — they see the inbox in the console; a
+  failed email is retried when the same proposal is pulled again). An older change is dropped and listed in SYNCLOG (`scheduleStaleRefs`).
 - **Admin inbox** (console "Medicoach sync", shown only with the feature on): Apply writes the
   proposal through `applySeriesPatch` (the clash gate runs again; still clashing ⇒ 409);
   Discard re-stamps the fixture and queues smart club's schedule, so the proposal can never
