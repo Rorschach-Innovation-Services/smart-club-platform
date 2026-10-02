@@ -70,8 +70,9 @@ byte-for-byte copies across the repos (prettier-ignored here).
 
 Because the fixture id is half of the ref, **fixture ids must never shift**. The Plan-B
 importer used to mint `f1..fN` from sheet row order on every run; it now matches incoming
-rows to stored fixtures (date + unordered pair, kick-off time breaking ties), keeps their
-ids, numbers new rows above the series' highest id, and reports stored fixtures the sheet
+rows to stored fixtures (date + unordered pair, kick-off time breaking ties; then, for a row
+whose date moved — on the sheet or by an applied medicoach reschedule — the unordered pair
+alone, same round first, then the nearest date), keeps their ids, numbers new rows above the series' highest id, and reports stored fixtures the sheet
 no longer has instead of dropping them (`fixture-identity.ts`). Sync-owned fixture fields
 (`syncRef`, `schedule.changedAt`) are carried across every rewrite. On a sync-enabled
 tenant the importer's destructive modes (`--revert`, `--prune`, `--discard-edits`) refuse
@@ -147,7 +148,10 @@ side's `changedAt`; smart club keeps its own as the fixture's `schedule.changedA
   `recordScheduleDiff`: it stamps `schedule.changedAt = now` in the same write and, once the
   write landed, collapses the snapshot onto `PENDINGSYNC#<ref>`. Origin `medicoach` (the
   inbound apply) is skipped, so nothing echoes. A fixture whose id now names a different
-  match is never pushed.
+  match is never pushed. A fixture the write ADDS to a mapped series (or every fixture of a
+  new mapped series) is not pushed either — the v1 contract has no create — but is reported
+  as "new fixture not in medicoach (needs bundle top-up)" on the CLI/log and in a
+  `new-fixtures` SYNCLOG row the admin page lists.
 - **Flush.** Each cron run and "Sync now" first flushes the outbox in batches of ≤100 to
   `POST /integrations/smartclub/schedule` (signed; dry run with the secret empty), then pulls,
   then retries pending captain's reports (`REPORTOPEN#`). `applied|stale|unchanged|unmapped`

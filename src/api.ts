@@ -646,8 +646,10 @@ export interface MedicoachSyncConflict {
 export interface MedicoachSyncLog {
   id: string;
   at: string;
-  trigger: 'cron' | 'manual';
-  kind?: 'pull' | 'push';
+  trigger: 'cron' | 'manual' | 'write' | 'cli';
+  kind?: 'pull' | 'push' | 'new-fixtures';
+  /** Refs of fixtures added in smart club that medicoach does not have (`new-fixtures`). */
+  newFixtureRefs?: string[];
   outcome: 'ok' | 'error';
   pages: number;
   fixtures: number;

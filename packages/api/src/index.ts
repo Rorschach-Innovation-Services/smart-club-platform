@@ -4215,7 +4215,12 @@ async function applySeriesPatch(
     if (requeue.fixtures) {
       patch.fixtures = requeue.fixtures;
       patch.version ??= current.version;
-      scheduleSync = { refs: [], enqueue: requeue.enqueue };
+      const edits = scheduleSync;
+      scheduleSync = {
+        refs: edits?.refs ?? [],
+        newRefs: edits?.newRefs ?? [],
+        enqueue: async () => (await edits?.enqueue(), requeue.enqueue()),
+      };
     }
   }
   let written: Series;

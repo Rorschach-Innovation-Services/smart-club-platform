@@ -205,11 +205,25 @@ export async function seriesMappedForSync(
 export interface ScheduleDiffHandle {
   /** Refs whose schedule this write changes (already stamped on `after.fixtures`). */
   refs: string[];
+  /**
+   * Refs of fixtures this write ADDS to a mapped series. Medicoach has no such match and the
+   * v1 contract cannot create one, so they are never pushed — `enqueue()` reports them (log +
+   * SYNCLOG) as needing a bundle top-up instead of ignoring them silently.
+   */
+  newRefs: string[];
   /** Write the PENDINGSYNC# rows — call only AFTER the series write succeeded. */
   enqueue(): Promise<number>;
 }
 
-const NO_DIFF: ScheduleDiffHandle = { refs: [], enqueue: async () => 0 };
+const NO_DIFF: ScheduleDiffHandle = { refs: [], newRefs: [], enqueue: async () => 0 };
+
+/** The CLI/log line for fixtures medicoach does not have (no create in contract v1). */
+export function newFixturesNotice(tenant: string, seriesId: string, refs: string[]): string {
+  return (
+    `[medicoach-sync] ${tenant}: ${refs.length} new fixture(s) in ${seriesId} not in medicoach ` +
+    `(needs bundle top-up): ${refs.join(', ')}`
+  );
+}
 
 /**
  * The one helper every smart-club series write calls (Slice 4). Compares `before` and
@@ -220,30 +234,38 @@ const NO_DIFF: ScheduleDiffHandle = { refs: [], enqueue: async () => 0 };
  * never happened).
  *
  * A no-op for origin `medicoach` (the inbound apply — nothing echoes), for a tenant without
- * `features.medicoachSync`, for a series medicoach does not own (`seriesIsSyncMapped`), for a
- * brand-new series (no `before`), and for fixtures that are new or now a different match
- * (their ref no longer means what medicoach has).
+ * `features.medicoachSync` and for a series medicoach does not own (`seriesIsSyncMapped`).
+ * Fixtures that are new (no stored counterpart, or a brand-new series) are never pushed —
+ * medicoach cannot create a match — but are reported by `enqueue()` as "new fixture not in
+ * medicoach (needs bundle top-up)"; a fixture whose id now names a different match is skipped
+ * (its ref no longer means what medicoach has).
  */
 export async function recordScheduleDiff(
-  repo: Pick<RepoModule, 'getTenantConfig' | 'putPendingSync' | 'getSeasonRun'>,
+  repo: Pick<RepoModule, 'getTenantConfig' | 'putPendingSync' | 'getSeasonRun' | 'putSyncLog'>,
   tenant: string,
   before: Series | null | undefined,
   after: Series,
   origin: ScheduleChangeOrigin,
-  opts: { config?: TenantConfig | null; now?: () => Date } = {},
+  opts: { config?: TenantConfig | null; now?: () => Date; log?: (line: string) => void } = {},
 ): Promise<ScheduleDiffHandle> {
-  if (origin === 'medicoach' || !before || !Array.isArray(after.fixtures)) return NO_DIFF;
+  if (origin === 'medicoach' || !Array.isArray(after.fixtures)) return NO_DIFF;
   const config = opts.config !== undefined ? opts.config : await repo.getTenantConfig(tenant);
   if (!(await seriesMappedForSync(repo, tenant, after, config))) return NO_DIFF;
   const nowIso = (opts.now?.() ?? new Date()).toISOString();
   const held = seriesHoldsSchedule(after);
   const prior = new Map<string, ScheduleFixture>();
-  for (const f of (before.fixtures as ScheduleFixture[]) ?? []) if (f?.id) prior.set(f.id, f);
+  for (const f of (before?.fixtures as ScheduleFixture[] | undefined) ?? [])
+    if (f?.id) prior.set(f.id, f);
 
   const rows: PendingScheduleSync[] = [];
+  const newRefs: string[] = [];
   after.fixtures = (after.fixtures as ScheduleFixture[]).map((f) => {
     const old = f?.id ? prior.get(f.id) : undefined;
-    if (!old || !sameMatch(old, f)) return f;
+    if (!old) {
+      if (f?.id) newRefs.push(fixtureSyncRef(tenant, String(after.id), f));
+      return f;
+    }
+    if (!before || !sameMatch(old, f)) return f;
     if (scheduleKey(before, old) === scheduleKey(after, f)) return f;
     const next: ScheduleFixture = { ...f, schedule: { ...(f.schedule ?? {}), changedAt: nowIso } };
     rows.push({
@@ -258,11 +280,34 @@ export async function recordScheduleDiff(
     });
     return next;
   });
-  if (!rows.length) return NO_DIFF;
+  if (!rows.length && !newRefs.length) return NO_DIFF;
+  const log = opts.log ?? ((line: string) => console.log(line));
   return {
     refs: rows.map((r) => r.ref),
+    newRefs,
     enqueue: async () => {
       for (const r of rows) await repo.putPendingSync(tenant, r);
+      if (newRefs.length) {
+        log(newFixturesNotice(tenant, String(after.id), newRefs));
+        await repo.putSyncLog(tenant, {
+          id: randomUUID(),
+          at: nowIso,
+          trigger: origin === 'cli' ? 'cli' : 'write',
+          kind: 'new-fixtures',
+          outcome: 'ok',
+          pages: 0,
+          fixtures: newRefs.length,
+          counts: {
+            resultsStored: 0,
+            resultsStale: 0,
+            resultsCleared: 0,
+            unmapped: 0,
+            slotsFilled: 0,
+            scheduleDiffers: 0,
+          },
+          newFixtureRefs: newRefs,
+        });
+      }
       return rows.length;
     },
   };

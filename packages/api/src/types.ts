@@ -1121,7 +1121,8 @@ export interface FixtureResultView {
 export interface SyncLogEntry {
   id: string;
   at: string;
-  trigger: 'cron' | 'manual';
+  /** `write`/`cli`: a smart-club series write (admin/API or a CLI), not a sync run. */
+  trigger: 'cron' | 'manual' | 'write' | 'cli';
   outcome: 'ok' | 'error';
   pages: number;
   fixtures: number;
@@ -1143,8 +1144,13 @@ export interface SyncLogEntry {
   scheduleDiffersRefs?: string[];
   /** Refs whose inbound schedule was dropped as older than smart club's (most-recent-wins). */
   scheduleStaleRefs?: string[];
-  /** `push` rows record an outbox flush (Slice 4); absent ⇒ a pull. */
-  kind?: 'pull' | 'push';
+  /**
+   * `push` rows record an outbox flush (Slice 4); `new-fixtures` a write that added fixtures
+   * to a mapped series which medicoach does not have (needs a bundle top-up); absent ⇒ a pull.
+   */
+  kind?: 'pull' | 'push' | 'new-fixtures';
+  /** Refs of the new fixtures (`new-fixtures` rows only). Fixture refs carry no PII. */
+  newFixtureRefs?: string[];
   /** Outbox flush outcome counts (push rows only). */
   push?: SchedulePushCounts;
   error?: string;

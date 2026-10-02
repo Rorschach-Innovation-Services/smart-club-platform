@@ -109,6 +109,41 @@ describe('reconcileFixtureIds', () => {
     assert.deepEqual(r.fixtures[0].schedule, { changedAt: '2026-10-01T10:00:00.000Z' });
   });
 
+  test('a moved date keeps the id (pair alone) instead of forking a new fixture', () => {
+    const stored = built(sheet);
+    const moved = built([...sheet.slice(0, 2), row('2026-10-25', 'c', 'b', '13:30'), sheet[3]]);
+    const r = reconcileFixtureIds(stored, moved);
+    assert.deepEqual(
+      r.fixtures.map((f) => `${f.id} ${f.date}`),
+      ['f1 2026-10-04', 'f2 2026-10-04', 'f3 2026-10-25', 'f4 2026-10-11'],
+    );
+    assert.deepEqual(r.added, []);
+    assert.deepEqual(r.removed, []);
+  });
+
+  test('a pair meeting twice, both moved: same round first, then the nearest date', () => {
+    const stored = [
+      { id: 'f1', round: 1, ...row('2026-10-04', 'a', 'b') },
+      { id: 'f2', round: 4, ...row('2026-10-25', 'b', 'a') },
+      { id: 'f3', ...row('2026-11-01', 'c', 'd') },
+      { id: 'f4', ...row('2026-11-29', 'c', 'd') },
+    ];
+    const incoming = built([
+      // Round 1 moved next to round 4's old date — the round wins over the nearer date.
+      { round: 1, ...row('2026-10-24', 'a', 'b') },
+      { round: 4, ...row('2026-10-05', 'a', 'b') },
+      // No rounds: nearest date decides.
+      row('2026-11-27', 'd', 'c'),
+      row('2026-11-03', 'c', 'd'),
+    ]);
+    const r = reconcileFixtureIds(stored, incoming);
+    assert.deepEqual(
+      r.fixtures.map((f) => f.id),
+      ['f1', 'f2', 'f4', 'f3'],
+    );
+    assert.deepEqual(r.added, []);
+  });
+
   test('a first import (nothing stored) writes f1..fN', () => {
     const r = reconcileFixtureIds([], built(sheet));
     assert.deepEqual(

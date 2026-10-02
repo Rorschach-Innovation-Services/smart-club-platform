@@ -694,6 +694,87 @@ describe('Slice 4 — the outbox', () => {
   });
 });
 
+// ── Fixture identity survives a moved date; new fixtures are reported (ADR 0016) ──
+describe('Slice 4 — moved dates keep their ref; new fixtures are reported', () => {
+  test('a medicoach-applied date, then a re-import of the old sheet date, keeps the id and pushes', async () => {
+    pages = [
+      changesPage([
+        { ref: REF(S1, 'f1'), schedule: { scheduledTime: '2026-10-18T09:00:00+02:00' } },
+      ]),
+    ];
+    assert.equal((await pull()).counts.scheduleApplied, 1);
+    assert.equal((await fixtureOf(S1, 'f1')).date, '2026-10-18');
+
+    // The sheet still says 4 Oct: the importer's id stabilisation + write path.
+    const { stabiliseFixtureIds } = await import('../src/import-planb-fixtures.js');
+    const existing = (await repo.getSeries(T, S1))!;
+    const sheetRows = [fx('f1'), fx('f2', { home: 'c', away: 'd', time: '13:30' })].map(
+      (f, i) => ({ ...f, id: `f${i + 1}` }),
+    );
+    // Row order swapped so a row-order id would be wrong.
+    const incoming = [sheetRows[1], sheetRows[0]].map((f, i) => ({ ...f, id: `f${i + 1}` }));
+    const reimported = { ...structuredClone(existing), fixtures: incoming } as Series;
+    const ids = stabiliseFixtureIds(T, [{ series: reimported, fixtures: incoming } as never], [
+      existing,
+    ]);
+    assert.deepEqual(ids.removedRefs, []);
+    assert.deepEqual(
+      incoming.map((f) => `${f.id} ${f.home}v${f.away} ${f.date}`),
+      ['f2 cvd 2026-10-04', 'f1 avb 2026-10-04'],
+    );
+    const handle = await schedule.recordScheduleDiff(repo, T, existing, reimported, 'cli');
+    assert.deepEqual(handle.refs, [REF(S1, 'f1')]);
+    assert.deepEqual(handle.newRefs, []);
+    await repo.putSeries(T, reimported);
+    await handle.enqueue();
+    await flush();
+    assert.deepEqual(
+      pushes[0].body.changes.map((c) => [c.ref, c.schedule.scheduledTime]),
+      [[REF(S1, 'f1'), '2026-10-04T09:00:00+02:00']],
+    );
+  });
+
+  test('a fixture added to a mapped series is not pushed but reported for a bundle top-up', async () => {
+    const s = (await repo.getSeries(T, S1))!;
+    const fixtures = [
+      ...(s.fixtures as unknown[]),
+      fx('f3', { date: '2026-11-08', home: 'a', away: 'c' }),
+    ];
+    const lines: string[] = [];
+    const after = { ...structuredClone(s), fixtures } as Series;
+    const handle = await schedule.recordScheduleDiff(repo, T, s, after, 'cli', {
+      log: (l) => lines.push(l),
+    });
+    assert.deepEqual(handle.newRefs, [REF(S1, 'f3')]);
+    await repo.putSeries(T, after);
+    await handle.enqueue();
+    assert.deepEqual(await repo.listPendingSync(T), [], 'medicoach cannot create a match');
+    assert.match(lines.join('\n'), /new fixture\(s\).*not in medicoach \(needs bundle top-up\)/);
+    assert.ok(lines.join('\n').includes(REF(S1, 'f3')));
+    const logs = await repo.listSyncLogs(T);
+    assert.equal(logs[0].kind, 'new-fixtures');
+    assert.deepEqual(logs[0].newFixtureRefs, [REF(S1, 'f3')]);
+
+    // The same through an admin PATCH: logged too, and nothing queued.
+    const cur = (await repo.getSeries(T, S1))!;
+    const res = await app.request(`/series/${S1}`, {
+      method: 'PATCH',
+      headers: headers(),
+      body: JSON.stringify({
+        version: cur.version,
+        fixtures: [
+          ...(cur.fixtures as unknown[]),
+          fx('f4', { date: '2026-11-15', home: 'b', away: 'd' }),
+        ],
+      }),
+    });
+    assert.equal(res.status, 200);
+    const again = await repo.listSyncLogs(T);
+    assert.deepEqual(again[0].newFixtureRefs, [REF(S1, 'f4')]);
+    assert.deepEqual(await repo.listPendingSync(T), []);
+  });
+});
+
 // ── Withheld venue/time never reaches medicoach (ADR 0011 × 0016) ──
 describe('Slice 4 — a draft or withheld series is held until released/revealed', () => {
   const SW = 's-planb-premier-men-t20-g3';

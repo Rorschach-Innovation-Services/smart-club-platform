@@ -9,6 +9,10 @@
  *
  *   - an incoming row matches an existing fixture on date + unordered pair (the series is
  *     one league), with the kick-off time breaking ties when a pair meets twice that day;
+ *   - a row still unmatched then matches a remaining fixture on the unordered pair alone
+ *     (its date moved — on the sheet, or by a medicoach reschedule smart club applied): the
+ *     same round first, then the nearest date, so a moved match keeps its id and its date
+ *     change goes out as an ordinary schedule push instead of forking a new ref;
  *   - matched rows keep the existing id and its sync-owned fields;
  *   - new rows get ids above the highest id the series has EVER held (max + 1, …), so a
  *     removed fixture's id — and therefore its ref — is never reused for another match;
@@ -25,6 +29,8 @@ export interface IdentityFixture {
   time?: string;
   home?: string;
   away?: string;
+  /** The fixture's round, when the series numbers them (breaks a pair-only tie). */
+  round?: number | string;
   /** Explicit sync ref (knockouts created from a recipe); absent ⇒ the derived ref. */
   syncRef?: string;
   /** Sync bookkeeping: when the schedule last changed (most-recent-wins, Slice 3/4). */
@@ -50,8 +56,16 @@ export function fixtureSyncRef(tenant: string, seriesId: string, f: IdentityFixt
   return f.syncRef ?? `smartclub:${tenant}:fixture:${seriesId}:${f.id ?? ''}`;
 }
 
-const pairKey = (f: IdentityFixture) =>
-  `${f.date ?? ''}|${[String(f.home ?? ''), String(f.away ?? '')].sort().join('|')}`;
+const sidesKey = (f: IdentityFixture) =>
+  [String(f.home ?? ''), String(f.away ?? '')].sort().join('|');
+const pairKey = (f: IdentityFixture) => `${f.date ?? ''}|${sidesKey(f)}`;
+
+/** Whole days between two YYYY-MM-DD dates; a missing/invalid date sorts last. */
+function dayGap(a: string | undefined, b: string | undefined): number {
+  const x = Date.parse(a ?? '');
+  const y = Date.parse(b ?? '');
+  return Number.isFinite(x) && Number.isFinite(y) ? Math.abs(x - y) / 86_400_000 : Infinity;
+}
 
 /** Numeric part of an `f<N>` id, or 0 for any other shape. */
 function idNumber(id: string | undefined): number {
@@ -102,6 +116,32 @@ export function reconcileFixtureIds<T extends IdentityFixture>(
     if (list?.length) assigned.set(f, list.shift()!);
   }
 
+  // Pass 3: the date moved. Among the fixtures still unmatched, the unordered pair alone;
+  // when a pair meets more than once, the same round first, then the nearest date, then the
+  // lowest id.
+  const leftover = [...pool.values()].flat();
+  for (const f of incoming) {
+    if (assigned.has(f)) continue;
+    const sides = sidesKey(f);
+    let best = -1;
+    let bestKey: [number, number, number] | undefined;
+    leftover.forEach((e, i) => {
+      if (sidesKey(e) !== sides) return;
+      const sameRound = f.round !== undefined && String(e.round) === String(f.round) ? 0 : 1;
+      const key: [number, number, number] = [sameRound, dayGap(e.date, f.date), idNumber(e.id)];
+      if (
+        !bestKey ||
+        key[0] < bestKey[0] ||
+        (key[0] === bestKey[0] &&
+          (key[1] < bestKey[1] || (key[1] === bestKey[1] && key[2] < bestKey[2])))
+      ) {
+        best = i;
+        bestKey = key;
+      }
+    });
+    if (best >= 0) assigned.set(f, leftover.splice(best, 1)[0]);
+  }
+
   let next = Math.max(0, ...existing.map((f) => idNumber(f.id)));
   const added: string[] = [];
   for (const f of incoming) {
@@ -114,7 +154,7 @@ export function reconcileFixtureIds<T extends IdentityFixture>(
       added.push(f.id);
     }
   }
-  const removed = [...pool.values()].flat().sort((a, b) => idNumber(a.id) - idNumber(b.id));
+  const removed = leftover.sort((a, b) => idNumber(a.id) - idNumber(b.id));
   return {
     fixtures: incoming,
     matched: incoming.length - added.length,

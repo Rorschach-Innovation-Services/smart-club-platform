@@ -44,7 +44,16 @@ function currentText(c: api.MedicoachSyncConflict): string {
   return parts.join(' · ') || '—';
 }
 
+const RUN_LABEL: Record<api.MedicoachSyncLog['trigger'], string> = {
+  cron: 'Scheduled',
+  manual: 'Sync now',
+  write: 'Fixture edit',
+  cli: 'Command-line tool',
+};
+
 function logSummary(l: api.MedicoachSyncLog): string {
+  if (l.kind === 'new-fixtures')
+    return `${l.fixtures} new fixture(s) not in medicoach — needs a bundle top-up: ${(l.newFixtureRefs ?? []).join(', ')}`;
   if (l.kind === 'push' && l.push) {
     const p = l.push;
     return `Pushed ${p.sent}: ${p.applied} applied, ${p.unchanged} unchanged, ${p.stale} stale, ${p.unmapped} unmapped, ${p.errors} failed`;
@@ -91,7 +100,7 @@ export function AdminMedicoachSyncView({
   }
 
   const data = status.data;
-  const lastPull = data?.logs?.find((l) => l.kind !== 'push');
+  const lastPull = data?.logs?.find((l) => !l.kind || l.kind === 'pull');
   const conflicts = data?.conflicts ?? [];
   const failures = data?.outbox?.failures ?? [];
   const held = data?.outbox?.held ?? [];
@@ -347,7 +356,7 @@ export function AdminMedicoachSyncView({
                     <tr key={l.id}>
                       <td>{fmtWhen(l.at)}</td>
                       <td>
-                        {l.trigger === 'manual' ? 'Sync now' : 'Scheduled'}
+                        {RUN_LABEL[l.trigger] ?? 'Scheduled'}
                         {l.outcome === 'error' && (
                           <>
                             {' '}
