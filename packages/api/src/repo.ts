@@ -1637,12 +1637,40 @@ export async function nextCaptainsReportRef(tenant: string, year: string): Promi
  * Submit a report — FIRST SUBMIT WINS. The conditional update only succeeds while the report
  * is pending (and, on the link path, still addressed to `memberId`); a second submit, from the
  * portal or the link, gets CaptainsReportStateError.
+ *
+ * The CR-<year>-NNNN number is allocated only AFTER that conditional write succeeded (unless
+ * the caller passes `ref`), so a losing or failed submit never burns a number.
  */
 export async function submitCaptainsReport(
   tenant: string,
+  key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'> & { matchDate?: string },
+  fields: CaptainsReportFields,
+  meta: { ref?: string; submittedBy: string; via: 'portal' | 'link'; memberId?: string },
+): Promise<CaptainsReport> {
+  const submitted = await submitCaptainsReportFields(tenant, key, fields, meta);
+  if (meta.ref) return submitted;
+  const year = (submitted.matchDate ?? key.matchDate ?? new Date().toISOString()).slice(0, 4);
+  const ref = await nextCaptainsReportRef(tenant, year);
+  const res = await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: reportKeyOf(tenant, key),
+      UpdateExpression: 'SET #ref = :ref',
+      ConditionExpression: 'attribute_exists(pk) AND attribute_not_exists(#ref)',
+      ExpressionAttributeNames: { '#ref': 'ref' },
+      ExpressionAttributeValues: { ':ref': ref },
+      ReturnValues: 'ALL_NEW',
+    }),
+  );
+  return stripKeys<CaptainsReport>(res.Attributes)!;
+}
+
+/** The first-submit-wins write itself (with `ref` only when the caller supplied one). */
+async function submitCaptainsReportFields(
+  tenant: string,
   key: Pick<CaptainsReport, 'seriesId' | 'fixtureId' | 'clubId'>,
   fields: CaptainsReportFields,
-  meta: { ref: string; submittedBy: string; via: 'portal' | 'link'; memberId?: string },
+  meta: { ref?: string; submittedBy: string; via: 'portal' | 'link'; memberId?: string },
 ): Promise<CaptainsReport> {
   const at = new Date().toISOString();
   try {
@@ -1652,11 +1680,16 @@ export async function submitCaptainsReport(
         Key: reportKeyOf(tenant, key),
         UpdateExpression:
           'SET captainName = :c, umpires = :u, #gen = :g, declaration = :d, #s = :submitted, ' +
-          '#ref = :ref, submittedBy = :by, submittedVia = :via, submittedAt = :at, updatedAt = :at',
+          (meta.ref ? '#ref = :ref, ' : '') +
+          'submittedBy = :by, submittedVia = :via, submittedAt = :at, updatedAt = :at',
         ConditionExpression:
           'attribute_exists(pk) AND #s = :pending' +
           (meta.memberId ? ' AND recipient.memberId = :m' : ''),
-        ExpressionAttributeNames: { '#s': 'status', '#ref': 'ref', '#gen': 'general' },
+        ExpressionAttributeNames: {
+          '#s': 'status',
+          '#gen': 'general',
+          ...(meta.ref ? { '#ref': 'ref' } : {}),
+        },
         ExpressionAttributeValues: {
           ':c': fields.captainName,
           ':u': fields.umpires,
@@ -1664,7 +1697,7 @@ export async function submitCaptainsReport(
           ':d': !!fields.declaration,
           ':submitted': 'submitted',
           ':pending': 'pending',
-          ':ref': meta.ref,
+          ...(meta.ref ? { ':ref': meta.ref } : {}),
           ':by': meta.submittedBy,
           ':via': meta.via,
           ':at': at,

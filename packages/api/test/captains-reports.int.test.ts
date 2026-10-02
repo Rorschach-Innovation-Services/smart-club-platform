@@ -655,6 +655,31 @@ describe('club routes', () => {
     assert.equal(((await second.json()) as { code: string }).code, 'report_closed');
   });
 
+  test('a losing submit never burns a CR number (allocated after the first-submit-wins write)', async () => {
+    page = liveResultPage('live');
+    await runPull();
+    const [a, b] = await reportsOf();
+    const put = (id: string, auth: string) =>
+      app.request(`/club/captains-reports/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: headers(auth),
+        body: JSON.stringify({ ...completeBody, submit: true }),
+      });
+    const repOf = (r: CaptainsReport) => (r.clubId === 'umzinto' ? REP_UMZINTO : REP_AW);
+    const year = MATCH_DATE.slice(0, 4);
+    // Three racing submits of one report: one wins, the others lose the conditional write.
+    const racing = await Promise.all([
+      put(a.id, repOf(a)),
+      put(a.id, repOf(a)),
+      put(a.id, repOf(a)),
+    ]);
+    assert.deepEqual(racing.map((r) => r.status).sort(), [200, 409, 409]);
+    const first = (await racing.find((r) => r.status === 200)!.json()) as CaptainsReport;
+    assert.equal(first.ref, `CR-${year}-0001`);
+    const second = (await (await put(b.id, repOf(b))).json()) as CaptainsReport;
+    assert.equal(second.ref, `CR-${year}-0002`, 'the two losing submits took no number');
+  });
+
   test('an appointed pair rejects an unknown umpire id; a registry substitute is flagged', async () => {
     page = liveResultPage('live');
     await runPull();
@@ -724,6 +749,30 @@ describe('club routes', () => {
       }),
     });
     assert.equal(foreign.status, 403);
+  });
+
+  test('the portal cannot file a report for a match that has not been played yet', async () => {
+    const s = (await repo.getSeries('dolphins', 's-planb-premier-men-t20-g1'))!;
+    await repo.putSeries('dolphins', {
+      ...s,
+      fixtures: (s.fixtures as Array<Record<string, unknown>>).map((f) => ({
+        ...f,
+        date: isoDay(3),
+      })),
+    } as Series);
+    const res = await app.request('/club/captains-reports', {
+      method: 'POST',
+      headers: headers(REP_UMZINTO),
+      body: JSON.stringify({
+        seriesId: 's-planb-premier-men-t20-g1',
+        fixtureId: 'f3',
+        clubId: 'umzinto',
+        ...completeBody,
+      }),
+    });
+    assert.equal(res.status, 400);
+    assert.equal(((await res.json()) as { code: string }).code, 'match_in_future');
+    assert.deepEqual(await reportsOf(), []);
   });
 });
 

@@ -4752,8 +4752,8 @@ async function writeReport(
     if (!submit) return await repo.saveCaptainsReportDraft(tenant, report, fields, meta);
     if (report.status !== 'pending')
       throw new repo.CaptainsReportStateError("captain's report already submitted");
-    const ref = await repo.nextCaptainsReportRef(tenant, report.matchDate.slice(0, 4));
-    return await repo.submitCaptainsReport(tenant, report, fields, { ref, ...meta });
+    // The CR number is allocated only once the first-submit-wins write landed (repo).
+    return await repo.submitCaptainsReport(tenant, report, fields, meta);
   } catch (err) {
     if (err instanceof repo.CaptainsReportStateError)
       throw new HttpError(409, err.message, { code: 'report_closed' });
@@ -4833,6 +4833,8 @@ app.post('/club/captains-reports', async (c) => {
   const matchDate = typeof fixture.date === 'string' ? fixture.date : '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(matchDate))
     throw new HttpError(400, 'the fixture has no date yet');
+  if (matchDate > tenantToday())
+    throw new HttpError(400, 'this match has not been played yet', { code: 'match_in_future' });
   const existing = await repo.getCaptainsReport(ra.tenant, seriesId, fixtureId, clubId);
   if (existing)
     throw new HttpError(409, 'a report already exists for this match', {
