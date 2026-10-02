@@ -270,3 +270,26 @@ describe('ClubFixturesView — the fixture matchup', () => {
     expect(document.querySelectorAll('.club-avatar')).toHaveLength(0);
   });
 });
+
+describe('ClubFixturesView — appointed umpires', () => {
+  const officials = {
+    umpires: [
+      { umpireId: 'u-a-ngubane', name: 'A.Ngubane' },
+      { umpireId: 'u-b-tyali', name: 'B.Tyali' },
+    ],
+  };
+  const withOfficials = (over: Record<string, unknown> = {}) => {
+    const s = series(over);
+    return { ...s, fixtures: s.fixtures.map((f) => ({ ...f, officials })) };
+  };
+
+  it('shows the umpires on the fixture row when the venue is shown', () => {
+    const { getByText } = renderView(withOfficials());
+    expect(getByText('Umpires: A.Ngubane, B.Tyali')).toBeTruthy();
+  });
+
+  it('never shows them while the venue is withheld', () => {
+    const { queryByText } = renderView(withOfficials({ withheld: { venue: true } }));
+    expect(queryByText(/A\.Ngubane/)).toBeNull();
+  });
+});

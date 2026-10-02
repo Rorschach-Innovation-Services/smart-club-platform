@@ -2,6 +2,7 @@ import { resolveCompetitionDefaults } from '../packages/engine/src/defaults';
 import { Sentry } from './sentry'; // first — installs global error handlers before render
 import { useState as useStateApp, useMemo as useMemoApp, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
+import type { Umpire } from './types';
 import { ErrorBoundary } from 'react-error-boundary';
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
@@ -103,6 +104,7 @@ import {
   ClubVeteransSquadView,
 } from './club';
 import { Onboarding } from './onboarding';
+import { AdminUmpiresView } from './umpires';
 import { useModule, useSeasonLabel, useVertical } from './branding';
 
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
@@ -1321,6 +1323,43 @@ function Shell({
   const allVeteransRequests = allVeteransRequestsQuery.data ?? [];
   const signupLink = signupLinkQuery.data?.clubSignupLink ?? null;
 
+  // ── Umpire allocation (admin) ──
+  // The registry with contacts; appointments ride on GET /series as each fixture's
+  // `officials`, so saving one refetches the series list rather than a separate query.
+  const umpiresQuery = useQuery({
+    queryKey: qk.umpires(),
+    queryFn: api.getUmpires,
+    enabled: role === 'admin',
+  });
+  const allUmpires = umpiresQuery.data ?? [];
+  function saveOfficials(seriesId: string, fixtureId: string, umpireIds: string[]) {
+    return withToast(
+      () => api.putFixtureOfficials(seriesId, fixtureId, umpireIds),
+      'Could not save the umpires',
+    ).then(() => invalidate(qk.series()));
+  }
+  function createUmpire(body: Partial<Umpire>): Promise<Umpire> {
+    return withToast(() => api.createUmpire(body), 'Could not add the umpire').then((u) => {
+      invalidate(qk.umpires());
+      return u;
+    });
+  }
+  function patchUmpire(id: string, body: Partial<Umpire>) {
+    return withToast(() => api.patchUmpire(id, body), 'Could not save the umpire').then(() => {
+      invalidate(qk.umpires());
+      invalidate(qk.series());
+    });
+  }
+  function mergeUmpire(sourceId: string, targetId: string) {
+    return withToast(() => api.mergeUmpire(sourceId, targetId), 'Could not merge the umpires').then(
+      (res) => {
+        toastShow(`Merged — ${res.repointed} appointment(s) moved to ${res.target.displayName}`);
+        invalidate(qk.umpires());
+        invalidate(qk.series());
+      },
+    );
+  }
+
   // ── Derive view from URL ──
   let view;
   if (role === 'admin') {
@@ -2306,6 +2345,12 @@ function Shell({
     { v: 'leagues', label: 'Leagues', icon: Icon.Shield, num: allLeagues.length },
     { v: 'insights', label: 'Insights', icon: Icon.Chart },
     { v: 'fixtures', label: 'Fixtures & Venues', icon: Icon.Field, dot: 'teal' },
+    {
+      v: 'umpires',
+      label: 'Umpires',
+      icon: Icon.Whistle,
+      num: allUmpires.filter((u) => u.active).length || undefined,
+    },
     ...(clearancesOn
       ? [
           {
@@ -2636,6 +2681,20 @@ function Shell({
             onRebaseSeasonRun={rebaseSeasonRun}
             onFetchSeasonRun={fetchSeasonRun}
             onGenerateStageSeries={generateStageSeries}
+            umpires={allUmpires}
+            onSaveOfficials={saveOfficials}
+            onCreateUmpire={(displayName) => createUmpire({ displayName })}
+          />
+        );
+      if (view === 'umpires')
+        return (
+          <AdminUmpiresView
+            umpires={allUmpires}
+            allSeries={allSeries}
+            loading={umpiresQuery.isLoading}
+            onCreate={createUmpire}
+            onPatch={patchUmpire}
+            onMerge={mergeUmpire}
           />
         );
       if (view === 'clearances')

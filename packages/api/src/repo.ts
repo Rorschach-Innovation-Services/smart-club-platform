@@ -77,6 +77,11 @@ import {
   syncLogKey,
   syncLogsListKey,
   syncPartitionPk,
+  umpireKey,
+  umpireGsi1,
+  umpiresListGsi1pk,
+  fixtureOfficialsKey,
+  fixtureOfficialsListKey,
 } from './keys.js';
 import { PLATFORM_TENANT } from './types.js';
 import type {
@@ -104,6 +109,9 @@ import type {
   RegistrationReviewResolution,
   StoredFixtureResult,
   SyncLogEntry,
+  Umpire,
+  FixtureOfficials,
+  FixtureOfficialsRecord,
 } from './types.js';
 
 import { tableName } from './env.js';
@@ -1043,6 +1051,134 @@ async function listSyncPartitionKeys(tenant: string): Promise<Array<{ pk: string
     ProjectionExpression: 'pk, sk',
   });
   return items.map((i) => ({ pk: i.pk as string, sk: i.sk as string }));
+}
+
+// ── Umpires + fixture officials ──
+// The registry is a handful of rows per tenant; officials are one small item per fixture
+// in a single tenant partition (see fixtureOfficialsKey), never inside the Series item.
+
+export class UmpireExistsError extends Error {
+  constructor() {
+    super('umpire id already exists');
+    this.name = 'UmpireExistsError';
+  }
+}
+
+export async function listUmpires(tenant: string): Promise<Umpire[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    IndexName: 'gsi1',
+    KeyConditionExpression: 'gsi1pk = :p',
+    ExpressionAttributeValues: { ':p': umpiresListGsi1pk(tenant) },
+  });
+  return items.map((i) => stripKeys<Umpire>(i)!);
+}
+
+export async function getUmpire(tenant: string, umpireId: string): Promise<Umpire | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: umpireKey(tenant, umpireId) }),
+  );
+  return stripKeys<Umpire>(res.Item);
+}
+
+/** Insert a NEW umpire; throws UmpireExistsError if the id is taken. */
+export async function createUmpire(tenant: string, umpire: Umpire): Promise<Umpire> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          ...umpireKey(tenant, umpire.id),
+          ...umpireGsi1(tenant, umpire.displayName),
+          ...umpire,
+        },
+        ConditionExpression: 'attribute_not_exists(pk)',
+      }),
+    );
+  } catch (err) {
+    if (isCcf(err)) throw new UmpireExistsError();
+    throw err;
+  }
+  return umpire;
+}
+
+/** Replace an umpire record (last write wins — a small, rarely contended row). */
+export async function putUmpire(tenant: string, umpire: Umpire): Promise<Umpire> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...umpireKey(tenant, umpire.id),
+        ...umpireGsi1(tenant, umpire.displayName),
+        ...umpire,
+      },
+    }),
+  );
+  return umpire;
+}
+
+export async function listFixtureOfficials(tenant: string): Promise<FixtureOfficialsRecord[]> {
+  const { pk, skPrefix } = fixtureOfficialsListKey(tenant);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items.map((i) => stripKeys<FixtureOfficialsRecord>(i)!);
+}
+
+export async function getFixtureOfficials(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+): Promise<FixtureOfficialsRecord | null> {
+  const res = await ddb.send(
+    new GetCommand({ TableName: TABLE, Key: fixtureOfficialsKey(tenant, seriesId, fixtureId) }),
+  );
+  return stripKeys<FixtureOfficialsRecord>(res.Item);
+}
+
+/** Write one fixture's officials. An empty appointment deletes the item. */
+export async function putFixtureOfficials(
+  tenant: string,
+  seriesId: string,
+  fixtureId: string,
+  officials: FixtureOfficials,
+): Promise<void> {
+  const key = fixtureOfficialsKey(tenant, seriesId, fixtureId);
+  if (!officials.umpires.length && !officials.referee) {
+    await ddb.send(new DeleteCommand({ TableName: TABLE, Key: key }));
+    return;
+  }
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { ...key, ...officials, seriesId, fixtureId },
+    }),
+  );
+}
+
+/** Drop every officials item for a series (the series itself is being deleted). */
+export async function deleteFixtureOfficialsForSeries(
+  tenant: string,
+  seriesId: string,
+): Promise<number> {
+  const keys = (await listFixtureOfficials(tenant))
+    .filter((o) => o.seriesId === seriesId)
+    .map((o) => fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId));
+  if (keys.length) await batchDelete(keys);
+  return keys.length;
+}
+
+/** pk/sk pairs for every umpire + officials item — the erasure sweep needs keys. */
+async function listUmpireAndOfficialsKeys(
+  tenant: string,
+): Promise<Array<{ pk: string; sk: string }>> {
+  const umpires = (await listUmpires(tenant)).map((u) => umpireKey(tenant, u.id));
+  const officials = (await listFixtureOfficials(tenant)).map((o) =>
+    fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId),
+  );
+  return [...umpires, ...officials];
 }
 
 // ── Season runs (ADR 0008) ──
@@ -5402,6 +5538,9 @@ export async function eraseTenantData(tenant: string): Promise<number> {
   // SYNC partition (cursor + audit rows) have no gsi1/META listing; enumerate them.
   for (const k of await listFixtureResultKeys(tenant)) keys.push(k);
   for (const k of await listSyncPartitionKeys(tenant)) keys.push(k);
+  // Umpires carry contact details; officials are per-fixture rows. Neither is in a club
+  // partition or the series listing, so enumerate both explicitly.
+  for (const k of await listUmpireAndOfficialsKeys(tenant)) keys.push(k);
 
   const unique = uniqueKeys(keys);
   await batchDelete(unique);
@@ -5463,8 +5602,14 @@ export async function clearCohort(tenant: string): Promise<number> {
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
   for (const r of await listSeasonRuns(tenant)) keys.push(seasonRunKey(tenant, r.id));
-  // Results belong to the series being cleared (and may hold a player ref — PII).
+  // Results belong to the series being cleared (and may hold a player ref — PII). The SYNC
+  // partition goes too: a surviving cursor would stop the next pull re-fetching the results.
   for (const k of await listFixtureResultKeys(tenant)) keys.push(k);
+  for (const k of await listSyncPartitionKeys(tenant)) keys.push(k);
+  // Officials hang off the series being cleared; the umpire registry itself is union data,
+  // not cohort data, so it stays.
+  for (const o of await listFixtureOfficials(tenant))
+    keys.push(fixtureOfficialsKey(tenant, o.seriesId, o.fixtureId));
 
   // Safety: never delete the tenant config or any user record.
   for (const k of keys) {

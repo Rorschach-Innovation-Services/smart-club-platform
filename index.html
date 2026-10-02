@@ -1946,6 +1946,55 @@
   }
   .fix-edit-actions{display:flex;gap:6px;align-self:end}
 
+  /* Umpire allocation — fixture-table cell + picker, admin Umpires page */
+  .ump-cell{position:relative;font-family:'Montserrat',sans-serif;font-size:12px}
+  .ump-names{display:flex;align-items:center;gap:4px;flex-wrap:wrap;color:var(--ink);font-weight:600}
+  .ump-none{color:var(--muted-2,var(--muted));font-weight:500}
+  .ump-warn{color:var(--gold-deep,#9a6a00);cursor:help}
+  .ump-edit{width:24px;height:24px;margin-left:2px}
+  .ump-picker{
+    position:absolute;z-index:30;top:calc(100% + 4px);right:0;width:260px;
+    background:var(--white);border:1px solid var(--line);border-radius:8px;
+    box-shadow:0 8px 24px rgba(0,0,0,0.12);padding:10px;display:flex;flex-direction:column;gap:8px;
+  }
+  .ump-slot{display:flex;flex-direction:column;gap:4px}
+  .ump-slot-l{
+    display:flex;flex-direction:column;gap:4px;font-size:9.5px;font-weight:700;
+    letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);
+  }
+  .ump-slot input,.ump-form-field input,.ump-merge select{
+    height:32px;border:1px solid var(--line);border-radius:6px;padding:0 10px;
+    font-family:'Montserrat',sans-serif;font-size:12.5px;font-weight:500;
+    background:var(--white);color:var(--ink);text-transform:none;letter-spacing:0;
+  }
+  .ump-chip{
+    display:inline-flex;align-items:center;gap:6px;align-self:flex-start;
+    background:var(--paper2);border-radius:999px;padding:3px 4px 3px 10px;font-weight:600;font-size:12px;
+  }
+  .ump-chip button{border:0;background:transparent;cursor:pointer;color:var(--muted);font-size:14px;line-height:1;padding:0 4px}
+  .ump-options{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  .ump-options button{
+    text-align:left;border:0;background:var(--white);padding:6px 10px;cursor:pointer;
+    font-family:'Montserrat',sans-serif;font-size:12px;font-weight:600;color:var(--ink);
+  }
+  .ump-options button:hover{background:var(--paper2)}
+  .ump-option-sub{color:var(--muted);font-weight:500}
+  .ump-add{color:var(--green) !important}
+  .ump-warn-box{background:rgba(201,151,0,0.1);border-radius:6px;padding:8px;font-size:11.5px;color:var(--ink)}
+  .ump-warn-sub{color:var(--muted);margin-top:4px}
+  .ump-picker-actions,.ump-form-actions,.ump-row-actions,.ump-merge{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap;align-items:center}
+  .ump-form{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;align-items:end;
+    background:var(--white);border:1px solid var(--line);border-radius:var(--radius-lg,10px);padding:14px;margin-top:14px;
+  }
+  .ump-form-field{
+    display:flex;flex-direction:column;gap:4px;font-family:'Montserrat',sans-serif;font-size:9.5px;
+    font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);
+  }
+  .ump-sub{font-size:11px;color:var(--muted)}
+  .ump-empty{padding:28px !important;text-align:center;color:var(--muted);font-size:13px}
+  .ump-footnote{font-size:11.5px;color:var(--muted);margin-top:10px}
+
   .fix-toolbar{
     display:flex;align-items:center;gap:10px;flex-wrap:wrap;
     padding:14px 20px;background:var(--white);

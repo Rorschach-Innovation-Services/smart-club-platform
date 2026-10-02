@@ -30,6 +30,8 @@ import type {
   Clash,
   SeasonRun,
   Venue,
+  Umpire,
+  FixtureOfficials,
   SendResult,
   LogoUploadPost,
   TutorialUploadGrant,
@@ -588,6 +590,26 @@ export const generateStage = (runId: string, specId: string, body: GenerateStage
       throw new ReleasedOverwriteError(err);
     throw err;
   });
+
+// ── Umpires ──
+// Admins get the full registry (contacts included); club members get id + name only.
+export const getUmpires = () => request<Umpire[]>('/umpires');
+export const createUmpire = (body: Partial<Umpire>) =>
+  request<Umpire>('/umpires', { method: 'POST', body });
+export const patchUmpire = (id: string, body: Partial<Umpire>) =>
+  request<Umpire>(`/umpires/${encodeURIComponent(id)}`, { method: 'PATCH', body });
+export const mergeUmpire = (id: string, targetId: string) =>
+  request<{ target: Umpire; source: Umpire; repointed: number }>(
+    `/umpires/${encodeURIComponent(id)}/merge`,
+    { method: 'POST', body: { targetId } },
+  );
+// A fixture's umpires (max two). Stored apart from the series, so it never bumps the
+// series version, withdraws approval or runs the clash gate. `[]` clears the fixture.
+export const putFixtureOfficials = (seriesId: string, fixtureId: string, umpireIds: string[]) =>
+  request<FixtureOfficials & { seriesId: string; fixtureId: string }>(
+    `/series/${encodeURIComponent(seriesId)}/fixtures/${encodeURIComponent(fixtureId)}/officials`,
+    { method: 'PUT', body: { umpires: umpireIds.map((umpireId) => ({ umpireId })) } },
+  );
 
 // ── Venues (ADR 0008 phase 2) ──
 // The master ground list fixture allocation draws on. Admin-managed: ground availability

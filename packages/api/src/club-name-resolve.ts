@@ -57,14 +57,15 @@ export const NAME_REDIRECTS: Record<string, string> = {
  * shared implementation — identical rules apply to clubs and grounds). */
 export const normalise = normaliseName;
 
+/** The plain club normal form (no typo redirects) — same as `normalise`. Kept under this
+ * name for the umpire-appointments importer, which layers its own sheet redirects on it. */
+export const normaliseClubName = normaliseName;
+
 /** A sheet club name's lookup key: the shared normal form with known typos redirected. */
-export function normaliseClubName(name: string): string {
+export function redirectedNormalise(name: string): string {
   const n = normalise(name);
   return NAME_REDIRECTS[n] ?? n;
 }
-
-/** @deprecated name kept for existing callers; prefer normaliseClubName. */
-export const redirectedNormalise = normaliseClubName;
 
 export function buildClubIndex(clubs: Club[]): Map<string, Club> {
   const byNorm = new Map<string, Club>();
@@ -80,7 +81,7 @@ export function resolveClub(
   clubs: Club[],
   byNorm: Map<string, Club>,
 ): Club | undefined {
-  const n = normaliseClubName(name);
+  const n = redirectedNormalise(name);
   const aliased = NAME_ALIASES[n];
   if (aliased) return clubs.find((c) => c.id === aliased);
   return byNorm.get(n);
@@ -125,7 +126,7 @@ export interface ResolutionEntry {
 }
 export type ResolutionLog = Map<string, ResolutionEntry>;
 
-function recordResolution(
+export function recordResolution(
   log: ResolutionLog,
   leagueKey: string,
   raw: string,

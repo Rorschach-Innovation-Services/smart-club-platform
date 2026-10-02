@@ -85,6 +85,17 @@ import {
   isWithheld,
 } from './series-projection.js';
 import {
+  applyUmpireInput,
+  findAliasConflict,
+  fixtureClubIds,
+  indexOfficials,
+  joinOfficials,
+  parseOfficialsInput,
+  parseUmpireInput,
+  stripJoinedOfficials,
+  umpireIdFor,
+} from './umpires.js';
+import {
   validateCalendars,
   validateStructures,
   validateSetups,
@@ -1821,6 +1832,8 @@ app.use('/season-runs/*', authenticate, requireTenantMembership);
 app.use('/season-runs', authenticate, requireTenantMembership);
 app.use('/venues/*', authenticate, requireTenantMembership);
 app.use('/venues', authenticate, requireTenantMembership);
+app.use('/umpires/*', authenticate, requireTenantMembership);
+app.use('/umpires', authenticate, requireTenantMembership);
 app.use('/tenant/config', authenticate, requireTenantMembership);
 app.use('/tenant/support', authenticate, requireTenantMembership);
 app.use('/admin/*', authenticate, requireTenantMembership, requireAdmin);
@@ -3787,15 +3800,30 @@ app.get('/series', async (c) => {
   // else sees the club-facing projection: released + activated series only, with any
   // withheld fields stripped (ADR 0011). Release filtering used to be client-only, which
   // leaked every draft and all fields to reps.
+  // Officials live in their own per-fixture items; join them on the way out. One Query for
+  // the appointments + one for the registry (so a renamed/merged umpire shows its new name).
+  const [officialRows, umpires] = await Promise.all([
+    repo.listFixtureOfficials(ra.tenant),
+    repo.listUmpires(ra.tenant),
+  ]);
+  const officials = indexOfficials(officialRows);
+  const namesById = new Map(umpires.map((u) => [u.id, u.displayName]));
   if (ra.membership.role === 'admin') {
     // `syncMapped` marks the fixtures whose result medicoach owns, so the console locks
     // the manual "completed" status there (and only there).
     const config = await repo.getTenantConfig(ra.tenant);
     return c.json(
-      joinFixtureResults(all, results, (s) => seriesIsSyncMapped(ra.tenant, s, config)),
+      joinFixtureResults(
+        all.map((s) =>
+          joinOfficials(s, officials, namesById, { include: () => true, audit: true }),
+        ),
+        results,
+        (s) => seriesIsSyncMapped(ra.tenant, s, config),
+      ),
     );
   }
   const today = tenantToday();
+  const ownClubs = new Set(ra.membership.clubIds ?? []);
   // Legacy series (created before the `participants` snapshot existed) carry no team
   // identity, so a rep's client — which can't call the admin-only GET /clubs — renders
   // opponents as "Removed club". Synthesise participants from the tenant's clubs on the
@@ -3807,7 +3835,17 @@ app.get('/series', async (c) => {
       all
         .map((s) => projectSeriesForClub(s, today))
         .filter((s): s is Series => s !== null)
-        .map((s) => withLegacyParticipants(s, clubsById)),
+        .map((s) => withLegacyParticipants(s, clubsById))
+        // A club sees the umpires for ITS OWN fixtures only, and only once the venue is
+        // visible to it — appointments follow the same reveal rule as the ground (ADR 0011).
+        .map((s) =>
+          isWithheld(s, 'venue')
+            ? s
+            : joinOfficials(s, officials, namesById, {
+                include: (f) => fixtureClubIds(s, f).some((id) => ownClubs.has(id)),
+                audit: false,
+              }),
+        ),
       results,
     ),
   );
@@ -3865,7 +3903,9 @@ async function createSeries(
       series.schedule,
       await seriesScheduleCalendars(tenant, series.seasonRunId, runCalendar),
     );
-  // Fixtures are generated client-side and POSTed whole.
+  // Fixtures are generated client-side and POSTed whole. `officials` is a read-only join
+  // (FIXOFFICIALS# items), never stored on the series.
+  series.fixtures = stripJoinedOfficials(series.fixtures);
   series.version = 1;
   // A brand-new series is a DRAFT (ADR 0011): release and approval are earned via PATCH,
   // never asserted at create. Force the server-owned state regardless of what the client
@@ -3911,9 +3951,12 @@ async function applySeriesPatch(
   const current = await repo.getSeries(tenant, id);
   if (!current) throw new HttpError(404, 'series not found');
   // A whole-series PATCH echoes GET /series' response-only fixture keys (the joined
-  // medicoach result, `syncMapped`); they never belong in the series item (ADR 0016).
+  // medicoach result, `syncMapped`, the FIXOFFICIALS# `officials` join); they never belong
+  // in the series item (ADR 0016).
   if (patch.fixtures !== undefined)
-    patch.fixtures = stripResponseOnlyFixtureFields(patch.fixtures) as unknown[];
+    patch.fixtures = stripJoinedOfficials(
+      stripResponseOnlyFixtureFields(patch.fixtures) as unknown[],
+    );
   // Same gsi1-sort-key guard as POST. `updateSeries` rewrites `gsi1sk` from the patched
   // `startDate` on every write, so a blank one here is the identical DynamoDB failure,
   // with the identical property that dynalite won't catch it.
@@ -4243,7 +4286,161 @@ app.post('/series/:id/clash-check', requireAdmin, async (c) => {
 app.delete('/series/:id', requireAdmin, async (c) => {
   const { tenant } = c.get('requestAuth')!;
   await repo.deleteSeries(tenant, c.req.param('id'));
+  // Its fixtures' umpire appointments go with it.
+  await repo.deleteFixtureOfficialsForSeries(tenant, c.req.param('id'));
   return c.json({ ok: true });
+});
+
+/* ─── Umpire allocation ───
+   A tenant umpire registry plus per-fixture appointments. Appointments are their own
+   FIXOFFICIALS# items, so writing them never touches the Series item: no version bump, no
+   approval reset, no clash gate. Contacts (phone/email) are admin-only. */
+
+/**
+ * Appoint a fixture's officials: up to two umpires and an optional referee, by registry
+ * id. An empty body (`{ umpires: [] }`) clears the appointment.
+ */
+app.put('/series/:id/fixtures/:fixtureId/officials', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const seriesId = c.req.param('id');
+  const fixtureId = c.req.param('fixtureId');
+  const input = parseOfficialsInput(await c.req.json().catch(() => null));
+  const series = await repo.getSeries(ra.tenant, seriesId);
+  if (!series) throw new HttpError(404, 'series not found');
+  const fixtures = (series.fixtures ?? []) as Array<{ id?: unknown }>;
+  if (!fixtures.some((f) => f.id === fixtureId)) throw new HttpError(404, 'fixture not found');
+  const registry = new Map((await repo.listUmpires(ra.tenant)).map((u) => [u.id, u]));
+  const ref = (umpireId: string) => {
+    const u = registry.get(umpireId);
+    if (!u) throw new HttpError(400, `unknown umpire ${umpireId}`);
+    if (!u.active) throw new HttpError(400, `${u.displayName} is no longer active`);
+    return { umpireId, name: u.displayName };
+  };
+  const officials = {
+    umpires: input.umpireIds.map(ref),
+    ...(input.refereeId ? { referee: ref(input.refereeId) } : {}),
+    updatedAt: now(),
+    updatedBy: ra.email ?? 'unknown',
+  };
+  await repo.putFixtureOfficials(ra.tenant, seriesId, fixtureId, officials);
+  return c.json({ seriesId, fixtureId, ...officials });
+});
+
+/** The registry. Admins get every entry with contacts; club members get active names only. */
+app.get('/umpires', async (c) => {
+  const ra = c.get('requestAuth')!;
+  const all = (await repo.listUmpires(ra.tenant)).sort((a, b) =>
+    a.displayName.localeCompare(b.displayName),
+  );
+  if (ra.membership.role === 'admin') return c.json(all);
+  return c.json(all.filter((u) => u.active).map((u) => ({ id: u.id, displayName: u.displayName })));
+});
+
+app.post('/umpires', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const input = parseUmpireInput(await c.req.json().catch(() => null), 'create');
+  const existing = await repo.listUmpires(tenant);
+  const at = now();
+  const stem = umpireIdFor(input.displayName!);
+  const taken = new Set(existing.map((u) => u.id));
+  const id = taken.has(stem) ? `${stem}-${randomUUID().slice(0, 6)}` : stem;
+  const umpire = applyUmpireInput(undefined, input, id, at);
+  const clash = findAliasConflict(umpire.aliases, existing);
+  if (clash)
+    throw new HttpError(409, `${clash.displayName} already answers to that name`, {
+      code: 'umpire_alias_taken',
+      umpireId: clash.id,
+    });
+  try {
+    await repo.createUmpire(tenant, umpire);
+  } catch (err) {
+    if (err instanceof repo.UmpireExistsError)
+      throw new HttpError(409, 'an umpire with that id already exists');
+    throw err;
+  }
+  return c.json(umpire, 201);
+});
+
+app.patch('/umpires/:id', requireAdmin, async (c) => {
+  const { tenant } = c.get('requestAuth')!;
+  const id = c.req.param('id');
+  const input = parseUmpireInput(await c.req.json().catch(() => null), 'patch');
+  const current = await repo.getUmpire(tenant, id);
+  if (!current) throw new HttpError(404, 'umpire not found');
+  if (current.mergedInto && input.active === true)
+    throw new HttpError(409, 'a merged umpire cannot be reactivated');
+  const next = applyUmpireInput(current, input, id, now());
+  if (next.active) {
+    const clash = findAliasConflict(next.aliases, await repo.listUmpires(tenant), id);
+    if (clash)
+      throw new HttpError(409, `${clash.displayName} already answers to that name`, {
+        code: 'umpire_alias_taken',
+        umpireId: clash.id,
+      });
+  }
+  await repo.putUmpire(tenant, next);
+  return c.json(next);
+});
+
+/**
+ * Merge a duplicate (`:id`, the source) into `targetId`: every appointment naming the source
+ * now names the target, the target takes over the source's aliases, and the source is
+ * deactivated with `mergedInto` set. Idempotent — re-running finds nothing left to re-point.
+ */
+app.post('/umpires/:id/merge', requireAdmin, async (c) => {
+  const ra = c.get('requestAuth')!;
+  const sourceId = c.req.param('id');
+  const body = (await c.req.json().catch(() => null)) as { targetId?: unknown } | null;
+  const targetId = typeof body?.targetId === 'string' ? body.targetId.trim() : '';
+  if (!targetId) throw new HttpError(400, 'targetId is required');
+  if (targetId === sourceId) throw new HttpError(400, 'cannot merge an umpire into itself');
+  const [source, target] = await Promise.all([
+    repo.getUmpire(ra.tenant, sourceId),
+    repo.getUmpire(ra.tenant, targetId),
+  ]);
+  if (!source) throw new HttpError(404, 'umpire not found');
+  if (!target) throw new HttpError(404, 'target umpire not found');
+  if (!target.active) throw new HttpError(409, 'cannot merge into an inactive umpire');
+  const at = now();
+  const targetRef = { umpireId: target.id, name: target.displayName };
+  let repointed = 0;
+  for (const row of await repo.listFixtureOfficials(ra.tenant)) {
+    const hasSource =
+      row.umpires.some((u) => u.umpireId === sourceId) || row.referee?.umpireId === sourceId;
+    if (!hasSource) continue;
+    const umpires: typeof row.umpires = [];
+    for (const u of row.umpires) {
+      const next = u.umpireId === sourceId ? targetRef : u;
+      if (!umpires.some((x) => x.umpireId === next.umpireId)) umpires.push(next);
+    }
+    let referee = row.referee?.umpireId === sourceId ? targetRef : row.referee;
+    // A merge can't leave one person as both umpire and referee on a fixture.
+    if (referee && umpires.some((u) => u.umpireId === referee!.umpireId)) referee = undefined;
+    await repo.putFixtureOfficials(ra.tenant, row.seriesId, row.fixtureId, {
+      umpires,
+      ...(referee ? { referee } : {}),
+      updatedAt: at,
+      updatedBy: ra.email ?? 'unknown',
+    });
+    repointed++;
+  }
+  const mergedTarget = {
+    ...target,
+    aliases: [...new Set([...target.aliases, ...(source.aliases ?? [])])],
+    updatedAt: at,
+  };
+  const retiredSource = {
+    ...source,
+    active: false,
+    mergedInto: target.id,
+    // Its aliases now belong to the target; keeping them here would make the source a
+    // second answer to the same name if it were ever looked up.
+    aliases: [],
+    updatedAt: at,
+  };
+  await repo.putUmpire(ra.tenant, mergedTarget);
+  await repo.putUmpire(ra.tenant, retiredSource);
+  return c.json({ target: mergedTarget, source: retiredSource, repointed });
 });
 
 /* ─── Season runs (ADR 0008) ───

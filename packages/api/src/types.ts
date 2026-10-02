@@ -64,6 +64,13 @@ export type {
   Weekday,
 };
 export { TEAM_ID_PREFIX } from '../../engine/src/types.js';
+export type {
+  Umpire,
+  UmpirePublic,
+  OfficialRef,
+  FixtureOfficials,
+  FixtureOfficialsRecord,
+} from '../../engine/src/umpires.js';
 
 export type Role = 'admin' | 'rep' | 'operator';
 
