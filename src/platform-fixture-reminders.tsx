@@ -144,9 +144,10 @@ export function FixtureRemindersCard({
           onChange={(e) => setLeadText(e.target.value)}
         />
         <p style={HINT}>
-          Days before the match to send a reminder, comma-separated ({LEAD_DAYS_MIN}–{LEAD_DAYS_MAX}
-          , up to {LEAD_DAYS_MAX_ENTRIES}). Each club gets one reminder per match date, so lead days
-          within a few days of each other collapse into the first.
+          {`Days before the match to send a reminder, comma-separated (${LEAD_DAYS_MIN}–${LEAD_DAYS_MAX}, up to ${LEAD_DAYS_MAX_ENTRIES}).`}{' '}
+          Each lead day sends its own reminder on its own day, e.g. 7, 1 reminds a week ahead and
+          again the day before. A club never gets more than one reminder per match date on the same
+          day.
         </p>
       </div>
       <div className="field" style={{ marginBottom: 12 }}>

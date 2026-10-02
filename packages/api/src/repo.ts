@@ -689,7 +689,8 @@ export async function appendClubCommEvents(
 
 /**
  * What an INVITE#-keyspace idempotency marker guards. `fixture-reminder` is the FixtureReminders
- * cron's once-per-(club, match date) marker (key `fixture-reminder:<targetDate>`).
+ * cron's once-per-(club, match date, send date) marker (key
+ * `fixture-reminder:<targetDate>:<sendDate>`).
  */
 export type InviteSendKind = 'invite' | 'fixtures' | 'staff-invite' | 'fixture-reminder';
 

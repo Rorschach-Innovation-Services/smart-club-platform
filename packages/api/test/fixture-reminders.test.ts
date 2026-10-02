@@ -314,7 +314,7 @@ describe('reminder runs', () => {
     assert.equal(home.fixtures[0].time, '10:00');
   });
 
-  test('the dedupe marker stops a second run — and a lead-day change — from re-reminding the same match date', async () => {
+  test('same-day idempotency: repeat runs on one tenant day send each club one reminder per match date', async () => {
     await seedTenant('rem-dup', ENABLED);
     const first = await run(['rem-dup']);
     assert.equal(first.summary.clubsNotified, 2); // home + away
@@ -322,11 +322,34 @@ describe('reminder runs', () => {
     assert.equal(again.sends.length, 0);
     assert.equal(again.summary.clubsNotified, 0);
     assert.equal(again.summary.skipped, 2);
-    // Yesterday's clock with lead day 2 targets the SAME match date: still deduped.
-    await repo.putTenantConfig(mkConfig('rem-dup', { ...ENABLED, leadDays: [2] }));
-    const shifted = await run(['rem-dup'], { now: () => new Date('2026-09-30T22:30:00Z') });
-    assert.equal(shifted.sends.length, 0);
+    // Later the same SAST day (06:30 vs 00:30): still the same send date, still deduped.
+    const later = await run(['rem-dup'], { now: () => new Date('2026-10-02T04:30:00Z') });
+    assert.equal(later.sends.length, 0);
     assert.equal((await commLog('rem-dup', 'home')).length, 1);
+  });
+
+  test('lead days [7, 1] remind the same match date on both days', async () => {
+    await seedTenant('rem-two', { ...ENABLED, leadDays: [7, 1] });
+    // 26 Sep (SAST) + 7 = 3 Oct; 2 Oct + 1 = 3 Oct. Each run's marker carries its own send date,
+    // so the week-ahead marker (still inside its 72h TTL or not) never blocks the day-before one.
+    const weekAhead = await run(['rem-two'], { now: () => new Date('2026-09-26T05:00:00Z') });
+    assert.deepEqual(weekAhead.sends.map((s) => s.clubName).sort(), [
+      'Glenwood CC',
+      'Northlands CC',
+    ]);
+    const dayBefore = await run(['rem-two'], { now: () => new Date('2026-10-02T05:00:00Z') });
+    assert.deepEqual(dayBefore.sends.map((s) => s.clubName).sort(), [
+      'Glenwood CC',
+      'Northlands CC',
+    ]);
+    assert.ok(dayBefore.sends.every((s) => s.dateLabel === 'Sat 2026-10-03'));
+    const log = await commLog('rem-two', 'home');
+    assert.equal(log.length, 2);
+    // Comm-log idempotency keys stay per (match date, channel).
+    assert.ok(log.every((e) => e.idempotencyKey === `fixture-reminder-${TARGET}-email`));
+    // A rerun on the day-before date is still a no-op.
+    const rerun = await run(['rem-two'], { now: () => new Date('2026-10-02T05:00:00Z') });
+    assert.equal(rerun.sends.length, 0);
   });
 
   test('disabled, unconfigured and unreleased tenants send nothing', async () => {

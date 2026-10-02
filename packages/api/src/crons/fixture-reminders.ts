@@ -7,7 +7,8 @@
  *   listTenants → skip unless enabled → listClubs + listSeries ONCE per tenant → per lead day,
  *   per club (unless `remindersOptIn === false`) → the club's fixtures on the target date, read
  *   THROUGH projectSeriesForClub (a withheld kick-off/ground never reaches a reminder, ADR 0011)
- *   → claim the `fixture-reminder:<targetDate>` marker → send → complete marker → comm log.
+ *   → claim the `fixture-reminder:<targetDate>:<sendDate>` marker → send → complete marker →
+ *   comm log.
  *
  * Opt-in semantics: an ABSENT `remindersOptIn` counts as opted in. The flag was only ever set by
  * the chair onboarding modal, so CLI-imported clubs (Titans/Tuskers/seeded cohorts) would otherwise
@@ -15,10 +16,14 @@
  * operational notices to club officials. Only an explicit `false` (the club-home toggle or the
  * onboarding modal) opts a club out.
  *
- * Dedupe: one marker per (club, match date) — the key carries the target date only, never the lead
- * day, so an operator changing `leadDays` mid-window can't remind the same match date twice, and a
- * retried/duplicate invocation replays the marker instead of re-sending. Markers ride the
- * claimInviteSend keyspace (72h TTL).
+ * Dedupe: one marker per (club, match date, send date), key
+ * `fixture-reminder:<targetDate>:<sendDate>` where sendDate is the tenant-local run date. So a
+ * cron day sends at most one reminder per club per match date (a retried/duplicate invocation
+ * replays the marker instead of re-sending), while each lead day ([7, 1] etc.) still sends on its
+ * own day. Because every send day has its own key, DynamoDB TTL reaping lag (markers ride the
+ * claimInviteSend keyspace, 72h TTL) never suppresses a later lead day. Accepted trade-off: an
+ * operator changing `leadDays` mid-window can cause at most one extra reminder for a date that was
+ * already reminded.
  *
  * WhatsApp goes out only when the tenant's channels include it, the `whatsappInvites` feature is on,
  * AND the `fixture_reminder` registry entry is "registered" — checked explicitly here rather than
@@ -267,7 +272,7 @@ export async function runFixtureReminders(
         for (const club of clubs) {
           let claimed = false;
           let sent = false;
-          const key = `fixture-reminder:${targetDate}`;
+          const key = `fixture-reminder:${targetDate}:${today}`;
           try {
             const fixtures = clubFixturesOn(club, projected, targetDate, clubsById);
             if (fixtures.length === 0) continue;
