@@ -16,7 +16,8 @@ export type EntityType =
   | 'CLEARANCE'
   | 'REGREVIEW'
   | 'VETAFFIL'
-  | 'VETREQ';
+  | 'VETREQ'
+  | 'CAPTREPORT';
 
 const tenantPrefix = (tenant: string) => `TENANT#${tenant}`;
 
@@ -219,6 +220,33 @@ export const veteransRequestGsi1 = (tenant: string, requestedAt: string) => ({
 
 /** gsi1pk used to query every veterans request in a tenant (admin console). */
 export const veteransRequestsListGsi1pk = (tenant: string) => `${tenantPrefix(tenant)}#TYPE#VETREQ`;
+
+/**
+ * Captain's post-match report. One item under the SUBMITTING club's partition (a rep only
+ * ever reads their own pk) with a gsi1 entry so the union admin can list every club's
+ * reports tenant-wide. No META listing — club/tenant erasure enumerates the CAPTREPORT#
+ * prefix per club.
+ */
+export const captainReportKey = (tenant: string, clubId: string, id: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${clubId}`,
+  sk: `CAPTREPORT#${id}`,
+});
+
+/** pk + sk-prefix to query one club's captain's reports. */
+export const captainReportsListKey = (tenant: string, clubId: string) => ({
+  pk: `${tenantPrefix(tenant)}#CLUB#${clubId}`,
+  skPrefix: 'CAPTREPORT#',
+});
+
+/** gsi1 attributes that make a captain's report listable tenant-wide (admin). */
+export const captainReportGsi1 = (tenant: string, submittedAt: string) => ({
+  gsi1pk: `${tenantPrefix(tenant)}#TYPE#CAPTREPORT`,
+  gsi1sk: submittedAt,
+});
+
+/** gsi1pk used to query every captain's report in a tenant (admin dashboard). */
+export const captainReportsListGsi1pk = (tenant: string) =>
+  `${tenantPrefix(tenant)}#TYPE#CAPTREPORT`;
 
 /**
  * Player clearance (inter-club transfer). Stored as two items:

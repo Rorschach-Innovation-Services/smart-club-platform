@@ -5,9 +5,11 @@ import type { ReactNode } from 'react';
 import { Icon, Btn, Choice } from './atoms';
 import { ownRoster } from './captainsReportRoster';
 import { clubFixtures, localISO } from './season';
+import type { SeriesLike } from './season-dashboards';
+import type { CaptainReport, Club, PlayerRegistration } from './types';
 
 // Part One guidance from the union's Captain's Report on Umpires form.
-const RATING_GUIDE = [
+export const RATING_GUIDE = [
   { score: 5, text: 'Accurate decisions, excellent performance, management & communication' },
   {
     score: 4,
@@ -24,7 +26,7 @@ const RATING_GUIDE = [
   { score: 1, text: 'Poor umpiring and management; negative impact on the match environment' },
 ];
 
-const RATING_CRITERIA = [
+export const RATING_CRITERIA = [
   { key: 'decisions', label: 'Correct decisions' },
   { key: 'pressure', label: 'Coping with pressure' },
   { key: 'behaviour', label: 'Management of player behaviour' },
@@ -32,7 +34,7 @@ const RATING_CRITERIA = [
   { key: 'regulations', label: 'Application of regulations' },
 ];
 
-const CONCERN_AREAS = [
+export const CONCERN_AREAS = [
   { key: 'lbw', label: 'LBW decisions' },
   { key: 'wkCatches', label: 'Catches by wicket-keeper' },
   { key: 'batPad', label: 'Bat / pad catches' },
@@ -78,9 +80,9 @@ const UMPIRE_PANEL = [
   'Wimpie Nell',
 ];
 
-// Per-club memory of the last report (captain, competition, recent umpires) so the
-// next one starts prefilled, plus the fixtures filed from this browser (`filed`), which
-// the season dashboard reads to show which matches still need a report. Browser-local and best-effort: storage can be unavailable.
+// Per-club memory of the last report (captain, competition, recent umpires) so the next
+// one starts prefilled. Browser-local and best-effort (storage can be unavailable); the
+// reports themselves are saved through the API.
 const memoryKey = (clubId) => `captains-report:${clubId}`;
 function recall(clubId) {
   try {
@@ -89,9 +91,6 @@ function recall(clubId) {
     return {};
   }
 }
-/** Fixture keys a report was filed for on this device (best-effort, browser-local). */
-export const filedFixtureKeys = (clubId: string): string[] => recall(clubId).filed || [];
-
 function remember(clubId, data) {
   try {
     localStorage.setItem(memoryKey(clubId), JSON.stringify(data));
@@ -386,6 +385,17 @@ export function CaptainsReportView({
   directory = [],
   allLeagues = [],
   toast,
+  onSubmit,
+}: {
+  club: Club;
+  allSeries?: SeriesLike[];
+  clubs?: Club[];
+  players?: PlayerRegistration[];
+  directory?: { id: string; name: string }[];
+  allLeagues?: { key: string; label: string }[];
+  toast?: (m: string, tone?: string) => void;
+  /** Saves the report (POST /clubs/:id/captain-reports) and resolves to the stored report. */
+  onSubmit: (payload: Record<string, unknown>) => Promise<CaptainReport>;
 }) {
   // Reps only hold their own club record; the directory ({id, name}) covers the rest.
   const clubName = (id) =>
@@ -455,7 +465,8 @@ export function CaptainsReportView({
   const [umpires, setUmpires] = useState([emptyUmpire(), emptyUmpire()]);
   const [general, setGeneral] = useState('');
   const [confirmed, setConfirmed] = useState(false);
-  const [submitted, setSubmitted] = useState(null);
+  const [submitted, setSubmitted] = useState<{ ref: string; at: Date } | null>(null);
+  const [saving, setSaving] = useState(false);
   // Guide starts collapsed on phones, where five stacked descriptions push the form down.
   const [guideOpen] = useState(() => !window.matchMedia?.('(max-width: 640px)').matches);
 
@@ -517,23 +528,44 @@ export function CaptainsReportView({
   const outstandingLabel = `${outstanding} section${outstanding === 1 ? '' : 's'} outstanding`;
   const progressLabel = `${steps.length - outstanding} of ${steps.length} complete`;
 
-  function submit() {
+  async function submit() {
     if (!ready) return toast?.('Complete the outstanding sections first', 'warn');
-    const ref = `CR-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
-    const names = umpires.map((u) => u.name.trim()).filter(Boolean);
-    const nextMemory = {
-      captain: match.captain.trim(),
-      competition: match.competition.trim(),
-      umpires: [...new Set([...names, ...(memory.umpires || [])])].slice(0, 12),
-      filed: [
-        ...new Set([...(match.fixtureKey ? [match.fixtureKey] : []), ...(memory.filed || [])]),
-      ].slice(0, 200),
-    };
-    remember(club.id, nextMemory);
-    setMemory(nextMemory);
-    setSubmitted({ ref, at: new Date() });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    toast?.(`Report ${ref} submitted to the union office`);
+    if (saving) return;
+    setSaving(true);
+    try {
+      const saved = await onSubmit({
+        fixtureKey: match.fixtureKey || undefined,
+        date: match.date,
+        side: match.side,
+        opponent: match.opponent.trim(),
+        competition: match.competition.trim() || undefined,
+        venue: match.venue.trim() || undefined,
+        captain: match.captain.trim(),
+        general: general.trim() || undefined,
+        umpires: umpires.map((u) => ({
+          name: u.name.trim(),
+          ratings: u.ratings,
+          concerns: Object.keys(u.concerns).filter((k) => u.concerns[k]),
+          otherConcern: u.concerns.other ? u.otherConcern.trim() || undefined : undefined,
+          comments: u.comments.trim() || undefined,
+        })),
+      });
+      const names = umpires.map((u) => u.name.trim()).filter(Boolean);
+      const nextMemory = {
+        captain: match.captain.trim(),
+        competition: match.competition.trim(),
+        umpires: [...new Set([...names, ...(memory.umpires || [])])].slice(0, 12),
+      };
+      remember(club.id, nextMemory);
+      setMemory(nextMemory);
+      setSubmitted({ ref: saved.ref, at: new Date(saved.submittedAt) });
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      toast?.(`Report ${saved.ref} submitted to the union office`);
+    } catch {
+      // withToast in the shell already surfaced the server's message.
+    } finally {
+      setSaving(false);
+    }
   }
 
   function reset() {
@@ -764,8 +796,8 @@ export function CaptainsReportView({
 
           <div className="cr-footer">
             <span className="cr-footer-progress">{ready ? 'Ready to submit' : progressLabel}</span>
-            <Btn tone="teal" onClick={submit} disabled={!ready}>
-              Submit report
+            <Btn tone="teal" onClick={submit} disabled={!ready || saving}>
+              {saving ? 'Submitting…' : 'Submit report'}
             </Btn>
           </div>
         </div>
@@ -789,10 +821,10 @@ export function CaptainsReportView({
             <Btn
               tone="teal"
               onClick={submit}
-              disabled={!ready}
+              disabled={!ready || saving}
               style={{ width: '100%', justifyContent: 'center' }}
             >
-              Submit report
+              {saving ? 'Submitting…' : 'Submit report'}
             </Btn>
             {!ready && (
               <div className="rp-validation" style={{ textAlign: 'center' }}>

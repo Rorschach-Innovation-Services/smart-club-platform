@@ -57,6 +57,7 @@ import type {
   ClubSignupLink,
   ClubSignupInfo,
   ClubSignupResult,
+  CaptainReport,
 } from './types';
 
 /**
@@ -639,6 +640,13 @@ export const revokeClubSignupLink = () => request('/admin/club-signup-link', { m
 // ── Veterans squad-selection requests (admin, ADR 0013) ──
 // Every veterans request in the tenant, listed once via the canonical gsi1 (public shape —
 // the PII natural key is stripped server-side). Drives the union-admin oversight console.
+// Captain's post-match reports: a club submits + lists its own; the admin lists every club's.
+export const submitCaptainReport = (clubId: string, body: unknown) =>
+  request<CaptainReport>(`/clubs/${clubId}/captain-reports`, { method: 'POST', body });
+export const getClubCaptainReports = (clubId: string) =>
+  request<CaptainReport[]>(`/clubs/${clubId}/captain-reports`);
+export const getAllCaptainReports = () => request<CaptainReport[]>('/admin/captain-reports');
+
 export const getAllVeteransRequests = () =>
   request<VeteransRequestPublic[]>('/admin/veterans-requests');
 // Admin OVERRIDE of a veterans request. `action` picks the terminal route; the body carries

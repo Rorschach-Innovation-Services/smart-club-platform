@@ -112,6 +112,7 @@ import {
 } from './season-dashboards';
 import { releasedFixtures, clubFixtures } from './season';
 import { AdminScoutingPage } from './scouting-page';
+import { CaptainReportsBoard } from './captain-reports-board';
 import { useModule, useSeasonLabel, useVertical } from './branding';
 
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
@@ -1321,6 +1322,20 @@ function Shell({
     queryFn: api.getDemographics,
     enabled: role === 'admin',
   });
+  // Captain's post-match reports (cricket): a rep reads their club's, the admin every club's.
+  const reportsOn = vertical.sport === 'cricket';
+  const captainReportsQuery = useQuery({
+    queryKey: qk.captainReports(clubId),
+    queryFn: () => api.getClubCaptainReports(clubId),
+    enabled: role === 'club' && !!clubId && reportsOn,
+  });
+  const allCaptainReportsQuery = useQuery({
+    queryKey: qk.allCaptainReports(),
+    queryFn: api.getAllCaptainReports,
+    enabled: role === 'admin' && reportsOn,
+  });
+  const captainReports = captainReportsQuery.data ?? [];
+  const allCaptainReports = allCaptainReportsQuery.data ?? [];
   const players = playersQuery.data ?? [];
   const clearances = clearancesQuery.data ?? { incoming: [], outbound: [] };
   const veteransRequests = veteransRequestsQuery.data ?? { inbound: [], outbound: [] };
@@ -2475,6 +2490,16 @@ function Shell({
                 gotoAdminView={gotoAdminView}
               />
             }
+            reports={
+              reportsOn ? (
+                <CaptainReportsBoard
+                  scope="admin"
+                  orgName={orgName}
+                  reports={allCaptainReports}
+                  loading={allCaptainReportsQuery.isLoading}
+                />
+              ) : undefined
+            }
             setup={
               <AdminDashboard
                 clubs={clubs}
@@ -2773,6 +2798,16 @@ function Shell({
             started={season.started}
             firstDate={season.firstDate}
             setup={clubHome}
+            reports={
+              reportsOn ? (
+                <CaptainReportsBoard
+                  scope="club"
+                  clubName={activeClub.name}
+                  reports={captainReports}
+                  loading={captainReportsQuery.isLoading}
+                />
+              ) : undefined
+            }
             season={
               <ClubSeasonHome
                 club={activeClub}
@@ -2784,7 +2819,8 @@ function Shell({
                 requiredDocs={requiredDocs}
                 complianceOn={complianceOn}
                 clearancesOn={clearancesOn}
-                reportsOn={vertical.sport === 'cricket'}
+                reportsOn={reportsOn}
+                reports={captainReports}
                 goto={gotoClubView}
                 onFileReport={(key) =>
                   navigate(
@@ -2848,6 +2884,16 @@ function Shell({
       if (view === 'captains-report' && vertical.sport === 'cricket') {
         return (
           <CaptainsReportView
+            onSubmit={(payload) =>
+              withToast(
+                () => api.submitCaptainReport(activeClub.id, payload),
+                'Could not submit the report',
+              ).then((saved) => {
+                invalidate(qk.captainReports(activeClub.id));
+                invalidate(qk.allCaptainReports());
+                return saved;
+              })
+            }
             club={activeClub}
             allSeries={allSeries}
             clubs={clubs}

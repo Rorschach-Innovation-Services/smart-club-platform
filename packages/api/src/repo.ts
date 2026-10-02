@@ -71,6 +71,10 @@ import {
   operatorMarkerKey,
   operatorGsi1,
   OPERATORS_GSI1PK,
+  captainReportKey,
+  captainReportsListKey,
+  captainReportGsi1,
+  captainReportsListGsi1pk,
 } from './keys.js';
 import { PLATFORM_TENANT } from './types.js';
 import type {
@@ -96,6 +100,7 @@ import type {
   RejectSnapshot,
   RegistrationReview,
   RegistrationReviewResolution,
+  CaptainReport,
 } from './types.js';
 
 import { tableName } from './env.js';
@@ -1695,6 +1700,49 @@ export async function listOutboundVeteransRequests(
     ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
   });
   return items.map((i) => stripKeys<VeteransRequest>(i)!);
+}
+
+/** Save a captain's report under the submitting club (+ gsi1 for the admin listing). */
+export async function createCaptainReport(tenant: string, r: CaptainReport): Promise<void> {
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        ...captainReportKey(tenant, r.clubId, r.id),
+        ...captainReportGsi1(tenant, r.submittedAt),
+        ...r,
+      },
+      ConditionExpression: 'attribute_not_exists(sk)',
+    }),
+  );
+}
+
+/** One club's captain's reports, newest first. */
+export async function listCaptainReportsForClub(
+  tenant: string,
+  clubId: string,
+): Promise<CaptainReport[]> {
+  const { pk, skPrefix } = captainReportsListKey(tenant, clubId);
+  const items = await queryAll({
+    TableName: TABLE,
+    KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',
+    ExpressionAttributeValues: { ':p': pk, ':s': skPrefix },
+  });
+  return items
+    .map((i) => stripKeys<CaptainReport>(i)!)
+    .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt));
+}
+
+/** Every captain's report in the tenant (admin dashboard), newest first, via the gsi1. */
+export async function listAllCaptainReports(tenant: string): Promise<CaptainReport[]> {
+  const items = await queryAll({
+    TableName: TABLE,
+    IndexName: 'gsi1',
+    KeyConditionExpression: 'gsi1pk = :p',
+    ExpressionAttributeValues: { ':p': captainReportsListGsi1pk(tenant) },
+    ScanIndexForward: false,
+  });
+  return items.map((i) => stripKeys<CaptainReport>(i)!);
 }
 
 /** Every veterans request in the tenant (admin console) — one row per request via the gsi1. */
@@ -5258,6 +5306,10 @@ export async function eraseTenantData(tenant: string): Promise<number> {
     for (const r of await listOutboundVeteransRequests(tenant, club.id)) {
       keys.push(outboundVeteransRequestKey(tenant, club.id, r.id));
     }
+    // Captain's reports (CAPTREPORT#) live under the club's pk with no META listing.
+    for (const r of await listCaptainReportsForClub(tenant, club.id)) {
+      keys.push(captainReportKey(tenant, club.id, r.id));
+    }
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
   // Season runs are cohort data like series; leaving them behind would strand a
@@ -5326,6 +5378,9 @@ export async function clearCohort(tenant: string): Promise<number> {
     }
     for (const r of await listOutboundVeteransRequests(tenant, club.id)) {
       keys.push(outboundVeteransRequestKey(tenant, club.id, r.id));
+    }
+    for (const r of await listCaptainReportsForClub(tenant, club.id)) {
+      keys.push(captainReportKey(tenant, club.id, r.id));
     }
   }
   for (const s of await listSeries(tenant)) keys.push(seriesKey(tenant, s.id));
@@ -5516,6 +5571,10 @@ export async function eraseClubData(
   for (const r of await listOutboundVeteransRequests(tenant, club.id)) {
     keys.push(outboundVeteransRequestKey(tenant, club.id, r.id));
     keys.push(veteransRequestKey(tenant, r.primaryClubId, r.id));
+  }
+  // Captain's reports this club submitted (single item under its own pk).
+  for (const r of await listCaptainReportsForClub(tenant, club.id)) {
+    keys.push(captainReportKey(tenant, club.id, r.id));
   }
 
   await batchDelete(uniqueKeys(keys));

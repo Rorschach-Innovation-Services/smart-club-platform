@@ -700,6 +700,38 @@ export type VeteransAffiliatePublic = Omit<VeteransAffiliation, 'naturalKey'>;
 /** Lifecycle of a veterans squad-selection request (ADR 0013). */
 export type VeteransRequestStatus = 'pending' | 'accepted' | 'declined' | 'withdrawn';
 
+/** One on-field umpire's ratings in a captain's report (criteria scored 5 best … 1). */
+export interface CaptainReportUmpire {
+  name: string;
+  /** decisions · pressure · behaviour · communication · regulations → 1..5 */
+  ratings: Record<string, number>;
+  /** Areas of concern ticked (lbw, wkCatches, batPad, noBallWide, conditions, other). */
+  concerns: string[];
+  otherConcern?: string;
+  comments?: string;
+}
+
+/** A captain's post-match report on the umpires (CAPTREPORT#, see `captainReportKey`). */
+export interface CaptainReport {
+  id: string;
+  /** Human reference shown on the confirmation, e.g. CR-2026-4821. */
+  ref: string;
+  clubId: string;
+  clubName: string;
+  /** Released fixture this report is for, when picked from the fixture list. */
+  fixtureKey?: string;
+  date: string;
+  side: 'Home' | 'Away';
+  opponent: string;
+  competition?: string;
+  venue?: string;
+  captain: string;
+  umpires: CaptainReportUmpire[];
+  general?: string;
+  submittedAt: string;
+  submittedBy: string;
+}
+
 /**
  * A veterans squad-selection request (ADR 0013): a veterans club has FOUND a player tenant-wide
  * and asks the player's PRIMARY club (the POPIA responsible party) to confirm the affiliation.

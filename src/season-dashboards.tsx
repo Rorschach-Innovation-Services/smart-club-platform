@@ -14,12 +14,11 @@ import {
   daysBetween,
   localISO,
 } from './season';
-import { filedFixtureKeys } from './CaptainsReport';
 import { SCOUTING_EVENTS } from './scouting-data';
-import type { Club, PlayerRegistration, RequiredDoc } from './types';
+import type { CaptainReport, Club, PlayerRegistration, RequiredDoc } from './types';
 import { leaderboard } from './scouting';
 
-export type SeasonMode = 'setup' | 'season';
+export type SeasonMode = 'setup' | 'season' | 'reports';
 
 /** The series fields these dashboards read (the wire shape carries much more). */
 export interface SeriesLike {
@@ -53,7 +52,7 @@ const modeKey = (scope: string) => `season-mode:${scope}`;
 function storedMode(scope: string): SeasonMode | null {
   try {
     const v = localStorage.getItem(modeKey(scope));
-    return v === 'setup' || v === 'season' ? v : null;
+    return v === 'setup' || v === 'season' || v === 'reports' ? v : null;
   } catch {
     return null;
   }
@@ -65,13 +64,24 @@ interface SeasonSwitchProps {
   firstDate: string | null;
   setup: ReactNode;
   season: ReactNode;
+  /** Optional third view — the captain's reports board (cricket tenants). */
+  reports?: ReactNode;
 }
 
 /** Renders the pre-season or in-season home with a toggle bar above it. */
-export function SeasonSwitch({ scope, started, firstDate, setup, season }: SeasonSwitchProps) {
-  const [mode, setMode] = useState<SeasonMode>(
+export function SeasonSwitch({
+  scope,
+  started,
+  firstDate,
+  setup,
+  season,
+  reports,
+}: SeasonSwitchProps) {
+  const [stored, setMode] = useState<SeasonMode>(
     () => storedMode(scope) ?? (started ? 'season' : 'setup'),
   );
+  // A remembered 'reports' view falls back when the board isn't offered (e.g. football).
+  const mode: SeasonMode = stored === 'reports' && !reports ? 'season' : stored;
   function pick(next: SeasonMode) {
     setMode(next);
     try {
@@ -108,7 +118,8 @@ export function SeasonSwitch({ scope, started, firstDate, setup, season }: Seaso
             [
               ['setup', 'Pre-season'],
               ['season', 'In season'],
-            ] as const
+              ...(reports ? ([['reports', "Captain's reports"]] as const) : []),
+            ] as [SeasonMode, string][]
           ).map(([k, label]) => (
             <button
               key={k}
@@ -123,7 +134,7 @@ export function SeasonSwitch({ scope, started, firstDate, setup, season }: Seaso
           ))}
         </div>
       </div>
-      {mode === 'season' ? season : setup}
+      {mode === 'reports' ? reports : mode === 'season' ? season : setup}
     </>
   );
 }
@@ -423,6 +434,8 @@ interface ClubSeasonProps {
   complianceOn: boolean;
   clearancesOn: boolean;
   reportsOn: boolean;
+  /** This club's saved captain's reports — a played fixture counts as filed when one names it. */
+  reports: CaptainReport[];
   goto: (v: string) => void;
   onFileReport: (fixtureKey: string) => void;
 }
@@ -438,6 +451,7 @@ export function ClubSeasonHome({
   complianceOn,
   clearancesOn,
   reportsOn,
+  reports,
   goto,
   onFileReport,
 }: ClubSeasonProps) {
@@ -450,7 +464,7 @@ export function ClubSeasonHome({
   const next = asc.find((f) => f.date >= today) ?? null;
   const later = asc.filter((f) => f.date >= today && f !== next).slice(0, 4);
   const played = fixtures.filter((f) => f.date < today);
-  const filed = new Set(filedFixtureKeys(club.id));
+  const filed = new Set(reports.map((r) => r.fixtureKey).filter(Boolean));
   const reportsDue = played.filter((f) => !filed.has(f.key)).length;
   const homeLeft = asc.filter((f) => f.date >= today && f.isHome).length;
   const awayLeft = asc.filter((f) => f.date >= today && !f.isHome).length;

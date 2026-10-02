@@ -46,6 +46,8 @@ export const qk = {
   // outbound (it is the veterans club) requests; and the admin cohort-wide list.
   veteransRequests: (clubId: string) => ['veterans-requests', t(), clubId],
   allVeteransRequests: () => ['veterans-requests-all', t()],
+  captainReports: (clubId: string) => ['captain-reports', t(), clubId],
+  allCaptainReports: () => ['captain-reports-all', t()],
   // The finder search is keyed on the (debounced) query so each term caches independently.
   veteransCandidates: (clubId: string, q: string) => ['veterans-candidates', t(), clubId, q],
   signupLink: () => ['signup-link', t()],
