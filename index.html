@@ -1995,6 +1995,7 @@
   .ump-warn-sub{color:var(--muted);margin-top:4px}
   .ump-picker-actions,.ump-form-actions,.ump-row-actions,.ump-merge{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap;align-items:center}
   .ump-row-actions{flex-wrap:nowrap}
+  .ump-num{text-align:right}
   .ump-form{
     display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;align-items:end;
     background:var(--white);border:1px solid var(--line);border-radius:var(--radius-lg,10px);padding:14px;margin-top:14px;
@@ -2055,17 +2056,38 @@
   .resync-list{max-height:min(40vh,320px);overflow:auto;border:1px solid var(--line,#e6e8ee);border-radius:8px}
   .resync-list .mcs-compare thead th{position:sticky;top:0;background:var(--white,#fff)}
   .resync-list .mcs-compare thead th:first-child{width:auto}
+  /* Captain's reports date range: wrap instead of running off a phone screen (UX pass) */
+  .cr-range{flex-wrap:wrap}
+  .cr-range input{max-width:100%}
   /* Upload appointments (admin, Umpires) */
   .upl-pick{display:flex;flex-direction:column;gap:6px;background:var(--white,#fff);border:1px solid var(--line,#e6e8ee);border-radius:10px;padding:14px 16px}
   .upl-label{font-weight:700;font-size:13px;color:var(--ink)}
   .upl-pick input[type=file]{font-size:12.5px;max-width:100%}
   .upl-pick input[type=file]:focus-visible,.upl-check input:focus-visible{outline:2px solid var(--green);outline-offset:2px}
+  .upl-pick input[type=file]::file-selector-button{font:inherit;font-weight:600;font-size:11.5px;padding:6px 11px;margin-right:10px;
+    border-radius:8px;border:1px solid var(--line,#e6e8ee);background:#fff;color:var(--ink);cursor:pointer}
+  @media (max-width:640px){
+    .upl-tbl{min-width:0 !important}
+    .upl-tbl thead{display:none}
+    .upl-tbl tr{display:block;padding:10px 12px;border-top:1px solid var(--line,#e6e8ee)}
+    .upl-tbl tbody tr:first-child{border-top:0}
+    .upl-tbl td[data-label]{padding-left:92px !important}
+    .upl-tbl .ump-num{text-align:left}
+    .upl-tbl .ump-row-actions,.upl-tbl .ump-merge{justify-content:flex-start;flex-wrap:wrap}
+    .upl-tbl td{display:block;position:relative;padding:3px 0 !important;border:0 !important;overflow-wrap:anywhere}
+    .upl-tbl td::before{content:attr(data-label);position:absolute;left:0;top:5px;width:84px;color:var(--muted);font-size:10px;
+      font-weight:700;letter-spacing:0.08em;text-transform:uppercase}
+  }
   .upl-names{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
   .upl-check{display:flex;gap:8px;align-items:center;font-size:13px;font-weight:600;color:var(--ink);cursor:pointer}
   .upl-check input{width:16px;height:16px}
   .upl-confirm{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:18px 0 8px;position:sticky;bottom:0;
     background:var(--paper,#f6f7f9);padding:10px 0;border-top:1px solid var(--line,#e6e8ee)}
+  .mcs-card a,.ph-crumb a{color:var(--green);font-weight:600;text-decoration:none}
+  .mcs-card a:hover,.ph-crumb a:hover{text-decoration:underline}
   @media (max-width:640px){
+    .mcs-stats{grid-template-columns:1fr 1fr;gap:8px}
+    .mcs-stat{padding:10px 12px}
     .mcs-list>li{flex-direction:column;gap:6px}
     .mcs-log-when{flex:none;display:flex;gap:8px;align-items:baseline}
     .mcs-link{white-space:normal}
@@ -2853,7 +2875,9 @@
 
   /* Tablet (≤ 980px): horizontal nav, denser KPIs, stack right rails */
   @media (max-width: 980px){
-    .shell{grid-template-columns:1fr}
+    /* rows: the horizontal nav keeps its own height; a short page's spare height goes to main
+       (otherwise the grid stretches the nav and every nav pill grows ~130px tall) */
+    .shell{grid-template-columns:1fr;grid-template-rows:auto 1fr}
     .nav{position:relative;top:auto;height:auto;flex-direction:row;overflow-x:auto;padding:10px;border-right:none;border-bottom:1px solid var(--line)}
     .nav-section{display:none}
     .nav-item{white-space:nowrap;padding:8px 12px}

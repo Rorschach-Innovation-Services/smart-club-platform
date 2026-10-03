@@ -277,7 +277,7 @@ export function UmpireAppointmentsUpload({
                 Fixtures &amp; Venues.
               </p>
               <div className="tbl-w" style={{ marginTop: 8 }}>
-                <table className="tbl" aria-label="Venue and time differences">
+                <table className="tbl upl-tbl" aria-label="Venue and time differences">
                   <thead>
                     <tr>
                       <th>Fixture</th>
@@ -290,7 +290,7 @@ export function UmpireAppointmentsUpload({
                     {differences.flatMap((r) =>
                       r.differences.map((d) => (
                         <tr key={`${r.sheetRow}-${d.field}`}>
-                          <td>
+                          <td data-label="Fixture">
                             <div style={{ fontWeight: 700 }}>
                               {r.home} v {r.away}
                             </div>
@@ -298,9 +298,9 @@ export function UmpireAppointmentsUpload({
                               Row {r.sheetRow} · {r.date}
                             </div>
                           </td>
-                          <td>{d.field === 'time' ? 'Time' : 'Venue'}</td>
-                          <td>{d.sheet}</td>
-                          <td>{d.fixture || '—'}</td>
+                          <td data-label="What">{d.field === 'time' ? 'Time' : 'Venue'}</td>
+                          <td data-label="Sheet says">{d.sheet}</td>
+                          <td data-label="Fixture has">{d.fixture || '—'}</td>
                         </tr>
                       )),
                     )}
@@ -315,7 +315,7 @@ export function UmpireAppointmentsUpload({
             <div className="mcs-empty">No row on the sheet matched a fixture.</div>
           ) : (
             <div className="tbl-w" style={{ marginTop: 8 }}>
-              <table className="tbl" aria-label="Matched rows">
+              <table className="tbl upl-tbl" aria-label="Matched rows">
                 <thead>
                   <tr>
                     <th>Row</th>
@@ -330,24 +330,24 @@ export function UmpireAppointmentsUpload({
                     const a = ACTION[r.action] ?? ACTION.skipped;
                     return (
                       <tr key={r.sheetRow}>
-                        <td>Row {r.sheetRow}</td>
-                        <td>
+                        <td data-label="Row">Row {r.sheetRow}</td>
+                        <td data-label="Fixture">
                           <div style={{ fontWeight: 700 }}>
                             {r.home} v {r.away}
                           </div>
                           <div className="ump-sub">{r.seriesName}</div>
                         </td>
-                        <td>
+                        <td data-label="Date">
                           {r.fixture.date}
                           {r.fixture.time ? ` ${r.fixture.time}` : ''}
                         </td>
-                        <td>
+                        <td data-label="Umpires">
                           {(r.appointed ?? r.umpires).join(', ') || '—'}
                           {r.previous && (
                             <div className="ump-sub">was {r.previous.join(', ') || '—'}</div>
                           )}
                         </td>
-                        <td>
+                        <td data-label="Result">
                           <Pill tone={a.tone}>{a.label}</Pill>
                           {r.skipReason && <div className="ump-sub">{r.skipReason}</div>}
                         </td>
@@ -366,7 +366,7 @@ export function UmpireAppointmentsUpload({
                 These rows are not written. Fix the sheet (or the fixture) and upload it again.
               </p>
               <div className="tbl-w" style={{ marginTop: 8 }}>
-                <table className="tbl" aria-label="Rows not matched">
+                <table className="tbl upl-tbl" aria-label="Rows not matched">
                   <thead>
                     <tr>
                       <th>Row</th>
@@ -378,16 +378,16 @@ export function UmpireAppointmentsUpload({
                   <tbody>
                     {p.unmatched.map((u) => (
                       <tr key={`${u.sheetRow}-${u.kind}`}>
-                        <td>Row {u.sheetRow}</td>
-                        <td>
+                        <td data-label="Row">Row {u.sheetRow}</td>
+                        <td data-label="Teams">
                           {u.home} v {u.away}
                           <div className="ump-sub">{u.section}</div>
                         </td>
-                        <td>
+                        <td data-label="Date">
                           {u.date}
                           {u.time ? ` ${u.time}` : ''}
                         </td>
-                        <td>
+                        <td data-label="Why">
                           <Pill tone={u.kind === 'ambiguous' ? 'gold' : 'coral'}>
                             {UNMATCHED[u.kind] ?? u.kind}
                           </Pill>

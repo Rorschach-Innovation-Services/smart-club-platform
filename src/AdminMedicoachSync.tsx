@@ -465,12 +465,14 @@ export function AdminMedicoachSyncView({
               </div>
             </div>
             <div className="mcs-stat">
-              <div className="mcs-stat-label">Captain&apos;s reports</div>
+              <div className="mcs-stat-label">Reports to open</div>
               <div className="mcs-stat-value">{data.pendingReports ?? 0}</div>
               <div className="ump-sub">
                 {data.noticesFailed
                   ? `${data.noticesFailed} notice(s) failed, retrying`
-                  : 'waiting to open'}
+                  : data.pendingReports
+                    ? "captain's reports retrying"
+                    : "captain's reports all opened"}
               </div>
             </div>
           </div>

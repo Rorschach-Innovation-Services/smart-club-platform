@@ -4283,7 +4283,8 @@ function inSeasonClashRefusal(
  * Admin "Sync now" (ADR 0016): run the medicoach puller for the caller's tenant right away,
  * instead of waiting for the 15-minute cron. Same code path as the cron; returns the run
  * summary (counts only — never a pulled payload). 409 when the tenant has no sync; 502 when
- * medicoach can't be reached or answers outside the contract. With the sync secrets unset
+ * medicoach can't be reached or answers outside the contract (`error` in plain language,
+ * `technical` the puller's own text). With the sync secrets unset
  * the run is a dry run (`status: 'dry-run'`, nothing requested).
  */
 app.post('/integrations/medicoach/sync-now', async (c) => {
@@ -4299,7 +4300,12 @@ app.post('/integrations/medicoach/sync-now', async (c) => {
       throw new HttpError(409, 'the medicoach sync is not enabled for this tenant');
     return c.json(summary);
   } catch (err) {
-    if (err instanceof MedicoachSyncError) throw new HttpError(502, err.message);
+    // The admin reads the plain-language reason; the technical text rides along.
+    if (err instanceof MedicoachSyncError)
+      throw new HttpError(502, explainSyncError(err.message), {
+        code: 'sync_failed',
+        technical: err.message,
+      });
     throw err;
   }
 });

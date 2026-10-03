@@ -2,7 +2,7 @@
    Appointments are written with their own call (PUT …/officials), never through the series
    PATCH, so assigning an umpire never withdraws approval or runs the clash gate. */
 
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Btn, Icon, Pill } from './atoms';
 import { ApiError } from './api';
 import {
@@ -143,7 +143,29 @@ function UmpireSlot({
 }) {
   const [q, setQ] = useState('');
   const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const listId = useId();
   const chosen = value ? umpires.find((u) => u.id === value) : undefined;
+  // Keyboard: ArrowDown from the box enters the suggestions, arrows move through them (Up
+  // from the first returns to the box), Enter picks (a native button click), Escape closes.
+  const items = () => [...(listRef.current?.querySelectorAll('button') ?? [])];
+  const close = (e: KeyboardEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setQ('');
+    inputRef.current?.focus();
+  };
+  const onListKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    const all = items();
+    const i = all.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === 'Escape') return close(e);
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    const next = e.key === 'ArrowDown' ? i + 1 : i - 1;
+    if (next < 0) inputRef.current?.focus();
+    else all[Math.min(next, all.length - 1)]?.focus();
+  };
   if (value) {
     return (
       <div className="ump-slot">
@@ -173,16 +195,34 @@ function UmpireSlot({
       <label className="ump-slot-l">
         {label}
         <input
+          ref={inputRef}
           type="text"
           value={q}
           placeholder="Type a name…"
           onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowDown' && q.trim()) {
+              e.preventDefault();
+              items()[0]?.focus();
+            } else if (e.key === 'Escape' && q) close(e);
+          }}
           aria-label={label}
+          role="combobox"
+          aria-expanded={!!q.trim()}
+          aria-controls={listId}
+          aria-autocomplete="list"
         />
       </label>
       {/* Suggestions open once typing starts, so two empty slots don't both list the panel. */}
       {q.trim() && (
-        <div className="ump-options" role="listbox" aria-label={`${label} suggestions`}>
+        <div
+          ref={listRef}
+          id={listId}
+          className="ump-options"
+          role="listbox"
+          aria-label={`${label} suggestions`}
+          onKeyDown={onListKey}
+        >
           {options.map((u) => (
             <button
               type="button"
@@ -579,7 +619,7 @@ export function AdminUmpiresView({
       </div>
 
       <div className="tbl-w" style={{ marginTop: 14 }}>
-        <table className="tbl">
+        <table className="tbl upl-tbl" aria-label="Umpires">
           <thead>
             <tr>
               <th>Umpire</th>
@@ -654,11 +694,11 @@ export function AdminUmpiresView({
               const mergeTargets = active.filter((t) => t.id !== u.id);
               return (
                 <tr key={u.id}>
-                  <td>
+                  <td data-label="Umpire">
                     <div style={{ fontWeight: 700 }}>{u.displayName}</div>
                     {u.fullName && <div className="ump-sub">{u.fullName}</div>}
                   </td>
-                  <td>
+                  <td data-label="Contact">
                     {u.phone || u.email ? (
                       <>
                         {u.phone && <div>{u.phone}</div>}
@@ -668,9 +708,11 @@ export function AdminUmpiresView({
                       <span className="ump-none">—</span>
                     )}
                   </td>
-                  <td style={{ textAlign: 'right' }}>{counts.get(u.id) ?? 0}</td>
+                  <td data-label="Appointed" className="ump-num">
+                    {counts.get(u.id) ?? 0}
+                  </td>
                   {/* Averages over submitted captain's reports (computed in the browser). */}
-                  <td>
+                  <td data-label="Ratings">
                     {(() => {
                       const r = ratings.get(u.id);
                       if (!r) return <span className="ump-none">No ratings yet</span>;
@@ -693,7 +735,7 @@ export function AdminUmpiresView({
                       );
                     })()}
                   </td>
-                  <td>
+                  <td data-label="Status">
                     {u.active ? (
                       <Pill tone="teal" dot>
                         Active
@@ -706,7 +748,7 @@ export function AdminUmpiresView({
                       </Pill>
                     )}
                   </td>
-                  <td>
+                  <td data-label="Actions">
                     {merging?.id === u.id ? (
                       <div className="ump-merge">
                         <select
