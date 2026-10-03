@@ -83,8 +83,11 @@ export function resolveClub(
 ): Club | undefined {
   const n = redirectedNormalise(name);
   const aliased = NAME_ALIASES[n];
-  if (aliased) return clubs.find((c) => c.id === aliased);
-  return byNorm.get(n);
+  // The alias names a prod club id; in a tenant without that club (another union, dev, a
+  // renamed record such as "Chatsworth Sporting CC") fall back to the plain lookup, which
+  // already ignores generic suffixes ("CC", "Cricket Club").
+  const viaAlias = aliased ? clubs.find((c) => c.id === aliased) : undefined;
+  return viaAlias ?? byNorm.get(n);
 }
 
 /** Reserved teamId namespace for synthesised multi-team sides — mirrors
