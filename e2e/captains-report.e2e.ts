@@ -355,9 +355,9 @@ test("the home club reports a match that isn't in the fixture list", async ({ pa
   await browser.getByLabel('Match date').fill(isoDay(-2));
   await browser.getByLabel('Competition').fill('Friendly');
   await browser.getByRole('button', { name: 'Continue to the umpires' }).click();
-  // No appointment → two registry pickers.
-  await browser.getByRole('combobox', { name: 'Umpire 1' }).selectOption({ label: UMP_A });
-  await browser.getByRole('combobox', { name: 'Umpire 2' }).selectOption({ label: UMP_B });
+  // No appointment → two registry pickers (type-ahead; an exact name is the registry umpire).
+  await browser.getByRole('combobox', { name: 'Umpire 1' }).fill(UMP_A);
+  await browser.getByRole('combobox', { name: 'Umpire 2' }).fill(UMP_B);
   for (const card of [1, 2]) {
     const groups = browser.getByTestId(`umpire-card-${card}`).getByRole('radiogroup');
     for (let i = 0; i < 5; i++) await groups.nth(i).getByRole('radio', { name: '3' }).click();
