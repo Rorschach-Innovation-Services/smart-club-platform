@@ -183,6 +183,47 @@ export const WHATSAPP_TEMPLATES = {
       suffix: 'signed report token',
     },
   },
+
+  /**
+   * Captain's report open, v2 copy: drops the club-name param (the awkward "Crusaders's") and
+   * the "works once" wording (a link can be opened and saved as a draft many times; it is
+   * SUBMITTED once). Same URL button as `captains_report_due`.
+   *
+   * NOT YET CREATED IN META. `bodyText` is the exact copy to submit (Utility, English). This
+   * `status` is the ONE switch for the captain's-report sender: while it is not "registered"
+   * the sender keeps using `captains_report_due` (`captainsReportTemplateKey`); flip it to
+   * "registered" once Meta approves the template.
+   */
+  captainsReportOpen: {
+    name: 'captains_report_open',
+    lang: 'en',
+    paramCount: 2,
+    params: ['recipient name', 'match line + date'],
+    bodyText:
+      'Hello {{1}},\n\n' +
+      "The captain's report for {{2}} is open. Please rate the umpires.\n\n" +
+      'Tap the button below to open it. You can submit it once; the link expires on the date shown in the report.',
+    status: 'pending',
+    urlButton: {
+      urlTemplate: 'https://platform.club.medicoach.co.za/r/{{1}}',
+      suffix: 'signed report token',
+    },
+  },
 } as const satisfies Record<string, WhatsAppTemplateDefinition>;
 
 export type WhatsAppTemplateKey = keyof typeof WHATSAPP_TEMPLATES;
+
+const isLive = (def: WhatsAppTemplateDefinition) => def.status === 'registered';
+
+/**
+ * Which template the captain's-report sender uses: the v2 `captains_report_open` once it is
+ * registered in Meta, else the v1 `captains_report_due`; null when neither is approved (the
+ * WhatsApp channel is then skipped as `template-pending`). Overridable for tests.
+ */
+export function captainsReportTemplateKey(
+  templates: Record<'captainsReportOpen' | 'captainsReportDue', WhatsAppTemplateDefinition> = WHATSAPP_TEMPLATES,
+): 'captainsReportOpen' | 'captainsReportDue' | null {
+  if (isLive(templates.captainsReportOpen)) return 'captainsReportOpen';
+  if (isLive(templates.captainsReportDue)) return 'captainsReportDue';
+  return null;
+}

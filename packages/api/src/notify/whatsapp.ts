@@ -15,7 +15,7 @@
  * Dry-run: NOTIFY_DRY_RUN=1 or missing token/phone-id → log + synthetic id.
  */
 import { randomUUID } from 'node:crypto';
-import { WHATSAPP_TEMPLATES } from './whatsapp-templates.js';
+import { WHATSAPP_TEMPLATES, captainsReportTemplateKey } from './whatsapp-templates.js';
 
 const TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
@@ -320,17 +320,49 @@ export function captainsReportDueParams(
   ];
 }
 
-/** Captain's report link over WhatsApp (URL button with the token as its suffix). */
+/**
+ * Build the two body params for `captains_report_open` (v2), in order: {{1}} recipient name
+ * (fallback 'there'), {{2}} match line + date ("Umzinto v African Warriors on Sun 4 Oct
+ * 2026"). The link rides in the URL button, as in v1.
+ */
+export function captainsReportOpenParams(
+  input: Pick<CaptainsReportDueWhatsAppInput, 'recipientName' | 'match'>,
+): TemplateParam[] {
+  return [
+    { type: 'text', text: cleanParam(input.recipientName || 'there') },
+    { type: 'text', text: cleanParam(input.match) },
+  ];
+}
+
+/**
+ * Captain's report link over WhatsApp (URL button with the token as its suffix), on the
+ * template `captainsReportTemplateKey` picks (v2 once registered, else v1). Throws
+ * `WhatsAppTemplatePendingError` when no captain's-report template is approved.
+ */
 export async function sendCaptainsReportDueWhatsApp(
   input: CaptainsReportDueWhatsAppInput,
 ): Promise<{ messageId: string }> {
-  const { name, lang } = WHATSAPP_TEMPLATES.captainsReportDue;
+  const key = captainsReportTemplateKey();
+  if (!key) throw new WhatsAppTemplatePendingError();
+  const { name, lang } = WHATSAPP_TEMPLATES[key];
+  const params =
+    key === 'captainsReportOpen'
+      ? captainsReportOpenParams(input)
+      : captainsReportDueParams(input);
   return sendTemplate(
     input.to,
     name,
     lang,
-    captainsReportDueParams(input),
+    params,
     `captain's report link for ${input.clubName}`,
     input.token,
   );
+}
+
+/** No approved captain's-report template in Meta: the channel is skipped, not failed. */
+export class WhatsAppTemplatePendingError extends Error {
+  constructor() {
+    super("no captain's report WhatsApp template is approved yet");
+    this.name = 'WhatsAppTemplatePendingError';
+  }
 }

@@ -786,16 +786,22 @@ export interface CaptainsReportDueEmailInput {
   /** Club chair cc'd when the captain is the recipient. */
   cc?: string;
   recipientName: string;
-  /** 'captain' → "you captained"; 'chair' → "please complete or forward". */
+  /** 'captain' → "you captained"; 'chair' → "please complete or send it to the captain". */
   recipientKind: 'captain' | 'chair';
   clubName: string;
   /** "Umzinto v African Warriors" */
   matchLine: string;
   /** "Sun 4 Oct 2026" */
   matchDateText: string;
+  /** When the link stops working, "Sunday, 11 Oct" (23:59 SAST that day). */
+  expiresText: string;
   /** The submit-once link. NEVER logged. */
   link: string;
   orgName: string;
+  /** The one pre-expiry reminder (same link). */
+  reminder?: boolean;
+  /** The chair who sent the report on to this captain. */
+  forwardedBy?: string;
 }
 
 /** Build the captain's-report-due email. Pure — exported so tests can assert the copy. */
@@ -806,23 +812,29 @@ export function captainsReportDueEmailContent(input: CaptainsReportDueEmailInput
 } {
   const { recipientName, recipientKind, clubName, matchLine, matchDateText } = input;
   const greet = recipientName || 'there';
-  const subject = `Captain's report open: ${matchLine} (${matchDateText})`;
-  const ask =
-    recipientKind === 'captain'
+  const subject = `${input.reminder ? 'Reminder: ' : ''}Captain's report open: ${matchLine} (${matchDateText})`;
+  const ask = input.forwardedBy
+    ? `${input.forwardedBy} asked you to complete ${clubName}'s captain's report for ${matchLine} on ${matchDateText}. Please rate the umpires.`
+    : recipientKind === 'captain'
       ? `Please rate the umpires from ${clubName}'s match ${matchLine} on ${matchDateText}.`
-      : `${clubName}'s captain's report for ${matchLine} on ${matchDateText} is open. Please complete it, or forward this email to the match captain.`;
+      : `${clubName}'s captain's report for ${matchLine} on ${matchDateText} is open. Please complete it, or use "Send to captain" on the report to pass it to the match captain.`;
+  const lead = input.reminder
+    ? `A reminder: the captain's report is still open and the link expires soon. ${ask}`
+    : ask;
+  const terms = `You can save a draft and submit once. Link expires ${input.expiresText}.`;
+  const after = 'After that, your club chair can still file the report from the club portal.';
   const text =
-    `Hi ${greet},\n\n${ask}\n\n` +
+    `Hi ${greet},\n\n${lead}\n\n` +
     `Open the report here (no sign-in needed):\n\n${input.link}\n\n` +
-    `The link works once and expires 7 days after the match. After that, your club chair can still file the report from the club portal.\n\n` +
+    `${terms} ${after}\n\n` +
     `Thank you,\nThe ${input.orgName} office`;
   const e = escapeHtml;
   const html =
     `<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1B2A4A;line-height:1.55;font-size:15px">` +
     `<p>Hi ${e(greet)},</p>` +
-    `<p>${e(ask)}</p>` +
+    `<p>${e(lead)}</p>` +
     `<p><a href="${e(input.link)}" style="color:#1D9E75;font-weight:600">Open the captain's report</a> (no sign-in needed)</p>` +
-    `<p>The link works once and expires 7 days after the match. After that, your club chair can still file the report from the club portal.</p>` +
+    `<p>${e(terms)} ${e(after)}</p>` +
     `<p>Thank you,<br/>The ${e(input.orgName)} office</p>` +
     `</div>`;
   return { subject, text, html };
