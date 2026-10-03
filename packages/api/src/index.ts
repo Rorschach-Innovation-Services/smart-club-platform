@@ -76,13 +76,7 @@ import {
   seriesHoldsSchedule,
   type ScheduleFixture,
 } from './medicoach-sync/schedule.js';
-import {
-  captainsReportLinkSecret,
-  medicoachSyncSecret,
-  medicoachSyncUrl,
-  whatsappAppSecret,
-  whatsappWebhookVerifyToken,
-} from './env.js';
+import { captainsReportLinkSecret, medicoachSyncSecret, medicoachSyncUrl } from './env.js';
 import { VersionConflictError, LastAdminError } from './repo.js';
 import { clubIdFromName } from './club-id.js';
 import {
@@ -230,12 +224,12 @@ import {
   reportView,
   UNLISTED_SERIES_ID,
 } from './captains-reports.js';
+import { applyWhatsAppStatuses, parseStatuses } from './notify/whatsapp-status.js';
 import {
-  applyWhatsAppStatuses,
-  parseStatuses,
-  verifyMetaSignature,
-  verifyTokenMatches,
-} from './notify/whatsapp-status.js';
+  SYNC_SIGNATURE_HEADER,
+  SYNC_TIMESTAMP_HEADER,
+  verifySignature as verifySyncSignature,
+} from './medicoach-sync-contract.js';
 import { submissionProblems } from '../../engine/src/captainsReport.js';
 import { hasFeature, hasModule } from './features.js';
 import {
@@ -1831,35 +1825,37 @@ async function registerWithoutClearance(
   return {};
 }
 
-/* ─── WhatsApp delivery statuses (public, Meta-signed) ───
-   Registered before the authenticated `/integrations/*` middleware: Meta (or medicoach's
-   forwarder, re-signing with the same app secret) calls it without a session. See
-   notify/whatsapp-status.ts. GET is Meta's verify handshake; POST fails closed without the
-   app secret or with a bad X-Hub-Signature-256. */
-app.get('/integrations/whatsapp/status', (c) => {
-  const mode = c.req.query('hub.mode');
-  const token = c.req.query('hub.verify_token');
-  const challenge = c.req.query('hub.challenge') ?? '';
-  if (mode === 'subscribe' && verifyTokenMatches(token, whatsappWebhookVerifyToken()))
-    return c.text(challenge);
-  return c.text('Forbidden', 403);
-});
-
+/* ─── WhatsApp delivery statuses (public, sync-signed) ───
+   Smart club sends through medicoach's Meta app, whose ONE webhook callback is medicoach's,
+   so medicoach FORWARDS the raw Meta `statuses[]` for smart club's sending number here,
+   signed with the medicoach sync scheme (X-Sync-Timestamp / X-Sync-Signature, the
+   MedicoachSyncSecret — see medicoach-sync-contract.ts). Registered before the
+   authenticated `/integrations/*` middleware. Fails closed with the secret empty. See
+   notify/whatsapp-status.ts. */
 app.post('/integrations/whatsapp/status', async (c) => {
   const raw = await c.req.text();
-  if (!verifyMetaSignature(raw, c.req.header('x-hub-signature-256'), whatsappAppSecret()))
-    return c.json({ error: 'invalid signature' }, 401);
+  const url = new URL(c.req.url);
+  const check = verifySyncSignature({
+    secret: medicoachSyncSecret(),
+    method: 'POST',
+    pathAndQuery: `${url.pathname}${url.search}`,
+    body: raw,
+    timestampHeader: c.req.header(SYNC_TIMESTAMP_HEADER),
+    signatureHeader: c.req.header(SYNC_SIGNATURE_HEADER),
+  });
+  if (!check.ok) return c.json({ error: 'invalid signature' }, 401);
   let payload: unknown;
   try {
     payload = JSON.parse(raw);
   } catch {
     return c.json({ error: 'invalid JSON' }, 400);
   }
-  // A repo failure answers 500 so Meta (or the forwarder) retries; applying is idempotent.
+  // Unknown message ids are acknowledged and ignored (no retry storm); a repo failure
+  // answers 500 so the forwarder may retry — applying a status is idempotent.
   const summary = await applyWhatsAppStatuses(repo, parseStatuses(payload));
   if (summary.matched)
     console.log(`[whatsapp-status] matched ${summary.matched}, unknown ${summary.unknown}`);
-  return c.text('OK');
+  return c.json(summary);
 });
 
 // ───────────────────── Authenticated routes ─────────────────────

@@ -271,15 +271,6 @@ export default $config({
     // so no link is minted (and no report notice sent) until it is set:
     //   sst secret set CaptainsReportLinkSecret $(openssl rand -hex 32) --stage <stage>
     const captainsReportLinkSecret = new sst.Secret('CaptainsReportLinkSecret', '');
-    // WhatsApp delivery statuses for captain's-report notices (POST /integrations/whatsapp/status).
-    // The Meta APP SECRET verifies X-Hub-Signature-256 — the route FAILS CLOSED while it is
-    // empty. Smart club shares medicoach's Meta app, so this is the same value as medicoach's
-    // WhatsappAppSecret (medicoach forwards the statuses it cannot match, re-signed with it).
-    // The verify token answers Meta's GET handshake if a callback ever points here directly.
-    //   sst secret set WhatsappAppSecret <meta app secret> --stage <stage>
-    //   sst secret set WhatsappWebhookVerifyToken $(openssl rand -hex 16) --stage <stage>
-    const whatsappAppSecret = new sst.Secret('WhatsappAppSecret', '');
-    const whatsappWebhookVerifyToken = new sst.Secret('WhatsappWebhookVerifyToken', '');
     // Template NAMES/languages are NOT secrets — they live in the code registry
     // packages/api/src/notify/whatsapp-templates.ts. A template name only changes when
     // the template is created/renamed in Meta (a code change, since the sender's param
@@ -510,8 +501,6 @@ export default $config({
         medicoachSyncUrl,
         medicoachSyncSecret,
         captainsReportLinkSecret,
-        whatsappAppSecret,
-        whatsappWebhookVerifyToken,
       ],
       // SES isn't covered by `link` (it's not an SST resource), so grant it directly.
       // SES authorizes by verified identity, not resource ARN, hence resources: ['*'].
@@ -597,9 +586,6 @@ export default $config({
         // platform host, like /verify (see captainsReportLinkBase).
         CAPTAINS_REPORT_LINK_SECRET: captainsReportLinkSecret.value,
         CAPTAINS_REPORT_LINK_BASE_URL: captainsReportLinkBaseUrl,
-        // WhatsApp status webhook (empty ⇒ every POST refused / every handshake fails).
-        WHATSAPP_APP_SECRET: whatsappAppSecret.value,
-        WHATSAPP_WEBHOOK_VERIFY_TOKEN: whatsappWebhookVerifyToken.value,
       },
       nodejs: { install: ['aws-jwt-verify'] },
       // The certificate renderer's EB Garamond TTFs are read from disk at runtime, which

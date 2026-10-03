@@ -12,7 +12,6 @@ import { test, before, after, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -880,78 +879,62 @@ describe('a free-text umpire on a filed report', () => {
   });
 });
 
-// ── 8. WhatsApp status webhook ──
-describe('POST /integrations/whatsapp/status', () => {
-  const APP_SECRET = 'meta-app-secret';
-  const sign = (body: string, secret = APP_SECRET) =>
-    `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
-  const statusBody = (id: string, status: string, ts: number, errors?: unknown[]) =>
-    JSON.stringify({
-      object: 'whatsapp_business_account',
-      entry: [
-        {
-          id: 'waba',
-          changes: [
-            {
-              field: 'messages',
-              value: {
-                messaging_product: 'whatsapp',
-                metadata: { phone_number_id: '123', display_phone_number: '27000000000' },
-                statuses: [
-                  {
-                    id,
-                    status,
-                    timestamp: String(ts),
-                    recipient_id: '27820000001',
-                    ...(errors ? { errors } : {}),
-                  },
-                ],
-              },
-            },
-          ],
-        },
-      ],
-    });
-  const post = (body: string, sig?: string) =>
-    app.request('/integrations/whatsapp/status', {
+// ── 8. WhatsApp statuses forwarded by medicoach ──
+describe('POST /integrations/whatsapp/status (forwarded by medicoach, sync-signed)', () => {
+  const PATH = '/integrations/whatsapp/status';
+  const status = (id: string, st: string, ts: number, errors?: unknown[]) => ({
+    id,
+    status: st,
+    timestamp: String(ts),
+    recipient_id: '27820000001',
+    ...(errors ? { errors } : {}),
+  });
+  const forwarded = (...statuses: unknown[]) => JSON.stringify({ statuses });
+  const post = (body: string, opts: { secret?: string; timestamp?: number; sign?: boolean } = {}) =>
+    app.request(PATH, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        ...(sig ? { 'x-hub-signature-256': sig } : {}),
+        ...(opts.sign === false
+          ? {}
+          : contract.signRequest({
+              secret: opts.secret ?? SECRET,
+              method: 'POST',
+              pathAndQuery: PATH,
+              body,
+              ...(opts.timestamp ? { timestamp: opts.timestamp } : {}),
+            })),
       },
       body,
     });
+  const withSyncSecret = async (value: string | undefined, fn: () => Promise<void>) => {
+    const prev = process.env.MEDICOACH_SYNC_SECRET;
+    if (value === undefined) delete process.env.MEDICOACH_SYNC_SECRET;
+    else process.env.MEDICOACH_SYNC_SECRET = value;
+    try {
+      await fn();
+    } finally {
+      if (prev === undefined) delete process.env.MEDICOACH_SYNC_SECRET;
+      else process.env.MEDICOACH_SYNC_SECRET = prev;
+    }
+  };
 
-  test('the GET verify handshake echoes the challenge for the right token only', async () => {
-    process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN = 'verify-me';
-    const ok = await app.request(
-      '/integrations/whatsapp/status?hub.mode=subscribe&hub.verify_token=verify-me&hub.challenge=12345',
-    );
-    assert.equal(ok.status, 200);
-    assert.equal(await ok.text(), '12345');
-    const bad = await app.request(
-      '/integrations/whatsapp/status?hub.mode=subscribe&hub.verify_token=nope&hub.challenge=1',
-    );
-    assert.equal(bad.status, 403);
-    process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN = '';
-    const unset = await app.request(
-      '/integrations/whatsapp/status?hub.mode=subscribe&hub.verify_token=&hub.challenge=1',
-    );
-    assert.equal(unset.status, 403);
-  });
-
-  test('fails closed without the app secret or with a bad signature', async () => {
-    process.env.WHATSAPP_APP_SECRET = '';
-    const body = statusBody('wamid.x', 'delivered', 1);
-    assert.equal((await post(body, sign(body))).status, 401);
-    process.env.WHATSAPP_APP_SECRET = APP_SECRET;
-    assert.equal((await post(body)).status, 401);
-    assert.equal((await post(body, sign(body, 'wrong'))).status, 401);
-    assert.equal((await post(body, sign(body))).status, 200);
+  test('fails closed without the sync secret, unsigned, mis-signed or stale', async () => {
+    const body = forwarded(status('wamid.x', 'delivered', 1));
+    await withSyncSecret('', async () => {
+      assert.equal((await post(body)).status, 401);
+    });
+    await withSyncSecret(SECRET, async () => {
+      assert.equal((await post(body, { sign: false })).status, 401);
+      assert.equal((await post(body, { secret: 'wrong' })).status, 401);
+      assert.equal((await post(body, { timestamp: Date.now() - 10 * 60_000 })).status, 401);
+      const ok = await post(body);
+      assert.equal(ok.status, 200);
+      assert.deepEqual(await ok.json(), { matched: 0, unknown: 1, stale: 0 });
+    });
   });
 
   test('matches statuses by message id onto the report delivery; never downgrades', async () => {
-    process.env.WHATSAPP_APP_SECRET = APP_SECRET;
     respond = (n) =>
       n.channels.map((channel) => ({
         channel,
@@ -961,37 +944,37 @@ describe('POST /integrations/whatsapp/status', () => {
     page = liveResultPage('manual');
     await pull();
     const r = await own();
-    const wa = r.deliveries!.find((d) => d.channel === 'whatsapp')!;
-    assert.equal(wa.status, 'sent');
+    assert.equal(r.deliveries!.find((d) => d.channel === 'whatsapp')!.status, 'sent');
     const id = 'wamid.whatsapp.chair@umzinto.test';
     const t0 = Math.floor(Date.now() / 1000);
+    const wa = async () => (await own()).deliveries!.find((d) => d.channel === 'whatsapp')!;
 
-    let body = statusBody(id, 'delivered', t0);
-    assert.equal((await post(body, sign(body))).status, 200);
-    assert.equal(
-      (await own()).deliveries!.find((d) => d.channel === 'whatsapp')!.providerStatus,
-      'delivered',
-    );
+    await withSyncSecret(SECRET, async () => {
+      assert.equal((await post(forwarded(status(id, 'delivered', t0)))).status, 200);
+      assert.equal((await wa()).providerStatus, 'delivered');
 
-    body = statusBody(id, 'read', t0 + 5);
-    await post(body, sign(body));
-    body = statusBody(id, 'delivered', t0 + 10); // late, out of order
-    await post(body, sign(body));
-    const read = (await own()).deliveries!.find((d) => d.channel === 'whatsapp')!;
-    assert.equal(read.providerStatus, 'read');
-    assert.ok(read.providerAt);
+      await post(forwarded(status(id, 'read', t0 + 5)));
+      await post(forwarded(status(id, 'delivered', t0 + 10))); // late, out of order
+      const read = await wa();
+      assert.equal(read.providerStatus, 'read');
+      assert.ok(read.providerAt);
 
-    // An unknown id is acknowledged and ignored.
-    body = statusBody('wamid.unknown', 'read', t0);
-    assert.equal((await post(body, sign(body))).status, 200);
+      // Meta's own envelope is accepted too.
+      const envelope = JSON.stringify({
+        entry: [{ changes: [{ value: { statuses: [status('wamid.unknown', 'read', t0)] } }] }],
+      });
+      assert.equal((await post(envelope)).status, 200);
 
-    // A failed message on the other report shows Meta's error title.
-    const other = await opp();
-    const otherId = other.deliveries!.find((d) => d.channel === 'whatsapp')!.messageId!;
-    body = statusBody(otherId, 'failed', t0, [{ code: 131026, title: 'Message undeliverable' }]);
-    await post(body, sign(body));
-    const failed = (await opp()).deliveries!.find((d) => d.channel === 'whatsapp')!;
-    assert.equal(failed.providerStatus, 'failed');
-    assert.equal(failed.providerError, 'Message undeliverable');
+      // A failed message on the other report shows Meta's error title.
+      const otherId = (await opp()).deliveries!.find((d) => d.channel === 'whatsapp')!.messageId!;
+      await post(
+        forwarded(
+          status(otherId, 'failed', t0, [{ code: 131026, title: 'Message undeliverable' }]),
+        ),
+      );
+      const failed = (await opp()).deliveries!.find((d) => d.channel === 'whatsapp')!;
+      assert.equal(failed.providerStatus, 'failed');
+      assert.equal(failed.providerError, 'Message undeliverable');
+    });
   });
 });

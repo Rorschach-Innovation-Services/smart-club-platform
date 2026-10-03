@@ -2,20 +2,21 @@
  * Meta WhatsApp delivery statuses for captain's-report notices (sent → delivered → read, or
  * failed), received on `POST /integrations/whatsapp/status`.
  *
- * Smart club sends through medicoach's Meta app and WABA (see ./whatsapp.ts), and a Meta app
- * has ONE webhook callback URL, which points at medicoach. So in practice these statuses
- * arrive FORWARDED by medicoach (the statuses it cannot match to its own sends), re-signed
- * with the same app secret — the verification below is identical either way. Should smart
- * club get its own Meta app, its callback can point here directly.
+ * Smart club sends through medicoach's Meta app and WABA (see ./whatsapp.ts). A Meta app has
+ * ONE webhook callback URL per field, and it is medicoach's, so smart club never hears from
+ * Meta directly: medicoach FORWARDS the raw `statuses[]` entries for smart club's sending
+ * number, signed with the medicoach sync scheme (`X-Sync-Timestamp` / `X-Sync-Signature`,
+ * the shared `MedicoachSyncSecret`; see medicoach-sync-contract.ts). The route fails closed
+ * while that secret is empty.
  *
- * Every POST must carry `X-Hub-Signature-256: sha256=<hex HMAC-SHA256(app secret, raw body)>`;
- * with the `WhatsappAppSecret` secret empty every POST is refused (fail closed).
+ * Body: `{ "statuses": [<Meta status>, ...] }` (Meta's own envelope,
+ * `entry[].changes[].value.statuses[]`, is accepted too).
  *
  * Matching is by message id (wamid) only, through the `WAMSG#<wamid>` lookup each send
  * writes. An unknown id is acknowledged and ignored (medicoach's own messages, an expired
- * lookup). Statuses only move forward: sent < delivered < read, and failed is final.
+ * lookup) — never an error, so the forwarder never retries it. Statuses only move forward:
+ * sent < delivered < read, and failed is final.
  */
-import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { CaptainsReportDelivery } from '../types.js';
 
 type RepoModule = typeof import('../repo.js');
@@ -26,26 +27,6 @@ export const MAX_STATUSES_PER_POST = 500;
 type ProviderStatus = NonNullable<CaptainsReportDelivery['providerStatus']>;
 const RANK: Record<ProviderStatus, number> = { sent: 1, delivered: 2, read: 3, failed: 4 };
 
-/** Constant-time check of Meta's `X-Hub-Signature-256` header against the raw body. */
-export function verifyMetaSignature(
-  rawBody: string,
-  header: string | undefined | null,
-  appSecret: string,
-): boolean {
-  if (!appSecret || !header || !header.startsWith('sha256=')) return false;
-  const given = Buffer.from(header.slice('sha256='.length), 'hex');
-  const expected = createHmac('sha256', appSecret).update(rawBody, 'utf8').digest();
-  return given.length === expected.length && timingSafeEqual(given, expected);
-}
-
-/** Constant-time string comparison for the GET handshake's verify token. */
-export function verifyTokenMatches(given: string | undefined, expected: string): boolean {
-  if (!expected || !given) return false;
-  const a = Buffer.from(given);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
-
 export interface ParsedStatus {
   id: string;
   status: ProviderStatus;
@@ -54,9 +35,11 @@ export interface ParsedStatus {
   error?: string;
 }
 
-/** The statuses in a webhook payload (`entry[].changes[].value.statuses[]`); others ignored. */
-export function parseStatuses(payload: unknown): ParsedStatus[] {
-  const out: ParsedStatus[] = [];
+/** Every raw status entry in a body: `{statuses}` (forwarded) or Meta's envelope. */
+function rawStatuses(payload: unknown): unknown[] {
+  const top = (payload as { statuses?: unknown })?.statuses;
+  if (Array.isArray(top)) return top;
+  const out: unknown[] = [];
   const entries = (payload as { entry?: unknown })?.entry;
   if (!Array.isArray(entries)) return out;
   for (const entry of entries) {
@@ -64,34 +47,40 @@ export function parseStatuses(payload: unknown): ParsedStatus[] {
     if (!Array.isArray(changes)) continue;
     for (const change of changes) {
       const statuses = (change as { value?: { statuses?: unknown } })?.value?.statuses;
-      if (!Array.isArray(statuses)) continue;
-      for (const s of statuses) {
-        const x = s as {
-          id?: unknown;
-          status?: unknown;
-          timestamp?: unknown;
-          errors?: Array<{ title?: unknown; message?: unknown }>;
-        };
-        if (typeof x.id !== 'string' || !x.id || x.id.length > 256) continue;
-        if (typeof x.status !== 'string' || !(x.status in RANK)) continue;
-        const secs = Number(x.timestamp);
-        const at = Number.isFinite(secs) && secs > 0 ? new Date(secs * 1000) : new Date();
-        const err = Array.isArray(x.errors) ? x.errors[0] : undefined;
-        const error =
-          typeof err?.title === 'string'
-            ? err.title
-            : typeof err?.message === 'string'
-              ? err.message
-              : undefined;
-        out.push({
-          id: x.id,
-          status: x.status as ProviderStatus,
-          at: at.toISOString(),
-          ...(error ? { error: error.slice(0, 200) } : {}),
-        });
-        if (out.length >= MAX_STATUSES_PER_POST) return out;
-      }
+      if (Array.isArray(statuses)) out.push(...statuses);
     }
+  }
+  return out;
+}
+
+/** The well-formed statuses in a body (others ignored), at most MAX_STATUSES_PER_POST. */
+export function parseStatuses(payload: unknown): ParsedStatus[] {
+  const out: ParsedStatus[] = [];
+  for (const s of rawStatuses(payload)) {
+    const x = s as {
+      id?: unknown;
+      status?: unknown;
+      timestamp?: unknown;
+      errors?: Array<{ title?: unknown; message?: unknown }>;
+    };
+    if (typeof x.id !== 'string' || !x.id || x.id.length > 256) continue;
+    if (typeof x.status !== 'string' || !(x.status in RANK)) continue;
+    const secs = Number(x.timestamp);
+    const at = Number.isFinite(secs) && secs > 0 ? new Date(secs * 1000) : new Date();
+    const err = Array.isArray(x.errors) ? x.errors[0] : undefined;
+    const error =
+      typeof err?.title === 'string'
+        ? err.title
+        : typeof err?.message === 'string'
+          ? err.message
+          : undefined;
+    out.push({
+      id: x.id,
+      status: x.status as ProviderStatus,
+      at: at.toISOString(),
+      ...(error ? { error: error.slice(0, 200) } : {}),
+    });
+    if (out.length >= MAX_STATUSES_PER_POST) return out;
   }
   return out;
 }
