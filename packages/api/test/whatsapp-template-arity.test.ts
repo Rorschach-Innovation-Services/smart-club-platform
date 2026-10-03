@@ -16,9 +16,11 @@ const {
   fixturesParams,
   clearanceParams,
   captainsReportDueParams,
+  captainsReportOpenParams,
   urlButtonComponent,
 } = await import('../src/notify/whatsapp.js');
-const { WHATSAPP_TEMPLATES } = await import('../src/notify/whatsapp-templates.js');
+const { WHATSAPP_TEMPLATES, captainsReportTemplateKey } =
+  await import('../src/notify/whatsapp-templates.js');
 
 const LINK = 'https://club.example.com/sign-in';
 
@@ -56,6 +58,13 @@ const BUILDERS = [
       recipientName: 'Sanele Mthembu',
       clubName: 'Umzinto CC',
       match: 'Umzinto v African Warriors, Sun 4 Oct 2026',
+    }),
+  },
+  {
+    key: 'captainsReportOpen' as const,
+    params: captainsReportOpenParams({
+      recipientName: 'Sanele Mthembu',
+      match: 'Umzinto v African Warriors on Sun 4 Oct 2026',
     }),
   },
   {
@@ -122,5 +131,54 @@ describe('whatsapp URL buttons', () => {
       match: 'C',
     });
     for (const p of params) assert.doesNotMatch(p.text, /https?:\/\//);
+  });
+});
+
+describe("captain's report template v2 (captains_report_open)", () => {
+  const v2 = WHATSAPP_TEMPLATES.captainsReportOpen;
+
+  test('two body params: recipient name, then match line + date', () => {
+    assert.equal(v2.name, 'captains_report_open');
+    assert.equal(v2.paramCount, 2);
+    assert.deepEqual(v2.params, ['recipient name', 'match line + date']);
+  });
+
+  test('the copy says "submit it once" and never "works once" or a possessive club name', () => {
+    assert.match(v2.bodyText, /You can submit it once; the link expires on the date shown/);
+    assert.doesNotMatch(v2.bodyText, /works once/);
+    assert.doesNotMatch(v2.bodyText, /'s captain's report/);
+  });
+
+  test('same URL button as v1', () => {
+    assert.deepEqual(v2.urlButton, WHATSAPP_TEMPLATES.captainsReportDue.urlButton);
+  });
+
+  test('the sender uses v2 only once it is registered, else falls back to v1', () => {
+    const base = {
+      captainsReportOpen: { ...v2, status: 'pending' as const },
+      captainsReportDue: WHATSAPP_TEMPLATES.captainsReportDue,
+    };
+    assert.equal(captainsReportTemplateKey(base), 'captainsReportDue');
+    assert.equal(
+      captainsReportTemplateKey({
+        ...base,
+        captainsReportOpen: { ...v2, status: 'registered' as const },
+      }),
+      'captainsReportOpen',
+    );
+    assert.equal(
+      captainsReportTemplateKey({
+        captainsReportOpen: { ...v2, status: 'pending' as const },
+        captainsReportDue: { ...WHATSAPP_TEMPLATES.captainsReportDue, status: 'pending' as const },
+      }),
+      null,
+    );
+    // Today: v2 is pending, so the live sender still uses v1.
+    assert.equal(captainsReportTemplateKey(), 'captainsReportDue');
+  });
+
+  test('the report link never rides in the v2 body params', () => {
+    for (const p of captainsReportOpenParams({ recipientName: 'A', match: 'B' }))
+      assert.doesNotMatch(p.text, /https?:\/\//);
   });
 });
