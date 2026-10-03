@@ -980,3 +980,21 @@ describe('POST /integrations/whatsapp/status (forwarded by medicoach, sync-signe
     });
   });
 });
+
+describe('dates in notices', () => {
+  test('a September match reads "Sep" (the platform formatter), never "Sept"', async () => {
+    const s = (await repo.getSeries('dolphins', 's-planb-premier-men-t20-g1'))!;
+    await repo.putSeries('dolphins', {
+      ...s,
+      fixtures: [fx('f3', 'umzinto', 'african-warriors', { date: '2026-09-20' })],
+    } as Series);
+    page = liveResultPage('manual');
+    await pull('2026-09-21T08:00:00.000Z');
+    const n = notices.find((x) => x.reportId.endsWith('~umzinto'))!;
+    assert.equal(n.matchDateText, 'Sun 20 Sep 2026');
+    assert.equal(n.expiresText, 'Sunday, 27 Sep');
+    assert.equal(n.orgName, 'Dolphins');
+    const { fmtExpiry, reportLinkExpiry } = await import('../src/captains-reports.js');
+    assert.equal(fmtExpiry(reportLinkExpiry('2026-09-20')), 'Sunday, 27 Sep');
+  });
+});

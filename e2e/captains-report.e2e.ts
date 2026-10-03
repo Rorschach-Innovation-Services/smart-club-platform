@@ -10,6 +10,7 @@ import {
   RUN,
   adminAuthHeader,
   apiHeaders,
+  createActivePlayer,
   operatorAuth,
   signInAsAdmin,
   signInAsRep,
@@ -179,15 +180,19 @@ async function mintLink(clubId: string): Promise<string> {
   );
   const memberId = item.Item?.recipient?.M?.memberId?.S;
   expect(memberId, 'the report has a recipient id').toBeTruthy();
+  const stored = item.Item?.linkExpiresAt?.S;
   const payload = Buffer.from(
     JSON.stringify({
       t: TENANT,
       r: `${SERIES_ID}~f1~${clubId}`,
       m: memberId,
-      // 23:59:59 SAST seven days after the match (captains-reports.ts reportLinkExpiry).
-      e: Math.floor(
-        (Date.parse(`${MATCH_DATE}T23:59:59Z`) - 2 * 3600 * 1000 + 7 * 24 * 3600 * 1000) / 1000,
-      ),
+      // The report's stored expiry (captains-reports.ts reportLinkExpiry), else the
+      // match rule: 23:59:59 SAST seven days after the match.
+      e: stored
+        ? Math.floor(Date.parse(stored) / 1000)
+        : Math.floor(
+            (Date.parse(`${MATCH_DATE}T23:59:59Z`) - 2 * 3600 * 1000 + 7 * 24 * 3600 * 1000) / 1000,
+          ),
     }),
   ).toString('base64url');
   const sig = createHmac('sha256', LINK_SECRET)
@@ -280,6 +285,44 @@ test('the home club files its report in the portal', async ({ page: browser }) =
   await expect(browser.getByText(/^CR-\d{4}-\d{4}$/)).toBeVisible();
 });
 
+test("the away chair sends the report on to a captain from the link; the chair's link keeps working", async ({
+  browser,
+  request,
+}) => {
+  // createActivePlayer registers "Test <name>" (first name Test).
+  const captain = `Test Fwd${RUN}`;
+  await createActivePlayer(request, AWAY, { name: `Fwd${RUN}` });
+  const token = await mintLink(AWAY);
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.goto(`/r/${token}`);
+  await expect(p.getByText("Crusaders / Captain's Report")).toBeVisible();
+  await expect(p.getByText(/Link expires \w+, \d{1,2} \w{3}\./)).toBeVisible();
+  await p.getByRole('button', { name: 'Send to captain' }).click();
+  const picker = p.getByRole('combobox', { name: 'Captain', exact: true });
+  await expect(picker.getByRole('option', { name: captain, exact: true })).toHaveCount(1);
+  await picker.selectOption({ label: captain });
+  await p.getByRole('button', { name: 'Send', exact: true }).click();
+  await expect(p.getByText(`Sent to ${captain}. They will get their own link.`)).toBeVisible();
+  // The report is now addressed to the captain…
+  const list = await request.get(`${API_BASE}/captains-reports?status=pending`, {
+    headers: admin(),
+  });
+  const away = (
+    (await list.json()) as Array<{
+      seriesId: string;
+      clubId: string;
+      recipient: { kind: string; name: string; forwardedBy?: { via: string } };
+    }>
+  ).find((r) => r.seriesId === SERIES_ID && r.clubId === AWAY)!;
+  expect(away.recipient).toMatchObject({ kind: 'captain', name: captain });
+  expect(away.recipient.forwardedBy?.via).toBe('link');
+  // …and the chair's own link still opens it (first submit wins — the next test files it).
+  await p.reload();
+  await expect(p.getByText("Crusaders / Captain's Report")).toBeVisible();
+  await ctx.close();
+});
+
 test('the away chair files through the submit-once link, which then closes', async ({
   browser,
 }) => {
@@ -303,19 +346,47 @@ test('the away chair files through the submit-once link, which then closes', asy
   await ctx.close();
 });
 
+test("the home club reports a match that isn't in the fixture list", async ({ page: browser }) => {
+  await signInAsRep(browser, HOME);
+  await dismissOnboarding(browser);
+  await browser.locator('aside.nav .nav-item', { hasText: "Captain's Report" }).click();
+  await browser.getByRole('button', { name: "Report a match that isn't listed" }).click();
+  await browser.getByLabel('Opponent').fill(`Friendly XI ${RUN}`);
+  await browser.getByLabel('Match date').fill(isoDay(-2));
+  await browser.getByLabel('Competition').fill('Friendly');
+  await browser.getByRole('button', { name: 'Continue to the umpires' }).click();
+  // No appointment → two registry pickers.
+  await browser.getByRole('combobox', { name: 'Umpire 1' }).selectOption({ label: UMP_A });
+  await browser.getByRole('combobox', { name: 'Umpire 2' }).selectOption({ label: UMP_B });
+  for (const card of [1, 2]) {
+    const groups = browser.getByTestId(`umpire-card-${card}`).getByRole('radiogroup');
+    for (let i = 0; i < 5; i++) await groups.nth(i).getByRole('radio', { name: '3' }).click();
+  }
+  await browser.getByRole('combobox', { name: "Captain's name" }).fill(`Captain ${RUN}`);
+  await browser.getByRole('checkbox').check();
+  await browser.getByRole('button', { name: 'Submit report' }).first().click();
+  await expect(browser.getByText('Report submitted')).toBeVisible();
+});
+
 test('the union office sees both reports and the umpire averages', async ({ page: browser }) => {
   await signInAsAdmin(browser);
   await browser.locator('aside.nav .nav-item', { hasText: "Captain's reports" }).click();
   const rows = browser.getByRole('row', { name: /UKZN v Crusaders/ });
   await expect(rows).toHaveCount(2);
+  // Each row says what happened to its notice, never just who it was "sent to".
+  await expect(browser.getByRole('columnheader', { name: 'Notice' })).toBeVisible();
+  await expect(rows.first().getByText(/^Email/)).toBeVisible();
+  const unlisted = browser.getByRole('row', { name: new RegExp(`Friendly XI ${RUN}`) });
+  await expect(unlisted.getByText('Not in the fixture list')).toBeVisible();
   await browser.getByRole('button', { name: /low ratings/i }).click();
   await expect(rows).toHaveCount(1);
   await rows.first().getByRole('button', { name: 'View' }).click();
   await expect(browser.getByText(`Umpire 1: ${UMP_A}`)).toBeVisible();
 
   await browser.locator('aside.nav .nav-item', { hasText: 'Umpires' }).click();
-  // UMP_A: (2+4+4+4+4)/5 = 3.6 from UKZN and 5.0 from Crusaders → 4.3 over 2 reports.
+  // UMP_A: (2+4+4+4+4)/5 = 3.6 from UKZN, 5.0 from Crusaders and 3.0 from the unlisted
+  // friendly → 3.9 over 3 reports.
   const row = browser.getByRole('row', { name: new RegExp(UMP_A.replace('.', '\\.')) });
-  await expect(row.getByText('4.3')).toBeVisible();
-  await expect(row.getByText(/2 reports/)).toBeVisible();
+  await expect(row.getByText('3.9')).toBeVisible();
+  await expect(row.getByText(/3 reports/)).toBeVisible();
 });

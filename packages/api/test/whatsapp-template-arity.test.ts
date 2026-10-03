@@ -64,6 +64,7 @@ const BUILDERS = [
     key: 'captainsReportOpen' as const,
     params: captainsReportOpenParams({
       recipientName: 'Sanele Mthembu',
+      orgName: 'KZN Dolphins',
       match: 'Umzinto v African Warriors on Sun 4 Oct 2026',
     }),
   },
@@ -137,10 +138,24 @@ describe('whatsapp URL buttons', () => {
 describe("captain's report template v2 (captains_report_open)", () => {
   const v2 = WHATSAPP_TEMPLATES.captainsReportOpen;
 
-  test('two body params: recipient name, then match line + date', () => {
+  test('three body params: recipient name, union name, match line + date', () => {
     assert.equal(v2.name, 'captains_report_open');
-    assert.equal(v2.paramCount, 2);
-    assert.deepEqual(v2.params, ['recipient name', 'match line + date']);
+    assert.equal(v2.paramCount, 3);
+    assert.deepEqual(v2.params, ['recipient name', 'org name', 'match line + date']);
+    assert.equal(
+      v2.bodyText,
+      'Hello {{1}},\n\n' +
+        "The {{2}} captain's report for {{3}} is open. Please rate the umpires.\n\n" +
+        'Tap the button below to open it. You can submit it once; the link expires on the date shown in the report.',
+    );
+    assert.deepEqual(
+      captainsReportOpenParams({
+        recipientName: 'Sanele',
+        orgName: 'KZN Dolphins',
+        match: 'Umzinto v AW on Sun 20 Sep 2026',
+      }).map((p) => p.text),
+      ['Sanele', 'KZN Dolphins', 'Umzinto v AW on Sun 20 Sep 2026'],
+    );
   });
 
   test('the copy says "submit it once" and never "works once" or a possessive club name', () => {
@@ -178,7 +193,7 @@ describe("captain's report template v2 (captains_report_open)", () => {
   });
 
   test('the report link never rides in the v2 body params', () => {
-    for (const p of captainsReportOpenParams({ recipientName: 'A', match: 'B' }))
+    for (const p of captainsReportOpenParams({ recipientName: 'A', orgName: 'O', match: 'B' }))
       assert.doesNotMatch(p.text, /https?:\/\//);
   });
 });
