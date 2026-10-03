@@ -2745,6 +2745,18 @@ function Shell({
           <AdminCaptainsReportsView
             reports={allCaptainsReports}
             loading={captainsReportsQuery.isLoading}
+            umpires={allUmpires}
+            onOpenClub={setActiveClub}
+            onCreateUmpire={(displayName) => createUmpire({ displayName })}
+            onAttribute={(reportId, index, umpireId, action) =>
+              withToast(
+                () => api.attributeCaptainsReportUmpire(reportId, index, { umpireId, action }),
+                'Could not attribute the umpire',
+              ).then((r) => {
+                invalidate(qk.captainsReports());
+                return r;
+              })
+            }
           />
         );
       if (view === 'clearances')

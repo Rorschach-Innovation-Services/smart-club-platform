@@ -476,6 +476,8 @@ describe('the link expiry window', () => {
       iso(reportLinkExpiry('2026-10-04', Date.parse('2026-10-12T10:00:00Z'))),
       '2026-10-15T21:59:59.000Z',
     );
+    const { fmtExpiry } = await import('../src/captains-reports.js');
+    assert.equal(fmtExpiry(reportLinkExpiry('2026-10-04')), 'Sunday, 11 Oct');
     // 23:30Z on 12 Oct is already 13 Oct in SAST.
     assert.equal(
       iso(reportLinkExpiry('2026-10-04', Date.parse('2026-10-12T23:30:00Z'))),

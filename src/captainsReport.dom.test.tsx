@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-utils';
-import { CaptainsReportForm, type ReportShell } from './CaptainsReport';
+import { CaptainsReportForm, SendToCaptain, type ReportShell } from './CaptainsReport';
 import { ownRoster } from './captainsReportRoster';
 
 const NGUBANE = { umpireId: 'u-ngubane', name: 'A.Ngubane' };
@@ -124,5 +124,67 @@ describe('captain suggestions', () => {
       { firstName: 'Ayanda', lastName: 'Cele' },
     ]);
     expect(r.players.map((p) => p.name)).toEqual(['Ayanda Cele', 'Zane Adams']);
+  });
+});
+
+describe('match details', () => {
+  it('show when the link expires, and "To be confirmed" for a withheld venue', () => {
+    renderWithProviders(
+      <CaptainsReportForm
+        report={{
+          ...shell([]),
+          venue: undefined,
+          venueWithheld: true,
+          linkExpiresAt: '2026-10-11T21:59:59.000Z',
+        }}
+        registry={REGISTRY}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Link expires')).toBeInTheDocument();
+    expect(screen.getByText('Sunday, 11 Oct')).toBeInTheDocument();
+    expect(screen.getByText('To be confirmed')).toBeInTheDocument();
+    expect(screen.queryByText('Kingsmead Oval')).toBeNull();
+  });
+});
+
+describe('Send to captain', () => {
+  it('lists the club’s eligible players by name and sends to the one picked', async () => {
+    const send = vi.fn(async () => ({}));
+    const onSent = vi.fn();
+    renderWithProviders(
+      <SendToCaptain
+        queryKey={['fwd-test']}
+        load={async () => ({
+          candidates: [
+            { id: 'c1', name: 'Adult Player' },
+            { id: 'c2', name: 'Cellonly Player' },
+          ],
+          remaining: 3,
+        })}
+        send={send}
+        onSent={onSent}
+      />,
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Send to captain' }));
+    const select = await screen.findByRole('combobox', { name: 'Captain' });
+    expect(optionsOf(select)).toEqual(['Choose a player', 'Adult Player', 'Cellonly Player']);
+    await userEvent.selectOptions(select, 'c2');
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(send).toHaveBeenCalledWith('c2');
+    expect(onSent).toHaveBeenCalledWith('Cellonly Player');
+    expect(await screen.findByText(/Sent to Cellonly Player/)).toBeInTheDocument();
+  });
+
+  it('says so when no player can be reached', async () => {
+    renderWithProviders(
+      <SendToCaptain
+        queryKey={['fwd-test-empty']}
+        load={async () => ({ candidates: [], remaining: 3 })}
+        send={vi.fn()}
+      />,
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Send to captain' }));
+    expect(await screen.findByText(/No registered adult player/)).toBeInTheDocument();
   });
 });

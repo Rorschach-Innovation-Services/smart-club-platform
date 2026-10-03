@@ -4014,6 +4014,55 @@
         font-size: 13px;
         margin: 8px 0 0;
       }
+      .cr-forward-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .cr-forward-pick {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-top: 10px;
+      }
+      .cr-forward-pick .field-select {
+        width: auto;
+        min-width: 220px;
+        max-width: 100%;
+      }
+      .cr-unlisted-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 12px;
+      }
+      .cr-unlisted-grid .field-label {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .cr-delivery {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 4px;
+      }
+      .cr-gaps {
+        margin: 0 0 14px;
+      }
+      .cr-gaps ul {
+        margin: 6px 0 0;
+        padding-left: 18px;
+      }
+      .cr-attribute {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin: 6px 0;
+      }
       .cr-link-shell {
         min-height: 100vh;
         background: var(--paper, #f6f8fb);

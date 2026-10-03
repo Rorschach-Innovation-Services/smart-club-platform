@@ -5,7 +5,9 @@
  * automatically when medicoach reports a result (one per side, addressed to the match
  * captain or the club chair); the club fills them here or through the submit-once link
  * (`/r/<token>`, CaptainsReportLinkPage). A club can also file one by hand for a fixture
- * that has no report. The first submit wins.
+ * that has no report, or for a match that is not in the fixture list. The first submit wins.
+ * The chair (portal, or the chair's own link) can "Send to captain": the report then goes to a
+ * player they pick, while the chair's link keeps working until it is submitted.
  *
  * The umpire cards follow the appointment snapshotted when the report opened: one
  * appointed → one autofilled card; two → each card limited to the pair; none → two
@@ -24,10 +26,16 @@ import { teamIdsForClub, resolveTeam } from './data';
 import {
   ApiError,
   createClubCaptainsReport,
+  createUnlistedCaptainsReport,
+  forwardClubCaptainsReport,
+  forwardLinkedCaptainsReport,
   getClubCaptainsReports,
+  getClubReportForwardCandidates,
   getLinkedCaptainsReport,
+  getLinkedForwardCandidates,
   putClubCaptainsReport,
   putLinkedCaptainsReport,
+  type ForwardCandidates,
 } from './api';
 import { applyTheme } from './config';
 import { qk } from './query';
@@ -60,6 +68,19 @@ export const fmtDate = (iso?: string | null) =>
         year: 'numeric',
       })
     : '';
+
+/** "Sunday, 11 Oct" — the SAST day a report link expires (it works until 23:59 that day). */
+export const fmtLinkExpiry = (iso?: string | null) => {
+  if (!iso) return '';
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'Africa/Johannesburg',
+  }).formatToParts(new Date(iso));
+  const part = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  return `${part('weekday')}, ${part('day')} ${part('month')}`;
+};
 
 // Local YYYY-MM-DD (toISOString would shift SAST dates back a day via UTC).
 const localISO = (d: Date) =>
@@ -438,6 +459,7 @@ export function UmpireCard({
 
 /** The report's header facts (read-only: they come from the fixture and the result). */
 function MatchFacts({ report }: { report: ReportShell }) {
+  const expires = fmtLinkExpiry(report.linkExpiresAt);
   return (
     <div className="rp-section">
       <SectionHead n={1} title="Match details" sub="From the fixture list and the scorecard." />
@@ -453,16 +475,27 @@ function MatchFacts({ report }: { report: ReportShell }) {
           <dt>Competition</dt>
           <dd>{report.competition || '—'}</dd>
         </div>
-        {report.venue && (
+        {report.venue ? (
           <div>
             <dt>Venue</dt>
             <dd>{report.venue}</dd>
           </div>
-        )}
+        ) : report.venueWithheld ? (
+          <div>
+            <dt>Venue</dt>
+            <dd>To be confirmed</dd>
+          </div>
+        ) : null}
         {report.resultSummary && (
           <div>
             <dt>Result</dt>
             <dd>{report.resultSummary}</dd>
+          </div>
+        )}
+        {expires && (
+          <div>
+            <dt>Link expires</dt>
+            <dd>{expires}</dd>
           </div>
         )}
       </dl>
@@ -480,6 +513,8 @@ export type ReportShell = Pick<
   | 'opponentName'
   | 'competition'
   | 'venue'
+  | 'venueWithheld'
+  | 'linkExpiresAt'
   | 'resultSummary'
   | 'umpiresSnapshot'
   | 'captainName'
@@ -686,7 +721,14 @@ export function CaptainsReportForm({
 }
 
 /** A filed report, read-only and printable (portal, link confirmation, admin). */
-export function CaptainsReportReadOnly({ report }: { report: CaptainsReport }) {
+export function CaptainsReportReadOnly({
+  report,
+  umpireAction,
+}: {
+  report: CaptainsReport;
+  /** Admin: an action under each umpire card (e.g. attribute a free-text umpire). */
+  umpireAction?: (u: ReportUmpireEntry, index: number) => ReactNode;
+}) {
   return (
     <div className="cr-print">
       <div className="cr-print-head">
@@ -697,6 +739,7 @@ export function CaptainsReportReadOnly({ report }: { report: CaptainsReport }) {
             {fmtDate(report.matchDate)} · {report.competition}
             {report.venue ? ` · ${report.venue}` : ''}
           </div>
+          {report.source === 'manual-unlisted' && <Pill tone="navy">Not in the fixture list</Pill>}
         </div>
         <div style={{ textAlign: 'right' }}>
           {report.ref && <div className="cr-print-ref">{report.ref}</div>}
@@ -718,6 +761,14 @@ export function CaptainsReportReadOnly({ report }: { report: CaptainsReport }) {
               {u.substitute && <Pill tone="navy">Stood in</Pill>}
               {avg != null && <span className="cr-print-avg">{avg.toFixed(1)} / 5</span>}
             </div>
+            {umpireAction?.(u, i)}
+            {u.attributed && (
+              <div className="cr-section-sub">
+                Entered as “{u.attributed.freeTextName}”;{' '}
+                {u.attributed.action === 'registered' ? 'added to the registry' : 'linked'} by{' '}
+                {u.attributed.by}
+              </div>
+            )}
             <table className="cr-print-table">
               <tbody>
                 {RATING_CRITERIA.map((c) => {
@@ -815,6 +866,193 @@ function SubmittedCard({ report, onBack }: { report: CaptainsReport; onBack?: ()
 const errText = (err: unknown) =>
   err instanceof ApiError ? err.message : 'Something went wrong — try again.';
 
+/* ─── Send to captain (the chair's portal view and the chair's own link) ─── */
+
+interface SendToCaptainProps {
+  /** Query key for the candidate list (scoped to the report / token). */
+  queryKey: readonly unknown[];
+  load: () => Promise<ForwardCandidates>;
+  send: (candidateId: string) => Promise<unknown>;
+  /** Who the report is addressed to now (shown when it has already been sent on). */
+  current?: CaptainsReport['recipient'];
+  onSent?: (name: string) => void;
+  onError?: (message: string) => void;
+}
+
+/**
+ * Pick one of the club's own registered adult players with a contact on file; the report
+ * (with a new link) goes to them. Names only — no contact details are shown or loaded.
+ */
+export function SendToCaptain({
+  queryKey,
+  load,
+  send,
+  current,
+  onSent,
+  onError,
+}: SendToCaptainProps) {
+  const [open, setOpen] = useState(false);
+  const [pick, setPick] = useState('');
+  const [sentTo, setSentTo] = useState<string | null>(null);
+  const query = useQuery({ queryKey, queryFn: load, enabled: open });
+  const mutation = useMutation({
+    mutationFn: (id: string) => send(id),
+    onSuccess: () => {
+      const name = query.data?.candidates.find((c) => c.id === pick)?.name ?? 'the captain';
+      setSentTo(name);
+      setOpen(false);
+      setPick('');
+      onSent?.(name);
+      void query.refetch();
+    },
+    onError: (err) => onError?.(errText(err)),
+  });
+  const remaining = query.data?.remaining;
+  const forwarded = current?.forwardedBy ? current.name : null;
+  return (
+    <div className="rp-section cr-forward" aria-label="Send to captain">
+      <div className="cr-forward-head">
+        <div>
+          <strong>Not the captain?</strong>
+          <div className="cr-section-sub">
+            {sentTo || forwarded
+              ? `Sent to ${sentTo ?? forwarded}. Your own link still works until the report is submitted.`
+              : 'Send this report to the match captain. They get their own link; yours keeps working until the report is submitted.'}
+          </div>
+        </div>
+        {!open && (
+          <Btn tone="outline" size="sm" onClick={() => setOpen(true)}>
+            Send to captain
+          </Btn>
+        )}
+      </div>
+      {open && (
+        <div className="cr-forward-pick">
+          {query.isLoading ? (
+            <div className="cr-section-sub">Loading players…</div>
+          ) : query.error ? (
+            <div className="rp-validation">{errText(query.error)}</div>
+          ) : !query.data?.candidates.length ? (
+            <div className="cr-section-sub">
+              No registered adult player has an email or cell on file. Ask the captain to update
+              their registration, or complete the report yourself.
+            </div>
+          ) : remaining === 0 ? (
+            <div className="cr-section-sub">
+              This report has already been sent on 3 times. Complete it yourself.
+            </div>
+          ) : (
+            <>
+              <select
+                className="field-select"
+                aria-label="Captain"
+                value={pick}
+                onChange={(e) => setPick(e.target.value)}
+              >
+                <option value="">Choose a player</option>
+                {query.data.candidates.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+              <Btn
+                tone="teal"
+                size="sm"
+                disabled={!pick || mutation.isPending}
+                onClick={() => mutation.mutate(pick)}
+              >
+                Send
+              </Btn>
+            </>
+          )}
+          <Btn tone="ghost" size="sm" onClick={() => setOpen(false)}>
+            Cancel
+          </Btn>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── A match that isn't in the fixture list ─── */
+
+interface UnlistedDetails {
+  opponentName: string;
+  matchDate: string;
+  competition: string;
+  venue: string;
+}
+
+function UnlistedMatchDetails({
+  onContinue,
+  onCancel,
+}: {
+  onContinue: (d: UnlistedDetails) => void;
+  onCancel: () => void;
+}) {
+  const today = localISO(new Date());
+  const [d, setD] = useState<UnlistedDetails>({
+    opponentName: '',
+    matchDate: '',
+    competition: '',
+    venue: '',
+  });
+  const set = (k: keyof UnlistedDetails) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    setD((x) => ({ ...x, [k]: e.target.value }));
+  const problem = !d.opponentName.trim()
+    ? 'Enter the opponent.'
+    : !d.matchDate
+      ? 'Enter the match date.'
+      : d.matchDate > today
+        ? 'The match date cannot be in the future.'
+        : null;
+  return (
+    <div className="rp-section">
+      <SectionHead
+        n={1}
+        title="Match details"
+        sub="For a match that is not in the fixture list (a friendly, a re-arranged game)."
+      />
+      <div className="cr-unlisted-grid">
+        <label className="field-label">
+          Opponent <span className="req">*</span>
+          <input className="field-input" value={d.opponentName} onChange={set('opponentName')} />
+        </label>
+        <label className="field-label">
+          Match date <span className="req">*</span>
+          <input
+            className="field-input"
+            type="date"
+            max={today}
+            value={d.matchDate}
+            onChange={set('matchDate')}
+          />
+        </label>
+        <label className="field-label">
+          Competition
+          <input className="field-input" value={d.competition} onChange={set('competition')} />
+        </label>
+        <label className="field-label">
+          Venue
+          <input className="field-input" value={d.venue} onChange={set('venue')} />
+        </label>
+      </div>
+      {problem && d.opponentName + d.matchDate !== '' && (
+        <div className="rp-validation">{problem}</div>
+      )}
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <Btn tone="ghost" size="sm" onClick={onCancel}>
+          Cancel
+        </Btn>
+        <Btn tone="teal" size="sm" disabled={!!problem} onClick={() => onContinue(d)}>
+          Continue to the umpires
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Club portal ─── */
 
 interface CaptainsReportViewProps {
@@ -844,6 +1082,7 @@ export function CaptainsReportView({
   const reports = useMemo(() => reportsQuery.data ?? [], [reportsQuery.data]);
   const [selected, setSelected] = useState<string | null>(null);
   const [newFixture, setNewFixture] = useState<string>('');
+  const [unlisted, setUnlisted] = useState<'details' | UnlistedDetails | null>(null);
   const [done, setDone] = useState<CaptainsReport | null>(null);
   const roster = useMemo(() => ownRoster(club, players), [club, players]);
   const refresh = () => qc.invalidateQueries({ queryKey: qk.clubCaptainsReports(club.id) });
@@ -935,6 +1174,18 @@ export function CaptainsReportView({
     },
   });
 
+  const createUnlisted = useMutation({
+    mutationFn: (args: { details: UnlistedDetails; fields: CaptainsReportFields }) =>
+      createUnlistedCaptainsReport({ ...args.fields, ...args.details, clubId: club.id }),
+    onSuccess: (r) => {
+      refresh();
+      setUnlisted(null);
+      setDone(r);
+      toast?.(`Report ${r.ref} submitted to the union office`);
+    },
+    onError: (err) => toast?.(errText(err), 'warn'),
+  });
+
   const header = (
     <div className="page-head">
       <div className="ph-left">
@@ -944,7 +1195,7 @@ export function CaptainsReportView({
         </h1>
         <p className="ph-desc">
           Rate the on-field umpires after each match. Reports open here when the result is in; the
-          captain also gets a link to fill it in, which works for 7 days after the match. You can
+          captain or chair also gets a link (it expires on the date shown on the report). You can
           file here at any time.
         </p>
       </div>
@@ -954,6 +1205,7 @@ export function CaptainsReportView({
   const back = () => {
     setSelected(null);
     setNewFixture('');
+    setUnlisted(null);
     setDone(null);
   };
 
@@ -976,16 +1228,31 @@ export function CaptainsReportView({
           </Btn>
         </div>
         {current.status === 'pending' ? (
-          <CaptainsReportForm
-            key={current.id}
-            report={current}
-            registry={registry}
-            captainOptions={roster.players}
-            captainGroupLabel={club.name}
-            busy={save.isPending}
-            onSaveDraft={(fields) => save.mutateAsync({ id: current.id, fields, submit: false })}
-            onSubmit={(fields) => save.mutateAsync({ id: current.id, fields, submit: true })}
-          />
+          <>
+            {current.source === 'auto' && (
+              <SendToCaptain
+                queryKey={['captains-report-forward', club.id, current.id]}
+                load={() => getClubReportForwardCandidates(current.id)}
+                send={(candidateId) => forwardClubCaptainsReport(current.id, candidateId)}
+                current={current.recipient}
+                onSent={(name) => {
+                  refresh();
+                  toast?.(`Report sent to ${name}`);
+                }}
+                onError={(m) => toast?.(m, 'warn')}
+              />
+            )}
+            <CaptainsReportForm
+              key={current.id}
+              report={current}
+              registry={registry}
+              captainOptions={roster.players}
+              captainGroupLabel={club.name}
+              busy={save.isPending}
+              onSaveDraft={(fields) => save.mutateAsync({ id: current.id, fields, submit: false })}
+              onSubmit={(fields) => save.mutateAsync({ id: current.id, fields, submit: true })}
+            />
+          </>
         ) : (
           <>
             <CaptainsReportReadOnly report={current} />
@@ -995,6 +1262,47 @@ export function CaptainsReportView({
               </Btn>
             </div>
           </>
+        )}
+      </div>
+    );
+  }
+
+  if (unlisted) {
+    const details = unlisted === 'details' ? null : unlisted;
+    return (
+      <div>
+        {header}
+        <div style={{ marginBottom: 12 }}>
+          <Btn tone="ghost" size="sm" onClick={back}>
+            ← All reports
+          </Btn>
+        </div>
+        {!details ? (
+          <UnlistedMatchDetails onContinue={(d) => setUnlisted(d)} onCancel={back} />
+        ) : (
+          <CaptainsReportForm
+            key={`unlisted:${details.matchDate}:${details.opponentName}`}
+            report={{
+              id: `unlisted:${club.id}`,
+              matchDate: details.matchDate,
+              side: 'home',
+              clubName: club.name,
+              opponentName: details.opponentName.trim(),
+              competition: details.competition.trim(),
+              venue: details.venue.trim() || undefined,
+              resultSummary: null,
+              umpiresSnapshot: [],
+              captainName: '',
+              umpires: [],
+              general: '',
+              declaration: false,
+            }}
+            registry={registry}
+            captainOptions={roster.players}
+            captainGroupLabel={club.name}
+            busy={createUnlisted.isPending}
+            onSubmit={(fields) => createUnlisted.mutateAsync({ details, fields })}
+          />
         )}
       </div>
     );
@@ -1043,6 +1351,7 @@ export function CaptainsReportView({
                     <strong>{matchLine(r)}</strong>
                     <span className="cr-section-sub">
                       {fmtDate(r.matchDate)} · {r.competition}
+                      {r.linkExpiresAt ? ` · link expires ${fmtLinkExpiry(r.linkExpiresAt)}` : ''}
                     </span>
                   </span>
                   <CaptainsReportStatusPill report={r} />
@@ -1080,6 +1389,11 @@ export function CaptainsReportView({
         ) : (
           <div className="cr-section-sub">Every played fixture already has a report.</div>
         )}
+        <div style={{ marginTop: 10 }}>
+          <Btn tone="outline" size="sm" onClick={() => setUnlisted('details')}>
+            Report a match that isn't listed
+          </Btn>
+        </div>
       </div>
 
       {filed.length > 0 && (
@@ -1128,6 +1442,7 @@ export function CaptainsReportLinkPage() {
       title: `${data.tenantBranding.name} · Captain's report`,
     });
   }, [data]);
+  const [forwardNote, setForwardNote] = useState<string | null>(null);
   const put = useMutation({
     mutationFn: ({ fields, submit }: { fields: CaptainsReportFields; submit: boolean }) =>
       putLinkedCaptainsReport(token, { ...fields, submit }),
@@ -1169,8 +1484,10 @@ export function CaptainsReportLinkPage() {
               Captain's <em>Report</em>
             </h1>
             <p className="ph-desc">
-              Rate the on-field umpires for this match. You can save a draft and come back; the link
-              closes once the report is submitted.
+              Rate the on-field umpires for this match. You can save a draft and submit once.
+              {data.report.linkExpiresAt
+                ? ` Link expires ${fmtLinkExpiry(data.report.linkExpiresAt)}.`
+                : ''}
             </p>
           </div>
         </div>
@@ -1178,6 +1495,28 @@ export function CaptainsReportLinkPage() {
           <div className="rp-validation" role="alert" style={{ marginBottom: 12 }}>
             {error}
           </div>
+        )}
+        {forwardNote && (
+          <div className="cr-section-sub" role="status" style={{ marginBottom: 12 }}>
+            {forwardNote}
+          </div>
+        )}
+        {data.canForward && (
+          <SendToCaptain
+            queryKey={['captains-report-link-forward', token]}
+            load={() => getLinkedForwardCandidates(token)}
+            send={async (candidateId) => {
+              const res = await forwardLinkedCaptainsReport(token, candidateId);
+              qc.setQueryData(qk.linkedCaptainsReport(token), res);
+              return res;
+            }}
+            current={data.report.recipient}
+            onSent={(name) => {
+              setError(null);
+              setForwardNote(`Sent to ${name}. They will get their own link.`);
+            }}
+            onError={setError}
+          />
         )}
         <CaptainsReportForm
           report={data.report}

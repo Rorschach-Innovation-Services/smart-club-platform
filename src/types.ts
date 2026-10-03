@@ -93,7 +93,8 @@ export interface CaptainsReport {
   fixtureId: string;
   clubId: string;
   status: 'pending' | 'submitted' | 'void';
-  source: 'auto' | 'manual';
+  /** `manual-unlisted`: filed for a match that is not in the fixture list. */
+  source: 'auto' | 'manual' | 'manual-unlisted';
   fixtureRef?: string;
   matchDate: string;
   side: 'home' | 'away';
@@ -101,9 +102,15 @@ export interface CaptainsReport {
   opponentName: string;
   competition: string;
   venue?: string;
+  /** The series withholds the venue from clubs for now (the venue is left out). */
+  venueWithheld?: true;
   resultSummary?: string | null;
   umpiresSnapshot: _AppointedUmpire[];
-  recipient: { kind: 'captain' | 'chair' | 'portal'; name: string };
+  recipient: {
+    kind: 'captain' | 'chair' | 'portal';
+    name: string;
+    forwardedBy?: { name: string; via: 'link' | 'portal'; at: string };
+  };
   captainName: string;
   umpires: _ReportUmpireEntry[];
   general: string;
@@ -114,8 +121,27 @@ export interface CaptainsReport {
   submittedAt?: string;
   voidedAt?: string;
   flagged?: { reason: string; at: string };
+  /** When the emailed/WhatsApp link stops working (ISO). */
+  linkExpiresAt?: string;
+  deliveries?: CaptainsReportDelivery[];
+  /** When a notice first reached someone. */
+  notifiedAt?: string;
+  reminderSentAt?: string;
+  forwardCount?: number;
   createdAt: string;
   updatedAt: string;
+}
+/** One channel of one notice about a report (MIRRORS the API's CaptainsReportDelivery). */
+export interface CaptainsReportDelivery {
+  channel: 'email' | 'whatsapp';
+  status: 'sent' | 'failed' | 'skipped';
+  reason?: 'no-contact' | 'no-email' | 'no-cell' | 'dry-run' | 'template-pending' | 'send-failed';
+  at: string;
+  purpose: 'opened' | 'forwarded' | 'reminder';
+  recipientKind: 'captain' | 'chair';
+  providerStatus?: 'sent' | 'delivered' | 'read' | 'failed';
+  providerAt?: string;
+  providerError?: string;
 }
 /** The editable part of a report, as PUT/POST bodies carry it. */
 export interface CaptainsReportFields {
@@ -127,6 +153,9 @@ export interface CaptainsReportFields {
 /** GET /captains-report-link/:token — one report, the registry names, the tenant's look. */
 export interface LinkedCaptainsReport {
   report: CaptainsReport;
+  /** The chair's link: may "Send to captain". */
+  canForward?: boolean;
+  forwardsRemaining?: number;
   registry: { id: string; displayName: string }[];
   tenantBranding: { name: string; logoUrl: string; colors: Record<string, string> };
 }

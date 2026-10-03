@@ -720,6 +720,40 @@ export const createClubCaptainsReport = (
 ) => request<CaptainsReport>('/club/captains-reports', { method: 'POST', body });
 export const getCaptainsReports = (query: { status?: string; from?: string; to?: string } = {}) =>
   request<CaptainsReport[]>('/captains-reports', { query });
+/** Clubs a report notice cannot reach (no chair email or cell) — sync tenants only. */
+export const getCaptainsReportContactGaps = () =>
+  request<{ enabled: boolean; clubs: Array<{ id: string; name: string }> }>(
+    '/captains-reports/contact-gaps',
+  );
+/** Attribute a free-text umpire on a filed report to a registry umpire. */
+export const attributeCaptainsReportUmpire = (
+  id: string,
+  index: number,
+  body: { umpireId: string; action: 'registered' | 'linked' },
+) =>
+  request<CaptainsReport>(
+    `/captains-reports/${encodeURIComponent(id)}/umpires/${index}/attribute`,
+    { method: 'POST', body },
+  );
+/** "Send to captain": who the report can go to (names + opaque ids), and how many sends remain. */
+export interface ForwardCandidates {
+  candidates: Array<{ id: string; name: string }>;
+  remaining: number;
+}
+export const getClubReportForwardCandidates = (id: string) =>
+  request<ForwardCandidates>(`${reportPath(id)}/forward-candidates`);
+export const forwardClubCaptainsReport = (id: string, candidateId: string) =>
+  request<CaptainsReport>(`${reportPath(id)}/forward`, { method: 'POST', body: { candidateId } });
+/** File a report for a match that is not in the fixture list (created submitted). */
+export const createUnlistedCaptainsReport = (
+  body: CaptainsReportFields & {
+    clubId: string;
+    opponentName: string;
+    matchDate: string;
+    competition: string;
+    venue: string;
+  },
+) => request<CaptainsReport>('/club/captains-reports/unlisted', { method: 'POST', body });
 // The public submit-once link: no auth, the token is the capability.
 export const getLinkedCaptainsReport = (token: string) =>
   request<LinkedCaptainsReport>(`/captains-report-link/${encodeURIComponent(token)}`, {
@@ -732,6 +766,18 @@ export const putLinkedCaptainsReport = (
   request<LinkedCaptainsReport>(`/captains-report-link/${encodeURIComponent(token)}`, {
     method: 'PUT',
     body,
+    auth: false,
+  });
+/** The chair's link only: who the report can be sent on to. */
+export const getLinkedForwardCandidates = (token: string) =>
+  request<ForwardCandidates>(
+    `/captains-report-link/${encodeURIComponent(token)}/forward-candidates`,
+    { auth: false },
+  );
+export const forwardLinkedCaptainsReport = (token: string, candidateId: string) =>
+  request<LinkedCaptainsReport>(`/captains-report-link/${encodeURIComponent(token)}/forward`, {
+    method: 'POST',
+    body: { candidateId },
     auth: false,
   });
 

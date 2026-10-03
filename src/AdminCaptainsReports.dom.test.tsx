@@ -223,7 +223,10 @@ describe('AdminCaptainsReportsView · free-text umpires', () => {
       <AdminCaptainsReportsView reports={[FREE]} umpires={REGISTRY} onAttribute={onAttribute} />,
     );
     await user.click(screen.getByRole('button', { name: 'View' }));
-    await user.selectOptions(screen.getByRole('combobox', { name: /existing umpire/i }), 'u-dlamini');
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: /existing umpire/i }),
+      'u-dlamini',
+    );
     await user.click(screen.getByRole('button', { name: /^link$/i }));
     expect(onAttribute).toHaveBeenCalledWith(FREE.id, 0, 'u-dlamini', 'linked');
   });

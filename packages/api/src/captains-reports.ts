@@ -190,12 +190,14 @@ export function reportExpirySeconds(
 
 /** "Sunday, 11 Oct" — the SAST day a link expires, as the email and pages show it. */
 export function fmtExpiry(epochSeconds: number): string {
-  return new Date(epochSeconds * 1000).toLocaleDateString('en-GB', {
+  const parts = new Intl.DateTimeFormat('en-GB', {
     weekday: 'long',
     day: 'numeric',
     month: 'short',
     timeZone: 'Africa/Johannesburg',
-  });
+  }).formatToParts(new Date(epochSeconds * 1000));
+  const part = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  return `${part('weekday')}, ${part('day')} ${part('month')}`;
 }
 
 /** The link for a report: `${base}/r/<token>`, expiring at the report's stored expiry. */
