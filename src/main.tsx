@@ -104,11 +104,22 @@ import {
   ClubVeteransSquadView,
 } from './club';
 import { Onboarding } from './onboarding';
-import { AdminUmpiresView } from './umpires';
+import { AdminUmpiresView, mergeErrorMessage } from './umpires';
+import { UmpireAppointmentsUpload } from './UmpireAppointmentsUpload';
+import { ResyncDialog, isResyncRequired } from './ResyncDialog';
+
 import { CaptainsReportView, CaptainsReportLinkPage } from './CaptainsReport';
 import { AdminCaptainsReportsView } from './AdminCaptainsReports';
 import { AdminMedicoachSyncView } from './AdminMedicoachSync';
 import { useFeature, useModule, useSeasonLabel, useVertical } from './branding';
+
+/** The admin cancelled the medicoach-resync confirmation: the request is simply not sent. */
+class ResyncCancelled extends Error {
+  constructor() {
+    super('cancelled');
+    this.name = 'ResyncCancelled';
+  }
+}
 
 // Resolve the tenant before any query runs so x-tenant is attached to requests.
 const TENANT_SLUG = resolveTenantSlug();
@@ -421,6 +432,20 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   // null = closed; {} = create; a league object = edit
   const [showLeagueForm, setShowLeagueForm] = useStateApp(null);
   const [showHelp, setShowHelp] = useStateApp(false);
+  // Medicoach sync: a regenerate/rebase that would orphan synced fixtures asks first
+  // (ResyncDialog); the pending answer resolves the request that is waiting on it.
+  const [resyncAsk, setResyncAsk] = useStateApp<{
+    error: ApiError;
+    action: 'regenerate' | 'rebase';
+    resolve: (ok: boolean) => void;
+  } | null>(null);
+  function askResync(error: ApiError, action: 'regenerate' | 'rebase') {
+    return new Promise<boolean>((resolve) => setResyncAsk({ error, action, resolve }));
+  }
+  function answerResync(ok: boolean) {
+    resyncAsk?.resolve(ok);
+    setResyncAsk(null);
+  }
 
   const membership = membershipFor(memberships, TENANT_SLUG);
   const role = routingRole(membership);
@@ -632,7 +657,8 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       return await fn();
     } catch (err) {
       const conflict = err instanceof ApiError && err.status === 409;
-      toastShow(toastCopy(err, errMsg, opts), 'warn');
+      // The admin cancelled a confirmation (ResyncCancelled): nothing to tell them.
+      if (!(err instanceof ResyncCancelled)) toastShow(toastCopy(err, errMsg, opts), 'warn');
       if (conflict) {
         (opts.invalidate ?? [qk.clubs(), qk.series(), qk.tenant()]).forEach(invalidate);
       }
@@ -681,6 +707,23 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
       .then(() => invalidate(qk.series()))
       .catch(() => {});
   }
+  /**
+   * Run a generate/rebase; when the server refuses because released fixtures are synced with
+   * medicoach (409 `sync_resync_required`), list them in ResyncDialog and, only on confirm,
+   * send it again with `allowResync: true`. Cancel throws ResyncCancelled (never toasted).
+   */
+  async function withResync<T>(
+    action: 'regenerate' | 'rebase',
+    send: (allowResync: { allowResync?: true }) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await send({});
+    } catch (err) {
+      if (!isResyncRequired(err)) throw err;
+      if (!(await askResync(err, action))) throw new ResyncCancelled();
+      return send({ allowResync: true });
+    }
+  }
   /* ─── Season runs (ADR 0008) ─── */
   function createSeasonRun(run) {
     // A league with no setup (400 setup_missing) or a label already running (409
@@ -712,11 +755,16 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   // thing moved — the structure (reopen Review changes) or the run (refreshed) — rather
   // than the generic series-conflict line; any other 409 is shown as the server worded it.
   function rebaseSeasonRun(id, body) {
-    return withToast(() => api.rebaseSeasonRun(id, body), 'Could not apply the structure', {
-      invalidate: [qk.seasonRuns()],
-      rawConflict: true,
-      conflictMessage: seasonRunConflictMessage,
-    }).then((r) => {
+    return withToast(
+      () =>
+        withResync('rebase', (allowResync) => api.rebaseSeasonRun(id, { ...body, ...allowResync })),
+      'Could not apply the structure',
+      {
+        invalidate: [qk.seasonRuns()],
+        rawConflict: true,
+        conflictMessage: seasonRunConflictMessage,
+      },
+    ).then((r) => {
       invalidate(qk.seasonRuns());
       return r;
     });
@@ -736,7 +784,10 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
    */
   async function generateStageSeries(run, stage) {
     return withToast(
-      () => generateStageSeriesInner(run, stage),
+      () =>
+        withResync('regenerate', (allowResync) =>
+          generateStageSeriesInner(run, stage, allowResync),
+        ),
       'Could not generate the fixtures',
       // A structured refusal (clash gate, released overwrite, awaiting entrants, does not
       // fit, missing block) names what to do; any other 409 is a
@@ -752,7 +803,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
   }
   // The server materialises the stage itself with the shared engine (ADR 0014); the
   // browser's materialisation only drives the preview.
-  async function generateStageSeriesInner(run, stage) {
+  async function generateStageSeriesInner(run, stage, allowResync: { allowResync?: true } = {}) {
     // The Seasons panel asks "Regenerate a released schedule?" before calling here whenever
     // this cache shows any of the stage's series released — so a released series in the
     // cache means the admin has already confirmed. When the cache is stale (released
@@ -770,6 +821,7 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
     const { series, warnings = [] } = await api.generateStage(run.id, stage.id, {
       version: run.version,
       ...(confirmed ? { confirmReleasedOverwrite: true as const } : {}),
+      ...allowResync,
     });
     invalidate(qk.series());
     invalidate(qk.seasonRuns());
@@ -1121,6 +1173,14 @@ function AuthedApp({ tenantConfig, tenantConfigError, onRetryTenantConfig }) {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       {toastNode}
+      {resyncAsk && (
+        <ResyncDialog
+          error={resyncAsk.error}
+          action={resyncAsk.action}
+          onCancel={() => answerResync(false)}
+          onConfirm={() => answerResync(true)}
+        />
+      )}
       {showHelp && (
         <HelpModal
           onClose={() => setShowHelp(false)}
@@ -1370,13 +1430,16 @@ function Shell({
     });
   }
   function mergeUmpire(sourceId: string, targetId: string) {
-    return withToast(() => api.mergeUmpire(sourceId, targetId), 'Could not merge the umpires').then(
-      (res) => {
-        toastShow(`Merged — ${res.repointed} appointment(s) moved to ${res.target.displayName}`);
-        invalidate(qk.umpires());
-        invalidate(qk.series());
-      },
-    );
+    // An umpire already merged elsewhere (a stale page) says where it went, and the 409
+    // refreshes the list so its row shows "Merged into …".
+    return withToast(() => api.mergeUmpire(sourceId, targetId), 'Could not merge the umpires', {
+      errorMessage: mergeErrorMessage,
+      invalidate: [qk.umpires(), qk.series()],
+    }).then((res) => {
+      toastShow(`Merged — ${res.repointed} appointment(s) moved to ${res.target.displayName}`);
+      invalidate(qk.umpires());
+      invalidate(qk.series());
+    });
   }
 
   // ── Derive view from URL ──
@@ -2506,7 +2569,8 @@ function Shell({
 
   const nav = role === 'admin' ? adminNav : clubNav;
   // The league drill-down is a sub-view of Insights — keep its nav item lit.
-  const navView = view === 'insights_league' ? 'insights' : view;
+  const navView =
+    view === 'insights_league' ? 'insights' : view === 'umpire_upload' ? 'umpires' : view;
   const orgName = branding?.name ?? 'Smart Club';
   const orgFooter = branding?.copy?.footer ?? 'Powered by Medicoach';
 
@@ -2730,13 +2794,30 @@ function Shell({
             onCreate={createUmpire}
             onPatch={patchUmpire}
             onMerge={mergeUmpire}
+            onUpload={() => gotoAdminView('umpire_upload')}
             reports={allCaptainsReports}
+          />
+        );
+      if (view === 'umpire_upload' && vertical.sport === 'cricket')
+        return (
+          <UmpireAppointmentsUpload
+            onBack={() => gotoAdminView('umpires')}
+            onDone={() => {
+              invalidate(qk.umpires());
+              invalidate(qk.series());
+            }}
           />
         );
       if (view === 'medicoach_sync' && medicoachSyncOn)
         return (
           <AdminMedicoachSyncView
-            onEditFixture={() => gotoAdminView('fixtures')}
+            allSeries={allSeries}
+            onEditFixture={(seriesId) =>
+              navigate(`/admin/fixtures?series=${encodeURIComponent(seriesId)}`)
+            }
+            onOpenSeries={(seriesId) =>
+              navigate(`/admin/fixtures?series=${encodeURIComponent(seriesId)}`)
+            }
             onToast={(message, tone) => toastShow(message, tone)}
           />
         );

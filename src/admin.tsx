@@ -509,7 +509,13 @@ export function AdminFixtures({
   // Owned here, not in SeasonRunsPanel, so its own button and the header button share it.
   const [launcherOpen, setLauncherOpen] = useStateA(false);
   const [viewerOpen, setViewerOpen] = useStateA(false);
-  const [activeId, setActiveId] = useStateA(allSeries[0]?.id);
+  // `?series=<id>` (from the Medicoach sync page) opens that series; else the first one.
+  const [activeId, setActiveId] = useStateA(
+    () =>
+      (typeof window !== 'undefined'
+        ? new URLSearchParams(window.location.search).get('series')
+        : null) ?? allSeries[0]?.id,
+  );
   const active = allSeries.find((s) => s.id === activeId) || allSeries[0];
   const [confirm, setConfirm] = useStateA<ConfirmDialogState | null>(null); // shared confirmation modal state (recall/reveal)
   const [releaseFor, setReleaseFor] = useStateA<ReleaseSeriesState | null>(null); // series whose ReleaseDialog is open

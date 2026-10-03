@@ -4,6 +4,7 @@
 
 import { useMemo, useState } from 'react';
 import { Btn, Icon, Pill } from './atoms';
+import { ApiError } from './api';
 import {
   MAX_UMPIRES_PER_FIXTURE,
   findUmpireDoubleBookings,
@@ -348,6 +349,16 @@ export function UmpireCell({
 
 /* ─── Admin Umpires page ─── */
 
+/**
+ * The toast for a refused merge, or null for the generic copy: an umpire someone already
+ * merged (a stale page, a double-click) names the umpire it went into.
+ */
+export function mergeErrorMessage(err: unknown): string | null {
+  if (!(err instanceof ApiError) || err.code !== 'umpire_already_merged') return null;
+  const name = err.details?.mergedIntoName;
+  return typeof name === 'string' && name ? `Already merged into ${name}` : 'Already merged';
+}
+
 interface UmpireDraft {
   displayName: string;
   fullName: string;
@@ -381,6 +392,8 @@ export interface AdminUmpiresViewProps {
   onCreate: (body: Partial<Umpire>) => Promise<unknown>;
   onPatch: (id: string, body: Partial<Umpire>) => Promise<unknown>;
   onMerge: (sourceId: string, targetId: string) => Promise<unknown>;
+  /** Opens the "Upload appointments" page. Absent ⇒ no button. */
+  onUpload?: () => void;
   /** Captain's reports — rating averages are computed here, in the browser (ADR 0004). */
   reports?: CaptainsReport[];
 }
@@ -415,6 +428,7 @@ export function AdminUmpiresView({
   onCreate,
   onPatch,
   onMerge,
+  onUpload,
 }: AdminUmpiresViewProps) {
   const [q, setQ] = useState('');
   const [filter, setFilter] = useState<'active' | 'inactive' | 'all'>('active');
@@ -482,11 +496,16 @@ export function AdminUmpiresView({
           </h1>
           <p className="ph-desc">
             The union&apos;s umpire panel. Appoint umpires to fixtures from the Fixtures &amp;
-            Venues table, or load the weekly appointments sheet with the importer. Contact details
-            are only ever shown to admins.
+            Venues table, or upload the weekly appointments sheet. Contact details are only ever
+            shown to admins.
           </p>
         </div>
-        <div className="ph-right">
+        <div className="ph-actions">
+          {onUpload && (
+            <Btn tone="outline" icon={Icon.Upload} onClick={onUpload}>
+              Upload appointments
+            </Btn>
+          )}
           <Btn tone="teal" icon={Icon.Plus} onClick={() => setAdding({ ...emptyDraft })}>
             Add umpire
           </Btn>
@@ -550,6 +569,7 @@ export function AdminUmpiresView({
           <button
             key={k}
             className={`filter-pill ${filter === k ? 'active' : ''}`}
+            aria-pressed={filter === k}
             onClick={() => setFilter(k)}
           >
             {l}
@@ -567,7 +587,9 @@ export function AdminUmpiresView({
               <th style={{ textAlign: 'right' }}>Appointments</th>
               <th>Ratings</th>
               <th>Status</th>
-              <th style={{ width: 220 }}></th>
+              <th>
+                <span className="sr-only">Actions</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -581,9 +603,13 @@ export function AdminUmpiresView({
             {!loading && list.length === 0 && (
               <tr>
                 <td colSpan={6} className="ump-empty">
-                  {umpires.length
-                    ? 'No umpires match this search.'
-                    : 'No umpires yet. Add one, or run the appointments importer.'}
+                  {!umpires.length
+                    ? 'No umpires yet. Add one, or upload this week’s appointments sheet.'
+                    : q.trim()
+                      ? 'No umpires match this search.'
+                      : filter === 'inactive'
+                        ? 'No inactive or merged umpires.'
+                        : 'No active umpires. Reactivate one from the Inactive list, or add one.'}
                 </td>
               </tr>
             )}
