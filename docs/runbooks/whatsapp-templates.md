@@ -140,3 +140,27 @@ real recipient until the token/phone-id secrets and (for WhatsApp) an approved t
   notify, so only the destination club is messaged on a resolution — that is by design.
 - Watch the comm log for `failed` WhatsApp rows after wiring a real token: they carry Meta's
   error code/message and usually mean the template name/language or a body param is off.
+
+## captains_report_open (v2) — to create
+
+Replaces `captains_report_due`'s copy ("works once" was ambiguous; "{{2}}'s" read badly for
+clubs such as Crusaders). Create it in WhatsApp Manager on the same WABA:
+
+- Name `captains_report_open`, category **Utility**, language **English (en)**.
+- Body (2 variables):
+
+```
+Hello {{1}},
+
+The captain's report for {{2}} is open. Please rate the umpires.
+
+Tap the button below to open it. You can submit it once; the link expires on the date shown in the report.
+```
+
+- Sample values: `{{1}}` = `Sanele Mthembu`, `{{2}}` = `Umzinto CC v African Warriors on Sun 4 Oct 2026`.
+- Button: **Visit website**, dynamic URL `https://platform.club.medicoach.co.za/r/{{1}}`
+  (sample suffix: any token-like string), button text e.g. `Open report`.
+
+Until it is approved the sender keeps using `captains_report_due`. Once Meta shows it Active,
+flip `captainsReportOpen.status` to `'registered'` in
+`packages/api/src/notify/whatsapp-templates.ts` (the one switch) and deploy.

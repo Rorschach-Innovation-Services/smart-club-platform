@@ -94,8 +94,8 @@ importer's `putSeries`) would overwrite them or lose them to a version conflict.
   manual "completed" status. Both keys are stripped from anything a client writes back.
 - A newly stored result (never a replay) calls the puller's `onResultStored` hook, which
   opens the captain's reports. It skips `source: 'import'` results, matches before
-  `integrations.medicoach.goLiveDate` (operator-only config) and matches more than 7 days
-  old. A corrected result (newer `recordedAt`, no clear) updates the summary on pending
+  `integrations.medicoach.goLiveDate` (operator-only config) and results whose link would
+  already have expired (see "Captain's reports have no due date"). A corrected result (newer `recordedAt`, no clear) updates the summary on pending
   reports and notifies nobody again.
 - **Delivery** — the store writes a `REPORTOPEN#<ref>` marker first and deletes it once the
   reports opened and were notified; a failure leaves it for the next run (at most
@@ -105,6 +105,20 @@ importer's `putSeries`) would overwrite them or lose them to a version conflict.
   that reached nobody (every channel tried failed) releases its claim and is retried; one
   delivered channel is done. The admin sync page shows "notices failed" for retries waiting
   on that.
+- **Honest delivery** — every notice (the opening, a chair's forward, the reminder) records
+  one `deliveries[]` entry per channel on the report: `sent | failed | skipped` with a reason
+  (`no-contact`, `no-email`, `no-cell`, `dry-run`, `template-pending`, `send-failed`), the
+  purpose and recipient kind, and no address. A dry-run "send" is recorded as skipped, never
+  sent. `notifiedAt` is set only when a channel actually went out. The admin page shows
+  per-channel chips, a "Notice not delivered" filter, and a banner of clubs with no chair
+  contact (`GET /captains-reports/contact-gaps`, sync tenants).
+- **WhatsApp delivery status** — smart club sends through medicoach's Meta app, and a Meta app
+  has one webhook callback per field (medicoach's). Medicoach forwards the raw `statuses[]`
+  for smart club's sending number to `POST /integrations/whatsapp/status`, signed with this
+  ADR's sync scheme (`X-Sync-Timestamp` / `X-Sync-Signature`, `MedicoachSyncSecret`; fails
+  closed while empty). Each WhatsApp send writes `WAMSG#<wamid>` → its report (30-day TTL, ids
+  only), so a status is matched by message id; it only moves forward (sent < delivered < read;
+  failed is final) and an unknown id is acknowledged and ignored.
 - **WhatsApp link host** — the `captains_report_due` template's URL button has the PROD host
   baked in by Meta's approval (only the token suffix is dynamic), so a link sent from a
   non-prod stage would open on prod. Accepted: non-prod stages run notices dry
@@ -119,9 +133,37 @@ importer's `putSeries`) would overwrite them or lose them to a version conflict.
 The 3rd-business-day deadline came from the misconduct clause, which was removed, so there is
 no due date and no "late" status (old reports' stored `deadline` is ignored and never served).
 The emailed/WhatsApp link is single-submission: drafts are allowed, and the first submit
-(link or portal) closes it (410). It expires at 23:59:59 SAST on the 7th day after the
-match (410, pointing the chair at the club portal). Reports therefore only auto-open for
-matches up to 7 days old; the chair can file from the portal at any time.
+(link or portal) closes it (410). It expires at 23:59:59 SAST on the LATER of the 7th day after
+the match and the 3rd day after the result first arrived (`linkExpiresAt`, stored on the
+report and carried by the token; reports opened before it was stored use the match rule). An
+expired link answers 410, pointing the chair at the club portal. Reports auto-open whenever
+that expiry is still ahead (a REPORTOPEN# retry judges it on the marker's time, so a
+long-failing opening does not stretch it); the chair can file from the portal at any time.
+The link page, the portal report and the email show "Link expires <weekday, d MMM>".
+
+- **Venue** — a report never stores a venue the series withholds (ADR 0011). The link page and
+  the club portal re-read the live series on every read (club projection rule: unreleased or
+  venue-withheld ⇒ no venue, `venueWithheld` shown as "To be confirmed"), so a reveal shows the
+  venue later. Reports carry no kick-off time.
+- **Send to captain** — on a pending report, the chair (club portal, or the chair's own link)
+  picks one of the club's OWN active, adult players with an email or cell (names and opaque
+  HMAC ids only; the roster key never leaves the server). The report gets a new link for that
+  player (`recipient.kind: 'captain'`, `forwardedBy`), the captain is notified (chair cc'd) and
+  their contact is kept server-side on the report (`recipientContact`, never served) for the
+  reminder. The chair's own link keeps working until the report is submitted
+  (`chairMemberId`); first submit wins. At most 3 forwards (429). A captain's link has no
+  roster access (403).
+- **Reminder** — one reminder, 2 days before the link expires, to the current recipient on the
+  same channels with the same link (NOTIFY# audience `reminder#<memberId>`), from the
+  15-minute sync run (sync tenants only). Best effort: at most one, even if it fails.
+- **A match that isn't listed** — the portal files a report for a match not in the fixture
+  list (free-text opponent, a date not in the future, competition, venue; umpires from the
+  registry or free text): `seriesId: 'unlisted'`, `source: 'manual-unlisted'`, submitted at
+  once. The admin page badges these.
+- **Free-text umpires** — on a submitted report the union office can add a free-text umpire to
+  the registry or link it to an existing one (`POST /captains-reports/:id/umpires/:i/
+attribute`); the entry then carries that `umpireId` (its ratings count for them) and an
+  `attributed` audit stamp (action, who, when, the name as typed).
 
 ### Audit
 
