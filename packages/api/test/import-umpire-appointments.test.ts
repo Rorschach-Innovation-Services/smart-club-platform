@@ -611,6 +611,32 @@ describe('umpire resolution and the write plan', () => {
     assert.deepEqual(third.writes[1].previous, ['S.Gasa']);
   });
 
+  test('a row naming more than two umpires is listed and never written (not truncated)', () => {
+    const registry = [
+      umpire('u-s-gasa', 'S.Gasa', ['sgasa']),
+      umpire('u-b-tyali', 'B.Tyali', ['btyali']),
+      umpire('u-o-panday', 'O.Panday', ['opanday']),
+    ];
+    const { matched } = matchAppointments(
+      [
+        row({
+          sheetRow: 7,
+          home: 'Dawnheights',
+          away: 'Amazimtoti',
+          umpires: ['S.Gasa', 'B.Tyali', 'O.Panday'],
+        }),
+      ],
+      ALL,
+      CLUBS,
+    );
+    assert.equal(matched.length, 1);
+    const { byName } = resolveUmpireNames(['S.Gasa', 'B.Tyali', 'O.Panday'], registry);
+    const plan = planWrites(matched, byName, new Map());
+    assert.equal(plan.writes.length, 0);
+    assert.equal(plan.skipped.length, 1);
+    assert.match(plan.skipped[0].reason, /3 umpires.*at most 2/);
+  });
+
   test('flags an umpire at two different grounds at overlapping times', () => {
     const registry = [umpire('u-s-gasa', 'S.Gasa', ['sgasa'])];
     const { matched } = matchAppointments(

@@ -40,6 +40,7 @@ import {
 import { groundKey } from './venue-clash.js';
 import {
   findUmpireDoubleBookings,
+  MAX_UMPIRES_PER_FIXTURE,
   normaliseUmpireAlias,
   type UmpireBooking,
 } from '../../engine/src/umpires.js';
@@ -538,8 +539,9 @@ const sameOfficials = (a: FixtureOfficials | null | undefined, b: FixtureOfficia
 /**
  * Turn matched rows into FIXOFFICIALS writes. `existing` is the stored appointment per
  * `seriesId#fixtureId`; an identical one is `unchanged` (no write), which is what makes a
- * re-run report "0 changed". At most two umpires are taken from a row (the sheet has two
- * Umpire columns; a third would be refused by the API too).
+ * re-run report "0 changed". A fixture takes at most two umpires (the API refuses a third),
+ * so a row naming more is listed as skipped, never truncated: dropping a name would
+ * silently lose an appointment.
  */
 export function planWrites(
   matched: MatchedRow[],
@@ -549,7 +551,14 @@ export function planWrites(
   const writes: PlannedWrite[] = [];
   const skipped: WritePlan['skipped'] = [];
   for (const m of matched) {
-    const names = m.row.umpires.slice(0, 2);
+    const names = m.row.umpires;
+    if (names.length > MAX_UMPIRES_PER_FIXTURE) {
+      skipped.push({
+        match: m,
+        reason: `${names.length} umpires on the sheet; a fixture takes at most ${MAX_UMPIRES_PER_FIXTURE}`,
+      });
+      continue;
+    }
     const missing = names.filter((n) => !byName.has(n));
     if (m.row.referee && !byName.has(m.row.referee)) missing.push(m.row.referee);
     if (missing.length) {
@@ -752,7 +761,7 @@ async function main() {
 
   console.log(
     `\nSummary: ${parsed.rows.length} rows · ${matched.length} matched · ${unmatched.length} not matched · ` +
-      `${plan.skipped.length} skipped (unknown umpire) · ${count('new')} new · ${count('changed')} changed · ` +
+      `${plan.skipped.length} skipped (see above) · ${count('new')} new · ${count('changed')} changed · ` +
       `${count('unchanged')} unchanged · ${toCreate.length} umpire(s) to create · ${doubles.length} double-booking warning(s)`,
   );
 
