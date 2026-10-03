@@ -1451,11 +1451,28 @@ export function CaptainsReportLinkPage() {
         </div>
       </div>
     );
-  else if (!data)
+  else if (!data && status !== null)
+    // A real API verdict (404 and friends): the token itself was refused.
     body = (
       <div className="cr-done">
         <div className="cr-done-title">This link isn't valid</div>
         <div className="cr-done-sub">Check you opened the full link from the message.</div>
+      </div>
+    );
+  else if (!data)
+    // No HTTP status at all — the request never completed (mobile data blip, DNS,
+    // in-app browser quirk). The link is fine; say so and offer a retry.
+    body = (
+      <div className="cr-done">
+        <div className="cr-done-title">Couldn't load the report</div>
+        <div className="cr-done-sub">
+          Check your connection and try again — the link itself is still good.
+        </div>
+        <div className="cr-done-actions">
+          <Btn tone="teal" onClick={() => void query.refetch()}>
+            Try again
+          </Btn>
+        </div>
       </div>
     );
   else
