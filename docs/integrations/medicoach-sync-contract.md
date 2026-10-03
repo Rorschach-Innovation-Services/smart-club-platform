@@ -115,3 +115,23 @@ Medicoach rules: apply only if `changedAt` > the fixture's `scheduleChangedAt`; 
 A `changedAt` more than 5 minutes ahead of medicoach's clock is refused with `error` (fix the sender's clock).
 Every applied change is audited in medicoach under the `smartclub-sync` principal.
 `stale`/`unchanged`/`unmapped` are success outcomes for the caller (drop from outbox); `error` = retry later.
+
+## WhatsApp status forwarding (medicoach → smart club)
+
+Smart club sends its WhatsApp notices through medicoach's Meta app/WABA, and a Meta app
+has ONE callback URL per subscribed field — so smart club's delivery statuses (sent /
+delivered / read / failed) arrive on medicoach's webhook. After its own Meta-signature
+check passes, medicoach forwards them, fire-and-forget:
+
+- `POST ${SmartClubBaseUrl}/integrations/whatsapp/status`
+- Body: `{"statuses": [ ...Meta status objects, unchanged... ]}` — at most 500 per request.
+- Headers: the v1 signing scheme and the SAME shared secret
+  (`X-Sync-Timestamp`, `X-Sync-Signature: sha256=<hex HMAC-SHA256(secret,
+  "${ts}.POST./integrations/whatsapp/status.${rawBody}")>`).
+- Only statuses whose `value.metadata.phone_number_id` is smart club's sending number are
+  forwarded. While the two platforms share one number, medicoach's own statuses are
+  forwarded too; smart club ignores message ids it doesn't know (200 with counts).
+- Fire-and-forget: ~3s timeout, no retries, never changes medicoach's response to Meta.
+  Statuses only move a delivery forward (sent < delivered < read; failed is final), so
+  drops and duplicates are both harmless.
+- Skipped silently when `SmartClubBaseUrl` or the shared secret is unset on that stage.
