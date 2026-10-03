@@ -48,6 +48,15 @@ Smart club is always the caller; medicoach never calls smart club.
 - **Empty secret or URL ⇒ dry run**: the puller logs the request it would make and calls
   nothing. Rollout runs one match weekend like that before the secrets are set.
 
+Field limit (v1 clarification, worded identically in both repos' contract):
+
+- venue: string | null — at most 200 characters; senders must not exceed it and receivers truncate anything longer.
+
+Smart club truncates its outbound venue to 200 (`capVenue`, also applied when an outbox row
+queued before the cap is sent) and truncates an inbound venue to 200 before resolving it
+against the ground list — the zod schema accepts a longer one and truncates it, never
+rejects the page.
+
 The wire contract is versioned (`MEDICOACH_SYNC_VERSION = 1`): zod schemas in
 `packages/api/src/medicoach-sync-contract.ts` (smart club) and
 `packages/types/src/smartclub-sync.ts` (medicoach), and shared JSON examples in
@@ -129,6 +138,13 @@ Each notable run writes one `SYNCLOG#` row (90-day TTL): counts of results store
 cleared, unmapped refs, slots filled and schedule differences, plus the refs whose schedule
 differs. A quiet run writes nothing at all.
 
+A failed run's row carries the technical `error` (field paths and statuses only) and a
+plain-language `message` (`medicoach-sync/explain.ts`: timeouts, unreachable, 401/403/5xx,
+off-contract replies, the page cap) — the admin page shows the message and keeps the
+technical text behind "Details". Because quiet runs leave no row, every real run also stamps
+`SYNCHEALTH#<t>` (last success, last failure and its text), which is where the page's "Last
+successful sync" comes from; a dry run never counts as a success.
+
 ### Quarantine
 
 Nothing the sync cannot place is guessed at:
@@ -184,7 +200,11 @@ any real medicoach edit does.
   then retries pending captain's reports (`REPORTOPEN#`). `applied|stale|unchanged|unmapped`
   delete the row (only if it still holds the snapshot sent); `error` and request failures keep
   it with `attempts` and `lastError`. `stale` means medicoach's newer edit wins; the pull brings
-  it back.
+  it back. A row that failed `STUCK_ATTEMPTS` (5) pushes is shown on the admin page as
+  **stuck** — still retried by every run, never silently given up on — with **Retry** (restart
+  its count and flush now, `POST /integrations/medicoach/outbox/retry`) and **Drop** (delete
+  that snapshot; medicoach keeps its version until the fixture is next edited,
+  `POST …/outbox/drop`).
 - **Drafts and withheld venue/time (ADR 0011).** Medicoach's match centre is public and the
   v1 contract has no draft or withheld flags, so a row whose series is not released (a draft,
   or recalled) or currently withholds venue and/or time is never sent. It is kept as

@@ -23,11 +23,14 @@
  * club resolution (club-name-resolve.ts) plus this sheet's own typo table. Fail-closed:
  * an unresolved, ambiguous or duplicated row is listed and NOT written; venue or time
  * differences are reported, never applied. Umpires resolve through the registry's
- * aliases; unknown names are listed and only created with --create-umpires.
+ * aliases; unknown names are listed and only created with --create-umpires — and only those
+ * named on rows that will actually be written. The admin console's "Upload appointments"
+ * (`POST /umpires/appointments/preview|confirm`) runs the same `planAppointmentImport`.
  *
  * Idempotent: a re-run writes only appointments that differ ("0 changed" on a repeat).
  */
 import ExcelJS from 'exceljs';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import type { Club, FixtureOfficials, Series, Umpire } from './types.js';
@@ -342,6 +345,8 @@ export interface MatchedRow {
   fixture: FixtureLite;
   /** Human notes: time tie-break, time/venue differences (reported, never applied). */
   notes: string[];
+  /** The same time/venue differences, structured (the console's preview table). */
+  differences: Array<{ field: 'time' | 'venue'; sheet: string; fixture: string }>;
 }
 
 export interface UnmatchedRow {
@@ -432,13 +437,20 @@ export function matchAppointments(
       continue;
     }
     const { s, f } = candidates[0];
-    if (row.time && f.time && row.time !== f.time)
+    const differences: MatchedRow['differences'] = [];
+    if (row.time && f.time && row.time !== f.time) {
       notes.push(`time differs: sheet ${row.time}, fixture ${f.time} (not changed)`);
-    if (row.time && !f.time)
+      differences.push({ field: 'time', sheet: row.time, fixture: f.time });
+    }
+    if (row.time && !f.time) {
       notes.push(`fixture has no time; sheet says ${row.time} (not changed)`);
+      differences.push({ field: 'time', sheet: row.time, fixture: '' });
+    }
     const venue = fixtureVenue(s, f);
-    if (row.venue && (!venue || groundKey(row.venue) !== groundKey(venue)))
+    if (row.venue && (!venue || groundKey(row.venue) !== groundKey(venue))) {
       notes.push(`venue differs: sheet "${row.venue}", fixture "${venue || '—'}" (not changed)`);
+      differences.push({ field: 'venue', sheet: row.venue, fixture: venue });
+    }
     matched.push({
       row,
       seriesId: s.id,
@@ -446,6 +458,7 @@ export function matchAppointments(
       fixtureId: f.id,
       fixture: f,
       notes,
+      differences,
     });
   }
 
@@ -619,6 +632,172 @@ export function clubsFromSeries(series: Series[]): Club[] {
   return [...byId.values()];
 }
 
+// ───────────────────────── One import, CLI and console alike ─────────────────────────
+
+export interface ImportInputs {
+  series: Series[];
+  clubs: Club[];
+  /** The tenant's umpire registry. */
+  registry: Umpire[];
+  /** Stored appointments by `seriesId#fixtureId`. */
+  existing: Map<string, FixtureOfficials>;
+  /** Create registry entries for unknown names (CLI `--create-umpires`, console checkbox). */
+  createUmpires: boolean;
+  /** Timestamp for created entries. */
+  at: string;
+}
+
+export interface ImportPlan {
+  matched: MatchedRow[];
+  unmatched: UnmatchedRow[];
+  /** Unknown names on rows that would be written (what `createUmpires` creates). */
+  unknownNames: string[];
+  toCreate: Umpire[];
+  plan: WritePlan;
+  doubles: ReturnType<typeof sheetDoubleBookings>;
+}
+
+/**
+ * Everything an import decides, without writing: match the rows, resolve umpire names, plan
+ * new registry entries and the FIXOFFICIALS writes. The CLI and `POST
+ * /umpires/appointments/*` both run exactly this.
+ *
+ * Unknown names are planned for creation only when they appear on a row that will actually
+ * be written: a matched row naming at most two umpires. A row that is unmatched, or names
+ * three umpires (skipped, never truncated), creates nobody.
+ */
+export function planAppointmentImport(rows: AppointmentRow[], inputs: ImportInputs): ImportPlan {
+  const { matched, unmatched } = matchAppointments(rows, inputs.series, inputs.clubs);
+  const writable = matched.filter((m) => m.row.umpires.length <= MAX_UMPIRES_PER_FIXTURE);
+  const names = [
+    ...new Set(
+      writable.flatMap((m) => [...m.row.umpires, ...(m.row.referee ? [m.row.referee] : [])]),
+    ),
+  ];
+  const first = resolveUmpireNames(names, inputs.registry);
+  const toCreate = inputs.createUmpires
+    ? planNewUmpires(first.unknown, inputs.registry, inputs.at)
+    : [];
+  const { byName } = toCreate.length
+    ? resolveUmpireNames(names, [...inputs.registry, ...toCreate])
+    : first;
+  const plan = planWrites(matched, byName, inputs.existing);
+  return {
+    matched,
+    unmatched,
+    unknownNames: first.unknown,
+    toCreate,
+    plan,
+    doubles: sheetDoubleBookings(plan.writes),
+  };
+}
+
+/**
+ * A fingerprint of what confirming would write (the appointments and the umpires to create).
+ * The console sends back the one it previewed; a confirm whose fresh plan differs (someone
+ * appointed or added an umpire meanwhile) is refused, so nothing is written unseen.
+ */
+export function appointmentPlanHash(p: ImportPlan): string {
+  const writes = p.plan.writes.map((w) => [
+    w.match.seriesId,
+    w.match.fixtureId,
+    w.action,
+    w.officials.umpires.map((u) => u.umpireId),
+    w.officials.referee?.umpireId ?? '',
+  ]);
+  const created = p.toCreate.map((u) => [u.id, u.displayName]);
+  return createHash('sha256')
+    .update(JSON.stringify({ writes, created }))
+    .digest('hex')
+    .slice(0, 32);
+}
+
+/** The preview the console renders (names only — never an umpire's contact details). */
+export function appointmentPreview(parsed: ParseResult, p: ImportPlan) {
+  const actionOf = new Map(p.plan.writes.map((w) => [w.match, w]));
+  const skippedOf = new Map(p.plan.skipped.map((s) => [s.match, s.reason]));
+  const count = (a: WriteAction) => p.plan.writes.filter((w) => w.action === a).length;
+  const base = (r: AppointmentRow) => ({
+    sheetRow: r.sheetRow,
+    section: r.section,
+    date: r.date,
+    ...(r.time ? { time: r.time } : {}),
+    home: r.home,
+    away: r.away,
+    venue: r.venue,
+    umpires: r.umpires,
+    ...(r.referee ? { referee: r.referee } : {}),
+  });
+  return {
+    sheet: parsed.sheet,
+    problems: parsed.problems,
+    summary: {
+      rows: parsed.rows.length,
+      matched: p.matched.length,
+      notMatched: p.unmatched.length,
+      new: count('new'),
+      changed: count('changed'),
+      unchanged: count('unchanged'),
+      skipped: p.plan.skipped.length,
+      toCreate: p.toCreate.length,
+      doubleBookings: p.doubles.length,
+    },
+    rows: p.matched.map((m) => {
+      const w = actionOf.get(m);
+      return {
+        ...base(m.row),
+        seriesId: m.seriesId,
+        seriesName: m.seriesName,
+        fixtureId: m.fixtureId,
+        fixture: {
+          date: m.fixture.date ?? '',
+          ...(m.fixture.time ? { time: m.fixture.time } : {}),
+        },
+        action: w ? w.action : 'skipped',
+        ...(w ? { appointed: w.officials.umpires.map((u) => u.name) } : {}),
+        ...(w?.previous ? { previous: w.previous } : {}),
+        ...(w ? {} : { skipReason: skippedOf.get(m) ?? 'not written' }),
+        differences: m.differences,
+        tieBroken: m.notes.some((n) => n.startsWith('tie broken')),
+      };
+    }),
+    unmatched: p.unmatched.map((u) => ({ ...base(u.row), kind: u.kind, reason: u.reason })),
+    unknownUmpires: p.unknownNames,
+    toCreate: p.toCreate.map((u) => ({ id: u.id, displayName: u.displayName })),
+    doubleBookings: p.doubles.map((d) => ({
+      umpireId: d.umpireId,
+      date: d.date,
+      a: { venue: d.a.venue, ...(d.a.time ? { time: d.a.time } : {}) },
+      b: { venue: d.b.venue, ...(d.b.time ? { time: d.b.time } : {}) },
+    })),
+    planHash: appointmentPlanHash(p),
+  };
+}
+
+export type AppointmentPreview = ReturnType<typeof appointmentPreview>;
+
+/** Write a plan: create the planned umpires, then every appointment that differs. */
+export async function writeAppointmentImport(
+  repo: Pick<typeof import('./repo.js'), 'createUmpire' | 'putFixtureOfficials'>,
+  tenant: string,
+  p: ImportPlan,
+  updatedBy: string,
+  at: string,
+): Promise<{ written: number; created: number }> {
+  for (const u of p.toCreate) await repo.createUmpire(tenant, u);
+  let written = 0;
+  for (const w of p.plan.writes) {
+    if (w.action === 'unchanged') continue;
+    await repo.putFixtureOfficials(tenant, w.match.seriesId, w.match.fixtureId, {
+      ...w.officials,
+      updatedAt: at,
+      updatedBy,
+    });
+    written++;
+  }
+  return { written, created: p.toCreate.length };
+}
+
 // ───────────────────────── CLI ─────────────────────────
 
 export interface Args {
@@ -713,7 +892,15 @@ async function main() {
       existing.set(`${o.seriesId}#${o.fixtureId}`, o);
   }
 
-  const { matched, unmatched } = matchAppointments(parsed.rows, series, clubs);
+  const imported = planAppointmentImport(parsed.rows, {
+    series,
+    clubs,
+    registry,
+    existing,
+    createUmpires: args.createUmpires,
+    at: new Date().toISOString(),
+  });
+  const { matched, unmatched, unknownNames, toCreate, plan, doubles } = imported;
   console.log(`\nMatched ${matched.length} of ${parsed.rows.length} rows`);
   for (const m of matched)
     if (m.notes.length)
@@ -723,37 +910,21 @@ async function main() {
     for (const u of unmatched) console.log(`  ✗ ${label(u.row)} — ${u.kind}: ${u.reason}`);
   }
 
-  const allNames = [
-    ...new Set(
-      matched.flatMap((m) => [...m.row.umpires, ...(m.row.referee ? [m.row.referee] : [])]),
-    ),
-  ];
-  let { byName, unknown: unknownNames } = resolveUmpireNames(allNames, registry);
-  const toCreate = args.createUmpires
-    ? planNewUmpires(unknownNames, registry, new Date().toISOString())
-    : [];
   if (unknownNames.length) {
     console.log(
-      `\nUnknown umpire(s) (${unknownNames.length}): ${unknownNames.join(', ')}` +
+      `\nUnknown umpire(s) on rows to be written (${unknownNames.length}): ${unknownNames.join(', ')}` +
         (args.createUmpires
           ? `\n  → ${args.confirm ? 'creating' : 'would create'} ${toCreate.length}: ${toCreate.map((u) => `${u.displayName} (${u.id})`).join(', ')}`
           : '\n  Rows naming them are skipped. Add them in the Umpires page, or re-run with --create-umpires.'),
     );
-    if (args.createUmpires)
-      ({ byName, unknown: unknownNames } = resolveUmpireNames(allNames, [
-        ...registry,
-        ...toCreate,
-      ]));
   }
 
-  const plan = planWrites(matched, byName, existing);
   const count = (a: WriteAction) => plan.writes.filter((w) => w.action === a).length;
   for (const w of plan.writes.filter((x) => x.action === 'changed'))
     console.log(
       `  ↻ ${label(w.match.row)}: ${w.previous!.join(', ') || '—'} → ${w.officials.umpires.map((u) => u.name).join(', ')}`,
     );
   for (const s of plan.skipped) console.log(`  – ${label(s.match.row)} skipped: ${s.reason}`);
-  const doubles = sheetDoubleBookings(plan.writes);
   for (const d of doubles)
     console.log(
       `  ⚠ ${d.a.umpireId} on ${d.date}: ${d.a.venue} ${d.a.time ?? ''} and ${d.b.venue} ${d.b.time ?? ''} overlap`,
@@ -769,19 +940,14 @@ async function main() {
     console.log('\nDry run — nothing written. Re-run with --confirm to write.');
     return;
   }
-  const at = new Date().toISOString();
-  for (const u of toCreate) await repo.createUmpire(args.tenant, u);
-  let written = 0;
-  for (const w of plan.writes) {
-    if (w.action === 'unchanged') continue;
-    await repo.putFixtureOfficials(args.tenant, w.match.seriesId, w.match.fixtureId, {
-      ...w.officials,
-      updatedAt: at,
-      updatedBy: 'import-umpire-appointments',
-    });
-    written++;
-  }
-  console.log(`\nWrote ${written} appointment(s); created ${toCreate.length} umpire(s).`);
+  const { written, created } = await writeAppointmentImport(
+    repo,
+    args.tenant,
+    imported,
+    'import-umpire-appointments',
+    new Date().toISOString(),
+  );
+  console.log(`\nWrote ${written} appointment(s); created ${created} umpire(s).`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

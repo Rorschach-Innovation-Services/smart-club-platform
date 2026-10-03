@@ -39,6 +39,7 @@ import { randomUUID } from 'node:crypto';
 import { isSlotRef } from '../../../engine/src/formats.js';
 import { fixtureSyncRef } from '../fixture-identity.js';
 import {
+  capVenue,
   isoInstant,
   MEDICOACH_SYNC_VERSION,
   SCHEDULE_PATH,
@@ -55,6 +56,7 @@ import {
   introducedClashes,
   venueAliasesFor,
 } from '../venue-clash.js';
+import { explainSyncError } from './explain.js';
 import { seriesIsSyncMapped } from './series-results.js';
 import type {
   Club,
@@ -69,6 +71,12 @@ import type {
 } from '../types.js';
 
 type RepoModule = typeof import('../repo.js');
+
+/**
+ * An outbox row that failed this many pushes in a row is shown as "stuck" on the admin page
+ * (with Retry and Drop). It is still retried by every run — never silently given up on.
+ */
+export const STUCK_ATTEMPTS = 5;
 
 /** Inbound apply attempts on a version conflict (a concurrent admin edit). */
 const APPLY_ATTEMPTS = 3;
@@ -141,7 +149,8 @@ export function fixtureSchedule(
     scheduledTime: f.date ? `${f.date}T${time || '00:00'}:00${OFFSET}` : null,
     timeTbc: !time,
     dateTbc: f.dateTbc === true || !f.date,
-    venue: effectiveVenue(series, f),
+    // Contract v1: at most 200 characters — a sender never exceeds it.
+    venue: capVenue(effectiveVenue(series, f)),
     postponed: f.status === 'postponed',
     cancelled: f.status === 'cancelled',
     changedAt,
@@ -477,12 +486,18 @@ export async function flushScheduleOutbox(
     else await failRow(row, 'the stored schedule does not fit the v1 contract');
   }
 
+  /** The first whole-request failure of this flush (unreachable, HTTP, contract), if any. */
+  let requestError: string | undefined;
   for (let i = 0; i < sendable.length; i += SCHEDULE_PUSH_MAX) {
     const batch = sendable.slice(i, i + SCHEDULE_PUSH_MAX);
     const body = JSON.stringify({
       version: MEDICOACH_SYNC_VERSION,
       tenant,
-      changes: batch.map((r) => ({ ref: r.ref, schedule: r.schedule })),
+      // Rows queued before the venue cap still go out within it.
+      changes: batch.map((r) => ({
+        ref: r.ref,
+        schedule: { ...r.schedule, venue: capVenue(r.schedule.venue) },
+      })),
     });
     counts.sent += batch.length;
     let results: Map<string, { status: string; message?: string }>;
@@ -522,6 +537,7 @@ export async function flushScheduleOutbox(
     } catch (err) {
       const message = err instanceof Error ? err.message : 'push failed';
       log(`[medicoach-sync] ${tenant}: schedule push failed — ${message}`);
+      requestError ??= message;
       for (const row of batch) await failRow(row, message);
       continue;
     }
@@ -554,6 +570,7 @@ export async function flushScheduleOutbox(
         scheduleDiffers: 0,
       },
       push: counts,
+      ...(requestError ? { error: requestError, message: explainSyncError(requestError) } : {}),
     });
   return { status: 'ok', pending: all.length - dropped, held, counts };
 }
@@ -617,12 +634,14 @@ export function buildInboundFixture(
     next.status = 'scheduled';
     changed.push('status');
   }
-  const wanted = schedule.venue?.trim();
+  // Truncated to the contract's 200-character cap before it is resolved, on both sides of
+  // the comparison (a ground named longer than that is what medicoach holds of it).
+  const wanted = capVenue(schedule.venue)?.trim();
   if (wanted) {
-    const current = effectiveVenue(series, fixture);
+    const current = capVenue(effectiveVenue(series, fixture));
     const key = groundKey(wanted, aliases);
     if (!current || groundKey(current, aliases) !== key) {
-      const venue = venues.find((v) => groundKey(v.name, aliases) === key);
+      const venue = venues.find((v) => groundKey(capVenue(v.name), aliases) === key);
       if (!venue)
         return {
           ok: false,
@@ -860,6 +879,38 @@ async function emailConflict(
       `[medicoach-sync] ${tenant}: conflict email failed — ${err instanceof Error ? err.message : 'error'}`,
     );
   }
+}
+
+/**
+ * A wire schedule as the conflict inbox compares it with smart club's (`SyncConflict.current`
+ * has the same shape): wall-clock date and time, venue, and a status.
+ */
+export function scheduleParts(s: SyncScheduleSnapshot | SyncSchedule): {
+  date?: string;
+  time?: string;
+  venue?: string;
+  status: string;
+  dateTbc?: boolean;
+} {
+  const out: { date?: string; time?: string; venue?: string; status: string; dateTbc?: boolean } = {
+    status: s.cancelled ? 'cancelled' : s.postponed ? 'postponed' : 'scheduled',
+  };
+  if (s.dateTbc) out.dateTbc = true;
+  else if (s.scheduledTime) {
+    const { date, time } = wallClock(s.scheduledTime);
+    out.date = date;
+    if (!s.timeTbc) out.time = time;
+  }
+  if (s.venue) out.venue = s.venue;
+  // Key order as `current` lists them, so the two read side by side.
+  const { date, time, venue, status, dateTbc } = out;
+  return {
+    ...(date ? { date } : {}),
+    ...(time ? { time } : {}),
+    ...(venue ? { venue } : {}),
+    status,
+    ...(dateTbc ? { dateTbc } : {}),
+  };
 }
 
 /** Human text of a proposed schedule for the inbox and the email. */

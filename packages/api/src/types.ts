@@ -1152,7 +1152,20 @@ export interface SyncLogEntry {
   newFixtureRefs?: string[];
   /** Outbox flush outcome counts (push rows only). */
   push?: SchedulePushCounts;
+  /** Technical failure text (field paths and statuses only — never a payload value). */
   error?: string;
+  /** `error` in plain language for the admin page (medicoach-sync/explain.ts). */
+  message?: string;
+}
+
+/** SYNCHEALTH#<tenant> — the last successful and the last failed sync run (admin page). */
+export interface SyncHealth {
+  lastAttemptAt?: string;
+  /** A pull that completed (dry runs never count). */
+  lastSuccessAt?: string;
+  lastErrorAt?: string;
+  /** Technical text (the "Details" toggle); the page explains it with explainSyncError. */
+  lastError?: string;
 }
 
 /** What one outbox flush did (Slice 4). */
