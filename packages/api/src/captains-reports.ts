@@ -437,9 +437,10 @@ export async function openCaptainReports(
   if (!series || !fixture?.date) return { ...out, skipped: 'no-fixture' };
   const matchDate = fixture.date;
   if (matchDate < goLive) return { ...out, skipped: 'before-go-live' };
-  const today = now().toISOString().slice(0, 10);
-  if (Date.parse(today) - Date.parse(matchDate) > MAX_REPORT_AGE_DAYS * DAY_MS)
-    return { ...out, skipped: 'too-old' };
+  // Too old = the link would already be dead. Judged on the link's own expiry (end of the 7th
+  // day after the match, SAST), not on the UTC date, which lags SAST by two hours: from
+  // 00:00 to 02:00 SAST on day 8 the UTC date still reads day 7.
+  if (reportLinkExpiry(matchDate) * 1000 <= now().getTime()) return { ...out, skipped: 'too-old' };
 
   const officials = await repo.getFixtureOfficials(tenant, seriesId, fixtureId);
   const umpiresSnapshot: AppointedUmpire[] = (officials?.umpires ?? []).map((u) => ({

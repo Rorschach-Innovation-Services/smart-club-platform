@@ -395,6 +395,36 @@ describe('result → reports → notices', () => {
     assert.equal((await reportsOf()).length, 0);
   });
 
+  test('a report opens only while its link still works (SAST day boundary, not UTC)', async () => {
+    // Match on Sun 27 Sep: the link works until 23:59:59 SAST on Sun 4 Oct (21:59:59Z).
+    // At 00:30 SAST on 5 Oct the UTC date is still 4 Oct, but the link is already dead, so
+    // nothing may open (and nobody may be sent a dead link).
+    const old = (await repo.getSeries('dolphins', 's-planb-premier-men-t20-g1'))!;
+    await repo.putSeries('dolphins', {
+      ...old,
+      fixtures: [fx('f3', 'umzinto', 'african-warriors', { date: '2026-09-27' })],
+    } as Series);
+    const pullAt = (iso: string) =>
+      puller.runMedicoachSync('dolphins', 'cron', {
+        repo,
+        url: stubUrl,
+        secret: SECRET,
+        now: () => new Date(iso),
+        log: (l) => logLines.push(l),
+        captainsReports: {
+          log: (l) => logLines.push(l),
+          sendNotice: async (n) => {
+            notices.push(n);
+            return n.channels.map((channel) => ({ channel, status: 'sent' as const }));
+          },
+        },
+      });
+    page = liveResultPage('live');
+    await pullAt('2026-10-04T22:30:00.000Z');
+    assert.equal((await reportsOf()).length, 0);
+    assert.equal(notices.length, 0);
+  });
+
   test('a match exactly 7 days ago still opens; no report carries a deadline', async () => {
     const old = (await repo.getSeries('dolphins', 's-planb-premier-men-t20-g1'))!;
     await repo.putSeries('dolphins', {
