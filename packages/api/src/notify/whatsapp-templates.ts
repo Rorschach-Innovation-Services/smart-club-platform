@@ -163,9 +163,10 @@ export const WHATSAPP_TEMPLATES = {
    * `/r/<token>` page is tenant-independent, like `/verify`): every tenant shares one
    * template. Non-prod stages send the same button — they normally dry-run anyway.
    *
-   * NOT YET CREATED IN META. `bodyText` is RECONSTRUCTED from the parameter order (the arity
-   * contract). Until it is approved a real send fails on the missing template and the email
-   * (always sent) carries the link.
+   * Approved and Active in Meta since 3 Oct 2026 (Utility, English, 3 body params, dynamic URL
+   * button `https://platform.club.medicoach.co.za/r/{{1}}`). `bodyText` is still the
+   * reconstruction from the parameter order (the arity contract) — confirm it against Business
+   * Manager's copy.
    */
   captainsReportDue: {
     name: 'captains_report_due',
@@ -176,7 +177,7 @@ export const WHATSAPP_TEMPLATES = {
       'Hello {{1}},\n\n' +
       "{{2}}'s captain's report for {{3}} is open. Please rate the umpires.\n\n" +
       'Tap the button below to open the report. The link works once and expires 7 days after the match.',
-    status: 'pending',
+    status: 'registered',
     urlButton: {
       urlTemplate: 'https://platform.club.medicoach.co.za/r/{{1}}',
       suffix: 'signed report token',
