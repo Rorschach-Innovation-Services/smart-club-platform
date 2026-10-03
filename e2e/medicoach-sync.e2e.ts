@@ -113,9 +113,12 @@ async function seed(request: APIRequestContext) {
   }
 }
 
-/** Medicoach moves f2 onto the Oval at 13:30 — where f1 already plays. */
+/**
+ * Medicoach moves f2 onto the Oval at 13:30 — where f1 already plays. Edited AFTER the release
+ * (which stamps and queues every fixture, ADR 0016), so medicoach's change is the newer one.
+ */
 function clashPage() {
-  const at = new Date(Date.now() - 3600_000).toISOString();
+  const at = new Date().toISOString();
   return {
     version: 1,
     tenant: TENANT,
