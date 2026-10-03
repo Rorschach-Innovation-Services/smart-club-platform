@@ -35,6 +35,7 @@ import {
   type ReportUmpireEntry,
 } from '../../engine/src/captainsReport.js';
 import { isSlotRef } from '../../engine/src/formats.js';
+import { formatSastWeekdayDay, formatWeekdayDayYear } from '../../../src/dates.js';
 import { orgCopy } from './branding.js';
 import { chairContactOf } from './club-contacts.js';
 import { captainsReportLinkBase, captainsReportLinkSecret } from './env.js';
@@ -188,16 +189,9 @@ export function reportExpirySeconds(
   return Number.isFinite(stored) ? Math.floor(stored / 1000) : reportLinkExpiry(r.matchDate);
 }
 
-/** "Sunday, 11 Oct" — the SAST day a link expires, as the email and pages show it. */
+/** "Sunday, 11 Oct" — the SAST day a link expires (the platform formatter: "Sep", not "Sept"). */
 export function fmtExpiry(epochSeconds: number): string {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'short',
-    timeZone: 'Africa/Johannesburg',
-  }).formatToParts(new Date(epochSeconds * 1000));
-  const part = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
-  return `${part('weekday')}, ${part('day')} ${part('month')}`;
+  return formatSastWeekdayDay(new Date(epochSeconds * 1000).toISOString());
 }
 
 /** The link for a report: `${base}/r/<token>`, expiring at the report's stored expiry. */
@@ -460,14 +454,8 @@ type StoredFixture = Record<string, unknown> & {
   venueName?: string;
 };
 
-const fmtDay = (iso: string) =>
-  new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', {
-    weekday: 'short',
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-    timeZone: 'UTC',
-  });
+/** "Sun 20 Sep 2026" — the platform formatter, so every surface spells months the same. */
+const fmtDay = (iso: string) => formatWeekdayDayYear(iso);
 
 function sideName(series: Series, teamId: string, club: Club | null): string {
   return (
@@ -859,6 +847,7 @@ export async function sendReportNotice(n: ReportNotice): Promise<NoticeResult[]>
           to: e164,
           recipientName: n.to.name,
           clubName: n.clubName,
+          orgName: n.orgName,
           match: `${n.matchLine} on ${n.matchDateText}`,
           token: n.token,
         });

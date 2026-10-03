@@ -117,6 +117,20 @@ export function formatTime(time?: string): string | null {
   return t.isValid() ? t.format('HH:mm') : null;
 }
 
+/** The union's UTC offset (SAST, UTC+2, no DST) — mirrors the API's TENANT_UTC_OFFSET_MINUTES. */
+const SAST_OFFSET_MINUTES = 120;
+
+/**
+ * An INSTANT as the SAST calendar day it falls on: `2026-09-20T21:59:59Z` → `Sunday, 20 Sep`.
+ * For deadlines that end at 23:59:59 SAST (a captain's-report link expiry), whatever zone the
+ * viewer (or the Lambda) is in. Shared by the API's notices and the report pages.
+ */
+export function formatSastWeekdayDay(iso?: string): string {
+  if (!iso) return '';
+  const d = dayjs.utc(iso);
+  return d.isValid() ? d.add(SAST_OFFSET_MINUTES, 'minute').format('dddd, D MMM') : '';
+}
+
 /* ─── Instant display (local time, deliberately) ─── */
 
 /** A timestamp as a local calendar day: `4 Jun 2026`. */

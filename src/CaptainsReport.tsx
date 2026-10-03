@@ -38,6 +38,7 @@ import {
   type ForwardCandidates,
 } from './api';
 import { applyTheme } from './config';
+import { formatSastWeekdayDay, formatWeekdayDayYear } from './dates';
 import { qk } from './query';
 import {
   CONCERN_AREAS,
@@ -59,28 +60,11 @@ import type { CaptainsReport, CaptainsReportFields } from './types';
 
 const SUBSTITUTE = '__substitute';
 
-export const fmtDate = (iso?: string | null) =>
-  iso
-    ? new Date(iso.slice(0, 10) + 'T00:00:00').toLocaleDateString('en-GB', {
-        weekday: 'short',
-        day: 'numeric',
-        month: 'short',
-        year: 'numeric',
-      })
-    : '';
+/** `Sun 20 Sep 2026` — the platform formatter (dayjs month names: "Sep", never "Sept"). */
+export const fmtDate = (iso?: string | null) => formatWeekdayDayYear(iso?.slice(0, 10));
 
 /** "Sunday, 11 Oct" — the SAST day a report link expires (it works until 23:59 that day). */
-export const fmtLinkExpiry = (iso?: string | null) => {
-  if (!iso) return '';
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'short',
-    timeZone: 'Africa/Johannesburg',
-  }).formatToParts(new Date(iso));
-  const part = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
-  return `${part('weekday')}, ${part('day')} ${part('month')}`;
-};
+export const fmtLinkExpiry = (iso?: string | null) => formatSastWeekdayDay(iso ?? undefined);
 
 // Local YYYY-MM-DD (toISOString would shift SAST dates back a day via UTC).
 const localISO = (d: Date) =>

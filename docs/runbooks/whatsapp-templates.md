@@ -147,19 +147,20 @@ Replaces `captains_report_due`'s copy ("works once" was ambiguous; "{{2}}'s" rea
 clubs such as Crusaders). Create it in WhatsApp Manager on the same WABA:
 
 - Name `captains_report_open`, category **Utility**, language **English (en)**.
-- Body (2 variables):
+- Body (3 variables):
 
 ```
 Hello {{1}},
 
-The captain's report for {{2}} is open. Please rate the umpires.
+The {{2}} captain's report for {{3}} is open. Please rate the umpires.
 
 Tap the button below to open it. You can submit it once; the link expires on the date shown in the report.
 ```
 
-- Sample values: `{{1}}` = `Sanele Mthembu`, `{{2}}` = `Umzinto CC v African Warriors on Sun 4 Oct 2026`.
+- Sample values: `{{1}}` = `Sanele Mthembu`, `{{2}}` = `KZN Dolphins`,
+  `{{3}}` = `Umzinto CC v African Warriors on Sun 20 Sep 2026`.
 - Button: **Visit website**, dynamic URL `https://platform.club.medicoach.co.za/r/{{1}}`
-  (sample suffix: any token-like string), button text e.g. `Open report`.
+  (sample suffix: any token-like string, e.g. `abc123.def456`), button text e.g. `Open report`.
 
 Until it is approved the sender keeps using `captains_report_due`. Once Meta shows it Active,
 flip `captainsReportOpen.status` to `'registered'` in

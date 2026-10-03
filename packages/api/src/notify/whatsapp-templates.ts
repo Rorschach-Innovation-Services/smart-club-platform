@@ -185,9 +185,9 @@ export const WHATSAPP_TEMPLATES = {
   },
 
   /**
-   * Captain's report open, v2 copy: drops the club-name param (the awkward "Crusaders's") and
-   * the "works once" wording (a link can be opened and saved as a draft many times; it is
-   * SUBMITTED once). Same URL button as `captains_report_due`.
+   * Captain's report open, v2 copy: names the union instead of the club (no awkward
+   * "Crusaders's") and drops "works once" (a link can be opened and saved as a draft many
+   * times; it is SUBMITTED once). Same URL button as `captains_report_due`.
    *
    * NOT YET CREATED IN META. `bodyText` is the exact copy to submit (Utility, English). This
    * `status` is the ONE switch for the captain's-report sender: while it is not "registered"
@@ -197,11 +197,11 @@ export const WHATSAPP_TEMPLATES = {
   captainsReportOpen: {
     name: 'captains_report_open',
     lang: 'en',
-    paramCount: 2,
-    params: ['recipient name', 'match line + date'],
+    paramCount: 3,
+    params: ['recipient name', 'org name', 'match line + date'],
     bodyText:
       'Hello {{1}},\n\n' +
-      "The captain's report for {{2}} is open. Please rate the umpires.\n\n" +
+      "The {{2}} captain's report for {{3}} is open. Please rate the umpires.\n\n" +
       'Tap the button below to open it. You can submit it once; the link expires on the date shown in the report.',
     status: 'pending',
     urlButton: {

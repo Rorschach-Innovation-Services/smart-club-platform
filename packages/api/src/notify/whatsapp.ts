@@ -299,7 +299,9 @@ export interface CaptainsReportDueWhatsAppInput {
   to: string; // already E.164 (see toE164)
   recipientName: string;
   clubName: string;
-  /** "Umzinto v African Warriors, Sun 4 Oct 2026" */
+  /** The union's display name ("KZN Dolphins") — v2 template {{2}}. */
+  orgName: string;
+  /** "Umzinto v African Warriors on Sun 4 Oct 2026" */
   match: string;
   /** The signed report token — the URL button's dynamic suffix. Never logged. */
   token: string;
@@ -321,15 +323,16 @@ export function captainsReportDueParams(
 }
 
 /**
- * Build the two body params for `captains_report_open` (v2), in order: {{1}} recipient name
- * (fallback 'there'), {{2}} match line + date ("Umzinto v African Warriors on Sun 4 Oct
- * 2026"). The link rides in the URL button, as in v1.
+ * Build the three body params for `captains_report_open` (v2), in order: {{1}} recipient name
+ * (fallback 'there'), {{2}} the union's display name ("KZN Dolphins"), {{3}} match line +
+ * date ("Umzinto v African Warriors on Sun 4 Oct 2026"). The link rides in the URL button.
  */
 export function captainsReportOpenParams(
-  input: Pick<CaptainsReportDueWhatsAppInput, 'recipientName' | 'match'>,
+  input: Pick<CaptainsReportDueWhatsAppInput, 'recipientName' | 'orgName' | 'match'>,
 ): TemplateParam[] {
   return [
     { type: 'text', text: cleanParam(input.recipientName || 'there') },
+    { type: 'text', text: cleanParam(input.orgName) },
     { type: 'text', text: cleanParam(input.match) },
   ];
 }
