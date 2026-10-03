@@ -68,6 +68,27 @@ describe('contract examples', () => {
     bad.fixtures[0].result.recordedAt = '4 Oct 2026';
     assert.equal(ChangesResponseSchema.safeParse(bad).success, false);
   });
+
+  test('a match link that is not http(s) is dropped, never passed on to a page', () => {
+    const raw = JSON.parse(readFileSync(path.join(EXAMPLES, 'changes-live-result.json'), 'utf8'));
+    for (const url of [
+      "javascript:document.title='x'",
+      'JaVaScRiPt:alert(1)',
+      'data:text/html,<script>alert(1)</script>',
+      'vbscript:msgbox(1)',
+    ]) {
+      const hostile = structuredClone(raw);
+      hostile.fixtures[0].result.medicoachMatchUrl = url;
+      const parsed = ChangesResponseSchema.parse(hostile);
+      assert.equal(parsed.fixtures[0].result!.medicoachMatchUrl, null, url);
+    }
+    const ok = structuredClone(raw);
+    ok.fixtures[0].result.medicoachMatchUrl = 'https://live.medicoach.co.za/m/1';
+    assert.equal(
+      ChangesResponseSchema.parse(ok).fixtures[0].result!.medicoachMatchUrl,
+      'https://live.medicoach.co.za/m/1',
+    );
+  });
 });
 
 describe('request signing', () => {
@@ -164,5 +185,29 @@ describe('refs', () => {
       teamId: 'crusaders',
     });
     assert.equal(parseTeamRef('smartclub:dolphins:fixture:a:b'), null);
+  });
+});
+
+describe('stored result view', () => {
+  test('a stored match link that is not http(s) is served as null (rows stored before the contract filter)', async () => {
+    const { toResultView } = await import('../src/medicoach-sync/series-results.js');
+    const base = {
+      seriesId: 's1',
+      fixtureId: 'f1',
+      ref: 'smartclub:t:fixture:s1:f1',
+      orderAt: '2026-10-03T00:00:00.000Z',
+      recordedAt: '2026-10-03T00:00:00.000Z',
+      storedAt: '2026-10-03T00:00:00.000Z',
+      summary: 'A won',
+    };
+    assert.equal(
+      toResultView({ ...base, medicoachMatchUrl: 'javascript:alert(1)' })!.medicoachMatchUrl,
+      null,
+    );
+    assert.equal(
+      toResultView({ ...base, medicoachMatchUrl: 'https://live.medicoach.co.za/m/1' })!
+        .medicoachMatchUrl,
+      'https://live.medicoach.co.za/m/1',
+    );
   });
 });

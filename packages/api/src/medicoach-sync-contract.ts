@@ -69,6 +69,14 @@ export const SyncTeamsSchema = z.object({
   awayRef: ref.nullable(),
 });
 
+/**
+ * A link a page may render as `href`: http(s) only. Anything else (`javascript:`, `data:`,
+ * `vbscript:` — all valid URLs to zod) would run script in the console when clicked.
+ */
+export function httpUrlOrNull(url: string | null | undefined): string | null {
+  return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : null;
+}
+
 export const SyncResultSchema = z.object({
   homeScore: z.string().nullable(),
   awayScore: z.string().nullable(),
@@ -84,7 +92,8 @@ export const SyncResultSchema = z.object({
   scoringSide: z.enum(['home', 'away']).nullable(),
   /** PERSONAL DATA (hashed ID number) — never log. */
   captainRef: ref.nullable(),
-  medicoachMatchUrl: z.string().url().nullable(),
+  /** A non-http(s) link is dropped to null rather than failing the page. */
+  medicoachMatchUrl: z.string().url().nullable().transform(httpUrlOrNull),
 });
 
 export const FixtureChangeSchema = z.object({

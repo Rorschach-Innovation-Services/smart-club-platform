@@ -11,6 +11,7 @@
 import { hasFeature } from '../features.js';
 import { isExcludedLeagueKey } from '../medicoach-export-build.js';
 import { isRecipeKnockoutSeries } from '../medicoach-bundle.js';
+import { httpUrlOrNull } from '../medicoach-sync-contract.js';
 import { recipesForTenant } from '../medicoach-recipes/index.js';
 import type { FixtureResultView, Series, StoredFixtureResult, TenantConfig } from '../types.js';
 
@@ -29,7 +30,7 @@ export function toResultView(r: StoredFixtureResult): FixtureResultView | null {
     noResult: r.noResult === true,
     source: r.resultSource ?? 'manual',
     recordedAt: r.recordedAt,
-    medicoachMatchUrl: r.medicoachMatchUrl ?? null,
+    medicoachMatchUrl: httpUrlOrNull(r.medicoachMatchUrl),
   };
 }
 
