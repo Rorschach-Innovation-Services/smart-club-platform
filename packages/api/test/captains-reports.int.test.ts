@@ -384,7 +384,7 @@ describe('result → reports → notices', () => {
     assert.equal((await reportsOf()).length, 0);
   });
 
-  test('a match older than 7 days opens nothing (its link would already be dead)', async () => {
+  test('a late result for a match older than 7 days still opens (expiry = received + 3 days)', async () => {
     const old = (await repo.getSeries('dolphins', 's-planb-premier-men-t20-g1'))!;
     await repo.putSeries('dolphins', {
       ...old,
@@ -392,37 +392,35 @@ describe('result → reports → notices', () => {
     } as Series);
     page = liveResultPage('live');
     await runPull();
-    assert.equal((await reportsOf()).length, 0);
+    assert.equal((await reportsOf()).length, 2);
   });
 
-  test('a report opens only while its link still works (SAST day boundary, not UTC)', async () => {
-    // Match on Sun 27 Sep: the link works until 23:59:59 SAST on Sun 4 Oct (21:59:59Z).
-    // At 00:30 SAST on 5 Oct the UTC date is still 4 Oct, but the link is already dead, so
-    // nothing may open (and nobody may be sent a dead link).
+  test('the expiry is judged on SAST days, not UTC (a result at 00:30 SAST counts from that day)', async () => {
+    // Match on Sun 27 Sep; the result arrives at 00:30 SAST on Mon 5 Oct (22:30Z on 4 Oct).
+    // Received + 3 days = Thu 8 Oct 23:59:59 SAST (21:59:59Z), later than match + 7 days.
     const old = (await repo.getSeries('dolphins', 's-planb-premier-men-t20-g1'))!;
     await repo.putSeries('dolphins', {
       ...old,
       fixtures: [fx('f3', 'umzinto', 'african-warriors', { date: '2026-09-27' })],
     } as Series);
-    const pullAt = (iso: string) =>
-      puller.runMedicoachSync('dolphins', 'cron', {
-        repo,
-        url: stubUrl,
-        secret: SECRET,
-        now: () => new Date(iso),
-        log: (l) => logLines.push(l),
-        captainsReports: {
-          log: (l) => logLines.push(l),
-          sendNotice: async (n) => {
-            notices.push(n);
-            return n.channels.map((channel) => ({ channel, status: 'sent' as const }));
-          },
-        },
-      });
     page = liveResultPage('live');
-    await pullAt('2026-10-04T22:30:00.000Z');
-    assert.equal((await reportsOf()).length, 0);
-    assert.equal(notices.length, 0);
+    await puller.runMedicoachSync('dolphins', 'cron', {
+      repo,
+      url: stubUrl,
+      secret: SECRET,
+      now: () => new Date('2026-10-04T22:30:00.000Z'),
+      log: (l) => logLines.push(l),
+      captainsReports: {
+        log: (l) => logLines.push(l),
+        sendNotice: async (n) => {
+          notices.push(n);
+          return n.channels.map((channel) => ({ channel, status: 'sent' as const }));
+        },
+      },
+    });
+    const reports = await reportsOf();
+    assert.equal(reports.length, 2);
+    for (const r of reports) assert.equal(r.linkExpiresAt, '2026-10-08T21:59:59.000Z');
   });
 
   test('a match exactly 7 days ago still opens; no report carries a deadline', async () => {
@@ -1185,7 +1183,7 @@ describe('durable report opening (REPORTOPEN# markers)', () => {
     assert.equal(notices.length, 0);
   });
 
-  test('a marker for a match now outside the 7-day window is dropped without opening', async () => {
+  test('a marker whose link window has closed is dropped without opening', async () => {
     page = liveResultPage('live');
     await puller.runMedicoachSync('dolphins', 'cron', {
       repo,
@@ -1206,7 +1204,12 @@ describe('durable report opening (REPORTOPEN# markers)', () => {
     for (const r of await reportsOf())
       await repo.voidOrFlagCaptainsReport('dolphins', r, 'test reset');
     const { retryPendingReportOpens } = await import('../src/captains-reports.js');
-    const retry = await retryPendingReportOpens('dolphins', { repo, ...sender });
+    // The retry runs 4 days after the result arrived: received + 3 days has passed too.
+    const retry = await retryPendingReportOpens('dolphins', {
+      repo,
+      ...sender,
+      now: () => new Date(Date.now() + 4 * DAY),
+    });
     assert.equal(retry.done, 1);
     assert.equal(notices.length, 0);
     assert.deepEqual(await repo.listReportOpenMarkers('dolphins'), []);
